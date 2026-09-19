@@ -111,8 +111,8 @@ pooled, load-balanced, and used with the prompt cache in mind.
   and drive the Chromium browser you already use, with your real logins,
   through the published browser extension. The
   [desktop app](#-desktop-app-local-operator-ui) puts the same sessions in a
-  native window, with a browser pane, a file canvas, and a terminal agents can
-  use.
+  desktop window, with a browser pane, a file canvas, and a terminal agents can
+  use (coming soon).
 
 ## 🚀 Quickstart
 
@@ -155,16 +155,34 @@ lop --hosting ollama --model qwen2.5:14b
 
 ## 🪟 Desktop App (local-operator-ui)
 
-The terminal stays the core surface, and everything below describes it. The
-desktop app is the second way in: **Local Operator UI** is a native application
-for macOS, Windows, and Linux that drives the same sessions, teams, schedules,
-and configuration, and adds the surfaces a terminal cannot draw.
+The terminal stays the core surface, and the rest of this page describes it.
+The desktop app is the second way in: **Local Operator UI** is a desktop
+application for macOS, Windows, and Linux that drives the same sessions, teams,
+schedules, and configuration, and adds the surfaces a terminal cannot draw.
 
 <p align="center">
-  <img src="./static/ui-desktop-app.png" alt="The Local Operator desktop app: a sidebar of chats, agents, teams, and schedules; a chat listing its subagents; a markdown document open in the file canvas beside the transcript; tool receipts with durations and costs; and the composer showing the working directory, model, context usage, and session cost" width="960">
+  <img src="./static/ui-desktop-app.png" alt="The desktop app: the chats, agents and teams sidebar; tool receipts with durations and costs; two subagents running; open to-dos; composer." width="720">
 </p>
 
-<p align="center"><i>The desktop app on a real session: the chat sidebar, a document open in the file canvas, tool receipts, and the composer with the working directory, model, context, and cost readouts.</i></p>
+<p align="center"><i>The desktop app on a real session: the sidebar, the transcript's tool receipts, two subagents running, and the composer's working directory, model, effort, context, and cost readouts.</i></p>
+
+What the app adds:
+
+- **A browser the agent can drive.** A Chromium pane with its own tabs and
+  address bar lives inside the session window, with an approval prompt before
+  the agent acts on a page, so a task can browse where you can watch it.
+- **A file canvas and viewer.** Documents a session works on open beside the
+  chat — markdown (with a WYSIWYG editor), code, HTML, images, PDFs,
+  spreadsheets, audio, and video — instead of being printed into the
+  transcript.
+- **The same surfaces, as pages.** Agents, teams, schedules, and settings are
+  pages and panels reachable from a command palette, over the same
+  configuration the TUI reads, with a built-in theme gallery.
+- **A terminal agents can use — coming soon.** A per-session Console tab with
+  real terminal emulation, which agents can open, read (stdout and stderr),
+  capture visually, and type into. That is what makes end-to-end testing of
+  interactive TUIs, and of other commands that need a live terminal, possible
+  for an agent where `bash` alone cannot.
 
 **Easiest install — the desktop build.** Download the installer for your
 platform from the [downloads page](https://local-operator.com/download)
@@ -183,24 +201,6 @@ local-operator-ui                  # ...then start it by name
 
 Source, issues, and release notes live at
 [damianvtran/local-operator-ui](https://github.com/damianvtran/local-operator-ui).
-
-What the app adds:
-
-- **A browser the agent can drive.** A Chromium pane with its own tabs and
-  address bar lives inside the session window, with an approval prompt before
-  the agent acts on a page, so a task can browse where you can watch it.
-- **A file canvas and viewer.** Documents a session works on open beside the
-  chat — markdown (with a WYSIWYG editor), code, HTML, images, PDFs,
-  spreadsheets, audio, and video — instead of being printed into the
-  transcript.
-- **The same surfaces, as pages.** Agents, teams, schedules, and settings are
-  pages with a command palette rather than slash commands, over the same
-  configuration the TUI reads, with a dozen built-in themes.
-- **A terminal agents can use — coming soon.** A per-session Console tab with
-  real terminal emulation, which agents can open, read (stdout and stderr),
-  capture visually, and type into. That is what makes end-to-end testing of
-  interactive TUIs, and of other commands that need a live terminal, possible
-  for an agent where `bash` alone cannot.
 
 ## 🏢 Agent Organizations
 
