@@ -1004,8 +1004,10 @@ def test_a_timeout_never_claims_the_observation_phase(tmp_path: Path, method: st
     """A call that was never ANSWERED is ambiguous whatever its phase would be.
 
     A timeout is the case where the worker may still be mid-mutation, so it
-    must poison. It reaches ``_mutating_call`` as a bare ``TimeoutError`` with
-    no detail at all, and the predicate must not be tempted to guess.
+    must poison. It reaches ``_mutating_call`` as a ``TimeoutError`` carrying
+    only PROSE -- the method and the budget it exceeded, never a declared phase
+    or an operation outcome -- and the predicate must not be tempted to guess
+    from it.
     """
 
     verifier = HostVerifier("task", "episode", tmp_path)

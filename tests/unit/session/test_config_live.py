@@ -493,6 +493,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "fork.cmux_placement": ("surface", lambda s, w: fork_cmux_placement(w.values)),
     "web_search.strategy": ("ordered", lambda s, w: _search_settings(w).strategy),
     "web_search.providers": (["brave"], lambda s, w: list(_search_settings(w).providers)),
+    # The opt-out list, read through the same per-call loader: an exclusion must
+    # apply on the NEXT search with no reload, exactly like the priority list.
+    "web_search.excluded_providers": (
+        ["exa"],
+        lambda s, w: list(_search_settings(w).excluded_providers),
+    ),
     "web_search.timeout_seconds": (5.0, lambda s, w: _search_settings(w).timeout_seconds),
     "web_search.searxng_endpoint": (
         "http://searx.local",
@@ -517,6 +523,9 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "web_fetch.max_attempts": (1, lambda s, w: _fetch_settings(w).max_attempts),
     "web_fetch.blocked_retry": (False, lambda s, w: _fetch_settings(w).blocked_retry),
     "bash.shell": ("/opt/probe/bash", lambda s, w: _bash_shell(w)),
+    # ``shell_environment.*`` is deliberately NOT here (review round 1, M2): the
+    # policy is resolved once per process, so it is a NEW-LAUNCH key and the
+    # non-LIVE guard below is what covers it, from the other direction.
     # -- web_tools: the inventory after the next turn boundary -----------------
     # Observed through the SAME reconcile the turn start runs, on a session
     # whose inventory starts with both tools, so a disable is seen as the tool
@@ -534,6 +543,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: (``tests/unit/session/runtime/test_serving_approvals_live.py``) and the
 #: TUI's ``_approve_all`` (``tests/unit/tui/test_config_change_notice.py``).
 #: The session only holds whatever gate closure the host installed.
+#:
+#: A file write reaches a running gate in the directions the HOST authorises,
+#: which since #1282 is not symmetric: a tightening always propagates, a
+#: loosening only when the write is the host's own through the settings facade
+#: (``harness.approval.loosening_is_authorised``). A probe in THIS file could
+#: only assert a transition the host refused, so the two hosts each pin their
+#: half where the gate lives, including the refusal.
 #:
 #: ``runtime`` is here for the same reason and a sharper one: its keys are
 #: read at COMMAND time by the surface that acts on them, so there is no
@@ -785,6 +801,11 @@ def test_the_scope_of_every_reclassified_key_is_the_one_its_consumer_earns() -> 
         assert setting is not None
         assert setting.section == section, key
         assert scope_of[section] is settings_io.Scope.LIVE, key
+    # The agent shell policy is NEW-LAUNCH on purpose, and the reason is a
+    # security one rather than a performance one: config.yml is writable by the
+    # agent's own shell, so a policy re-read per command is a policy the
+    # constrained party can turn OFF between two commands.
+    assert scope_of["shell_environment"] is settings_io.Scope.NEW_LAUNCH
     for key in ("auto_save_conversation", "session.cleanup.enabled"):
         setting = settings_io.resolve_key(key)
         assert setting is not None

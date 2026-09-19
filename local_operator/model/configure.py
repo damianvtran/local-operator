@@ -715,10 +715,39 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         model_name = bare_name
     from local_operator.providers.registry import (
         AGGREGATOR_PROVIDERS,
+        decision_only_message,
         get_provider_definition,
+        is_decision_only,
     )
 
-    canonical = "test" if hosting == "noop" else hosting
+    # NORMALISED before anything looks it up, and that is the guard's other half
+    # (review round 3, MAJOR 1): ``get_provider_definition`` is a dict keyed by
+    # lowercase ids, so a mixed-case spelling used to sail through every
+    # decision-only check and build a spec with ``base_url=None`` — the wire's
+    # ``set_model`` op takes the frame's string verbatim, and a hand-edited
+    # ``config.yml`` is just as easy. Stripping too, because " deepseek" is the same
+    # provider as "deepseek" to a human and was a lookup miss to the harness.
+    canonical = "test" if hosting.strip().lower() == "noop" else hosting.strip().lower()
+    if is_decision_only(canonical):
+        # THE LAST DOOR, and the one a running session reaches: this function is the
+        # single chokepoint every surface that can put a model on a LIVE session
+        # builds its spec through — the TUI's ``/model`` (``_cmd_model``), the
+        # viewer's routed ``/model`` (``_model_slash_result``), and the wire's
+        # ``set_model`` op (``ServingHandle.set_model_effort``) — and the returned
+        # spec IS what the next request carries. Refusing here rather than three
+        # times over is the same argument the catalogue, the ranking, the resolver
+        # and the failover chain already follow: one predicate, at the boundary the
+        # value crosses.
+        #
+        # Not a picker concern, which is why the catalogue's own filter cannot stand
+        # in for it: ``/model <provider>/<id>`` is the documented escape hatch PAST
+        # the pickers, and ``ProviderController.provider('typesafe')`` answers with
+        # the real definition (it is a shipped provider with a shipped login), so
+        # the TUI's unknown-provider gate waves it through.
+        raise ValueError(
+            f"{decision_only_message(canonical)} Pick a chat model instead — the "
+            "session stays on the one it is running."
+        )
     from local_operator.providers.local import LOCAL_PROVIDER_IDS, local_model_spec
 
     if canonical in LOCAL_PROVIDER_IDS:

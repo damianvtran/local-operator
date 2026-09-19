@@ -1889,12 +1889,29 @@ def expand_fallback_targets(
     route, while an unchanged legacy string is still suppressed. Callers that
     know the selected effort pass it so quota preflight and the stream agree:
     an explicitly identical effort is not another route to spend or pin.
+
+    A DECISION-ONLY PROVIDER IS DROPPED HERE (``registry.is_decision_only`` —
+    TypeSafe's Jev), before the wildcard expansion below, so the selector is
+    read for the provider it names rather than for the id a ``provider/*``
+    entry would inherit. This is the one place a chain ENTRY becomes a ROUTE:
+    the waterfall in ``model.configure``, the quota preflight and the TUI's
+    chain display all materialize through this function, so filtering here is
+    what makes "the fallback chain never routes a turn onto Jev" true for every
+    one of them. A dropped entry is skipped exactly like an unparsable one — the
+    remaining chain still runs, and a session whose entire chain names Jev
+    simply has no fallback, which is what it should have.
     """
+    # Imported at call time, like the sibling helpers in this module: `registry`
+    # is a heavier module and this one sits on the request path.
+    from local_operator.providers.registry import is_decision_only
+
     _, _, bare_id = selector.partition("/")
     targets: list[FallbackTarget] = []
     for entry in chain:
         target = _fallback_target(entry)
         if target is None:
+            continue
+        if is_decision_only(parse_selector(target.selector)[0]):
             continue
         if target.selector.endswith("/*"):
             target = dataclasses.replace(target, selector=f"{target.selector[:-1]}{bare_id}")

@@ -9002,9 +9002,20 @@ async def test_the_paste_key_rows_do_not_wrap_at_eighty_columns() -> None:
     pinning today's copy to today's arithmetic would keep passing while the
     row silently wrapped again. Reading the compositor asks the only question
     that matters — is this row one line or two.
+
+    HEIGHT, and it is not decoration. The transcript follows the tail, so the
+    frame is a slice of the block's END: measured, `/help` is 83 painted rows,
+    the dock takes 9, and 44 rows showed rows 48..83 — with `ctrl+v` at row 48,
+    i.e. the FIRST row of the slice. One more row anywhere above it moves it out
+    of the frame, and the assertion below then reports a missing row rather than
+    a wrapped one: adding `/links` to the command table did exactly that. The
+    failure only appeared inside the full suite because the block's own
+    config-toggle section is a row taller for some config files the workers
+    share with the rest of the suite. 52 leaves eight rows of headroom, which is
+    what this measurement is for — do not shrink it back onto the boundary.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
-    async with app.run_test(size=(80, 44)) as pilot:
+    async with app.run_test(size=(80, 52)) as pilot:
         await pilot.pause()
         editor = app.query_one(Editor)
         editor.focus()

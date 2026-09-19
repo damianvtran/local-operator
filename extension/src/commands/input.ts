@@ -29,7 +29,10 @@ async function callOnNode<T>(
   return out.result?.value as T;
 }
 
-async function nodeIdFor(surface: StoredSurface, selector: unknown): Promise<number> {
+/* Exported because `upload` resolves its file input through it: a second copy of
+ * the ref/selector resolution would be a second place for the
+ * `pushNodesByBackendIdsToFrontend` document-request fixup to be forgotten. */
+export async function nodeIdFor(surface: StoredSurface, selector: unknown): Promise<number> {
   const tabId = surface.tabId;
   if (typeof selector !== "string" || !selector) throw new BridgeCommandError("element_not_found", "selector is required");
   // Refs are read from THIS surface's own map: a snapshot taken on another

@@ -83,6 +83,7 @@ from local_operator.session.transcript import (
 )
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.animation import BLURRED_SPINNER_INTERVAL_S, animation_focused
+from local_operator.tui.narration import is_intermediate_narration
 from local_operator.tui.widgets import tool_card
 from local_operator.tui.widgets.assistant import AssistantBlock
 from local_operator.tui.widgets.subagent_panel import (
@@ -487,6 +488,14 @@ class SubagentEntry:
     #: page's in-place reconciliation exists to remove. The stream carries the
     #: fact; it was only being discarded at the fold.
     complete: bool = False
+    #: Is this a MID-TURN PROGRESS row — the prose a child's model call streamed
+    #: before it finalized into tool calls — rather than an answer? Classified by
+    #: the fold from the message's own two fields with the SHARED rule
+    #: (``tui/narration.py``), then applied to the block so the page paints no
+    #: rail beside it: the rail marks the ANSWER, and every prose block on this
+    #: page is a model response, so a mark on all of them carried no information
+    #: (the note this page's rail landed under).
+    narration: bool = False
 
 
 def _notice(key: str, text: str, kind: NoticeKind = "info", *, head: bool = False) -> SubagentEntry:
@@ -515,6 +524,14 @@ def _supersedes(new: SubagentEntry, old: SubagentEntry) -> bool:
             # with a REMOUNT — so a row that had settled correctly would be
             # torn down and rebuilt mid-read. Same rule as the text length
             # below, applied to the other thing a fold can lose.
+            return False
+        if old.narration and not new.narration:
+            # AND SO IS THE RAIL CLASSIFICATION. It is read off the same
+            # evictable `message_end`, so a fold that no longer sees the calls
+            # would hand back a row that looks like an ANSWER — and the mark is
+            # what stops a progress sentence being read as the outcome. The
+            # calls were in the window when the row was classified; a fold that
+            # cannot see them has lost information, not gained it.
             return False
         return len(new.text) >= len(old.text)
     if new.kind == "tool":
@@ -715,12 +732,29 @@ def fold_transcript_entries(
                 folded.append(SubagentEntry(entry.id, "user", text=text))
             continue
         if role == "assistant":
+            # The rail marks the ANSWER on this page too, so the fold answers the
+            # narration question from the row's OWN calls — the same rule the
+            # parent transcript reads (``tui/narration.py``) — and the block
+            # below is marked with it. A child's progress sentence is progress
+            # here exactly as it is in the parent's transcript.
+            narration = is_intermediate_narration(
+                stop_reason=payload.get("stop_reason"),
+                has_tool_calls=bool(payload.get("tool_calls")),
+            )
             if text:
                 # A durable row is a message the engine already committed to
                 # the transcript, so it is complete whatever the job is doing
                 # now. Saying so here is what stops a paged-in history message
                 # rendering with the streaming fold on a live page.
-                folded.append(SubagentEntry(entry.id, "text", text=text, complete=True))
+                folded.append(
+                    SubagentEntry(
+                        entry.id,
+                        "text",
+                        text=text,
+                        complete=True,
+                        narration=narration,
+                    )
+                )
             for raw_call in payload.get("tool_calls") or ():
                 if not isinstance(raw_call, Mapping):
                     continue
@@ -774,6 +808,13 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
     # represented separately; the set keeps the same first-seen contract in O(1).
     remembered: set[tuple[str, str]] = set()
     streams: dict[str, str] = {}
+    #: Message ids whose own ``tool_calls`` were seen in ANY of this window's
+    #: events for them — i.e. the calls the message finalized into. Kept per id
+    #: and only ever set, because the classification is a fact about the MESSAGE
+    #: and the rolling window can evict the ``message_end`` that carried it: a
+    #: later fold that no longer sees the calls must not un-learn that the row is
+    #: progress. Same shape as ``finished`` above, and for the same reason.
+    narration: set[str] = set()
     #: Message ids whose ``message_end`` arrived in THIS window. The child is
     #: done writing them even while it goes on working, which is what lets the
     #: page finalize them per row instead of waiting for the job to settle.
@@ -794,6 +835,24 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
         key = f"n{anchors.of(event)}"
         notices[key] = _notice(key, text, kind)
         remember("notice", key)
+
+    def note_narration(message_id: str, message: Mapping[str, Any]) -> None:
+        """Record whether ``message_id``'s message is mid-turn progress.
+
+        The SAME rule the parent transcript and the durable fold use
+        (:func:`is_intermediate_narration`), read off a relayed ``Message``
+        dump: ``model_dump`` carries ``tool_calls`` and ``stop_reason`` on the
+        assistant message, which is exactly the pair the live path classifies
+        from at ``AssistantMessageEnd``. Nothing here infers the calls from the
+        ``tool_execution_start`` events beside them — that would be a second
+        rule, and the two surfaces would be free to disagree about a message
+        whose calls were never executed (an aborted batch).
+        """
+        if is_intermediate_narration(
+            stop_reason=message.get("stop_reason"),
+            has_tool_calls=bool(message.get("tool_calls")),
+        ):
+            narration.add(message_id)
 
     try:
         raw_events = list(events)
@@ -823,17 +882,20 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
             message_id = str(message.get("id") or f"m:{anchors.of(event)}")
             if etype == "message_start":
                 streams[message_id] = ""
+                note_narration(message_id, message)
                 remember("text", message_id)
             elif etype == "message_update":
                 if message_id not in streams:
                     streams[message_id] = ""
                     remember("text", message_id)
                 streams[message_id] += str(event.get("delta") or "")
+                note_narration(message_id, message)
             else:  # message_end adopts the authoritative text
                 text = _content_text(message) or streams.get(message_id, "")
                 if message_id not in streams and not text:
                     continue
                 streams[message_id] = text
+                note_narration(message_id, message)
                 finished.add(message_id)
                 remember("text", message_id)
         elif etype == "tool_execution_start":
@@ -932,6 +994,7 @@ def fold_trajectory(events: Sequence[Any], *, settled: bool = False) -> list[Sub
                         kind="text",
                         text=text,
                         complete=key in finished or settled,
+                        narration=key in narration,
                     )
                 )
         elif kind == "tool":
@@ -1200,6 +1263,11 @@ def entry_block(
     if entry.kind in ("text", "subagent_message"):
         block = AssistantBlock()
         block.set_fold_hint(fold_width)
+        # BEFORE `update_text`, for the reason `set_fold_hint` above is: the rail
+        # is read at paint rate, so a mark applied afterwards would leave the
+        # rows this call authors carrying a rail the next rebuild drops.
+        if entry.narration:
+            block.mark_narration()
         block.update_text(entry.text)
         if entry.complete or settled:
             block.finalize_text()
@@ -1291,7 +1359,19 @@ def update_entry_block(
             # Committed and immutable: agreeing is the whole answer, and a row
             # that has somehow gained text after settling has to be rebuilt
             # because `update_text` is a no-op on a finalized block.
+            #
+            # A row that has newly become NARRATION is the same shape of
+            # change: its committed rows already carry the rail and marking the
+            # block cannot repaint them, so it is rebuilt rather than marked
+            # too late to be seen. The reverse never arrives — `_supersedes`
+            # refuses a fold that would un-classify a row.
+            if entry.narration and not previous.narration:
+                return False
             return entry.text == previous.text
+        # Set BEFORE the text work: `mark_narration` is read at paint rate by
+        # every row this call may author (see `entry_block`).
+        if entry.narration:
+            block.mark_narration()
         # Only ever GROWS. A shorter text at the same key is the rolling window
         # having evicted the opening deltas, which `_supersedes` already
         # refuses; reaching here with one would mean silently truncating a

@@ -47,6 +47,11 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # tool calls or in the answer, so narration streams live and is dropped one
     # event later.
     #
+    # This flag decides whether narration is THERE at all; `display.rail`
+    # separately decides whether it wears the rail. Both were set from the same
+    # classification of the event that ended the message, so a narration block
+    # that survives this setting is un-railed (the rail marks the ANSWER).
+    #
     # A mid-session flip applies FORWARD ONLY — already-mounted blocks are left
     # exactly as they are. Re-projecting the transcript to apply it backwards
     # means mounting many blocks in one synchronous pass, which leaves them
@@ -54,6 +59,54 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # blanking a transcript. The session history keeps the narration either
     # way, so `/resume` re-reads it under the current value.
     "display.narration": True,
+    # A rule down the left edge of the assistant's ANSWER, in the `label`
+    # token. It ECHOES the user prompt's rule rather than matching it: same
+    # column and same role, but deliberately a different glyph and a different
+    # ink (a quarter block in `label` against the prompt's half block in
+    # `signal`), because a rail that looked identical to the prompt's would
+    # remove the distinction it exists to draw.
+    #
+    # ANSWER means the TERMINAL message of the turn — precisely the finalized
+    # message `tui/narration.py::is_intermediate_narration` returns False for.
+    # A mid-turn progress sentence is painted by the same block, and railing it
+    # too is what made progress and outcome look identical (the report this
+    # change answers): the prose stays, because dropping it is
+    # `display.narration`'s separate job, and the mark goes.
+    #
+    # The rail is a SETTLED-state property. A message still streaming paints no
+    # bar and folds to the lane's full width — rail-OFF geometry exactly — and
+    # the bar appears in the same paint that commits the message
+    # (`AssistantBlock.finalize_text`). Narration is never railed, streaming or
+    # settled, because the rail marks the ANSWER rather than every assistant
+    # block; both routes are read from the one gate (`_rail_cols`), so the fold,
+    # the paint, the copy gutter and the selection slice cannot disagree about a
+    # frame. The cost of the streaming state is that the settle re-folds the
+    # message two cells narrower, so a long message re-wraps once — see
+    # `_rail_cols` for why the alternative (reserving the cells blank) was
+    # rejected.
+    #
+    # Default ON. The rail answers "where does the answer start and stop",
+    # which only bites a reader who cannot already tell — so the people it
+    # helps are exactly the people who would never go looking for the setting.
+    # The asymmetry decides it: a user who dislikes the rail sees a line and
+    # turns it off, while a user who needs it under a default of OFF never
+    # discovers it exists. The cost of the wrong default is recoverable in one
+    # direction and invisible in the other.
+    #
+    # OFF restores pre-rail rendering exactly for a lane of `MIN_BODY` or
+    # wider, which is every ordinary terminal. Below that the pre-rail build
+    # had no floor and this one clamps for containment, so the two differ by
+    # design (see `AssistantBlock._body_width`). It is not merely an unpainted
+    # gutter either way: the fold width, the copy gutter and the selection
+    # slice are all read at the same rate as the paint, so the prose is not
+    # left indented two cells by a rail that is not there. An UN-RAILED
+    # narration block, and a message that has not SETTLED yet, are that same
+    # state, reached from inside the block rather than from this setting
+    # (`mark_narration`, and the flag `finalize_text` raises). A mid-session
+    # flip DOES reach blocks already on screen — `display.*` runs `retheme`,
+    # which re-enters `_apply_rows`, which is where the rail is painted and
+    # where the flag is read.
+    "display.rail": True,
     # One padding row above and below a tool row and a user prompt
     # (`.comfortable-rows` in the stylesheet). Default ON was changed to OFF
     # by the maintainer.

@@ -33,6 +33,7 @@ from local_operator.jobs import JobManager
 from local_operator.logger import configure_console_logging, get_logger
 from local_operator.scheduler_service import SchedulerService
 from local_operator.server import registry as serve_registry
+from local_operator.server import reload as serve_reload
 from local_operator.server import retire as serve_retire
 from local_operator.server.desktop import desktop_posture, require_desktop
 from local_operator.server.routes import (
@@ -59,10 +60,8 @@ from local_operator.server.routes import (
     sse,
     static,
     transcription,
-    websockets,
 )
 from local_operator.server.utils.event_broker import EventBroker
-from local_operator.server.utils.websocket_manager import WebSocketManager
 
 # Annotating the lifespan's record publisher (`None` on a boot that was not
 # announced) needs the shared publisher's type. Zero runtime cost where it
@@ -159,10 +158,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
-    app.state.websocket_manager = WebSocketManager()
-    # The SSE fan-out. One instance per process, mirroring the websocket
-    # manager: both are subscribers to the same pump, which is what keeps the
-    # legacy transport byte-identical while SSE carries the richer taxonomy.
+    # The SSE fan-out. One instance per process: it is the ONLY streaming
+    # transport the server offers (the deprecated /v1/ws socket surface was
+    # removed, so a subscriber count here is the whole live-stream picture -
+    # see `server/retire.py::in_flight`).
     app.state.event_broker = EventBroker()
     app.state.env_config = get_env_config()
 
@@ -174,7 +173,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         operator_type=OperatorType.SERVER,
         verbosity_level=VerbosityLevel.QUIET,
         job_manager=app.state.job_manager,
-        websocket_manager=app.state.websocket_manager,
         event_broker=app.state.event_broker,
     )
 
@@ -225,6 +223,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # channel and therefore nothing to retire into (see the branch below).
     retire_task: asyncio.Task[None] | None = None
     retire_stop: asyncio.Event | None = None
+    # The reload task: None when the reload could not be armed (a --reload child,
+    # a boot with no listener of its own, a platform without asyncio signal
+    # handlers), which is a refusal rather than a fault — the daemon then serves
+    # the build it loaded for as long as it runs, exactly as it did before this
+    # existed. It shares ``retire_stop`` because there is one event that means
+    # "this daemon is going away" and two tasks that must observe it.
+    reload_task: asyncio.Task[None] | None = None
+    reload_stop: asyncio.Event | None = None
     if announced is not None:
         # THE BUILD WATCH'S BASELINE IS SAMPLED HERE, BEFORE THE RECORD EXISTS —
         # and the ordering is load-bearing rather than incidental. The baseline
@@ -238,8 +244,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # evidence driver. `LOP_BUILD_PREFIX` is the e2e-only override the
         # reader honours; production reads `sys.prefix`.
         boot_build = buildwatch.boot_build()
+        # ARMED BEFORE THE RECORD EXISTS, and the order is load-bearing rather
+        # than tidy. The record PUBLISHES the capability, so a record written
+        # before the handler was installed would invite a caller to send SIGUSR1
+        # to a process whose default answer to that signal is death. "Armed"
+        # means the handler is in place; the task that acts on a request is
+        # started further down, once the scheduler is up and the record exists.
+        reload_stop = asyncio.Event()
+        reload_watch = serve_reload.install(app, stop=reload_stop)
         serve_record = serve_registry.build_record(
-            instance_id=app.state.instance_id, announced=announced
+            instance_id=app.state.instance_id,
+            announced=announced,
+            # The capability the record publishes and the handler just installed
+            # are ONE decision, so the record is told what `install` actually
+            # did rather than what the process looks like: a --reload child, a
+            # boot with no listener of its own and a platform without asyncio
+            # signal handlers all answer None, and all three would be lying if
+            # this read `listener_fd is not None` instead.
+            reloadable=reload_watch is not None,
         )
         # The config root resolved above, passed explicitly: the publisher pins
         # the directory it publishes into for its whole life, so a heartbeat can
@@ -289,6 +311,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.serve_retire = retire_task
             app.state.serve_retire_stop = retire_stop
 
+            # A REQUESTED reload, which is a different question from the
+            # announcement above and deliberately not part of its poll. The poll
+            # answers "is another build on disk" and must never act on it alone
+            # (a marker proves neither a ready successor nor that
+            # scheduler-owned work can stop). A reload answers "an operator asked
+            # this daemon to move onto the build the pointer names", and it CAN
+            # act, because it keeps this pid, this socket, this cwd and this
+            # environment: there is no successor to be ready, and nothing outside
+            # this process has to bring it back. `serve_reload`'s module docstring
+            # carries the whole argument and the fail-closed rules.
+            #
+            # `reload_watch` is None on every boot that could not be armed, and
+            # that is exactly the set of daemons whose record published
+            # `reloadable: false` — so the capability a reader sees and the task
+            # it can wake are the same decision, made once.
+            if reload_watch is not None:
+                reload_task = asyncio.create_task(reload_watch.run())
+                reload_task.add_done_callback(serve_reload.observe_reload)
+                app.state.serve_reload = reload_task
+
     yield
     try:
         # Clean up on shutdown
@@ -309,7 +351,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.config_manager = None
         app.state.agent_registry = None
         app.state.job_manager = None
-        app.state.websocket_manager = None
         app.state.event_broker.close()
         app.state.event_broker = None
         app.state.env_config = None
@@ -337,6 +378,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # its check sleep, where the event is not what it awaits.
         if retire_stop is not None:
             retire_stop.set()
+        if reload_stop is not None:
+            reload_stop.set()
+        if reload_task is not None:
+            reload_task.cancel()
+            await asyncio.gather(reload_task, return_exceptions=True)
         if retire_task is not None:
             retire_task.cancel()
             await asyncio.gather(retire_task, return_exceptions=True)
@@ -347,6 +393,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.serve_retiring = False
         app.state.serve_retire = None
         app.state.serve_retire_stop = None
+        app.state.serve_reload = None
+        app.state.serve_reload_pending = False
         if serve_heartbeat is not None and serve_publisher is not None:
             serve_heartbeat.cancel()
             await asyncio.gather(serve_heartbeat, return_exceptions=True)
@@ -385,8 +433,20 @@ app = FastAPI(
 #: the router by :func:`_legacy_gate_matchers` so a newly added route under them
 #: is gated BY DEFAULT. This set is only the flat singleton paths, which have no
 #: id segment and no family to walk.
+#:
+#: ``/v1/agent-name-availability`` is here because a route can be flat, read-only
+#: and carry no credential of its own and still be the wrong thing to leave open:
+#: it is EGRESS this machine performs on an unauthenticated caller's behalf (the
+#: hub is asked whether a name is free), on an app whose ``CORSMiddleware``
+#: allows every origin, so a page the operator merely visited could drive it. The
+#: prefix families cannot see it — ``"/v1/agent-name-availability".startswith(
+#: "/v1/agents")`` is False, the hyphen is not a segment boundary — which is why
+#: ``test_managed_gate_covers_every_control_surface_route`` walks the ROUTERS
+#: rather than the prefixes and fails when a route like this appears without an
+#: entry here.
 _LEGACY_CONTROL_PATHS = frozenset(
     {
+        "/v1/agent-name-availability",
         "/v1/config",
         "/v1/config/system-prompt",
         "/v1/credentials",
@@ -693,13 +753,10 @@ app.include_router(
     static.router,
 )
 
-# /v1/ws
-app.include_router(
-    websockets.router,
-)
-
-# /v1/sse - the preferred streaming transport; /v1/ws above is the fallback
-# kept for older clients.
+# /v1/sse - the only streaming transport the HTTP plane serves. The deprecated
+# /v1/ws socket mount that used to sit above this was removed rather than kept
+# as a fallback: it carried the same frames on a second, unversioned contract,
+# and every maintained client negotiates SSE from /v1/sse/capabilities.
 app.include_router(
     sse.router,
 )

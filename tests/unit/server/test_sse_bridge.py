@@ -172,7 +172,8 @@ def test_attach_broker_reuses_the_record_projection_verbatim() -> None:
         if event.name == EventName.RECORD_UPDATE
     ]
     assert records[-1]["message"] == "Hello world"
-    # The legacy injections the WebSocket transport made are still present.
+    # The legacy injections the removed WebSocket transport made are still
+    # present - an installed client's reducer reads them.
     assert records[-1]["message_id"] == "m1"
     assert records[-1]["connection_type"]
 

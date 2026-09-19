@@ -259,3 +259,170 @@ def test_resolve_hosting_model_no_hosting_raises_hosting_error(
     args = argparse.Namespace(hosting=None, model=None)
     with pytest.raises(HostingNotConfiguredError):
         resolve_hosting_model(None, args, manager)
+
+
+# ---------------------------------------------------------------------------
+# A decision-only provider is never a chat hosting (the fifth door)
+# ---------------------------------------------------------------------------
+
+
+#: The one-row budget for a RECEIPT SENTENCE, and it is a measured number with a
+#: provenance rather than a round figure: at 100 columns the designer's rendered frame
+#: (`save_capture`, production stylesheet) gave the notice block 75 cells and the
+#: sentence inside it 71 — the glyph, the gutter and the indent take the rest. QA round 4
+#: (Q4) is why this replaced `<= 90`: 90 was never measured, and the sentences these
+#: tests assert are 54-63 cells, so the old bound could not fail for anything a user
+#: would see wrap.
+#:
+#: WHAT IT DOES AND DOES NOT COVER. The branches whose text is fully determined here —
+#: no-hosting (54), first-run write (60), a decision-only login against a typical
+#: configured pair (63) — are asserted against it. The branches whose length is the IDS'
+#: are not, because no copy change can bound them: measured, `openrouter/anthropic/
+#: claude-opus-5-20260101` puts the sentence at 84 and the repairing sentence
+#: (`Replaced unusable hosting 'anthropicxyq' with 'deepseek', model to 'deepseek-chat'`)
+#: at 83, both of which wrap. That is a real, known wrap in a branch no alternative copy
+#: would fix, and it is recorded here rather than hidden by an assertion that would pass
+#: for the wrong reason.
+RECEIPT_ROW_CELLS = 71
+
+
+def test_a_decision_only_provider_is_never_adopted_as_hosting() -> None:
+    """``login typesafe`` stores a credential; it must not move the routing.
+
+    TypeSafe's Jev rejects ``chat/completions`` on every host we reach it through
+    (``registry.is_decision_only``), so a plan that adopted it as hosting — as
+    cases 2 and 3 below would — writes a config whose very next session cannot
+    answer a turn. That is the trap the catalogue, the ``/model`` ranking, the
+    session-model resolver and the failover chain each refuse; login is the fifth
+    door to it, and this is the only one where the credential IS the point: the
+    layer needs the key, and nothing about that needs a chat hosting.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    # The COMMON state — a working hosting already configured — must still say
+    # something: this is the state the note used to be unreachable in, and the login
+    # then read as having silently done nothing (review round 1, Q4).
+    configured = plan_login_defaults("typesafe", "deepseek", "deepseek-chat")
+    assert configured.hosting is None
+    assert configured.model_name is None
+    assert configured.receipt is not None
+    # The copy answers the only question the user has ("did this change my model?")
+    # and names what is actually serving — the fact they can act on. Design round 1's
+    # D5 took the harness's vocabulary off it: no "Jev", no "decision-model calls",
+    # no "resource recommendations", and it ends with its own full stop (D6).
+    assert configured.receipt == "Nothing changed — chats keep running on deepseek/deepseek-chat."
+    # THIS BRANCH, named rather than assumed: the configured-hosting sentence is the
+    # only one that can name what serves, and the length below is a claim about IT —
+    # a bare ``<= RECEIPT_ROW_CELLS`` would pass on any branch's string, including one
+    # this test never meant to describe. The other branch's tell (it points at
+    # ``/model`` because there is nothing serving to name) must not appear here.
+    assert "deepseek/deepseek-chat" in configured.receipt
+    assert "/model" not in configured.receipt
+    assert len(configured.receipt) <= RECEIPT_ROW_CELLS, len(configured.receipt)
+    assert len(configured.receipt) == 63, "the measured length this test's budget is about"
+
+    # Case 2: hosting empty (a fresh config, or `hosting: ""`).
+    for empty in ("", None):
+        plan = plan_login_defaults("typesafe", empty, None)
+        assert plan.hosting is None, empty
+        assert plan.model_name is None
+        # Not a repair: nothing was written, and `repairing` is what the callers
+        # use for wording.
+        assert plan.repairing is False
+        # The receipt is the ONE caller-facing channel, and it has to name both
+        # the reason and the provider a user recognises.
+        assert plan.receipt is not None
+        # No routing to name, so the sentence names the way out of that state.
+        assert plan.receipt == "Nothing changed — pick a chat model with /model first."
+        assert len(plan.receipt) == 54, len(plan.receipt)
+        assert len(plan.receipt) <= RECEIPT_ROW_CELLS
+        # The wire vocabulary the design round took off the default copy.
+        assert "Jev" not in plan.receipt
+        assert "decision-model" not in plan.receipt
+
+    # Case 3: hosting set but unusable. A repair must not replace a broken
+    # hosting with one that cannot serve a session at all, and it must not write
+    # the dead model either.
+    repaired = plan_login_defaults("typesafe", "anthropicxyq", "claude-sonnet-4-5")
+    assert repaired.hosting is None
+    assert repaired.model_name is None
+    assert repaired.receipt is not None
+
+
+def test_a_normal_provider_still_adopts_on_an_empty_hosting() -> None:
+    """The regression guard: the exemption is about ONE provider, not the rule.
+
+    Identical call, same empty hosting, an ordinary provider — the adoption that
+    makes a fresh ``login`` usable has to survive.
+    """
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    plan = plan_login_defaults("xai", None, None)
+
+    assert plan.hosting == "xai"
+    assert plan.model_name == "grok-3"
+    assert plan.receipt is not None
+
+
+def test_apply_login_defaults_writes_nothing_and_says_so_for_typesafe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI half: the no-write path must still print the note.
+
+    ``_apply_login_defaults`` returned before printing whenever the plan wrote
+    nothing, which would have made this receipt unreachable — the user would see
+    ``Stored API key for 'typesafe'.`` and then nothing about their routing.
+    """
+    from local_operator.paths import CONFIG_DIR_ENV
+    from local_operator.providers import auth_cli
+
+    # The failure the note exists for happened in the COMMON state: a hosting already
+    # configured and perfectly usable, where the planner returned only "nothing to
+    # write" and the user saw `Stored API key for 'typesafe'.` and silence.
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    manager = ConfigManager(tmp_path)
+    manager.set_config_value("hosting", "deepseek")
+    manager.set_config_value("model_name", "deepseek-chat")
+
+    auth_cli._apply_login_defaults("typesafe")
+    printed = capsys.readouterr().out
+
+    # THE LITERAL sentence, capital and full stop included — deliberately not the
+    # planner's own output run a second time, which would move with the copy and so
+    # could never fail (review round 4, NIT). The two front ends agreeing is a
+    # consequence of the print sites, not of this assertion: ``auth_cli`` prints
+    # ``plan.receipt`` and the TUI's ``_apply_login_defaults`` returns ``plan.receipt``
+    # for ``notice(..., "note")``, so pinning the bytes HERE pins what both render.
+    assert "Nothing changed — chats keep running on deepseek/deepseek-chat." in printed
+    # ...and the routing is untouched: the configured pair, unchanged.
+    assert manager.get_config_value("hosting") == "deepseek"
+    assert manager.get_config_value("model_name") == "deepseek-chat"
+
+    # The same on a config with no hosting at all, and still nothing written.
+    fresh = tmp_path / "fresh"
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(fresh))
+    auth_cli._apply_login_defaults("typesafe")
+    fresh_out = capsys.readouterr().out
+    assert "Nothing changed — pick a chat model with /model first." in fresh_out
+    # One full stop, from the receipt itself — not the CLI's own punctuation (D6).
+    assert fresh_out.count(".") == 1, fresh_out
+    # The lowercase-start case, which is where the two front ends used to diverge: the
+    # CLI upper-cased it and the TUI did not (D9). Both now print what the planner
+    # wrote, so a receipt that starts lowercase stays lowercase everywhere.
+    from local_operator.providers.login_defaults import plan_login_defaults
+
+    deepseek_receipt = plan_login_defaults("deepseek", "", None).receipt
+    assert deepseek_receipt is not None and deepseek_receipt.startswith("Set default")
+    reloaded = ConfigManager(fresh)
+    assert not reloaded.get_config_value("hosting")
+    assert not reloaded.get_config_value("model_name")
+
+    # A normal provider through the SAME command still adopts, and prints its
+    # write receipt — the two paths share one print site.
+    auth_cli._apply_login_defaults("deepseek")
+    write_receipt = capsys.readouterr().out.strip()
+    # The WRITE branch too: literal, and inside the same row budget. This is the
+    # receipt that would otherwise be the silent one — the round-4 NIT's point is that
+    # every branch of this copy is asserted against the bytes a user sees.
+    assert write_receipt == "Set default hosting to 'deepseek', model to 'deepseek-chat'."
+    assert len(write_receipt) == 60 and len(write_receipt) <= RECEIPT_ROW_CELLS, len(write_receipt)

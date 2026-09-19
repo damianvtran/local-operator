@@ -3864,7 +3864,137 @@ def _print_current_generation() -> None:
         print(f"current install: {generation}")
 
 
-def _generation_upgrade(total: int) -> int:
+def _services_refusal(prefix: Path | None = None) -> str | None:
+    """Why this process must not move the machine's services, or ``None``.
+
+    THE SAME TWO QUESTIONS :func:`_repair_refusal` ASKS before it rewrites a
+    plist, because moving a daemon onto a build is the same kind of act: it
+    changes which install a long-lived process runs.
+
+    1. **Is this an installation at all?** A kind that is not a uv tool — a
+       source checkout, a pip or pipx tree, anything unrecognised — is refused
+       outright (serve-reload review round 2, R2-1). A worktree venv once rewrote the
+       operator's four live plists to point at itself, and the same reasoning
+       applies to signalling the services those plists start.
+    2. **Is this process running this machine's install?** (serve-reload review rounds 3
+       and 4, R3-2 then R4-1.) Asking only the first let a pip-installed `lop update` on
+       a uv-tool machine reload the fleet that install owns: harmless in
+       destination, since everything converges on the shared pointer, but not in
+       authority, and a spurious reload cuts the app's relay for nothing.
+
+    **THE SECOND QUESTION IS NOT "IS THIS THE POINTER'S GENERATION"**, which is
+    where the first attempt at it went wrong and had to be fixed a round later.
+    ``perform_upgrade`` installs into a new generation and flips the pointer **in
+    this same process** — nothing re-execs, and this module says so itself where
+    it explains that ``sys.executable`` is "precisely the SUPERSEDED build"
+    (``_tui_reexec_hint``'s neighbourhood). So on the one path where this stage
+    matters most, the caller is *by construction* the generation the pointer has
+    just moved past, and comparing against the current pointer refused the very
+    caller that had performed the upgrade: `lop update` would move the tree,
+    refuse to move a single service, and report success. That is the reported bug
+    restored one generation later.
+
+    The question that survives both cases is membership: is this one of THIS
+    MACHINE's generations? A steady-state `lop` (invoked through `current`) is;
+    the superseded build a flip has just left behind is; a pip tree, a worktree
+    venv or anybody else's tool directory is not. That is also the honest
+    reading of what the daemons have in common — they were all started from this
+    install, and they all converge on its pointer.
+
+    ``prefix`` is a seam, not a parameter anyone passes in production: it exists
+    so the upgrade-path shape above can be tested by giving this function the
+    superseded prefix, which a test cannot otherwise fabricate.
+    """
+    kind = install_kind()
+    if kind is not InstallKind.UV_TOOL:
+        return f"this install's kind is {kind.value}"
+    mine = (prefix or Path(sys.prefix)).resolve()
+    # ASK ABOUT THE SAME INSTALL, or the seam above silently checks one tree's
+    # membership while judging another's kind (serve-reload review round 5, R5-2:
+    # measured ACCEPT for a non-existent, non-install path under the store while
+    # the calling process was a uv tool, because the kind question was still asked
+    # about the CALLER).
+    # KEYWORD, because `install_kind` is keyword-only: calling it positionally is a
+    # TypeError, and that is what shipped in the previous revision of this line
+    # (serve-reload review round 6, R6-1). It escaped 145 passing tests because the
+    # guard short-circuits on `EDITABLE` in this venv before reaching it, and
+    # because every test double was written `lambda *a, **k` — a WIDER signature
+    # than the real function, so no double could see the mistake. The doubles now
+    # mirror the real signature; see `_install_kind_double` in the tests.
+    kind = install_kind(prefix=mine)
+    if kind is not InstallKind.UV_TOOL:
+        return f"this install's kind is {kind.value}"
+    generations = (stable_root() / "generations").resolve()
+    if mine == generations or not mine.is_relative_to(generations):
+        return (
+            f"this process runs from {mine}, which is not one of this machine's "
+            f"install generations ({generations})"
+        )
+    return None
+
+
+def _services_stage(*, wait_s: float | None = None) -> None:
+    """Bring the non-runtime fleet onto the build the pointer now names.
+
+    THE STEP THAT MAKES AN UPDATE ACTUALLY AN UPDATE. Replacing the install used
+    to leave every ``lop serve`` daemon serving the build it had loaded — for as
+    long as it ran, by design (``server/retire`` refuses to exit on a marker) — so
+    a desktop app's "update server" button moved the tree and left the backend
+    where it was, then reported exactly that. ``local_operator.services`` owns the
+    sentence and :mod:`local_operator.server.reload` the mechanism; this function
+    exists only to call it and to word a failure as a warning on a successful
+    update.
+
+    Imported function-locally because ``services`` reaches the serve registry and
+    ``update`` is on ``lop``'s startup path — the same rule that keeps this module
+    free of uvicorn (``tests/unit/test_import_graph.py``).
+    """
+    from local_operator.services import print_refreshes, restart_services
+
+    # IS THIS THE INSTALL THAT OWNS THEM? `_services_refusal` carries both halves
+    # and their reasoning. Before the services stage existed this was unreachable by
+    # construction — a checkout that was behind hit `editable_refusal` above, and
+    # one that was not behind returned early — so wiring the stage to the "nothing
+    # to install" path is what opened it. The consequence was measured in review:
+    # an editable caller classifies EVERY daemon as stale (its `disk_build()` is
+    # None, and a comparison against an absent right-hand side is not a verdict)
+    # and signals the machine's serve fleet.
+    #
+    # The plist half was never reachable this way: `_repair_refusal` already refuses
+    # an editable caller inside the refresh child, so the blast radius here is the
+    # SERVES (serve-reload review round 3, R3-4: an earlier version of this comment listed the
+    # mobile daemon, the browser bridge and the tunnel too, and overclaimed). The
+    # mobile daemon IS reachable from an editable caller, but only through
+    # `--no-services` (serve-reload review round 4, R4-4), which is by design the pre-change path
+    # and is therefore left exactly as it was.
+    #
+    # `services.reload_serve_daemons` refuses on the same missing stamp, so this is
+    # the sentence rather than the fence — but the sentence is what an operator
+    # reads, and "a worktree bounced your daemon" needs to be impossible to reach
+    # rather than merely survivable.
+    refusal = _services_refusal()
+    if refusal is not None:
+        print(
+            f"warning: {refusal}, so it does not own this machine's services and none "
+            "were moved; run `lop services status` to see them, and run the update "
+            "from the install that owns them",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        refreshes = restart_services() if wait_s is None else restart_services(wait_s=wait_s)
+    except Exception as exc:  # noqa: BLE001 — the install already succeeded
+        print(
+            f"warning: the installed services could not be moved onto the new build: {exc}; "
+            "run `lop services restart` when this is resolved",
+            file=sys.stderr,
+        )
+        return
+    print_refreshes(refreshes)
+
+
+def _generation_upgrade(total: int, *, services: bool = True) -> int:
     """The tail every successful install shares: report, prune, refresh, succeed.
 
     ``lop update --from-snapshot`` uses this directly; the PyPI path prints its own
@@ -3872,15 +4002,23 @@ def _generation_upgrade(total: int) -> int:
     :func:`prune_notice_lines`, the one renderer both front ends use, and it prints
     AFTER ``current install:`` — the removal reported where it belongs rather than
     as a bare record above the lines that explain it (design review D4).
+
+    ``services=False`` (``lop update --no-services``) stops after the supervised
+    daemons are repaired, which is the pre-``services`` behaviour exactly: a caller
+    that wants the trees and nothing else is a caller that has its own reason for
+    leaving a daemon where it is.
     """
     _print_current_generation()
     for line in prune_notice_lines(prune_generations(referenced=referenced_install_roots())):
         print(line)
-    _print_daemon_refreshes(refresh_daemons_after_upgrade())
+    if services:
+        _services_stage()
+    else:
+        _print_daemon_refreshes(refresh_daemons_after_upgrade())
     return total
 
 
-def _snapshot_command(value: str) -> int:
+def _snapshot_command(value: str, *, services: bool = True) -> int:
     """``lop update --from-snapshot <dir-or-ref>``: install a local build.
 
     The in-repo half of what the out-of-tree ``lop-update`` script does today,
@@ -3937,11 +4075,15 @@ def _snapshot_command(value: str) -> int:
             # and leaving 136 MB of tree per install in TMPDIR is how a machine
             # with a small /tmp dies on a day nobody is looking.
             _remove_tree(snapshot.path)
-    return _generation_upgrade(0)
+    return _generation_upgrade(0, services=services)
 
 
 def update_command(
-    *, check: bool = False, refresh_daemons: bool = False, from_snapshot: str | None = None
+    *,
+    check: bool = False,
+    refresh_daemons: bool = False,
+    from_snapshot: str | None = None,
+    services: bool = True,
 ) -> int:
     """``lop update``, ``lop update --check``, ``--from-snapshot`` and the repair.
 
@@ -3965,7 +4107,7 @@ def update_command(
         if check:
             print("--check compares against PyPI; --from-snapshot installs a tree", file=sys.stderr)
             return 1
-        return _snapshot_command(from_snapshot)
+        return _snapshot_command(from_snapshot, services=services)
 
     result = check_latest(force=True)
     if result.latest is None:
@@ -3982,7 +4124,23 @@ def update_command(
         return 0
 
     if not result.behind:
+        # NOT AN EARLY RETURN ANY MORE, and that is the whole fix for the report
+        # this change exists for (serve-reload review round 1, R1-2). "Nothing to install" is
+        # not "nothing to do": the reported machine printed exactly this line
+        # while its backend went on serving a build four releases old, because
+        # `behind` is a version-string compare and the SERVICES are not versioned
+        # by the pointer at all — a daemon's build is whatever generation it
+        # resolved at exec, so an install that never moves can still leave four
+        # supervisors and a serve daemon behind it forever.
+        #
+        # The stage is idempotent and says so out loud: a service already on the
+        # current build is reported as such and not touched, so the cost of
+        # running it on every `lop update` is a health probe per daemon.
         print(f"local-operator {result.installed} is the latest")
+        if services:
+            _services_stage()
+        else:
+            _print_daemon_refreshes(refresh_daemons_after_upgrade())
         return 0
 
     kind = install_kind()
@@ -4019,5 +4177,8 @@ def update_command(
     _print_current_generation()
     for line in pruned:
         print(line)
-    _print_daemon_refreshes(refresh_daemons_after_upgrade())
+    if services:
+        _services_stage()
+    else:
+        _print_daemon_refreshes(refresh_daemons_after_upgrade())
     return 0

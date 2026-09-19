@@ -62,6 +62,9 @@ pooled, load-balanced, and used with the prompt cache in mind.
 - [🌐 Drive Your Own Browser (Browser Extension)](#-drive-your-own-browser-browser-extension)
 - [📦 Installation Options](#-installation-options)
 - [🔧 Configuration & Credentials](#-configuration--credentials)
+  - [Credentials and secrets](#credentials-and-secrets)
+  - [What the agent's shell may see](#what-the-agents-shell-may-see)
+  - [Standing instructions](#standing-instructions)
 - [🌟 Radient: automatic model selection and agent sharing](#-radient-automatic-model-selection-and-agent-sharing)
 - [🔒 Safety Model](#-safety-model)
 - [📝 Examples](#-examples)
@@ -349,8 +352,9 @@ per account and a hop would re-pay to rebuild it.
   lightweight quota request per user message to leave a provider *before* it
   fails, with `retry.usageReservePercent` (default 10) as the headroom floor.
 - **Everything is visible in-app.** `/usage` shows each provider's quota
-  windows and account spend; `/accounts` lists every stored credential;
-  `/session` reports the current session's cost, cache, and request
+  windows and account spend; `/accounts` lists every signed-in provider account
+  (the `lop secret` store is separate); `/session` reports the current session's
+  cost, cache, and request
   diagnostics. One exception: QwenCloud's personal Token Plan window needs a
   [console ticket](./local_operator/guides/qwencloud/GUIDE.md) stored alongside
   the login.
@@ -449,7 +453,8 @@ with its title and age:
 | `/usage`, `/context` | Provider quota and account spend · what's occupying the context window |
 | `/session` | Current-session recorded usage, combined cost, cache, and request diagnostics |
 | `/failovers` | The model cascade for this session, and which account is serving |
-| `/provider`, `/login`, `/logout`, `/accounts`, `/credential` | Manage providers and stored credentials |
+| `/provider`, `/login`, `/logout`, `/accounts` | Manage providers and signed-in accounts |
+| `/credential` | Hand over a secret: type it after `/credential` and a space to have it masked and captured; a paste your terminal delivers as text is captured the same way; the composer's own paste key (`Ctrl+V` on macOS) is not. Bare `/credential` lists this session's credentials, and `/credential --persist <KEY>` saves one to the long-term store. See [Credentials and secrets](#credentials-and-secrets) |
 | `/search` | Configure web-search providers and load balancing |
 | `/team` | Launch a saved team: `/team <name> <request>`; `/team chart <name>` draws its org chart |
 | `/skills`, `/mcp` | List loaded skills · MCP servers |
@@ -487,6 +492,11 @@ update leaves the current terminal and runtime running.
 - `shift+tab`: cycle reasoning effort.
 - `ctrl+l`: clear the transcript (history is untouched).
 - `ctrl+t` / `ctrl+g`: expand the todo list · cycle the subagent panel.
+- **Hand over a secret**: `/credential` followed by a space opens a masked
+  capture: type the value and **Enter** turns it into a chip, and a paste your
+  terminal delivers as text (`Cmd+V` on macOS) is captured the same way. The
+  composer's own paste key (`Ctrl+V` on macOS) never consults the capture: it
+  reads the clipboard itself, so it inserts the value as ordinary text.
 - `option+←` / `option+→` (`ctrl+←` / `ctrl+→` on Linux and Windows): move the
   caret a word at a time in the composer; add `shift` to select by word. Works
   the same in shell (`!`) mode and with a command list open, and `option+↑` /
@@ -528,7 +538,10 @@ lop logout kimi
 ```
 
 Legacy `--hosting <name> --model <name>` flags keep working, and API keys can
-be stored with `lop credential update <KEY_NAME>` (a masked prompt).
+be stored with `lop credential update <KEY_NAME>` (a masked prompt); the
+`lop secret` store, and the `/credential` hand-over that keeps a secret out of
+the prompt text, are covered in
+[Credentials and secrets](#credentials-and-secrets).
 
 ## 🧰 What the Agent Can Do
 
@@ -538,11 +551,15 @@ The agent's built-in tools, each with its own card in the transcript:
   kernel: variables survive across calls).
 - **Work with files**: `read`, `write`, `edit` (surgical search/replace),
   `glob`, `grep`, plus `lsp` for Jedi-backed Python code intelligence.
-- **Reach the web**: load-balanced `web_search` across seven providers,
+- **Reach the web**: load-balanced `web_search` across eight providers,
   `web_fetch` for reading pages headlessly, and a `browser` tool for pages
   that need rendering, a login, or interaction.
 - **Stay organized**: a visible `todo` list for multi-step work, `ask` to
   put real decisions back to you as a picker instead of a wall of text.
+- **Handle secrets**: the `secret` tool stores, lists, updates and removes
+  entries in the encrypted long-term store, and hands a value to `bash` or
+  `eval` without ever returning it to the model. See
+  [Credentials and secrets](#credentials-and-secrets).
 - **Run an organization**: `task` spawns subagents, `hub` talks to them,
   `jobs`/`wait` manage background work, `send` reaches other sessions,
   `agent` and `team` author profiles and rosters, and `wake` schedules future
@@ -550,28 +567,58 @@ The agent's built-in tools, each with its own card in the transcript:
 
 ### 🔎 Web search
 
-Search works out of the box. DuckDuckGo and Tavily's keyless endpoint are
-enabled by default, and requests rotate across providers with automatic
-fallback when one is rate-limited or down:
+Search works out of the box. The chain walks **free legs first and metered legs
+last**: the free providers you list, then the credential-free providers this
+install can reach, then the best-effort ones, then anything that would spend money
+or a model turn — including a paid provider you listed, which is tried first among
+the paid legs and never before a free one.
 
 ```bash
 lop search list
 lop search test "Python 3.13 release notes"
-lop search enable perplexity
+lop search enable perplexity          # clears an exclusion
+lop search disable brave             # excludes it from every search
+lop search order duckduckgo tavily   # the priority prefix: free legs first, paid ids run after them
 lop search setup brave --api-key
 lop search setup tavily --oauth      # official Tavily MCP server
 lop search setup searxng --endpoint https://search.example.com
 ```
 
+`web_search.providers` is a **priority prefix, not an allowlist**, and its
+authority is over order **within a band**: a named free provider joins the free
+pool where you put it — and with the default `round_robin` that pool is rotated, so
+"where you put it" is its position in the pool rather than a promise it is tried
+first on every call (`search balance ordered` is the strict version). Every other
+usable provider joins automatically behind the ones you named.
+`web_search.excluded_providers` is the only way to say never — an id there is
+skipped in the prefix *and* in the automatic bands. A provider that becomes
+usable mid-session (a DeepSeek login, an Exa key) joins its band on the next
+search with no further configuration; `lop search list` states each provider's
+state, so the chain is never a guess.
+
+Listing a provider whose transport would **spend** — a key, or a model turn —
+does not put it first. It moves it to the head of the **paid** band, so every
+free leg is still tried before it: a paid provider listed ahead of a free one is
+tried first *among the paid legs*, and `lop search list` names it as `paid` rather
+than as a plain `enabled`. That keeps the free-before-paid rule absolute, and
+`search list`'s `chain:` line shows the resulting order.
+
+`round_robin` spreads the first attempt across the whole **free pool** — the
+listed free providers in their listed order, then the credential-free providers
+that joined automatically — and never across a band boundary, so nothing that
+spends can be rotated (or listed) ahead of a free leg.
+
 | Provider | Access | Default |
 | --- | --- | --- |
-| DuckDuckGo | Credential-free | Enabled |
-| Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Enabled |
-| Perplexity | Anonymous or `PERPLEXITY_API_KEY` | Disabled |
-| Brave | `BRAVE_API_KEY` | Disabled |
-| Exa | `EXA_API_KEY` | Disabled |
-| SerpApi | `SERPAPI_API_KEY` | Disabled |
-| SearXNG | Self-hosted endpoint URL | Disabled |
+| DuckDuckGo | Credential-free | Priority prefix |
+| Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Priority prefix (keyed: paid band) |
+| Exa | Keyless MCP (no key needed), or `EXA_API_KEY` | Automatic (free; keyed: paid band) |
+| Parallel | Keyless MCP (no key needed), or `PARALLEL_API_KEY` | Automatic (free; keyed: paid band) |
+| Perplexity | Anonymous or `PERPLEXITY_API_KEY` | Automatic (best-effort; keyed: paid band) |
+| DeepSeek | Model login or `DEEPSEEK_API_KEY` | Automatic (paid) |
+| Brave | `BRAVE_API_KEY` | Automatic (paid) |
+| SerpApi | `SERPAPI_API_KEY` | Automatic (paid) |
+| SearXNG | Self-hosted endpoint URL | Automatic (free, with an endpoint) |
 
 The same controls are available in-app via `/search`.
 
@@ -788,6 +835,199 @@ interpreter the `bash` tool spawns: unset, it runs the first `bash` on `PATH`
 syntax work as the tool's name promises. Every option is browsable in
 `/settings`.
 
+### Credentials and secrets
+
+Five different things get called "credentials" here, and they behave
+differently. **Provider API keys** are the keys `lop` itself reads: they live
+in `~/.local-operator/credentials.env` as plaintext, and you set them once
+through a masked prompt. **Provider logins** are the OAuth tokens `lop login`
+gets, stored in `~/.local-operator/auth.db`, where they refresh themselves. The
+QwenCloud console ticket is one login you keep by hand (below).
+**Session credentials** are what a secret handed over through the `/credential`
+capture becomes: held in memory for that session, injected into every `bash`
+child's environment so a command can use them, and never readable by the model.
+**Ordinary variables** are the named values a session carries for the agent,
+shared through the `list_variables` and `read_variable` tools; they are not
+secret at all, and they are filtered against a list of names that must never be
+passed on. The **encrypted long-term store** (`~/.local-operator/secrets/`) is
+where a secret goes when it has to outlive the session, and it is the main
+subject of this section.
+
+`lop credential` stores provider API keys; `lop secret` stores every other
+secret you save yourself, the QwenCloud ticket included.
+
+```bash
+lop credential update OPENROUTER_API_KEY    # provider key, masked prompt
+lop credential delete OPENROUTER_API_KEY
+```
+
+**What the `lop secret` store is, and is not.** Secrets are encrypted with
+AES-256-GCM under names the store keeps only as a keyed hash, so the store's own
+directory holds no readable `.env`, no greppable `API_KEY=`, and not even the
+secret names. That is a statement about the store alone: the provider keys above
+are still a plaintext file.
+
+In the default mode the master key is a file beside the store, so anyone who
+copies that directory can decrypt it. Against an attacker who reads the key
+file itself, that is the same bar as a plaintext `.env`. `lop secret harden`
+moves the store to passphrase mode, where the only key on disk is a
+passphrase-wrapped copy and the unwrapped master key lives in the memory of a
+running broker; it is not the passphrase that stays in memory, and reading that
+key from another process raises a macOS authorization prompt. Run
+`lop secret unlock` once after each boot to put the key back in the broker.
+
+What the store is **not** is a vault: `lop` is on your `PATH`, so anything
+running as you that is willing to run `lop` can read every secret exactly as
+the agent does, and a value an agent retrieves is in that session's memory for
+the turn. `lop secret status` reports the mode, and the risk that comes with it
+when the command can open the store: the key file itself in the default mode,
+the unlocked broker's memory in passphrase mode. When it cannot open the store
+it prints the reason and the command that fixes it, and no note. Neither mode
+is a vault, and the limit above holds in both. The store raises the cost of
+stealing these credentials a long way. It is not a guarantee.
+
+**One provider login you keep by hand** is the QwenCloud console ticket: a
+browser session cookie you capture and store yourself, expiring roughly weekly.
+Its value goes into the encrypted `lop secret` store rather than into `auth.db`,
+which keeps only the ticket's metadata: its name, when it was captured, and
+its length. The
+[QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers it,
+including `lop qwencloud-ticket migrate` for a ticket stored by an older build.
+
+The `lop secret` commands are the main way in. Values are read from stdin,
+never from the command line, where any process running as you can read them:
+
+```bash
+printf %s "$TOKEN" | lop secret set GITHUB_TOKEN --description "CI token"
+lop secret list                     # names and descriptions, never values
+lop secret get GITHUB_TOKEN         # value to stdout, no trailing newline
+lop secret rm GITHUB_TOKEN
+```
+
+Use a stored secret in the command that needs it:
+
+```bash
+curl -H "Authorization: Bearer $(lop secret get GITHUB_TOKEN)" https://api.github.com/user
+```
+
+The value reaches `curl` inside the child process; the model sees only the
+command text it wrote, and the value never enters the transcript.
+Neither you nor the agent should ever echo a secret, print a variable holding
+one, write one to a file you do not immediately delete, or paste one into a
+commit or a message, because each of those puts it somewhere it outlives the
+command.
+
+**From the agent's side**, the `secret` tool takes
+`op: store|retrieve|list|describe|update|delete`. `retrieve` deliberately
+returns a receipt naming the secret and how to reach it, never the value: in
+`bash` that is `$(lop secret get NAME)`, and in the `eval` kernel it is
+`secrets["NAME"]`, which hands the real string to the worker process rather
+than to the transcript. Agent-facing guidance lives in
+[`local_operator/guides/credentials/GUIDE.md`](./local_operator/guides/credentials/GUIDE.md).
+
+**Type `/credential` and a space, then type the secret, or paste it so your
+terminal delivers it as text**, and it is captured as a credential chip. Typing
+is masked and captured. So is a paste your terminal delivers as text: `Cmd+V` on
+macOS, or your terminal's own Paste command elsewhere. The composer's own paste
+key, `Ctrl+V` on macOS, is **not** captured: it reads the clipboard directly and
+inserts the value as ordinary text, so a secret must not be pasted that way. The
+value goes to this session's credential store, the line
+carries only the chip, and you keep typing to say what the secret is for: that
+description, not the secret, is what the agent reads.
+
+<p align="center">
+  <img src="./static/tui-credential-chip.png" alt="A session's composer showing the line Here's my OpenRouter key, use it to test the integration followed by a collapsed [Credential #1, 15 chars] chip" width="720">
+</p>
+
+<p align="center"><i>A key handed over with /credential goes to this session's credential store: the composer keeps a chip in its place, and your description is what the agent reads.</i></p>
+
+**Without the `/credential` token, a paste is not captured.** What opens the
+capture is the `/credential` token, not what the text looks like: paste a key
+into a composer that has not been armed and it is inserted exactly as typed,
+into the draft, into the prompt and on to the provider. This gesture is a
+hand-over, not a safety net.
+
+**Typing into the capture is masked as well.** With the token entered, the
+characters are held out of the draft and painted as dots, and **Enter** turns
+them into the same chip. **Esc** cancels the capture and puts the characters
+back in the line as plain text. Bare `/credential` lists what this session
+holds, and `/credential --persist <KEY>` also saves a session credential to the
+long-term store.
+
+<p align="center">
+  <img src="./static/tui-credential-masked-typing.png" alt="The composer while a secret is being typed after /credential: the characters render as dots, with the notice underneath reading masked as you type — Enter turns it into a chip, Esc cancels" width="720">
+</p>
+
+<p align="center"><i>A hand-typed secret is masked as you type: Enter turns it into a chip, Esc cancels the capture and puts your text back in the line.</i></p>
+
+### What the agent's shell may see
+
+`bash` and the `eval` kernel are real child processes, and both take their
+environment from the session's `shell_environment` policy:
+
+| `mode` | What a command the model runs can see |
+| --- | --- |
+| `inherit` (default) | a copy of the environment `lop` was started with, so `gh`, `aws`, `npm`, your proxy settings and your locale all keep working |
+| `allowlist` | `HOME`, `LOGNAME`, `PATH`, `SHELL`, `TERM`, `USER`, whatever `shell_environment.inherit` names, and nothing else |
+
+**What the strict mode does and does not close.** It closes the *inherited
+copy*: the provider key `lop` was started with is no longer handed to the child,
+and the child's own environment becomes a decision this program makes rather
+than an accident of how it was launched. It does **not** make the key
+unreadable. A command the model writes runs as the same user as `lop`, so it can
+read the parent process's environment in one line — `ps eww -p $PPID` on macOS,
+`cat /proc/$PPID/environ` on Linux. Read `allowlist` as "the commands my agent
+runs no longer carry the credential", not as "the credential cannot be recovered
+from a command". Closing that second half means not holding the provider key in
+the process environment at all (or running the child as another user), which is
+a separate change.
+
+**The mode is resolved once per session.** `config.yml` lives in a directory the
+agent's own shell can write, as the same user, so a policy re-read per command
+is one the model could turn off between two commands. An edit here applies at
+the next launch, and the settings page marks the section accordingly. The
+consequence to know: if a run can rewrite its own config *before* its first
+command, treat the strict mode as a mitigation rather than a guarantee.
+
+The `bash` child keeps the harness's own additions in either mode: the
+non-interactive defaults (pagers off, `CI=1`, `LOCAL_OPERATOR_AGENT_SHELL=1`,
+`TERM=dumb`) and any credential the session store injected for the agent to
+*use*. The `eval` worker is never handed
+those: it gets its own protocol channel instead, so `lop` gives a cell no `CI`
+and no session credential in either mode. It does still see whatever the harness
+was *launched* with when the mode is `inherit` (a `CI=1` the launching
+environment exported included) — the difference is the injection, which is a
+`bash`-only addition. Any subprocess the cell spawns follows the same policy. In either mode
+`shell_environment.exclude` removes names outright — including those injections,
+so it is the way to deny a variable rather than merely not grant it. It governs
+these two children only: MCP servers (already limited to the SDK's safe set plus
+their own configured `env`) and `lop`'s own processes are unaffected. A name in
+`inherit` or `exclude` that matches nothing is a no-op and is reported — a
+denial at `WARNING`, a grant at debug — so a typo cannot pass for a control.
+
+```yaml
+values:
+  shell_environment:
+    mode: allowlist                 # strict; the default is `inherit`
+    inherit: [LANG, LOCAL_OPERATOR_CONFIG_DIR]   # names the strict mode keeps
+    exclude: [GH_TOKEN]             # never passed on, in either mode
+```
+
+Set it per deployment, not globally: the interactive session you are sitting at
+wants `inherit`, a server-owned run wants `allowlist`. Why the strict mode
+exists: `lop` reads its provider API key **from its own environment** before the
+copy in `credentials.env`, and falls back to that file only when the environment
+does not supply a value for the key. The file is not consulted for every
+provider: a request reads Anthropic's key from the environment or a stored
+login, and never from `credentials.env`. An inherited copy is the copy a request
+uses when the provider has no stored login, and it is a spend credential in the
+hands of any command the model writes. A run whose whole job is fetching
+attacker-influenceable pages is exactly the run that must not have one. `mode`
+unset (or blank) is `inherit`;
+an unrecognised value (`strict`, `allow-list`) resolves to `allowlist` and warns
+by name, so a typo cannot silently disarm a hardened run. Every name here is a
+variable NAME, never a value.
+
 ### Standing instructions
 
 Your machine-wide preferences — output style, commit conventions, safety
@@ -816,24 +1056,6 @@ duplicate — paths and sizes only, never the contents.
 Project-level `AGENTS.md` / `CLAUDE.md` files are discovered separately by
 walking up from your working directory, and can be disabled with
 `LOCAL_OPERATOR_CONTEXT_FILES=0`.
-
-Credentials are stored in `~/.local-operator/credentials.env` and never
-echoed:
-
-```bash
-lop credential update TAVILY_API_KEY
-lop credential delete TAVILY_API_KEY
-```
-
-OAuth tokens from `lop login` are stored separately, in
-`~/.local-operator/auth.db`, and refresh themselves. The one credential that
-does not is the QwenCloud console ticket: a browser session cookie you capture
-and store by hand, expiring roughly weekly. Its value is held in the encrypted
-`lop secret` store rather than in `auth.db`, which keeps only when it was
-captured and how long it is — a higher bar than a file mode, though not a vault,
-since anything running as you that can run `lop` can read it. The
-[QwenCloud guide](./local_operator/guides/qwencloud/GUIDE.md) covers it,
-including `lop qwencloud-ticket migrate` for a ticket stored by an older build.
 
 ## 🌟 Radient: automatic model selection and agent sharing
 
@@ -873,8 +1095,18 @@ lop agents pull --id "<agent_id>"     # no key needed to pull
 - **MCP trust model.** Project-supplied MCP configs are treated as trusted
   input and warned about on first connect. See [docs/mcp.md](./docs/mcp.md)
   for the trust model.
-- **Credential hygiene.** Keys live in a local credential store, are entered
-  through hidden prompts, and are kept out of transcripts.
+- **Credential hygiene.** Provider keys live in a local file, are entered
+  through masked prompts, and are kept out of transcripts. A secret handed over
+  with `/credential` becomes a chip rather than text; the composer's own paste
+  key (`Ctrl+V` on macOS) is not a hand-over, and it inserts the value as
+  ordinary text. Provider logins stay in `auth.db`, and everything you save with
+  `lop secret` lives in the encrypted long-term store. See
+  [Credentials and secrets](#credentials-and-secrets).
+- **A shell's environment is a policy, not an accident.** A command the model
+  runs sees your environment by default (`shell_environment.mode: inherit`); a
+  server-owned run sets `allowlist`, so the provider key that session launched
+  with is not readable from that shell. See
+  [What the agent's shell may see](#what-the-agents-shell-may-see).
 - **Endpoint protection.** A full install registers per-user services, which
   behaviour-based EDR can read as persistence. See
   [docs/ENDPOINT_PROTECTION.md](./docs/ENDPOINT_PROTECTION.md) for the inventory

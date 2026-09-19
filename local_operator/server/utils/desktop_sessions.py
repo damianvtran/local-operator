@@ -19,7 +19,7 @@ import sqlite3
 import time
 import uuid
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -289,6 +289,16 @@ def draft_birth_selection(root: Path, session_id: str) -> ModelSpec | None:
     model_id = str(choice["model_id"])
     if get_provider_definition(provider) is None:
         logger.info("draft birth model names an unknown provider; using the default")
+        return None
+    from local_operator.providers.registry import is_decision_only
+
+    if is_decision_only(provider):
+        # Same door as the pick boundary and the journal validator, for the same
+        # reason: a marker written before this build refused the pair names a model
+        # that rejects ``chat/completions``, so adopting it as the birth model would
+        # open the pane on a session that cannot answer. ``None`` here means "fall
+        # back to the default", which is what every other unusable marker does.
+        logger.info("draft birth model names a decision-only provider; using the default")
         return None
     from local_operator.model.discovery import offered_model_ids
 
@@ -730,8 +740,9 @@ async def _move_session(bridge: DesktopSessionBridge, requested: str) -> MoveRec
     except OSError as error:
         # A path on an unmounted volume, or a symlink loop. The TUI answers this
         # class of case in the same words (``_apply_move``), and it is NOT left to
-        # the route's ``errors()`` ladder: that ladder has no OSError clause, so
-        # an unmounted volume would reach the user as a 500.
+        # the route's ``errors()`` ladder: that ladder's ``OSError`` arm claims
+        # ONLY the disk-full errnos (ENOSPC/EDQUOT) and re-raises the rest, so
+        # this one would reach the user as a 500 rather than as the path it is.
         raise HTTPException(409, f"cannot move to {requested}: {error}") from None
 
     resolved = str(directory)
@@ -2568,6 +2579,44 @@ class DesktopSessions:
                 return f"a runtime being started for session {bridge.session_id}"
         return None
 
+    def reload_blocker(self) -> str | None:
+        """Why an in-place RELOAD should wait, or ``None``.
+
+        DELIBERATELY NARROWER THAN :meth:`in_flight_reason`, and the difference is
+        the whole reason this method exists rather than that one being reused. A
+        reload keeps this process's pid, socket, cwd and environment and only
+        replaces its code image, so the terms that matter are the ones a
+        replacement CANNOT recover:
+
+        * **A runtime being started** — the engage is a ~1.2 s handshake with a
+          child process whose conversation, journal and first advertisement live
+          in the half of it that has already happened. Both the spawn and the
+          handshake are this process's, so cutting it in the middle loses work
+          that a reconnect cannot rebuild.
+
+        NOT listed, on purpose:
+
+        * **An in-flight HTTP operation.** An ordinary desktop request is tens of
+          milliseconds and a client retries it; the long ones on this plane are
+          the relays, below.
+        * **A standing attachment** — ``GET /v1/desktop/sessions/{id}/events``
+          holds a bridge for the whole life of the view, and the watch lease
+          beside it is renewed every 15 s. Those are EXACTLY what a reload is
+          allowed to cut and a latch is not: the app re-opens the relay and
+          re-reads history, and the turn itself is running inside the runtime,
+          which never stopped. Gating on them would mean a reload that never
+          fires on the only machine it exists for — an app-attached daemon is
+          never idle by ``in_flight_reason``'s own definition.
+
+        Read without ``watch_lock``, exactly as :meth:`in_flight_reason` is and
+        for its reason: a synchronous filter over an in-process dict on the event
+        loop, so it cannot interleave with a mutation.
+        """
+        for bridge in list(self.bridges.values()):
+            if bridge.warm_task is not None and not bridge.warm_task.done():
+                return f"a runtime being started for session {bridge.session_id}"
+        return None
+
     async def acknowledge_attention(self, session_id: str, token: str) -> dict[str, Any]:
         """A read receipt never admits work, binds a viewer, or starts a runtime.
 
@@ -2640,6 +2689,87 @@ class DesktopSessions:
             }
 
         return await asyncio.to_thread(apply)
+
+    async def acknowledge_attention_many(self, items: Sequence[tuple[str, str]]) -> dict[str, Any]:
+        """Clear the unread completion marks a CLIENT enumerated, in one write.
+
+        The machine-wide sibling of :meth:`acknowledge_attention`, and cold for
+        the same reason: a read receipt never admits work, binds a viewer or
+        starts a runtime, so this takes no bridge and no runtime spawn. It exists
+        because the per-session route can only clear what it is told, one call at
+        a time, and the desktop sidebar's pile of marks is thousands of
+        conversations the user would have to open one by one.
+
+        NOT a sweep, and the distinction is the whole safety story. The caller
+        sends the completions it actually RENDERED, each ``(session_id,
+        token)``; the store's own compare (:meth:`AttentionStore.
+        acknowledge_many`) runs inside the write transaction against each
+        item's CURRENT token, so a completion published after the client's
+        render is not in the batch and stays unread. There is deliberately no
+        "mark everything read" form: that would advance watermarks by the
+        daemon's MAX(sequence) and silently clear results nobody saw.
+
+        The conversation identity is DERIVED here (``session/<id>``) and never
+        taken from the caller -- the client names a session id and nothing else,
+        so it cannot write receipts for identities it cannot enumerate. An item
+        whose id is malformed, whose directory is gone, or which is not one of
+        the user's own sessions is answered ``unknown`` FOR THAT ITEM rather
+        than refused for the call: one stale row in a batch of forty must not
+        cost the other thirty-nine their receipt.
+
+        Returns the three verdict buckets, in input order within each bucket::
+
+            {"read": [state, ...], "superseded": [session_id, ...],
+             "unknown": [session_id, ...]}
+
+        ``read`` entries are the store's own post-write state dicts, which is
+        what the list route already publishes per row -- the caller needs no
+        second read to learn what its rows now say. ``superseded`` and
+        ``unknown`` are the two verdicts that mean "not cleared", so a consumer
+        can name the remainder instead of reporting a clean sweep it did not
+        get.
+
+        ONE worker hop for the whole batch, and ONE transaction inside it: the
+        per-item validation is a directory stat, so doing it per item on the
+        event loop would be a blocking ladder, while splitting the write would
+        expose a partially applied batch. A ``sqlite3.Error`` propagates to the
+        shared failure ladder (``session/store_failures``), which splits it
+        by condition -- contention answers the retryable 503, an unreadable or
+        corrupt store the 500 that says retrying will not help -- and the single
+        transaction guarantees nothing was written on either path.
+        """
+
+        def acknowledge() -> dict[str, Any]:
+            store = AttentionStore(self.root / "attention.db")
+            # Every item gets a slot first, so the buckets below can be filled in
+            # INPUT order -- including the items rejected before the store is
+            # ever consulted, which is also the order a caller's own listing is
+            # in.
+            outcomes: list[tuple[str, dict[str, Any] | None]] = [("unknown", None) for _ in items]
+            batched: list[int] = []
+            for index, (session_id, token) in enumerate(items):
+                path = self.root / "sessions" / session_id
+                if (
+                    not SESSION_ID.fullmatch(session_id)
+                    or not path.is_dir()
+                    or not is_user_session(path)
+                ):
+                    continue
+                batched.append(index)
+            verdicts = store.acknowledge_many(
+                [(f"session/{items[index][0]}", items[index][1]) for index in batched]
+            )
+            for index, verdict in zip(batched, verdicts):
+                outcomes[index] = (verdict["status"], verdict["state"])
+            result: dict[str, Any] = {"read": [], "superseded": [], "unknown": []}
+            for (session_id, _token), (status, state) in zip(items, outcomes):
+                if status == "read":
+                    result["read"].append(state)
+                else:
+                    result[status].append(session_id)
+            return result
+
+        return await asyncio.to_thread(acknowledge)
 
     def bridged_notify_sessions(self) -> set[str]:
         """The FEED's key domain for sessions whose bridge will announce them.

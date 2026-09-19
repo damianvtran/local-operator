@@ -76,6 +76,12 @@ class UiHostState(HeartbeatState):
     profile_dir: str = ""
     tabs: int = 0
     agent_tabs: int = 0
+    #: The wire methods this host serves (design §6.3), read by the harness the
+    #: same way the bridge record's is: before dispatching `download`/`upload`,
+    #: with an absent key meaning "this host predates the feature" so the caller
+    #: gets a typed `capability_unsupported` naming the app instead of a
+    #: 120-second wait on a method the host would answer with a bare internal.
+    capabilities: list[str] = Field(default_factory=list)
 
 
 def state_path(root: Path | None = None) -> Path:

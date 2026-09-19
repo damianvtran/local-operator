@@ -48,14 +48,21 @@ the way ``Session._build_tool_context`` lets a yolo session skip it.
 The child inherits a bounded directory of the parent's selected knowledge and
 repository guidance, with on-demand ``read skill://`` / ``read guide://``
 resolution. It does not copy the parent's full conversation. The
-session-capability tools ``task``/``wait``/``jobs``/``wake`` are scoped below —
-children are one level deep, because a grandchild registers on the CHILD's
-job manager, which no panel renders and which dies with the child's single
-prompt. That last exclusion used to be implicit in the child's ToolContext
-carrying no launcher; it stopped holding when ``Session.__init__`` grew
+session-capability tools ``task``/``wait``/``jobs``/``wake`` are scoped below,
+and the rule is WHO MAY DELEGATE, not how deep this child sits (operator,
+2026-09-18): a subagent that is ALLOWED ``task`` must delegate with it and one
+that was not given it may not create subagents at all. An allowance therefore
+follows the role down the lineage rather than stopping at one level — a
+``delegate: yes`` manager keeps ``task`` at any depth, so a manager's child is
+a manager too, and the tree it grows is walked one page at a time by the TUI
+and the desktop UI, both of which read the comms tree recursively. A
+role-less child inherits its parent's allowance. What no child ever keeps is
+``wake``: a child session ends after one prompt, so a wake armed there would
+be silently lost. The scoping used to be implicit in the child's ToolContext
+carrying no launcher; that stopped holding when ``Session.__init__`` grew
 ``_merge_capability_tools``, which re-derives those four from the session's
-OWN context and so handed every child a ``task`` tool. They are pruned
-explicitly now (:data:`_CHILD_FORBIDDEN_TOOLS`).
+OWN context and so handed every child a ``task`` tool, so it is applied
+explicitly in :func:`_build_child` now.
 
 ``hub`` is the deliberate exception to that prune, and the mechanism matters:
 it is built into the inventory this module CONSTRUCTS (the child's tool
@@ -1906,6 +1913,14 @@ async def _construct_child_session(
     # rediscovering the same guides in every child. These are names/links and
     # descriptions, not the parent's conversation or full skill documents.
     knowledge = getattr(parent_hooks, "frozen_block", "") or ""
+    if not knowledge:
+        # A skill-tree change invalidates the parent's frozen block and parks the
+        # previous render in ``superseded_block``; the NEXT parent message re-renders
+        # it. This closure is synchronous — it cannot wait for that render — so a child
+        # spawned inside that window inherits yesterday's directory, which is strictly
+        # better than an empty one. Same bound as before, applied to the block we
+        # actually ship.
+        knowledge = getattr(parent_hooks, "superseded_block", "") or ""
     if len(knowledge) > 12000:
         knowledge = knowledge[:12000].rsplit("\n", 1)[0]
 
@@ -2044,26 +2059,36 @@ async def _construct_child_session(
     # same-named entries, so whatever the constructor ADDED to the list we passed
     # in is precisely the set of tools gated on session capabilities.
     #
-    # A child of a TOP-LEVEL session keeps task/wait/jobs: one further level
-    # of delegation (map-then-fan-out inside a child) is observable through
-    # the child's own jobs/wait tools, and its job manager is disposed with
-    # the child, so a grandchild cannot outlive its lineage. What still never
-    # crosses any boundary: ``wake`` (a child session ends after one prompt,
-    # so a wake armed there would be silently lost) and, one level deeper,
-    # everything again — a grandchild's children would register on a manager
-    # nothing observes and that dies mid-turn. Scouts lose the whole set: a
-    # read-only agent that delegates autonomous work is not read-only.
+    # WHO MAY DELEGATE IS THE ROLE'S DECISION, NOT THE DEPTH'S (operator,
+    # 2026-09-18: "if it is allowed the task tool, then it should use it; if
+    # not allowed, then that agent is not allowed to create subagents and must
+    # work on things itself"). The capability therefore follows the ALLOWANCE
+    # down the lineage instead of stopping at one level: a child whose role
+    # says ``delegate: yes`` (a manager) keeps ``task``/``wait``/``jobs`` at any
+    # depth, and the tree it grows is navigable — the TUI re-scopes its roster
+    # to the open page's direct children and the desktop UI walks the same
+    # comms edges, both recursively. A role-less child owns no allowance and
+    # inherits its parent's, so a parent that held ``task`` may hand it down
+    # and a parent that did not hands down nothing.
+    #
+    # What still never crosses any boundary: ``wake``, for every child — a
+    # child session ends after one prompt, so a wake armed there would be
+    # silently lost. Scouts lose the whole set: a read-only agent that
+    # delegates autonomous work is not read-only. And a role that does not
+    # delegate (a reviewer, a coder) loses it at every depth, including as a
+    # grandchild of a manager: it does the work itself, which is what the
+    # harness's own refusal message tells it.
     #
     # ``refresh_tools`` rather than touching ``_tools``: it is the committed
     # hook and it keeps the loop's ``context.tools`` in step.
     merged_in = {tool.name for tool in child._tools} - {tool.name for tool in tools}
-    parent_is_child = parent_session._job_id is not None
-    # A role that does not delegate loses the whole capability set, for the
-    # same reason a scout does: a reviewer or coder spawning its own children
-    # turns one delegated slice into a fan-out nobody is watching. Roles that
-    # coordinate (``delegate: yes``) keep it.
-    role_forbids_delegation = profile is not None and not profile.may_delegate
-    if agent == "scout" or parent_is_child or role_forbids_delegation:
+    if profile is not None:
+        may_delegate = profile.may_delegate
+    else:
+        may_delegate = any(
+            tool.name == "task" for tool in (getattr(parent_session, "_tools", None) or ())
+        )
+    if agent == "scout" or not may_delegate:
         drop = merged_in
     else:
         drop = {name for name in merged_in if name == "wake"}
@@ -2088,6 +2113,29 @@ async def _construct_child_session(
     if _can_background(tools):
         drop = drop - {"jobs"}
     child.refresh_tools([tool for tool in child._tools if tool.name not in drop])
+    # A DECLARED parent inventory carries down, or a bounded session could reach
+    # an excluded tool by delegating to a child that never heard of the bound.
+    # One hop is enough to make the declaration meaningful and is also all the
+    # grandchild level needs: this stamps the child, and the child stamps its own
+    # children off the same attribute. The child's own role allow-list has already
+    # narrowed its candidate set above, so the two intersect rather than either
+    # winning — a caller who declares a set that cannot reach what the delegated
+    # role needs has declared that; the alternative, letting the child's role
+    # widen the parent, is the leak this exists to stop.
+    #
+    # ``unattended`` rides along for the same reason the bound does: a child that
+    # inherited a reach but not the approval for it would be a session whose every
+    # permitted call is refused by a gate nobody is present to answer.
+    #
+    # Read through ``getattr`` because not every session shape is a real
+    # ``Session`` (reduced test doubles and the resume path construct children
+    # around hosts that predate this attribute).
+    declared = getattr(parent_session, "_declared_tools", None)
+    if declared is not None and hasattr(child, "set_tool_inventory"):
+        child.set_tool_inventory(
+            declared,
+            unattended=bool(getattr(parent_session, "_declared_tools_unattended", False)),
+        )
     # Record the denial on the child so its OWN children inherit it (see the
     # ``restricted`` computation above). Set UNCONDITIONALLY, outside the
     # ``mcp is not None`` branch below: a child built with no MCP surface --

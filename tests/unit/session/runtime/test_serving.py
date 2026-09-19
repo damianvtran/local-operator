@@ -2407,3 +2407,33 @@ async def test_a_manager_that_cannot_name_its_servers_does_not_kill_the_command(
     assert result.text != "no MCP servers configured."
     assert "could not read" in result.text
     assert result.style == "warning"
+
+
+@pytest.mark.asyncio
+async def test_the_wire_op_refuses_a_decision_only_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The phone's model sheet takes bare strings, so the handle must refuse too.
+
+    ``server.py``'s ``set_model`` arm passes whatever ``provider``/``model_id`` a
+    client sent straight here, and any client can send any pair — this is the one
+    live-switch surface with no picker, no catalogue and no config file in front of
+    it. The refusal must leave the session untouched: the spec is built (and
+    therefore refused) BEFORE ``Session.set_model`` is reached, which is what the
+    ``applied`` list asserts.
+    """
+    handle, session = make_handle()
+    applied: list[Any] = []
+    monkeypatch.setattr(
+        session, "set_model", lambda spec, explicit=False: applied.append(spec), raising=False
+    )
+    monkeypatch.setattr(handle, "_refresh_state", lambda: None)
+
+    with pytest.raises(ValueError) as refused:
+        # MIXED CASE, deliberately: the wire takes the frame's strings verbatim, so the
+        # spelling is the client's and not a user's — a lowercase-only test would pass
+        # on the very hole this closes (review round 3, MAJOR 1).
+        await handle.set_model_effort("TypeSafe", "jev-1.13", None)
+
+    assert "serves decision-model calls, not chat completions" in str(refused.value)
+    assert applied == [], "the session must not be switched onto a provider that cannot chat"

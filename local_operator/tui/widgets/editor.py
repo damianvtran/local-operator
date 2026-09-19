@@ -108,6 +108,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import re
 import secrets
 import shlex
@@ -135,10 +136,16 @@ from textual.style import Style as ContentStyle
 from textual.widgets import TextArea
 from textual.widgets.text_area import Edit, EditResult, Selection
 
-from local_operator.clipboard import MAX_CLIPBOARD_READ_BYTES, read_clipboard
+from local_operator.clipboard import (
+    MAX_CLIPBOARD_READ_BYTES,
+    SCRATCH_NO_SPACE,
+    read_clipboard,
+)
 from local_operator.harness.types import ImageContent
 from local_operator.imaging import bound_image_for_model
 from local_operator.media import ImageInfo, sniff_image, sniff_image_file
+from local_operator.references import at_references_enabled, reference_resolves
+from local_operator.sigils import at_token, at_token_spans, split_token
 from local_operator.tui.autocomplete import ArgumentMode, SlashCommand
 from local_operator.tui.widgets.command_picker import (
     CommandPicker,
@@ -198,6 +205,21 @@ PASTE_READING_NOTICE_DELAY_S = 0.35
 #: card's own lifetime, not about every notice that can occupy the slot
 #: (issue #422).
 PASTE_READING_NOTICE_MIN_S = 0.4
+
+#: How a clipboard read that never HAPPENED is named on
+#: :class:`EditorPasteEmpty`, keyed by the reason
+#: :mod:`local_operator.clipboard` records.
+#:
+#: A mapping rather than a branch per reason because the two ends are named for
+#: different things on purpose: the module names the CAUSE (``"no-space"``),
+#: which is what a log reader needs, and the message names the READ
+#: (``"read-no-space"``), which is what a user needs — one of them is about a
+#: filesystem and the other is about a paste. The default covers every other
+#: reason, including the ones this module cannot classify, so a new reason
+#: added to the clipboard lands on the honest generic notice rather than
+#: falling through to "the clipboard was empty".
+_CLIPBOARD_READ_FAILURE_REASONS = {SCRATCH_NO_SPACE: "read-no-space"}
+DEFAULT_CLIPBOARD_READ_FAILURE_REASON = "read-failed"
 
 #: A paste is treated as paths only if EVERY segment looks like one. Requiring
 #: a separator is what keeps prose out: "see screenshot.png" splits into two
@@ -1332,7 +1354,15 @@ class EditorPasteEmpty(Message):
     clipboard was never read, and an oversized screenshot IS on the clipboard.
     Both mislead a user into the one move that cannot help — re-copying.
 
-    Three values, no more, because three is what the code can establish:
+    **A CLOSED SET, and the list is the record of how it got closed.** One
+    value per outcome this code can honestly name, no more and no fewer. It
+    started at three and has grown one value per case a single value would have
+    described WRONGLY; that history is why the bar for a new one is not "is
+    this interesting" but "does the user's next move differ from every move
+    already on the list". Two of the values below exist only because the reason
+    they replace sent the user to the one action that could not work
+    (``"timeout"``, ``"too_large"``), and the two newest exist for exactly the
+    same reason:
 
     * ``"nothing"`` — the clipboard was read and had nothing attachable on it.
       This is the deliberately vague one: an empty clipboard, a text-only one,
@@ -1372,9 +1402,27 @@ class EditorPasteEmpty(Message):
       screenshot that their clipboard was empty (ux round 1, U3). A retry is
       the move that helps here and the move that cannot help there, so one
       sentence could not serve both.
+    * ``"read-no-space"`` — the read never happened because there was no room
+      to stage it: the scratch directory the file-based backends need could not
+      be allocated and the OS said the volume or the quota was full. The move
+      is to free space, and it is the ONLY move: ``copy again``, which is what
+      every other down-the-list reason implies, cannot help on a full disk, and
+      the failure surfaces as a paste that kills the app rather than as
+      anything about a disk (2026-09-17).
+    * ``"read-failed"`` — the read never happened for any other reason: a
+      scratch allocation refused for something other than space, an allocation
+      refused while the scratch bases looked writable to a probe, or an
+      exception escaping a backend and caught by the guard in
+      :func:`~local_operator.clipboard.read_clipboard`. One value for all of
+      them because the distinction is not one this code can establish, and the
+      honest thing for the app to say is exactly what it knows: the clipboard
+      was not read. The remedy is the PATH route, not a retry — half of this
+      value is a permanent refusal (a read-only or missing scratch base) where
+      a retry cannot work, and pasting a file path never touches the clipboard
+      at all (review round 1, NIT-5 / QA Q2).
 
     The app owns the wording, the same way :class:`EditorCopyStale` leaves the
-    card to the app; this only says which of the three happened.
+    card to the app; this only says which of them happened.
 
     THIS NOTICE IS NOT A DISCOVERY SURFACE, and an earlier revision's attempt
     to make it one is recorded here because the reasoning looks right and is
@@ -1596,6 +1644,33 @@ class SkillQueryOpened(Message):
     re-arms it (``Editor._skill_choices_requested``), which is what lets the
     app re-answer with a fresh set on the next ``$``.
     """
+
+
+class FileQueryOpened(Message):
+    """Posted when the buffer enters an ``@path`` token, so the app fills rows.
+
+    CARRIES THE DIRECTORY PART, unlike :class:`SkillQueryOpened`, which carries
+    nothing. That difference is the whole design of this message. A skill
+    vocabulary is fixed for the session, so one message per token is enough. A
+    file vocabulary is not: ``@src/`` and ``@src/ap`` list the SAME directory,
+    but ``@src/`` and ``@src/sub/`` list DIFFERENT ones. Keying the re-arm on
+    the token — the rule ``SkillQueryOpened`` uses — would list the parent
+    forever as the user typed deeper.
+
+    So the editor re-posts this whenever the directory part changes, not merely
+    when the token opens. That is the same problem
+    :class:`RefreshArgumentChoices` solves for a two-level argument whose choice
+    set changes under a standing command word, and the economy it documents is
+    preserved the same way: one scan per DIRECTORY, not one per keystroke.
+    """
+
+    def __init__(self, directory: str) -> None:
+        super().__init__()
+        #: The directory part of the token, as :func:`split_token` reads it —
+        #: ``""`` for a bare ``@``, ``"src/"`` for ``@src/ap``. The app resolves
+        #: it against the session cwd; it is never an absolute path of the
+        #: app's choosing.
+        self.directory = directory
 
 
 class RefreshArgumentChoices(Message):
@@ -1996,6 +2071,13 @@ class Editor(TextArea):
         "text-area--slash-argument",  # recognized team/agent NAME
         "text-area--slash-unknown",  # a leading /word that is NOT a command
         "text-area--credential-armed",  # a /credential token arming a capture
+        # A resolvable `@path` reference. The fourth member of the same
+        # family as the three above — a span of the buffer the composer can
+        # name as structure rather than prose — and the only one that was
+        # missing its ink (design round 1, D2: measured 1.00:1 against the
+        # prose beside it, because there was no rule at all). See
+        # `_reference_runs` for what "resolvable" is asked, and why.
+        "text-area--at-reference",
     }
 
     def __init__(
@@ -2009,6 +2091,13 @@ class Editor(TextArea):
         self._picker = CommandPicker(
             self._apply_command, self._on_picker_highlight, self._on_picker_preview
         )
+        # What an accept key would DO to a highlighted row is a question about
+        # this buffer and caret, so the editor owns the answer and the picker
+        # asks it per painted row (design round 1, D5). Installed here rather
+        # than set at each sync: a flag would have to be refreshed after the
+        # arrow keys, after the app's one-tick-later refill and after every
+        # buffer mutation, and one missed site is a row whose mark lies.
+        self._picker.set_send_predicate(self._file_row_would_send)
         self._model_picker = ModelPicker(self._apply_model)
         # Which list-taking command the argument list is currently open for, or
         # None when the buffer is not in one. This is the transition edge the
@@ -2026,6 +2115,15 @@ class Editor(TextArea):
         #: the token so the next ``$`` asks again. Assigned here because
         #: ``_sync_picker`` reads it during ``super().__init__()``.
         self._skill_choices_requested: bool = False
+        #: The DIRECTORY a :class:`FileQueryOpened` has been posted for, or
+        #: ``None`` outside an ``@`` token. The file list's re-arm latch, and it
+        #: holds a directory rather than a bool because the file vocabulary
+        #: changes UNDER a standing token: ``@src/`` and ``@src/ap`` are the same
+        #: scan, ``@src/sub/`` is a different one. A bool latch — the rule the
+        #: skill list can afford — would list the parent directory forever as
+        #: the user typed deeper. Assigned here because ``_sync_picker`` reads
+        #: it during ``super().__init__()``.
+        self._file_choices_requested: str | None = None
         # Command words (primaries AND aliases) whose argument opens the value
         # list, and the subset of those the bare command cannot stand without.
         # DERIVED from the registry in :meth:`set_commands` rather than listed
@@ -2080,16 +2178,36 @@ class Editor(TextArea):
         self._slash_runs_cache: (
             tuple[tuple[object, ...], tuple[int, list[tuple[int, int, str]]] | None] | None
         ) = None
+        # Memo for :meth:`_reference_runs` (design round 1, D2), deduping the
+        # `stat` a `@` token costs across the rows of one frame — `render_line`
+        # runs once per visible screen row and the reference spans are identical
+        # for every row of a frame. Keyed on the inputs that DECIDE the spans
+        # (text, cwd, kill switch) and not on the one it cannot see, whether the
+        # paths exist right now: see `_reference_runs` for why that is left
+        # stale on purpose and what it bounds. ``None`` until the first row of
+        # the first frame that asks.
+        self._reference_runs_cache: (
+            tuple[tuple[object, ...], dict[int, list[tuple[int, int]]]] | None
+        ) = None
         # Guards the picker resync inside ``load_text`` so ``_set_text_and_caret``
         # can move the caret first and sync ONCE at the final position (D5). Set
         # BEFORE ``super().__init__`` because TextArea's constructor loads the
         # initial document through ``load_text`` → ``_sync_picker``.
         self._suspend_picker_sync = False
-        # Last parse phase `_sync_picker` settled. Compared by
-        # `_sync_picker_if_phase_changed` so a caret move that stays inside
-        # one phase does not re-open an Esc-dismissed list. Set BEFORE
-        # ``super().__init__`` because that constructor already syncs.
-        self._picker_phase_at_last_sync: str | None = None
+        # Last (phase, query) pair `_sync_picker` settled on, compared by
+        # `_sync_picker_if_phase_changed`. BOTH halves are in the key, and the
+        # second one is the caret `@` TOKEN rather than the phase: a caret move
+        # that starts and ends inside `@` tokens is `"file" -> "file"`, so a key
+        # of the phase alone let the previous token's rows stand under the
+        # caret's token, with Enter then rewriting the draft into a path that
+        # does not exist or sending it (design round 1, D1). The DIRECTORY alone
+        # was still too coarse when two tokens share one (round 1, R1), which is
+        # why the key carries the whole query — see `_picker_sync_key`. A motion
+        # that stays inside ONE token — the case the phase gate exists for — is
+        # still a no-op, which is what keeps Esc a dismissal.
+        #
+        # Set BEFORE ``super().__init__`` because that constructor syncs.
+        self._picker_key_at_last_sync: tuple[str | None, str | None] | None = None
         # The escape action held for one pump turn, or ``None`` when no escape
         # is in flight (the resting state). See the escape-coalescing block
         # below :meth:`_on_key` for why an escape is ever held at all.
@@ -2345,7 +2463,10 @@ class Editor(TextArea):
         # ghost's first cell. :meth:`_paint_ghost_ink` only re-inks that one
         # cell; it does not move the caret.
         return self._paint_ghost_ink(
-            self._paint_slash(self._paint_markers(super().render_line(y), y), y), y
+            self._paint_reference_ink(
+                self._paint_slash(self._paint_markers(super().render_line(y), y), y), y
+            ),
+            y,
         )
 
     def _paint_ghost_ink(self, strip: Strip, y: int) -> Strip:
@@ -3269,7 +3390,41 @@ class Editor(TextArea):
                     # afterwards would measure the completed word (always one
                     # exact match) and submit unconditionally.
                     unambiguous = self._picker_choice_is_unambiguous(name)
-                    if self._picker.mode is PickerMode.SKILL:
+                    if self._picker.mode is PickerMode.FILE:
+                        # NO trailing space is inserted, unlike SKILL below, so
+                        # a completed token stays OPEN under the caret and the
+                        # list re-opens on the very name it just completed —
+                        # that is the mid-path rule, and it is what makes
+                        # `@src/` one keystroke from `@src/app.py`.
+                        #
+                        # It also means Enter alone can never terminate the
+                        # token, so the escape hatch is: ENTER SENDS WHEN THERE
+                        # IS NOTHING LEFT TO ACCEPT. A row that is already what
+                        # the buffer holds changes nothing, so the keystroke
+                        # means what Enter means everywhere else in the app. A
+                        # row that would APPEND anything still completes, which
+                        # leaves the mid-path case above exactly as it was — and
+                        # submitting a `@src/` the user is still typing is the
+                        # mis-send the no-submit rule exists to prevent.
+                        #
+                        # Without this the two rules composed into a keyboard
+                        # trap rather than a preference: `summarise @README.md`
+                        # + Enter ×3 sent nothing at all, forever (QA round 1,
+                        # Q-1), and every ordinary submission in this feature's
+                        # own test file had to press Escape first — which is
+                        # exactly how a green suite missed the headline flow.
+                        if key == "enter" and self._file_row_is_already_in_the_buffer(name):
+                            # Submitted HERE rather than left to fall out of the
+                            # picker block: the ctrl+c/super+c branch below ends
+                            # in an unconditional `event.stop()` + return, so
+                            # bubbling out would SWALLOW the press instead of
+                            # submitting it.
+                            self._submit()
+                            event.stop()
+                            event.prevent_default()
+                            return
+                        self._complete_file(name)
+                    elif self._picker.mode is PickerMode.SKILL:
                         # NEITHER key ever submits here, ambiguous or not. A
                         # completed `$skill ` is not a runnable thing the way
                         # `/logout anthropic` is — it is the opening of a
@@ -4448,17 +4603,17 @@ class Editor(TextArea):
             cells.append((x_start + gutter, x_end + gutter, component))
         return cells
 
-    def _paint_slash(self, strip: Strip, y: int) -> Strip:
-        """Overlay the slash-command / name highlight on an already-rendered row.
+    def _overlay_runs(self, strip: Strip, cells: list[tuple[int, int, str]]) -> Strip:
+        """Overlay foreground-only component runs on an already-rendered row.
 
-        Foreground-only component styles (see the tcss) laid on as ``post_style``
-        for the same reason as the chip: every segment ``TextArea`` returns
-        carries an explicit fg/bg, so a base style is discarded on arrival.
-        Foreground-only is deliberate — it composes with the cursor's inverse and
-        the selection ground without fighting them, so the pass need not exclude
-        the caret cell the way the opaque chip does.
+        ``cells`` is ``(x_start, x_end, component_class)`` in screen columns —
+        the shape both the slash pass and the reference pass derive from their
+        own span tables. Shared rather than spelled twice because the two passes
+        differ only in which spans they carry: the divide/join math, the
+        "post_style, not base style" reason and the edges mattering are all
+        properties of overlaying on a `TextArea` strip, not of a particular
+        token kind.
         """
-        cells = self._slash_cells(y)
         if not cells:
             return strip
         width = strip.cell_length
@@ -4472,6 +4627,156 @@ class Editor(TextArea):
                 continue
             pieces.append(self._overlay(piece, styles[component]))
         return Strip.join(pieces)
+
+    def _paint_slash(self, strip: Strip, y: int) -> Strip:
+        """Overlay the slash-command / name highlight on an already-rendered row.
+
+        Foreground-only component styles (see the tcss) laid on as ``post_style``
+        for the same reason as the chip: every segment ``TextArea`` returns
+        carries an explicit fg/bg, so a base style is discarded on arrival.
+        Foreground-only is deliberate — it composes with the cursor's inverse and
+        the selection ground without fighting them, so the pass need not exclude
+        the caret cell the way the opaque chip does.
+        """
+        return self._overlay_runs(strip, self._slash_cells(y))
+
+    def _reference_cwd(self) -> str:
+        """The directory `@path` tokens resolve against — the SESSION's, not the process's.
+
+        It has to be the session's: the file list scans that directory and
+        `Session.prompt` expands the token against it (`app.session_cwd`), so a
+        second opinion here would let the ink disagree with both. Read through the
+        app the way the composer reads its other session facts — a published hook
+        looked up with ``getattr`` — so a bare widget host in a test answers with
+        the process cwd instead of raising, and a `/move` is picked up on the next
+        frame rather than cached at construction.
+        """
+        hook = getattr(self.app, "session_cwd", None)
+        if callable(hook):
+            value = hook()
+            if isinstance(value, str) and value:
+                return value
+        return os.getcwd()
+
+    def _reference_runs(self) -> dict[int, list[tuple[int, int]]]:
+        """Document line -> the column spans on it that are RESOLVING `@path` tokens.
+
+        RESOLVING, not merely well-formed, and that distinction is the finding's
+        own ruling rather than a refinement of it. The ink claims "this is a
+        reference", and the resolver calls a token whose path does not exist
+        PROSE — it is sent as written, with a notice saying so (`@me — no such
+        path`) — so painting `@me` would assert something false about precisely
+        the token the Q-2 fix exists to keep as prose. `references.reference_resolves`
+        is the resolver's question asked with the resolver's own steps, so the
+        ink cannot promise an expansion that will not happen. The visible
+        consequence is that a half-typed path has no ink until it names
+        something; the ink arrives with the file, which is when the claim
+        becomes true.
+
+        Per LINE rather than per buffer, because a reference can sit on any line
+        of a multi-line draft while the parse that feeds the picker only ever
+        looks at the caret's — `at_token_spans` is the same grammar over one
+        line, so a wrapped or multi-line draft paints every reference it holds.
+        (It is imported from `local_operator.sigils`, the module that owns the
+        grammar, rather than through `command_picker`'s re-export the way
+        `at_token` and `split_token` arrive: one rule, one question about where a
+        token starts and ends.)
+
+        Memoized on the inputs the PARSE reads — the text, the cwd and the kill
+        switch — and deliberately not re-derived per render pass. The one
+        remaining input the answer depends on is whether each path exists NOW,
+        and the key cannot carry it: nothing signals a filesystem change (there
+        is no watcher) and `render_line` is handed a row index rather than a
+        frame identity, so a `time.monotonic()` bucket is the only mechanical
+        alternative — and it would make the ink's appearance depend on paint
+        timing instead of on state a test can set, which is exactly the property
+        D2's evidence relies on (the ink appears when the token starts naming a
+        file). Cached at all because `render_line` runs once per visible row and
+        each `@` token costs a `stat`: the memo is what makes that one `stat`
+        per token per FRAME rather than one per token per screen row.
+
+        The staleness is therefore INTENDED, and this is its bound. While the
+        text, the cwd and the switch are all unchanged, a path appearing or
+        disappearing under an untouched draft does not move the ink until the
+        next text mutation — any keystroke, a paste, or a submit clearing the
+        buffer. The ink can lag by exactly one draft edit, in either direction,
+        and nothing else depends on it: `expand_references` re-stats at submit,
+        so a stale reference ink never expands a path that is gone — measured,
+        the prompt carries the token verbatim — and a stale prose ink never
+        blocks a path that does exist. The ink is a hint about what the resolver
+        will do; the resolver's own verdict, not the hint, decides what is sent.
+        """
+        cwd = self._reference_cwd()
+        enabled = at_references_enabled()
+        key: tuple[object, ...] = (self.text, cwd, enabled)
+        cached = self._reference_runs_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        runs: dict[int, list[tuple[int, int]]] = {}
+        if enabled:
+            for line_index, line in enumerate(self.text.split("\n")):
+                for start, end, query in at_token_spans(line):
+                    if reference_resolves(query, cwd):
+                        runs.setdefault(line_index, []).append((start, end))
+        self._reference_runs_cache = (key, runs)
+        return runs
+
+    def _reference_cells(self, y: int) -> list[tuple[int, int]]:
+        """``(x_start, x_end)`` of every resolving `@path` run on screen row ``y``.
+
+        The same screen-row -> document-column mapping :meth:`_slash_cells` uses,
+        including the wrap boundary: a reference in a long draft that soft-wraps
+        must paint on whichever wrapped row carries it. What differs is the line
+        filter — the slash pass is restricted to the command line, where a
+        reference is not.
+        """
+        runs = self._reference_runs()
+        if not runs:
+            return []
+        wrapped = self.wrapped_document
+        absolute_y = self.scroll_offset.y + y
+        if absolute_y >= wrapped.height:
+            return []
+        row_line, section_start = wrapped.offset_to_location(Offset(0, absolute_y))
+        spans = runs.get(row_line)
+        if not spans:
+            return []
+        line = self.document.get_line(row_line)
+        offsets = wrapped.get_offsets(row_line)
+        section_index = bisect_right(offsets, section_start)
+        wraps_on = section_index < len(offsets)
+        section_end = offsets[section_index] if wraps_on else len(line)
+        gutter = self.gutter_width
+        cells: list[tuple[int, int]] = []
+        for col_start, col_end in spans:
+            start = max(col_start, section_start)
+            end = min(col_end, section_end)
+            if start >= end:
+                continue  # this token lives entirely on another wrapped row
+            x_start = wrapped.location_to_offset((row_line, start)).x
+            if wraps_on and end >= section_end:
+                # ``end`` IS the wrap offset, which location_to_offset reads as
+                # column 0 of the NEXT row; the token runs to this row's text end.
+                x_end = cell_len(
+                    expand_tabs_inline(line[section_start:section_end], self.indent_width)
+                )
+            else:
+                x_end = wrapped.location_to_offset((row_line, end)).x
+            cells.append((x_start + gutter, x_end + gutter))
+        return cells
+
+    def _paint_reference_ink(self, strip: Strip, y: int) -> Strip:
+        """Overlay the reference ink on every resolving `@path` run of a rendered row.
+
+        Foreground-only, like the slash pass and for the same reason — see
+        :meth:`_overlay_runs`. That it composes rather than replaces is what lets
+        a reference sit inside a selection or under the caret without either
+        losing its own state.
+        """
+        return self._overlay_runs(
+            strip,
+            [(start, end, "text-area--at-reference") for start, end in self._reference_cells(y)],
+        )
 
     async def _on_mouse_down(self, event: events.MouseDown) -> None:
         """Note a press that landed inside a marker; the release decides.
@@ -5546,6 +5851,28 @@ class Editor(TextArea):
                     _retire_this_card()
                 else:
                     self.set_timer(PASTE_READING_NOTICE_MIN_S - shown_for, _retire_this_card)
+        if contents.read_failed:
+            # FIRST, ahead of every shape below. A read that never happened has
+            # no image, no paths and no text, so it would fall through the text
+            # branch into the reason block at the bottom and be reported as
+            # ``"nothing"`` — telling a user who is holding a screenshot that
+            # their clipboard is empty. That is the exact wrong-diagnosis class
+            # ``"timeout"`` and ``"too_large"`` were split out to end, and on
+            # the incident that produced these two values the user's clipboard
+            # did hold a valid image; what was empty was the disk (2026-09-17).
+            #
+            # Nothing below can be reachable honestly once this is set, which is
+            # why this is a guard at the top rather than another ``elif`` at the
+            # bottom beside the other reasons: the ordering is the claim, not a
+            # detail of which branch happens to win.
+            self.post_message(
+                EditorPasteEmpty(
+                    reason=_CLIPBOARD_READ_FAILURE_REASONS.get(
+                        contents.read_failed, DEFAULT_CLIPBOARD_READ_FAILURE_REASON
+                    )
+                )
+            )
+            return None
         if contents.image is not None:
             markers = await self._attach_image_bytes([contents.image.data])
             if markers is not None:
@@ -7250,10 +7577,17 @@ class Editor(TextArea):
     def _picker_phase(self) -> str | None:
         """Which list the caret is currently inside, or ``None``.
 
-        ``"argument"`` while :func:`slash_argument` matches, ``"command"``
-        while :func:`slash_context` matches, ``None`` otherwise. Used by
+        ``"file"`` while :func:`at_token` matches, ``"argument"`` while
+        :func:`slash_argument` matches, ``"command"`` while
+        :func:`slash_context` matches, ``None`` otherwise. Used by
         :meth:`_sync_picker_if_phase_changed` so a caret move that stays
         inside one phase does not re-open an Esc-dismissed list.
+
+        ``"file"`` is the FOURTH answer and it is mutually exclusive with the
+        other three for the cheapest possible reason: a boundary ``@`` is not a
+        boundary ``$`` and not a boundary ``/``. The sigils are distinct
+        characters, so no buffer position can open two of these tokens at once
+        and the order below decides only who is ASKED first, never who wins.
 
         The three answers are still mutually exclusive, but the claim alone no
         longer delivers that. A prompt command's claim is now PARTIAL: a ``$``
@@ -7266,6 +7600,11 @@ class Editor(TextArea):
         never who wins.
         """
         cursor = self._caret_offset()
+        # Asked first because it is the cheapest parse of the four and cannot
+        # collide with them: `at_token` matches only a boundary `@`, a character
+        # none of the other three parsers reads as a sigil.
+        if at_token(self.text, cursor) is not None:
+            return "file"
         # Checked FIRST and short-circuiting, but the reason is no longer "a `$`
         # is anchored at offset 0": it is inline now, so `/team ops $research`
         # puts both sigils on one line. `skill_token` takes the recognised
@@ -7315,10 +7654,13 @@ class Editor(TextArea):
         with its own vocabulary.
 
         ``self._picker`` is asked with ANY non-``None`` phase, not just
-        ``"command"`` (round 2, R14). That widget serves FOUR lists — the
+        ``"command"`` (round 2, R14). That widget serves FIVE lists — the
         command word, an argument list (`/theme `, `/effort `, `/login `,
-        `/mcp `, `/team `…), the `$skill` list and the loading reserve — and
-        every one of them can hold an Esc. Narrowing the question to the
+        `/mcp `, `/team `…), the `$skill` list, the `@path` list and the
+        loading reserve — and every one of them can hold an Esc. The `@path`
+        list cost this site NO edit, which is the point of asking a total
+        question: it became live the moment :meth:`_picker_phase` learned to
+        answer ``"file"``. Narrowing the question to the
         command word answered it for one list and returned the other three to
         the literal-whitespace corruption U13 exists to prevent: `/theme d`
         became `/theme d    `. ``_picker_phase()`` returning non-``None`` is
@@ -7356,8 +7698,65 @@ class Editor(TextArea):
             return self._picker.is_dismissed()
         return False
 
+    def _picker_sync_key(self) -> tuple[str | None, str | None]:
+        """The parse state a picker re-derivation is a function of: (phase, QUERY).
+
+        The phase alone is not that state, and this function exists because
+        assuming it was one is design round 1's D1. `@README.md` and `@src/`
+        are both phase ``"file"``, so a caret that moves between them is
+        ``"file" -> "file"``, and a gate reading only the phase left the
+        previous token's rows on screen under the caret's token. Enter then
+        acted on a row that cannot be accepted at this caret —
+        ``_file_row_is_already_in_the_buffer`` is False — so control fell
+        through to the ordinary submit and the draft went out; the same staleness
+        on a caret-only move into the second token (a click, `home`/`end`, or an
+        `up`-recall, none of which is a paste — a paste re-derives at the caret
+        it leaves) rewrote the draft into ``@src/README.md``, a path that does
+        not exist, silently.
+
+        The QUERY rather than the directory it contains, because the directory
+        is only half of what the rows are a function of: `sync_files` fills them
+        from the directory's scan and then matches them against
+        `split_token(token.query)[1]`, the caret token's NAME query
+        (`command_picker.py:1848`). A directory-only key — this function's first
+        form, and round 1's R1 — left a second, narrower no-op: two tokens in
+        the SAME directory are one directory and two different row sets. Typed
+        `@src/app.py and @src/ed`, then a caret-only move back into
+        `@src/app.py`, is ``"file" -> "file"`` and ``"src/" -> "src/"``, so the
+        gate stayed shut and the list went on offering `editor.py` — the token
+        the caret LEFT — under a caret inside `app.py`. A mouse click on one of
+        those rows then rewrote the reference the caret was in
+        (`@src/editor.py and @src/ed`), silently, with nothing sent and no
+        notice. The query answers both halves, so one parse still answers the
+        whole key.
+
+        It is also the axis the picker itself dismisses on: for FILE mode
+        `_apply` is handed `split_token(token.query)[1]`, the NAME part, and
+        clears Esc's "not now" when that moves. So the gate is now at least as
+        fine as the question the widget answers — it cannot be coarser than the
+        thing it is guarding — and the one case where it is finer (same name,
+        different directory) resolves the way the picker already wanted: the
+        dismissal is kept rather than undone.
+
+        CONTAINMENT is what keeps a dismissal a dismissal, and it survives:
+        the query is the token's TEXT, not the caret's offset within it, so a
+        motion inside one token does not move the key. Only crossing into a
+        token whose text differs does — a different question, not a dismissal
+        being undone.
+
+        ``None`` for the query outside an `@` token, which is every other
+        phase: the three slash parses and the `@` parse are mutually exclusive
+        by construction (`_picker_phase` asks `at_token` FIRST and returns
+        ``"file"`` whenever it matches), so a non-`@` phase cannot hide a
+        query and a `@` phase cannot hide behind one.
+        """
+        token = at_token(self.text, self._caret_offset())
+        if token is not None:
+            return "file", token.query
+        return self._picker_phase(), None
+
     def _sync_picker_if_phase_changed(self) -> None:
-        """Re-sync the picker only when the caret crossed a parse phase.
+        """Re-sync the picker only when the caret crossed a parse phase, or an `@` token.
 
         The #393 reopen (`end` after `home` on `/mcp `) is a phase change:
         column 0 is outside the argument, the end of the line is inside
@@ -7365,9 +7764,17 @@ class Editor(TextArea):
         `shift+up` with a model list dismissed — must not call
         :meth:`_sync_picker`, because that helper treats a matching query
         as "show the list" and would undo Esc.
+
+        The caret's `@` TOKEN is in the key for the reason
+        :meth:`_picker_sync_key` records: a caret move that stays inside `@`
+        tokens is a phase no-op, and the rows follow the token's directory AND
+        its name query — so the key is the query, which answers both.
+        The Esc property above is unaffected — arrows inside one token change no
+        half of the key, and crossing into a token with different text moves the
+        caret into a genuinely different candidate set, which is a new question
+        rather than a dismissal being undone.
         """
-        phase = self._picker_phase()
-        if phase == getattr(self, "_picker_phase_at_last_sync", None):
+        if self._picker_sync_key() == self._picker_key_at_last_sync:
             self._sync_ghost()
             return
         self._sync_picker()
@@ -7388,6 +7795,33 @@ class Editor(TextArea):
         the caret sits, not just what the buffer contains.
         """
         cursor = self._caret_offset()
+        # The `@path` list is derived first, for the reason `_picker_phase`
+        # gives: `@` is a character no other parser here reads as a sigil, so
+        # this branch cannot take a token another list wanted.
+        file_token = at_token(self.text, cursor)
+        if file_token is not None:
+            # Re-posted on a DIRECTORY change, not once per token. This is the
+            # `RefreshArgumentChoices` problem in a new place: that message
+            # exists because a two-level argument's choice set changes while the
+            # command word stands still, and a file token does the same thing —
+            # `@src/` then `sub/` is the same token and a different directory.
+            # Keying the latch on the token alone (what the `$` branch below can
+            # safely do, because a session has one skill vocabulary) would list
+            # the parent forever.
+            directory = split_token(file_token.query)[0]
+            if self._file_choices_requested != directory:
+                self._file_choices_requested = directory
+                self.post_message(FileQueryOpened(directory))
+            self._picker.sync_files(self.text, cursor)
+            self._picker_key_at_last_sync = self._picker_sync_key()
+            self._sync_ghost()
+            return
+        # Left the token: the next `@` asks for rows again, so a file created
+        # between two references is not invisible for the rest of the session.
+        # `None` rather than `""` because `""` is a REAL directory here — the
+        # cwd, what a bare `@` scans — and using it as the "nothing requested"
+        # value would suppress the post for the most common token of all.
+        self._file_choices_requested = None
         # The `$skill` list is derived before either slash list, and the
         # arbitration that makes that safe is inside the parse rather than in
         # this ordering — see `_picker_phase`: an inline `$` sitting in an
@@ -7408,7 +7842,7 @@ class Editor(TextArea):
                 self._skill_choices_requested = True
                 self.post_message(SkillQueryOpened())
             self._picker.sync_skills(self.text, cursor)
-            self._picker_phase_at_last_sync = self._picker_phase()
+            self._picker_key_at_last_sync = self._picker_sync_key()
             self._sync_ghost()
             return
         # Left the token: the next `$` asks for rows again, so a skill added
@@ -7626,7 +8060,7 @@ class Editor(TextArea):
             # the short-circuit leaves the cost only where the answer is used.
             if self._model_picker.is_dismissed() and not self._text_holds_model_token():
                 self._model_picker.forget_dismissal()
-            self._picker_phase_at_last_sync = self._picker_phase()
+            self._picker_key_at_last_sync = self._picker_sync_key()
             return
         if self._model_picker.is_open():
             self._model_picker.set_query(argument)
@@ -7641,8 +8075,9 @@ class Editor(TextArea):
             self.post_message(ModelQueryOpened())
         # Recorded after both list branches so a later caret-only move can
         # tell whether the parse PHASE changed (#393 reopen vs. an
-        # Esc-dismissed list that must stay closed).
-        self._picker_phase_at_last_sync = self._picker_phase()
+        # Esc-dismissed list that must stay closed) — and, inside `@`, whether
+        # the caret token's QUERY did (see `_picker_sync_key`).
+        self._picker_key_at_last_sync = self._picker_sync_key()
 
     def _on_picker_highlight(self, name: str | None) -> None:
         """Relay the picker's highlight to the app (see ArgumentHighlightChanged).
@@ -7907,6 +8342,14 @@ class Editor(TextArea):
         """
         if not self._picker.is_open():
             return None
+        # ABOVE the two tests below, and that position is load-bearing rather
+        # than stylistic. The ARGUMENT test two lines down is a FALLTHROUGH —
+        # `is not ARGUMENT` returns COMMAND — so a FILE mode reaching it would
+        # be described as a command completion, and since `_ghost_completion`
+        # reads this function the user would see ghost text for a `/command`
+        # dimmed over a path token. Do not move this below it.
+        if self._picker.mode is PickerMode.FILE:
+            return CompletionMode.FILE
         if self._picker.mode is PickerMode.SKILL:
             return CompletionMode.SKILL
         if self._picker.mode is not PickerMode.ARGUMENT:
@@ -8116,6 +8559,18 @@ class Editor(TextArea):
         closes the picker — the word is now whitespace-terminated, so the list
         drops away on the same keystroke that chose from it.
         """
+        if self._picker.mode is PickerMode.FILE:
+            # A clicked file row FILLS AND WAITS, never submits — the same rule
+            # the keyboard gets, because the path may be mid-segment.
+            #
+            # This arm is required, not symmetry: without it FILE falls through
+            # to the COMMAND completion at the end of this method, which looks
+            # `src/app.py` up in the command vocabulary, gets `None` back from
+            # `completion_for`, and returns at the `completed is None` guard.
+            # The click would then do NOTHING — no row inserted, no error, no
+            # clue — which is the worst failure shape available here.
+            self._complete_file(name)
+            return
         if self._picker.mode is PickerMode.ARGUMENT:
             # A clicked team/agent row fills the name and a space and waits for
             # the message, exactly like Tab/Enter on the same row — a click on a
@@ -8189,6 +8644,71 @@ class Editor(TextArea):
         (review round 1, B1).
         """
         completed = self._completion_for(CompletionMode.SKILL, name)
+        if completed is None:
+            return
+        self._set_text_and_caret(*completed)
+
+    def _file_row_is_already_in_the_buffer(self, name: str) -> bool:
+        """Whether accepting file row ``name`` would leave the buffer unchanged.
+
+        The FILE list's Enter rule needs this because a FILE completion inserts
+        no trailing space: the token stays open, the list re-opens on the name
+        it just completed, and without a termination condition the next Enter
+        completes it again — measured, `summarise @README.md` + Enter ×3 kept
+        the buffer byte-identical and sent nothing (QA round 1, Q-1). A row the
+        buffer already holds has nothing left to accept, so Enter sends.
+
+        Compared on the TEXT the completion would produce, never on the row
+        name, because the two deliberately differ in two shapes: the directory
+        part survives (`@src/` + `app.py` is `@src/app.py`) and a name with a
+        space is emitted quoted (`@"my file.txt"`). A name comparison would
+        therefore report "not yet accepted" forever for exactly the rows a
+        path list is most useful for.
+        """
+        completed = self._completion_for(CompletionMode.FILE, name)
+        return completed is not None and completed[0] == self.text
+
+    def _file_row_would_send(self, name: str) -> bool:
+        """Whether an accept key on row ``name`` would SEND instead of completing.
+
+        The picker's own question, in the picker's own terms: it is handed to
+        ``CommandPicker.set_send_predicate`` and asked once per painted row, so
+        the `↵` gutter mark cannot lag a highlight, a refill or a buffer edit.
+        A value here is what :meth:`_file_row_is_already_in_the_buffer` answers
+        at the moment Enter would be pressed, which is the point — the mark
+        states the consequence rather than a heuristic about it.
+
+        Gated on the FILE list because that is the only list where an accept key
+        has two meanings; a COMMAND or ARGUMENT row is completed by definition
+        (their completion always changes the buffer), so they answer False and
+        keep the plain cursor.
+        """
+        if self._picker.mode is not PickerMode.FILE:
+            return False
+        return self._file_row_is_already_in_the_buffer(name)
+
+    def _complete_file(self, name: str) -> None:
+        """Put ``@name`` in the buffer, leaving the caret at the token's end.
+
+        NO TRAILING SPACE, unlike :meth:`_complete_skill`. A path segment may
+        continue — ``@src/`` is very often one keystroke from ``@src/app.py`` —
+        and a space would terminate the token, closing the very list the user is
+        still navigating down. This is the rule an enum-tail ARGUMENT gets, and
+        for the identical reason.
+
+        NO REASSEMBLY either, unlike :meth:`_complete_skill`. That method moves
+        the whole construct to the buffer front because the skill parser is
+        ANCHORED at offset 0 and cannot read an inline token. A reference has no
+        anchored parser: it is resolved wherever it sits, so the span
+        replacement is the entire edit and the user's draft is never reordered
+        around it.
+
+        Nothing submits here, on either key or a click. Enter SENDS instead of
+        completing only when the row is already what the buffer holds — see
+        :meth:`_file_row_is_already_in_the_buffer` — and a click never reaches
+        the submit path at all.
+        """
+        completed = self._completion_for(CompletionMode.FILE, name)
         if completed is None:
             return
         self._set_text_and_caret(*completed)

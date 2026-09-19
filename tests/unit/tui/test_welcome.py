@@ -1072,6 +1072,25 @@ async def test_a_glow_frame_repaints_the_mark_and_moves_no_row(animation_on: Non
     app = _make_app(FakeSession())
     async with app.run_test(size=(100, 30)) as pilot:
         welcome = await _settled_welcome(pilot)
+        # The interval timer is a CONCURRENT writer to `_mark_color` and reads
+        # the very `_pulse_origin` this test back-dates: it fires every
+        # `MARK_PULSE_INTERVAL_S` and re-derives the colour from the phase the
+        # test just set. Left running, the sampled phase is therefore the phase
+        # at the LAST live tick before the frame is read, not the one set here
+        # — and a pause that outlives the swell (0.8 s of a `pause()` whose own
+        # ceiling is 1.0 s, easily reached under `-n auto` contention) walks the
+        # peak down to the resting `dim` before the read. Both samples then
+        # agree, the second resolves to the colour already drawn and repaints
+        # nothing, and `differing` comes back empty: CI run 35336307899 failed
+        # exactly there, `assert [] == [2, 3, 4, ...]`. Reproduced on this box
+        # by lengthening the window to 0.9 s: 12 live ticks, colour at read
+        # `#837C6D` (rest) against the peak's `#928B7C`.
+        #
+        # The two properties under test are about what ONE tick paints, so stop
+        # the timer and let the manual ticks be the only driver — the same fix,
+        # for the same reason, as the sibling pin below. Stopping also resets
+        # `_mark_color` to `None`, so the first tick has a deterministic start.
+        welcome._stop_pulse_timer()
 
         welcome._pulse_origin = time.monotonic() - MARK_PULSE_SWELL_S / 2
         welcome._pulse_tick()
@@ -1313,13 +1332,17 @@ def test_the_pool_stays_a_readable_size_and_fits_a_60_column_terminal() -> None:
     of its own (see ``TIP_ROTATE_INTERVAL_S``): under 8 s the row turns over
     while it is being read, over 15 s a short session only ever sees one.
     """
-    # The ceiling moved 12 -> 15 when the three KEYED tips were added, and the
-    # reason is recorded in full on the pool itself: those three teach the only
-    # affordances with no second discovery route (a remappable key has no
-    # picker, unlike every slash command in the pool). The dilution argument
+    # The ceiling moved 12 -> 15 when the three KEYED tips were added, and
+    # 15 -> 17 when the classification layer's off switch and login commands
+    # were, and the reason for each is recorded in full on the pool itself: those
+    # entries teach facts with no second discovery route (a remappable key has no
+    # picker, unlike every slash command in the pool, and a layer that ships ON,
+    # spends per new message and is silent whenever it has nothing to say stays
+    # invisible to a user who never goes looking for a setting they have not
+    # heard of). The dilution argument
     # still governs everything else — a further slash-command tip takes a slot
     # rather than adding one.
-    assert 8 <= len(TIPS) <= 15
+    assert 8 <= len(TIPS) <= 17
     assert len(set(TIPS)) == len(TIPS)
     # Measured on the RENDERED sentence, not the template: a keyed entry stores
     # `{key}` and is what the user reads only after substitution, so measuring

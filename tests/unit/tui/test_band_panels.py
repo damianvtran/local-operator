@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from rich.cells import cell_len
 from rich.style import Style
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -1613,8 +1614,12 @@ def test_summary_row_counts_each_state_and_sheds_segments_in_order() -> None:
         assert len(text) <= width or text == floor, (width, text)
         if not seen or seen[-1] != text:
             seen.append(text)
-    # The documented order: cancelled, interrupted, queued, done, label,
-    # running count (glyph stays), failed count (glyph stays).
+    # The documented order: cancelled, interrupted, queued, done, paused,
+    # running count (glyph stays, but only once the label has gone), failed
+    # count (glyph stays, likewise), and the level name LAST (design round 1,
+    # D1) — a shed count is re-readable by opening the page, while an unnamed
+    # level is a caption that may describe a different list, so every count
+    # yields before the name does.
     assert seen[0] == wide
     assert (
         seen[1] == "Subagents · 1 running ⣾ · 3 done · 1 failed · 2 queued · 1 interrupted · ctrl+g"
@@ -1622,10 +1627,51 @@ def test_summary_row_counts_each_state_and_sheds_segments_in_order() -> None:
     assert seen[2] == "Subagents · 1 running ⣾ · 3 done · 1 failed · 2 queued · ctrl+g"
     assert seen[3] == "Subagents · 1 running ⣾ · 3 done · 1 failed · ctrl+g"
     assert seen[4] == "Subagents · 1 running ⣾ · 1 failed · ctrl+g"
-    assert seen[5] == "1 running ⣾ · 1 failed · ctrl+g"
-    assert seen[6] == "⣾ · 1 failed · ctrl+g"
+    assert seen[5] == "Subagents · 1 failed · ctrl+g"
+    assert seen[6] == "Subagents · ctrl+g"
     assert seen[7] == floor
     assert seen[-1] == floor
+
+
+def test_the_summary_names_the_level_its_counts_belong_to() -> None:
+    """D1: the compact caption had no scope segment, so it named the wrong list.
+
+    The summary is the panel's ONLY representation once the roster has no row
+    to give — that is the state at 40x20 — and it read a bare ``Subagents · 1
+    running ⣯ · ctrl+g`` over the OPEN PAGE's counts. The level name is now a
+    bounded segment like the header's, and the shed order gives up counts
+    before it: a shed count is re-readable by opening the page, an unnamed
+    level is a caption that may be describing a different list.
+    """
+    counts = SummaryCounts(running=1, failed=1)
+    wide = compose_summary(counts, spinner_glyph="⣾", width=80, scope="Inspect documentation").plain
+    assert wide == "Subagents of Inspect documentation · 1 running ⣾ · 1 failed · ctrl+g"
+
+    # At 40 the name has to shorten, and it takes its cells from the counts
+    # rather than from the hint — 13 of chrome + 18 of scope + 3 + 6 is all
+    # there is, so every count is shed and the level still reads.
+    narrow = compose_summary(
+        counts, spinner_glyph="⣾", width=40, scope="Inspect documentation"
+    ).plain
+    assert narrow.startswith("Subagents of Inspect"), narrow
+    assert "…" in narrow, narrow
+    assert "running" not in narrow and "failed" not in narrow, narrow
+    assert narrow.endswith(" · ctrl+g"), narrow
+    assert cell_len(narrow) == 40, narrow
+
+    # Too narrow to name anything: the scope is dropped whole and the way out
+    # is what is left — the scope never eats `ctrl+g`.
+    floor = compose_summary(
+        counts, spinner_glyph="⣾", width=20, scope="Inspect documentation"
+    ).plain
+    assert "of" not in floor, floor
+    assert floor.endswith("ctrl+g"), floor
+    assert cell_len(floor) <= 20, floor
+
+    # No scope (the root page) is the bare label, byte for byte what it was.
+    assert compose_summary(counts, spinner_glyph="⣾", width=80).plain.startswith(
+        "Subagents · 1 running"
+    )
 
 
 @pytest.mark.asyncio

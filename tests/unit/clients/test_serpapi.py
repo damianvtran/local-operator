@@ -111,6 +111,9 @@ def test_search_api_error(serp_client: SerpApiClient) -> None:
     """
     mock_requests_get = Mock()
     mock_requests_get.return_value.status_code = 400
+    # The non-200 path reads the body through the shared scrubber, so the double
+    # carries bytes, as a real Response does.
+    mock_requests_get.return_value.content = b'{"error": "bad request"}'
 
     with patch("requests.get", mock_requests_get):
         with pytest.raises(RuntimeError) as exc_info:

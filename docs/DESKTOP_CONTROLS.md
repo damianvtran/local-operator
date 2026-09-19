@@ -89,7 +89,11 @@ is navigation, not an attempt to attach a team named `chart`.
 
 Defaults use the existing typed settings API; session model, effort and approval
 mutations do not silently persist. `/approvals default ...` opens the default
-editor for `tool_approval_mode` and explicitly leaves the current session alone.
+editor for `tool_approval_mode` and explicitly leaves the current session alone:
+that editor writes the file, which is where every NEW session reads the mode, so
+a running session's gate is loosened only by `/approvals auto` in that session
+(route: `POST /v1/desktop/sessions/{id}/commands`). The file still tightens every
+running session at once, which is the safe direction.
 The frontend must obtain explicit default scope and premium-pricing consent in
 its forms. Retain locally selected images while presenting an interactive action.
 
@@ -129,7 +133,7 @@ and rendered verification.
 | btw | Runtime completion, off-record panels, explicit adoption | Aside panel and adoption confirmation |
 | compact | Existing runtime compact control/events | Pending/completed/error from canonical events |
 | stop | Explicit target list/confirmation, canonical stop protocol | Current/selected/all picker; submit exact IDs |
-| approvals | Runtime mode; explicit default editor | Session/default scope and confirmation |
+| approvals | Runtime mode; explicit default editor writes the file, which loosens no running session but tightens every one | Session/default scope and confirmation |
 | skills | Effective discovered catalogue and closed skill:// detail resolver | Catalogue/details; distinguish discoverable from selected |
 | mcp | Effective source ownership, configuration, connections and grants | Server panel, forms, transport/downstream auth distinction |
 | login | Central provider/method action and existing auth operation | Browser/input/cancel flow without renderer secrets |

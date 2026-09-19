@@ -76,8 +76,10 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
+from local_operator.agent_shell import AGENT_SHELL_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
+from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -118,7 +120,22 @@ from local_operator.imaging import (
 )
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
-from local_operator.tools import group_reaper
+from local_operator.redaction_shapes import (
+    PEM_BODY_LINE_RE,
+    PEM_END_LINE_RE,
+    PEM_HEADER_LINE_RE,
+    REDACTION_MARKER,
+    credential_dump_notice,
+    scrub_secrets_with_hits,
+)
+from local_operator.scratchpad import (
+    SCRATCHPAD_NAMESPACE,
+    SCRATCHPAD_SCHEME,
+    SCRATCHPAD_UNAVAILABLE,
+    ScratchpadPathError,
+    parse_scratchpad_url,
+)
+from local_operator.tools import group_reaper, shell_env
 from local_operator.tools.spill import (
     SPILL_ENTRY_LIMIT_BYTES,
     SPILL_SCHEME,
@@ -347,7 +364,12 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
     #
     # If this marker is ever dropped the failure is benign and loud (a laptop
     # takes too many workers again), not a silent permanent CI slowdown.
-    "LOCAL_OPERATOR_AGENT_SHELL": "1",
+    #
+    # The NAME lives in ``local_operator.agent_shell`` and this entry is the one
+    # writer: that module reads the same constant back to decide whether a `lop`
+    # invocation may open a session of its own. One name, two consumers — a
+    # second literal here would be the copy that drifts.
+    AGENT_SHELL_ENV: "1",
     # Package manager defaults for unattended execution.
     "npm_config_yes": "true",
     "npm_config_update_notifier": "false",
@@ -375,6 +397,15 @@ NON_INTERACTIVE_ENV: dict[str, str] = {
 #: name because tests and the browser paths reference it; the text now names
 #: the recovery route instead of just announcing a loss.
 BASH_TRUNCATION_MARKER = "\n\n... [output truncated] ...\n\n"
+
+# The key the harness marks elided content with, inside a JSON payload. It is
+# deliberately NOT `_truncated`: that key belongs to the Minerva toolproxy, whose
+# shape is `{"_truncated": true, "reason": "max_depth"}` — a bool with a sibling
+# `reason`. Writing that shape into a trimmed OBJECT would mean inventing a
+# `reason` key inside a payload's own namespace and overwriting an upstream
+# `_truncated`, so a model could no longer tell which layer elided what, or why
+# (review round 1, F4). One harness-owned key cannot collide with either.
+ELISION_MARKER_KEY = "_elided"
 
 
 def _clip_head_tail(text: str, limit: int) -> tuple[str, str]:
@@ -417,21 +448,40 @@ def truncate_output(text: str, limit: int = TOOL_OUTPUT_LIMIT_CHARS) -> str:
     return head + BASH_TRUNCATION_MARKER + tail
 
 
-def _elision_span(text: str, head: str, tail: str) -> tuple[int, int, int]:
+#: An elision gap, in whichever coordinate space the payload actually has.
+#: ``("lines", first, last)`` is a line range in the spilled copy, which the
+#: model can page to. ``("chars", served, original)`` is a reduction with no
+#: line structure to address — see :func:`_elision_span`.
+ElisionSpan = tuple[str, int, int]
+
+
+def _elision_span(text: str, head: str, tail: str) -> tuple[int, int, int] | None:
     """``(total_lines, first_elided_line, last_elided_line)``, all 1-based.
 
     Line numbers are what makes an expansion targeted rather than a blind
     page: the footer can say "lines 58-3970 are elided" and the model can ask
     for 40 of them. Counting is done on the same ``splitlines`` basis the
     store uses to serve a range, so the two agree by construction.
+
+    ``None`` means the payload has no interior line boundary to report in:
+    ``splitlines()`` collapses it to a single line, so ``first`` (head_lines +
+    1) would exceed ``last`` (total - tail_lines) and the span would be a lie.
+    Every MCP tool result is exactly this shape — one marshalled JSON string —
+    and the shape is common enough that the caller must handle it rather than
+    print it, which is what produced ``[-1 of 1 lines elided — they are lines
+    2-0 of the saved output]`` inside risk-assessment payloads on 2026-09-17.
     """
     total = len(text.splitlines())
     head_lines = len(head.splitlines())
     tail_lines = len(tail.splitlines())
-    return total, head_lines + 1, total - tail_lines
+    first = head_lines + 1
+    last = total - tail_lines
+    if first > last:
+        return None
+    return total, first, last
 
 
-def _spill_footer(meta: SpillMeta, suggested: tuple[int, int] | None = None) -> str:
+def _spill_footer(meta: SpillMeta, suggested: ElisionSpan | None = None) -> str:
     """The recovery instructions that replace destroyed content.
 
     ONE footer per tool result, appended at the very end, never one per
@@ -448,7 +498,45 @@ def _spill_footer(meta: SpillMeta, suggested: tuple[int, int] | None = None) -> 
     knows where to look, a search when it does not.
     """
     handle = meta.handle
-    first, last = suggested if suggested else (1, meta.lines)
+    unit, first, last = suggested if suggested else ("lines", 1, meta.lines)
+    partial = (
+        ""
+        if meta.complete
+        else (
+            f"\n  NOTE: output exceeded the {SPILL_ENTRY_LIMIT_BYTES // (1024 * 1024)} MB "
+            "per-entry store cap; the stored copy is itself head+tail of the original."
+        )
+    )
+    if unit == "chars":
+        # No line coordinate space exists for this payload, so a `range` cannot
+        # help here. The second route is printed ONLY when the stored copy has
+        # line structure to page: for a payload that is one unbroken line — every
+        # MCP JSON result — `read(path=handle)` returns that same single line and
+        # its own continuation then names a range the store rejects, i.e. the
+        # footer would be teaching a call that cannot resolve, which is the
+        # failure this function exists to prevent (review round 1, F2).
+        saved = "in full" if meta.complete else "head+tail (see the note)"
+        if meta.lines > 1:
+            routes = (
+                f'  read(path="{handle}?q=<regex>")  -> find matching lines first, then read '
+                f"around them"
+            )
+            routes += (
+                f'\n  read(path="{handle}")  -> the stored payload, itself capped at the same '
+                f'budget per page\n  read(path="{handle}", range="1-200")  -> first page'
+            )
+        else:
+            # One line: there is no "around them", and saying otherwise invites a model
+            # to budget for a cheap follow-up it will not get (review round 2, N2).
+            routes = (
+                f'  read(path="{handle}?q=<regex>")  -> the whole line comes back (the copy is '
+                f"one line), so search to confirm what it holds rather than to page it"
+            )
+        return (
+            f"\n[Output was {last} chars and is SAVED {saved} at {handle}; this result "
+            f"shows {first} of them — expand it, do not re-run the command:\n"
+            f"{routes}{partial}]"
+        )
     # Suggest ONE PAGE, not the whole gap. A footer that prints
     # range="462-3596" invites a call whose own answer is truncated at the
     # same budget, so the agent's first obedient follow-up lands it right back
@@ -458,14 +546,6 @@ def _spill_footer(meta: SpillMeta, suggested: tuple[int, int] | None = None) -> 
     page_end = min(last, first + SPILL_PAGE_LINES - 1)
     span = f"{first}-{page_end}"
     more = f" (of {first}-{last} elided; page through or search)" if page_end < last else ""
-    partial = (
-        ""
-        if meta.complete
-        else (
-            f"\n  NOTE: output exceeded the {SPILL_ENTRY_LIMIT_BYTES // (1024 * 1024)} MB "
-            "per-entry store cap; the stored copy is itself head+tail of the original."
-        )
-    )
     return (
         f"\n[Full output ({meta.lines} lines) is SAVED at {handle} — expand it, "
         f"do not re-run the command:\n"
@@ -491,31 +571,311 @@ def _spill(text: str, tool_name: str, context: ToolContext | None) -> SpillMeta 
     )
 
 
-def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, tuple[int, int] | None]:
-    """``(head + marker + tail, elided_span)`` with the span named IN the marker.
+#: Compaction rungs for a JSON payload, tried in order until one fits. Each
+#: rung is ``(string_limit, array_limit, object_limit, depth_limit)``; ``None``
+#: for the string limit means "stop shortening strings". Strings go first
+#: because that is where prose lives and where the bytes are, and container
+#: limits come last because dropping an element changes what the document says.
+JSON_ELISION_RUNGS: tuple[tuple[int | None, int, int, int], ...] = (
+    (2000, 200, 200, 12),
+    (800, 60, 80, 8),
+    (300, 20, 40, 6),
+    (120, 8, 24, 5),
+    (60, 4, 12, 4),
+    (None, 3, 8, 3),
+    (None, 0, 4, 2),
+)
 
-    The span is stated where the gap is, rather than only in the trailing
-    footer, so a model scanning a two-stream result can see which lines are
-    missing from WHICH stream. ``offset`` shifts the numbers into the
-    coordinate space of the spilled copy, whose framing may differ from this
-    fragment's (bash stores both streams under their banners in one entry).
+
+def _elide_json(text: str, limit: int) -> str | None:
+    """A budget-fitting copy of a JSON payload that is STILL VALID JSON.
+
+    Why this exists: a model reads a tool result with ``json.loads``. The
+    head+tail elision every other oversized output gets cannot survive that —
+    the marker lands inside a string literal and both joins cut tokens in half
+    — so for a payload that is already JSON the useful degradation is *inside*
+    the structure: shorten strings, then trim containers.
+
+    Object KEYS are kept wherever the budget allows: which keys survive is a
+    decision about meaning, and the arbitrary one (alphabetical order, since Go
+    marshals maps sorted) drops exactly the fields a reader wants.
+
+    Trim markers use the harness-owned :data:`ELISION_MARKER_KEY`, deliberately
+    NOT the ``_truncated`` key the Minerva toolproxy writes into domain payloads.
+    The proxy's shape is ``{"_truncated": true, "reason": "max_depth"}`` — a
+    bool plus a SIBLING ``reason`` — and this function trims *objects* as well as
+    lists, so writing that shape into an object would mean inventing a ``reason``
+    key inside a payload's own namespace (clobbering a real field) and would
+    overwrite an upstream ``_truncated``, destroying the signal that the proxy,
+    not the harness, elided it. A distinct key cannot collide with either.
+
+    ``None`` means the interpreter's parser raised ``JSONDecodeError`` — this text
+    is not a JSON document — or the text is a bare scalar with other text after it,
+    which is a log line that happens to begin with a number. It does NOT mean
+    "not JSON", and that distinction is the whole rule: CPython is stricter than
+    JSON, refusing a number past its int-conversion guard (4,301 digits,
+    CVE-2020-10735) and a document nested past the recursion limit, and both are
+    JSON a model's own parser accepts. Those get the envelope from
+    :func:`_refused_json_envelope` rather than ``None``, because ``None`` is the
+    one value that routes into the head+tail path, which splices a marker into
+    bytes the model was about to parse. So the question is asked with
+    ``raw_decode`` AND the exception TYPE decides — syntax means text, a refusal
+    means a document — never the payload's first character, because `{` and `[`
+    begin `print(rows)` output and bracketed logs as readily as they begin a
+    document.
+    """
+    # A UTF-8 BOM survives the transport of some tool results, and `json.loads`
+    # rejects one in `str` input. Without this a BOM'd payload was classified
+    # "not JSON", took the head+tail path, and came back with the marker spliced
+    # into its first line — reproduced on a 20,010-char BOM'd document as
+    # "Expecting value: line 1 column 1" (review round 1, F1a).
+    head = text.lstrip("\ufeff \t\r\n")
+    try:
+        parsed, consumed = json.JSONDecoder().raw_decode(head)
+    except json.JSONDecodeError:
+        # The interpreter says this is NOT a JSON document: prose, a log line,
+        # Python's repr of a list or dict (single quotes), a bracketed log, a
+        # truncated fragment. The line path is right for all of those — a spliced
+        # marker in readable text still reads — and deciding by EXCEPTION TYPE
+        # rather than by the first character is what keeps that true: `[` and `{`
+        # start `print(rows)` and `[INFO]` output as readily as they start a
+        # document. A leading-brace test collapsed 10-12 KB of readable eval output
+        # to a 167-byte stub and labelled it `not_parseable`, which was false
+        # (review round 3, F1). Do not reintroduce a shape proxy here.
+        return None
+    except (ValueError, RecursionError):
+        # NOT a JSONDecodeError, so this text IS a document the interpreter's
+        # parser refused: a number past the int-conversion guard (plain
+        # ValueError, CVE-2020-10735), or nesting past the recursion limit. A
+        # model's own parser accepts those, so they get the envelope rather than a
+        # marker spliced into bytes the model was about to parse.
+        return _refused_json_envelope(head, limit, len(text))
+    if not isinstance(parsed, (dict, list)) and head[consumed:].strip():
+        # A bare SCALAR followed by text is a log line that happens to start with a
+        # number ("2026-09-17T01:23 …"), not a document with a trailer; eliding it
+        # structurally would keep 4 characters and throw the line away. A container
+        # keeps its trailer, appended after the document (see below): the document
+        # is what a caller parses and the trailer is outside it, so both fit.
+        return None
+    parsed = _scrub_surrogates(parsed)
+    for rung in JSON_ELISION_RUNGS:
+        candidate = json.dumps(
+            _elide_json_value(parsed, rung, 0), separators=(",", ":"), ensure_ascii=False
+        )
+        if len(candidate) <= limit:
+            return _with_trailer(candidate, head[consumed:], limit)
+    return _elision_envelope(parsed, limit, len(text))
+
+
+def _with_trailer(document: str, trailer: str, limit: int) -> str:
+    """The elided document with the text that followed it kept, not dropped.
+
+    A payload can be a JSON document followed by a status line, and the trailer is
+    OUTSIDE the document a caller parses, so keeping it costs nothing and losing it
+    silently is the failure mode this module keeps paying for: the served result
+    showed only an aggregate character count, which a reader attributes to the
+    elided JSON fields the `_elided` marker enumerates (review round 3, F3). The
+    trailer is bounded by what is left of the budget, and when it does not fit the
+    note says how long it was so the handle is the obvious next call.
+    """
+    if not trailer.strip():
+        return document
+    room = limit - len(document)
+    if room <= 0:
+        return document
+    if len(trailer) <= room:
+        return document + trailer
+    note = f"\n...[{len(trailer) - room} of {len(trailer)} trailer chars elided]...\n"
+    keep = max(0, room - len(note))
+    return document + trailer[:keep] + note if keep else document
+
+
+def _refused_json_envelope(head: str, limit: int, original_chars: int) -> str:
+    """The answer for a JSON-SHAPED payload that the interpreter's parser refused.
+
+    Three shapes land here and all three are valid JSON: a number past CPython's
+    int-conversion guard (4,301 digits, CVE-2020-10735), a document nested past
+    its recursion limit, and a document whose head is a complete value followed by
+    text. The first two raise inside the parser, so no structural elision is
+    available; the alternative to this envelope is declining to the head+tail
+    path, whose marker lands inside the document and hands the model output its
+    ``json.loads`` rejects — the exact failure this module exists to remove, and
+    one that a model's looser parser would otherwise have accepted (review round
+    2, F1). The head preview is a JSON string, so the envelope is a clean document
+    and the reader still learns what the payload started with.
+    """
+    detail: dict[str, Any] = {
+        "reason": "not_parseable",
+        "original_chars": original_chars,
+        "head": _scrub_surrogates(head[:96]),
+    }
+    envelope = json.dumps({ELISION_MARKER_KEY: detail}, separators=(",", ":"), ensure_ascii=False)
+    if len(envelope) <= limit:
+        return envelope
+    minimal = json.dumps({ELISION_MARKER_KEY: True}, separators=(",", ":"))
+    return minimal if len(minimal) <= limit else "{}"
+
+
+def _scrub_surrogates(value: Any) -> Any:
+    """Lone surrogates replaced with U+FFFD, recursively.
+
+    A payload can carry ``\\ud800`` (an upstream encoder emitting one for invalid
+    input), and ``json.loads`` turns that into a lone surrogate in the ``str``. With
+    ``ensure_ascii=False`` that character would reach the body raw, where any plain
+    UTF-8 write of it raises ``UnicodeEncodeError`` — the agent persists these
+    bodies to ``execution_history.jsonl`` through a UTF-8 handle, so the elided
+    body would be the one result that cannot be written down (review round 2, F3).
+    Scrubbing keeps ``ensure_ascii=False`` for real characters, which is what stops
+    a CJK payload from spending six characters of budget per glyph.
+    """
+    if isinstance(value, str):
+        if not any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            return value
+        return "".join(
+            "\ufffd" if 0xD800 <= ord(character) <= 0xDFFF else character for character in value
+        )
+    if isinstance(value, dict):
+        return {_scrub_surrogates(key): _scrub_surrogates(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_scrub_surrogates(item) for item in value]
+    return value
+
+
+def _elision_envelope(parsed: Any, limit: int, original_chars: int) -> str:
+    """The answer for JSON that no rung fits — a document of oversized KEYS, or a
+    top-level scalar, which cannot be shortened without ceasing to be the value.
+
+    Returning a small valid object beats returning ``None``: ``None`` sends the
+    payload down the head+tail path, whose marker lands inside the document and
+    leaves the caller with a string ``json.loads`` refuses. The envelope states
+    what was there — the kind of value, how large it was, and for a container
+    how many top-level members — so a reader can decide whether to expand the
+    handle instead of re-running the call blind (review round 1, F1b/F1c).
+    """
+    detail: dict[str, Any] = {"reason": "too_large", "original_chars": original_chars}
+    if isinstance(parsed, dict):
+        detail["top_level"] = "object"
+        detail["keys"] = len(parsed)
+    elif isinstance(parsed, list):
+        detail["top_level"] = "array"
+        detail["items"] = len(parsed)
+    else:
+        detail["top_level"] = "scalar"
+    envelope = json.dumps({ELISION_MARKER_KEY: detail}, separators=(",", ":"), ensure_ascii=False)
+    if len(envelope) <= limit:
+        return envelope
+    minimal = json.dumps({ELISION_MARKER_KEY: True}, separators=(",", ":"))
+    return minimal if len(minimal) <= limit else "{}"
+
+
+def _elide_json_value(value: Any, rung: tuple[int | None, int, int, int], depth: int) -> Any:
+    """``value`` reduced to fit ``rung``, with every reduction marked in band."""
+    string_limit, array_limit, object_limit, depth_limit = rung
+    if depth >= depth_limit:
+        return {ELISION_MARKER_KEY: {"reason": "max_depth"}}
+    if isinstance(value, dict):
+        keys = list(value)
+        kept = keys[:object_limit] if object_limit < len(keys) else keys
+        out: dict[str, Any] = {key: _elide_json_value(value[key], rung, depth + 1) for key in kept}
+        if len(kept) < len(keys):
+            # The marker is added under this harness's own key, so a payload that
+            # already carries the proxy's `_truncated` keeps it: a reader must be
+            # able to tell which layer elided what, and why.
+            out[ELISION_MARKER_KEY] = {
+                "omitted_keys": len(keys) - len(kept),
+                "total_keys": len(keys),
+            }
+        return out
+    if isinstance(value, list):
+        out_list = [_elide_json_value(item, rung, depth + 1) for item in value[:array_limit]]
+        if len(value) > array_limit:
+            dropped = {"omitted_items": len(value) - array_limit, "total_items": len(value)}
+            out_list.append({ELISION_MARKER_KEY: dropped})
+        return out_list
+    if isinstance(value, str) and string_limit is not None and len(value) > string_limit:
+        return _elide_string_middle(value, string_limit)
+    return value
+
+
+def _elide_string_middle(value: str, string_limit: int) -> str:
+    """A long string reduced to head + tail around a marker that states the COUNT.
+
+    Head-only cut with a bare ``...[truncated]`` told a reader nothing about the
+    scale of the loss and destroyed whatever the field concluded with, which for
+    a disposition or a finding summary is usually the part that matters. The
+    count is what makes the marker usable: 100 characters lost and 48,000 lost
+    call for different follow-ups (review round 1, F3).
+
+    The count is the characters ACTUALLY dropped, not ``len(value) - string_limit``
+    — that would count the marker's own length as content that survived, so a
+    300-character budget reported 19,700 dropped where 19,729 were.
+    """
+    total = len(value)
+    # Size the kept content from an upper-bound marker first, then state the real
+    # count in the marker we return.
+    room = max(0, string_limit - len(f"...[{total} of {total} chars elided]..."))
+    head_chars = (room * 2) // 3
+    tail_chars = room - head_chars
+    marker = f"...[{total - room} of {total} chars elided]..."
+    if len(marker) >= string_limit:
+        # Nothing survives beside the marker, so the count must be the whole value:
+        # `total - room` would under-report the loss by `room`. Unreachable with the
+        # shipped rungs (the smallest string limit is 60 and the marker is ~40), and
+        # kept true by construction anyway (review round 2, N1).
+        return f"...[{total} of {total} chars elided]..."
+    head = value[:head_chars]
+    tail = value[total - tail_chars :] if tail_chars else ""
+    return f"{head}{marker}{tail}"
+
+
+def _elide_inline(text: str, limit: int, offset: int = 0) -> tuple[str, ElisionSpan | None]:
+    """``(body, elided_span)``: the budget-fitting body and where the gap is.
+
+    For a payload with line structure the span is stated where the gap is as
+    well as in the trailing footer, so a model scanning a two-stream result can
+    see which lines are missing from WHICH stream. ``offset`` shifts the
+    numbers into the coordinate space of the spilled copy, whose framing may
+    differ from this fragment's (bash stores both streams under their banners
+    in one entry).
+
+    For a payload with NO line structure — one marshalled JSON string, i.e.
+    every MCP tool result — there is no line span to state and no line to page
+    to, so the gap is reported in characters and only in the footer. Splicing a
+    line marker into such a payload is what left risk-assessment readbacks
+    unparseable; the JSON branch below avoids the splice entirely.
 
     Returns a ``None`` span when nothing was elided.
     """
     if len(text) <= limit:
         return text, None
+    structured = _elide_json(text, limit)
+    if structured is not None:
+        # Still valid JSON, so the footer has to say "the whole payload" rather
+        # than name a line range; `offset` does not apply to char coordinates.
+        return structured, ("chars", len(structured), len(text))
     # Two passes: build the marker from a first-pass clip to learn its true
     # length, then re-clip against the real budget. Sizing the clip with
     # ``len(BASH_TRUNCATION_MARKER)`` alone would overshoot the limit by the
     # length of the span annotation, and the limit is the whole point.
     head, tail = _clip_head_tail(text, limit - len(BASH_TRUNCATION_MARKER))
-    total, first, last = _elision_span(text, head, tail)
+    span = _elision_span(text, head, tail)
+    if span is None:
+        # One unbroken line that is not JSON: keep head and tail but state the
+        # gap only in the footer. The span-free marker is the shape
+        # :func:`truncate_output` already ships, so nothing here is new to a
+        # renderer, and it cannot mis-number a coordinate space that does not
+        # exist.
+        return head + BASH_TRUNCATION_MARKER + tail, ("chars", len(head) + len(tail), len(text))
+    total, first, last = span
     marker = _elision_marker(last - first + 1, total, first + offset, last + offset)
     head, tail = _clip_head_tail(text, limit - len(marker))
-    total, first, last = _elision_span(text, head, tail)
-    span = (first + offset, last + offset)
-    marker = _elision_marker(last - first + 1, total, span[0], span[1])
-    return head + marker + tail, span
+    span = _elision_span(text, head, tail)
+    if span is None:
+        return head + BASH_TRUNCATION_MARKER + tail, ("chars", len(head) + len(tail), len(text))
+    total, first, last = span
+    line_span: ElisionSpan = ("lines", first + offset, last + offset)
+    marker = _elision_marker(last - first + 1, total, line_span[1], line_span[2])
+    return head + marker + tail, line_span
 
 
 def _elision_marker(elided: int, total: int, first: int, last: int) -> str:
@@ -551,6 +911,13 @@ def spill_truncate(
         return text, None
     meta = _spill(text, tool_name, context)
     if meta is None:
+        # Degraded path: there is no handle to expand, so the shape here is all
+        # the model gets. A JSON payload still comes back as JSON — otherwise a
+        # store failure would silently reintroduce the unparseable result this
+        # function's structured branch exists to remove.
+        structured = _elide_json(text, limit - len(BASH_TRUNCATION_MARKER))
+        if structured is not None:
+            return structured + BASH_TRUNCATION_MARKER, None
         return truncate_output(text, limit), None
     body, span = _elide_inline(text, limit)
     return body + _spill_footer(meta, span), {"spill": _spill_detail(meta)}
@@ -715,6 +1082,40 @@ def _describe_shell_approval(args: dict[str, Any], cwd: str) -> str:
     return f"run: {_display_target(command)}" if command else ""
 
 
+#: A scheme-shaped target, anchored: `scheme://`. A PATH is allowed to contain
+#: `://` (`~/x://y`), where the workspace verdict still applies — but the pattern
+#: is CASE-INSENSITIVE, because the tools dispatch on the scheme case-insensitively
+#: (`_has_scratchpad_scheme`) and the parser is where the spelling is corrected.
+#: Matching only lower-case here made `C://tmp/x.txt` and `SCRATCHPAD://x.md`
+#: prompt as an in-workspace PATH that the tool then refuses (round 2, MINOR-1).
+_SCHEME_SHAPED_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+
+
+def _scratchpad_display_target(url: str, context: ToolContext | None) -> str | None:
+    """The absolute path a scratchpad URL will touch, for the approval prompt.
+
+    Best-effort by design: a stranger scheme, an unavailable root, or a URL the
+    parser refuses all answer ``None``, and the prompt then names only the URL.
+    An approval prompt that GUESSES a path is worse than one that shows less —
+    the tool's own error reports the refusal.
+    """
+    if not _has_scratchpad_scheme(url):
+        return None
+    root = _scratchpad_root(context)
+    if root is None:
+        return None
+    try:
+        target = parse_scratchpad_url(url, root)
+    except ScratchpadPathError:
+        return None
+    # A DIRECTORY target is refused by every caller of this describer (``write`` and
+    # ``edit`` take a file, and the bare ``scratchpad://`` names the root), so naming
+    # its folder would ask a person to approve a write that cannot happen and touches
+    # nothing. The fallback — the URL alone — is what the "never a guessed path"
+    # contract already promises (round 2, D9).
+    return None if target.directory else str(target.path)
+
+
 def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeFn:
     """``<action>: <resolved path>``, marked when the path leaves the workspace.
 
@@ -722,9 +1123,15 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
     uses, so the sentence the user answers names the file the tool will touch —
     `../../etc/hosts` and `~/x` are the two forms where the raw string and the
     target genuinely differ.
+
+    The describer also takes the turn's ``context`` when the host offers it (see
+    ``AgentLoop._approval_summary``), because a ``scratchpad://`` target has
+    no path to resolve without the session's root — and a prompt that names only
+    the URL is asking the user to authorise a file it will not name (design
+    round 1, D5).
     """
 
-    def describe(args: dict[str, Any], cwd: str) -> str:
+    def describe(args: dict[str, Any], cwd: str, context: ToolContext | None = None) -> str:
         # NOT stripped: `execute_write` and `execute_edit` pass the raw string to
         # the resolver, and " notes.md" and "notes.md" are different files on a
         # POSIX filesystem. A prompt that quietly normalises names a file the tool
@@ -732,6 +1139,24 @@ def _describe_path_approval(action: str, key: str = "path") -> ApprovalDescribeF
         raw = str(args.get(key) or "")
         if not raw.strip():
             return ""
+        if _SCHEME_SHAPED_RE.match(raw.strip()):
+            # A URL is not a path, so the workspace resolver must not judge it:
+            # it would resolve ``scratchpad://x.md`` — or any stranger scheme —
+            # as the relative path ``<cwd>/scratchpad:/x.md`` and mark it
+            # ``[outside workspace]``. That is a false escalation on a target
+            # which is either the session's own (``scratchpad://``, already
+            # proved contained by the parser) or one the tool will refuse
+            # outright. The URL is the decision here, so the prompt names it —
+            # AND, when the scratchpad root is available, the file it lands on,
+            # exactly as an ordinary path prompt names its target.
+            #
+            # Matched on the scheme SHAPE, not on `"://" in raw`: a PATH can
+            # contain that substring (`~/x://y`), and skipping resolution for it
+            # dropped the `[outside workspace]` marker from a target that really
+            # is outside (review round 1, R3).
+            shown = _display_target(raw.strip())
+            resolved = _scratchpad_display_target(raw.strip(), context)
+            return f"{action}: {shown} -> {resolved}" if resolved else f"{action}: {shown}"
         try:
             path, inside, resolvable = _resolve_workspace_path(raw, cwd or ".")
         except (OSError, ValueError, RuntimeError):
@@ -867,11 +1292,53 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         raw_path = str(args.get("path") or "")
         if not raw_path.strip():
             return "screenshot to a temporary file"
+        if _SCHEME_SHAPED_RE.match(raw_path.strip()):
+            # This tool resolves no scheme, so the call will be refused: naming
+            # the mangled relative path ``<cwd>/scratchpad:/shot.png`` the
+            # resolver would invent would describe a write that never happens.
+            return f"screenshot: {_display_target(raw_path.strip())}"
         try:
             path, inside, resolvable = _resolve_workspace_path(raw_path, cwd or ".")
         except (OSError, ValueError):
             return f"screenshot: {_display_target(raw_path)}"
         return _approval_description(path, inside, "screenshot", resolvable)
+    if action == "download":
+        # The consent question is "may this page write files to your disk", and the
+        # DIRECTORY is the answer — the file names are the page's to choose, and a
+        # prompt that showed one of them would describe the wrong thing. Folded to
+        # `~` like every other row: the path is on every row of a session, so the
+        # home prefix is noise in a 40-cell budget.
+        from local_operator import browser_files as _files
+
+        root = str(_files.downloads_root())
+        home = str(Path.home())
+        shown = root.replace(home, "~", 1) if root.startswith(home) else root
+        return f"download \u2192 {_display_target(shown)}/"
+    if action == "upload":
+        # Both halves are mandatory (design §7.3): the FILE, because that is what
+        # leaves the machine, and the ORIGIN, because that is where it goes. The
+        # file goes through the same resolver and marker as `screenshot`, so an
+        # outside-workspace path is named as one and the row shows the resolved
+        # target rather than the string the model typed. A multi-file call shows
+        # the first and the count, because a prompt that truncates a list of
+        # secrets is worse than one that admits the count.
+        raw_paths = args.get("paths")
+        named = [str(entry) for entry in raw_paths] if isinstance(raw_paths, list) else []
+        if not named:
+            return "upload: no files named"
+        first = named[0]
+        if _SCHEME_SHAPED_RE.match(first.strip()):
+            row = f"upload: {_display_target(first.strip())}"
+        else:
+            try:
+                path, inside, resolvable = _resolve_workspace_path(first, cwd or ".")
+            except (OSError, ValueError):
+                row = f"upload: {_display_target(first)}"
+            else:
+                row = _approval_description(path, inside, "upload", resolvable)
+        if len(named) > 1:
+            row = f"{row} +{len(named) - 1} more"
+        return f"{row} \u2192 the page in the tab this session is driving"
     if url and action in NAVIGATING_BROWSER_ACTIONS:
         if url_unparsed:
             return f"{UNRESOLVABLE_MARKER} {UNPARSED_URL_PREFIX} {url}"
@@ -1484,6 +1951,41 @@ class BashParams(BaseModel):
     )
 
 
+#: What the live card shows while the pipe is holding an unterminated line.
+#:
+#: ``(empty)`` is the SETTLED answer — "there never will be output" — and the live
+#: card asserted it at every 500 ms emit while bytes were actively arriving and
+#: being withheld. The card's own word for the open case is
+#: :data:`local_operator.tui.widgets.tool_card.LIVE_HEADER_PENDING`, which this
+#: mirrors rather than imports (the tool layer must not depend on the TUI layer);
+#: ``test_the_live_pending_text_matches_the_card`` keeps the two in step.
+_LIVE_PENDING_TEXT = "no output yet"
+
+#: What the live view carries once the pipe filter has faulted. The text is
+#: withheld rather than guessed at: a filter that cannot vouch for the bytes must
+#: not paint them.
+_WITHHELD_LIVE_OUTPUT = (
+    "[live output withheld: this session's credential filter could not read its sink]"
+)
+
+#: A PEM armour header, and a base64 body line. Only a header opens the streaming
+#: mask, and only body lines are masked inside it — see
+#: ``_PipeRedactor._mask_open_key_block``.
+# The prefix grammar and the body-line test are the SHAPE TABLE's (`redaction_shapes`),
+# imported rather than restated: this layer masks BEFORE the table runs, so a divergence
+# between the two classifiers is a silent leak — which is exactly what happened when the
+# table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
+# published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
+_PEM_HEADER_LINE = PEM_HEADER_LINE_RE
+_PEM_BODY_LINE = PEM_BODY_LINE_RE
+_PEM_END_LINE = PEM_END_LINE_RE
+
+#: How many lines a streamed PEM block may mask before the state resets. A real
+#: 8192-bit key is ~100 lines at 64 columns; this is generous for one and far
+#: short of "the rest of the command's output".
+_PEM_STREAM_LINE_LIMIT = 512
+
+
 class _BashOutput:
     """Bound retention while the pipe is drained, keeping both diagnostic ends.
 
@@ -1501,6 +2003,11 @@ class _BashOutput:
         self.head = bytearray()
         self.tail: deque[bytes] = deque()
         self.tail_bytes = 0
+        #: Bytes the pipe filter is holding back right now — an unterminated
+        #: line, or an open key block. Reported so the live card can say "no
+        #: output yet" instead of the settled "``(empty)``" while a command is
+        #: demonstrably producing output (see ``_LIVE_PENDING_TEXT``).
+        self.withheld = 0
 
     @property
     def retained_bytes(self) -> int:
@@ -1541,21 +2048,71 @@ class _BashOutput:
         )
 
 
+#: How much undecided text the pipe filter holds before it releases its oldest
+#: bytes anyway (``_PipeRedactor._release_point``).
+#:
+#: A CONSTANT rather than a function of the pattern table, deliberately: a bound
+#: derived from the longest possible match would silently change (or grow
+#: unbounded) the next time a rule is added, and this one has to hold whatever
+#: the table says. 8 KiB is chosen to be comfortably larger than any credential
+#: shape the table spans — the widest is a PEM block, whose 2048-bit body is
+#: under 2 KiB — while staying small enough that a command printing one enormous
+#: line still publishes most of it promptly.
+_PIPE_DEFERRAL_LIMIT = 8192
+
+
 class _PipeRedactor:
     """Delay only a possible credential suffix before publishing pipe bytes.
 
     Redacting each read independently leaks a secret split across reads. Keep
-    enough undecided text for the longest injected credential, and never cut
-    through a complete match. UTF-8 decoding is incremental for the same
-    reason. Retained output and live job tails receive the same safe bytes.
+    enough undecided text that a known credential VALUE cannot be split across
+    two reads, and never cut through a complete match. UTF-8 decoding is
+    incremental for the same reason. Retained output and live job tails receive
+    the same safe bytes.
 
     Accepts a credential MAP (the historic caller) or a plain sequence of
     values. The sequence form is what carries §6 registrations — values a child
     fetched through ``lop secret get``, which have a name nowhere in this
     process, so there is no map to put them in.
+
+    **Why the release point moved, and what it costs.** Holding back a fixed
+    window sized from the longest KNOWN value is enough to keep that value whole
+    across a chunk boundary, and it is nothing at all against a SHAPE: a DSN or
+    an ``AWS_SECRET_ACCESS_KEY=`` line that a child prints in two reads was
+    painted live and then never re-read, because the live stream is the one
+    surface no later pass rewrites. So the release point is now the last line
+    terminator in hand, and every complete line goes out with
+    :func:`~local_operator.redaction_shapes.scrub_secrets` over it — values and
+    shapes both. Shapes are line-anchored, so a partial SENTENCE cannot carry a
+    shape across the boundary; a partial LINE can, and no longer does.
+
+    **Bounded, and stated rather than implied.** ``pending`` is capped at
+    :data:`_PIPE_DEFERRAL_LIMIT` bytes: a child that prints 10 MB with no
+    newline (one enormous JSON blob, a progress bar with no terminator) is
+    released in cap-sized pieces rather than accumulating, so memory does not
+    grow with the command's output. The cap is a CONSTANT, not a function of the
+    longest possible match — a bound derived from the pattern table would be
+    wrong the moment a rule was added. The residual is the obvious one: a shape
+    straddling a cap-forced cut, or one whose whole block (a PEM body) exceeds
+    the cap, is split across two releases and not matched here. Both are
+    contained by the result path, which scrubs the finished text in one piece.
+
+    Trailing partial lines are therefore withheld until they complete. That is
+    a real trade for a line-oriented surface, taken deliberately: a credential
+    painted live is unrecoverable, while a partial line's bytes arrive as soon
+    as its newline does — or at the cap, or at end-of-stream, whichever comes
+    first.
     """
 
     def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
+        #: An open PEM block, whether its marker is already out, and how many
+        #: lines it has covered (the bound that keeps a stream from holding the
+        #: state forever).
+        self._in_key_block = False
+        self._key_block_marker_sent = False
+        self._key_block_lines = 0
+        #: Whether this filter has withheld its output after a fault.
+        self._withheld = False
         values = credentials.values() if isinstance(credentials, dict) else list(credentials)
         self._set(values)
         self.pending = ""
@@ -1580,8 +2137,134 @@ class _PipeRedactor:
         self._set(values)
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
+        """Release what is safe to paint; never raise, and never lose the stream.
+
+        FAIL CLOSED BY DRAINING, and that is the contract rather than an
+        implementation detail: a raise here used to kill the reader, which lost the
+        command's output silently AND — once the child filled its pipe — wedged the
+        command itself. The withheld marker goes out once, a sticky flag records it,
+        and the reader keeps draining so the child is never blocked on a full pipe.
+        """
+        try:
+            return self._feed_scrubbed(chunk, final=final)
+        except Exception:  # noqa: BLE001 — see the docstring: draining IS the guard
+            if not self._withheld:
+                self._withheld = True
+                return _WITHHELD_LIVE_OUTPUT.encode("utf-8")
+            return b""
+
+    def _feed_scrubbed(self, chunk: bytes, *, final: bool = False) -> bytes:
         text = self.pending + self.decoder.decode(chunk, final=final)
-        cut = len(text) if final else max(len(text) - self.lookbehind, 0)
+        cut = self._release_point(text, final=final)
+        ready, self.pending = text[:cut], text[cut:]
+        ready = self._mask_open_key_block(ready)
+        scrubbed, hits = scrub_secrets_with_hits(ready, self.secrets)
+        # REPORT FROM HERE. This filter is the only layer that sees a credential
+        # that exists only in a command's OUTPUT — the production case this
+        # feature was written for — and it masks the bytes before the result
+        # exists, so the loop's hook later finds nothing to match and files
+        # nothing. Without this call the size of the incident that motivated the
+        # whole change is: zero notices, zero rotation tickets.
+        report_shape_hits([hit.label for hit in hits if hit.complete])
+        return scrubbed.encode("utf-8")
+
+    def _mask_open_key_block(self, ready: str) -> str:
+        """Mask the BODY of an open ``-----BEGIN … KEY-----`` block, line by line.
+
+        Why it exists: the release point defers a whole key block until its
+        terminator or the cap, which is the right unit for the table but leaves
+        the live view publishing key material when the block is larger than the
+        cap — an 8192-bit RSA body is ~6.4 KiB against an 8 KiB cap.
+
+        Why it is written this way — three constraints, each paid for:
+
+        * only a PEM HEADER opens the state (``-----BEGIN [A-Z0-9 ]+-----``). A
+          bare ``-----BEGIN`` in prose (``head -n 5 key.pem``, a doc quoting an
+          armour header, ``grep BEGIN``) used to open it and then swallow
+          everything after it — in the live view AND in the settled result, which
+          is built from the same sink. Round 2 measured both.
+        * a line is masked only when it is base64 BODY. Prose after a stray
+          header is released verbatim and CLOSES the state, so no ordinary line
+          can be eaten by it.
+        * the state is bounded by lines, so a stream that never terminates a
+          block cannot hold it open for the rest of the command's output.
+        """
+        if self._in_key_block:
+            out: list[str] = []
+            for line in ready.splitlines(keepends=True):
+                if self._key_block_lines > _PEM_STREAM_LINE_LIMIT:
+                    # Bound reached: stop masking, release, and reset.
+                    self._in_key_block = False
+                    out.append(line)
+                    continue
+                self._key_block_lines += 1
+                if _PEM_END_LINE.match(line.rstrip("\r\n")):
+                    self._in_key_block = False
+                    self._key_block_marker_sent = False
+                    out.append(line)
+                    continue
+                if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
+                    if not self._key_block_marker_sent:
+                        self._key_block_marker_sent = True
+                        out.append(REDACTION_MARKER + "\n")
+                    continue
+                # Not body: prose. Release it and close the state.
+                self._in_key_block = False
+                self._key_block_marker_sent = False
+                out.append(line)
+            return "".join(out)
+        begin = _PEM_HEADER_LINE.search(ready)
+        if begin is None:
+            return ready
+        self._in_key_block = True
+        self._key_block_lines = 0
+        self._key_block_marker_sent = False
+        # Keep the rest of this chunk: it is the block's first lines, and they go
+        # through the same line loop as everything else. Replacing it with a
+        # marker here DROPPED whatever followed the header in the same read.
+        # NO INJECTED SEPARATOR. This used to splice a real newline in after the
+        # header, which rewrote the ESCAPED spelling a JSON service-account value
+        # uses (`\\n`) and left the table unable to match the body — the marker was
+        # masked and the key published, silently, because a withheld claim means no
+        # notice either (QA's Q4-F1). The text after the header is passed through
+        # unchanged; a real newline there is stripped by ``lstrip`` only when it is
+        # really a newline.
+        # NO SEPARATOR REWRITING: stripping the leading newline here (or splicing one in,
+        # as an earlier round did) changes the bytes the shape table is about to read, and
+        # a rewritten separator is a shape the table cannot match. The remainder is
+        # passed through exactly as read.
+        return ready[: begin.end()] + self._mask_open_key_block(ready[begin.end() :])
+
+    def _release_point(self, text: str, *, final: bool) -> int:
+        """Where the decidable prefix ends: after the last newline, capped."""
+        if final:
+            return len(text)
+        # BOTH terminators: a progress bar rewrites its line with ``\r`` and may
+        # not emit ``\n`` until it is done, and a shape cannot straddle either
+        # one, so releasing at ``\r`` is free and keeps a long build's output
+        # visible while it runs.
+        cut = max(text.rfind("\n"), text.rfind("\r")) + 1
+        # An UNTERMINATED private-key block defers the WHOLE block, not just to
+        # the last newline: a PEM body is the credential and it spans lines, so
+        # releasing up to the last newline would publish the key material and
+        # hold back only the ``-----END`` line. The block is held until its END
+        # arrives (or the cap below forces it through, which is the documented
+        # residual for a block larger than the cap).
+        begin = text.rfind("-----BEGIN", 0, cut)
+        if begin >= 0:
+            end = text.find("-----END", begin)
+            if end < 0 or end >= cut:
+                cut = begin
+        # The cap is applied LAST and wins over every hold above: bounded memory
+        # is the property that must not depend on what the child prints, so a
+        # command that opens a PEM block and never closes it cannot pin the
+        # buffer forever.
+        if len(text) - cut > _PIPE_DEFERRAL_LIMIT:
+            cut = len(text) - _PIPE_DEFERRAL_LIMIT
+        # Never cut through a KNOWN value. The newline rule above already
+        # prevents that for any value without a newline in it, which is every
+        # credential in practice; this keeps the guarantee for the ones with
+        # one, and for the cap-forced cut above.
         while True:
             previous_cut = cut
             for secret in self.secrets:
@@ -1590,10 +2273,7 @@ class _PipeRedactor:
                     cut = start
             if cut == previous_cut:
                 break
-        ready, self.pending = text[:cut], text[cut:]
-        for secret in self.secrets:
-            ready = ready.replace(secret, "[redacted]")
-        return ready.encode("utf-8")
+        return cut
 
 
 def _bash_progress_line(
@@ -1690,6 +2370,24 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     redact = getattr(store, "redact", None)
     if not callable(redact):
         return text
+    # ``redact_with_hits`` when the store has it: the live stream, the peek
+    # buffer and the abort receipt are the surfaces that paint a credential
+    # BEFORE any result exists, so they have to file the incident themselves —
+    # there is no later hook that will see the pre-mask text.
+    # Cast rather than probed: ``getattr`` yields ``object``, and the two names this
+    # looks for are the store's own public surface (``VariableStore.redact_with_hits``
+    # and its ``redact``), so a Callable annotation is the honest description.
+    hits_aware = cast(
+        Callable[[str], tuple[str, list[str]]] | None,
+        getattr(store, "redact_with_hits", None),
+    )
+    if callable(hits_aware):
+        try:
+            scrubbed, labels = hits_aware(text)
+            report_shape_hits(labels)
+            return scrubbed
+        except Exception:  # noqa: BLE001 — fall through to the plain path below
+            logger.warning("hit-aware redaction failed on a live surface", exc_info=True)
     try:
         redacted = redact(text)
     except Exception:
@@ -1815,8 +2513,6 @@ async def execute_bash(
             f"aborted ({signal.reason or 'aborted'}): {params.command}",
         )
 
-    env = os.environ.copy()
-    env.update(NON_INTERACTIVE_ENV)
     # Session credentials ride the child environment so the agent can USE a
     # secret it can never READ. Injected here rather than advertised as a
     # bash ``env`` argument: a model-authored env map would have to carry
@@ -1825,9 +2521,19 @@ async def execute_bash(
     store = context.variables if context is not None else None
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
+    injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
     if isinstance(extra, dict):
-        extra = {str(name): str(value) for name, value in extra.items()}
-        env.update(extra)
+        injections.update({str(name): str(value) for name, value in extra.items()})
+
+    # The child environment is built from the session's `shell_environment`
+    # policy, not copied wholesale: `inherit` (the default) is the copy this
+    # used to be, `allowlist` is the strict mode a server-owned run turns on so
+    # a model-authored command cannot read the provider key out of its own
+    # environment. Both the non-interactive contract and the credential store
+    # above are worth keeping in EITHER mode, so they ride the policy as
+    # intentional injections rather than around it — see
+    # local_operator.tools.shell_env, the one place this decision is made.
+    env = shell_env.child_environment(injections=injections)
 
     # Real bash, not /bin/sh (#629). On macOS /bin/sh is bash 3.2 in POSIX
     # mode, which rejects process substitution and other bashisms at parse
@@ -1962,7 +2668,11 @@ async def execute_bash(
         # the guard keeps the reader honest instead of asserting.
         if stream is None:
             return
-        redactor = _PipeRedactor(_stream_redaction_values(store, injected))
+        # The sentinel means "this session's own redaction sink could not be
+        # read" and must never be treated as an ordinary list of secrets; the
+        # loop checks it before every feed, and so must the construction site.
+        initial = _stream_redaction_values(store, injected)
+        redactor = _PipeRedactor([] if initial is _REDACTION_SEAM_BROKEN else initial)
         withheld = False
         try:
             while True:
@@ -2000,6 +2710,7 @@ async def execute_bash(
                     continue
                 redactor.refresh(values)
                 safe = redactor.feed(chunk)
+                sink.withheld = len(redactor.pending)
                 sink.append(safe)
                 _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
@@ -2046,6 +2757,10 @@ async def execute_bash(
             ),
             context,
         )
+        if not stdout and not stderr and (stdout_chunks.withheld or stderr_chunks.withheld):
+            # Bytes are arriving and being held; ``(empty)`` would tell the
+            # operator the opposite of what is happening.
+            stdout = _LIVE_PENDING_TEXT
         on_update(
             AgentToolUpdate(
                 content=[TextContent(text=_bash_output_summary(stdout, stderr))],
@@ -2362,7 +3077,13 @@ async def execute_bash(
             tool_call_id,
             "bash",
             f"aborted ({(signal.reason or 'aborted') if signal else 'aborted'}): "
-            f"{params.command}\n{_redact_tool_text(partial, context)}",
+            # The COMMAND line is scrubbed as well as the output. A command can
+            # carry a credential (`curl -u svc:pw`, `-ppw`, a DSN in an argument)
+            # and this receipt is a tool result like any other; the loop's
+            # ``redact_tool_result`` covers the product path, and a direct caller
+            # of ``execute_bash`` had this one unredacted.
+            f"{_redact_tool_text(params.command, context)}\n"
+            f"{_redact_tool_text(partial, context)}",
         )
 
     # Decoding and, for oversized output, spilling/eliding run in a thread:
@@ -2396,6 +3117,24 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    # ONE advisory line when the command is shaped like a credential dump, so the
+    # model learns the safer form at the moment it needs it rather than after the
+    # secret is already in the transcript. It rides the RESULT, not the stream:
+    # the stream is bytes from the child, and this is the harness talking.
+    #
+    # The notice carries no value from the command (see ``credential_dump_notice``)
+    # and is appended here, before the footer, so a spilled transcript's
+    # expansion hints stay at the end where the model looks for them.
+    # The advisory goes SECOND, immediately under the exit code — not last,
+    # which is where it was. The operator reads a result through the tool card,
+    # which keeps the HEAD of at most 40 lines, so a notice at the end of a long
+    # result was the first thing dropped: measured, a 200-line command whose last
+    # line held the credential settled with "… 169 more lines" and no advisory
+    # anywhere. Short (see ``_BRIEF_ADVICE``) and near the top is what makes it
+    # survive both truncations.
+    notice = credential_dump_notice(params.command)
+    if notice:
+        parts.insert(1, notice)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
@@ -2504,7 +3243,7 @@ class ReadParams(BaseModel):
             "File path (absolute or relative to the working directory), or an "
             "internal URL: skill://<name> (its reference files via "
             "skill://<name>/<relpath>, listed at the end of the skill body — "
-            "never via a raw filesystem path), or spill://<id> to expand an "
+            "never via a raw filesystem path), spill://<id> to expand an "
             "output that was truncated (append '?q=<regex>' to search inside "
             "it instead of paging through it)."
         )
@@ -2590,7 +3329,9 @@ def _fits_output_budget(body: str) -> bool:
     return len(body) <= READ_OUTPUT_LIMIT_CHARS
 
 
-def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
+def _clamp_file_body(
+    body: str, path: Path, start: int, total: int, *, display: str | None = None
+) -> str:
     """Hold one ``read`` result inside the char budget.
 
     A file needs no spill entry: the file IS the store, it is already on disk,
@@ -2602,6 +3343,13 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     by line and the model chose the offset, so the useful continuation is
     "carry on from where this stopped"; splicing in a tail would break the
     contiguity that makes a numbered listing readable.
+
+    ``display`` is the caller's own spelling of the file, and the continuation
+    suggests THAT rather than the resolved absolute path. For a scratchpad file
+    the two are the difference between a continuation that costs nothing and one
+    that is outside the workspace: the absolute path is a read the write/read
+    gate escalates to an approval prompt, while ``scratchpad://big.md`` is the
+    same continuation the caller already made (QA round 1, Q3).
     """
     if _fits_output_budget(body):
         return body
@@ -2613,7 +3361,7 @@ def _clamp_file_body(body: str, path: Path, start: int, total: int) -> str:
     return (
         f"{clipped}\n\n[truncated at {READ_OUTPUT_LIMIT_CHARS} chars; "
         f"{total - next_line + 1} of {total} lines not shown. Continue with "
-        f'read(path="{path}", range="{next_line}-{next_line + 200}") '
+        f'read(path="{display or path}", range="{next_line}-{next_line + 200}") '
         f"or narrow with grep]"
     )
 
@@ -2971,7 +3719,7 @@ def _capped_list_body(
         # Fits the prompt, but the count cap still hid entries. Point at the
         # rest explicitly rather than leaving "(capped at N)" as a dead end.
         hidden_from = len(shown.splitlines()) + 1
-        return shown + _spill_footer(meta, (hidden_from, meta.lines)), {
+        return shown + _spill_footer(meta, ("lines", hidden_from, meta.lines)), {
             "spill": _spill_detail(meta)
         }
     body, span = _elide_inline(shown, TOOL_OUTPUT_LIMIT_CHARS)
@@ -3043,14 +3791,24 @@ def _read_spill(tool_call_id: str, target: str, range_spec: str | None) -> ToolR
     if len(body) > READ_OUTPUT_LIMIT_CHARS:
         head, tail = _clip_head_tail(body, READ_OUTPUT_LIMIT_CHARS - len(BASH_TRUNCATION_MARKER))
         shown = len(head.splitlines())
-        body = (
-            head
-            + BASH_TRUNCATION_MARKER
-            + tail
-            + f"\n[this page was itself truncated. Continue with "
-            f'read(path="{ref.handle}", range="{start + shown}-{start + shown + 200}") '
-            f'or narrow first with read(path="{ref.handle}?q=<regex>")]'
-        )
+        body = head + BASH_TRUNCATION_MARKER + tail
+        # Offer the next page only when the stored copy HAS one. `total` is the
+        # entry's own line count, so a payload stored as one unbroken line — the
+        # shape every MCP JSON result is stored as — has no second page, and
+        # naming a range past its end is the same class of defect as
+        # `lines 2-0`: a printed call that cannot resolve (review round 1, F2).
+        if start + shown <= total:
+            body += (
+                f"\n[this page was itself truncated. Continue with "
+                f'read(path="{ref.handle}", range="{start + shown}-{start + shown + 200}") '
+                f'or narrow first with read(path="{ref.handle}?q=<regex>")]'
+            )
+        else:
+            body += (
+                f"\n[this page was itself truncated and this page's last line is only "
+                f"partly shown, so there is no next range: narrow it with "
+                f'read(path="{ref.handle}?q=<regex>")]'
+            )
     header = f"{ref.handle} — lines {start}-{start + len(selected) - 1} of {total}"
     if not meta.complete:
         header += " (stored copy is head+tail of an over-cap output)"
@@ -3270,13 +4028,18 @@ def _structural_summary_result(
     return _text(tool_call_id, "read", header + "\n" + body + footer, details=details)
 
 
-def _list_dir_entries(path: Path) -> list[str]:
+def _list_dir_entries(path: Path, *, skip_dotfiles: bool = False) -> list[str]:
     """One directory's entries, directories marked with a trailing ``/``.
 
     Synchronous by design: ``asyncio.to_thread`` is the only caller, and the
     shape is exactly what the loop-bound listing used to build inline.
+
+    ``skip_dotfiles`` serves the scratchpad listing, whose reader refuses dotfiles
+    by name (``parse_scratchpad_url``): advertising a name that cannot be read is the
+    own-goal ``skills/protocol.py`` warns about, so the two rules agree here.
     """
-    return sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
+    entries = (p for p in path.iterdir() if not (skip_dotfiles and p.name.startswith(".")))
+    return sorted(p.name + ("/" if p.is_dir() else "") for p in entries)
 
 
 def _read_file_snapshot(path: Path) -> tuple[int, ImageInfo | None, bytes | None]:
@@ -3625,21 +4388,34 @@ async def execute_read(
             is_error=is_error,
         )
 
+    # ``scratchpad://`` is served HERE (not by the resolver): it is a real
+    # directory in the session's own folder, addressed by a scheme, and one
+    # scheme covers read, write and edit. Above the catch-all below, which would
+    # otherwise answer every scratchpad URL with "the resolver does not handle
+    # this URL" — the exact misleading error this branch exists to remove. Below
+    # ``spill://`` and http(s), whose prefixes cannot collide.
+    if _has_scratchpad_scheme(target):
+        return await _read_scratchpad(tool_call_id, target, params, context)
+
     # Internal URLs (skill://...) go through the session-installed resolver.
-    if "://" in target and not target.startswith(("http://", "https://", "file://")):
+    if "://" in target and not target.startswith(("http://", "https://")):
         resolver = getattr(context, "resolve_internal_url", None) if context else None
         if resolver is None:
             return _error(
                 tool_call_id,
                 "read",
-                f"Cannot resolve '{target}': no internal URL resolver is available.",
+                f"Cannot resolve '{target}': no internal URL resolver is available. "
+                "read takes a filesystem path, or one of its own internal URLs — "
+                f"{SCRATCHPAD_SCHEME}<name> is this session's own scratch area.",
             )
         content = resolver(target)
         if content is None:
             return _error(
                 tool_call_id,
                 "read",
-                f"Cannot resolve '{target}': the resolver does not handle this URL.",
+                f"Cannot resolve '{target}': the resolver does not handle this URL. "
+                "read takes a filesystem path, or one of its own internal URLs — "
+                f"{SCRATCHPAD_SCHEME}<name> is this session's own scratch area.",
             )
         # Deliberately NO supersede_key here. This path serves internal URLs
         # (skill://, guide://, mcp://), and skill reads are exempt from pruning
@@ -3657,6 +4433,284 @@ async def execute_read(
 
     cwd = _safe_cwd(context)
     path, inside, resolvable = _resolve_workspace_path(target, cwd)
+    return await _read_path(
+        tool_call_id, params, context, path=path, inside=inside, resolvable=resolvable
+    )
+
+
+# ---------------------------------------------------------------------------
+# URL schemes in path arguments
+# ---------------------------------------------------------------------------
+
+
+def _has_scratchpad_scheme(raw: str) -> bool:
+    """True when ``raw`` spells the scratchpad scheme, in any case.
+
+    Dispatch is case-INSENSITIVE here and the parser is case-SENSITIVE (see
+    ``parse_scratchpad_url``): ``SCRATCHPAD://x`` has to reach the parser to be
+    told the scheme is written lower-case, instead of being refused here as a
+    stranger scheme and answering a question the caller did not ask. Two rules
+    for one string is how the contradiction in review round 1 (R7) happened.
+    """
+    return raw.strip().lower().startswith(SCRATCHPAD_SCHEME)
+
+
+def _scheme_refusal(
+    tool_call_id: str,
+    tool_name: str,
+    raw: str,
+    *,
+    serves: str | None = None,
+    remedy: str | None = None,
+) -> ToolResult | None:
+    """Refuse a URL scheme THIS tool does not serve, or ``None`` to proceed.
+
+    Without this, a path argument carrying ANY scheme falls through to the
+    workspace resolver, which reads it as a RELATIVE path: ``notes://x.py``
+    resolves to ``<cwd>/notes:/x.py``, and ``write`` then creates a literal
+    ``notes:`` directory inside the user's working directory. That is silent
+    litter — no approval, because a fresh path inside the workspace reads as
+    ordinary — and it is what a model does out of habit or from a typo.
+
+    ``serves`` is the one scheme the CALLING tool resolves itself, and it is a
+    parameter rather than a blanket allowance for ``scratchpad://``: a tool that
+    cannot serve the scheme must refuse it too, or the refusal text itself
+    ("the one URL scheme grep takes is ``scratchpad://<name>``") walks the
+    caller into the bug it is warning about — ``grep path=scratchpad://perf.md``
+    then reads ``<cwd>/scratchpad:/perf.md``, and ``browser`` WROTE a screenshot
+    to ``<cwd>/scratchpad:/shot.png`` and reported success (round 1, R1/Q1).
+    """
+    stripped = raw.strip()
+    if "://" not in stripped:
+        return None
+    if serves is not None and stripped.lower().startswith(serves):
+        return None
+    scheme = stripped.split("://", 1)[0]
+    if serves is not None:
+        return _invalid_arguments(
+            tool_call_id,
+            tool_name,
+            f"{scheme}:// is not a scheme {tool_name} can resolve, so nothing was written: "
+            f"'{raw}' is a URL, not a path. The one URL scheme {tool_name} takes is "
+            f"{serves}<name> (this session's own scratch area); every other "
+            "argument is a plain filesystem path.",
+        )
+    # This tool serves NO scheme, so the remedy is a path — and the way to get one
+    # for a file in the session's scratch area is usually to read it with the scheme
+    # and use the absolute path that result prints. A caller that cannot USE such a
+    # path passes its own remedy instead: ``glob`` searches the working directory
+    # and refuses absolute patterns, so "pass the absolute path" is a dead end
+    # there (round 2, Q7).
+    remedy_text = remedy or (
+        "For a file in this session's scratch area, read it first with "
+        f'read(path="{SCRATCHPAD_SCHEME}<name>") and pass the absolute path that result prints.'
+    )
+    return _invalid_arguments(
+        tool_call_id,
+        tool_name,
+        f"{scheme}:// is a URL, and {tool_name} takes only filesystem paths: reading '{raw}' "
+        f"as one would walk the relative path '{scheme}:' plus the rest, under the working "
+        "directory, so it is refused and nothing was touched. " + remedy_text,
+    )
+
+
+# ---------------------------------------------------------------------------
+# scratchpad:// — the session's own scratch area
+# ---------------------------------------------------------------------------
+
+
+def _scratchpad_root(context: ToolContext | None) -> Path | None:
+    """The scratchpad root off the context, or ``None``. ``""`` reads as ``None``.
+
+    ``""`` is treated as absent rather than as a path: ``Path("")`` is the cwd,
+    which would silently make the whole working directory listable through the
+    scheme.
+    """
+    raw = getattr(context, "scratchpad_dir", None) if context else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    return Path(raw)
+
+
+def _scratchpad_address(result: ToolResult, url: str, path: Path) -> ToolResult:
+    """Put the RESOLVED ABSOLUTE PATH into the result TEXT.
+
+    The result text is the only signal BOTH consumers get: the agent, which
+    needs a path ``bash``/``ls``/``grep``/``eval`` can take (they cannot resolve
+    a scheme), and the desktop Files panel, which infers its tiles from
+    transcript text and needs an absolute path to open one. Placed at the HEAD,
+    because the 8 KiB output clamp keeps the head.
+    """
+    if result.is_error or not result.content:
+        return result
+    first = result.content[0]
+    if not isinstance(first, TextContent):
+        return result
+    return result.model_copy(
+        update={
+            "content": [TextContent(text=f"{url} -> {path}\n{first.text}"), *result.content[1:]]
+        }
+    )
+
+
+def _scratchpad_listing(
+    tool_call_id: str, url: str, directory: Path, context: ToolContext | None
+) -> ToolResult:
+    """The one directory level ``url`` names, in the shape the file listing uses.
+
+    The header is ``<url> -> <absolute path> (<n> entries):`` — the URL as
+    typed, then where it resolved. It deliberately does NOT name the scheme
+    again ("scratchpad listing scratchpad://…" wraps a 100-column pane and says
+    the same thing twice), and the count is singular for one file, because a
+    "1 entries" header is the kind of seam that makes a reader distrust the
+    number beside it (design round 1).
+
+    Entries stay RELATIVE, which is the deliberate trade: an absolute path per
+    entry would cost ~30 tokens on every listing to buy a Files-panel tile for a
+    name the agent can see anyway.
+    """
+    entries = _list_dir_entries(directory, skip_dotfiles=True) if directory.is_dir() else []
+    count = len(entries)
+    header = f"{url} -> {directory} ({count} {'entry' if count == 1 else 'entries'}):"
+    if entries:
+        body = f"{header}\n" + "\n".join(entries)
+    else:
+        # The extra line appears only when there is nothing to list: that is the
+        # state where the agent needs its next move, and a non-empty listing
+        # needs nothing but its names.
+        body = (
+            f"{header}\n"
+            f"(nothing here yet; write one with "
+            f'write(path="{SCRATCHPAD_SCHEME}name.md", content="…"))'
+        )
+    # Bounded like every other read outcome: a wide directory cannot inject an
+    # unbounded result into the transcript.
+    text, spill = spill_truncate(body, "read", context, READ_OUTPUT_LIMIT_CHARS)
+    # ``path`` and never ``url``: ``details['url']`` means "an internal URL the
+    # resolver served" (the contract the catch-all branch documents), and
+    # compaction's supersede keys read ``path`` first.
+    return _text(tool_call_id, "read", text, details={"path": str(directory), **(spill or {})})
+
+
+def _scratchpad_target(
+    tool_call_id: str, tool_name: str, url: str, context: ToolContext | None
+) -> Path | ToolResult:
+    """Resolve a ``scratchpad://`` URL for a MUTATING tool, or return the error.
+
+    Returns a ``ToolResult`` on every failure, so each caller has ONE branch it
+    cannot forget part of: no scratchpad root, a malformed URL, and a URL that
+    names a directory. A scratchpad file needs a file name —
+    ``write(path="scratchpad://")`` is a refusal, not a silent write to the
+    directory's own path.
+    """
+    root = _scratchpad_root(context)
+    if root is None:
+        return _error(tool_call_id, tool_name, SCRATCHPAD_UNAVAILABLE)
+    try:
+        target = parse_scratchpad_url(url, root)
+    except ScratchpadPathError as exc:
+        return _invalid_arguments(tool_call_id, tool_name, str(exc))
+    if target.directory:
+        # ``scratchpad://`` rstrips to ``scratchpad:`` — the scheme separator IS
+        # the trailing slash — so the root example is spelled out rather than
+        # derived from a string that has already lost the only marker that
+        # mattered.
+        stem = url.rstrip("/")
+        example = (
+            f"{SCRATCHPAD_SCHEME}name.md"
+            if stem == SCRATCHPAD_SCHEME.rstrip("/")
+            else f"{stem}/name.md"
+        )
+        return _invalid_arguments(
+            tool_call_id,
+            tool_name,
+            f"A {SCRATCHPAD_NAMESPACE} URL must name a file, not the folder itself: {url} "
+            f"names {SCRATCHPAD_NAMESPACE}/. Address one file, e.g. '{example}'; "
+            f'read(path="{url}") lists what is already there.',
+        )
+    # The root is created lazily by the write itself (``path.parent``), so a
+    # scratchpad directory that does not exist yet is a normal first write.
+    return target.path
+
+
+async def _read_scratchpad(
+    tool_call_id: str, url: str, params: ReadParams, context: ToolContext | None
+) -> ToolResult:
+    """Serve ``scratchpad://``: a listing, or one file through the file ladder.
+
+    Deliberately NOT routed through ``ToolContext.resolve_internal_url``: a
+    resolver returns ONE opaque string, so it cannot express a listing, cannot
+    express a RANGE, and could never serve a WRITE — and one scheme covering
+    read, write and edit is the whole point of ``scratchpad://``.
+    """
+    root = _scratchpad_root(context)
+    if root is None:
+        return _error(tool_call_id, "read", SCRATCHPAD_UNAVAILABLE)
+    try:
+        target = parse_scratchpad_url(url, root)
+    except ScratchpadPathError as exc:
+        return _invalid_arguments(tool_call_id, "read", str(exc))
+    # A URL that named a directory, and one that names a directory on disk
+    # without saying so (``scratchpad://logs``), both list. One level, like the
+    # file listing; ``read scratchpad://logs/`` descends explicitly.
+    if target.directory and target.path.is_file():
+        # The trailing slash says directory and the disk says file. Listing it
+        # answered "0 entries … nothing here yet" for a file the caller can
+        # plainly see (round 1, R6).
+        return _invalid_arguments(
+            tool_call_id,
+            "read",
+            f"{url} names a directory, but it is a file: drop the trailing '/' to read it.",
+        )
+    if target.directory or target.path.is_dir():
+        return _scratchpad_listing(tool_call_id, url, target.path, context)
+    if not target.path.exists():
+        return _error(
+            tool_call_id,
+            "read",
+            f"Scratchpad file does not exist: {url}. Write it first with "
+            f'write(path="{url}", content="…").',
+        )
+    # ``inside=True`` unconditionally: the scratchpad root is outside the
+    # working directory by construction, and ``parse_scratchpad_url`` has
+    # already proved this path contained in it — so the ``[outside workspace]``
+    # escalation, which exists to flag a path that left the workspace, would be
+    # false here and must not fire.
+    result = await _read_path(
+        tool_call_id,
+        params,
+        context,
+        path=target.path,
+        inside=True,
+        resolvable=True,
+        display_path=url,
+    )
+    return _scratchpad_address(result, url, target.path)
+
+
+async def _read_path(
+    tool_call_id: str,
+    params: ReadParams,
+    context: ToolContext | None,
+    *,
+    path: Path,
+    inside: bool,
+    resolvable: bool,
+    display_path: str | None = None,
+) -> ToolResult:
+    """The file half of ``read``: one path, every classification and bound.
+
+    Split out of :func:`execute_read` so the scratchpad scheme reuses THIS
+    ladder rather than growing a second one. Deliberately NOT decorated with
+    ``_guard``: its only caller is the guarded ``execute_read``, and a second
+    guard would turn one unexpected raise into two "read failed unexpectedly"
+    results.
+
+    ``display_path`` is the caller's own spelling of ``path`` (the URL, for a
+    scratchpad file) and is used ONLY in the continuation hint — the result text
+    still carries the resolved absolute path, which is what the agent's other
+    tools and the desktop Files panel both need.
+    """
     if not path.exists():
         message = f"Path does not exist: {path}"
         # Skills are virtual resources, not files on disk. Point the agent to
@@ -3751,7 +4805,7 @@ async def execute_read(
                 # exact total with a count-only pass over the same bytes
                 # whenever the rendered head does not fit this budget.
                 assert total is not None
-                rendered = _clamp_file_body(body, path, start, total)
+                rendered = _clamp_file_body(body, path, start, total, display=display_path)
             return _text(
                 tool_call_id,
                 "read",
@@ -3839,14 +4893,18 @@ async def execute_read(
         return _text(
             tool_call_id,
             "read",
-            _clamp_file_body(body, path, 1, len(lines))
+            _clamp_file_body(body, path, 1, len(lines), display=display_path)
             + f"\n\n[{remaining} more lines in file. Use range to continue]",
             details={"path": str(path)},
         )
     return _text(
         tool_call_id,
         "read",
-        _clamp_file_body(_number_lines(lines, 1), path, 1, len(lines)) if lines else "(empty file)",
+        (
+            _clamp_file_body(_number_lines(lines, 1), path, 1, len(lines), display=display_path)
+            if lines
+            else "(empty file)"
+        ),
         details={"path": str(path)},
     )
 
@@ -4903,9 +5961,39 @@ async def execute_edit(
             "nothing to edit: pass 'edits' (preferred) or old_text/new_text.",
         )
 
-    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
+    raw = params.path
+    # A scheme is refused before the resolver sees it (see ``_scheme_refusal``),
+    # and ``scratchpad://`` is resolved here rather than through the workspace
+    # resolver, which would treat the scheme as a relative path and hand the
+    # approval prompt a nonsense target under the cwd. The unstripped string
+    # still goes to the resolver for every other path: " x.md" and "x.md" are
+    # different files, and normalising names a file the caller did not ask for.
+    refusal = _scheme_refusal(tool_call_id, "edit", raw, serves=SCRATCHPAD_SCHEME)
+    if refusal is not None:
+        return refusal
+    url = raw.strip()
+    if _has_scratchpad_scheme(url):
+        scratchpad_target = _scratchpad_target(tool_call_id, "edit", url, context)
+        if isinstance(scratchpad_target, ToolResult):
+            return scratchpad_target
+        path = scratchpad_target
+    else:
+        path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
     if not path.is_file():
-        return _error(tool_call_id, "edit", f"File does not exist: {path}")
+        # Name the URL when the caller used one: the raw string is what the
+        # model typed, and echoing the mangled filesystem path the scheme would
+        # have resolved to is a name it never used.
+        return _error(
+            tool_call_id,
+            "edit",
+            (
+                f"Scratchpad file does not exist: {url}. Write it first with "
+                f'write(path="{url}", content="…").'
+                if _has_scratchpad_scheme(url)
+                else f"File does not exist: {path}. Write it first with "
+                f'write(path="{path}", content="…"), or check the path with a listing read.'
+            ),
+        )
 
     # Read/match/replace/write/diff in a thread. Main's multi-hunk edit grew
     # substantially after the first liveness fix, but its contract is the
@@ -4918,10 +6006,14 @@ async def execute_edit(
     if isinstance(outcome, str):
         return _error(tool_call_id, "edit", outcome)
     total_replacements, details = outcome
+    # The URL is echoed for a scratchpad file so the result text reads as the
+    # address the agent used, followed by where it landed
+    # (see ``_scratchpad_address``).
+    where = f"{url} -> {path}" if _has_scratchpad_scheme(url) else str(path)
     return _text(
         tool_call_id,
         "edit",
-        f"Edited {path}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
+        f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
         details=details,
     )
 
@@ -5233,8 +6325,23 @@ async def execute_write(
         return _validation_error(tool_call_id, "write", exc)
     if not params.path.strip():
         return _error(tool_call_id, "write", "path must be a non-empty string")
-    # Write-tier approval is the loop's gate; see execute_bash.
-    path, inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
+    # Write-tier approval is the loop's gate; see execute_bash. Same split as
+    # ``execute_edit``, and for the same reason: a scheme must not reach the
+    # workspace resolver, whose verdict feeds the approval prompt — and an
+    # UNRECOGNISED scheme must not silently become a relative path, which is how
+    # ``notes://x.py`` would create a literal ``notes:`` directory here.
+    raw = params.path
+    refusal = _scheme_refusal(tool_call_id, "write", raw, serves=SCRATCHPAD_SCHEME)
+    if refusal is not None:
+        return refusal
+    url = raw.strip()
+    if _has_scratchpad_scheme(url):
+        scratchpad_target = _scratchpad_target(tool_call_id, "write", url, context)
+        if isinstance(scratchpad_target, ToolResult):
+            return scratchpad_target
+        path = scratchpad_target
+    else:
+        path, _inside, _resolvable = _resolve_workspace_path(raw, _safe_cwd(context))
 
     # The read-modify-write-diff block runs in a thread: the loop this
     # coroutine rides is the SAME loop that renders the TUI, and a previous
@@ -5244,10 +6351,21 @@ async def execute_write(
     # intermittent whole-screen freeze; off it, the frame keeps animating.
     existed, details = await asyncio.to_thread(_write_file_result, path, params.content)
     verb = "Overwrote" if existed else "Created"
+    # ``_write_file_result_locked`` creates parents, so a nested scratchpad file
+    # (``scratchpad://runs/deep.csv``) needs no special case here.
+    is_scratchpad = _has_scratchpad_scheme(url)
+    where = f"{url} -> {path}" if is_scratchpad else str(path)
+    # The lifetime is a PERSON's concern — the agent is told once, in the guide —
+    # so it is stated where a person reads it: the receipt that announces a NEW
+    # file to whoever is watching the transcript or the Files panel. Only on the
+    # create, because the store is session-scoped: every file in it was created
+    # in this session, so the create receipt already covers all of them, and an
+    # overwrite receipt would restate the same fact on every edit (UX round 1, U1).
+    lifetime = " — deleted with the session" if is_scratchpad and not existed else ""
     return _text(
         tool_call_id,
         "write",
-        f"{verb} {path} ({len(params.content)} chars).",
+        f"{verb} {where} ({len(params.content)} chars){lifetime}.",
         details=details,
     )
 
@@ -5581,6 +6699,31 @@ async def execute_glob(
     pattern = params.pattern.strip()
     if not pattern:
         return _error(tool_call_id, "glob", "pattern must be a non-empty string")
+    # A scheme in a PATTERN is a URL, and this tool resolves none: it would match
+    # nothing (a glob is relative to the working directory, and a scheme is not a
+    # path component), so the caller reads "No paths matched pattern
+    # 'scratchpad://*.md'" as "the file is not there" rather than "this tool
+    # cannot be addressed that way" — the same misleading-answer class the other
+    # path-taking tools refuse. Found while sweeping for the tools that take a
+    # path string (round 1, per-tool refusal).
+    if "://" in pattern:
+        # Its own remedy, not the shared one: this tool's patterns are relative to
+        # the working directory and an absolute pattern is refused below, so
+        # "pass the absolute path read prints" is a route glob cannot take
+        # (round 2, Q7).
+        refusal = _scheme_refusal(
+            tool_call_id,
+            "glob",
+            pattern,
+            remedy=(
+                "glob searches the working directory with a relative pattern, so it cannot be "
+                f'pointed at a scratchpad file at all: read it with read(path="{SCRATCHPAD_SCHEME}'
+                '<name>"), or search inside it with grep(path=<the absolute path that read '
+                "prints>)."
+            ),
+        )
+        if refusal is not None:
+            return refusal
     if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
         message = (
             "pattern must be a relative glob within the working directory "
@@ -5983,6 +7126,14 @@ async def execute_grep(
         # Malformed: `pattern` is typed `string`, so an unbalanced group passes
         # schema validation and only fails here. The model could have known.
         return _invalid_arguments(tool_call_id, "grep", f"invalid regex '{params.pattern}': {exc}")
+
+    # A URL argument is refused before resolution: `grep <pattern> path=notes://x.py`
+    # would otherwise walk the bogus relative path `<cwd>/notes:/x.py`. ``grep``
+    # serves no scheme at all, ``scratchpad://`` included — it cannot resolve one,
+    # and the absolute path its results print is what this tool takes.
+    refusal = _scheme_refusal(tool_call_id, "grep", params.path)
+    if refusal is not None:
+        return refusal
 
     cwd = _safe_cwd(context)
     target, inside, resolvable = _resolve_workspace_path(params.path, cwd)
@@ -7114,7 +8265,8 @@ def build_send_tool(context: ToolContext) -> AgentTool | None:
             "right away; `wake=False` is the quiet "
             "mailbox drop (read on the peer's next turn), and `now=True` steers "
             "mid-turn (opens a turn if the peer is idle). The result says how the "
-            "peer received it."
+            "peer received it. A session with no message sent in it yet (a fresh "
+            "`/new`) is not a recipient: sends to it are refused."
         ),
         parameters=SendParams.model_json_schema(),
         # write tier: a delivery can start an autonomous turn in ANOTHER session
@@ -7194,17 +8346,26 @@ async def execute_send(
         live_scan_found_nothing,
         peer_sender_identity_async,
         resolve_peer_target,
+        session_id_unowned,
+        skipped_clause,
         validate_peer_body,
     )
 
     # Off the loop: the resolver reads and parses every registry record, and
     # this tool runs inside the session's own event loop, where a blocking
     # filesystem walk stalls the UI along with every other task.
+    #
+    # ``skipped`` carries the name-matches held back for being unengaged into
+    # the receipt below, so a model that broadcast a name learns which part of
+    # its needle was not delivered (design round 1, D1). The CLI appends the
+    # same clause from the same helper, so a model and a human read one wording.
+    skipped: list[Any] = []
     record, candidates, error = await asyncio.to_thread(
         resolve_peer_target,
         target=params.target,
         pid=params.pid,
         session=params.session,
+        skipped=skipped,
     )
     if candidates:
         # ``pid=<n>`` rather than ``pid <n>``: the reader is a model that has to
@@ -7222,11 +8383,18 @@ async def execute_send(
         lines.extend(candidate_lines(candidates, indent="  ", prefix="pid="))
         return _error(tool_call_id, "send", "\n".join(lines))
     cold_session_id = ""
-    if record is None:
-        # An exact ``session`` may still name a stored session that is simply
-        # not running. A quiet note to one of those is spooled rather than
-        # refused (that is what ``wake=false`` asks for); anything wanting
-        # attention engages a runtime. See ``peer_send.deliver_peer_message``.
+    if record is None and session_id_unowned(error):
+        # No live record OWNS this id — the scan did not know it, or the record
+        # it found was stale (the pid is gone) — so an exact ``session`` may
+        # name a stored session that is simply not running. A quiet note to one
+        # of those is spooled rather than refused (that is what ``wake=false``
+        # asks for); anything wanting attention engages a runtime. See
+        # ``peer_send.deliver_peer_message``.
+        #
+        # The predicate keeps a refusal about a LIVE session standing (QA
+        # round 3, Q8; review round 4, MINOR-1): a wedged or unengaged match is
+        # the live resolver's answer, and re-asking the store for the same id
+        # would deliver behind a process that still owns the session.
         from local_operator.mobile.peer_send import resolve_cold_session
 
         cold_session_id = await asyncio.to_thread(resolve_cold_session, params.session or "")
@@ -7257,12 +8425,14 @@ async def execute_send(
             stored_candidate_lines,
         )
 
-        stored_id, stored_candidates, _stored_error = await asyncio.to_thread(
+        stored_id, stored_candidates, stored_error = await asyncio.to_thread(
             resolve_stored_target, params.target
         )
-        # ``_stored_error`` is deliberately unread: the resolver returns ""
-        # for a no-match by contract (see its docstring) and the refusal that
-        # reaches the user is composed below, where the live miss is known.
+        # ``stored_error`` is read here, unlike a plain no-match (which returns
+        # "" by contract, because the refusal for THAT is composed below from
+        # both searches): a row that answered to the name but was withheld for
+        # never having been engaged comes back as its own refusal, and printing
+        # "no session matches" over it would be false (review round 1, F-4).
         if stored_candidates:
             lines = [
                 f"{len(stored_candidates)} stored sessions match; drop `target` and "
@@ -7272,6 +8442,8 @@ async def execute_send(
             return _error(tool_call_id, "send", "\n".join(lines))
         if stored_id:
             cold_session_id = stored_id
+        elif stored_error:
+            error = stored_error
     if not cold_session_id and (error or record is None):
         if error and live_scan_found_nothing(error):
             error = f"no session matches {params.target!r} (searched live and stored sessions)"
@@ -7354,16 +8526,20 @@ async def execute_send(
         return _text(
             tool_call_id,
             "send",
-            f"→ {name} (pid {record.pid}): {detail}",
+            f"→ {name} (pid {record.pid}): {detail}{skipped_clause(skipped)}",
             details={"pid": record.pid, "mode": mode, "wake": bool(params.wake)},
         )
     # A session with no runtime: the receipt names the session rather than a
     # pid, because there is no process to name and claiming one would be a lie
-    # the model might then try to signal.
+    # the model might then try to signal. The clause is normally empty here — a
+    # stored fallback happens only when the live scan matched NOTHING, and a
+    # live match that was merely unengaged returns the refusal instead — but it
+    # is composed once for both receipts, so a future stored delivery cannot
+    # silently drop the fact that a live namesake was skipped.
     return _text(
         tool_call_id,
         "send",
-        f"→ {cold_session_id} (not running): {detail}",
+        f"→ {cold_session_id} (not running): {detail}{skipped_clause(skipped)}",
         details={
             "session_id": cold_session_id,
             "mode": mode,
@@ -7560,6 +8736,16 @@ BROWSER_ACTIONS = (
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
     # multi-surface registry, so it degrades with the same typed error.
     "tabs",
+    # File transfer. `upload` is served by BOTH non-cmux hosts (it needs only the
+    # tab-scoped CDP session they already hold); `download` is served by the
+    # desktop app's host only, because Chrome refuses an extension the
+    # browser-level commands that would let it choose a destination — see
+    # EXTENSION_CANNOT_SERVE, and the extension host answers with a typed
+    # capability refusal that names where to go instead of failing obscurely.
+    # Both are ACTIONS so they ride the same schema, approval tier and dispatch as
+    # everything else, and both are in CMUX_UNSUPPORTED_BROWSER_ACTIONS below.
+    "download",
+    "upload",
     # The async site-approval flow, non-cmux only like scroll/logs. open/goto
     # to a not-yet-allowed origin fails EARLY with a typed error naming these
     # two actions, because the old behaviour — blocking the navigation RPC on
@@ -7589,7 +8775,16 @@ BROWSER_ACTIONS = (
 #: BROWSER_ACTIONS so the degrade check and the advertised action list can never
 #: drift apart.
 CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
-    {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
+    {
+        "scroll",
+        "logs",
+        "tabs",
+        "request_access",
+        "await_access",
+        "cancel_access",
+        "download",
+        "upload",
+    }
 )
 
 #: The actions whose whole handler lives in the ownership lane (see
@@ -7686,9 +8881,8 @@ class BrowserParams(BaseModel):
         "| goto | read (page text) | snapshot (accessibility tree with click "
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
         "(console + errors) | tabs (list agent-driven tabs) | request_access "
-        "(raise the site-approval prompt for a not-yet-allowed origin; returns "
-        "pending/allowed/denied immediately) | "
-        "await_access (wait for the user's decision on that prompt) | "
+        "(raise the site-approval prompt for a not-yet-allowed origin) | "
+        "await_access (wait for the user's decision) | "
         "cancel_access (cancel YOUR pending exact-origin request) | "
         "recover (recover YOUR tab) | "
         "retain (hold it) | release (end that hold) | close (end "
@@ -7708,14 +8902,28 @@ class BrowserParams(BaseModel):
             "new tab; a redacted handle is not yours to drive."
         ),
     )
-    path: str = Field(default="", description="Destination file for 'screenshot'.")
+    path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
         description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
         "scopes the text for 'read' (default: body); for 'scroll', the element "
-        "to bring into view.",
+        "to bring into view; for 'download', the control that starts it; for "
+        "'upload', the file input to fill.",
     )
     text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
+    # One new field for the whole feature (the tool-surface ladder's rung 1):
+    # `download` needs no destination (the harness chooses it), so a comma-split
+    # of the existing `path` was the alternative — rejected because a filename may
+    # legally contain a comma, which would make the failure a silently wrong
+    # attachment.
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "'upload' only: the local files to attach, one or more. Credential "
+            "files and the harness's own config directory are refused; relative "
+            "paths resolve against the session's working directory."
+        ),
+    )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
     # down. Precedence is selector > x/y > direction > default (mirrors
     # extension/src/commands/scroll.ts).
@@ -7746,8 +8954,8 @@ class BrowserParams(BaseModel):
     timeout_s: float | None = Field(
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
-        "(default 120, max 240). Still pending after that? Tell the user, then "
-        "call await_access again.",
+        "(default 120, max 240); 'download' max seconds to wait for one to start "
+        "(default 120, max 600).",
     )
 
 
@@ -8145,6 +9353,26 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"(expected one of {', '.join(sorted(_SCROLL_DIRECTIONS))})"
             )
         return ""
+    if action == "download":
+        # Only the selector is optional: a page that starts its own download needs
+        # none, and one that needs a click names the control. The wait is bounded
+        # by `timeout_s` and by the host, so there is nothing else to validate —
+        # the DESTINATION is composed by the harness and is not a parameter at all
+        # (design §6.1).
+        return _validate_selector(params.selector, "download") if params.selector.strip() else ""
+    if action == "upload":
+        problem = _validate_selector(params.selector, "upload")
+        if problem:
+            return problem
+        if not params.paths:
+            return "'upload' needs paths: name at least one local file to attach"
+        # Entries that are not strings are refused by the model's own validator
+        # (`list[str]`), which reports the offending value; only emptiness has to
+        # be caught here, because "" is a well-formed string.
+        for entry in params.paths:
+            if not entry.strip():
+                return "every entry in 'paths' must be a non-empty path"
+        return ""
     if action == "logs":
         level = params.level.strip().lower()
         if level and level not in _LOG_LEVELS:
@@ -8441,6 +9669,9 @@ async def _browser_screenshot(
         # `call.raw_arguments` and resolution was invisible to the person
         # answering.) `inside` is deliberately unused: unlike read/grep this tool
         # has no read-tier to escalate FROM, and `write` already always prompts.
+        refusal = _scheme_refusal(tool_call_id, "browser", raw_path)
+        if refusal is not None:
+            return refusal
         resolved, _inside, _resolvable = _resolve_workspace_path(raw_path, _safe_cwd(context))
         target = str(resolved)
     else:
@@ -9888,6 +11119,707 @@ async def _bridge_tabs(
     )
 
 
+def _audit_host(client: Any) -> str:
+    """The audit row's host column: ``extension`` | ``app`` | ``cmux``.
+
+    The design's vocabulary (design §10.5), which is NOT the handle spelling
+    `_host_of_client` returns ("bridge"/"ui") and not the copy spelling
+    ("extension"/"ui"): a log read months later should name the product surface,
+    not the handle grammar.
+    """
+    return "app" if _host_of_client(client) == HOST_UI_PREFIX else "extension"
+
+
+def _capability_problem(
+    tool_call_id: str, method: str, client: Any, *, surface: str = ""
+) -> ToolResult | None:
+    """Refuse a capability-gated method from the host's own record, no socket call.
+
+    The FIRST line of the capability check (design §6.3): the daemon refuses to
+    send an unadvertised method too, but by then a socket round trip has been paid
+    and the refusal arrives as a wire error rather than as the local, immediate
+    answer the model can act on. `None` means the host advertises the method and
+    the call may proceed.
+
+    The decision reads the discovery FILE, which is what makes it work between
+    dials and costs nothing; a record written by a pre-feature daemon or app has no
+    `capabilities` key at all, and that reads as "told us nothing" — the refusal.
+    """
+    from local_operator.browser_bridge.backend import (
+        HOST_EXTENSION,
+        HostCapabilities,
+        capability_refusal,
+        format_error,
+    )
+
+    # The COPY's host (``extension``/``ui``), read off the client exactly as
+    # `_bridge_call` reads it, so the reference and the refusal cannot name
+    # different processes. `_host_of_client` is the HANDLE spelling and is used
+    # below, not here.
+    host = str(getattr(client, "host", HOST_EXTENSION) or HOST_EXTENSION)
+    # `client` defaults to None at every call site and the production path always
+    # passes a real one — but this function's whole purpose is to answer BEFORE
+    # touching a socket, so an unknown host gets the refusal (an empty
+    # capability set is "told us nothing") rather than an AttributeError from the
+    # one place that must never raise before deciding (review round 1, N3).
+    capabilities = client.capabilities() if client is not None else HostCapabilities()
+    if capabilities.serves(method):
+        return None
+    error = capability_refusal(method, host=host, capabilities=capabilities)
+    problem = _error(
+        tool_call_id,
+        "browser",
+        format_error(error, action=method, surface=surface, host=host),
+    )
+    problem.details = {**(problem.details or {}), "error_code": error.code.value}
+    return problem
+
+
+def _download_audit(
+    *,
+    call_id: str,
+    session_id: str,
+    host: str,
+    action: str,
+    origin: str,
+    name: str,
+    path: str = "",
+    size: int = 0,
+    verdict: str = "",
+    reason: str = "",
+    declared_mime: str = "",
+    sniffed: str = "",
+    sha256: str = "",
+    redact: bool = False,
+) -> None:
+    """One audit row (design §10.5), best-effort and never raising.
+
+    A REFUSED file's name field is redacted to its first character: the log is
+    not allowed to become a map of where the secrets are, and the model (whose
+    context is the user's own transcript) is told the real name elsewhere.
+    """
+    from local_operator import browser_files as files
+
+    files.audit(
+        {
+            "session_id": session_id,
+            "call_id": call_id,
+            "tool": "browser",
+            "action": action,
+            "origin": origin,
+            "host": host,
+            "name": files.redact_name(name) if redact else name,
+            "path": path,
+            "bytes": size,
+            "sha256": sha256,
+            "declared_mime": declared_mime,
+            "sniffed": sniffed,
+            "verdict": verdict,
+            "reason": reason,
+        }
+    )
+
+
+async def _browser_download(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+    policy: Any = None,
+) -> ToolResult:
+    """`download`: arm the host, then judge what LANDED, from disk.
+
+    The whole shape follows the screenshot precedent: the host's exit code is not
+    evidence, so the answer is assembled from Python's own inspection of the
+    quarantine directory it composed itself (§5.3). A host that reports a file
+    which is not there — or a PDF that is an ELF — is CAUGHT rather than believed.
+    """
+    from local_operator import browser_files as files
+
+    # `policy` is the caps as data, injectable so a test can shrink a ceiling
+    # instead of writing a 256 MB file. The tool always leaves it at the default.
+    limits = policy or files.DEFAULT
+    host = _audit_host(client)
+    problem = _capability_problem(tool_call_id, "download", client, surface=state.surface_id)
+    if problem is not None:
+        return problem
+
+    session_id = str(getattr(context, "session_id", "") or "")
+    # Over-quota sessions are refused BEFORE anything is armed: the ceiling exists
+    # so a page cannot fill the disk through an agent loop, and a check that runs
+    # after the bytes land is a check that already lost.
+    if files.session_bytes(session_id) > limits.download_max_session_bytes:
+        return _error(
+            tool_call_id,
+            "browser",
+            "refused: this session has already downloaded more than "
+            f"{limits.download_max_session_bytes} bytes. Move or delete some of "
+            "what is in the browser download directory, then retry.",
+        )
+    directory = files.session_dir(session_id)
+    before = files.snapshot(directory)
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        # Composed by the harness from the config root and never from page input:
+        # this parameter is the one whose value the Project Zero report used to
+        # write into ~/.ssh, so it is the last thing a page is allowed to reach.
+        "dir": str(directory),
+        **_browser_identity_params(context, tool_call_id),
+    }
+    if params.selector.strip():
+        wire["selector"] = params.selector.strip()
+    if params.timeout_s is not None and params.timeout_s > 0:
+        wire["timeout_s"] = min(float(params.timeout_s), files.DOWNLOAD_TIMEOUT_MAX_S)
+    result, problem = await _bridge_call(
+        tool_call_id, "download", wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    assert result is not None
+    call_id = files.new_call_id()
+    origin = str(result.get("url", ""))
+    if not bool(result.get("armed", True)):
+        # The host refused to arm. That is a policy answer carried as a result
+        # (§6.2 — an extension may not emit an ErrorCode an old daemon would
+        # drop), and it is rendered here as the model-facing refusal.
+        reason = str(result.get("reason") or "the host refused to arm a download")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_false",
+            reason=reason,
+        )
+        return _error(tool_call_id, "browser", f"refused: {reason}")
+
+    reported = {
+        str(item.get("name")): item
+        for item in (result.get("files") or [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    landed = files.snapshot(directory)
+    candidates = sorted(name for name in landed if name not in before)
+    if not candidates:
+        wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="no_download",
+            reason="nothing started",
+        )
+        return _error(
+            tool_call_id,
+            "browser",
+            f"no download started within {wait:g} s. If the page needs a click first, "
+            "call 'click' on its Download control and retry with selector=..., or the "
+            "file may be behind a login — ask the user to sign in, then retry.",
+        )
+
+    kept: list[dict[str, Any]] = []
+    refused: list[str] = []
+    # Artifacts whose 0600 mode could not be set (Linux has no `lchmod`, so a
+    # symlink ENTRY is never settable there). Reported rather than implied.
+    unhardened: list[str] = []
+    # The per-CALL cap is applied to the CANDIDATE list, BEFORE anything is
+    # classified, renamed or audited (review round 1, R2). Truncating the kept
+    # list after the loop deleted the extra files but left their `verdict=allow`
+    # rows behind naming paths that no longer existed, and no row named the cap —
+    # so the trail over-reported what the session kept and never said why the rest
+    # went. Every dropped candidate gets its own `deny` row here instead.
+    over_cap = candidates[limits.download_max_files :]
+    for name in over_cap:
+        removed = _unlink_quietly(directory / name)
+        # The sentence and the audit row both come from `_delete_outcome`, so the
+        # over-cap refusal says what happened to the entry in the same words as
+        # the containment rule and the content refusals (review round 2, N7 — the
+        # row used to carry the cap and not the outcome, so a reader could not
+        # tell an entry that was removed from one still in the session
+        # directory, and this path can FAIL to delete when the directory is not
+        # writable).
+        word, trail = _delete_outcome(removed)
+        rule = f"over the {limits.download_max_files} files per call limit"
+        refused.append(f"{name}: {word} — {rule}")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=name,
+            path="",
+            size=landed.get(name, 0),
+            verdict="deny",
+            reason=f"{rule}; {trail}",
+            redact=True,
+        )
+    for name in candidates[: limits.download_max_files]:
+        path = directory / name
+        declared = files.declared_mime_label(str((reported.get(name) or {}).get("mime") or ""))
+        try:
+            # `resolve()` is what the CONTAINMENT check reads: the destination is
+            # ours, but a hostile host could still have written a symlink, and it
+            # is the target that decides whether the entry escapes (§5.3 step 4).
+            # Everything after the check works on the ENTRY, never on the
+            # resolved path — see the refusal branch below.
+            resolved = path.resolve()
+        except OSError:
+            refused.append(f"{name}: could not be read")
+            continue
+        if not files.is_within(resolved, directory.resolve()):
+            # The ENTRY is deleted, never what it points at (review round 1, R1).
+            # `resolved` here is by definition a path OUTSIDE the quarantine
+            # root, so unlinking it deleted the user's own file — the data loss
+            # the containment rule exists to prevent — while leaving the
+            # escaping entry sitting in the session directory. Unlinking the
+            # entry removes the escape and touches nothing outside the root: a
+            # symlink dies, its target does not. The message and the audit row
+            # say what actually happened, including a delete that failed.
+            removed = _unlink_quietly(path)
+            word, trail = _delete_outcome(removed)
+            refused.append(f"{name}: {word} — it resolved outside the download directory")
+            _download_audit(
+                call_id=call_id,
+                session_id=session_id,
+                host=host,
+                action="download",
+                origin=origin,
+                name=name,
+                path="",
+                verdict="deny",
+                reason=f"outside the quarantine root; {trail}",
+                redact=True,
+            )
+            continue
+        verdict = files.classify_download(path, declared_mime=declared, policy=limits)
+        if verdict.kind == "deny":
+            # The entry, for the same reason as above: a symlink that stays
+            # inside the root must not be able to make Python delete the file it
+            # points at and leave the link behind.
+            removed = _unlink_quietly(path)
+            # One construction for every deny reason (review round 2, N7): the
+            # verdict and the entry's fate come from what actually happened, and
+            # `verdict.reason` is the rule alone — no reason can claim a delete it
+            # did not do, and none can delete the artifact silently.
+            word, trail = _delete_outcome(removed)
+            refused.append(f"{name}: {word} — {verdict.reason}")
+            _download_audit(
+                call_id=call_id,
+                session_id=session_id,
+                host=host,
+                action="download",
+                origin=origin,
+                name=name,
+                path="",
+                size=landed.get(name, 0),
+                verdict="deny",
+                reason=f"{verdict.reason}; {trail}",
+                declared_mime=declared,
+                sniffed=verdict.sniffed,
+                redact=True,
+            )
+            continue
+        final = path
+        if verdict.safe_name and verdict.safe_name != path.name:
+            # ALLOW-WITH-RENAME: the content disagreed with the name, so the file
+            # takes the name the content earns and the change is reported.
+            final = path.with_name(_unique_name(directory, verdict.safe_name))
+            try:
+                path.rename(final)
+            except OSError:
+                final = path
+        # The host wrote the bytes, so the host owned the mode they landed with
+        # (an Electron/Chromium write lands 0644 by umask). §4.1 promises files
+        # 0600, so the harness tightens the artifact it is about to report
+        # (review round 1, Q-2). Best-effort and never fatal: the 0700 session
+        # directory is the real bound, and a failed chmod must not cost the file
+        # it was protecting.
+        if not files.chmod_private(final):
+            # NOT silent (review round 4): on Linux a symlink entry's own mode is
+            # not settable at all, and a tightened mode that did not happen is a
+            # claim the result must not imply. The 0700 session directory is
+            # still the bound, so this is a caveat rather than a failure.
+            logger.warning("could not tighten the mode of the kept browser download %s", final)
+            unhardened.append(final.name)
+        fact = files.stat_fact(final.name, final, declared_mime=declared)
+        fact["sniffed"] = verdict.sniffed
+        kept.append(fact)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=final.name,
+            path=str(final),
+            size=int(fact["bytes"]),
+            verdict=verdict.kind,
+            reason=verdict.reason,
+            declared_mime=declared,
+            sniffed=verdict.sniffed,
+            sha256=str(fact["sha256"]),
+        )
+        if verdict.reason:
+            kept[-1]["note"] = verdict.reason
+
+    if not kept:
+        return _error(
+            tool_call_id,
+            "browser",
+            "nothing was saved. " + " ".join(refused),
+        )
+    lines = [f"downloaded {len(kept)} file(s) into {directory}:"]
+    for fact in kept:
+        kind = str(fact.get("sniffed") or fact.get("mime") or "unknown type")
+        line = f"- {fact['path']} — {fact['bytes']} bytes, {kind}"
+        if fact.get("sniffed") == "":
+            line += " (unverified: not opened)"
+        if fact.get("note"):
+            line += f" [{fact['note']}]"
+        lines.append(line)
+    if refused:
+        lines.append("refused:")
+        lines.extend(f"- {item}" for item in refused)
+    if unhardened:
+        lines.append(
+            "note: could not tighten the mode of "
+            + ", ".join(unhardened)
+            + " to 0600 (a symlink's own mode is not settable on this platform); the "
+            "0700 session directory is still the bound, but the file's own mode is "
+            "not private."
+        )
+    text = "\n".join(lines)
+    return _text(
+        tool_call_id, "browser", text, details={"files": kept, "directory": str(directory)}
+    )
+
+
+async def _browser_upload(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+    policy: Any = None,
+) -> ToolResult:
+    """`upload`: the unconditional gate, then the attach, then the read-back.
+
+    The gate runs BEFORE anything reaches a browser (§9.2) and it consults no
+    approval policy, because the adversary it exists for is a confused-deputy
+    agent whose call may be auto-approved. All-or-nothing on a multi-file call: a
+    partial attach would send the page a set of files the model never asked for.
+    """
+    from local_operator import browser_files as files
+
+    limits = policy or files.DEFAULT
+    host = _audit_host(client)
+    problem = _capability_problem(tool_call_id, "upload", client, surface=state.surface_id)
+    if problem is not None:
+        return problem
+    if len(params.paths) > limits.upload_max_files:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"refused: {len(params.paths)} files named, over the {limits.upload_max_files} "
+            "files per call limit. Attach them in batches.",
+        )
+    session_id = str(getattr(context, "session_id", "") or "")
+    resolved: list[Path] = []
+    for raw in params.paths:
+        path, reason = files.check_upload(raw, cwd=_safe_cwd(context), policy=limits)
+        if path is None:
+            # Refused as a whole call: attaching the rest would send a set the
+            # caller did not name, and the refusal names the one rule that fired.
+            return _error(tool_call_id, "browser", f"refused: nothing was attached — {reason}")
+        resolved.append(path)
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        "selector": params.selector.strip(),
+        # The RESOLVED paths, so the host is handed targets that were checked,
+        # never the strings the model typed (design §9.2's step 2).
+        "paths": [str(path) for path in resolved],
+        **_browser_identity_params(context, tool_call_id),
+    }
+    result, problem = await _bridge_call(
+        tool_call_id, "upload", wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    assert result is not None
+    call_id = files.new_call_id()
+    origin = str(result.get("url", ""))
+    host_refused = result.get("refused") or []
+    if host_refused:
+        reasons = "; ".join(
+            str(item.get("reason") or item) if isinstance(item, dict) else str(item)
+            for item in host_refused
+        )
+        return _error(tool_call_id, "browser", f"refused: nothing was attached — {reasons}")
+    accepted = [item for item in (result.get("accepted") or []) if isinstance(item, dict)]
+    by_path = {str(item.get("path") or ""): item for item in accepted}
+    # The host's read-back can be LOST to the page's own success: a form that
+    # submits itself from the change handler navigates in the same tick as the
+    # attach, so the DOM can no longer be asked what it holds — while the bytes
+    # have already gone. The marker therefore means "the attach happened, the
+    # read-back did not": the facts come from Python's own re-stat + digest, and
+    # the call is reported as an UNVERIFIED attach rather than as a failure,
+    # because a failure here reads as "nothing was sent" and invites the
+    # double-send it is trying to prevent (review round 1, Q-1). The host
+    # reports it for ANY failed read, not only a navigation (a stall on the read
+    # is the same situation, and the read is what failed either way).
+    #
+    # It is a HOST-supplied string, so it is sanitised and capped like the declared
+    # type is before it reaches the transcript or the audit row (review round 2,
+    # R7): a marker containing a newline used to grow the tool result by a line
+    # the host chose. Its PRESENCE and its TEXT are kept apart, because sanitising
+    # can empty a marker that was really sent — and a marker that sanitises down
+    # to nothing must still mark the attach unverified rather than read as a
+    # verified one.
+    readback_reported = bool(result.get("readback"))
+    readback = files.readback_label(str(result.get("readback") or ""))
+    # One spelling for "the host said its read failed but left nothing printable",
+    # which is also the fallback the extension uses for an empty error detail.
+    readback_note = readback or "no detail"
+    facts: list[dict[str, Any]] = []
+    # What a contract-violating host sent in place of a count, one entry per file,
+    # carried into the note AND the audit row below so the two cannot disagree
+    # (review round 3's MINOR-2 / QA's Q-1).
+    malformed_counts: list[str] = []
+    for path in resolved:
+        fact = files.stat_fact(files.safe_name(path.name), path)
+        seen = by_path.get(str(path))
+        if seen is None:
+            # Not even a path came back for a file the host was told to set.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: nothing came back for "
+                f"{path}, and the file on disk is {fact['bytes']} bytes. Nothing was sent.",
+            )
+        # Never a bare `int()`: a count the host typed wrong must not raise out of
+        # the tool (review round 3's MINOR-2).
+        count, malformed = _host_byte_count(seen.get("bytes", -1))
+        # Gated on the SENTINEL, never on the marker (review round 2, R6). The
+        # marker is the host's word about its own read and means "I could not read
+        # it back"; treating it as "do not check" let one field that the host
+        # controls suppress the only check a real mismatch is caught by — a host
+        # reporting both a count and a marker lost the comparison entirely.
+        if count >= 0:
+            # The byte count is what Python compares (the extension compares the
+            # NAMES, in the read-back it does itself), so the check is
+            # name-plus-size rather than contents: a same-name, same-size
+            # replacement between the read and this stat would pass. That is the
+            # residual limit of the read-back, stated rather than implied
+            # (review round 1, N5) — which is why the digest is Python's own and
+            # the bytes are re-statted from disk rather than taken from the host.
+            if count != int(fact["bytes"]):
+                # The DOM holds something else. Reported as an error naming both
+                # sides rather than as a success: a file input that ignored the
+                # attach is exactly the failure a page would like us to call filled.
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    "the file input did not take the attach: it holds "
+                    f"{count} bytes for {path}, and the file "
+                    f"on disk is {fact['bytes']} bytes. Nothing was sent.",
+                )
+        elif malformed and not readback_reported:
+            # A count the host typed wrong, with nothing to explain it: refused
+            # with the value NAMED, because "no byte count" would be a lie about a
+            # field the host did send — and the sentence is what tells a reader
+            # which writer is broken.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: the host reported a malformed "
+                f"byte count ({malformed}) for {path}, and the file on disk is "
+                f"{fact['bytes']} bytes. Nothing was sent.",
+            )
+        elif not readback_reported:
+            # No count AND no marker: the host claims a read that reported nothing
+            # it measured, and there is no unverified note to carry either, so the
+            # call is refused rather than reported as a verified attach. The marker
+            # is what makes the unreported case legitimate — not the absence of a
+            # comparison.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: the host reported no byte "
+                f"count for {path}, and the file on disk is {fact['bytes']} bytes. "
+                "Nothing was sent.",
+            )
+        elif malformed:
+            # A marker says the read failed, so the count is unusable either way —
+            # that is the unverified attach this branch already reports, NOT a
+            # refusal: the host listed the file as accepted, so "the file input did
+            # not take the attach" would be false over bytes that went, which is
+            # the double-send harm Q-1 exists to prevent (round 1). The bad value
+            # is recorded rather than swallowed.
+            malformed_counts.append(malformed)
+        # A fact is VERIFIED only when the host's own read completed and agreed
+        # with Python's stat: an unverified attach must be discriminable by a
+        # consumer reading `details` and not only by one reading the prose
+        # (review round 2, N6) — the caveat below is what the key mirrors.
+        verified = count >= 0 and not readback_reported
+        facts.append({**fact, "verified": verified})
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="upload",
+            origin=origin,
+            name=str(fact["name"]),
+            path=str(path),
+            size=int(fact["bytes"]),
+            verdict="allow",
+            # Empty in the ordinary case; the unverified marker otherwise, so the
+            # trail carries the same caveat the model was given.
+            reason=_readback_reason(readback_note if readback_reported else "", malformed),
+            sha256=str(fact["sha256"]),
+        )
+    accept = str(result.get("accept") or "")
+    # The same construction as each row above, so the note and the trail cannot
+    # drift apart (review round 2, N7's rule).
+    readback_reason = _readback_reason(
+        readback_note if readback_reported else "", ", ".join(malformed_counts)
+    )
+    where = f" to {origin}" if origin else " to the page in this tab"
+    lines = [f"attached {len(facts)} file(s){where}:"]
+    lines.extend(
+        f"- {fact['path']} — {fact['bytes']} bytes, sha256 {str(fact['sha256'])[:12]}"
+        for fact in facts
+    )
+    if accept:
+        # REPORTED, never obeyed: a site's `accept` filter protects nothing and
+        # honouring it would let the page steer which local files we try.
+        lines.append(f"the input declares accept='{accept}'; it was not applied to the attach")
+    if readback_reason:
+        # Never silent: an unverified attach that reads like a confirmed one is
+        # how a model ends up re-sending files that already left.
+        lines.append(
+            f"note: the attach could not be read back ({readback_reason}). The bytes above are "
+            "what is on disk and were handed to the page; whether the page kept or sent them "
+            "is not something this call can confirm — check before re-sending."
+        )
+    return _text(tool_call_id, "browser", "\n".join(lines), details={"files": facts})
+
+
+def _host_byte_count(raw: Any) -> tuple[int, str]:
+    """The host's reported byte count, or the sentinel plus what was wrong with it.
+
+    `bytes` is a field the HOST chooses the type of, and this is the boundary
+    that must not take that on trust: `null`, `{}`, a non-numeric string or a
+    float-shaped one used to reach a bare `int()`, which raised straight out of
+    `_browser_upload` and surfaced as `Tool raised: ...` — an internal-error card
+    and a warning traceback where the design says the call is refused with a
+    sentence (review round 3's MINOR-2 / QA's Q-1).
+
+    Returns `(count, "")` for an integer count, and `(-1, label)` for everything
+    else — including a JSON float, which `int()` would silently TRUNCATE into a
+    count nobody sent. `-1` is the documented "unknown here" sentinel, so the
+    CALLER decides the shape: with a marker it is the unverified attach the
+    sentinel already means, and with no marker it is a refusal that names what the
+    host sent instead.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw, ""
+    if isinstance(raw, str):
+        text = raw.strip()
+        body = text[1:] if text[:1] in ("+", "-") else text
+        # `str.isdigit()` alone is not enough, and round 4 measured why: it is
+        # TRUE for Unicode digits `int()` rejects ("\u00b2"), and it says nothing
+        # about CPython's ~4300-digit limit on `int()` from a string ("9"*4301
+        # raises `ValueError`). `isascii()` plus the try/except closes both, so a
+        # value the host typed can never raise out of the tool.
+        if body.isascii() and body.isdigit():
+            try:
+                return int(text), ""
+            except ValueError:
+                pass
+    from local_operator import browser_files as files
+
+    # The offending value lands in the transcript and the audit row, so it goes
+    # through the same sanitiser as every other host-supplied string.
+    return -1, files.readback_label(repr(raw)) or "empty value"
+
+
+def _readback_reason(note: str, malformed: str) -> str:
+    """One string for the unverified note and the audit row: they cannot disagree.
+
+    `note` is the sanitised marker (empty when the host sent none) and `malformed`
+    is the count it sent instead of a number, if any — both are host-supplied, so
+    both are already sanitised by the time they arrive here. Round 2's N7 is the
+    rule: a reader of the trail and a reader of the transcript are looking at the
+    same fact, so they get the same sentence.
+    """
+    parts = [note] if note else []
+    if malformed:
+        parts.append(f"the host's byte count was malformed ({malformed})")
+    return "; ".join(parts)
+
+
+def _delete_outcome(removed: bool) -> tuple[str, str]:
+    """What happened to a refused ENTRY: the verdict word and the row's clause.
+
+    Both halves are built from the RETURN of the delete rather than from the
+    assumption that it worked (review round 1, R1) and from ONE function rather
+    than one spelling per branch (review round 2, N7): the containment rule, the
+    per-call cap and the content refusals all delete the entry, and a reader of
+    the trail reconstructs what a session kept from these rows — two vocabularies
+    for one fact is a row that cannot be compared with its neighbour.
+    """
+    if removed:
+        return "refused and deleted", "the entry was removed"
+    return "refused, NOT deleted", "the entry could NOT be removed — it is still on disk"
+
+
+def _unlink_quietly(path: Path) -> bool:
+    """Delete a refused artifact, absorbing the failure. ``True`` when it went.
+
+    Best-effort on purpose: the verdict is the deliverable here, and a file we
+    could not delete must not turn a policy refusal into a traceback in the
+    model's context. The audit row already records what was refused.
+
+    The RETURN VALUE is what the model-facing sentence is built from, and it is
+    not decoration: this is called on the candidate ENTRY (never on a resolved
+    path — see the containment branch), and a refusal that claims "deleted" over
+    an entry still sitting on disk is the same class of false report the whole
+    post-hoc verification exists to remove (review round 1, R1).
+    """
+    try:
+        path.unlink()
+    except OSError:
+        logger.warning("could not delete the refused browser download %s", path)
+        return False
+    return True
+
+
+def _unique_name(directory: Path, name: str) -> str:
+    """``name``, or ``name-2``, ``name-3``... when something already holds it.
+
+    The rename a content-corrected file needs must never overwrite: two receipts
+    downloaded from one page can both be called `invoice.pdf` after correction.
+    """
+    candidate = name
+    stem, dot, ext = name.rpartition(".")
+    stem = stem if dot else name
+    ext = ext if dot else ""
+    index = 2
+    while (directory / candidate).exists():
+        candidate = f"{stem}-{index}.{ext}" if ext else f"{stem}-{index}"
+        index += 1
+    return candidate
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -9906,6 +11838,10 @@ async def _bridge_action(
     """
     host = _host_of_client(client)
     surface = state.surface_id
+    if action == "download":
+        return await _browser_download(tool_call_id, state, params, context, client=client)
+    if action == "upload":
+        return await _browser_upload(tool_call_id, state, params, context, client=client)
     wire: dict[str, Any] = {
         "tab": surface,
         # Identity and display label are trusted host metadata. Keeping both on
@@ -10027,6 +11963,9 @@ async def _bridge_action(
     # The extension returns bytes, never a filesystem path. The Python tool
     # keeps path resolution, PNG validation and write approval in one place.
     if params.path:
+        refusal = _scheme_refusal(tool_call_id, "browser", params.path)
+        if refusal is not None:
+            return refusal
         resolved, _inside, _resolvable = _resolve_workspace_path(params.path, _safe_cwd(context))
         target = str(resolved)
     else:
@@ -10603,8 +12542,10 @@ async def _execute_browser(
             tool_call_id,
             "browser",
             f"'{action}' is not supported on the cmux backend — cmux has no console-log tap, "
-            "background-tab scroll primitive, multi-surface registry or site-permission "
-            "model. " + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available) + demotion,
+            "background-tab scroll primitive, multi-surface registry, site-permission "
+            "model, or file-transfer primitive. "
+            + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
+            + demotion,
         )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
@@ -10821,42 +12762,53 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         label="Browser",
         describe_approval=_describe_browser_approval,
         description=(
+            # Footprint: this description rides in EVERY session's cache prefix, so
+            # the per-action detail lives in `guide://browser` (the playbook the
+            # model is pointed at below) and in the parameter descriptions, and
+            # this string carries only what a model needs to CHOOSE the tool and
+            # call it correctly. The context-budget guard measures the whole
+            # surface and it is why the download/upload sentence is one clause
+            # rather than the four the design first drafted (AGENTS.md,
+            # "tool-surface footprint ladder"; see the round-4 remediation).
             "Drive the user's REAL browser (the Local Operator desktop app's browser "
             "tab, their paired browser extension, or a cmux browser "
-            "panel): open/goto a URL, read page text, snapshot the "
-            "accessibility tree for click refs, click, type, scroll, read console "
-            "logs, screenshot, close. Cookies and logins persist across calls and "
+            "panel): open/goto a URL, read text, snapshot for click refs, click, type, "
+            "scroll, logs, screenshot, close. Cookies and logins persist across calls and "
             "across sessions, and the user can sign in by hand when you ask them "
-            "to, so this reaches authenticated pages a throwaway headless browser "
-            "cannot. 'scroll' pages the view (default: one screen down) and "
-            "reports whether more content remains; 'logs' returns the page's "
-            "console output and uncaught exceptions for debugging web apps. "
+            "to, so this reaches authenticated pages a throwaway browser cannot. "
             "Parallel "
             "sessions each drive their own tab: a fresh 'open' creates one NEW "
             "tab owned by this session; reuse it because later opens navigate it. "
-            "Before your final response, call 'close' unless the user explicitly "
-            "needs it left open for a pending or immediately continuing interaction. "
+            "Before your final response, call 'close' unless the user needs it left "
+            "open for a pending interaction. "
             "'tabs' lists every agent-driven tab including other sessions' "
-            "(handles are redacted: awareness-only, it cannot "
-            "drive or close anything — except a tab the user handed over, listed in "
-            "full for 'open'), and 'close' ends only your own tab. "
-            "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
-            "your turn with 'retain' and end that hold with 'release'. "
+            "(handles are redacted: awareness-only), and 'close' ends only your own tab. "
             "'scroll', 'logs' and "
             "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
+            "'download' saves what the page offers into this session's private "
+            "download directory, and 'upload' attaches local files to a page's file "
+            "input. "
             "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
-            "user (ask tool or message) to approve the prompt in the extension popup "
-            "or the app's browser tab, "
-            "and 'await_access' before navigating again. "
-            "Use it for every "
-            "screenshot and page interaction; never install or script a browser "
-            "engine instead."
+            "origin_not_allowed: call 'request_access', NOTIFY the user to approve "
+            "it, and 'await_access' before navigating again. "
+            "Never install or script a browser engine instead."
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write
-        # approval gate rather than auto-approved read.
+        # approval gate rather than auto-approved read. `upload` escalates PER
+        # CALL to `exec`, because it transmits local bytes to a remote origin — a
+        # side effect whose consequence is not visible from the arguments.
+        #
+        # The honest caveat, which must not be lost: today the gate is ONE callback
+        # for both tiers and `tool_approval_mode: auto` / `--yolo` installs no gate
+        # at all, so the tier records intent and future-proofs a tier-sensitive
+        # host — it is NOT the protection. The protection is the policy in
+        # `local_operator/browser_files.py`, which runs unconditionally, plus this
+        # describer naming what the call will do.
         approval_tier="write",
+        call_approval_tier=lambda args: (
+            "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
+        ),
         concurrency="shared",
         interruptible=False,
         execute=execute_browser,

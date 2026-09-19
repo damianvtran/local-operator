@@ -24,6 +24,11 @@ app's connect path calls to publish this state, and the frame is a real
 ``scripts.visual_capture.save_capture``, so the SVG carries the native cell grid
 and a ``.geometry.json``. Isolation comes from ``scripts.probe_isolation``,
 imported before any application module.
+
+The seeded prose is a fixture, not a subject: ``_seed_transcript`` mounts it
+without ``finalize_text()``, so it is a STREAMING block and deliberately paints
+no rail (``AssistantBlock._rail_cols``) — a missing bar beside it is that, not a
+defect.
 """
 
 from __future__ import annotations

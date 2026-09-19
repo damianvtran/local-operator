@@ -161,6 +161,56 @@ async def test_read_skill_url_still_resolves(context: ToolContext) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_scratchpad_url_never_reaches_the_resolver(
+    context: ToolContext, tmp_path
+) -> None:
+    """``scratchpad://`` is served by the read tool itself, and the assertion is a
+    COUNT: a test that only asserted the file's content would pass with the
+    branch below the catch-all if the resolver were also made scratchpad-aware."""
+    calls: list[str] = []
+
+    def _resolver(target: str) -> str | None:
+        calls.append(target)
+        return "resolver body"
+
+    pad = tmp_path / "sessions" / "s" / "scratchpad"
+    ctx = ToolContext(
+        cwd=context.cwd,
+        session_id="read-sugar",
+        scratchpad_dir=str(pad),
+        resolve_internal_url=_resolver,
+    )
+    result = await execute_read("t1", {"path": "scratchpad://"}, None, None, ctx)
+    assert result.is_error is False
+    assert "0 entries" in result.text
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_read_spill_wins_over_every_other_scheme(context: ToolContext) -> None:
+    """Regression guard for the branch ORDER: a spill handle is expanded by this
+    module even when a host also claims the scheme, because a handle's whole
+    value is that it answers a RANGE — which a resolver's one-string contract
+    cannot."""
+    calls: list[str] = []
+
+    def _resolver(target: str) -> str | None:
+        calls.append(target)
+        return "resolver body"
+
+    meta = spill.get_store().write("y" * 20000, tool_name="bash", session_id="read-sugar")
+    assert meta is not None
+    ctx = ToolContext(
+        cwd=context.cwd,
+        session_id="read-sugar",
+        resolve_internal_url=_resolver,
+    )
+    result = await execute_read("t1", {"path": meta.handle, "range": "1-1"}, None, None, ctx)
+    assert result.is_error is False
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_read_url_is_refused_when_web_fetch_is_disabled(
     context: ToolContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:

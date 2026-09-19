@@ -70,7 +70,7 @@ from local_operator.compaction.marker import (
     replayed_user_message,
 )
 from local_operator.compaction.tokens import IMAGE_TOKEN_ESTIMATE, approx_text_tokens
-from local_operator.harness.approval import ApprovalGate
+from local_operator.harness.approval import ApprovalGate, ask_approval
 from local_operator.harness.comms import SubagentComms
 from local_operator.harness.jobs import (
     JOB_RESULT_MESSAGE_TYPE,
@@ -93,6 +93,7 @@ from local_operator.harness.message_types import (
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
+from local_operator.harness.redaction import current_tool_source, set_shape_hit_reporter
 
 # Hoisted to the harness so the evaluation runner can render a transcript
 # through this same function without importing session code. Only these two
@@ -169,6 +170,7 @@ from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
 )
+from local_operator.references import expand_references
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
 from local_operator.session.model_selection import SELECTED_MODEL_CUSTOM_TYPE
@@ -1927,6 +1929,27 @@ class Session:
         self._wire_budget_override: int | None = None
         self._compaction_settings = _coerce_compaction_settings(compaction_settings)
         self._yolo = yolo
+        #: This session's DECLARED tool inventory, or ``None`` for the default:
+        #: every tool the host built is reachable and the ordinary gate governs.
+        #: Set through :meth:`set_tool_inventory` by a host that needs a BOUNDED
+        #: runtime rather than a trusted one — an unattended compliance worker
+        #: that must reach its screening tools and nothing else.
+        self._declared_tools: frozenset[str] | None = None
+        #: Whether the declaration above also stands as the APPROVAL for its own
+        #: members. Set with it, never implied by it: see
+        #: :meth:`set_tool_inventory` for why an interactive host that narrows a
+        #: role still wants its human asked per call.
+        self._declared_tools_unattended = False
+        #: The ``tools:`` allow-list of the role CURRENTLY attached to this
+        #: session, recorded when the role was attached rather than re-resolved
+        #: later. Re-resolution would have to go back through a DISPLAY name,
+        #: and a name that a role and a specialist can both answer is exactly the
+        #: ambiguity the shared resolver exists to keep out of attach; recording
+        #: the fact at the one point that already resolved it cannot drift.
+        #: Holds ``()`` for a role that declares none, which the exec path must
+        #: tell apart from "declare nothing" (an empty inventory strands a
+        #: session with nothing to reach).
+        self._attached_profile_tools: tuple[str, ...] = ()
         self._has_ui = has_ui
         self._cwd = cwd or "."
         self._skill_resolver = skill_resolver
@@ -2004,6 +2027,22 @@ class Session:
         # Host-registered teardown (see add_dispose_hook): resources the
         # composition root owns but the session's lifetime governs.
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
+        #: Teardown that must run after EVERY ordinary hook (see
+        #: :meth:`add_dispose_hook`'s ``last``). Kept in its own list rather than
+        #: appended in place because a late hook is registered EARLY — often
+        #: before the hooks it has to outlive even exist.
+        self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
+        #: Notices that belong AFTER the running turn's answer (see
+        #: :meth:`queue_notice`). A list, not a single slot: a turn can raise more
+        #: than one, and their order is the order they were raised in.
+        #:
+        #: NO PRODUCER IN THIS TREE AT PRESENT. The classification layer's resource
+        #: line was the first caller and it is deleted — the layer no longer writes
+        #: into the transcript at all — so this queue is a facade facility a host may
+        #: still use, kept with its contract tests rather than removed with its first
+        #: caller. Anyone tempted to delete it should read ``queue_notice``'s docstring:
+        #: the deferral is turn-bookkeeping, not notice-specific.
+        self._queued_notices: list[tuple[str, Literal["info", "warning", "error"]]] = []
         # Set by the composition root when MCP servers are wired in, and read
         # only for diagnostics — the session never drives the manager itself,
         # it just governs its lifetime through a dispose hook.
@@ -2192,8 +2231,11 @@ class Session:
         #: handle (``ServingSessionHandle._publish_session_started``) and probed
         #: so a reduced host without it is a no-op.
         self._publish_session_started: Callable[[], None] | None = None
-        #: Guards the once-per-lifetime peer-inbox drain at the top of
-        #: ``_run_turn_pipeline`` — see ``_drain_spooled_peer_inbox``.
+        #: Guards the once-per-lifetime peer-inbox drain inside
+        #: ``_run_turn_pipeline``. That drain is deliberately NOT at the top of
+        #: the pipeline: it runs once this turn's own messages are durable, so a
+        #: leftover spool can never become the opening row of the history (see
+        #: ``_drain_spooled_peer_inbox``).
         self._peer_inbox_drained = False
         self._abort_requested = False  # sticky across the continuation gap
         # Turns dropped back-to-back because they were born pre-aborted. Reset
@@ -2342,6 +2384,28 @@ class Session:
         #: drain, pipeline exit, prompt entry, dispose) in the manner of
         #: ``_pending_shell_records``.
         self._pending_context_journal: list[CustomMessage] = []
+        #: Tool results whose text the credential-SHAPE pass rewrote, awaiting
+        #: their incident row: ``(tool name, shape labels, argument summary)``.
+        #:
+        #: Queued rather than journalled at the point of masking because that
+        #: point is INSIDE a tool batch, where appending a message would produce
+        #: ``assistant(tool_use) -> user -> tool_result`` and brick the session
+        #: (see ``_append_or_park_journal``). The flush is at the turn boundary,
+        #: next to the other parked notices.
+        self._pending_shape_incidents: list[tuple[str, list[str], str]] = []
+        # The sink for shape hits observed by layers that mask BEFORE a result
+        # exists — the live pipe filter and the live/peek/abort text path. The
+        # production shape this feature exists for (``kubectl exec … env``) has
+        # the credential in the OUTPUT, so those layers mask it before the loop's
+        # result hook ever sees the text; without this the size of the incident
+        # that motivated the whole change is 0 notices and 0 rotation tickets,
+        # which is what round 2 measured.
+        set_shape_hit_reporter(self._queue_shape_incident)
+        #: ``(tool, labels)`` already reported this session. A command that
+        #: echoes the same credential ten times, or a poller that prints the
+        #: same DSN every tick, is ONE fact about the session; reporting it per
+        #: result would bury the transcript in identical rows.
+        self._reported_shape_incidents: set[tuple[str, tuple[str, ...]]] = set()
         #: Serialises the ASYNC journal notices so they reach the live context in
         #: the order their hooks fired, not in the order they happen to finish.
         #:
@@ -3246,8 +3310,14 @@ class Session:
                 merged = [tool if t.name == name else t for t in merged]
             else:
                 merged.append(tool)
-        self._tools = merged
-        self._context.tools = merged
+        # Through the declaration, like every other write: these are the tools
+        # gated on the session's own capabilities (``task``/``wait``/``jobs``, and
+        # ``ask`` rescued by ``set_ask_handler``), and a declared inventory that
+        # bounded only what the FACTORY built would still leave this session able
+        # to delegate to an unrestricted child — the excluded set reachable one
+        # hop away, which is not excluded.
+        self._tools = self._filter_declared(merged)
+        self._context.tools = self._tools
 
     async def async_init(self) -> None:
         """Async second half of construction.
@@ -4437,8 +4507,18 @@ class Session:
         """
         kind, profile, specialist_prompt, display_name = self._resolve_profile_or_specialist(name)
         if kind in ("role", "seed") and profile is not None:
+            # Recorded BEFORE the brief is stamped, and only on a resolved
+            # attach: a typo must not half-attach, which includes half-declaring
+            # a tool surface for the role that was NOT attached. See
+            # :attr:`attached_profile_tools` for why this is recorded rather
+            # than re-resolved on demand.
+            self._attached_profile_tools = tuple(profile.tools or ())
             return self._stamp_agent_brief(profile.preamble.strip(), profile.name)
         if kind == "specialist":
+            # A specialist carries instructions only — the registry row has no
+            # ``tools:`` surface to record, and the slot must not keep the
+            # previous role's allow-list after a switch.
+            self._attached_profile_tools = ()
             # Tagged with the specialist's name so the model can tell whose
             # voice this is — the same shape a role preamble carries.
             body = f"[agent: {display_name}]\n{specialist_prompt}" if specialist_prompt else ""
@@ -4455,6 +4535,11 @@ class Session:
         can still report plainly.
         """
         self._goal_state.agent_brief = ""
+        # The slot this recorded for the detached role goes with it: it is a
+        # statement about the profile in force, and "no profile" has no tool
+        # surface. Left behind it would let a host that bounds itself on the
+        # attached role honour a role the user has already taken off.
+        self._attached_profile_tools = ()
         # Blank the NAME as well, not just the brief. The band's active-profile
         # segment (U2) reads ``active_agent`` (i.e. ``agent_name``), so a detach
         # that dropped only the brief would leave ``◉ auditor`` painted next to a
@@ -5123,19 +5208,83 @@ class Session:
         on-demand compaction holds, which the rejection names. ``_is_streaming``
         is then re-checked under the lock to close the race where streaming was
         set between the lock probe and the acquire.
+
+        ``@path`` expansion sits BETWEEN those two points, and that placement
+        is part of the contract rather than an implementation detail: a
+        rejected prompt must not have read a referenced file or raised an
+        approval card on its way to the raise.
         """
         if self._disposed:
             raise RuntimeError("session is disposed")
+        # THE PROBE COMES FIRST, ahead of anything that can touch the disk or a
+        # human. Expansion reads every referenced file and can raise a live
+        # approval card, so with the probe below it a caller that arrives
+        # mid-turn (`serving`, `attached`, `mobile/tui_handle`, `goal_loop`,
+        # `subagent`) had the operator's files read — and a card for a
+        # referenced `.env` ANSWERED — for a prompt this method then rejects.
+        # `locked()` does not await, so nothing here can deadlock, and the
+        # verdict is the one the probe always produced: what moves is only the
+        # work that used to happen before it.
         if self._turn_lock.locked():
             # An on-demand compaction holds the same lock a turn does, and for
             # the same reason — it is rewriting the history a request would be
             # built from. Saying "already streaming" for it would send the user
             # looking for a turn that is not there.
-            raise RuntimeError(
+            # The TYPED refusal, not a bare sentence: the spooled-owner drain and
+            # the two command queues classify it, and classifying text breaks
+            # silently on a reword (agent review round 2, MINOR-1). A
+            # ``RuntimeError`` subclass, so nothing that already caught the plain
+            # raise changes behaviour.
+            from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+            raise TurnInFlight(
                 "context compaction is running; the prompt can be sent once it finishes"
                 if self._compacting
-                else "session is already streaming; use steer() to inject mid-turn"
+                else TURN_IN_FLIGHT
             )
+        # `@path` expansion, and it runs HERE — after the probe, before the
+        # lock, not inside it. An approval can park on a human indefinitely, and
+        # in the TUI the app awaiting this prompt is the same one that would
+        # draw the approval card; awaiting a person while holding `_turn_lock`
+        # also blocks the compaction that shares it, which is a deadlock-shaped
+        # risk rather than a slow turn. Expanding before `acquire()` costs
+        # nothing and removes the shape entirely.
+        #
+        # This one call is what gives EVERY composer surface the feature: CLI,
+        # headless, server, scheduler, mobile, subagents and the TUI's own
+        # submit exits all funnel through `prompt`. The TUI does NOT expand
+        # earlier — that pass was removed, because awaiting an approval card
+        # inside a Textual message handler deadlocks the composer (the pump
+        # awaits the handler to completion, and the card is mounted AND
+        # answered through that same pump; `on_editor_submitted` records the
+        # probe). So this is the first and only expansion of a composer draft,
+        # and the transcript row stays the typed line because the row is built
+        # from it, not because a second pass declined to touch it.
+        #
+        # THREE entry paths predate the feature and bypass `prompt`, so an
+        # `@path` in them stays inert prose: `steer` (queues the message
+        # directly — and `_submit_prompt` routes a draft typed while a turn
+        # runs there, so the TUI's own submit exit is on both lists), a wake
+        # delivery (`_prompt_messages`), and an aside fork (`adopt_aside`,
+        # which adopts the TYPED question — `_aside_worker` expands only the
+        # text it hands the model, and the panel keeps the typed one).
+        #
+        # IDEMPOTENCE is still a hard requirement with a single expansion site,
+        # because this pass runs on text it did not type: a subagent launch
+        # forwards the manager's own prompt into `child.prompt`, and a manager
+        # that quoted an already-expanded block out of its context would have
+        # it doubled here.
+        expansion = await expand_references(
+            text,
+            self._cwd,
+            request_approval=None if self._yolo else self._request_approval,
+        )
+        # Notices are discarded deliberately: `prompt` has no channel back to a
+        # UI, and no surface pre-expands a composer draft, so an unresolved
+        # token on a submit exit is sent verbatim and silently — the accepted
+        # cost `on_editor_submitted` records. The aside is the one path that
+        # paints its notices, from its own call in `_aside_worker`.
+        text = expansion.sent
         await self._turn_lock.acquire()
         try:
             # Close the narrow completion-after-final-flush race: a shell
@@ -5146,6 +5295,10 @@ class Session:
             # holder must reach the model before this prompt's request is built,
             # or the switch it announces goes unmentioned for another turn.
             self._flush_context_journal()
+            # A shape report queued by a surface that ran outside a turn (the
+            # live stream, a background job's peek) reaches the model before the
+            # request this prompt is about to build.
+            await self._flush_shape_incidents()
             # A fresh user prompt supersedes any earlier interrupt request.
             self._abort_requested = False
             # ...and any earlier boundary cancel, for the same reason: the
@@ -5153,7 +5306,9 @@ class Session:
             # one they have just submitted.
             self._graceful_cancel_requested = False
             if self._is_streaming:
-                raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+                from local_operator.session.errors import TURN_IN_FLIGHT, TurnInFlight
+
+                raise TurnInFlight(TURN_IN_FLIGHT)
             # INLINE a pending wake catch-up ahead of the user's message, in
             # the SAME turn: the missed wakes belong before the work they were
             # meant to start, and spawning the catch-up as a competing
@@ -5485,15 +5640,18 @@ class Session:
     async def _drain_spooled_peer_inbox(self) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
 
-        Called at the top of ``_run_turn_pipeline`` (see the call site for
-        why the first real turn is the right moment). The session usually
-        never has spool: the runtime child's boot drain consumed it before
-        the socket even listened, and live deliveries dial instead of
-        spooling. This drain exists for the rows that bypass both — a sender
-        on an older binary, or a race that left the record unreadable — so
-        the flag is what keeps it off the steady-state turn path: after the
-        first attempt it is never tried again, and the cold-open drain
-        remains the owner of anything written later.
+        Called by ``_run_turn_pipeline`` AFTER the turn's own messages are
+        durable and before the model is asked anything (see the call site for
+        why that position — not merely the moment — is the guarantee). The
+        session usually never has a spool: the runtime child's boot drain
+        consumed it before the socket even listened, and live deliveries dial
+        instead of spooling. This drain exists for the rows that bypass both —
+        a sender on an older binary, or a race that left the record
+        unreadable, or a session that has not been engaged yet (whose spool
+        ``process._drain_inbox_into`` deliberately preserves) — so the flag is
+        what keeps it off the steady-state turn path: after the first attempt
+        it is never tried again, and the cold-open drain remains the owner of
+        anything written later.
 
         Best-effort per row, mirroring ``process._drain_inbox_into``: one
         malformed or rejected row must not stop the rest, and none of it may
@@ -5505,7 +5663,7 @@ class Session:
         # Imported in-function: the runtime inbox lives behind the mobile
         # package's config-path machinery, and this module does not carry a
         # module-level dependency on it for a once-per-session path.
-        from local_operator.session.runtime.inbox import drain_inbox
+        from local_operator.session.runtime.inbox import SOURCE_USER, drain_inbox
 
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
@@ -5515,20 +5673,85 @@ class Session:
         except Exception:  # noqa: BLE001 — a bad spool must not fail the turn
             logger.warning("peer inbox drain failed", exc_info=True)
             return
+        # Rows of ONE batch carrying the same owner ``command_id``: ``drain_inbox``
+        # empties the file, so a crash between the read and its receipt can
+        # re-deliver the whole batch, and the steer arm's identity does not
+        # reach the transcript index until the correction is drained at a later
+        # tool boundary — long after this loop has moved on (agent review round
+        # 1, R3). The set makes the batch's own repeats answerable here; the
+        # durable index remains the authority for the turn arm.
+        seen_owner_ids: set[str] = set()
         for line in lines:
             try:
-                # The row's own ``wake``, never a guess: a row spooled by a
-                # runtime that was leaving a replaced build carries what its
-                # sender asked for, and ``send --wake`` asked for a turn. Rows
-                # written before the field existed read as notes, unchanged.
-                await self.receive_peer_message(
-                    line.text,
-                    mode="mailbox",
-                    wake=bool(getattr(line, "wake", False)),
-                    sender=line.sender,
-                )
+                # The row's own ``wake`` is forwarded, never guessed: a row
+                # spooled by a runtime that was leaving a replaced build
+                # carries what its sender asked for, and ``send --wake`` asked
+                # for a turn. Rows written before the field existed read as
+                # notes, unchanged. What this drain DOES with that request is
+                # the consumer's business, not the field's: the BOOT drain runs
+                # before the socket listens, on an idle session, so the wake is
+                # honoured with a turn of its own, while the first-turn drain
+                # reaches the receiver mid-turn and the row rides that turn's
+                # context instead (see the paragraph at its call site).
+                #
+                # THE ROW'S ``source`` DECIDES WHO IS SPEAKING, the same split
+                # ``process._drain_inbox_into`` makes: a ``SOURCE_USER`` row is
+                # the OWNER's own prompt spooled by a draining runtime, and it
+                # joins this turn as an identified user message instead of
+                # acquiring a peer's provenance envelope (see
+                # ``_run_spooled_owner_prompt``).
+                if getattr(line, "source", "") == SOURCE_USER:
+                    self._run_spooled_owner_prompt(line, seen=seen_owner_ids)
+                else:
+                    await self.receive_peer_message(
+                        line.text,
+                        mode="mailbox",
+                        wake=bool(getattr(line, "wake", False)),
+                        sender=line.sender,
+                    )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
+
+    def _run_spooled_owner_prompt(self, line: Any, *, seen: set[str]) -> None:
+        """Join one spooled OWNER prompt to the turn already running.
+
+        The owner's own message, spooled by a runtime that was leaving a
+        replaced build, arriving at a successor that is ALREADY mid-turn — the
+        window where no durable history existed yet when the drain latched, so
+        ``process._drain_inbox_into`` kept the row for the first turn instead of
+        running it at boot.
+
+        ``steer`` rather than ``prompt``, and that is not a preference: this
+        drain runs from inside ``_run_turn_pipeline`` with ``_turn_lock`` held,
+        and ``Session.prompt`` REJECTS outright while a turn is running. The
+        conclusion is the one the peer paragraph above reaches for its own rows
+        — the row rides the turn in flight — taken with the verb the OWNER's
+        words deserve: this is the user speaking, so it is an identified user
+        message rather than a peer's ``CustomMessage``, and it carries the
+        message id the viewer painted the row under so its announcement matches
+        that row instead of adding one.
+
+        The durable index answers the already-appended case for the same reason
+        it does at boot (``process._run_owner_prompt``): the identity is
+        append-only, and a retried prompt must not land twice. ``seen`` covers
+        what the index cannot — two rows of one batch with the same id, where
+        the first steer is still queued and has therefore not reached the index
+        yet (agent review round 1, R3).
+        """
+        command_id = str(getattr(line, "command_id", "") or "")
+        if command_id and command_id in seen:
+            logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
+            return
+        if command_id and self.has_admitted_command(command_id):
+            logger.info("spooled prompt already in the transcript; not steering it twice")
+            return
+        self.steer(line.text, [], message_id=command_id or None)
+        # AFTER the steer, for the reason ``process._run_owner_prompt`` gives:
+        # the batch's repeat is the retry the at-least-once contract promises,
+        # and it is only redundant once the first row landed (agent review round
+        # 2, MINOR-2).
+        if command_id:
+            seen.add(command_id)
 
     async def receive_peer_message(
         self,
@@ -5903,11 +6126,263 @@ class Session:
         ``context.tools`` fresh on every model call and every tool resolution,
         so the new set is effective from the NEXT model call onward — and even
         mid-turn at the next tool batch — with no restart.
+
+        A session with a declared inventory (:meth:`set_tool_inventory`) narrows
+        the set it is handed here before swapping it in, so an MCP tool that
+        arrives after the declaration is subject to it. That ordering is the
+        whole point: MCP tools are discovered lazily, so filtering only the
+        construction-time builtins would leave the declaration unenforced on
+        exactly the surface an embedder declares it for.
         """
-        self._tools = list(tools)
+        self._tools = self._filter_declared(tools)
         self._context.tools = self._tools
         if hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
+
+    def _filter_declared(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
+        """Narrow a candidate inventory to this session's declared one.
+
+        THE enforcement point. Every writer of the inventory routes through
+        here — construction, :meth:`refresh_tools` (which is where a lazily
+        discovered MCP tool arrives), and :meth:`_merge_capability_tools` (which
+        is where ``task``/``wake``/``ask`` arrive after the fact) — because a
+        declaration that only filtered the surface the model is SHOWN would
+        leave the excluded tool reachable by name through the loop's resolution
+        path. The property a caller buys with a declaration is *the excluded
+        tools are not reachable*, not *the model was not told about them*.
+
+        An unknown name is not an error, deliberately: a declaration naming a
+        tool this build does not have (an MCP server that is not connected on
+        this host, a renamed builtin) simply matches nothing, exactly as
+        :func:`local_operator.agent_profiles.filter_tools` treats the same case
+        for a role. It fails CLOSED, which is the right direction for a security
+        control.
+        """
+        if self._declared_tools is None:
+            return list(tools)
+        allowed = self._declared_tools
+        return [tool for tool in tools if getattr(tool, "name", None) in allowed]
+
+    def set_tool_inventory(
+        self,
+        names: Sequence[str] | None,
+        *,
+        unattended: bool = False,
+    ) -> None:
+        """Declare — and ENFORCE — the set of tools THIS session may reach.
+
+        ``names=None`` applies NO declaration, which is the state a session is
+        constructed in. It does not LIFT one already in force — see the one-way
+        invariant below, which is why that is stated as an invariant rather than
+        left to be discovered.
+
+        WHY THIS IS A SESSION-LEVEL DECLARATION AND NOT A HOST-SIDE FILTER.
+        A headless embedder running an agent against a bounded capability — a
+        compliance worker that must call screening tools and must NOT be able to
+        run ``bash``, ``write``, ``edit`` or ``eval`` on the host it runs on —
+        previously had one option: ``--yolo``, which is the only way a
+        write/exec-tier tool call can succeed with no tty to answer the gate.
+        ``--yolo`` also unlocks every local-execution tool, so "reach my MCP
+        tools" and "be unable to shell out" were not jointly expressible. The
+        fix belongs at the INVENTORY rather than at the gate, because the gate is
+        consulted per call and the excluded-then-denied shape still leaves the
+        tool advertised, retried, and reported to the model as a denial it should
+        work around.
+
+        ``unattended=True`` makes the declaration stand as the APPROVAL for its
+        own members. This is the second half of the same fix rather than a
+        loosening of it: with the excluded set genuinely unreachable, a gate that
+        refuses a *permitted* tool is refusing the only thing the run was allowed
+        to do. The security property is the enumeration, so the enumeration is the
+        decision — and it is scoped to the names given here, never to the session
+        at large. It is deliberately NOT implied by narrowing alone: a host with a
+        human at the gate narrows a role's reach and still wants that human asked
+        per call (see ``attach_agent_profile``), which is why the two are separate
+        arguments and not one behaviour.
+
+        Invariants a caller can rely on:
+
+        * every tool a declared run reaches is named in ``names``;
+        * a name that matches nothing this build has is simply unreachable, never
+          an error (fail-closed, like a role allow-list);
+        * the declaration is inherited by the children this session delegates to,
+          so a declared session cannot reach an excluded tool one hop down;
+        * narrowing is ONE-WAY for the life of the session. Widening is refused
+          rather than honoured because the alternative is a live session whose
+          bounded reach can be lifted mid-run by whoever can call this method;
+          a host that needs a different set starts a session with it. Refused
+          means ENFORCED by this method rather than stated in this docstring: a
+          call naming anything outside the set already in force raises
+          ``ValueError`` and changes nothing, and ``names=None`` — the value an
+          absent declaration has — does not lift one in force;
+          * the APPROVAL half is one-way in the same direction, and enforced the
+          same way: a later call may turn the declaration's auto-approval OFF
+          (``unattended=False``) but never ON. A narrowing call cannot be the
+          loosening one.
+        """
+        incoming = None if names is None else frozenset(names)
+        in_force = self._declared_tools
+        if in_force is not None:
+            # THE one-way invariant, where a caller can actually break it. The
+            # bound is a security control, so the two refusals below are what
+            # stops whoever can reach this method (a host, a front end, a future
+            # writer) from re-admitting a tool the run was declared not to have:
+            # a superset would be re-admitted by the very next ``refresh_tools``
+            # (it re-derives the inventory from the declaration), and ``None``
+            # would restore the full builtin reach. Raising on a widening call
+            # rather than intersecting: a silent intersection leaves the caller
+            # believing its superset applied, which is the same "the declared
+            # guarantee does not hold" shape this whole mechanism exists to
+            # remove — and only the caller knows whether it meant to widen.
+            if incoming is None:
+                logger.warning(
+                    "set_tool_inventory(None) ignored: this session's declaration (%s) is "
+                    "one-way for its lifetime",
+                    ", ".join(sorted(in_force)),
+                )
+                return
+            widened = sorted(incoming - in_force)
+            if widened:
+                raise ValueError(
+                    "a tool declaration is one-way for the life of a session: refusing to "
+                    f"widen {sorted(in_force)} with {widened}"
+                )
+        self._declared_tools = incoming
+        # ``unattended`` is one-way in the direction that matters, for the same
+        # reason the reach above is: whoever can reach this method must not be
+        # able to LOOSEN what a declaration in force granted. Before this, the
+        # plain assignment let the *allowed* subset call be the loosening one —
+        # declare ``['read', 'bash']`` with a human at the gate, then narrow to
+        # ``['read']`` with ``unattended=True``, and the declared gate answered
+        # ``True`` for ``read`` without consulting the base gate at all (measured
+        # on a real session: the reach stayed bounded, the approval did not).
+        #
+        # Call shapes reachable after this change, against before:
+        #
+        #   * a FIRST declaration — either value applies, unchanged; this is the
+        #     call that decides whether the declaration stands as the approval;
+        #   * a later call with ``unattended=False`` — still applies: tightening
+        #     is not a loosening. A host that narrows and wants the human asked
+        #     again keeps the flow it had, and fails CLOSED on a run with no tty,
+        #     because every remaining call then goes to the base gate;
+        #   * a later call with ``unattended=True`` against a declaration in force
+        #     without it — IGNORED and logged, which is the hole this closes.
+        #
+        # The trade-off, stated rather than left implicit: a host that declares
+        # ``unattended=True`` and later re-declares a SUBSET with
+        # ``unattended=False`` turns its own auto-approval off, so where nobody
+        # can be asked the remaining calls are refused. That is the caller
+        # explicitly asking for the human back, and refusing is the direction to
+        # fail in; freezing the flag at its first value instead would silently
+        # ignore the request rather than honour it.
+        if in_force is None:
+            self._declared_tools_unattended = bool(unattended)
+        elif not unattended:
+            self._declared_tools_unattended = False
+        elif not self._declared_tools_unattended:
+            logger.warning(
+                "set_tool_inventory(unattended=True) ignored: this session's declaration "
+                "(%s) was made with a human at the gate, and a later call cannot turn "
+                "auto-approval on",
+                ", ".join(sorted(in_force)),
+            )
+        # Re-published through ``refresh_tools`` so the narrowing reaches the
+        # model-facing view (``self._context.tools``) by the same route every
+        # other inventory change takes, rather than by a second assignment that
+        # could drift from it.
+        self.refresh_tools(self._tools)
+        self.materialize_declared_tools()
+
+    def materialize_declared_tools(self) -> tuple[str, ...]:
+        """Grant the SCHEMAS of this session's declared tools that are lazy.
+
+        MCP tools are lazy by design: a connected server's tools stay off the
+        provider's schema list — and out of the prompt-cache prefix the tool
+        array shares with the system prompt — until something SELECTS one, which
+        by default means the model activating an entry from that server's
+        ``mcp://`` catalogue. The advertised way to do that is the ``read``
+        tool, and a bounded runtime is exactly the run that may deliberately not
+        have ``read``.
+
+        Measured, not theorised: ``--tools mcp__fixture_echo`` against a live
+        fixture server left the session reaching NOTHING — the declaration had
+        removed every builtin and nothing had put the declared MCP tool in their
+        place, so the model, shown no tools at all, emitted a tool call as prose
+        and the run answered nothing useful.
+
+        A declaration is that decision already made: the caller enumerated the
+        tools by name, so a declared name this session's MCP manager knows about
+        is granted its schema here, with no activation step and no capability the
+        caller did not ask for. Called when the declaration is made and again
+        when MCP discovery settles (see ``session_factory``), because a
+        declaration made while servers were still connecting would otherwise
+        have nothing to grant. Returns the names granted.
+        """
+        declared = self._declared_tools
+        manager = getattr(self, "mcp_manager", None)
+        if declared is None or manager is None:
+            return ()
+        try:
+            available = manager.get_tools()
+        except Exception:  # noqa: BLE001 — a reduced manager must not break a run
+            logger.debug("mcp get_tools() unavailable for a declaration", exc_info=True)
+            return ()
+        present = {tool.name for tool in self._tools}
+        granted = [
+            tool
+            for tool in available
+            if getattr(tool, "name", None) in declared and tool.name not in present
+        ]
+        if granted:
+            # Through ``refresh_tools``, so the grant is subject to the very
+            # declaration that asked for it rather than beside it.
+            self.refresh_tools([*self._tools, *granted])
+        return tuple(tool.name for tool in granted)
+
+    def unresolved_declared_tools(self) -> tuple[str, ...]:
+        """Declared names this session reaches NOTHING for, for a host to report.
+
+        Meaningful only once MCP discovery has settled: until then a declared
+        ``mcp__`` name may simply not have arrived yet, and a caller that asks
+        early can be told "unresolved" about a tool that is still connecting.
+        ``exec_session`` therefore asks at the END of the run, where nothing is
+        in flight and the answer is definitive — asking it at startup, which is
+        where it looks like it belongs, silenced the report on precisely the runs
+        it exists for (a server that is connecting looks identical to a typo).
+
+        What is left is a name that never arrived — a typo, or a tool this build
+        does not have — which fails closed but must not fail SILENTLY: with no
+        matching tool the run answers nothing, and every call comes back "Tool
+        not found", which reads as a harness fault rather than as the declaration
+        it is.
+        """
+        declared = self._declared_tools
+        if declared is None:
+            return ()
+        reachable = {tool.name for tool in self._tools}
+        return tuple(name for name in sorted(declared) if name not in reachable)
+
+    @property
+    def tool_inventory(self) -> tuple[str, ...]:
+        """The names of the tools this session can actually reach, in order.
+
+        The ENFORCED set — the live inventory, not the declaration — so a host
+        that declared an inventory can report which names matched nothing this
+        build. A typo in a security control fails closed, but it must not fail
+        silently: the model would then simply have no tools and the run would be
+        diagnosed as a harness fault rather than as the declaration it is.
+        """
+        return tuple(tool.name for tool in self._tools)
+
+    @property
+    def attached_profile_tools(self) -> tuple[str, ...]:
+        """The ``tools:`` allow-list the attached role declares, or ``()``.
+
+        ``()`` means "the role declares none", NOT "declare an empty
+        inventory"; a caller deciding whether to bound itself on this must treat
+        them as different answers (see :meth:`set_tool_inventory`).
+        """
+        return self._attached_profile_tools
 
     def set_fallback_tool_resolver(
         self, resolver: Callable[[str], AgentTool | None] | None
@@ -5917,6 +6392,63 @@ class Session:
         loop can dispatch calls to tools not yet materialized. ``None`` clears
         it."""
         self._fallback_tool_resolver = resolver
+
+    def _resolve_tool_outside_inventory(self, name: str) -> AgentTool | None:
+        """Resolve a name the inventory does not hold — unless it is declared out.
+
+        THE second half of a declared inventory's enforcement, and the half that
+        is easy to miss: the loop asks this resolver for any name that is not in
+        ``context.tools`` BEFORE reporting the call as an unknown tool (see
+        ``harness.loop._plan_call``). That is how a deferred or lazily discovered
+        MCP tool is dispatchable without being materialized. Left ungated it is
+        also how an EXCLUDED MCP tool stays reachable — the model can name a tool
+        whose schema it was never shown, and the resolver would hand it over.
+        So the declaration is consulted here too, and an excluded name resolves to
+        ``None``, which the loop reports as "Tool not found" exactly like any
+        other absent tool.
+        """
+        declared = self._declared_tools
+        if declared is not None and name not in declared:
+            return None
+        resolver = self._fallback_tool_resolver
+        return resolver(name) if resolver is not None else None
+
+    def _tool_approval_gate(self) -> ApprovalGate | None:
+        """The gate this turn's tool calls are decided by.
+
+        ``--yolo`` skips the gate OBJECT entirely, unchanged. Otherwise a session
+        whose host declared its inventory as unattended decides its DECLARED
+        members here, by the declaration — with the base gate still consulted for
+        anything else, so this narrows WHEN the host is asked and is never a
+        blanket approval of the session.
+
+        The membership check is not redundant with the inventory filter, and it
+        is not defensive padding: it is what keeps this method correct even if
+        some future writer reaches the inventory by a route the filter does not
+        cover. A gate that approved whatever it was handed would collapse the
+        whole design back to ``--yolo`` the first time one did.
+        """
+        if self._yolo:
+            return None
+        base = self._request_approval
+        declared = self._declared_tools
+        if base is None or declared is None or not self._declared_tools_unattended:
+            return base
+
+        async def declared_gate(
+            tool_name: str, description: str, job_id: str | None = None
+        ) -> bool:
+            if tool_name in declared:
+                return True
+            # Forwarded through the shared arity resolver rather than called
+            # directly: the base gate may take two arguments or three, and which
+            # one is resolved in exactly one place (``harness.approval``). Calling
+            # it here with three would ``TypeError`` inside every two-argument
+            # host gate, and both call sites turn that into a silent denial — the
+            # failure mode that module exists to stop.
+            return await ask_approval(base, tool_name, description, job_id)
+
+        return declared_gate
 
     def _record_tool_call(
         self, tool_name: str, origin: str, fault: str, duration_ms: float
@@ -6470,9 +7002,16 @@ class Session:
         cancel as an error — the one misclassification this taxonomy calls
         worse than the bug it fixes.
 
-        A no-op on an idle session: the cause is consumed only by an
-        ``AgentEndEvent`` for the turn that was running, and it is cleared at
-        the head of the next one.
+        A no-op on an idle session, and the disposal now ENFORCES that rather
+        than assuming it: a cause is consumed by the next ``AgentEndEvent``, and
+        the event that carries it must be one ``_classify_cut_off`` can arm —
+        ``aborted``, i.e. a turn this session watched end involuntarily. A run
+        left UNSETTLED by a turn that stopped somewhere else is NOT that shape:
+        the teardown could synthesise an end for it and the note would brand
+        work this exit never cut, which is the ``error`` row the operator's own
+        ``attention.db`` is full of (2026-09-17). See
+        ``Session.disposal_cuts_a_turn`` and
+        ``ServingSessionHandle._note_retirement_cut_off``.
 
         FIRST WRITER WINS. An exit is a sequence of rungs (a retirement latch,
         then the stop rung, then the dispose), and the EARLIEST note is the
@@ -6517,6 +7056,22 @@ class Session:
         The ``cut_off``/``cut_off_cause`` fields ride along so a NEW viewer can
         name the cause precisely without re-deriving it from the vocabulary.
 
+        THE EVENT MUST SAY IT WAS ABORTED, and the shape this guard exists for
+        is the DISPOSAL's synthesised end. The reachable ordering is
+        latch -> dispose -> orphan: ``begin_retire`` refuses while anything
+        would be lost (``may_refresh``), so a run carrying a build retirement's
+        cause is one nothing was in flight for. What a latch CAN arm is a turn
+        the disposal is about to abort (the signal drain's ``runtime-shutdown``
+        latch, or no latch at all — see
+        ``Session.disposal_cuts_a_turn``), plus ``install-mid-update`` when a
+        lazy import meets a half-replaced tree mid-turn
+        (``Session._note_import_failure``). Every one of those ends says
+        ``aborted=True``; a normally-completed end keeps its ``aborted=False``
+        and is left exactly as it was, which is the whole point — without this
+        guard an armed cause rewrote a completed turn's outcome to an error the
+        moment any retirement latch had run (2026-09-17; the durable rows are in
+        ``attention.db``).
+
         A turn that ALREADY ended with a real provider/tool error is left alone:
         that error is a more specific diagnosis than "the runtime went away",
         and overwriting it would throw away the only text that names the actual
@@ -6532,6 +7087,8 @@ class Session:
         """
         cause = self._cut_off_cause
         if not cause:
+            return event
+        if not event.aborted:
             return event
         if event.error:
             return event
@@ -6782,6 +7339,80 @@ class Session:
             await self._journal_cut_off_once(token, reason, cause)
         self.refresh_frontend_state()
 
+    async def _settle_run_without_an_outcome(self) -> None:
+        """Settle a run this exit ended WITHOUT publishing a verdict for it.
+
+        THE THIRD DISPOSITION, and the one the operator's report needed. A
+        disposal can meet a run that never published an outcome and that this
+        exit did NOT cut: the latch that commits a runtime to leaving
+        (``serving.ServingSessionHandle.begin_retire``) refuses while any work
+        would be lost, so a retirement exit cannot be the party that ended a
+        turn, and the disposal's own cut records a cause
+        (:meth:`disposal_cuts_a_turn`). What is left is a run that stopped
+        without an outcome being recorded — this host's shape, where a run's
+        last turn row preceded its ``error`` row by hours and the conversation
+        then continued normally.
+
+        WHY NOTHING IS PUBLISHED, rather than one of the three kinds:
+
+        * ``error`` is what the disposal used to write (``runtime-retired`` from
+          the build rungs, then ``runtime-shutdown``), and it is a claim this
+          exit cannot support. It is the operator's exact complaint — "an
+          update that catches nothing must produce no error trace" — whose
+          receipt is the durable rows in ``~/.local-operator/attention.db``.
+        * ``interrupted`` is the taxonomy's DELIBERATE verdict, whose one cause
+          is ``user-stop``: publishing it either names the user for a stop
+          nobody recorded (the quiet rung's false claim, agent review round 1
+          MAJOR-2) or coins a second meaning for the kind every surface paints
+          as "Interrupted".
+        * ``complete`` is the opposite claim again, and this run did not report
+          it. (On this host the run had in fact finished, which is exactly why
+          the exit must not choose between the three.)
+
+        SO THE SETTLEMENT ASSERTS NOTHING, and closing the run's TOKEN is the
+        point rather than tidiness. Leaving the marker open for the successor —
+        the alternative agent review round 1 offered — is not neutral here:
+        ``attention._classify_orphaned_run`` answers from the run record and
+        the turn journal, and for this shape the process has exited cleanly, so
+        there is no dead record and no open row, which drops it to its last rung
+        and publishes ``error`` with ``CUT_OFF_UNKNOWN`` — the same mystery
+        cut-off the six ``idle-exit`` rows already render from. The exit is the
+        only party that ever knew nothing was in flight, so it is the party that
+        must close the question.
+
+        The marker is the one a completed run with nothing to show already
+        writes (``eligible: False``), so no reader is taught a new shape, and a
+        LATER real outcome for the same token still supersedes it: every reader
+        takes the LAST marker of this type (``_import_transcript_outcome``,
+        ``Session.refresh_attention``).
+        """
+        from local_operator.session.attention import (
+            ATTENTION_CUSTOM_TYPE,
+            conversation_identity,
+        )
+
+        token = self._attention_run_token
+        if token is None:
+            return
+        self._attention_run_settled = True
+        # Logged because the settlement is deliberately silent everywhere else:
+        # no attention row, no card, no notice. An investigation asking "what
+        # happened to that run" gets its answer here rather than nowhere.
+        logger.info(
+            "session %s: run %s left no outcome and this exit cut no turn; "
+            "settled with no verdict",
+            getattr(self, "session_id", "?"),
+            token,
+        )
+        await self._transcript.append_custom(
+            ATTENTION_CUSTOM_TYPE,
+            {
+                "conversation_id": conversation_identity(self._transcript.directory),
+                "token": token,
+                "eligible": False,
+            },
+        )
+
     @property
     def frontend_state(self):  # type: ignore[no-untyped-def]
         """Current canonical state for any full terminal frontend."""
@@ -6941,6 +7572,73 @@ class Session:
                 self._dispose_hooks.remove(observer.aclose)
 
         return unsubscribe
+
+    async def queue_notice(
+        self,
+        text: str,
+        kind: Literal["info", "warning", "error"] = "info",
+    ) -> None:
+        """Emit a notice AFTER the running turn's answer, or at once if none is running.
+
+        WHY THIS EXISTS, and why it is not just ``_stream_notice``. A notice raised
+        while a turn's prompt is being built lands between the user's question and
+        the reply — the notice occupies the answer slot, and a reader takes the
+        dimmest ink on screen for the first thing the model said (design round 1,
+        D1). The classification layer's resource line used to be exactly that case,
+        raised during prompt build; that line is now DELETED (the layer writes
+        nothing into the transcript), so this method currently has no caller in the
+        tree and is kept as a facade facility for any future prompt-build-time line.
+
+        Deferral is conditioned on a turn actually running, not on a flag the
+        caller passes: outside a turn there is no answer to wait for, and holding
+        the line would delay it with nothing to gain. ``_turn_lock`` is the same
+        condition ``_run_turn`` documents (its caller holds it), so a host that
+        emits from a viewer or a preflight still gets its line immediately.
+        """
+        if not self._turn_lock.locked() or self._disposed:
+            await self._stream_notice(text, kind)
+            return
+        self._queued_notices.append((text, kind))
+
+    def _discard_queued_notices(self) -> None:
+        """Drop whatever a finished turn left queued. The counterpart to the flush.
+
+        Every line in the queue is attributed to the message whose ANSWER was being
+        built, so a line may only be released by the turn that raised it — and only the
+        flush, which runs once that answer is persisted, releases it as a line. What
+        reaches here is therefore either nothing (the flush emptied the queue, which is
+        what a normal turn and an aborted-but-persisted one both do) or a line whose
+        answer will never arrive: see ``_run_turn``'s ``finally`` for the three cases.
+
+        Logged rather than silent, so a turn that dies before its reply still leaves a
+        trace of what the user did not see."""
+        if not self._queued_notices:
+            return
+        dropped, self._queued_notices = self._queued_notices, []
+        logger.debug(
+            "session: dropped %d queued notice(s) from a turn with no answer", len(dropped)
+        )
+
+    async def _flush_queued_notices(self) -> None:
+        """Release the notices whose turn has finished. Never raises.
+
+        Called from ``_run_turn`` once the answer has landed and been persisted, so
+        the line reads as a note about the turn that just finished rather than as
+        part of the reply. The ORDER is the contract, not an accident of where the
+        call sits: the answer's own events are emitted by the persist above it, so a
+        subscriber sees the assistant's message BEFORE this notice (pinned by
+        ``test_a_queued_notice_lands_after_the_answer``), and the queue is swapped out
+        atomically, so a second flush cannot re-emit it. One that fails to paint is
+        logged and dropped: a notice is never worth failing the teardown it rides on.
+        """
+        if not self._queued_notices:
+            return
+        queued, self._queued_notices = self._queued_notices, []
+        for text, kind in queued:
+            try:
+                await self._stream_notice(text, kind)
+            except Exception:  # noqa: BLE001 — a notice never fails a turn
+                logger.warning("session queued notice failed to emit", exc_info=True)
 
     async def _stream_notice(
         self,
@@ -7313,19 +8011,6 @@ class Session:
         opened the run, so the TUI's supersede guard still pairs them.
         """
         await self._refresh_context_metadata()
-        # Belt-and-braces for peer delivery: consume any inbox rows spooled
-        # for this session BEFORE the first real turn runs. The primary inbox
-        # consumer is the runtime child's boot drain (``process.amain``),
-        # which a session that opened some other way — or that was sent a
-        # spool by an older sender that had no live record for it — never
-        # passes through; without this drain those rows would sit unread
-        # until some future process cold-opens the session. Delivered in the
-        # quiet mailbox shape so the drain itself can never drive a turn.
-        # Runs BEFORE the started-flip below so the spooled notes are durable
-        # and visible even if this turn then fails; under the already-held
-        # ``_turn_lock`` their live-context append parks and rejoins at this
-        # very turn's first injection boundary (``_drain_steering``).
-        await self._drain_spooled_peer_inbox()
         # Flip the discovery record's ``started`` bit the first time a REAL
         # turn runs. This is the single choke point every spawn path funnels
         # through — the user's ``prompt()``, wake deliveries
@@ -7345,9 +8030,12 @@ class Session:
         # reason the flip above is here — this is the single choke point every
         # spawn path funnels through — and guarded the same way, because a
         # record that could fail a turn would be a worse defect than the
-        # unattributable death it exists to fix. Called AFTER the inbox drain
-        # above on purpose: a drain that aborts before the turn starts should
-        # not leave a row claiming a turn that never ran.
+        # unattributable death it exists to fix. The row opens the turn at
+        # ADMISSION, above both the pre-abort drop and the peer-inbox drain that
+        # run further down this pipeline; the drain in particular is no longer
+        # above this line — it runs AFTER this turn's own messages are durable
+        # (see ``_drain_spooled_peer_inbox``) — so nothing here is ordered
+        # against it any more.
         note_open = getattr(self, "note_turn_open", None)
         if callable(note_open):
             try:
@@ -7419,6 +8107,11 @@ class Session:
             # aborted turn still hands the notice to the next one instead of
             # stranding it until the session is disposed.
             self._flush_context_journal()
+            # And the credential-shape reports queued by the result hook: the
+            # same boundary, for the same reason, plus one of its own — the
+            # operator's rotation ticket has to exist even when the turn that
+            # leaked the credential is the one being aborted.
+            await self._flush_shape_incidents()
             # LAST, by design: ``_run_turn``'s own ``finally`` has already
             # cleared ``_is_streaming`` on the way out of the await above, and
             # ``_flush_held_end`` has delivered the end event, so a reader
@@ -7562,6 +8255,56 @@ class Session:
                 ):
                     await self._emit(MessageStartEvent(message=message))
 
+            # Belt-and-braces for peer delivery: consume any inbox rows spooled
+            # for this session, ONCE, at the first real turn. The primary inbox
+            # consumer is the runtime child's boot drain (``process.amain``),
+            # which a session that opened some other way — or that was sent a
+            # spool by an older sender that had no live record for it, or by one
+            # on an older build — never passes through; without this drain those
+            # rows would sit unread until some future process cold-opens the
+            # session. The row's own ``wake``/mode are FORWARDED rather than
+            # rewritten, and the no-extra-turn property comes from WHERE this
+            # runs — inside a turn that is already streaming — not from a quiet
+            # override: see the caller's paragraph below.
+            #
+            # HERE, AFTER this turn's own messages are durable, and that
+            # position is the guarantee rather than a convenience: a peer row
+            # lands in the transcript at the moment it is delivered, so draining
+            # before the append loop wrote the note ABOVE the owner's opening
+            # prompt — the peer message became the first row of a conversation
+            # its owner had just started, which is the reported symptom in the
+            # one corner the unengaged gate cannot cover (a spool written by a
+            # build that predates the gate).
+            #
+            # What the move does NOT cost, measured rather than assumed: the
+            # rows' visibility to the model is identical in both positions. The
+            # live append parks (the turn lock is held), and the loop drains
+            # steering only from its SECOND inner iteration onward
+            # (``harness/loop.py``: ``if not first_inner``), so a spooled row was
+            # never in this turn's FIRST request either way — it lands in live
+            # context at the continuation/yield boundary and is carried by the
+            # next model call. Do not re-describe this as "visible in the same
+            # turn's first request": that was never true.
+            #
+            # And nothing is consumed before the turn can deliver it — the
+            # once-per-lifetime flag is set inside the drain, so a turn dropped
+            # as pre-aborted, or a turn that fails before its own rows are
+            # written, leaves the spool whole for the next real turn instead of
+            # discarding rows it never showed anyone.
+            #
+            # A spooled row's own ``wake`` is NOT authoritative here, and that
+            # is a property of this position rather than an oversight: the drain
+            # runs inside a turn that is already streaming (``_is_streaming`` is
+            # True above), so ``receive_peer_message`` takes its busy branch and
+            # the row rides THIS turn's context as a quiet note instead of
+            # spawning a second turn. That is the benign direction — nothing is
+            # lost, the row is durable and in live context, and it is exactly
+            # what a live dial into a busy session does — but do not read the
+            # row's field as "a turn will be driven for this": a sender's
+            # ``--wake`` asks for attention, and it gets the attention of the
+            # turn already running.
+            await self._drain_spooled_peer_inbox()
+
             # Inventory changes deferred from a `web_*.enabled` edit land HERE,
             # before the tool context and the loop config are built for this
             # turn, so the schema the model sees is consistent for the whole
@@ -7602,13 +8345,13 @@ class Session:
                 has_pending_fork=self.has_pending_fork,
                 get_aside_messages=self._drain_asides,
                 get_follow_up_messages=self._todo_continuation,
-                resolve_fallback_tool=self._fallback_tool_resolver,
+                resolve_fallback_tool=self._resolve_tool_outside_inventory,
                 # Redact stored credential values out of every tool result
                 # before the message lands in the transcript. The store is
                 # in-memory and session-scoped, so this is the one place a
                 # credential can be turned back into plain text for the model.
                 redact_tool_result=(
-                    self._variables.redact if self._variables is not None else None
+                    self._redact_tool_result_text if self._variables is not None else None
                 ),
                 # Tool-call outcomes into the shared ledger, so /session can
                 # report this model's tool-call validity. Supplied as a closure
@@ -7715,6 +8458,14 @@ class Session:
             # site: the clone copies what is on disk.
             await self._drain_pending_fork()
 
+            # Anything that was waiting for this turn's answer goes out HERE, after
+            # the reply is on disk and therefore after it has painted: notices raised
+            # during prompt build would otherwise sit between the question and the
+            # answer (see ``queue_notice``). Before the bookkeeping below, so the line
+            # lands as promptly as the answer it follows rather than trailing the
+            # todo/spend writes.
+            await self._flush_queued_notices()
+
             # Snapshot the todo list when it moved this turn. Guarded by the
             # same full-list fingerprint the continuation guardrail uses, so an
             # unchanged list costs one tuple comparison and no transcript write,
@@ -7761,6 +8512,27 @@ class Session:
             # write that fails must not replace the original exception (which
             # is what the caller and the incident journal need to see).
             await self._persist_progress(self._context.messages)
+            # …and the notices that turn queued are DISCARDED rather than flushed. What
+            # that means depends on how the turn ended, and there are three cases:
+            #
+            # * a turn that reached the flush above — the ordinary one, and also an
+            #   ABORTED stream, which returns normally, persists the partial answer and
+            #   flushes — finds the queue already empty, so this is a no-op;
+            # * a turn CANCELLED before the flush (Ctrl+C, dispose, a steering teardown)
+            #   never produced an answer, and its line would attribute a suggestion to a
+            #   message that delivered nothing;
+            # * a turn that RAISES after the answer landed (out of
+            #   ``_persist_new_messages``, ``_drain_pending_fork``, the todo checkpoint)
+            #   did answer, but its line is dropped with the failing turn rather than
+            #   delivered onto the next message, where it would name the wrong question.
+            #   A line queued after the flush point goes the same way, by construction:
+            #   this and the flush are the only two places the queue is emptied.
+            #
+            # Flushing here instead was round 3's bug in the other direction — the
+            # stale line survived its turn and arrived ahead of the NEXT turn's own,
+            # misattributed to a message that delivered nothing (round 4, MINOR-2, for
+            # the claim that all three cases are one).
+            self._discard_queued_notices()
             self._signal = None
             self._is_streaming = False
 
@@ -7987,6 +8759,26 @@ class Session:
         task.add_done_callback(_on_done)
         return task
 
+    def _scratchpad_dir(self) -> str | None:
+        """This session's ``scratchpad://`` root as a path string, or ``None``.
+
+        Derived from the TRANSCRIPT's directory, which is the one place that
+        already owns the session-directory layout, and derived HERE rather
+        than taken as a constructor argument so it cannot be "set by the host
+        and forgotten on the way to the executor" — the drop the parity test
+        exists to catch, avoided by never letting a host configure it at all.
+
+        Defensive about a transcript with no usable ``.directory``, matching
+        how the id derivation tolerates one: a host with no session has no
+        scratch area, and that is a ``None`` rather than an exception on the
+        path every turn walks. Cost is one join and one ``parent.name`` compare.
+        """
+        from local_operator.scratchpad import scratchpad_root
+
+        bound = getattr(self._transcript, "directory", None)
+        root = scratchpad_root(bound if isinstance(bound, (str, Path)) else None)
+        return None if root is None else str(root)
+
     def _build_tool_context(self) -> ToolContext:
         # This context is REBUILT on every turn, so anything that must outlive
         # a turn is owned by the session and injected here. ``wake_scheduler``
@@ -7997,6 +8789,8 @@ class Session:
         # work, and for teardown to be able to close the tab.
         return ToolContext(
             cwd=self._cwd,
+            # Derived, never configured: see :meth:`_scratchpad_dir`.
+            scratchpad_dir=self._scratchpad_dir(),
             session_id=self._session_id,
             # Re-read the live holder every turn so generated, user-set, and
             # resumed titles reach display-only browser metadata after renames.
@@ -8024,7 +8818,7 @@ class Session:
             job_label=self._job_label,
             has_ui=self._has_ui,
             resolve_internal_url=self._skill_resolver,
-            request_approval=None if self._yolo else self._request_approval,
+            request_approval=self._tool_approval_gate(),
             ask_user=self._ask_user,
             wake_scheduler=self._wake,
             on_todos_changed=self.refresh_frontend_state,
@@ -8484,6 +9278,108 @@ class Session:
         # shows nothing after a restart. Mirrors the transient model-switch
         # split (``_is_persistable_message``).
         self._append_or_park_journal(message)
+
+    def _redact_tool_result_text(self, text: str) -> str:
+        """``LoopConfig.redact_tool_result``. Mask, then REPORT what was masked.
+
+        The masking half is :meth:`VariableStore.redact_with_hits`: exact values
+        first, then the credential-SHAPE pass, with every matched credential
+        registered back as a value to scrub for the rest of the session.
+
+        The reporting half is the shape labels, and it exists because a shape
+        match is the ONLY signal that a credential the session never knew about
+        reached a tool result — a live production DSN was found in a transcript
+        with nothing anywhere saying it had happened, and every such miss today
+        is discovered by accident. One :data:`SESSION_INCIDENT_MESSAGE_TYPE` row
+        names the tool and the shapes, so it becomes a rotation ticket rather
+        than a footnote. Labels only: a notice carrying the credential would be
+        the leak it exists to report.
+
+        Called with text alone, so the tool identity rides
+        :func:`local_operator.harness.redaction.current_tool_source` — published
+        by the loop around the redaction of each result.
+
+        Never raises: this is on the result path, and a redaction fault must not
+        turn a tool result into a tool crash. A host with no variable store (a
+        minimal embedder) keeps the untouched text, which is the pre-existing
+        behaviour for a session built without one.
+        """
+        store = self._variables
+        if store is None:
+            return text
+        try:
+            scrubbed, labels = store.redact_with_hits(text)
+        except Exception:  # noqa: BLE001 — see the docstring's never-raises note
+            logger.warning("credential shape pass failed; withholding this text", exc_info=True)
+            return "[output withheld: this session's credential redaction sink could not be read]"
+        if labels:
+            self._queue_shape_incident(labels)
+        return scrubbed
+
+    def _queue_shape_incident(self, labels: list[str]) -> None:
+        """Record one shape-masked result for the boundary flush. Never raises."""
+        try:
+            tool, summary = current_tool_source()
+            key = (tool, tuple(labels))
+            if key in self._reported_shape_incidents:
+                return
+            self._reported_shape_incidents.add(key)
+            self._pending_shape_incidents.append((tool, labels, summary))
+        except Exception:  # noqa: BLE001 — reporting must not break the turn
+            logger.debug("shape incident queue failed", exc_info=True)
+
+    async def _flush_shape_incidents(self) -> None:
+        """Journal the queued shape reports. Called at the turn boundary."""
+        pending, self._pending_shape_incidents = self._pending_shape_incidents, []
+        for tool, labels, summary in pending:
+            try:
+                await self.journal_shape_incident(tool, labels, summary)
+            except Exception:  # noqa: BLE001 — a notice is not worth a turn
+                logger.warning("could not journal a credential-shape incident", exc_info=True)
+
+    async def journal_shape_incident(self, tool: str, labels: list[str], summary: str) -> None:
+        """Tell the model (and the transcript) that a result was masked.
+
+        Rendered rather than classified: this is not a FAILURE, and running it
+        through :func:`~local_operator.incidents.classify_incident` would attach
+        a failure category and a "this is why the previous turn ended" tail to a
+        turn that ended for its own reasons — the same reason a credential
+        change and a model switch carry their own formatter.
+
+        Persisted, unlike an MCP recovery: what it records (a credential reached
+        a tool result, it is contained for this session, and it must be rotated)
+        is still true in a resumed session, and the value stays contained
+        because the store re-registers it from the transcript's own redaction.
+        """
+        from local_operator.incidents import format_shape_incident_message
+
+        if self._disposed:
+            return
+        text = format_shape_incident_message(tool, labels, summary)
+        message = CustomMessage(
+            custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": text, "tool": tool, "shapes": list(labels), "summary": summary},
+        )
+        try:
+            async with self._journal_lock:
+                await self._transcript.append_message(message, preserve_mtime=True)
+                self._append_or_park_journal(message)
+        except OSError:
+            logger.warning("could not journal a credential-shape incident", exc_info=True)
+            return
+        # THE LIVE RECEIPT, and the reason this method exists in the shape it
+        # does: a row written to the transcript and to the model's context is not
+        # a rotation ticket — the operator has to SEE it. Measured before this
+        # emit: the row reached the model, persisted, and painted on no operator
+        # surface at all, live or on replay.
+        #
+        # `warning` ink: a credential that reached a tool result is a state the
+        # operator has to act on, not a receipt they can skim past.
+        try:
+            await self._emit(NoticeEvent(text=text, kind="warning", headline="credential masked"))
+        except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
+            logger.debug("could not emit the shape-incident receipt", exc_info=True)
 
     async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
         """Tell the MODEL an MCP server it was told was broken is usable again.
@@ -13171,7 +14067,9 @@ class Session:
         except Exception:  # noqa: BLE001 — the inventory is never worth a broken turn
             logger.warning("web tool inventory could not be reconciled", exc_info=True)
 
-    def add_dispose_hook(self, hook: Callable[[], Awaitable[None] | None]) -> None:
+    def add_dispose_hook(
+        self, hook: Callable[[], Awaitable[None] | None], *, last: bool = False
+    ) -> None:
         """Register teardown that runs after the session's own dispose.
 
         The composition root owns resources the session never created — MCP
@@ -13180,8 +14078,25 @@ class Session:
         place to hang them. Hooks run in registration order, and one that
         raises is logged rather than propagated: teardown must never mask the
         dispose that triggered it.
+
+        ``last=True`` defers one hook past ALL the others, whatever order they
+        were registered in, and exists for exactly one kind of resource: one
+        that the other hooks still need while they run. The credential store is
+        that resource — MCP teardown persists a refresh rotation into it, and a
+        refresh exchange detached mid-POST can still be writing seconds later —
+        so its close cannot be expressed as "registered after the MCP hooks":
+        the deferred MCP wiring registers ITS hooks from a background task, long
+        after the store's was registered, and a session disposed before that
+        task finished has no MCP hook at all. A late hook is order-independent,
+        which is the property the store's lifetime actually needs (it was a
+        measured bug, not a hypothetical: the store closed first, the rotation
+        write was swallowed at DEBUG, and the user paid for it with a browser
+        sign-in).
         """
-        self._dispose_hooks.append(hook)
+        if last:
+            self._final_dispose_hooks.append(hook)
+        else:
+            self._dispose_hooks.append(hook)
 
     @property
     def browser_generation(self) -> str:
@@ -13262,6 +14177,46 @@ class Session:
         except Exception:
             logger.warning("closing the browser surface failed", exc_info=True)
 
+    def _disposal_turn(self) -> asyncio.Task[None] | None:
+        """The live turn THIS disposal is about to abort, or ``None``.
+
+        ONE DEFINITION OF "this exit cut something", shared by the note, the
+        abort that follows it, and the runtime handle that asks before it
+        notes. Three terms, and every one of them is load-bearing:
+
+        * a live ``_turn_task`` — the turn is still running, so ending it is a
+          cut rather than bookkeeping;
+        * an abort signal, because the abort below is what actually stops it
+          and the disposal cannot cut a turn it cannot abort;
+        * and the task not DONE, so a turn that finished while the caller was
+          getting here is not relabelled after the fact.
+
+        WHAT THIS IS NOT: a test of whether a RUN is unsettled. A run can be
+        left without an outcome by a turn cancelled somewhere else entirely
+        (``Session.dispose``'s synthesis comment names the socket case), and
+        that run is not work this exit ended. The two questions were conflated
+        by the note this change corrects: a disposal that cut nothing branded
+        the leftover run anyway, which is how a backend update put an error row
+        under a conversation that had gone quiet (2026-09-17).
+        """
+        turn = self._turn_task
+        if turn is None or turn.done() or self._signal is None:
+            return None
+        return turn
+
+    def disposal_cuts_a_turn(self) -> bool:
+        """Whether ``dispose`` is about to abort a LIVE turn.
+
+        The PUBLIC form of :meth:`_disposal_turn`, for
+        ``ServingSessionHandle``: the cut-off note a retirement may write is
+        only honest when this disposal is the party ending work, and the handle
+        has to ask before it notes rather than infer it from its own latch (a
+        retirement latch REFUSES while anything is in flight, so a latched
+        retirement is proof of the opposite — see
+        ``serving.ServingSessionHandle._note_retirement_cut_off``).
+        """
+        return self._disposal_turn() is not None
+
     async def dispose(self) -> None:
         """Abort any in-flight turn, close the browser surface, cancel
         background work, dispose jobs and the wake scheduler, flush the
@@ -13275,14 +14230,26 @@ class Session:
         if self._disposed:
             return
         self._disposed = True
-        # In-process disposal is a cut-off for whatever turn is running: this
+        # In-process disposal is a cut-off for whatever turn is RUNNING: this
         # path is reached by a host tearing a session down directly (the
         # runtime's own handle disposes through ``ServingSessionHandle``, which
-        # notes its more specific cause FIRST, and first-wins keeps that one).
-        # Harmless when nothing is in flight — the cause is consumed only by the
-        # running turn's end event — and suppressed outright after a deliberate
-        # stop, so a user's own cancel is never relabelled.
-        self.note_cut_off("disposed")
+        # notes its more specific cause FIRST, and first-wins keeps that one),
+        # and suppressed outright after a deliberate stop, so a user's own
+        # cancel is never relabelled.
+        #
+        # A TURN MUST ACTUALLY BE RUNNING, and the evidence is the same one the
+        # abort below keys on (``disposal_cuts_a_turn``). The note used to be
+        # written unconditionally on the grounds that it is "consumed only by the
+        # running turn's end event" and therefore harmless when nothing is in
+        # flight — which is exactly what stops being true when a run is left
+        # UNSETTLED: the synthesis further down used to fabricate an end for it,
+        # so an unconditional note branded a run whose turn had already ended.
+        # Measured on the reporting host as durable ``error`` rows against runs
+        # whose last turn row preceded them by minutes (six with the retirement
+        # label, more with this one), each rendered as a cut-off of work that had
+        # finished (2026-09-17).
+        if self.disposal_cuts_a_turn():
+            self.note_cut_off("disposed")
         unsubscribe_state = getattr(self, "_unsubscribe_subagent_state", None)
         if unsubscribe_state is not None:
             unsubscribe_state()
@@ -13309,8 +14276,8 @@ class Session:
         try:
             # HC-14: abort the in-flight turn and await its completion (bounded)
             # before flushing — its persistence must land on a live transcript.
-            turn = self._turn_task
-            if turn is not None and not turn.done() and self._signal is not None:
+            turn = self._disposal_turn()
+            if turn is not None:
                 self.abort("session disposed")
                 try:
                     await asyncio.wait_for(asyncio.shield(turn), timeout=5.0)
@@ -13336,11 +14303,27 @@ class Session:
                 # through the SAME classifier and publisher, so the
                 # deliberate/error split is still decided in one place.
                 try:
-                    if self._attention_outcome is None:
-                        self._attention_outcome = self._classify_cut_off(
-                            AgentEndEvent(messages=[], aborted=True)
-                        )
-                    await self._publish_attention_outcome()
+                    # WHETHER THIS RUN'S FATE HAS ANY EVIDENCE BEHIND IT, read
+                    # before the synthesis invents the end the publisher needs.
+                    # A cause (noted by the disposal's own cut, or by a
+                    # mid-turn import failure) and a recorded deliberate stop
+                    # are the two things that make an outcome assertable; the
+                    # synthesis exists for exactly the second one, whose run
+                    # leaves no end event when it is cancelled at a tool await.
+                    # With neither, this run stopped without anyone recording
+                    # why and WITHOUT this exit cutting it — see
+                    # ``_settle_run_without_an_outcome`` for why the honest
+                    # disposition there is to publish nothing at all.
+                    if self._attention_outcome is None and not (
+                        self._cut_off_cause or self._deliberate_stop_noted
+                    ):
+                        await self._settle_run_without_an_outcome()
+                    else:
+                        if self._attention_outcome is None:
+                            self._attention_outcome = self._classify_cut_off(
+                                AgentEndEvent(messages=[], aborted=True)
+                            )
+                        await self._publish_attention_outcome()
                 except Exception:  # noqa: BLE001 — teardown must always proceed
                     logger.warning("could not publish a disposed turn's outcome", exc_info=True)
             # The browser surface is session-scoped and lives in the user's own
@@ -13424,9 +14407,27 @@ class Session:
             from local_operator.session.retention import release_session
 
             release_session(self._transcript.directory)
+            # A queued notice whose turn never finished (aborted, or a raise out of
+            # the run) would otherwise sit here forever. Emitting it now is the
+            # honest choice of the two: it belongs to no later answer, and the
+            # substitute — delivering it onto the next turn — is exactly the wrong
+            # attribution the queue exists to avoid. Before the hooks, so the event
+            # stream is still live when it goes out.
+            await self._flush_queued_notices()
             # ``finally``: host-owned resources must be released even when the
             # session's own teardown blew up part way through.
             for hook in self._dispose_hooks:
+                try:
+                    outcome = hook()
+                    if inspect.isawaitable(outcome):
+                        await outcome
+                except Exception:
+                    logger.warning("session dispose hook failed", exc_info=True)
+            # ...and the late hooks LAST, after every one of those has had its
+            # turn: they are the resources the ordinary hooks still need (see
+            # ``add_dispose_hook``'s ``last``), so a hook registered to run
+            # after them would defeat the point of the two lists.
+            for hook in self._final_dispose_hooks:
                 try:
                     outcome = hook()
                     if inspect.isawaitable(outcome):

@@ -200,6 +200,27 @@ def test_agent_shell_marker_denies_the_ci_core_grab(
     assert workers == 7, "an agent shell must get the developer CPU share, not every core"
 
 
+def test_the_marker_means_the_same_thing_to_the_hook_and_the_guard(
+    hook_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Presence was the old test; production reads ``1``/``true``/``yes``/``on``.
+
+    ``LOCAL_OPERATOR_AGENT_SHELL=0`` used to deny the CI core grab here while
+    `agent_shell.in_agent_shell` allowed the run: one variable, two answers
+    (review round 1, F4). Routing the hook through the production predicate is
+    what this asserts — the value must resolve to the PLAIN-CI arm.
+    """
+    workers = _resolve(
+        hook_module,
+        monkeypatch,
+        cpus=14,
+        available_mb=_AMPLE_MB,
+        env={"CI": "1", "LOCAL_OPERATOR_AGENT_SHELL": "0"},
+    )
+    plain = _resolve(hook_module, monkeypatch, cpus=14, available_mb=_AMPLE_MB, env={"CI": "1"})
+    assert workers == plain, "an off value must not read as an agent shell"
+
+
 def test_agent_shell_and_plain_ci_differ(
     hook_module: types.ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:

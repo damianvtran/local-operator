@@ -10,7 +10,11 @@ socket addresses, credentials or another conversation's identity.
 # table below is keyed on them, and a reworded phrase must fail at import time
 # rather than silently stop matching. Safe to import here (no cycle):
 # ``session.runtime.types`` reaches ``session.retention`` and the stdlib only.
-from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_FOR_BUILD_OVERDUE,
+    LEAVING_ON_SIGNAL,
+)
 
 
 class AttachmentUnavailable(ValueError):
@@ -21,6 +25,27 @@ class AttachmentUnavailable(ValueError):
             "The attached profile or team could not be restored. "
             "Choose an available profile or detach it before sending."
         )
+
+
+#: The sentence ``Session.prompt`` raises when a turn (or a compaction) already
+#: holds the lock. Public because four call sites classify that refusal —
+#: ``mobile/attach_client``, ``mobile/tui_handle``, ``session/runtime/serving``
+#: and ``session/runtime/process`` — and matching it as text is a seam that
+#: breaks silently when the wording changes (agent review round 2, MINOR-1).
+TURN_IN_FLIGHT = "session is already streaming; use steer() to inject mid-turn"
+
+
+class TurnInFlight(RuntimeError):
+    """``prompt`` was called while a turn holds the session's lock.
+
+    The TYPED form of :data:`TURN_IN_FLIGHT`, so a caller can decide what to do
+    about it (the spooled-owner drain steers the message into the turn in flight)
+    instead of pattern-matching a sentence. A ``RuntimeError`` subclass, so every
+    existing catcher of the plain raise is unaffected — which is why the three
+    call sites outside ``session/`` also accept the text: on a version skew the
+    producer may be a build that has never heard of this class, and the old
+    sentence is the only seam the two ends share.
+    """
 
 
 class RuntimeRetiring(ValueError, RuntimeError):
@@ -75,11 +100,12 @@ class RuntimeRetiring(ValueError, RuntimeError):
     #: field should not have to go hunting for a producer that is not there:
     #: ``SIGNAL`` is the one, raised by
     #: ``serving.ServingSessionHandle._retiring_refusal`` from the cause its own
-    #: latch committed (``types.SIGNAL_DRAIN_CAUSE``). ``BUILD`` is decoded and
-    #: reachable — a peer may name it, and it is what the far side resolves a
-    #: build drain TO from the phrase that drain published — but nothing in this
-    #: tree raises it: the cause behind a build drain is the one ``/move`` shares,
-    #: and the phrase, not the cause, is what tells those two apart.
+    #: latch committed (``types.SIGNAL_DRAIN_CAUSE``). ``BUILD`` is raised by the
+    #: runtime whose drain is still running — ``ServingSessionHandle.
+    #: _retiring_refusal`` names it from ``_draining`` without a committed exit,
+    #: which is the term that tells a build drain from the ``/move`` retirement
+    #: sharing its cause — and it is also what the far side resolves a build
+    #: drain TO from the phrase that drain published.
     SIGNAL = "signal"
     BUILD = "build"
 
@@ -130,8 +156,39 @@ class RuntimeRetiring(ValueError, RuntimeError):
     HEAD_UNNAMED = "This session is leaving; it will not start a new turn."
     REFUSED = "The message was not admitted"
     TAIL = "send it again once the session is running again."
+    #: The tail for the departure that OWES A SUCCESSOR, reached on the refusal
+    #: paths: there was nowhere to spool the message (an unwritable inbox, an
+    #: attachment an inbox row cannot carry) or the exit was already committed.
+    #: The old tail — "send it again once the session is running again" — sent
+    #: the operator to perform the one operation the refusal had just refused,
+    #: and it is what the incident left them with for 1 h 40 m (memo §4.2 piece
+    #: 3). The old instruction stays; the DESTINATION is what changes.
+    #:
+    #: IT NAMES NO CARRIAGE, and that is a correction rather than a style
+    #: choice: this arm is exactly the one where the message was NOT carried
+    #: (QA round 1, Q-2 — the earlier "a newer build is starting here to carry
+    #: on" read as "your message is on its way" while the spool had failed, and
+    #: a front end that does not restore a draft would never re-send). Asking
+    #: for the re-send is the honest instruction here, and naming the build is
+    #: what makes it actionable (UX round 1, U5).
+    TAIL_HANDOVER = "send it again once the new build is up."
+    #: The tail for a message that IS carried — on the successor's spool — and
+    #: reaching a caller that cannot watch the turn it will run in: a loop's
+    #: ``prompt_and_wait`` correlates on an ``AgentEndEvent`` from THIS runtime,
+    #: and the successor writes that row after this process has exited. So the
+    #: refusal is the answer, and this is its honest tail: the deferral, named
+    #: as a deferral. Never sent over the wire — the spool receipt is what the
+    #: runtime answers with — so no ``error_*`` field carries it.
+    TAIL_QUEUED = "your message is queued and will run as soon as this session runs again."
+    #: The queued tail for a departure that owes NO successor: a signalled stop, or
+    #: a phrase this build cannot place. The row IS durable — the next runtime to
+    #: open the session drains it — but whether one ever does is the host's
+    #: decision, not the signal's, so the sentence must not promise a future the
+    #: departure does not establish (the D6 rule the neighbouring notice is split
+    #: by; agent review round 2, NIT-1). Hence the conditional.
+    TAIL_QUEUED_OTHER = "your message is queued and will run if this session runs again."
 
-    def __init__(self, trigger: str = "", leaving: str = "") -> None:
+    def __init__(self, trigger: str = "", leaving: str = "", *, queued: bool = False) -> None:
         # ``HEAD`` is per-INSTANCE because the situation is: the same refusal
         # carries different sentences for the departures, and the far side
         # rebuilds whichever one the raiser's enumerated ``trigger`` names.
@@ -160,6 +217,19 @@ class RuntimeRetiring(ValueError, RuntimeError):
         if not self.trigger:
             self.trigger = _TRIGGER_FOR_LEAVING.get(leaving, "")
         self.HEAD = _HEADS.get(self.trigger, self.HEAD_UNNAMED)
+        # The tail is chosen off the SAME token as the head, for the reason
+        # ``_HEADS`` gives below: one departure, one reading of it. A trigger
+        # that names nothing keeps the tail this class has always carried.
+        #
+        # ``queued`` outranks the token because it is a fact about THIS MESSAGE
+        # rather than about the departure, and the two sentences are not
+        # interchangeable: one asks for a re-send, the other says the message is
+        # already on its way.
+        self.TAIL = (
+            _QUEUED_TAILS.get(self.trigger, self.TAIL_QUEUED_OTHER)
+            if queued
+            else _TAILS.get(self.trigger, self.TAIL)
+        )
         super().__init__(f"{self.HEAD} {self.REFUSED} — {self.TAIL}")
 
 
@@ -173,13 +243,42 @@ _HEADS: dict[str, str] = {
     RuntimeRetiring.BUILD: RuntimeRetiring.HEAD,
 }
 
+#: The tail each enumerated departure earns, chosen off the same token as
+#: ``_HEADS`` and for the same reason: they are two readings of one state, and
+#: the two ends must pick them the same way. A SIGNAL drain is leaving for good
+#: and owes nobody; a BUILD drain is handing the session to the build on disk,
+#: which is the one departure where re-sending is not the operator's job.
+#: The queued tail per trigger, on the same reasoning as ``_TAILS``: a sentence
+#: may state only what the departure establishes, and only a build drain
+#: establishes that a successor is coming.
+_QUEUED_TAILS: dict[str, str] = {
+    RuntimeRetiring.BUILD: RuntimeRetiring.TAIL_QUEUED,
+}
+
+_TAILS: dict[str, str] = {
+    RuntimeRetiring.BUILD: RuntimeRetiring.TAIL_HANDOVER,
+}
+
 #: The departure a phrase establishes, for a raiser that could not name one.
-#: Only the two phrases the runtime publishes are keys: anything else — an empty
+#: Only the phrases the runtime publishes are keys: anything else — an empty
 #: phrase, or a phrase written by a build this one has never heard of — is
 #: evidence about nothing, and the unnamed sentence is the answer for it.
+#:
+#: THE BOUNDED HANDOVER RESOLVES TO ``BUILD`` (agent review round 1, N1). It is a
+#: build departure in every clause the build head states — the install on disk
+#: moved under this runtime, it is leaving for the newer build, and the successor
+#: that answers the refusal is that build — so the alternative, no token at all,
+#: gave the MOST serious departure the VAGUEST sentence ("This session is
+#: leaving…") while an ordinary handover named the build. What the head does not
+#: say is that the turn was cut rather than finished; that fact is the phrase's
+#: (``types.LEAVING_FOR_BUILD_OVERDUE``, which this table is keyed by and the
+#: refusal's receipt quotes) and the record's, and the refusal sentence holds only
+#: the token its own category enumerates — a third trigger value would be a wire
+#: change to say it twice.
 _TRIGGER_FOR_LEAVING: dict[str, str] = {
     LEAVING_ON_SIGNAL: RuntimeRetiring.SIGNAL,
     LEAVING_FOR_BUILD: RuntimeRetiring.BUILD,
+    LEAVING_FOR_BUILD_OVERDUE: RuntimeRetiring.BUILD,
 }
 
 

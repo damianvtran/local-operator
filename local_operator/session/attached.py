@@ -112,6 +112,7 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
 from local_operator.session.runtime.types import drain_phrase_for_frame
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
@@ -1175,6 +1176,15 @@ class AttachedSession:
         #: starts unmuted and only this flag can put the mute back.
         self._event_mute_requested = False
         self._event_mute_tasks: set[asyncio.Task[None]] = set()
+        #: Whether this viewer last told the owner it is DISPLAYING the session
+        #: (see ``viewer_watch``). Remembered for the same reason the mute
+        #: above is: the claim is per CONNECTION and a fresh socket defaults to
+        #: displaying, so a parked source that redialed would silently resume
+        #: suppressing the owner's parked-gate notification until it was
+        #: released. ``True`` is the pre-signal behaviour and the honest start:
+        #: a source that has never declared otherwise IS the one on screen for
+        #: every single-session viewer.
+        self._viewer_displaying = True
         self._name_state = ConversationName()
         self._model: ModelSpec | None = None
         # Double-Esc subagent cancel: the synchronous protocol method issues
@@ -3968,6 +3978,23 @@ class AttachedSession:
                 await asyncio.wait_for(client.set_event_muted(True), timeout=5.0)
             except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
                 logger.debug("event mute re-assert failed", exc_info=True)
+        # Re-assert a switched-away claim across a reconnect, for the same
+        # reason and on the same terms as the mute above: the claim is per
+        # connection and a fresh one defaults to displaying, so a parked
+        # source that redialed would resume suppressing its owner's parked-gate
+        # notification for the rest of the sidebar retention (independent
+        # review round 4, F1b). Only the AWAY claim is re-sent -- `True` is the
+        # owner's own default, so restating it would spend a dial-path round
+        # trip to change nothing.
+        if not self._viewer_displaying:
+            try:
+                # Bounded exactly like the mute re-assert: a wedged owner must
+                # not hold the redial open over a routing signal. A lost
+                # re-assert costs a notification, never correctness -- the
+                # source's release still closes the socket and republishes.
+                await asyncio.wait_for(client.viewer_watch(displaying=False), timeout=5.0)
+            except Exception:  # noqa: BLE001 — a lost re-assert is a cost, not a defect
+                logger.debug("viewer watch re-assert failed", exc_info=True)
         if self._surface == "desktop":
             from local_operator.session.runtime.types import DESKTOP_WATCH_LEASE_S
 
@@ -7528,7 +7555,27 @@ class AttachedSession:
         try:
             # Loop iterations are queued prompt turns, never steering inferred
             # from a transient current-busy observation.
-            await client.send_command(command, streaming=False)
+            receipt = await client.send_command(command, streaming=False)
+            if receipt == SPOOL_RECEIPT_PROMPT:
+                # A DRAINING OWNER THAT QUEUED THE MESSAGE FOR ITS SUCCESSOR.
+                # The message is safe — the successor runs it (memo §4.2) — but
+                # THIS connection cannot observe that turn: the row it would
+                # correlate on is written by another process, after this one
+                # exits, and no ``MessageStartEvent`` for `command_id` will ever
+                # arrive here. Waiting for `completed` would park this caller
+                # until its own timeout on a turn that is not coming.
+                #
+                # So it gets the typed refusal, which is the honest answer for a
+                # caller whose contract is "the owner's actual terminal outcome":
+                # this runtime will not run it, and the message itself is queued
+                # (``queued=True`` selects that tail — the default one asks for a
+                # re-send, which would be false advice for a message already on
+                # the successor's spool).
+                from local_operator.session.errors import RuntimeRetiring
+
+                raise RuntimeRetiring(
+                    leaving=str(getattr(client, "_drain_phrase", "") or ""), queued=True
+                )
             outcome = await completed
             if outcome.error:
                 raise RuntimeError(outcome.error)
@@ -7548,7 +7595,7 @@ class AttachedSession:
         images: Sequence[ImageContent] | None = None,
         *,
         message_id: str | None = None,
-    ) -> None:
+    ) -> str:
         """Send a prompt to the owner, optionally under a caller-supplied id.
 
         ``message_id`` becomes the ``ContinuationCommand`` id, which the owner
@@ -7564,6 +7611,18 @@ class AttachedSession:
         (``_send_steer_when_ready`` sends ``command_id=message.id``); this is
         the prompt path catching up with its own sibling. Minted here when the
         caller supplies nothing, which is the historical behaviour.
+
+        RETURNS THE OWNER'S RECEIPT LINE, which is a protocol fact this method
+        had been dropping: ``prompt``'s reply IS a sentence (``serving``'
+        'prompt admitted', the spool receipt, or the legacy 'prompt queued
+        (n)'), and a viewer that discards it cannot tell an admission from a
+        deferral. The TUI needs exactly that distinction against a DRAINING
+        owner, where the message is queued onto the successor instead of run
+        (memo §4.4) — the incident's whole complaint being that a refusal was
+        the only report the app could give of a state it could have named.
+        Empty for the in-process takeover target, whose ``prompt`` runs the
+        whole turn and returns nothing (its caller awaits completion, not a
+        receipt).
         """
         # The cold-to-attached seam: a viewer that has been LOOKING at a
         # session starts working in it here, which is the first moment a
@@ -7580,7 +7639,7 @@ class AttachedSession:
                 await target.prompt(text, images, message_id=message_id)
             else:
                 await target.prompt(text, images)
-            return
+            return ""
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
@@ -7595,7 +7654,7 @@ class AttachedSession:
             if message_id
             else ContinuationCommand.create(self._session_id, text, images_wire)
         )
-        await client.send_command(command, streaming=self._streaming)
+        return await client.send_command(command, streaming=self._streaming)
 
     async def seed_history(self, messages: list[Message]) -> None:
         if self.history_message_count:

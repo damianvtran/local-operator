@@ -145,6 +145,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only this call's own mkstemp sidecar temp file after a failed replace",
     ),
+    # The browser file-transfer quarantine. Every path these two calls touch is
+    # composed by `browser_files.session_dir()` as
+    # `<config_dir>/browser/downloads/<stamp>-<session8>/` — a SIBLING of
+    # `sessions/` under the config root, never a descendant of it — and the
+    # candidate names are produced by listing THAT directory (`browser_files.
+    # snapshot`). The unlink is the refusal's tidy-up of one direct child entry
+    # (the entry, never a resolved target: review round 1's R1), and the rename
+    # is the content-corrected name of one landed file, with BOTH sides direct
+    # children of the same quarantine directory. Neither can name a session
+    # directory, and no path here is derived from a session id beyond the eight
+    # characters sanitised into the directory's own label.
+    (
+        "local_operator/tools/builtin.py::_unlink_quietly",
+        "<path>.unlink",
+        "Deletes one refused ENTRY inside the browser download quarantine "
+        "(<config_dir>/browser/downloads/<stamp>-<session8>/), never a session directory",
+    ),
+    (
+        "local_operator/tools/builtin.py::_browser_download",
+        "<path>.rename",
+        "Renames one landed file WITHIN that same quarantine directory to its "
+        "content-corrected name; both sides are direct children of it",
+    ),
     (
         "local_operator/tui/session_drafts.py::SessionDraftStore._write",
         "os.replace",
@@ -654,6 +677,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/wakes/deliveries.py::remove_delivery",
         "<path>.unlink",
         "wakes/deliveries/<id>.json FILE",
+    ),
+    # The serving plane's publication latch. `wait_until_published` takes its own
+    # waiter back OUT of `_publication_gates` when its bound expires, so a
+    # runtime whose boot prologue never settles cannot leave a dead
+    # `PublicationGate` behind in a list that every later waiter walks (review
+    # round 1, NIT-2). The call is a `list.remove` on an in-memory list of
+    # objects authored in this class: no receiver on that line is a path, and
+    # nothing in the method is derived from a session id or a transcript.
+    (
+        "local_operator/session/runtime/server.py::RuntimeServer.wait_until_published",
+        "<path>.remove",
+        "`_publication_gates.remove(gate)` — a LIST of in-memory PublicationGate "
+        "objects, never a path",
     ),
     # The registry's staged write is now ONE helper shared by the discovery
     # record and the durable stop marker, and the reaper MOVES a dead record
@@ -1212,6 +1248,23 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/mcp/credentials.py::store_credentials.persist",
         "<path>.remove",
         "list.remove(key) — drops a written id from the failed-ids list",
+    ),
+    # The clipboard scratch probe (2026-09-17). `_probe_scratch_errno` creates
+    # ONE file per candidate base with `mkstemp` and unlinks that same file
+    # immediately, because `tempfile` throws away the errno of the refusal that
+    # matters: on a full volume it collapses `Errno 28` into
+    # `FileNotFoundError: No usable temporary directory found in [...]`, which
+    # named directories that existed and cost the operator a TUI session (the
+    # read runs on `ctrl+v` and must never raise). The name it unlinks is the
+    # one `mkstemp` generated and returned inside `$TMPDIR` — or `/tmp`, or
+    # Windows' `TEMP`/`TMP` — so it comes from the OS's scratch lookup and never
+    # from a caller, a config dir or a session id; the call is `unlink`, which
+    # takes files, and its argument is a scratch file, never a directory.
+    (
+        "local_operator/clipboard.py::_probe_scratch_errno",
+        "os.unlink",
+        "Removes only the probe FILE mkstemp just created in a scratch base "
+        "($TMPDIR//tmp-class); never a directory, never under sessions/",
     ),
 )
 

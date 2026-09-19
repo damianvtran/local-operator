@@ -497,15 +497,22 @@ async def test_the_stream_guard_is_load_bearing(tmp_path: Path, monkeypatch) -> 
     R2. The previous form was provably inert: it monkeypatched
     ``_stream_redaction_values``, collected the live updates but never asserted
     on them, and its only real assertion — an empty ``_PipeRedactor`` passing
-    bytes through — is tautological. The pipe filter's guarantee is genuinely
-    carried by the two peek-buffer tests below, so this RED is pointed at the
-    same surface they guard: a background job's peek buffer, which the model
-    reads with NO finished ToolResult and which the result path's
-    ``redact_tool_result`` never touches. The union is reverted the way the
-    reviewer demonstrated (``_stream_redaction_values`` returns the injected
-    map alone), the command is run as a background job, and the secret is
-    asserted to be PRESENT in the peek buffer — the leak must be shown to
+    bytes through — is tautological. The union is reverted the way the reviewer
+    demonstrated (``_stream_redaction_values`` returns the injected map alone),
+    the command is run as a background job, and the secret is asserted to be
+    PRESENT in the bytes the pipe filter emitted — the leak must be shown to
     exist, not assumed. Mutation-verified: this test reds under the revert.
+
+    **Why the assertion reads the pipe's OWN sink rather than the peek buffer.**
+    It used to assert on the peek window, and that stopped being the channel the
+    union exclusively guards when the filter learned to release whole lines:
+    the peek is fed by a second pass (``_redact_tool_text``) that only ever saw
+    fragments while the filter published per-read, so a split value painted it —
+    and now that the filter hands it one complete line, that pass matches the
+    value and masks it. The union's own guarantee is about what the FILTER
+    publishes, so this reads the sink the filter publishes into. The peek
+    surface keeps its coverage in the tests below, which assert the masked
+    value and the withheld notice.
     """
     from local_operator.harness.jobs import AsyncJobManager
 
@@ -528,6 +535,18 @@ async def test_the_stream_guard_is_load_bearing(tmp_path: Path, monkeypatch) -> 
         'sys.stdout.write("\\n"); sys.stdout.flush()\n'
         "time.sleep(0.4)\n"
     )
+    # Spy on the CAPTURE SINK rather than replacing the class: the background
+    # path does ``isinstance(chunks, _BashOutput)`` on the module global, so a
+    # stand-in class makes the tool fail for a reason that has nothing to do
+    # with redaction. ``append`` is where the filter's bytes land.
+    published: list[bytes] = []
+    real_append = builtin._BashOutput.append
+
+    def spy_append(self: Any, chunk: bytes) -> None:
+        published.append(bytes(chunk))
+        real_append(self, chunk)
+
+    monkeypatch.setattr(builtin._BashOutput, "append", spy_append)
     started = await builtin.execute_bash(
         "bash-red", {"command": command, "background": True}, AbortSignal(), None, context
     )
@@ -535,18 +554,23 @@ async def test_the_stream_guard_is_load_bearing(tmp_path: Path, monkeypatch) -> 
     try:
         for _ in range(60):
             await asyncio.sleep(0.05)
-            probe = manager.read_output(job_id, 0)
-            if probe is not None and "loadbearing-9f3e1a" in probe[0]:
+            if "loadbearing-9f3e1a" in b"".join(published).decode("utf-8", "replace"):
                 break
-        window = manager.read_output(job_id, 0)
-        assert window is not None
         # The union is dead, so the pipe filter does not know the registered
-        # value and the peek buffer carries it raw — the leak, demonstrated on
-        # the channel the filter alone guards.
-        assert "loadbearing-9f3e1a" in window[0], (
-            "with the union reverted the secret must paint in the peek buffer; "
+        # value and it publishes the line raw — the leak, demonstrated on the
+        # channel the filter alone guards.
+        assert "loadbearing-9f3e1a" in b"".join(published).decode("utf-8", "replace"), (
+            "with the union reverted the secret must reach the pipe filter's output; "
             "if it does not, the RED harness is broken"
         )
+        # ...and the model-facing window does NOT carry it anyway, because the
+        # peek re-runs the store's composed scrub on whatever the filter
+        # published. Asserted here rather than assumed: it is the property that
+        # makes the peek safe even when the live filter's own value set is not,
+        # and it is the reason this RED no longer lives on the peek buffer.
+        window = manager.read_output(job_id, 0)
+        assert window is not None
+        assert "loadbearing-9f3e1a" not in window[0]
     finally:
         with contextlib.suppress(Exception):
             await manager.cancel(job_id)

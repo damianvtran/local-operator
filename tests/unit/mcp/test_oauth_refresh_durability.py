@@ -975,3 +975,640 @@ async def test_a_first_grant_still_creates_its_row(
 
     tokens = await storage.get_tokens()
     assert tokens is not None and tokens.refresh_token == "ref"
+
+
+# ---------------------------------------------------------------------------
+# Teardown: the credential store must outlive the exchange, and the loss of a
+# rotation must be readable in the log.
+# ---------------------------------------------------------------------------
+#
+# The tests above cancel a connect and let the detached exchange finish while the
+# process lives on. This section is about the other half of every runtime exit:
+# the session's dispose hooks, which close the credential store — and which used
+# to close it BEFORE the MCP teardown ran, so an exchange still in flight got its
+# HTTP 200, tried to persist the rotation through a closed SQLite connection,
+# had the write swallowed at DEBUG, and was told it had succeeded. The row kept
+# the SPENT token with the write-ahead marker still armed, so every later connect
+# refused to refresh for an hour and told the user to re-authenticate.
+#
+# Three claims, and each is asserted against the real objects rather than a
+# double: a real ``AuthStore`` (SQLite, so a closed handle genuinely refuses the
+# write), the real ``drain_refresh_exchanges``, and the real provider built by
+# ``build_oauth_provider`` — the same call the manager makes per connect.
+
+
+async def _cancellation_was_logged(caplog: pytest.LogCaptureFixture) -> bool:
+    """Whether any cancelled detached exchange has reported itself yet.
+
+    The settle callback runs from the loop's done-callback queue, so it lands a
+    tick after the task resolves: polling is the honest way to read it, and
+    polling for the MESSAGE (not for a sleep long enough) is what keeps the
+    assertions below from passing on an empty log.
+    """
+    return any("CANCELLED before any answer" in record.getMessage() for record in caplog.records)
+
+
+#: A task left pending by a loop that closed under it can never be collected
+#: cleanly, and letting it go would print "Task was destroyed but it is pending!"
+#: into the suite's output — noise about the loop, not about the drain the test
+#: below is about. One strong reference for the life of the process.
+_ABANDONED_TASKS: list[Any] = []
+
+
+def _cancellation_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Every settle line a cancelled detached exchange has emitted.
+
+    The LINE is the behaviour under test in the arms below — what the log says
+    after the fact is the whole point of d2 — so the filter lives in one place
+    rather than being restated, differently, by each arm.
+    """
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if "CANCELLED before any answer" in record.getMessage()
+    ]
+
+
+async def _cancel_pending_like_a_loop_teardown() -> bool:
+    """Cancel every detached exchange, exactly as ``asyncio.run`` does on exit.
+
+    ``asyncio.runners._cancel_all_tasks`` cancels everything the loop still has
+    pending when ``amain()`` returns, and a detached exchange IS pending then —
+    the connect that started it was cancelled seconds earlier and its await was
+    dropped on purpose. Returns whether the registry held anything, so a test
+    cannot mistake "nothing was cancelled" for "the line did not happen".
+    """
+    pending = [task for task in list(auth_mod._DETACHED_REFRESH_EXCHANGES) if not task.done()]
+    for pending_task in pending:
+        pending_task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    return bool(pending)
+
+
+async def _seed_real_grant(
+    store: Any,
+    *,
+    access: str = "access-0",
+    refresh: str = "refresh-0",
+    age_s: float = 600.0,
+    lifetime_s: int = 60,
+) -> McpTokenStorage:
+    """Install an EXPIRED grant in a real ``AuthStore`` and return its storage.
+
+    Written through ``McpTokenStorage`` (production's own funnel) and then
+    re-upserted to backdate ``tokens_obtained_at``, because expiry is computed
+    from that stamp: without it the proactive refresh returns before reaching the
+    lock and the test would silently exercise nothing.
+    """
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+    from local_operator.mcp.auth import MCP_OAUTH_PROVIDER
+
+    storage = McpTokenStorage(SERVER_URL, store)
+    await storage.set_client_info(OAuthClientInformationFull(client_id=CLIENT_ID))
+    await storage.set_tokens(
+        OAuthToken(access_token=access, refresh_token=refresh, expires_in=lifetime_s)
+    )
+    rows = store.list_credentials(MCP_OAUTH_PROVIDER)
+    assert rows, "the grant was not stored"
+    payload = {k: v for k, v in rows[0].data.items() if k != "type"}
+    payload["project_id"] = SERVER_URL
+    payload["tokens_obtained_at"] = time.time() - age_s
+    store.upsert_credential(MCP_OAUTH_PROVIDER, payload)
+    return storage
+
+
+async def _abandon_a_refresh_mid_post(
+    store: Any, monkeypatch: pytest.MonkeyPatch, endpoint: FakeTokenEndpoint
+) -> None:
+    """Start a real refresh and cancel the connect once the server has rotated.
+
+    The connect is cancelled rather than the exchange, so the exchange is
+    DETACHED exactly as a session exit detaches it: it still owns the refresh
+    lock, its response is still on the wire, and the rotation exists only in the
+    answer it has not read yet.
+    """
+    _stub_discovery(monkeypatch, endpoint.token_endpoint)
+    task = asyncio.ensure_future(auth_mod.ensure_mcp_oauth_fresh(SERVER_URL, _cfg(), store=store))
+    await asyncio.wait_for(endpoint.rotation_applied.wait(), 5)
+    assert endpoint.rotation_count == 1, "the exchange never reached the server"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_the_teardown_drain_persists_the_rotation_before_the_store_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """L1, both ways round, with the ORDER OF CLOSE AND DRAIN as the only difference.
+
+    Arm 1 is the shipped order — drain first, then close — and asserts the
+    outcome the operator actually feels: the row holds the ROTATED refresh token
+    (``refresh-1``) and no send marker, so the next boot connects instead of
+    refusing.
+
+    Arm 2 is the pre-fix order — close first, then drain — and asserts the loss,
+    because that is what makes arm 1 evidence rather than decoration: the drain
+    had nothing to write into, the row kept the spent ``refresh-0``, and the
+    marker stayed armed. Without this arm a green arm 1 could equally mean "the
+    drain is unnecessary"; with it, the ordering is the load-bearing change.
+
+    ``AuthStore`` is real, so the closed store is not simulated: SQLite raises and
+    ``_write`` reports the drop, which is also asserted here (``_write``'s return
+    value is the caller-visible half of the d3 fix).
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    delay_s = 0.3
+
+    # --- Arm 1: the shipped order (drain, then close) -----------------------
+    store = AuthStore(tmp_path / "auth.db")
+    storage = await _seed_real_grant(store)
+    async with FakeTokenEndpoint(response_delay_s=delay_s) as endpoint:
+        await _abandon_a_refresh_mid_post(store, monkeypatch, endpoint)
+        drained = await auth_mod.drain_refresh_exchanges(2.0)
+        assert drained is True, "the drain must see the detached exchange and wait for it"
+        tokens = await storage.get_tokens()
+        payload = storage._read() or {}
+        store.close()
+
+    assert tokens is not None
+    assert tokens.refresh_token == "refresh-1", (
+        "the rotation the server performed must be persisted while the store is "
+        f"still open; the row holds {tokens.refresh_token!r}, a spent token"
+    )
+    assert tokens.access_token == "access-1"
+    assert (
+        auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in payload
+    ), "the exchange got its answer, so the write-ahead marker must be resolved"
+    assert endpoint.reuse_attempts == 0
+
+    # --- Arm 2: the pre-fix order (close, then drain) -----------------------
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+        doomed = AuthStore(tmp_path / "auth.db")
+        await _seed_real_grant(doomed)
+        async with FakeTokenEndpoint(response_delay_s=delay_s) as endpoint2:
+            await _abandon_a_refresh_mid_post(doomed, monkeypatch, endpoint2)
+            doomed.close()  # exactly what the dispose hook did before the fix
+            await auth_mod.drain_refresh_exchanges(2.0)
+
+    # A fresh handle, standing in for the next boot's process — the closed store
+    # cannot be asked, which is the point of the arm rather than an inconvenience.
+    reader = AuthStore(tmp_path / "auth.db")
+    try:
+        next_boot = await McpTokenStorage(SERVER_URL, reader).get_tokens()
+        next_payload = McpTokenStorage(SERVER_URL, reader)._read() or {}
+    finally:
+        reader.close()
+
+    assert next_boot is not None and next_boot.refresh_token == "refresh-0", (
+        "closing the store first is what loses the rotation — this arm exists to "
+        "prove the ordering, not to bless the outcome"
+    )
+    assert (
+        auth_mod.GRANT_UNCONFIRMED_SEND_KEY in next_payload
+    ), "and the marker stays armed, which is what makes the next connect refuse"
+    assert any(
+        "was NOT persisted" in record.getMessage() for record in caplog.records
+    ), "a dropped rotation must say so at INFO rather than only at DEBUG"
+
+
+@pytest.mark.asyncio
+async def test_a_drain_that_has_not_yielded_never_reports_nothing_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R1-1/Q5: the empty verdict must not come from a snapshot taken before a yield.
+
+    ``disconnect_all`` cancels its in-flight connects and reaches the drain with no
+    ``await`` in between whenever ``self._connections`` is empty, so a cancellation
+    it has delivered has not even been SCHEDULED when the drain starts. A first
+    snapshot taken then sees an empty registry and returns ``True`` — read by every
+    caller as "nothing in flight" — while the cancelled connect registers its
+    detached exchange one tick later, and the caller closing the store on that
+    verdict is the incident this PR exists to remove.
+
+    The shape below is exactly that interleaving: rotate at the issuer, cancel the
+    connect, call the drain with NO intervening await, then close the store on the
+    verdict the way the dispose chain does. Before the fix the close landed before
+    the exchange was registered, its write was swallowed, and the row kept the
+    spent ``refresh-0`` with its marker armed; after it, the drain observes the
+    exchange, waits for it, and the rotation is in the row when the store closes.
+    """
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(tmp_path / "auth.db")
+    await _seed_real_grant(store)
+    async with FakeTokenEndpoint(response_delay_s=0.3) as endpoint:
+        _stub_discovery(monkeypatch, endpoint.token_endpoint)
+        task = asyncio.ensure_future(
+            auth_mod.ensure_mcp_oauth_fresh(SERVER_URL, _cfg(), store=store)
+        )
+        await asyncio.wait_for(endpoint.rotation_applied.wait(), 5)
+        assert endpoint.rotation_count == 1, "the exchange never reached the server"
+        with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+            # No await between the cancel and the drain — the production shape.
+            task.cancel()
+            drained = await auth_mod.drain_refresh_exchanges(2.0)
+            assert drained is True, "a completed drain must still report True"
+            # Acting on the verdict, exactly as the dispose chain does: the store
+            # closes on the strength of it.
+            store.close()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert not [
+        exchange for exchange in list(auth_mod._DETACHED_REFRESH_EXCHANGES) if not exchange.done()
+    ], "the drain must have waited for the exchange, not returned before it registered"
+
+    reader = AuthStore(tmp_path / "auth.db")
+    try:
+        storage = McpTokenStorage(SERVER_URL, reader)
+        next_boot = await storage.get_tokens()
+        next_payload = storage._read() or {}
+    finally:
+        reader.close()
+
+    assert next_boot is not None and next_boot.refresh_token == "refresh-1", (
+        "a True verdict from the drain means the rotation was persisted BEFORE the "
+        "store closed; the row holds "
+        f"{getattr(next_boot, 'refresh_token', None)!r} instead, which is the loss "
+        "the empty first snapshot used to cause"
+    )
+    assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in next_payload
+    assert endpoint.reuse_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_disconnect_all_does_not_report_nothing_in_flight_from_a_pre_yield_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R1-1, seen from the CALLER: the manager's own teardown is that shape.
+
+    The test above drives the drain's contract; this one drives the caller the
+    reviewer and QA reproduced with, because the empty first snapshot is a property
+    of HOW ``disconnect_all`` reaches the drain, not of the drain alone:
+
+    * a RECONNECT is in flight with its refresh POST already on the wire and the
+      server already rotated — the failure the incident describes;
+    * ``_reconnect`` tears the old connection down BEFORE it connects, so
+      ``self._connections`` is empty (the "its connection already went" shape) and
+      ``disconnect_all`` therefore has NO ``await`` between cancelling the
+      reconnect and calling the drain;
+    * so the cancellation it has just delivered has not even been scheduled when
+      the drain begins.
+
+    Pre-fix the drain read an empty registry, returned ``True`` — "nothing in
+    flight" — and the teardown walked on past an exchange that registered one tick
+    later. The assertion is that the caller cannot return while an exchange it
+    cancelled is still unobserved, and that the rotation is in the row by then.
+    """
+    from local_operator.mcp.manager import McpManager
+    from local_operator.providers.auth_store import AuthStore
+
+    store = AuthStore(tmp_path / "auth.db")
+    await _seed_real_grant(store)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    async with FakeTokenEndpoint(response_delay_s=0.3) as endpoint:
+        _stub_discovery(monkeypatch, endpoint.token_endpoint)
+        manager = McpManager(str(workspace), auth_store=store)
+        manager._configs["dd"] = _cfg()
+        manager._connect_futures["dd"] = asyncio.get_running_loop().create_future()
+        manager._schedule_reconnect("dd")
+        await asyncio.wait_for(endpoint.rotation_applied.wait(), 10)
+        assert endpoint.rotation_count == 1, "the reconnect's exchange never reached the server"
+        assert not manager._connections, (
+            "this test is about the shape with no connection to await: the reconnect "
+            "tore the old one down before it refreshed, so ``if names:`` gives the "
+            "teardown no suspension point"
+        )
+        assert [
+            task for task in manager._pending_reconnects.values() if not task.done()
+        ], "the reconnect must still be the live task the teardown cancels"
+
+        with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+            await manager.disconnect_all()
+
+        # Read the row SYNCHRONOUSLY, with no await between the verdict and the
+        # assertion. A read that yielded first would let the un-drained exchange
+        # land its rotation behind it and hide exactly the defect: the drain said
+        # "nothing in flight" and the teardown walked on with a live POST still
+        # unwinding. (The registry is not the assertion here: with the exchange
+        # not yet registered it is empty, so a "no live exchange" check passes
+        # vacuously — the row is what the caller actually acts on.)
+        # ``_read`` is the module's own SYNCHRONOUS reader (the row's shape is its
+        # business, not this test's): what matters is that no await sits between
+        # the dispose returning and this assertion.
+        payload = McpTokenStorage(SERVER_URL, store)._read() or {}
+        stored = payload.get("tokens") or {}
+        assert stored.get("refresh_token") == "refresh-1", (
+            "the rotation the server performed during the teardown must be in the row "
+            f"by the time disconnect_all returns, not the spent token: {payload!r}"
+        )
+        assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in stored, (
+            "the exchange got its answer before the store could close under it, so "
+            "the write-ahead marker must be resolved"
+        )
+        assert endpoint.reuse_attempts == 0
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_a_detached_exchange_names_what_is_observable_about_its_request(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """L2/d2: the line must distinguish "handed to the client" from "never built".
+
+    This is the question the 14-hour incident could not answer — the exchange's
+    settle callback returned SILENTLY for a cancelled task, so a window with 36
+    user-visible connect failures contained zero exchange-outcome lines.
+
+    What the line may say is bounded by what can be OBSERVED, and the three arms
+    below are that boundary rather than a claim about the wire:
+
+    * **arm 1 — the request went out, the answer never arrived** (real endpoint,
+      real POST): the marker stays armed, because a token that left the machine
+      may have been spent;
+    * **arm 2 — cancelled during the CONNECT phase** (a transport that blocks
+      inside ``handle_async_request``, driven through the real
+      ``httpx.AsyncClient``, its hooks and redirect handling included): the marker
+      is ALREADY armed when the transport is entered, so the line reports a
+      hand-off and this class is explicitly NOT removed by arming in the hook. An
+      earlier revision asserted the opposite for this state with a stand-in client
+      that never reached a transport — a belief rather than a measurement
+      (reviewer round 1, R1-2) — which is why the stand-in is gone and the real
+      client is here. The FAIL case is stated rather than asserted: httpx exposes
+      no seam that reports "the bytes are on the wire", so a cancellation between
+      the hook and the socket cannot be told from one inside it, and this test
+      does not pretend otherwise;
+    * **arm 3 — cancelled BEFORE any request was built** (held at the exchange's
+      own pre-flight store read, so the client is never handed anything): nothing
+      is armed and the line says so. That direction IS conclusive, and it is the
+      one the refusal policy needs.
+    """
+    import httpx
+
+    # --- Arm 1: the request went out, the answer never arrived --------------
+    store = FakeAuthStore()
+    storage = await _seed_expired_grant(store)
+
+    async with FakeTokenEndpoint(response_delay_s=0.5) as endpoint:
+        with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+            task = asyncio.ensure_future(
+                auth_mod._refresh_oauth_token_locked(
+                    SERVER_URL, storage, _endpoints_for(endpoint.token_endpoint)
+                )
+            )
+            await asyncio.wait_for(endpoint.rotation_applied.wait(), 5)
+            # The connect goes first, which DETACHES the exchange — it is
+            # shielded, so it keeps running with the response still on the wire.
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert (
+                await _cancel_pending_like_a_loop_teardown()
+            ), "the exchange must be registered as detached: nothing else holds it"
+            assert await _until(
+                lambda: _cancellation_was_logged(caplog)
+            ), "a cancelled detached exchange must log before the loop moves on"
+
+    handed_over = _cancellation_lines(caplog)
+    assert handed_over, "a cancelled detached exchange must not be silent any more"
+    assert "its request had already entered the sending pipeline" in handed_over[0], handed_over[0]
+    assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY in (storage._read() or {}), (
+        "a request that reached the wire may have spent the token, so the marker "
+        "must stay armed — this fix changes what is LOGGED, never the refusal"
+    )
+
+    # --- Arm 2: cancelled inside the transport, before it wrote anything -----
+    # The real client, the real request hooks, a transport that never writes.
+    caplog.clear()
+    connect_store = FakeAuthStore()
+    connect_storage = await _seed_expired_grant(connect_store)
+    reached_the_transport = asyncio.Event()
+    #: What the row said AT the instant the transport was entered: this is the
+    #: measurement the old comment got wrong — the hook runs BEFORE it.
+    armed_when_the_transport_was_entered: list[bool] = []
+
+    async def _blocking_transport(request: httpx.Request) -> httpx.Response:
+        armed_when_the_transport_was_entered.append(
+            auth_mod.GRANT_UNCONFIRMED_SEND_KEY in (connect_storage._read() or {})
+        )
+        reached_the_transport.set()
+        await asyncio.Event().wait()  # no bytes, no answer: a connect-phase hold
+        raise AssertionError("a cancelled connect must never be answered")
+
+    class _RealClientWithABlockingTransport(httpx.AsyncClient):
+        """httpx's own client whose transport blocks before writing a byte.
+
+        A SUBCLASS, not a stand-in: what is under test is where httpx runs the
+        request hook relative to the transport, and only the real implementation
+        can answer that. ``MockTransport`` is httpx's own transport seam, so the
+        handler below runs exactly where ``handle_async_request`` does — after
+        the hook, before anything is written.
+        """
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx.MockTransport(_blocking_transport)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _RealClientWithABlockingTransport)
+    with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+        task = asyncio.ensure_future(
+            auth_mod._refresh_oauth_token_locked(
+                SERVER_URL, connect_storage, _endpoints_for("http://127.0.0.1:9/token")
+            )
+        )
+        await asyncio.wait_for(reached_the_transport.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await _cancel_pending_like_a_loop_teardown()
+        assert await _until(lambda: _cancellation_was_logged(caplog))
+    monkeypatch.undo()
+
+    assert armed_when_the_transport_was_entered == [True], (
+        "the request hook arms the marker BEFORE the transport is entered, so a "
+        "cancellation during the connect phase still quarantines the grant: that "
+        "class is NOT removed by arming in the hook, and the test that used to "
+        "assert it was asserting a stand-in"
+    )
+    assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY in (connect_storage._read() or {}), (
+        "the connect phase is not spared: an armed marker here is the conservative "
+        "direction and is the honest state of this change"
+    )
+    cancelled_in_the_connect = _cancellation_lines(caplog)
+    assert cancelled_in_the_connect and (
+        "had already entered the sending pipeline" in cancelled_in_the_connect[0]
+    ), cancelled_in_the_connect
+    assert "not evidence it reached the wire" in cancelled_in_the_connect[0], (
+        "the line must not claim the request reached the wire: " + cancelled_in_the_connect[0]
+    )
+
+    # --- Arm 3: cancelled before any request was built -----------------------
+    # The other half of the flag, and the half that IS conclusive. The exchange is
+    # held at its own pre-flight store read — a real await it must pass before it
+    # can build a request — with the real client (arm 2's patch is undone) never
+    # handed anything, so no marker must exist and the line must say `never`.
+    caplog.clear()
+    unbuilt_store = FakeAuthStore()
+    unbuilt_storage = await _seed_expired_grant(unbuilt_store)
+    reached_the_preflight = asyncio.Event()
+    release_the_preflight = asyncio.Event()
+    held_get_tokens = unbuilt_storage.get_tokens
+
+    async def _get_tokens_after_the_gate() -> Any:
+        reached_the_preflight.set()
+        await release_the_preflight.wait()
+        return await held_get_tokens()
+
+    monkeypatch.setattr(unbuilt_storage, "get_tokens", _get_tokens_after_the_gate)
+    with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+        task = asyncio.ensure_future(
+            auth_mod._refresh_oauth_token_locked(
+                SERVER_URL, unbuilt_storage, _endpoints_for("http://127.0.0.1:9/token")
+            )
+        )
+        await asyncio.wait_for(reached_the_preflight.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await _cancel_pending_like_a_loop_teardown()
+        assert await _until(lambda: _cancellation_was_logged(caplog))
+    monkeypatch.undo()
+
+    never_built = _cancellation_lines(caplog)
+    assert never_built and "never entered the sending pipeline" in never_built[0], never_built
+    assert auth_mod.GRANT_UNCONFIRMED_SEND_KEY not in (unbuilt_storage._read() or {}), (
+        "a request that was never built must leave the grant untouched rather than "
+        "quarantined for an hour — that is the half of the flag that is conclusive"
+    )
+
+
+def test_a_registry_entry_left_by_a_closed_loop_does_not_poison_a_later_drain(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R1-4: an entry whose loop closed can never run, so it must not be waited on.
+
+    The registry is process-wide and entries normally leave it from their own done
+    callback. A loop that closes WITHOUT cancelling what it had pending — the
+    hand-driven ones in ``session/runtime``, and any future one — leaves its entry
+    behind forever, and every later drain in the process then pays the FULL bound
+    and logs a loss that no exchange is carrying. That false loss line lands in the
+    one log support reads to COUNT real ones, which is why the entry is dropped (at
+    the only point it can be recognised: its own callback will never run) instead
+    of being counted.
+
+    A SYNC test on purpose: the shape needs a second loop, one that really ran the
+    task and then closed with it still pending, while the drain runs on this
+    thread's own loop.
+
+    The bound is the discriminator, not a stopwatch: at 0.2s an undiscarded entry
+    makes this drain time out and return ``False`` with an overrun line, and the
+    discard makes it return ``True`` immediately with none.
+    """
+    stale_loop = asyncio.new_event_loop()
+    run_until_abandoned = asyncio.Event()
+
+    # ``Any`` rather than ``RefreshOutcome``: the task is abandoned before it can
+    # return one, and the promise the registry makes is about the tasks that DO
+    # run. A coroutine the loop actually started, so this is the shape a loop that
+    # goes down without cancelling leaves behind, not an unstarted stub.
+    async def _parked_forever() -> Any:
+        await run_until_abandoned.wait()
+
+    try:
+        stale_task = stale_loop.create_task(_parked_forever())
+        stale_loop.run_until_complete(asyncio.sleep(0))
+        assert not stale_task.done(), "the abandoned task must still be pending"
+        auth_mod._detach_refresh_exchange(stale_task, "https://stale.test/mcp")
+    finally:
+        # Closed with its task still pending: exactly what a hand-driven loop does
+        # when it goes down without cancelling.
+        stale_loop.close()
+    _ABANDONED_TASKS.append(stale_task)
+
+    assert stale_task in auth_mod._DETACHED_REFRESH_EXCHANGES
+    assert stale_task.get_loop().is_closed(), "the entry's loop must really be closed"
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+        drained = asyncio.run(auth_mod.drain_refresh_exchanges(0.2))
+
+    assert drained is True, (
+        "a task abandoned by a closed loop can never complete, so waiting it out "
+        "would be a false loss on every later teardown"
+    )
+    assert stale_task not in auth_mod._DETACHED_REFRESH_EXCHANGES
+    assert not any(
+        "outlived the" in record.getMessage() for record in caplog.records
+    ), "an abandoned entry must not be reported as a rotation lost at exit"
+    assert any(
+        "abandoned by a closed event loop" in record.getMessage() for record in caplog.records
+    ), "dropping an entry must say why, so a real one is not mistaken for noise"
+
+
+@pytest.mark.asyncio
+async def test_the_leaving_gate_keeps_a_teardown_refresh_off_the_wire(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A session on its way out must not be the party that spends the token.
+
+    This is the companion the store-reordering requires rather than a nicety:
+    the SDK runs the SAME auth flow for its session-terminate DELETE, so once the
+    credential store outlives the teardown, an ungated teardown would POST a
+    refresh token from a process that has already given up on persisting the
+    answer. Today that path only fails closed because the store is shut, which is
+    the defect this PR removes — so removing it without this gate would trade a
+    lost rotation for a POST from a dying process.
+
+    Driven the way httpx drives it for that DELETE: an ``AsyncClient`` with the
+    provider as its ``auth``, one request, an expired stored grant. The ONLY
+    difference between the two arms is the predicate, which is what makes the
+    second arm evidence that the first is not vacuous: with it, zero token POSTs
+    reach the authorization server; without it, one does.
+    """
+    import contextlib
+
+    from mcp.client.streamable_http import create_mcp_http_client
+
+    from local_operator.mcp.auth import build_oauth_provider
+
+    async def _token_posts_for(leaving: Any) -> list[dict[str, str]]:
+        store = FakeAuthStore()
+        await _seed_expired_grant(store)
+        async with FakeTokenEndpoint() as endpoint:
+            provider = build_oauth_provider(
+                SERVER_URL,
+                _cfg(),
+                store=store,
+                interactive=False,
+                endpoints=_endpoints_for(endpoint.token_endpoint),
+                leaving=leaving,
+            )
+            # The SAME client factory the manager wires a real connection with,
+            # so the flow is driven by the transport that runs the terminate
+            # DELETE rather than by a look-alike.
+            client = create_mcp_http_client(auth=provider)
+            try:
+                with contextlib.suppress(Exception):
+                    await client.request("DELETE", endpoint.token_endpoint)
+            finally:
+                await client.aclose()
+            return [form for form in endpoint.requests if form.get("grant_type") == "refresh_token"]
+
+    with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
+        suppressed = await _token_posts_for(lambda: True)
+        allowed = await _token_posts_for(None)
+
+    assert suppressed == [], "a leaving session must make no token POST at all"
+    assert any(
+        "refresh suppressed" in record.getMessage() and "tearing down" in record.getMessage()
+        for record in caplog.records
+    ), "the suppression must be readable in the log, not inferred from silence"
+    assert len(allowed) == 1, (
+        "the same flow WITHOUT the gate must still post — otherwise this test "
+        "would pass for any reason at all"
+    )

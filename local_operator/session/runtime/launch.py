@@ -525,6 +525,21 @@ def _spawn_failure_reason(capture: Path) -> tuple[str, str]:
     return (lines[-1] if lines else ""), ""
 
 
+#: What an engage reports for a record whose runtime has COMMITTED TO LEAVING.
+#:
+#: NOT ``"runtime ready"``, because that errand is not completed: the runtime
+#: will run nothing new. NOT an error either, and that second half is the whole
+#: reason this is a detail rather than a raise: the record is LIVE and dialable,
+#: and the caller's bind must reach it — a joiner lands on the runtime that
+#: holds the transcript, which is the property the session is joinable by
+#: (memo §4.2, and ``attached.py``'s read path already names the same state
+#: ``owner-leaving``). Measured consequence of getting this wrong: raising here
+#: instead made a cold viewer unable to join a live, draining session at all —
+#: zero dials, ``ConnectionError("the runtime is reconnecting")``, which is the
+#: exact axis this change exists to fix (agent review round 1, R1).
+LEAVING_DETAIL = "owner-leaving"
+
+
 async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, bool]:
     """Hand one errand to a live runtime. Returns ``(detail, duplicate)``."""
     from local_operator.mobile.peer_client import send_peer_message
@@ -534,6 +549,25 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         # cost early, and a wake is delivered by the session's own scheduler
         # the moment it loads (see WakeErrand). Reaching a live runtime IS the
         # completed errand for both.
+        #
+        # AND THAT IS WHY A LEAVING RUNTIME MUST NOT ANSWER ``runtime ready``.
+        # The record stays published and the heartbeat stays fresh for the whole
+        # drain (measured: 1 h 40 m, 21 sessions at once), so the unqualified
+        # answer made the warm re-bind every front end performs on the
+        # ``retiring`` frame report a completed errand against a runtime that
+        # will run nothing — the bind then set ``_warm_engage_started`` and
+        # nothing ever started a successor.
+        #
+        # The answer is the STATE, not a failure: ``LEAVING_DETAIL`` tells the
+        # caller the record is live and leaving, so its bind dials it (the
+        # joiner lands on the runtime holding the transcript) while nothing here
+        # claims the errand was delivered. A successor is started by whichever
+        # engage runs after this runtime's dispose releases the claim — see
+        # ``_lease_holder`` in the loop below.
+        leaving = str(getattr(record, "leaving", "") or "")
+        if leaving:
+            logger.debug("engage: %s is leaving (%s); not reporting it ready", session_id, leaving)
+            return LEAVING_DETAIL, False
         return "runtime ready", False
     if isinstance(work, PeerMessageErrand):
         detail = await send_peer_message(
@@ -551,6 +585,15 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
     try:
         await client.connect(record, session_id)
         op = "prompt" if isinstance(work, PromptErrand) else "steer"
+        # THE RECEIPT IS RETURNED AS ITSELF, deferral and all. A draining
+        # runtime answers a prompt with ``inbox.SPOOL_RECEIPT_PROMPT`` — the
+        # message is on the successor's spool, not in this runtime's history —
+        # and this detail is what the caller renders. Collapsing it into the
+        # success shape (or letting a caller hardcode "prompt admitted" over
+        # it) would report a stronger fact than the one established, which is
+        # the same defect the warm/wake arm above refuses (agent review round
+        # 1, R2). ``duplicate`` stays the runtime's own, so the idempotency
+        # seam is unchanged.
         return await client.request_ack_with_duplicate(
             op,
             text=work.text,

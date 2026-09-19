@@ -3,21 +3,25 @@
 Three endpoints, and the difference between the first two matters:
 
 ``GET /v1/sse/messages/{message_id}``
-    Parity with the legacy WebSocket channel, keyed by the assistant *record*
-    id. Use it when the id is already known (e.g. re-attaching to a message
-    the transcript already lists).
+    Keyed by the assistant *record* id, which is the key the removed WebSocket
+    channel used and still the key an installed client holds. Use it when the id
+    is already known (e.g. re-attaching to a message the transcript already
+    lists).
 
 ``GET /v1/sse/jobs/{job_id}``
     Keyed by the job id returned from ``POST /v1/chat/.../async``. This is the
     one to prefer: it can be opened the instant the turn is submitted, before
-    any record exists. The WebSocket design could not do this - the client had
-    to poll job status until a record id appeared, then connect, and relied on
-    frames being cumulative to catch up on whatever it missed in between. That
-    race is a design defect, not a fact of life, and this endpoint removes it.
+    any record exists. The removed socket design could not do this - the client
+    had to poll job status until a record id appeared, then connect, and relied
+    on frames being cumulative to catch up on whatever it missed in between.
+    That race is a design defect, not a fact of life, and this endpoint removes
+    it.
 
 ``GET /v1/sse/capabilities``
     Transport negotiation. A client hits this once; a backend too old to have
-    SSE answers 404, which is the signal to fall back to WebSockets.
+    SSE answers 404, which now means "no streaming transport here" - the
+    WebSocket fallback such a client used to switch to was removed, so the only
+    remaining answer is a version-skew refusal.
 
 Resume is supported two ways because two kinds of client exist. ``EventSource``
 sends ``Last-Event-ID`` automatically on reconnect; a ``fetch``-based reader
@@ -258,7 +262,7 @@ async def stream_message_events(
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     broker: EventBroker = Depends(get_event_broker),
 ) -> StreamingResponse:
-    """Events for one assistant record, keyed exactly as the WebSocket path is.
+    """Events for one assistant record, keyed exactly as the socket path was.
 
     Prefer ``/jobs/{job_id}`` for new work: this endpoint requires the record
     id, which only exists once the turn has started producing.
@@ -303,15 +307,20 @@ async def stream_capabilities(
 ) -> Dict[str, Any]:
     """Transport negotiation for a client that may face an older backend.
 
-    A backend without SSE has no such route and answers 404 - that is the
-    signal to use WebSockets. Returning the event names as data (rather than
-    making the client hardcode them) lets a newer client detect that a backend
-    predates an event it wants to consume, instead of waiting forever for a
-    frame that will never arrive.
+    A backend without SSE has no such route and answers 404, which is a
+    version-skew refusal: there is no second transport to fall back to.
+    ``transports`` therefore names SSE alone, and no ``websocket`` key is
+    advertised. An installed client that reads ``transports`` still finds
+    ``"sse"``; one that reads the removed ``websocket`` key reads absent data
+    (not a malformed payload) and has no socket to fall back to - see the
+    module docstring. Returning the event names as data (rather than making the
+    client hardcode them) lets a newer client detect that a backend predates an
+    event it wants to consume, instead of waiting forever for a frame that will
+    never arrive.
     """
     del job_manager  # presence proves the app is fully wired, not read here
     return {
-        "transports": ["sse", "websocket"],
+        "transports": ["sse"],
         "preferred": "sse",
         "sse": {
             "version": 1,
@@ -332,9 +341,5 @@ async def stream_capabilities(
                 if not key.startswith("_") and isinstance(value, str)
             ),
             "legacy_record_frames": True,
-        },
-        "websocket": {
-            "channels": {"message": "/v1/ws/messages/{message_id}"},
-            "deprecated": True,
         },
     }

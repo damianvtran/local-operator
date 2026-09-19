@@ -15,7 +15,7 @@ import json
 import statistics
 import threading
 import time
-from typing import Any, Coroutine, cast
+from typing import Any, Callable, Coroutine, cast
 
 import pytest
 
@@ -534,10 +534,16 @@ async def test_recall_steer_dispatches_by_command_id() -> None:
 
 @pytest.mark.asyncio
 async def test_peer_message_dispatches_with_parsed_args() -> None:
-    """A `lop send` peer_message reaches the handle with mode/wake/sender parsed."""
+    """A `lop send` peer_message reaches the handle with mode/wake/sender parsed
+
+    — for a session that HAS been engaged. ``set_record_started`` is called
+    first because the receive side now refuses an unengaged session outright
+    (see the refusal test below); this test is about the frame's arguments.
+    """
     handle = FakeHandle()
     runtime = RuntimeServer(handle, kind="tui")
     runtime.start()
+    runtime.set_record_started(True)
     writer = None
     try:
         record = await _wait_record()
@@ -666,13 +672,66 @@ async def test_an_owner_without_the_effort_capability_keeps_its_plain_switch() -
         runtime.close()
 
 
+@pytest.mark.asyncio
+async def test_peer_message_to_an_unengaged_session_is_refused() -> None:
+    """THE NEW RULE, receive side: a runtime whose record says ``started=False``
+    (a fresh ``/new`` in the composer) refuses a ``peer_message`` op.
+
+    This is the only layer that holds against a sender on an OLDER build: such
+    a sender reads a pre-field record's missing ``started`` key as True, resolves
+    it and dials — so the row can be refused here or not at all, and a row
+    written here would become the OPENING row of a conversation its owner never
+    started. The refusal rides the ordinary error frame, which both send
+    surfaces render as ``could not deliver: ...``.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        assert record.started is False
+        reader, writer = await _dial(record)
+        writer.write(
+            json.dumps({"op": "peer_message", "req": 13, "text": "hi", "mode": "mailbox"}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        err = await _until(reader, "error", 13)
+        assert "has not been engaged yet" in err["message"]
+        assert "no user message has been sent in it" in err["message"]
+        assert "no live session" not in err["message"]
+        # The label follows the ADDRESS the sender used: a dial arrives at this
+        # runtime's pid, so the refusal names the pid rather than a session id
+        # the sender never typed (review round 1, F-5).
+        assert f"pid {record.pid} has not been engaged yet" in err["message"], err["message"]
+        assert handle.calls == [], "nothing may reach the handle for an unengaged session"
+
+        # And the SAME frame is delivered the moment the session runs a turn,
+        # with no re-dial logic anywhere: the bit is the whole state.
+        runtime.set_record_started(True)
+        writer.write(
+            json.dumps({"op": "peer_message", "req": 14, "text": "hi", "mode": "mailbox"}).encode()
+            + b"\n"
+        )
+        await writer.drain()
+        ack = await _until(reader, "ack", 14)
+        assert "mailbox" in ack["detail"]
+        assert handle.calls[-1][0] == "receive_peer_message"
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
 class NoPeerHandle(FakeHandle):
     """An owner runtime that predates peer messaging: no receive_peer_message.
 
     The dispatch probes the capability with getattr, so a handle that simply
     lacks the method must surface the clear "cannot receive" error rather than
     an AttributeError — exactly the optional-capability contract recall_steer
-    documents."""
+    documents.
+    """
 
     receive_peer_message = None  # type: ignore[assignment]
 
@@ -682,6 +741,9 @@ async def test_peer_message_on_handle_without_capability_errors_cleanly() -> Non
     handle = NoPeerHandle()
     runtime = RuntimeServer(handle, kind="tui")
     runtime.start()
+    # The capability probe is reached only by an ENGAGED session now, so the
+    # engagment gate is satisfied first; the point here is the missing method.
+    runtime.set_record_started(True)
     writer = None
     try:
         record = await _wait_record()
@@ -1325,6 +1387,134 @@ async def test_injected_sink_is_used_as_is() -> None:
         runtime.close()
 
 
+async def _until_push(
+    reader: asyncio.StreamReader,
+    want: object,
+    *,
+    activity: str | None = None,
+    schedule: Callable[[], None] | None = None,
+    deadline_s: float = 60.0,
+) -> dict[str, Any]:
+    """Read pushed projections until one carries ``want`` as the band's age.
+
+    A push is a whole repaint and several can be in flight for one change, so
+    waiting for the value under test is the only assertion that names the frame
+    it means; the failure message carries the last value seen.
+
+    The wait drives its own deadline and RE-ASKS for a repaint (``schedule``)
+    rather than trusting one event's delivery, because the push is coalesced
+    onto the runtime's own loop: a single scheduling lost its frame on a loaded
+    CI shard (PR #1241, ``test (3.12, 1)``), and that is a property of the wait,
+    not of the age under test.
+
+    ``activity`` matches the BAND LABEL as well as the age, and it has to: two
+    phases in a row both start at a known zero (``thinking`` then
+    ``responding``), so "the first frame carrying 0.0" is not the edge a caller
+    means — the label is what names it.
+    """
+    last: object = "<no frame>"
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_s
+    while loop.time() < deadline:
+        if schedule is not None:
+            schedule()
+        try:
+            raw = await asyncio.wait_for(reader.readline(), timeout=2)
+        except TimeoutError:
+            continue
+        text = raw.decode("utf-8", "replace").strip()
+        if not text:
+            continue
+        frame = json.loads(text)
+        if frame.get("op") != "projection":
+            continue
+        seen = frame["data"].get("activity")
+        last = frame["data"].get("activity_started_s")
+        if last == want and (activity is None or seen == activity):
+            return frame
+        last_pair = f"{seen!r}/{last!r}"
+        last = f"activity {last_pair}"
+    raise AssertionError(
+        f"no pushed frame carried activity_started_s={want!r}"
+        + (f" for phase {activity!r}" if activity else "")
+        + f" (last {last!r})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_pushed_frame_carries_the_bands_age_from_the_fold_events_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 4, BLOCKER 1 + MINOR 1: the PUSHED age, off the wire the daemon reads.
+
+    Every other band-age assertion in the tree drives the fold directly or reads
+    the handle's seed, and the runtime's own push path is where review round 4
+    found the blocker: it re-dated through ``self._projection_sink`` — in
+    production a SECOND fold the runtime builds over the handle's projection
+    object and never feeds — so the empty state of that fold overwrote the live
+    age with ``None`` on every frame build, and the phone withheld its clock for
+    every phase, watched edges included.
+
+    So this drives the production path end to end: a real ``TuiSessionHandle``
+    over a real session shape, a real ``RuntimeServer``, a real daemon-kind dial
+    (which is what builds the runtime's own sink), real harness events through
+    the handle's stream, and the age read off the frames the daemon receives.
+    """
+    import local_operator.mobile.projection as projection_module
+    from local_operator.harness.types import (
+        AgentEndEvent,
+        AgentStartEvent,
+        Message,
+        MessageUpdateEvent,
+    )
+    from local_operator.mobile.tui_handle import TuiSessionHandle
+    from tests.unit.mobile.test_projection import _StubClock
+    from tests.unit.tui.test_app_pilot import FakeSession
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            callback()
+
+    clock = _StubClock()
+    monkeypatch.setattr(projection_module, "time", clock)
+    session = FakeSession()
+    session.streaming = True
+    handle = TuiSessionHandle(App(session))  # type: ignore[arg-type]
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="daemon")
+        assert runtime.projection_sink is not None, "a daemon dial is what builds the sink"
+
+        session.emit(AgentStartEvent(generation=1))
+        session.emit(MessageUpdateEvent(message=Message.assistant(), delta="Here "))
+        frame = await _until_push(
+            reader, 0.0, activity="responding", schedule=runtime._schedule_push
+        )
+        assert frame["data"]["activity"] == "responding"
+        assert frame["data"]["activity_started_s"] == 0.0, "a watched edge publishes a KNOWN zero"
+
+        # 45 s of prose with no band event in it: the pushed age must be the
+        # PHASE's, not the runtime's own empty fold's state and not the last
+        # edge's zero.
+        clock.advance(45)
+        session.emit(MessageUpdateEvent(message=Message.assistant(), delta="more prose "))
+        await _until_push(reader, 45.0, activity="responding", schedule=runtime._schedule_push)
+
+        # An instant the fold cannot date still crosses as unknown, never as a zero.
+        session.emit(AgentEndEvent(generation=1))
+        await _until_push(reader, None, schedule=runtime._schedule_push)
+    finally:
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
 def test_fold_property_rejects_a_foreign_sink() -> None:
     class Stub:
         def __init__(self, projection: SessionProjection) -> None:
@@ -1415,6 +1605,161 @@ class TestLiveStateReachesTheRecord:
         handle = FakeHandle()
         handle._session = SimpleNamespace(transcript_path=path)  # type: ignore[attr-defined]
         return handle
+
+    def _tui_handle_over_transcript(self, tmp_path, name: str, rows: list[str]) -> Any:
+        """A TUI-SHAPED handle: ``_session`` is a METHOD, as ``TuiSessionHandle``'s is.
+
+        The shape the seed used to be blind to (review round 1, F-1):
+        ``getattr`` bound the function, ``has_durable_history`` read
+        ``transcript_path`` off it, got ``None`` and answered False — for EVERY
+        TUI window, including a ``lop --resume <sid>`` boot over a conversation
+        with hundreds of rows. The phone must follow a ``/new``/``/resume``
+        swap, which is why the TUI reads its session per call instead of
+        storing it, so the two shapes are both real and the seed has to answer
+        for both.
+        """
+        from types import SimpleNamespace
+
+        path = tmp_path / name / "transcript.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(row + "\n" for row in rows))
+        session = SimpleNamespace(transcript_path=path)
+
+        class _TuiShaped(FakeHandle):
+            def _session(self) -> Any:  # noqa: ANN401 — the handle's own shape
+                return session
+
+        return _TuiShaped()
+
+    @pytest.mark.asyncio
+    async def test_a_tui_shaped_handle_seeds_started_from_durable_history(self, tmp_path) -> None:
+        """F-1, the direction that was broken: a TUI-shaped handle over a
+        conversation that has run turns publishes ``started=True`` from its
+        FIRST publish.
+
+        ``lop --resume <sid>`` is exactly this shape — the TUI's first session
+        is adopted before any ``rebind`` — so before the fix its record said
+        ``started=false`` over a live conversation and the peer gate refused
+        sends to it with a sentence that was false about it.
+        """
+        handle = self._tui_handle_over_transcript(
+            tmp_path,
+            "tui-resumed",
+            [
+                '{"id":"m1","ts":1,"type":"custom","payload":{"custom_type":"title"}}',
+                '{"id":"m2","ts":2,"type":"message","payload":{"role":"user"}}',
+            ],
+        )
+        server = RuntimeServer(handle, kind="tui")
+        assert server._started is True
+        assert server._record.started is True
+
+    @pytest.mark.asyncio
+    async def test_a_tui_shaped_handle_over_a_fresh_session_boots_unstarted(self, tmp_path) -> None:
+        """The other direction on the same shape: a true ``/new`` still boots
+        ``started=False``, because the whole peer gate rests on that bit."""
+        bookkeeping_only = self._tui_handle_over_transcript(
+            tmp_path,
+            "tui-fresh",
+            ['{"id":"t1","ts":1,"type":"custom","payload":{"custom_type":"title"}}'],
+        )
+        server = RuntimeServer(bookkeeping_only, kind="tui")
+        assert server._started is False
+        assert server._record.started is False
+
+    @pytest.mark.asyncio
+    async def test_a_tui_shaped_handle_that_cannot_answer_boots_unstarted(self) -> None:
+        """``TuiSessionHandle._session()`` RAISES before the app binds one
+        (``RuntimeError("session is still starting")``). A boot must not fail
+        over a seed, so the probe swallows it and keeps the conservative False
+        the first real turn corrects."""
+
+        class _StillStarting(FakeHandle):
+            def _session(self) -> Any:  # noqa: ANN401 — the raising shape
+                raise RuntimeError("session is still starting")
+
+        server = RuntimeServer(_StillStarting(), kind="tui")
+        assert server._started is False
+
+    def _real_tui_handle(self, tmp_path, name: str, rows: list[str]) -> Any:
+        """A REAL ``TuiSessionHandle`` over a stub app (review round 2, F-8).
+
+        The pins above use a ``FakeHandle`` subclass with the right SHAPE
+        (``_session`` as a method); this one binds the class the shape stands
+        in for, which is the shape QA could not reach from outside (round 1,
+        Q3). Cheap to build: the constructor reads the fields a projection
+        carries and wires the ``started`` publisher only when the session has
+        one, so a stub app and a session stub are enough.
+        """
+        from types import SimpleNamespace
+
+        from local_operator.mobile.tui_handle import TuiSessionHandle
+
+        path = tmp_path / name / "transcript.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(row + "\n" for row in rows))
+        session = SimpleNamespace(
+            session_id=name,
+            transcript_path=path,
+            conversation_name=name,
+            cwd=str(tmp_path),
+        )
+        # The real constructor's parameter is typed ``OperatorApp``; the stub is
+        # deliberate (the handle reads only ``_session`` off the app), so the
+        # ignore documents the double rather than widening the class's type.
+        return TuiSessionHandle(SimpleNamespace(_session=session))  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_a_real_tui_handle_seeds_started_the_same_way(self, tmp_path) -> None:
+        """F-8: the F-1 fix, on the class rather than on a stand-in for it.
+
+        Both directions, because the enclosing gate (and the refusal that
+        depends on it) rests on the fresh direction staying False.
+        """
+        resumed = RuntimeServer(
+            self._real_tui_handle(
+                tmp_path,
+                "real-tui-resumed",
+                [
+                    '{"id":"t1","ts":1,"type":"custom","payload":{"custom_type":"title"}}',
+                    '{"id":"m1","ts":2,"type":"message","payload":{"role":"user"}}',
+                ],
+            ),
+            kind="tui",
+        )
+        assert resumed._started is True
+        assert resumed._record.started is True
+
+        fresh = RuntimeServer(
+            self._real_tui_handle(
+                tmp_path,
+                "real-tui-fresh",
+                ['{"id":"t1","ts":1,"type":"custom","payload":{"custom_type":"title"}}'],
+            ),
+            kind="tui",
+        )
+        assert fresh._started is False
+        assert fresh._record.started is False
+
+    @pytest.mark.asyncio
+    async def test_a_handle_answering_with_something_unreadable_boots_unstarted(self) -> None:
+        """F-8, second half: the DERIVATION is inside the guard too.
+
+        The reader ends at ``durable_conversation_path``, which catches only
+        ``OSError`` — so a session answering with something that is not a path
+        used to raise ``TypeError`` out of ``RuntimeServer.__init__``, killing
+        the boot over a seed. A record we cannot read is unengaged: the
+        conservative False, corrected by the owner's first turn.
+        """
+        from types import SimpleNamespace
+
+        class _Odd(FakeHandle):
+            def _session(self) -> Any:  # noqa: ANN401 — an unreadable shape
+                return SimpleNamespace(transcript_path=object())
+
+        server = RuntimeServer(_Odd(), kind="tui")
+        assert server._started is False
+        assert server._record.started is False
 
     @pytest.mark.asyncio
     async def test_a_resumed_boot_seeds_started_from_durable_history(self, tmp_path) -> None:
@@ -3391,3 +3736,103 @@ async def test_the_shedding_pass_does_not_mutate_the_shared_frame() -> None:
     assert clipped != "x" * (2 * _MAX_LINE_BYTES), "the shed stage did not run"
     assert clipped.endswith("…")
     assert json.dumps(frames[0], sort_keys=True) == json.dumps(frames[1], sort_keys=True)
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_that_switched_away_stops_counting_as_a_watcher() -> None:
+    """A retained attach is a connection, not a person reading this session.
+
+    THE BUG THIS PINS. A multiplexing TUI keeps the outgoing session's
+    connection open when the user switches away, so `_visible_attach_surfaces`
+    counted a viewer that was showing something else. `_announce_pending`
+    suppresses its out-of-band toast whenever a surface is watching, so a gate
+    parked behind such a connection waited in silence for the whole unattended
+    timeout with its card painted into a viewer nobody was looking at.
+
+    Asserted on `watching_surfaces()` -- the predicate the notification
+    routing actually reads -- rather than on the flag, so the test fails if the
+    field stops reaching the decision.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+
+        # Displaying by default: an older viewer that never sends the op is
+        # counted exactly as it was before this field existed.
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+
+        writer.write(
+            json.dumps({"op": "viewer_watch", "req": 1, "displaying": False}).encode() + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "ack", 1)
+
+        # The connection is still open -- only the claim to be showing it went.
+        assert runtime.attach_clients() == 1
+        assert runtime.watching_surfaces() == frozenset()
+
+        writer.write(
+            json.dumps({"op": "viewer_watch", "req": 2, "displaying": True}).encode() + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "ack", 2)
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+        writer.close()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_switching_away_re_announces_a_parked_gate() -> None:
+    """The 1->0 transition must reach `reannounce_pending`.
+
+    The suppression is only half the defect: a gate that opened while somebody
+    WAS watching sends no toast by design, and the re-announce on the detached
+    edge is what rescues it. A viewer that switches away without closing its
+    socket has to produce that edge, or the rescue never runs.
+    """
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    announced: list[str] = []
+    setattr(handle, "reannounce_pending", lambda: announced.append("reannounced"))
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        runtime.set_record_pending("approval")
+        announced.clear()
+
+        writer.write(
+            json.dumps({"op": "viewer_watch", "req": 1, "displaying": False}).encode() + b"\n"
+        )
+        await writer.drain()
+        await _until(reader, "ack", 1)
+
+        assert announced == ["reannounced"], "a parked gate was not re-announced on switch-away"
+        writer.close()
+    finally:
+        runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_viewer_watch_rejects_a_non_boolean_and_leaves_state_intact() -> None:
+    """A malformed frame must not silently blank the display claim."""
+    handle = FakeHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial(record, client="attach")
+        writer.write(
+            json.dumps({"op": "viewer_watch", "req": 1, "displaying": "no"}).encode() + b"\n"
+        )
+        await writer.drain()
+        reply = await _until(reader, "error", 1)
+        assert "boolean" in str(reply.get("message", ""))
+        assert runtime.watching_surfaces() == frozenset({"attach"})
+        writer.close()
+    finally:
+        runtime.close()

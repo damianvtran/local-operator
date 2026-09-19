@@ -708,6 +708,29 @@ class SettingsPreview(Message):
         self.value = value
 
 
+#: What the page says when ITS OWN write could not loosen a gate this process
+#: does not hold (UX round 1, U1), as a SHED LADDER walked longest-first.
+#:
+#: The alert is a sole-content line on a widget that CLIPS rather than wraps
+#: (`.settings-view-detail` is one row tall at every size, measured), so a string
+#: handed over whole is REMOVED rather than shortened. The first cut appended the
+#: sentence raw: at 60 columns the frame ended on a bare `/approvals auto`, and at
+#: 44 it ended on a dangling em dash with the route gone entirely and no `…` to
+#: say anything had been dropped (design round 2, D4; UX round 2, U8; agent
+#: review round 2, nit). The rungs therefore drop the FACT before the REMEDY —
+#: the page's own rule for this line, the same reason `_rejection_render` sheds a
+#: value and never its advice — and the floor MARKS a cut instead of hiding it.
+#:
+#: Cell counts are against `_detail_width()`: 74 at 80x24, 54 at 60x24, 38 at
+#: 44x20. Rung 2 (40) is what a 60-column footer shows, rung 3 (26) is what
+#: survives 44 — the widths where the row help has already shed to its clause.
+_GATE_KEPT_ALERT_RUNGS: tuple[str, ...] = (
+    "saved; this session keeps asking — /approvals auto loosens it",  # 61
+    "keeps asking — /approvals auto loosens it",  # 40
+    "/approvals auto loosens it",  # 26
+)
+
+
 class SettingsView(Vertical):
     """The page: title, a rule, the settings body, a side pane, and the footer.
 
@@ -798,6 +821,18 @@ class SettingsView(Vertical):
         #: said "you did something wrong" about a press the footer advertises
         #: (UX round 2, U16).
         self._notice = ""
+        #: Whether the page's detail line owes the ALERT — the answer to an action
+        #: that did NOT take effect for the thing the user aimed it at. Today
+        #: exactly one case: a loosening written from this page while an attached
+        #: runtime holds the gate, so the file changed and the running session did
+        #: not (UX round 1, U1). Its own state rather than a rung on `_notice`
+        #: because the ink differs (`_notice` is `faint`, 1.97:1 — the page's
+        #: watermark rung, wrong for the only sentence that says the user's action
+        #: did not land) and because the lifetime differs: it is consumed by the
+        #: write that produced it and dies on the next cursor move. The TEXT is
+        #: the ladder in `_GATE_KEPT_ALERT_RUNGS`; a bool here means an empty
+        #: alert cannot be confused with no alert.
+        self._notice_alert = False
         #: Caret position INSIDE the buffer. The editor owns left/right/home/end
         #: while it is open (UX round 1, U2): unhandled they fell through to the
         #: page bindings and switched the read-only side pane mid-typing, and
@@ -2002,10 +2037,39 @@ class SettingsView(Vertical):
 
     def _write(self, setting: Setting, value: Any) -> None:
         """Store ``value`` and report it, or hold the reason it was refused."""
+        # Cleared BEFORE the write: a write this page makes can be refused by the
+        # gate of a process it is not (`_take_gate_kept_notice`), and the record
+        # is read after the save because `_save` clears this slot on success.
+        self._notice_alert = False
         if not self._save(lambda: settings_io.write_setting(self._manager, setting, value)):
             return
         self.post_message(SettingsChanged(setting.key, value))
+        self._notice_alert = self._take_gate_kept_notice(setting.key)
         self._repaint()
+
+    def _take_gate_kept_notice(self, key: str) -> bool:
+        """Ask the app whether THIS write was refused by a gate it does not own.
+
+        A LIVE key can be refused by the process holding the gate — `/approvals`
+        on an attached pane is the runtime's, a process away — and the sentence
+        the runtime prints lands in the transcript this page has HIDDEN while it
+        is open (`OperatorApp._open_settings_view`), so the page that took the
+        action would otherwise report a bare success (UX round 1, U1). The fact
+        is known synchronously (the write goes through ``settings_io``, whose
+        in-process fast path runs the app's own config listener on this call
+        stack), but it is ASKED FOR here rather than pushed, because `_save`
+        clears this slot on the way out — anything set during the write would be
+        wiped by the line that reports the save.
+
+        ``getattr`` rather than a typed call: this widget is mounted by test
+        hosts that are not an ``OperatorApp``, and in those nothing is refused.
+        """
+        take = getattr(self.app, "_take_page_kept_loosening", None)
+        if not callable(take):
+            return False
+        # `getattr` hands back an untyped callable, so the answer is narrowed
+        # rather than assumed: this decides whether a line is painted.
+        return take(key) is True
 
     # -- hotkey capture -----------------------------------------------------
     def _begin_capture(self, setting: Setting) -> None:
@@ -2306,7 +2370,11 @@ class SettingsView(Vertical):
         # The notice answered a keypress on THIS row, so it stops being true
         # the moment the cursor leaves it — the same lifetime `_error` has.
         # Set again below when the discard itself is what needs announcing.
+        # The ALERT message goes with it: it answers the same keypress, and a
+        # "your write did not land" line left standing over an unrelated row
+        # invites the reader to apply it to that row.
         self._notice = ""
+        self._notice_alert = False
         # NOT the expansion. A choice group is left by the cursor travelling
         # OUT of it, which only the mover knows about — collapsing here would
         # close the group on the arrow that browses within it, which is the one
@@ -4094,6 +4162,13 @@ class SettingsView(Vertical):
         # and the only statement of the way out (design round 1, D3).
         dim = Style(color=theme_mod.semantic_color("dim"))
         error = Style(color=theme_mod.semantic_color("danger"))
+        # The rung for a message answering an action that did NOT take effect for
+        # what it was aimed at (`_notice_alert`): the transcript gives the same
+        # fact its `warning` ink, and the page's copy of it cannot be quieter
+        # than the receipt it stands in for. `faint` (1.97:1) is the watermark
+        # rung and `dim` (4.55:1) is the one design round 1's D2 moved this class
+        # of sentence off.
+        alert = Style(color=theme_mod.semantic_color("warning"))
         text = Text(no_wrap=True, overflow="ellipsis")
         row = self._current()
         question, contract = self._confirm_parts()
@@ -4227,6 +4302,14 @@ class SettingsView(Vertical):
             text.append(self._CONFIRM_MARKER, style=error + Style(bold=True))
             text.append(question, style=error + Style(bold=True))
             text.append(f"  {contract}", style=error)
+        elif self._notice_alert:
+            # The answer to an action that did not land (UX round 1, U1), above
+            # the ordinary notice because it is the row's more important
+            # statement, and below the confirm/delete ask because that one is
+            # about to DESTROY something and nothing outranks it. The TEXT comes
+            # from the shed ladder: this is a sole-content line on a widget that
+            # clips, so a raw string loses its tail with no mark (D4/U8).
+            text.append(self._alert_text(), style=alert)
         elif self._notice:
             # An informational message is NOT an error. It used to route
             # through `self._error` and inherit the danger ink, so telling a
@@ -4322,6 +4405,18 @@ class SettingsView(Vertical):
             # stays faint, so a HARD routing cost can never be mistaken for
             # a SOFT note.
             help_part = (help_text, faint, False)
+            # THE HELP ALONE TAKES `dim`, NOT `faint` (design round 2, D5). The
+            # rule is stated eight lines up for the state clause — a clause that
+            # is the ONLY text on the line takes the `dim` rung (4.55:1), never
+            # `faint` (1.97:1) — and the help-alone rung is exactly that state:
+            # at 80x24 on-default, and off-default too once the key path sheds.
+            # On the approvals row that sentence IS the caveat this change
+            # bought, so leaving it at the watermark rung would have hidden the
+            # fix in the ink. The help keeps `faint` at every rung where it is
+            # read BESIDE the clause or the key, which is the distinction the
+            # rule draws: faint is for the softer half of a line, dim for a line
+            # that has no other half.
+            help_alone_part = (help_text, Style(color=theme_mod.semantic_color("dim")), False)
             clause_part = (clause, clause_style, False)
             key_part = (key_suffix.strip(), key_style, True)
             base_rungs: list[list[tuple[str, Style, bool]]] = (
@@ -4331,10 +4426,10 @@ class SettingsView(Vertical):
                     [clause_part, key_part],
                     [clause_part],
                     [help_part, key_part],
-                    [help_part],
+                    [help_alone_part],
                 ]
                 if clause
-                else [[help_part, key_part], [help_part]]
+                else [[help_part, key_part], [help_alone_part]]
             )
             warning = row.setting.warning
             if warning:
@@ -4374,6 +4469,21 @@ class SettingsView(Vertical):
         # routed through the same helper so all five surfaces behave alike and
         # a future state that DOES repeat a detail line is covered for free.
         self._detail.update_if_changed(text)
+
+    def _alert_text(self) -> str:
+        """The alert, shed so the REMEDY is the last thing to go (D4/U8).
+
+        The page's rule for a line that clips: shed until what is left is the
+        part that cannot be missing, and MARK the cut if even that does not fit.
+        Here the remedy is the part that cannot be missing and the fact ("saved",
+        "keeps asking") sheds first, because the whole reason the line exists is
+        to name the way out of a refused loosening.
+        """
+        width = self._detail_width()
+        for rung in _GATE_KEPT_ALERT_RUNGS:
+            if cell_len(rung) <= width:
+                return rung
+        return truncate_cells(_GATE_KEPT_ALERT_RUNGS[-1], width)
 
     def _rejection_render(self, style: Style) -> Text:
         """One rejection, shed so WHAT WENT WRONG always survives (D11/D16).
@@ -5560,8 +5670,13 @@ class SettingsView(Vertical):
 
         Separate from :attr:`error_text` because the two are inked differently
         and a test that could not tell them apart is how an informational
-        message ended up in the danger colour (UX round 2, U16).
+        message ended up in the danger colour (UX round 2, U16). The ALERT
+        message is reported here too — it is what the row is painting — because
+        a caller asserting "the page said something" must not have to know which
+        of the two slots carried it.
         """
+        if self._notice_alert:
+            return self._alert_text()
         return self._notice
 
     # -- suggestion accessors (assertable state) ----------------------------

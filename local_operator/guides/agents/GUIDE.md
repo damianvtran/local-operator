@@ -47,7 +47,7 @@ Use the `task` tool when the current job contains an independent, well-bounded s
   model each child will run on (`on <provider/model>`, or `on this session's model
   (<provider/model>)` when it inherits), and `wait`/`jobs` repeat it, so a
   delegated slice's model never has to be inferred
-- is one level deep and cannot spawn grandchildren
+- may itself delegate **if and only if its role allows the `task` tool**. A `manager` keeps `task` at any depth, so a manager's child is a manager too; a role that does not delegate (a `reviewer`, a `coder`, a `scout`) is never handed it and must do the work itself. A subagent launched with no role inherits its parent's allowance. When a child does delegate, its own children are listed in its page — in the TUI the roster re-scopes to them and you walk back up with `p`/`Esc`; the desktop UI walks the same tree with its back control and breadcrumbs.
 - is ephemeral; it does not become a registered profile or keep durable specialist state
 
 ## Roles: `task(agent=...)`

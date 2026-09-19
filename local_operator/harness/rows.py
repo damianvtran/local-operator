@@ -90,6 +90,7 @@ _HARNESS_NOTICE_HEADS: tuple[str, ...] = (
     "[model switch] ",  # incidents.format_model_switch_message
     "[session incident",  # incidents.Incident.render
     "[session credential] ",  # incidents.format_credential_message
+    "[credential redaction] ",  # incidents.format_shape_incident_message
     "[mcp recovery] ",  # incidents.format_mcp_recovery_message
     "[session-state]\n",  # Session._system_state_message
     # The unattended-gate timeouts, in _default_convert_to_llm. Two heads rather
@@ -325,14 +326,112 @@ def typed_line_of(text: str) -> str | None:
         return None
 
 
+def reference_block_stripped(text: str) -> str:
+    """``text`` without the ``<operator-references>`` blocks appended to it.
+
+    An ``@path`` reference is expanded ONCE, at submit, and the expansion is
+    appended to the message as a block. The model needs that block; the
+    transcript must not show it, or a one-line question about a file paints as
+    the whole file. Exactly the failure :func:`typed_line_of` exists to prevent
+    for a skill payload.
+
+    Stripping HERE rather than in a host is the point (design R5). Both surfaces
+    paint through :func:`user_row_text`, so a strip written in the TUI would
+    leave the phone showing the block — which is precisely how one surface got
+    the skill rule and the other did not.
+
+    EVERY COMPLETE BLOCK goes, and the spans come from
+    ``references.reference_block_spans`` rather than being found here. Both
+    halves are load-bearing:
+
+    - COMPLETE is what keeps the marker quotable. The tag is part of the
+      product's visible vocabulary now, so asking about this feature, pasting a
+      log line, or quoting a prompt is ordinary — and an unanchored ``find``
+      truncated every one of those messages at the word they quoted: "why does
+      my message contain <operator-references> in it?" painted as "why does my
+      message contain", silently, with no notice, on both surfaces. The
+      transcript showing strictly less than what was typed is the failure R4
+      names. A marker the operator quoted is not followed by the block's own
+      preamble line, so it is not a span; an UNCLOSED block is not provably one
+      and reports nothing either (truncated history, a message cut mid-write —
+      showing too much is recoverable, showing less than the operator typed, with
+      no notice, is not).
+    - PASTED, not only appended. The anchor is the preamble line plus the
+      closer, so a COMPLETE block the operator pasted, quoted or forwarded is
+      stripped too, and that is intended rather than overlooked (review round 2,
+      MINOR-2). An appended block and a pasted one are the same bytes and there
+      is no sound way to tell them apart — which is exactly why base anchored
+      to the END of the message, and why that anchor broke the ordinary
+      forwarding shape. The accepted cost is that asking about a complete
+      payload of this feature paints less than was typed; the property bought
+      for it is that the ordinary case cannot leak a file body into the row.
+    - EVERY is because a message can carry more than one. Expansion only ever
+      APPENDS, so a second pass over text that already held a block leaves the
+      FIRST one mid-message: pass 1's block, then prose carrying a new token,
+      then pass 2's block. Stripping only the trailing block painted 6,496
+      characters of file body — the whole of the first block — into the row,
+      which is the failure this function exists to prevent, reached through the
+      ordinary forwarding shape (a subagent launch re-prompting a manager's own
+      text).
+
+    The block's grammar lives with the code that writes it, because recognising
+    a real block means knowing the open marker AND the preamble line; a second
+    copy of that rule here is how the TUI and the phone came to disagree in the
+    first place.
+
+    Lazy-imported and failure-swallowing by contract, like :func:`typed_line_of`
+    above and for the same reason: this module stays host-free, and a broken or
+    absent resolver must never stop a transcript replaying. Every failure
+    degrades to "no block here", so the caller paints the text verbatim.
+    """
+    try:
+        from local_operator.references import reference_block_spans
+    except Exception:  # noqa: BLE001 — replay must never fail on this
+        return text
+    spans = reference_block_spans(text)
+    if not spans:
+        return text
+    kept: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        # The resolver appends a block as ``JOIN + block``, so the separator
+        # before one belongs to the block rather than to the operator's prose:
+        # keeping it would paint a blank line where the block stood, turning
+        # "first @a.txt and now @b.txt" into a two-paragraph row.
+        kept.append(text[cursor:start].rstrip())
+        cursor = end
+    kept.append(text[cursor:].rstrip())
+    # A SEPARATOR where two segments would otherwise fuse. Each segment is
+    # right-stripped, because the separator BEFORE a block belongs to the block
+    # rather than to the operator's prose, so a segment can end at a word — and
+    # a caller that appends text to an expanded message with no space of its own
+    # then painted `first @a.txtand next` (review round 2, NIT-1). A single
+    # space only when the next segment starts on a non-space character: the
+    # ordinary shapes already carry their own leading whitespace, so they are
+    # joined byte-identically to before.
+    joined = ""
+    for segment in kept:
+        if not segment:
+            continue
+        if joined and not segment[0].isspace():
+            joined += " "
+        joined += segment
+    return joined
+
+
 def user_row_text(text: str) -> str:
     """What a surface paints for a ``role="user"`` message.
 
-    Collapses a skill payload to the line the user actually typed and leaves
-    every other message alone. Kept beside :func:`is_harness_chrome` because
-    the two are the whole of the "what did the user really say" decision, and
-    splitting them across hosts is how one surface got the skill rule and the
-    other did not.
+    Collapses a skill payload to the line the user actually typed, strips an
+    expanded reference block, and leaves every other message alone. Kept beside
+    :func:`is_harness_chrome` because the two are the whole of the "what did the
+    user really say" decision, and splitting them across hosts is how one
+    surface got the skill rule and the other did not.
+
+    The reference block is removed FIRST, before the skill fallback: a
+    `$skill` invocation whose request cited a file carries both, and
+    :func:`typed_line_of` parses the payload envelope, which a trailing block
+    would sit outside of and survive.
 
     Strips for the same reason :func:`is_harness_chrome` does: the two hosts
     normalise differently, so an envelope with surrounding whitespace would
@@ -340,7 +439,7 @@ def user_row_text(text: str) -> str:
     phone. The fallback returns the stripped text so both surfaces paint one
     row, not one padded and one not.
     """
-    stripped = text.strip()
+    stripped = reference_block_stripped(text).strip()
     return typed_line_of(stripped) or stripped
 
 

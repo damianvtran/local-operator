@@ -41,6 +41,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, cast
 
+from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.mobile.command_reservation import CommandReservations
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import (
@@ -286,7 +287,28 @@ class TuiSessionHandle(SessionHandle):
 
     @property
     def session_projection_seed(self) -> SessionProjection:
+        """The projection skeleton: identity fields the runtime folds onto.
+
+        A pure read, deliberately: the runtime reads this for IDENTITY (to stamp
+        ``kind``, and to build its own sink fold over the object), and a getter
+        that also mutates is the shape that has twice produced this PR's defects
+        — a reader changing state it did not know it touched (review round 4,
+        NIT 2). Re-dating is :meth:`redate_from_phase`, called where the age
+        becomes a frame.
+        """
         return self._projection
+
+    def redate_from_phase(self) -> None:
+        """Re-date the band's age through the fold the EVENTS ARE FED into.
+
+        The runtime calls this on the frame it is about to serialize (probing for
+        the member, so a reduced handle without a fold simply has none): the age
+        is written when the phase moves, so a viewer — or a push — arriving
+        mid-phase must be served the phase's age AT THAT MOMENT rather than the
+        number from the last edge (review round 3, MAJOR 1 and round 4's BLOCKER,
+        both on this hand-off).
+        """
+        self._fold.redate_from_phase()
 
     def subscribe(self, on_projection: Callable[[], None]) -> Callable[[], None]:
         self._on_projection = on_projection
@@ -325,6 +347,13 @@ class TuiSessionHandle(SessionHandle):
         # events (start/end/turn-end) are the sole authority — see
         # ``_reconcile_streaming`` for why per-event reads are poison.
         self._reconcile_streaming()
+        # And seed the CLOCKS from the same attach, for the same reason: a phone
+        # subscribing mid-turn never witnessed the ``tool_execution_start`` (or
+        # the phase edge) either, so the fold's first event would date work that
+        # is already running from the phone's arrival — the reported band
+        # reading ``0s`` and counting up. One-shot, and probed: a session that
+        # cannot answer seeds nothing. See ``ProjectionFold.reconcile_clocks``.
+        self._fold.reconcile_clocks(session)
         self._refresh_state()
         self._warm_subagent_details()
         self._unsubscribe = unsubscribe
@@ -371,7 +400,19 @@ class TuiSessionHandle(SessionHandle):
 
         def handler(event: Any) -> None:
             try:
-                on_event(event.model_dump(mode="json"))
+                # Bounded here for the same reason the serving handle bounds: this
+                # is a wire encoder — the OTHER implementation of the handle
+                # capability ``RuntimeServer`` relays (``server.py``
+                # ``_on_connection``), used when the session is owned by a TUI
+                # rather than by the server. An ``agent_end`` carries the whole
+                # turn, so leaving it unbounded here would leave the bound
+                # bypassable by whichever host happens to own the session.
+                on_event(
+                    bound_agent_end_for_wire(
+                        event.model_dump(mode="json"),
+                        session_id=getattr(self._session(), "session_id", None),
+                    )
+                )
             except Exception:  # noqa: BLE001 — relay is additive, never a gate
                 logger.debug("mobile event serialization failed", exc_info=True)
 
@@ -409,9 +450,13 @@ class TuiSessionHandle(SessionHandle):
                     await session.prompt(text, image_blocks, **fields)
                 except BaseException as exc:
                     if not admitted.done():
+                        from local_operator.session.errors import TurnInFlight
+
                         self._command_reservations.reject(
                             command_id,
-                            transfer_to_steer="already streaming" in str(exc),
+                            transfer_to_steer=(
+                                isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
+                            ),
                         )
                         admitted.set_exception(exc)
                     raise

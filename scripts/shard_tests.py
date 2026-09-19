@@ -1,8 +1,19 @@
-"""Partition the unit suite into N shards balanced by MEASURED test duration.
+"""Partition a pytest tree into N shards balanced by MEASURED test duration.
 
 Usage:
     python scripts/shard_tests.py --shard I --total N [--out shard_tests.txt]
     python scripts/shard_tests.py --report          # all shards, projected totals
+    python scripts/shard_tests.py --tree e2e --shard I --total 3 --out e2e_tests.txt
+
+Two trees are sharded today -- ``unit`` (the default) and ``e2e`` -- and the
+only thing that differs between them is which files to collect and which
+committed manifest weighs them. Both live in ``TREES`` below; ``--tree``
+selects one. This is deliberately the SAME script rather than a second copy
+under a new name: the properties that make the split safe (globbed file list,
+committed weights, pessimistic fallback, deterministic LPT) are the ones a
+copied script silently loses, and the invariants in
+``tests/unit/test_ci_hygiene.py`` are written against these functions, so a
+fork would move the guard rails off the code that runs.
 
 WHY THIS EXISTS
 ---------------
@@ -59,6 +70,48 @@ retired.
 one pytest process; this split happens across five machines before pytest
 starts.
 
+WHY THE E2E TREE IS SHARDED THE SAME WAY, AND WHY THAT IS SAFE
+-------------------------------------------------------------
+``tests/e2e`` is the opposite of the unit tree in one respect that decides
+its sharding axis: it runs ``-n0``, serially, because a test's failure mode is
+a HANG and a fired ``faulthandler`` watchdog exits the process -- under xdist
+that kills a worker carrying unrelated tests and reports them as
+infrastructure errors instead of a freeze (see AGENTS.md). It also contends
+real ``flock`` lock files and drives whole application lifecycles.
+
+So the workers cannot be the sharding axis; the RUNNERS are. Each matrix leg
+is a separate machine, which is exactly what ``-n0`` needs -- no two e2e
+shards share a process, a lock file or an app lifecycle, and no shard sees a
+neighbour's hang. The tree is split by measured per-file duration into three
+legs per OS instead of one serial leg, which is what took ~19 minutes of
+critical path off a green run (see tests/durations-e2e.json for the measured
+weights and the PR that added this for the per-shard wall times).
+
+WHAT THIS SCRIPT IS AND IS NOT RESPONSIBLE FOR
+----------------------------------------------
+Worth reading before adding a shard or a new term to the weight, because the
+2026-09-19 measurements separate the two cleanly (the numbers and their run ids
+are in ``scripts/gen_test_durations.py``):
+
+- **The partition is exact on the weights it is given.** LPT equalised the
+  measured per-file cost to 1.000x once the manifest was current -- five shards
+  at 42.2 test-min each -- against 1.189x-1.310x for the same weights scored on
+  a run they were not fitted to.
+- **That is a weaker claim than it sounds, and the walls show why.** A few
+  dominant files swing 0.6-1.6x between runs, so two runs of ONE manifest gave
+  shard walls 634-785 s (1.24x) and 461-846 s (1.84x), with the slowest shard of
+  the first the fastest of the second. More RUNS of junit timings are what
+  shrink that; more shards only divide it -- and score every comparison on the
+  same tree, because a pre-rebase and a post-rebase table are not comparable
+  (that error is recorded in ``scripts/gen_test_durations.py``).
+- **A tree that outgrows its job's ceiling fails a test, not a runner.**
+  ``tests/unit/test_ci_hygiene.py`` asserts the ceiling against the projection
+  printed below, in minutes, at the worker count the job really gets.
+
+So when a shard is slow, read the projection against the pytest summary line in
+the same log FIRST: if they agree, the shard is doing the work the manifest
+says, and the answer is more shards or less suite -- not a better partition.
+
 THE ALGORITHM
 -------------
 Longest-processing-time-first (LPT): sort files by descending weight, assign
@@ -113,11 +166,64 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-MANIFEST = REPO / "tests" / "durations.json"
-TEST_GLOB = "tests/unit/**/test_*.py"
+
+
+@dataclass(frozen=True)
+class Tree:
+    """One shardable pytest tree: what to collect, and what weighs it.
+
+    ``default_shards`` is the count the matching CI job passes as ``--total``.
+    It is per-tree because the two trees are split across different things --
+    five unit shards on one OS versus three e2e shards on EACH of two OSes --
+    and a count that silently disagreed with the job's matrix is how a shard
+    ends up orphaned (see `test_ci_shard_matrix_covers_every_shard_...`).
+    """
+
+    name: str
+    glob: str
+    manifest: Path
+    default_shards: int
+
+    @property
+    def root(self) -> str:
+        """The directory this tree collects from (``tests/e2e``).
+
+        Derived from the glob rather than stored beside it, so a tree cannot
+        end up collecting one directory and validating another.
+        """
+        return self.glob.split("/**")[0]
+
+
+#: The registry `--tree` selects from. A new tree is added HERE, not as a
+#: second copy of this script: every guard in tests/unit/test_ci_hygiene.py is
+#: written against these functions, so a fork would leave the code that runs
+#: unguarded.
+TREES: dict[str, Tree] = {
+    "unit": Tree(
+        name="unit",
+        glob="tests/unit/**/test_*.py",
+        manifest=REPO / "tests" / "durations.json",
+        default_shards=5,
+    ),
+    # `tests/e2e` is globbed with `**` like the unit tree even though it is
+    # flat today, so a future subdirectory is collected rather than silently
+    # dropped -- the same reason the unit glob is recursive.
+    "e2e": Tree(
+        name="e2e",
+        glob="tests/e2e/**/test_*.py",
+        manifest=REPO / "tests" / "durations-e2e.json",
+        default_shards=3,
+    ),
+}
+DEFAULT_TREE = "unit"
+
+# Kept as a module alias because the partition is documented and tested
+# against "the manifest" (the unit one) far more often than against a tree.
+MANIFEST = TREES[DEFAULT_TREE].manifest
 
 # Used only if the manifest is missing or unreadable. The partition must
 # still be produced -- a broken manifest degrades balance, it never stops
@@ -125,14 +231,16 @@ TEST_GLOB = "tests/unit/**/test_*.py"
 DEFAULT_FALLBACK_SECONDS = 50.0
 
 
-def collect_test_files(repo: Path = REPO) -> list[str]:
-    """Every unit test file CI would run, in a deterministic order.
+def collect_test_files(repo: Path = REPO, tree: str = DEFAULT_TREE) -> list[str]:
+    """Every test file of `tree` CI would run, in a deterministic order.
 
     Deliberately the same expression the positional split used, so the SET
     of tests executed is provably unchanged by this refactor -- only their
-    distribution across shards differs.
+    distribution across shards differs. The glob is recursive so a test
+    package that later grows a subdirectory keeps being collected.
     """
-    return sorted(p.relative_to(repo).as_posix() for p in repo.glob(TEST_GLOB) if p.is_file())
+    glob = TREES[tree].glob
+    return sorted(p.relative_to(repo).as_posix() for p in repo.glob(glob) if p.is_file())
 
 
 def load_weights(manifest: Path = MANIFEST) -> tuple[dict[str, float], float]:
@@ -175,20 +283,38 @@ def partition(
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
+    ap.add_argument(
+        "--tree",
+        choices=sorted(TREES),
+        default=DEFAULT_TREE,
+        help="which shardable tree to split (default: %(default)s)",
+    )
     ap.add_argument("--shard", type=int, help="0-based shard index to emit")
-    ap.add_argument("--total", type=int, default=5, help="number of shards")
+    ap.add_argument(
+        "--total",
+        type=int,
+        help="number of shards (default: the tree's own, "
+        + "/".join(f"{n}={t.default_shards}" for n, t in sorted(TREES.items()))
+        + ")",
+    )
     ap.add_argument("--out", type=Path, help="write the file list here")
     ap.add_argument("--report", action="store_true", help="print projected totals for all shards")
     args = ap.parse_args(argv)
 
-    files = collect_test_files()
-    weights, fallback = load_weights()
-    shards = partition(files, weights, fallback, args.total)
+    tree = TREES[args.tree]
+    # The tree's own count is the default rather than a module constant, so a
+    # bare `--report` describes the split CI actually runs for that tree.
+    total = args.total if args.total is not None else tree.default_shards
+
+    files = collect_test_files(tree=args.tree)
+    weights, fallback = load_weights(tree.manifest)
+    shards = partition(files, weights, fallback, total)
     unmeasured = [f for f in files if f not in weights]
 
     if args.report:
         print(
-            f"{len(files)} test files, {len(unmeasured)} unmeasured " f"(fallback {fallback:.1f}s)"
+            f"{tree.name}: {len(files)} test files, {len(unmeasured)} unmeasured "
+            f"(fallback {fallback:.1f}s), {total} shards"
         )
         for i, shard in enumerate(shards):
             secs = sum(weights.get(f, fallback) for f in shard)
@@ -197,15 +323,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.shard is None:
         ap.error("--shard is required unless --report is given")
-    if not 0 <= args.shard < args.total:
-        ap.error(f"--shard must be in [0, {args.total})")
+    if not 0 <= args.shard < total:
+        ap.error(f"--shard must be in [0, {total})")
 
     selected = shards[args.shard]
     projected = sum(weights.get(f, fallback) for f in selected) / 60
     # Printed on every run so a manifest going stale is visible in the log
     # that would suffer from it, rather than only when a shard times out.
     print(
-        f"Shard {args.shard + 1}/{args.total}: {len(selected)} test files, "
+        f"Shard {args.shard + 1}/{total} of {tree.name}: {len(selected)} test files, "
         f"~{projected:.1f} projected test-min "
         f"({len(unmeasured)} of {len(files)} files unmeasured, "
         f"weighted at the {fallback:.1f}s fallback)"

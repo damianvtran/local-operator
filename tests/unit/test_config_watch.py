@@ -403,8 +403,9 @@ async def test_notify_local_from_a_worker_thread_delivers_on_the_loop_thread(tmp
     The kqueue accelerator is disarmed here so the delivery under test is the
     ``call_soon_threadsafe`` hop itself; with it armed, the directory event can
     legitimately win the race and deliver the same change as ``"disk"``
-    (documented on ``notify_local``), which would make this assert about
-    scheduling rather than about the hop."""
+    (documented on ``notify_local``, and pinned as its own case in
+    ``test_an_off_loop_facade_write_delivered_by_the_disk_tick_arrives_as_disk``),
+    which would make this assert about scheduling rather than about the hop."""
     watcher = process_watcher(tmp_path)
     watcher.start()
     watcher._disarm_kqueue()
@@ -420,6 +421,61 @@ async def test_notify_local_from_a_worker_thread_delivers_on_the_loop_thread(tmp
         assert recorder.threads == [loop_thread]
         assert recorder.changes[0].source == "local"
         assert len(recorder.changes) == 1
+    finally:
+        await watcher.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_off_loop_facade_write_delivered_by_the_disk_tick_arrives_as_disk(
+    tmp_path,
+) -> None:
+    """The accepted edge on ``notify_local``, pinned as behaviour (issue #1282).
+
+    An off-loop facade write hops through ``call_soon_threadsafe``. A disk tick —
+    the kqueue reader where the platform armed it, the poll otherwise — can
+    adopt the change FIRST, and the change is then delivered as ``"disk"``: the
+    conservative value. That used to cost a spare TUI line; since the approval
+    gate authorises a LOOSENING on ``source == "local"`` it costs a REFUSED
+    loosening instead, which is fail-closed — and is why the pre-write handshake
+    that would make the source unlosable is deliberately not built.
+
+    An operator action this cheap to lose is worth a pin, and it is the one place
+    where the conservative direction is not merely a notice. Driven by running
+    the race's two real halves in the order it produces them — the facade write on
+    a worker thread, ``join()``-ed so the loop cannot run the queued hop first,
+    then the disk tick — so this asserts an ORDER rather than hoping the
+    scheduler cooperates.
+    """
+    watcher = process_watcher(tmp_path)
+    watcher.start()
+    recorder = Recorder()
+    watcher.subscribe(recorder)
+    setting = settings_io.resolve_key("tool_approval_mode")
+    assert setting is not None
+    try:
+        worker = threading.Thread(
+            target=settings_io.write_setting,
+            args=(ConfigManager(tmp_path), setting, "auto"),
+        )
+        worker.start()
+        # Synchronous on the loop thread: the queued "local" hop CANNOT have run
+        # yet, which is the window the disk tick wins in production.
+        worker.join()
+        assert recorder.changes == [], "the queued local hop ran before the disk tick"
+
+        if watcher._kqueue is not None:  # darwin/BSD: the accelerator's reader
+            watcher._on_kqueue_readable()
+        else:  # linux: the poll tick, the same ``_tick(source="disk")``
+            watcher.poll_now()
+
+        assert [change.source for change in recorder.changes] == ["disk"]
+        assert recorder.changes[0].changed_keys == {"tool_approval_mode"}
+
+        # Bound by turns, not seconds: the queued hop lands here and finds no
+        # change left to deliver, so the same write is not announced twice.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert [change.source for change in recorder.changes] == ["disk"]
     finally:
         await watcher.stop()
 

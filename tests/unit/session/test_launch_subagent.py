@@ -1341,11 +1341,11 @@ async def test_child_inherits_a_mid_session_model_override(tmp_path, monkeypatch
 
 @pytest.mark.asyncio
 async def test_child_of_top_level_session_keeps_delegation_but_not_wake(tmp_path, monkeypatch):
-    """Depth is two: a child of a TOP-LEVEL session keeps task/wait/jobs (its
-    own job manager is observable through its own tools and is disposed with
-    it, so grandchildren cannot outlive their lineage), while ``wake`` never
-    crosses any boundary — a child session ends after one prompt, so a wake
-    armed there would be silently lost."""
+    """A role-less child inherits the allowance of the parent that delegated.
+
+    The top-level session holds ``task``, so the slice it launches may delegate
+    too; ``wake`` never crosses any boundary — a child session ends after one
+    prompt, so a wake armed there would be silently lost."""
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
 
@@ -1363,23 +1363,97 @@ async def test_child_of_top_level_session_keeps_delegation_but_not_wake(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_grandchild_cannot_fan_out_but_polls_its_own_background_bash(tmp_path, monkeypatch):
-    """One level deeper the SPAWN/PERSIST tools go: a grandchild's children
-    would register on a job manager nothing observes and that dies mid-turn.
-    But ``jobs`` stays, because the grandchild keeps ``bash`` with
-    ``background`` — so it can still poll and cancel the background command it
-    is told to (the bash receipt advertises ``jobs(op='peek')``), and without
-    ``jobs`` that advice loops forever on ``Tool not found: jobs``. The
-    invariant: ``jobs`` survives IFF ``bash`` can still background."""
+async def test_a_delegating_role_keeps_delegation_at_any_depth(tmp_path, monkeypatch):
+    """WHO may delegate is the role's answer, never the depth's (operator, 2026-09-18).
+
+    A ``delegate: yes`` manager keeps ``task``/``wait``/``jobs`` as a
+    grandchild exactly as it does as a child: nesting is the capability the
+    operator asked for, and the tree it grows is walked one page at a time by
+    the TUI and the desktop UI. ``wake`` still never crosses any boundary.
+    """
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
     parent = make_session(tmp_path, OneShotStream())
-    # A parent that is itself a child is recognisable by its _job_id.
+    # A parent that is itself a child is recognisable by its _job_id — under the
+    # OLD rule that alone stripped the capability set, whether or not the role
+    # allowed delegation.
     parent._job_id = "job-parent"
+    delegating = AgentProfile(
+        name="manager",
+        description="coordinates delegated work",
+        tools=("read", "grep", "bash", "edit", "write"),
+        may_delegate=True,
+    )
 
-    child = await build_child(parent)
+    manager = await subagent_mod._build_child_session(
+        label="mgr",
+        prompt="coordinate the work",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-grandchild",
+        agent="manager",
+        profile=delegating,
+    )
+    names = {tool.name for tool in manager._tools}
+    assert {"task", "wait", "jobs"} <= names
+    assert "wake" not in names
+
+    # ...and a ROLE-LESS child of that manager inherits the allowance, because
+    # it owns none of its own and its parent held one.
+    worker = await subagent_mod._build_child_session(
+        label="worker",
+        prompt="do the thing",
+        parent_session=manager,
+        model_spec=None,
+        job_id="job-worker",
+        agent="task",
+        profile=None,
+    )
+    worker_names = {tool.name for tool in worker._tools}
+    assert {"task", "wait"} <= worker_names
+    assert "wake" not in worker_names
+    await worker.dispose()
+    await manager.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_non_delegating_role_loses_delegation_at_every_depth(tmp_path, monkeypatch):
+    """The other half of the rule: no ``task``, so no subagents, so do the work.
+
+    A reviewer or coder is meant to work on the slice itself rather than fan
+    it out, and that is true whether it sits at depth 1 or depth 3 — the
+    refusal message an agent in this position reads says exactly that. ``jobs``
+    survives IFF its ``bash`` can still background, which is the invariant the
+    bash receipt depends on (``jobs(op='peek')`` must exist for a command that
+    was told to background).
+    """
+    from local_operator.agent_profiles import AgentProfile
+    from local_operator.harness import subagent as subagent_mod
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    parent._job_id = "job-parent"
+    non_delegating = AgentProfile(
+        name="coder",
+        description="implements a slice",
+        tools=("read", "grep", "bash", "edit", "write"),
+        may_delegate=False,
+    )
+
+    child = await subagent_mod._build_child_session(
+        label="code",
+        prompt="implement the slice",
+        parent_session=parent,
+        model_spec=None,
+        job_id="job-coder",
+        agent="coder",
+        profile=non_delegating,
+    )
 
     names = {tool.name for tool in child._tools}
-    # No fan-out and no cross-boundary persistence from a grandchild.
     assert names.isdisjoint({"task", "wait", "wake"})
     # ...but it can observe/cancel its OWN background job.
     assert "jobs" in names
@@ -2767,3 +2841,43 @@ async def test_a_restored_swept_child_still_points_at_its_transcript(tmp_path, m
         assert row.session_dir == str(child_dir)
     finally:
         await resumed.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_declared_parent_inventory_bounds_its_child(tmp_path, monkeypatch):
+    """A declaration that stopped at the parent would leave the excluded set one
+    hop away: the parent cannot itself run ``bash``, but it could delegate to a
+    child that never heard of the bound. The child's reach is the parent's
+    declaration intersected with whatever its own role allows."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+    parent.set_tool_inventory(["read", "task"], unattended=True)
+
+    child = await build_child(parent)
+
+    names = set(child.tool_inventory)
+    assert "read" in names
+    assert "task" in names
+    assert not names & {"bash", "write", "edit", "eval"}
+    # The approval for the inherited reach rides with it: a child that inherited
+    # a permitted tool but not the approval would have every one of its calls
+    # refused by a gate nobody is present to answer.
+    assert child._declared_tools_unattended is True
+    await child.dispose()
+    await parent.dispose()
+
+
+@pytest.mark.asyncio
+async def test_an_undeclared_parent_leaves_its_child_untouched(tmp_path, monkeypatch):
+    """The negative case: with no declaration the child is built exactly as it
+    was before this feature existed — full local reach, no declaration recorded."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    parent = make_session(tmp_path, OneShotStream())
+
+    child = await build_child(parent)
+
+    assert child._declared_tools is None
+    names = set(child.tool_inventory)
+    assert {"read", "bash", "write", "edit", "eval"} <= names
+    await child.dispose()
+    await parent.dispose()

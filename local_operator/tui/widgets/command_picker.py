@@ -52,6 +52,7 @@ from textual.dom import NoScreen
 from textual.message import Message
 from textual.widgets import Static
 
+from local_operator.sigils import SlashContext, at_token, is_boundary, split_token
 from local_operator.tui import theme as theme_mod
 from local_operator.tui.autocomplete import (
     ArgumentChoice,
@@ -104,6 +105,22 @@ _ARGUMENT_ROWS_MIN = 3
 #: (SPINE_INDENT is 2 cells for exactly this reason); the picker reuses that
 #: vocabulary rather than introducing a second cursor glyph.
 _CURSOR = "❯"
+
+#: The mark for a highlighted row an ACCEPT KEY WOULD SEND rather than complete,
+#: one cell wide so it drops into the cursor's own cell without moving the row.
+#:
+#: The file list is the only list where an accept key has two different
+#: meanings: a row that would APPEND something completes it, and a row the
+#: buffer already holds has nothing left to accept, so Enter sends the draft
+#: (see ``Editor._file_row_is_already_in_the_buffer``). Until this mark existed
+#: the two states were pixel-identical — same ``❯``, same ink, same ground — so
+#: the one press in this feature that CAN send was the one press with no
+#: pre-press tell (design round 1, D5). ``↵`` is the return glyph the reply line
+#: already uses for "this is what Enter does", rather than a second colour on
+#: the row: the row's ink carries selection state (``tint-select`` ground,
+#: ``accent`` name, ``danger`` for an alert row) and spending any of it here
+#: would make "selected" and "will send" compete in one channel.
+_SEND_CURSOR = "↵"
 
 #: Gutter width. THREE, not two: the prompt occupies ``❯`` plus a space and the
 #: editor's own text starts in the third cell, so a two-cell gutter left every
@@ -168,6 +185,17 @@ class PickerMode(Enum):
     #: not run anything — an invocation produces a PROMPT the user still has to
     #: write.
     SKILL = "skill"
+    #: The ``@path`` file/folder list. A FOURTH mode rather than a reuse of
+    #: ``SKILL``, because the two things that make ``SKILL`` what it is are both
+    #: wrong for paths. :meth:`sync_skills` remembers ``_skill_inline`` state one
+    #: tick across the refill, and a path has no such state to remember — every
+    #: keystroke re-derives the list from the buffer alone. And
+    #: :func:`skill_suggestions`' lowercase-evidence gate exists to keep four
+    #: classes of non-invocation off a row, which would reject ``README.md`` for
+    #: being uppercase and ``src/`` for carrying no skill evidence at all. FILE
+    #: ranks through :func:`argument_suggestions` instead, like every other
+    #: app-pushed list.
+    FILE = "file"
 
 
 #: One rendered row: its display name and the thing it stands for. A UNION
@@ -190,34 +218,11 @@ class _RowStyles(NamedTuple):
     cursor: Style
 
 
-class SlashContext(NamedTuple):
-    """Where the active command word sits, and the word typed so far.
-
-    ``start`` indexes the ``/`` itself and ``end`` the first cell past the word,
-    so a completion can rebuild JUST that span and leave the rest of the draft
-    untouched. Before inline detection the word always ran to the end of the
-    buffer, so a completion could splice from ``start`` to the end; now the word
-    can have a message typed after it (``fix this /team``, or ``/team\\nfix
-    this``), and only ``[start, end)`` is the command — everything outside it is
-    the user's prose and must survive the completion verbatim.
-    """
-
-    start: int
-    query: str
-    end: int
-
-
-#: A sigil opens a token only at a WORD BOUNDARY: the line start, or right
-#: after whitespace. This is what keeps ``src/foo`` and ``and/or`` from opening
-#: the picker — the ``/`` there is glued to a preceding non-space character, so
-#: it is punctuation inside a word, not the start of a command. The rule is the
-#: same one a shell or an editor command palette uses to tell a path apart from
-#: a command, and it is the ONE thing that makes inline detection safe to run on
-#: every keystroke of ordinary prose. ``$`` leans on it harder still: it is the
-#: whole reason ``costs$5`` and ``a$b`` cannot open a skill list.
-def _is_boundary(line: str, index: int) -> bool:
-    """Whether ``line[index]`` (a sigil) begins a fresh token."""
-    return index == 0 or line[index - 1].isspace()
+#: Re-exported under its historical private name so in-module call sites and
+#: any external import keep resolving after the move to `local_operator.sigils`
+#: (Slice 0). The grammar moved because `references.py` is a session-layer
+#: module that must not import a Textual widget — see that module's docstring.
+_is_boundary = is_boundary
 
 
 def _line_of_cursor(text: str, cursor: int | None) -> tuple[str, int, int]:
@@ -700,6 +705,12 @@ class CompletionMode(Enum):
     #: space for the same reason ``NAME_ARGUMENT`` does: the space closes the
     #: list and opens the request tail the user is about to type.
     SKILL = "skill"
+    #: An ``@path`` reference — ``@sr`` → ``@src/``. Takes NO trailing space,
+    #: unlike ``SKILL``: a path segment may continue (``@src/`` → ``@src/app.py``)
+    #: and a space would terminate the token and close the very list the
+    #: keystroke just used. That is the ``ARGUMENT`` reasoning above, which
+    #: withholds the space for the identical reason.
+    FILE = "file"
 
 
 def completion_for(
@@ -772,6 +783,11 @@ def completion_for(
         if reassembled is not None:
             return reassembled
         return _skill_span_replacement(text, token, row_name)
+    if mode is CompletionMode.FILE:
+        token = at_token(text, caret)
+        if token is None:
+            return None
+        return _file_span_replacement(text, token, row_name)
     if mode is CompletionMode.COMMAND:
         context = slash_context(text, caret, known)
         if context is None:
@@ -813,6 +829,51 @@ def completion_for(
         if outside:
             return _reassembled_completion(filled, caret_after, known)
     return filled, caret_after
+
+
+def _file_span_replacement(text: str, token: SlashContext, row_name: str) -> tuple[str, int]:
+    """Replace just the ``@`` token's span with ``row_name`` — the whole of FILE.
+
+    The simplest completion in this module, and deliberately so. ``$`` needs
+    :func:`_reassembled_skill` because its submit-side parser is ANCHORED at
+    offset 0, so an inline token has to be moved to the front before that parser
+    can read it. ``@`` has no anchored parser — a reference is resolved wherever
+    it sits in the text — so there is nothing to reassemble and the span
+    replacement is the entire operation.
+
+    NO trailing space, unlike the skill and command words. A path segment may
+    continue (``@src/`` → ``@src/app.py``) and a space would terminate the token
+    and close the list the user is still navigating. For the same reason the
+    tail is preserved verbatim rather than ``lstrip``-ed as the ``$`` path does:
+    there is no request tail to open here, so removing the user's spacing would
+    be an edit nobody asked for.
+
+    The token's DIRECTORY PART survives; only the last segment is replaced.
+    ``scan_directory`` returns BARE entry names — ``app.py``, not
+    ``src/app.py`` — because that is what a row should read under a ``@src/``
+    the user just typed. So replacing the whole span with the row name would
+    drop the directory: ``@src/`` + ``app.py`` became ``@app.py``, a path that
+    does not exist, and the reference then failed to resolve with a "no such
+    path" notice at submit. The displayed row and the inserted text are
+    deliberately allowed to differ here, which is the whole reason this
+    arithmetic lives in the one function that owns "what does accepting this
+    row put in the buffer".
+
+    Every segment before the last is kept, not just one, so a second-level
+    accept (``@src/sub/`` + ``deep.py``) keeps ``src/sub/`` rather than
+    truncating to ``sub/``.
+
+    A name containing a space is emitted in its QUOTED form. ``at_token`` reads
+    that form back; a bare space would otherwise end the token at the gap and
+    leave the rest of the filename as prose. The quotes go around the FULL
+    path, not the bare name, so the directory sits inside them and the whole
+    thing round-trips as one token.
+    """
+    directory = token.query[: token.query.rfind("/") + 1]
+    path = f"{directory}{row_name}"
+    quoted = f'"{path}"' if " " in path else path
+    completed = f"{text[: token.start]}@{quoted}{text[token.end :]}"
+    return completed, token.start + len(quoted) + 1
 
 
 def _skill_span_replacement(text: str, token: SlashContext, row_name: str) -> tuple[str, int]:
@@ -1165,6 +1226,62 @@ def argument_suggestions(
     return prefixed or matches
 
 
+def file_suggestions(query: str, choices: list[ArgumentChoice]) -> list[tuple[str, ArgumentChoice]]:
+    """``(display_name, choice)`` suggestions for an ``@path`` token.
+
+    Ranked by the very scorer that ranks commands, providers and skills, so
+    ``@ap`` finds ``app.py`` by the rule the user already learned from ``/lgt``
+    finding ``logout`` — and then FILTERED to PREFIX matches, which is the one
+    rule a path list has of its own.
+
+    THE PREFIX FILTER IS THE FIX FOR A MEASURED DRAFT-MUTATION (QA round 1,
+    Q-2). Rows are produced by ``match_choices``, a SUBSEQUENCE scorer that
+    returns the name for any query its characters can be found inside — so in a
+    directory holding ``README.md``, ``@me`` reached a row. That is the same
+    trap :func:`skill_suggestions` documents for the inline ``$``, one sigil
+    over and with the same consequence: a non-empty match set keeps the list
+    OPEN, an open FILE list owns Enter, and the draft is then REWRITTEN with
+    nothing sent and no notice. Measured on the base: ``run glab mr create
+    --assignee @me`` + Enter became ``…--assignee @README.md``, ``requests=0``,
+    and the second Enter sent nothing either. The resolver's governing rule
+    (``references.py``: a token that does not resolve to an existing path is
+    prose, and ``@me`` is its named example) says that sentence is not a
+    reference at all, so the list was offering a rewrite of prose — the one
+    thing a composer must never do silently.
+
+    The evidence required is therefore the same SHAPE of evidence
+    :func:`skill_suggestions` demands, adapted to what a path can show. A skill
+    name has case to testify with; a path does not, so the test is the one a
+    shell user already has in their fingers: the typed segment must be a
+    case-INSENSITIVE PREFIX of the entry. ``@ap`` keeps ``app.py``, ``@read``
+    keeps ``README.md`` (the case-insensitive half is what makes that work, and
+    is why the letter-for-letter rule below it is NOT reused here), ``@src/su``
+    keeps ``sub/``, and a bare ``@`` — an explicit "what is here" — still lists
+    the whole directory.
+
+    What it costs, stated at its true width: a query with a typo in it no
+    longer reaches its near-miss row, so ``@appp.py`` offers nothing to correct
+    it to. That direction is deliberate. The two outcomes are not symmetric —
+    a list that stays shut leaves the operator's prose exactly as typed, while
+    a list that opens on a subsequence can silently turn `--assignee @me` into
+    a file the model will then read. Fail closed.
+
+    Kept as a named seam rather than inlined at the two call sites, so that if
+    paths ever do need a rule of their own there is one place to put it, and so
+    the call sites read in the same shape as their ``skill``/``argument``
+    siblings.
+    """
+    if not query:
+        return [(choice.name, choice) for choice in choices]
+    lowered = query.lower()
+    # ``match_choices`` for the RANKING (it is the shared scorer, and its order
+    # is what makes the top row the one Tab takes), then the prefix test as a
+    # filter on top. Case-folded with ``.lower()`` rather than ``casefold()``,
+    # matching ``argument_suggestions`` above: the fold only ever has to
+    # agree with itself on both sides of the comparison.
+    return [pair for pair in match_choices(query, choices) if pair[0].lower().startswith(lowered)]
+
+
 def _pad_to(row: Text, width: int, style: Style) -> Text:
     """Pad ``row`` out to exactly ``width`` cells under ``style``.
 
@@ -1268,9 +1385,9 @@ class CommandPicker(Static):
         self._hovered: int | None = None
         self._query = ""
         self._dismissed_query: str | None = None
-        # Set when an ARGUMENT list has nothing to offer AND that is worth saying.
-        # Not a match: it is never selectable, so it lives beside the rows rather
-        # than among them (see set_notice).
+        #: Set when an ARGUMENT list has nothing to offer AND that is worth saying.
+        #: Not a match: it is never selectable, so it lives beside the rows rather
+        #: than among them (see set_notice).
         self._notice = ""
         # Widest-first phrasings for a notice whose TAIL must not crop, resolved
         # at paint time so the choice survives a resize (see set_notice_rungs).
@@ -1291,6 +1408,19 @@ class CommandPicker(Static):
         # Closed picker takes no layout space at all — `visible: hidden` would
         # still reserve the rows and leave a hole above the status band.
         self.display = False
+        # Asked at PAINT time for each row an accept key could act on, rather
+        # than read from a flag the caller has to keep in step: the answer
+        # changes when the row set changes, when the arrow keys move the
+        # highlight, when the app refills the list one tick later, and when the
+        # buffer changes under it — four sites and one of them is a message the
+        # editor never sees. A predicate has none (see set_send_predicate).
+        self._sends: Callable[[str], bool] | None = None
+        #: How many LISTABLE entries the directory holds beyond the scan cap
+        #: (see ``references.scan_directory_report`` and `set_choices`). Counted
+        #: into the overflow row only: it is a fact about the directory, not a
+        #: suggestion this widget holds, so it deliberately does NOT move
+        #: ``visible_window``'s total.
+        self._unlisted = 0
 
     # -- public API ---------------------------------------------------------
     def set_commands(self, commands: list[SlashCommand]) -> None:
@@ -1322,7 +1452,31 @@ class CommandPicker(Static):
             for name in command.names
         )
 
-    def set_choices(self, choices: list[ArgumentChoice], highlight: str | None = None) -> None:
+    def set_send_predicate(self, predicate: Callable[[str], bool] | None) -> None:
+        """Install the question "would an accept key SEND row ``name`` instead?"
+
+        A PREDICATE, not a name, and the difference is the whole design. A flag
+        has to be refreshed at every site that can change the answer — the row
+        set, an arrow press, the app's one-tick-later refill, the buffer itself
+        — and each site forgotten is a row whose mark lies about the key. The
+        predicate is asked once per painted row from ``_gutter``, so it cannot
+        lag any of them, and the editor's implementation is a pure function of
+        the buffer and the caret (``Editor._file_row_would_send``).
+
+        It reports ``False`` where the question does not apply: the widget
+        paints one list at a time and should not have to know which list means
+        what, so a COMMAND or ARGUMENT row simply gets ``False`` from the
+        editor's own gate rather than needing a second lookup here.
+        """
+        self._sends = predicate
+
+    def set_choices(
+        self,
+        choices: list[ArgumentChoice],
+        highlight: str | None = None,
+        *,
+        unlisted: int = 0,
+    ) -> None:
         """Replace the values offered for the current command's ARGUMENT.
 
         Re-derives the visible rows immediately, because the app fills these in
@@ -1337,25 +1491,44 @@ class CommandPicker(Static):
         non-default user to the default theme before they touched a key
         (review round 1, F2). Seeding the row where the user already IS makes
         the first report a no-op — and is where a browse should start anyway.
+
+        ``unlisted`` is how many LISTABLE entries the source held beyond the cap
+        its own scan applies (``references.SCAN_CANDIDATE_LIMIT``), 0 for every
+        ordinary list. It reaches the overflow row only, so that row can say how
+        much of the directory is not on screen instead of describing the capped
+        set as if it were the directory (design round 1, D6). Held as state
+        rather than threaded through ``_apply`` because the editor re-derives
+        the rows on every keystroke: the count is a property of the LISTING,
+        which the editor does not know, so it has to survive those
+        re-derivations. Reset by ``_close`` and by a mode change for the same
+        reason the notice is.
         """
         self._choices = list(choices)
-        # SKILL rides the same fill path as ARGUMENT: both are app-pushed
-        # ``ArgumentChoice`` sets that land one message-loop tick after the
-        # keystroke that opened the list, so both need the immediate re-derive
-        # below or the picker sits closed on the empty set it opened with until
-        # the user types another character. Gating this on ARGUMENT alone is
-        # exactly why a bare ``$`` painted nothing.
-        if self._mode in (PickerMode.ARGUMENT, PickerMode.SKILL):
+        self._unlisted = max(0, unlisted)
+        # SKILL and FILE ride the same fill path as ARGUMENT: all three are
+        # app-pushed ``ArgumentChoice`` sets that land one message-loop tick
+        # after the keystroke that opened the list, so all three need the
+        # immediate re-derive below or the picker sits closed on the empty set
+        # it opened with until the user types another character. Gating this on
+        # ARGUMENT alone is exactly why a bare ``$`` painted nothing, and FILE
+        # is the third case: without it a bare ``@`` paints nothing either.
+        if self._mode in (PickerMode.ARGUMENT, PickerMode.SKILL, PickerMode.FILE):
             # SKILL re-derives through its own gate: this refill lands a tick
             # after the keystroke that opened the list, so reaching for
             # ``argument_suggestions`` here would restore the fuzzy rows
             # ``sync_skills`` had just excluded and hand an inline ``$LANG``
-            # back the open list that makes Enter rewrite the draft.
-            matches = (
-                skill_suggestions(self._query, self._choices, self._skill_inline)
-                if self._mode is PickerMode.SKILL
-                else argument_suggestions(self._query, self._choices)
-            )
+            # back the open list that makes Enter rewrite the draft. FILE is the
+            # same drift a second time, and it was measured rather than assumed:
+            # routing only ``sync_files`` through :func:`file_suggestions` left
+            # ``@me`` closed on the keystroke and REOPENED one tick later when
+            # the app answered ``FileQueryOpened``, so the prose rewrite Q-2
+            # names came back on a path no test of the keystroke could see.
+            if self._mode is PickerMode.SKILL:
+                matches = skill_suggestions(self._query, self._choices, self._skill_inline)
+            elif self._mode is PickerMode.FILE:
+                matches = file_suggestions(self._query, self._choices)
+            else:
+                matches = argument_suggestions(self._query, self._choices)
             seeding = highlight is not None and not self._query and not self._chosen_by_hand
             if seeding:
                 # Silence `_apply`'s own report: it fires for row 0 before the
@@ -1506,7 +1679,7 @@ class CommandPicker(Static):
         return bool(self._matches)
 
     def is_pending(self) -> bool:
-        """True for an ARGUMENT list that is open in principle but has no rows yet.
+        """True for an app-filled list that is open in principle but has no rows yet.
 
         The app fills an argument list in answer to a posted message, so for one
         message-loop tick the picker is in argument mode holding nothing —
@@ -1514,11 +1687,16 @@ class CommandPicker(Static):
         just opened. A key that only reaches an ``is_open()`` picker is silently
         dropped in that window.
 
+        FILE has the identical window and for the identical reason: the editor
+        posts ``FileQueryOpened`` and the app answers with ``set_choices`` a tick
+        later, so an Esc pressed in between would be dropped and the user would
+        watch the list they just dismissed appear anyway.
+
         False once :meth:`dismiss` has recorded the query, so a dismissed list
         stops swallowing the key that dismissed it.
         """
         return (
-            self._mode is PickerMode.ARGUMENT
+            self._mode in (PickerMode.ARGUMENT, PickerMode.FILE)
             and not self._matches
             and self._dismissed_query is None
         )
@@ -1637,6 +1815,39 @@ class CommandPicker(Static):
             skill_suggestions(token.query, self._choices, self._skill_inline),
         )
 
+    def sync_files(self, text: str, cursor: int | None = None) -> None:
+        """Re-derive the ``@path`` suggestions from the editor's ``text``.
+
+        The fourth sibling of :meth:`sync`, :meth:`sync_argument` and
+        :meth:`sync_skills`, and it closes exactly the way they do: leaving the
+        token forgets the dismissal, so the next ``@`` opens a fresh list rather
+        than inheriting an Esc.
+
+        THERE IS NO ``_skill_inline`` ANALOGUE HERE, and there must not be one.
+        That flag exists because :meth:`sync_skills` has to remember one bit of
+        parse state across the app's asynchronous refill, and carrying remembered
+        state is precisely why FILE is not riding :attr:`PickerMode.SKILL`. A
+        path list is a pure function of the buffer and the choices the app
+        pushed: every keystroke re-derives it from scratch, and the refill in
+        :meth:`set_choices` re-derives the same rows through
+        :func:`argument_suggestions` with nothing to remember.
+        """
+        token = at_token(text, cursor)
+        if token is None:
+            self._dismissed_query = None
+            self._mode = PickerMode.FILE
+            self._close()
+            return
+        # Ranked on the NAME part, never the whole token. The rows the app
+        # pushes are that directory's BARE entry names (``app.py``), so matching
+        # them against the full query would compare ``app.py`` to ``src/ap`` and
+        # match nothing: a `@src/` list that scanned correctly and then painted
+        # empty. ``split_token`` is the same split the scan is keyed on, so the
+        # directory that produced the rows and the query they are matched
+        # against cannot drift apart.
+        _, name_query = split_token(token.query)
+        self._apply(PickerMode.FILE, name_query, file_suggestions(name_query, self._choices))
+
     def sync_argument(self, query: str) -> None:
         """Re-derive the ARGUMENT suggestions for the current command.
 
@@ -1682,6 +1893,15 @@ class CommandPicker(Static):
             self._window_start = 0
             self._chosen_by_hand = False
             self._notice = ""
+            # The unlisted count describes the FILE listing — the one list whose
+            # source can be capped — so it is cleared when the list STOPS being
+            # that, and never on the way in: `set_choices` fills it on the same
+            # tick this branch runs, and zeroing it here would throw away the
+            # answer the app just delivered (measured: it made the 2500-entry
+            # count read 1992 again whenever the fill arrived before the
+            # editor's own sync).
+            if mode is not PickerMode.FILE:
+                self._unlisted = 0
             # The rungs go with the notice they phrase, for the same reason.
             self._notice_rungs = ()
             # The loading reserve goes with the notice it was riding: it
@@ -1696,11 +1916,59 @@ class CommandPicker(Static):
         # Esc once with no way to get the list back while still typing.
         self._dismissed_query = None
         if not matches:
-            if mode is PickerMode.ARGUMENT and self._notice:
+            if mode is PickerMode.FILE and query and self._choices:
+                # The directory listed FINE and the QUERY matched nothing in it
+                # — one keystroke from `@srx/`, which explains itself, and the
+                # two are the same gesture: the user asked "what is here" and
+                # got a withdrawn list with nothing said (`@me`, 0 rows,
+                # ``display=False``, ``notice=''``, measured). Silence reads as
+                # "the surface is broken" rather than as an answer, and the
+                # answer exists: nothing in this directory starts with that.
+                #
+                # A NOTICE AND NOT A ROW, which is the property the Q-2 fix
+                # depends on: a notice is not a match, so the fuzzy near-miss
+                # stays unoffered, ``is_open()`` stays False and every key still
+                # reaches the buffer. `@me` remains prose that will be sent as
+                # written — it is now prose that SAYS SO.
+                #
+                # The arm immediately below does the painting, so this writes
+                # state and nothing else: one repaint per keystroke rather than
+                # ``set_notice``'s paint followed by this arm's. ``query`` is
+                # The copy is RE-WRITTEN on every derivation rather than set
+                # once, because it quotes the query and the query moves: holding
+                # the first one left `@zz` reading "nothing here matches `z`".
+                #
+                # Gated on ``self._choices``, which is what makes this a
+                # statement about THIS directory rather than about the buffer:
+                # the listing is the only thing that can say the directory was
+                # readable and the query matched none of it. An empty listing is
+                # the app's own notice ("nothing to reference in srx/"), which
+                # the arm below holds.
+                #
+                # ``query`` is non-empty for the same reason: a bare `@` with
+                # nothing to list is that same app notice, and its one-tick fill
+                # window must not flash a notice about a query nobody has typed.
+                self._notice = f"nothing here matches `{query}`"
+                self._notice_rungs = ()
+            if mode in (PickerMode.ARGUMENT, PickerMode.FILE) and self._notice:
                 # No rows, but something to say in their place. The list stays up
                 # holding the one informational row, and holds it across every
                 # re-derivation — the user editing the argument of a command with
                 # nothing to offer does not make the answer any less true.
+                #
+                # FILE is here for exactly that reason, and the pairing is spelled
+                # the same way :meth:`is_pending` spells it. "nothing to reference
+                # in src/" stays true while the user types a longer name INSIDE
+                # that directory, and the editor only re-posts `FileQueryOpened`
+                # when the DIRECTORY changes — so without this arm the notice
+                # painted for one frame and the next keystroke dropped it, which
+                # is a notice the user cannot read.
+                #
+                # SKILL is deliberately NOT included. Its vocabulary is fixed for
+                # the session, so an empty match set there means "no skill by
+                # that name", which is an ordinary no-match the closed list
+                # already says — not an informative answer that has to outlive
+                # the next keystroke.
                 self._reset_rows()
                 self.display = True
                 self._repaint()
@@ -1992,17 +2260,31 @@ class CommandPicker(Static):
             cursor=cursor_style,
         )
 
-    def _gutter(self, styles: _RowStyles) -> Text:
-        # Padded from the constant rather than written out: a hard-coded two-cell
-        # mark under a three-cell gutter would shift only the SELECTED row, which
-        # is the one row a misalignment is guaranteed to be noticed on.
+    def _gutter(self, styles: _RowStyles, name: str) -> Text:
+        """The selection mark for one row, plus the D5 "this key SENDS" variant.
+
+        ``name`` is the row's own name so the send question can be asked of the
+        row being painted rather than of a flag set elsewhere — see
+        :meth:`set_send_predicate`. It is REQUIRED: every call site has a row
+        identity, and a default of ``""`` for a hypothetical caller without one
+        would have that caller's rows silently claim "this row cannot send"
+        rather than fail where the omission is.
+
+        The mark stays in the cursor's own cell and the padding stays derived
+        from the constant rather than written out: a hard-coded mark under a
+        wider gutter would shift only the SELECTED row, which is the one row a
+        misalignment is guaranteed to be noticed on.
+        """
         row = Text()
-        mark = (_CURSOR if styles.selected else "").ljust(_GUTTER_CELLS)
-        row.append(mark, style=styles.cursor)
+        mark = ""
+        if styles.selected:
+            sends = bool(name) and self._sends is not None and self._sends(name)
+            mark = _SEND_CURSOR if sends else _CURSOR
+        row.append(mark.ljust(_GUTTER_CELLS), style=styles.cursor)
         return row
 
     def _command_row(self, name: str, command: SlashCommand, width: int, s: _RowStyles) -> Text:
-        row = self._gutter(s)
+        row = self._gutter(s, name)
         row_bg = s.ground
 
         primary = f"/{name}"
@@ -2022,7 +2304,7 @@ class CommandPicker(Static):
                 return _pad_to(row, width, row_bg)
             # Not enough room after the name column to say anything useful:
             # rebuild as a name-only row rather than ship a stub description.
-            row = self._gutter(s)
+            row = self._gutter(s, name)
 
         budget = max(1, width - _GUTTER_CELLS - _EDGE_MARGIN)
         self._append_primary(row, primary, alias_run, budget, s.name, s.alias)
@@ -2037,7 +2319,7 @@ class CommandPicker(Static):
         only text that completes into the buffer is the provider id, so listing
         the alias would advertise input the command does not accept.
         """
-        row = self._gutter(s)
+        row = self._gutter(s, name)
         row_bg = s.ground
         # `danger` only when the state is a problem; an unfinished login is not
         # one. Tinting every un-logged-in provider red would make the ordinary
@@ -2117,7 +2399,7 @@ class CommandPicker(Static):
                 return self._append_detail(row, width, detail, column_cells, detail_style, row_bg)
             # Not enough room after the name column to say anything useful:
             # rebuild as a name-only row rather than ship a stub description.
-            row = self._gutter(s)
+            row = self._gutter(s, name)
 
         row.append(truncate_cells(name, max(1, body)), style=name_style)
         return self._append_detail(row, width, detail, column_cells, detail_style, row_bg)
@@ -2169,6 +2451,15 @@ class CommandPicker(Static):
     def _overflow_row(self, width: int) -> Text | None:
         start, end, total = self.visible_window()
         hidden = total - (end - start)
+        # PLUS what the scan never returned. The two are different facts and
+        # this row is the only place the user can learn either: ``total`` counts
+        # the rows this widget was GIVEN, and ``_unlisted`` counts the entries
+        # the directory holds beyond the scan's own cap. Reporting only the
+        # first is how a 2500-entry directory came to read ``… 1992 more`` — 500
+        # entries invisible AND uncounted (design round 1, D6), where the
+        # expansion side accounts for its own limit honestly (``[N more entries;
+        # use glob or read to list them]``).
+        hidden += self._unlisted
         if hidden <= 0:
             return None
         dim = Style(
@@ -2354,6 +2645,11 @@ class CommandPicker(Static):
         # submission all arrive here, and each one is the user done with it.
         self._notice = ""
         self._notice_rungs = ()
+        # And with the list gone, so is the account of what its source held
+        # beyond the scan cap (see `set_choices`): the next list's own fill sets
+        # it, and until then any stale count belongs to a listing that is no
+        # longer on screen.
+        self._unlisted = 0
         self._loading = False
         self.display = False
         self._report_highlight()

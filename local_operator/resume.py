@@ -72,6 +72,13 @@ ORIGIN_NAME = "origin.json"
 #: scheduled run, a server-side session) is a new value and not a second file.
 ORIGIN_SUBAGENT = "subagent"
 
+#: ``origin`` value for a session a command from an agent's shell opened under
+#: the escape hatch (:mod:`local_operator.agent_shell`). The FIRST value minted
+#: on the "any non-user origin is hidden" default rather than on a new kind of
+#: hidden, which is the point: the operator's sidebar listed two review sessions
+#: spawned this way because nothing on disk said a machine had started them.
+ORIGIN_AGENT_SHELL = "agent-shell"
+
 #: ``origin`` value for a session ``/fork`` branched off another. Unlike
 #: :data:`ORIGIN_SUBAGENT` this marks the user's OWN work: the marker records
 #: PROVENANCE (which conversation this branched from, in its ``parent`` field),
@@ -1355,7 +1362,7 @@ def recent_sessions(
     file read per subagent directory: 1127 ms over 31,700 dirs, of which the
     reads were 639 ms. The verdict cache removed the READS (~310 ms warm,
     ``bench/resume-picker-after.json``), and the hidden-skip above removed the
-    remaining per-directory STAT. Quote the committed bench figure here rather
+    remaining per-directory STAT. Quote the recorded bench figure here rather
     than a remembered one — an optimistic number in a docstring is how the next
     person's regression looks like an improvement.
 
