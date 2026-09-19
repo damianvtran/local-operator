@@ -243,6 +243,20 @@ async def start_exec_control(
     # documents the contract: continuing without the surface hands the
     # supervisor an agent it cannot stop while reporting success.
     if not await runtime.wait_until_published():
+        # CLOSE WHAT WE STARTED BEFORE RAISING. ``start()`` has already put a
+        # thread, a loop and (on the timeout path) a still-running boot prologue
+        # behind the caller who is about to fail this run; raising alone leaves
+        # all three behind a decision that says the surface is unusable, which is
+        # the opposite of what that answer means.
+        #
+        # ``aclose_remote`` rather than ``close``, and the difference is this
+        # call site's whole problem: this runs on the SESSION's loop, and
+        # ``close`` is a bounded SYNCHRONOUS join — a cross-thread wait on the
+        # loop every other part of this change exists to keep free (review round
+        # 1, D-5). ``aclose_remote`` awaits the same bounded join through a
+        # thread hop, which is the spelling ``process._clean_exit`` already uses
+        # for the same teardown.
+        await runtime.aclose_remote()
         raise RuntimeError(
             "the exec control surface was asked for but the runtime never "
             "published its record; the run cannot be supervised"
