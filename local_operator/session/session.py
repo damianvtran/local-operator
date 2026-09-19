@@ -5620,7 +5620,7 @@ class Session:
         # Imported in-function: the runtime inbox lives behind the mobile
         # package's config-path machinery, and this module does not carry a
         # module-level dependency on it for a once-per-session path.
-        from local_operator.session.runtime.inbox import drain_inbox
+        from local_operator.session.runtime.inbox import SOURCE_USER, drain_inbox
 
         directory = getattr(self._transcript, "directory", None)
         if directory is None:
@@ -5642,14 +5642,53 @@ class Session:
                 # honoured with a turn of its own, while the first-turn drain
                 # reaches the receiver mid-turn and the row rides that turn's
                 # context instead (see the paragraph at its call site).
-                await self.receive_peer_message(
-                    line.text,
-                    mode="mailbox",
-                    wake=bool(getattr(line, "wake", False)),
-                    sender=line.sender,
-                )
+                #
+                # THE ROW'S ``source`` DECIDES WHO IS SPEAKING, the same split
+                # ``process._drain_inbox_into`` makes: a ``SOURCE_USER`` row is
+                # the OWNER's own prompt spooled by a draining runtime, and it
+                # joins this turn as an identified user message instead of
+                # acquiring a peer's provenance envelope (see
+                # ``_run_spooled_owner_prompt``).
+                if getattr(line, "source", "") == SOURCE_USER:
+                    self._run_spooled_owner_prompt(line)
+                else:
+                    await self.receive_peer_message(
+                        line.text,
+                        mode="mailbox",
+                        wake=bool(getattr(line, "wake", False)),
+                        sender=line.sender,
+                    )
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
+
+    def _run_spooled_owner_prompt(self, line: Any) -> None:
+        """Join one spooled OWNER prompt to the turn already running.
+
+        The owner's own message, spooled by a runtime that was leaving a
+        replaced build, arriving at a successor that is ALREADY mid-turn — the
+        window where no durable history existed yet when the drain latched, so
+        ``process._drain_inbox_into`` kept the row for the first turn instead of
+        running it at boot.
+
+        ``steer`` rather than ``prompt``, and that is not a preference: this
+        drain runs from inside ``_run_turn_pipeline`` with ``_turn_lock`` held,
+        and ``Session.prompt`` REJECTS outright while a turn is running. The
+        conclusion is the one the peer paragraph above reaches for its own rows
+        — the row rides the turn in flight — taken with the verb the OWNER's
+        words deserve: this is the user speaking, so it is an identified user
+        message rather than a peer's ``CustomMessage``, and it carries the
+        message id the viewer painted the row under so its announcement matches
+        that row instead of adding one.
+
+        The durable index answers the twice-spooled case for the same reason it
+        does at boot (``_run_owner_prompt``): the identity is append-only, and a
+        retried prompt must not land twice.
+        """
+        command_id = str(getattr(line, "command_id", "") or "")
+        if command_id and self.has_admitted_command(command_id):
+            logger.info("spooled prompt already in the transcript; not steering it twice")
+            return
+        self.steer(line.text, [], message_id=command_id or None)
 
     async def receive_peer_message(
         self,

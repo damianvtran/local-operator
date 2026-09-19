@@ -61,6 +61,7 @@ from local_operator.mobile.types import (
 # handlers, and a second copy of the words is how `--stop` would cancel a loop in
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
+from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
@@ -1471,16 +1472,36 @@ class ServingSessionHandle(SessionHandle):
         # ``SIGNAL_DRAIN_CAUSE`` is the token ``process._drain_for_signal``
         # commits its drain with — imported from the drain vocabulary rather
         # than spelled here, because a rename that missed this file would
-        # silently restore the build sentence for a signalled runtime. It is the
-        # ONLY departure this side names: the build arm is left unnamed on
-        # purpose, because its cause token is shared with ``/move`` (see above),
-        # and the far side reads the trigger off the phrase the frame published
-        # instead — which a build drain carries and a move does not.
-        trigger = RuntimeRetiring.SIGNAL if self._retiring_cause == SIGNAL_DRAIN_CAUSE else ""
+        # silently restore the build sentence for a signalled runtime.
+        #
+        # THE BUILD ARM IS NAMED TOO, from the one fact that separates it from
+        # the idle retirement sharing its cause: ``_draining`` without a
+        # committed exit is the DRAIN, and every drain is raised by
+        # ``process._begin_drain`` (the stale build / the vanished tree) or by
+        # the signal handler, while ``begin_retire`` — the viewer-driven rotate,
+        # the ``/move`` — commits its exit in the same synchronous step it sets
+        # the cause. That term is what the old comment above said was missing
+        # ("the cause is shared with ``/move``, so the phrase tells them apart"),
+        # and it matters here for one reason: a build drain OWES a successor, and
+        # the refusal's tail says so instead of telling the operator to do the
+        # thing this very refusal just refused (memo §4.2 piece 3).
+        if self._retiring_cause == SIGNAL_DRAIN_CAUSE:
+            trigger = RuntimeRetiring.SIGNAL
+        elif self._draining and not self._exit_committed:
+            trigger = RuntimeRetiring.BUILD
+        else:
+            trigger = ""
         return RuntimeRetiring(trigger=trigger)
 
     async def _spool_for_successor(
-        self, text: str, *, mode: str, wake: bool, sender: dict[str, Any]
+        self,
+        text: str,
+        *,
+        mode: str,
+        wake: bool,
+        sender: dict[str, Any],
+        source: str = SOURCE_PEER,
+        command_id: str = "",
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -1514,10 +1535,22 @@ class ServingSessionHandle(SessionHandle):
         directory, an unwritable inbox): the caller then gets the sentence that
         tells it to send again, which is the same contract every other admission
         gets once a runtime is leaving.
+
+        ``source`` and ``command_id`` are the OWNER's-prompt halves and default
+        to the peer shape, so the peer callers above are unchanged and a row a
+        build older than these fields wrote still reads as a peer row. See
+        ``inbox.SOURCE_USER`` for why the successor cannot guess: the two
+        deliveries differ in provenance, not just in wording. The receipt
+        follows the source, because the two senders are buying different things
+        from the same vehicle — a peer's message is held for the next runtime, a
+        user's own prompt is queued onto it, and only the second one is the same
+        admission their composer was refused a moment ago.
         """
         from local_operator.session.runtime.inbox import (
             SPOOL_RECEIPT_NOTE,
+            SPOOL_RECEIPT_PROMPT,
             SPOOL_RECEIPT_WAKE,
+            SOURCE_USER,
             InboxLine,
             append_inbox,
         )
@@ -1537,14 +1570,21 @@ class ServingSessionHandle(SessionHandle):
                     mode=mode,
                     written_at=time.time(),
                     wake=wake,
+                    source=source,
+                    command_id=command_id,
                 ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
-            logger.warning("could not spool a peer message for the successor", exc_info=True)
+            logger.warning("could not spool a message for the successor", exc_info=True)
             written = False
         if not written:
             raise self._retiring_refusal()
-        logger.info("session runtime: spooled a peer message for the successor")
+        logger.info(
+            "session runtime: spooled a %s for the successor",
+            "prompt" if source == SOURCE_USER else "peer message",
+        )
+        if source == SOURCE_USER:
+            return SPOOL_RECEIPT_PROMPT
         return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE
 
     def may_refresh(self) -> str:
@@ -1989,6 +2029,54 @@ class ServingSessionHandle(SessionHandle):
             # Refused, not queued: a turn admitted here is aborted one await
             # later by the dispose that is already on its way, after the
             # provider has been paid for whatever it managed to stream.
+            #
+            # UNLESS THE SUCCESSOR CAN HAVE IT, which is the sibling of the peer
+            # path one method over: the message is SPOOLED into the same inbox
+            # the successor drains before its socket listens, so the user's own
+            # message runs on the build that is taking over instead of being
+            # handed back to them to send again. The refusal that remains is the
+            # fallback for the case where there is nowhere to put it, and that is
+            # deliberate rather than incidental: telling a user "send it again
+            # later" is worse than carrying the message, but it beats both a
+            # silent drop and a receipt for a deferral no runtime will ever read.
+            #
+            # THREE TERMS, and each excludes a case where the spool would lie.
+            # ``_draining`` is the committed-but-not-yet-exiting drain whose
+            # successor is owed; ``begin_retire`` (a viewer-driven rotate, a
+            # ``/move``) sets the cause WITHOUT it and commits its exit in the
+            # same step, so there is no handover for a message to ride.
+            # ``_exit_committed`` is the drain's own terminal rung — once the
+            # process is taking the exit nothing will ever read the spool.
+            #
+            # ATTACHMENTS ARE THE ONE THING THE VEHICLE CANNOT CARRY: an inbox
+            # row is text (``inbox.InboxLine``), so spooling an image-carrying
+            # prompt would return a receipt for a message that arrives without
+            # its attachment — losing the user's file while telling them it was
+            # queued. It takes the refusal, which returns both to the composer.
+            if (
+                self._draining
+                and not self._exit_committed
+                and not blocks
+            ):
+                try:
+                    receipt = await self._spool_for_successor(
+                        text,
+                        mode="mailbox",
+                        wake=True,
+                        sender={},
+                        source=SOURCE_USER,
+                        command_id=command_id,
+                    )
+                finally:
+                    # Rejected on BOTH outcomes, and for the same reason the
+                    # refusal below rejects: this command is not in the
+                    # transcript, so the identity must not be spent. A retry
+                    # that re-spools is deduplicated by the successor instead
+                    # (``process._drain_inbox_into`` consults the durable index
+                    # with this same id), which is the only place the answer is
+                    # authoritative — this process is leaving.
+                    self._command_reservations.reject(command_id)
+                return receipt
             self._command_reservations.reject(command_id)
             raise self._retiring_refusal()
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:

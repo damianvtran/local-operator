@@ -75,11 +75,12 @@ class RuntimeRetiring(ValueError, RuntimeError):
     #: field should not have to go hunting for a producer that is not there:
     #: ``SIGNAL`` is the one, raised by
     #: ``serving.ServingSessionHandle._retiring_refusal`` from the cause its own
-    #: latch committed (``types.SIGNAL_DRAIN_CAUSE``). ``BUILD`` is decoded and
-    #: reachable — a peer may name it, and it is what the far side resolves a
-    #: build drain TO from the phrase that drain published — but nothing in this
-    #: tree raises it: the cause behind a build drain is the one ``/move`` shares,
-    #: and the phrase, not the cause, is what tells those two apart.
+    #: latch committed (``types.SIGNAL_DRAIN_CAUSE``). ``BUILD`` is raised by the
+    #: runtime whose drain is still running — ``ServingSessionHandle.
+    #: _retiring_refusal`` names it from ``_draining`` without a committed exit,
+    #: which is the term that tells a build drain from the ``/move`` retirement
+    #: sharing its cause — and it is also what the far side resolves a build
+    #: drain TO from the phrase that drain published.
     SIGNAL = "signal"
     BUILD = "build"
 
@@ -130,6 +131,22 @@ class RuntimeRetiring(ValueError, RuntimeError):
     HEAD_UNNAMED = "This session is leaving; it will not start a new turn."
     REFUSED = "The message was not admitted"
     TAIL = "send it again once the session is running again."
+    #: The tail for the departure that OWES A SUCCESSOR: a newer build is
+    #: already taking this session over, so the one act ``TAIL`` names — send it
+    #: again once the session is running again — is both unnecessary and the
+    #: exact operation the refusal just performed. That sentence is what the
+    #: incident left operators with: every prompt refused for 1 h 40 m by a
+    #: runtime that had announced a handover, each refusal ending in advice to
+    #: resend, and no runtime to resend to (memo §4.2 piece 3).
+    #:
+    #: IT PROMISES ONLY WHAT THE DEPARTURE ITSELF ESTABLISHES, which is why it
+    #: says the successor is STARTING rather than that it has the message: this
+    #: tail is reached on the refusal paths (there was nowhere to spool the
+    #: message, or the exit was already committed), so what the operator may
+    #: rely on is the handover, not the carriage of this particular message.
+    #: The viewer that put the message back in the composer says so where it is
+    #: true, exactly as it does for the fallback above.
+    TAIL_HANDOVER = "a newer build is starting here to carry on."
 
     def __init__(self, trigger: str = "", leaving: str = "") -> None:
         # ``HEAD`` is per-INSTANCE because the situation is: the same refusal
@@ -160,6 +177,10 @@ class RuntimeRetiring(ValueError, RuntimeError):
         if not self.trigger:
             self.trigger = _TRIGGER_FOR_LEAVING.get(leaving, "")
         self.HEAD = _HEADS.get(self.trigger, self.HEAD_UNNAMED)
+        # The tail is chosen off the SAME token as the head, for the reason
+        # ``_HEADS`` gives below: one departure, one reading of it. A trigger
+        # that names nothing keeps the tail this class has always carried.
+        self.TAIL = _TAILS.get(self.trigger, self.TAIL)
         super().__init__(f"{self.HEAD} {self.REFUSED} — {self.TAIL}")
 
 
@@ -171,6 +192,15 @@ class RuntimeRetiring(ValueError, RuntimeError):
 _HEADS: dict[str, str] = {
     RuntimeRetiring.SIGNAL: RuntimeRetiring.HEAD_SIGNALLED,
     RuntimeRetiring.BUILD: RuntimeRetiring.HEAD,
+}
+
+#: The tail each enumerated departure earns, chosen off the same token as
+#: ``_HEADS`` and for the same reason: they are two readings of one state, and
+#: the two ends must pick them the same way. A SIGNAL drain is leaving for good
+#: and owes nobody; a BUILD drain is handing the session to the build on disk,
+#: which is the one departure where re-sending is not the operator's job.
+_TAILS: dict[str, str] = {
+    RuntimeRetiring.BUILD: RuntimeRetiring.TAIL_HANDOVER,
 }
 
 #: The departure a phrase establishes, for a raiser that could not name one.

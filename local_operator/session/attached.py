@@ -7574,7 +7574,7 @@ class AttachedSession:
         images: Sequence[ImageContent] | None = None,
         *,
         message_id: str | None = None,
-    ) -> None:
+    ) -> str:
         """Send a prompt to the owner, optionally under a caller-supplied id.
 
         ``message_id`` becomes the ``ContinuationCommand`` id, which the owner
@@ -7590,6 +7590,18 @@ class AttachedSession:
         (``_send_steer_when_ready`` sends ``command_id=message.id``); this is
         the prompt path catching up with its own sibling. Minted here when the
         caller supplies nothing, which is the historical behaviour.
+
+        RETURNS THE OWNER'S RECEIPT LINE, which is a protocol fact this method
+        had been dropping: ``prompt``'s reply IS a sentence (``serving``'
+        'prompt admitted', the spool receipt, or the legacy 'prompt queued
+        (n)'), and a viewer that discards it cannot tell an admission from a
+        deferral. The TUI needs exactly that distinction against a DRAINING
+        owner, where the message is queued onto the successor instead of run
+        (memo §4.4) — the incident's whole complaint being that a refusal was
+        the only report the app could give of a state it could have named.
+        Empty for the in-process takeover target, whose ``prompt`` runs the
+        whole turn and returns nothing (its caller awaits completion, not a
+        receipt).
         """
         # The cold-to-attached seam: a viewer that has been LOOKING at a
         # session starts working in it here, which is the first moment a
@@ -7606,7 +7618,7 @@ class AttachedSession:
                 await target.prompt(text, images, message_id=message_id)
             else:
                 await target.prompt(text, images)
-            return
+            return ""
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
@@ -7621,7 +7633,7 @@ class AttachedSession:
             if message_id
             else ContinuationCommand.create(self._session_id, text, images_wire)
         )
-        await client.send_command(command, streaming=self._streaming)
+        return await client.send_command(command, streaming=self._streaming)
 
     async def seed_history(self, messages: list[Message]) -> None:
         if self.history_message_count:

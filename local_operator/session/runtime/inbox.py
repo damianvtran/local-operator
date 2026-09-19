@@ -79,6 +79,46 @@ INBOX_NAME = "inbox.jsonl"
 SPOOL_RECEIPT_WAKE = "held for the next runtime — it runs it"
 SPOOL_RECEIPT_NOTE = "held for the next runtime — read when it next opens"
 
+#: The receipt a DRAINING runtime hands back for the OWNER's own prompt, which
+#: is the third spooling writer and a different situation from both of the
+#: above: nobody sent this to the session, its author typed it, and the session
+#: they typed it into has already refused its turn.
+#:
+#: IT MUST NOT READ AS ADMITTED, and that is why it is not the wake receipt one
+#: line up. ``prompt``'s normal ACK is the DURABLE TRANSCRIPT APPEND
+#: (``serving.ServingSessionHandle.prompt``), so any other string on that op is
+#: a weaker fact and has to be visibly weaker: the message has not been written
+#: to this session's history, it has been written to the successor's spool. The
+#: composer's own claim ("your message is back in the composer") is the
+#: fallback's wording, not this one, because here the message is NOT coming
+#: back: the successor runs it.
+#:
+#: Same short budget as its siblings for the same measured reason: a client
+#: frame is not the place to discover a wrap.
+SPOOL_RECEIPT_PROMPT = "queued for the next runtime — it will run it"
+
+#: Which of the two PRODUCERS a row belongs to, carried on the row because the
+#: successor delivers them differently and cannot guess which it holds.
+#:
+#: ``SOURCE_PEER`` — another local session's message (``send``, a scheduled
+#: wake, a broadcast). It is delivered into the successor as a PEER message, with
+#: the sender's provenance wrapped around it for the model, exactly as a live
+#: dial would have delivered it.
+#:
+#: ``SOURCE_USER`` — the session OWNER's own prompt, spooled by a draining
+#: runtime instead of refused. It must NOT be delivered as a peer message: the
+#: model would read a foreign-session envelope over the user's own words and the
+#: transcript would paint a ``peer`` card labelled 'another session' for a
+#: message the user typed in this very session (``session.receive_peer_message``
+#: builds that envelope from the sender dict). Its delivery is the ordinary
+#: admission it would have had, run on the successor's build — see
+#: ``process._drain_inbox_into`` and ``Session._drain_spooled_peer_inbox``.
+#:
+#: Absent in rows written before this field existed, which reads as
+#: ``SOURCE_PEER``: every writer that predates it is the peer path.
+SOURCE_PEER = "peer"
+SOURCE_USER = "user"
+
 #: Non-blocking lock retries, and the pause between them. Deliberately small:
 #: the critical section is one ``write()`` of a few hundred bytes, so a
 #: contender that cannot get in within ~50 ms is not merely slow, and waiting
@@ -104,6 +144,20 @@ class InboxLine:
     delivered it as a quiet note would keep the reminder and never do the work
     (review round 1, MINOR 3). Absent in rows written before this field
     existed, which reads as the old quiet-note behaviour: False.
+
+    ``source`` says WHO is speaking in the row, which is what decides how the
+    successor delivers it — see ``SOURCE_PEER``/``SOURCE_USER``. It is not a
+    second ``mode``: ``mode`` is the peer sender's stated intent (and is
+    deliberately not honoured on delivery), while ``source`` is the receiving
+    side's own question about provenance.
+
+    ``command_id`` is the producer identity the owner's prompt was admitted
+    under, and it only ever rides a ``SOURCE_USER`` row. It exists so the
+    successor's delivery is the SAME admission the predecessor refused rather
+    than a second one: the transcript's append-only index
+    (``transcript.has_admitted_command``) then answers a retried or
+    twice-spooled row without appending it twice, and the viewer that painted a
+    row for that id has its announcement matched rather than duplicated.
     """
 
     text: str
@@ -111,6 +165,8 @@ class InboxLine:
     mode: str = "mailbox"
     written_at: float = 0.0
     wake: bool = False
+    source: str = SOURCE_PEER
+    command_id: str = ""
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "InboxLine":
@@ -121,6 +177,12 @@ class InboxLine:
             mode=str(payload.get("mode", "mailbox") or "mailbox"),
             written_at=float(payload.get("written_at", 0.0) or 0.0),
             wake=bool(payload.get("wake", False)),
+            # Anything that is not the owner's own row is a peer's: the peer
+            # path is the one that predates the field, so an unknown value
+            # (a build this one has never heard of) must not inherit the one
+            # delivery shape that skips the sender's provenance.
+            source=(SOURCE_USER if payload.get("source") == SOURCE_USER else SOURCE_PEER),
+            command_id=str(payload.get("command_id", "") or ""),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -130,6 +192,8 @@ class InboxLine:
             "mode": self.mode,
             "written_at": self.written_at,
             "wake": self.wake,
+            "source": self.source,
+            "command_id": self.command_id,
         }
 
 
