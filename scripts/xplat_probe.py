@@ -34,6 +34,7 @@ Usage
     python scripts/xplat_probe.py --only tui cli     # substring filter
     python scripts/xplat_probe.py --list             # probe names only
     python scripts/xplat_probe.py --keep             # keep the sandbox dir
+    python scripts/xplat_probe.py --budget 1200      # ... and return inside 20 minutes
 
 Exit code is 0 when no probe FAILed, 1 otherwise. `WARN` and `SKIP` do not fail
 the run: `WARN` is "works, but with a gap you should read", `SKIP` is "this
@@ -47,6 +48,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
 import json
 import os
 import platform
@@ -58,7 +60,7 @@ import textwrap
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -161,6 +163,23 @@ def isolated_env(root: Path) -> dict[str, str]:
     env["GH_TOKEN"] = ""
     env["GLAB_CONFIG_DIR"] = str(root / "glab-config")
     env["SSH_AUTH_SOCK"] = ""
+    # Every child here is a Python program writing to a PIPE, so it encodes its
+    # output with the LOCALE codec -- cp1252 on the Windows runner. That cost
+    # run 35405383805 two false FAILs, in both directions: `config.roundtrip`
+    # failed to DECODE the child's bytes in this parent ("er maps to
+    # <undefined>"), and `tui.boot` failed to ENCODE them in the child
+    # (UnicodeEncodeError inside the child's own cp1252.py, writing the logo's
+    # block characters). Pin BOTH ends to UTF-8 -- the child here, this parent
+    # via `run()`/`_spawn_child()` -- because the battery measures platform
+    # mechanisms, and a console codec is not one of them.
+    env["PYTHONIOENCODING"] = "utf-8"
+    # A child whose stdout is a FILE (see `ChildRun`) is block-buffered, so
+    # everything it printed on the way to a crash or a timeout would still be
+    # sitting in its buffer -- which is exactly the evidence the daemon and
+    # server probes exist to capture, and exactly what run 35405383805 could not
+    # explain about `serve.health`, `serve.double_bind` and
+    # `mobile.daemon_serve`.
+    env["PYTHONUNBUFFERED"] = "1"
     # A TUI that thinks it has no colour exercises a different render path, and
     # the probe is meant to measure the render path a user actually gets.
     env.pop("NO_COLOR", None)
@@ -189,15 +208,25 @@ def run(
     cwd: Path | None = None,
     stdin: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a child with a hard timeout, never inheriting this process's tty."""
+    """Run a child with a hard timeout, never inheriting this process's tty.
+
+    `encoding`/`errors` are named rather than left to `locale.getpreferredencoding()`
+    on purpose. `errors="replace"` is the load-bearing half: a probe's detail
+    line is EVIDENCE, and a child that emits one byte the codec of the day cannot
+    decode must not turn a working surface into a FAIL whose detail is a codec
+    problem (run 35405383805: `config.roundtrip` FAILed with "er maps to
+    <undefined>", which is cp1252, not lop).
+    """
     return subprocess.run(
         argv,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         env=env,
         cwd=str(cwd or REPO),
         input=stdin,
-        timeout=timeout,
+        timeout=BUDGET.clamp(timeout),
     )
 
 
@@ -213,6 +242,92 @@ def _first_line(text: str, limit: int = 240) -> str:
         if line.strip():
             return line.strip()[:limit]
     return ""
+
+
+# --------------------------------------------------------------------------- #
+# The battery's own wall-clock budget
+# --------------------------------------------------------------------------- #
+
+
+class BudgetSpent(Exception):
+    """The battery's own budget ran out while a probe was still running.
+
+    Deliberately NOT a `subprocess.TimeoutExpired`: a probe's timeout is a
+    statement about the surface ("it did not answer in 60 s"), while the budget
+    is a statement about the RUN ("there was no time left to ask"). Reporting
+    the second as the first turns a truncated run into a list of fabricated
+    defects, which is the one way this gate could do more harm than good.
+    """
+
+
+class Budget:
+    """The whole battery's wall-clock ceiling, and the arithmetic around it.
+
+    The per-probe timeouts SUM to ~64 minutes (3836 s at the time of writing)
+    against job ceilings of 25 and 45 minutes, so three or four probes hanging to
+    their own documented bound would have the JOB killed -- and a job killed by
+    `timeout-minutes` prints no matrix and uploads no artifact, which is the
+    exact failure the `if: always()` upload step exists to prevent (reviewer B,
+    A2). The way out is not to lengthen the legs until they fit the worst case:
+    it is for the battery to RETURN before the ceiling, having marked the probes
+    it never reached as not-run rather than as failures.
+
+    0 (the default) means no aggregate bound, which is what a local run wants --
+    there is no job ceiling to beat, and the per-probe timeouts already bound it.
+    """
+
+    def __init__(self, seconds: float = 0.0) -> None:
+        self.seconds = 0.0
+        self.deadline: float | None = None
+        self.start(seconds)
+
+    def start(self, seconds: float) -> None:
+        self.seconds = float(seconds or 0.0)
+        self.deadline = time.monotonic() + self.seconds if self.seconds > 0 else None
+
+    def left(self) -> float:
+        """Seconds until the battery must stop; `inf` when unbounded."""
+        if self.deadline is None:
+            return float("inf")
+        return self.deadline - time.monotonic()
+
+    def spent(self) -> bool:
+        return self.left() <= 0
+
+    def window(self, seconds: float) -> float:
+        """`seconds` of polling, or less where the budget ends first.
+
+        Used by the probes that poll a long-lived child instead of calling
+        `run()`, so that the budget is a bound on the whole battery and not only
+        on the children started through `run()`.
+        """
+        return max(min(seconds, self.left()), 0.0)
+
+    def clamp(self, timeout: float) -> float:
+        """`timeout`, shortened to what the budget has left.
+
+        Raises `BudgetSpent` once there is nothing left, so a probe cannot be
+        STARTED on borrowed time and report the resulting instant timeout as a
+        defect in the surface it was measuring.
+        """
+        if self.deadline is None:
+            return timeout
+        left = self.left()
+        if left <= 0:
+            raise BudgetSpent(f"the battery's {int(self.seconds)}s budget was spent")
+        return min(timeout, left)
+
+    def note(self) -> str:
+        """A suffix for a failure line when the BUDGET, not the surface, ran out."""
+        if self.deadline is not None and self.spent():
+            return f" (the battery's {int(self.seconds)}s budget was spent first)"
+        return ""
+
+
+#: Set once, from `--budget`, before the first probe runs. Module-level because
+#: `run()` and the probes' poll loops read it directly; a parameter threaded
+#: through twenty probe signatures would be forgotten at the twenty-first.
+BUDGET = Budget(0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -274,12 +389,69 @@ def _posix_import_names(node: object) -> list[str]:
     return found
 
 
+#: Exception types a module raises when it deliberately REFUSES to be imported
+#: on this platform. Kept to the types a refusal is actually written with here:
+#: `RuntimeError` is the repository's spelling
+#: (`evaluation/adapters/supervisor.py`), and the import/OS errors are what a
+#: module that gates a dependency raises. A `TypeError` or an `AttributeError`
+#: is never a refusal -- it is the module breaking -- so no marker can rescue it.
+REFUSAL_EXCEPTIONS = frozenset(
+    {"RuntimeError", "NotImplementedError", "ImportError", "ModuleNotFoundError", "OSError"}
+)
+
+#: Words that say the PLATFORM is the reason. A refusal without one of these
+#: does not count: "it broke" is not "it declined", and an unexplained failure
+#: is exactly what this probe exists to surface.
+REFUSAL_PLATFORM_MARKERS = (
+    "posix",
+    "windows",
+    "linux",
+    "darwin",
+    "macos",
+    "mac os",
+    "this platform",
+    "not available on",
+    "unsupported platform",
+    "requires systemd",
+    "requires launchd",
+)
+
+
+def _classify_import_failures(failed: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Split `{module: "Type: message"}` into (refused, unexpected).
+
+    Both halves are reported; only the second fails the probe. The distinction
+    has to be made on the message, because that is all an import can tell us --
+    a module that refuses and a module that crashes are the same event from the
+    outside, and the difference lives in the sentence it chose.
+    """
+    refused: dict[str, str] = {}
+    unexpected: dict[str, str] = {}
+    for module, report in failed.items():
+        exc_type = report.split(":", 1)[0].strip()
+        lowered = report.lower()
+        if exc_type in REFUSAL_EXCEPTIONS and any(
+            marker in lowered for marker in REFUSAL_PLATFORM_MARKERS
+        ):
+            refused[module] = report
+        else:
+            unexpected[module] = report
+    return refused, unexpected
+
+
 def probe_import_package(env: dict[str, str]) -> Result:
     """Import EVERY submodule of the package, and report what would not import.
 
     This is the single most informative probe in an OS-portability battery: it
     turns "does lop run on this OS" into a list of module names, and it catches
     the module that is only imported on a rarely-taken branch.
+
+    ...but only the SECOND of its two failure kinds is a defect. A module that
+    REFUSES to be imported here, with a named platform reason, is the deliberate
+    shape this branch standardises -- `evaluation/adapters/supervisor.py` raises
+    `RuntimeError: evaluation adapter supervision requires POSIX process groups`
+    and five modules import it -- and failing on it would make this probe red on
+    Windows forever for a design decision (reviewer B, A4/Q1).
     """
     driver = textwrap.dedent("""
         import importlib, json, pkgutil, sys, traceback
@@ -297,7 +469,11 @@ def probe_import_package(env: dict[str, str]) -> Result:
     try:
         proc = run([sys.executable, "-c", driver], env, timeout=600.0)
     except subprocess.TimeoutExpired:
-        return Result("import.package", "FAIL", "timed out importing the package")
+        return Result(
+            "import.package",
+            "FAIL",
+            f"timed out importing the package{BUDGET.note()}",
+        )
     if proc.returncode != 0:
         return Result(
             "import.package",
@@ -307,12 +483,17 @@ def probe_import_package(env: dict[str, str]) -> Result:
         )
     payload = json.loads(proc.stdout.strip().splitlines()[-1])
     failed = payload["failed"]
-    detail = f"{payload['total'] - len(failed)}/{payload['total']} modules import"
+    refused, unexpected = _classify_import_failures(failed)
+    parts = [f"{payload['total'] - len(failed)}/{payload['total']} modules import"]
+    if refused:
+        parts.append(f"{len(refused)} refuse off POSIX with a named reason")
+    if unexpected:
+        parts.append(f"{len(unexpected)} unexpected")
     return Result(
         "import.package",
-        "FAIL" if failed else "PASS",
-        detail,
-        {"failed": failed},
+        "FAIL" if unexpected else "PASS",
+        "; ".join(parts),
+        {"failed": failed, "refused": refused, "unexpected": unexpected},
     )
 
 
@@ -453,22 +634,46 @@ def probe_wake_status(env: dict[str, str]) -> Result:
 
     The detail carries the whole line, because "supported: false" is the
     finding on an OS where the supervisor installer has no arm.
+
+    THREE states, not two, and the third is the one this probe used to get
+    wrong. `supervisor_available` was computed from a denylist of phrases, so
+    the CLI's other answer -- "cannot be verified for this store", which is what
+    a redirected HOME always produces -- contained none of them and was read as
+    support being PRESENT: the "reports success while doing nothing" class this
+    battery exists to catch, inside the battery (reviewer B, A5). Under this
+    harness that is the NORMAL reading on macOS and Linux, so the WARN is not
+    noise: the state is named, and a reader can see that no supervisor was
+    confirmed rather than assuming one was found.
     """
     proc = run(_cli_argv("wake", "status"), env, timeout=120.0)
     text = (proc.stdout + proc.stderr).strip()
     if proc.returncode != 0:
         return Result("wake.status", "FAIL", _tail(proc.stderr))
-    text = (proc.stdout + proc.stderr).strip()
-    lowered = text.lower()
-    supported = not (
-        _platform_unavailable(text)
-        or any(marker in lowered for marker in ("not installed", "no supervisor"))
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    line = next(
+        (ln for ln in lines if ln.lower().startswith("supervisor")), lines[0] if lines else ""
     )
+    said = line.split(":", 1)[1].strip().lower() if ":" in line else line.lower()
+    if any(marker in said for marker in ("not installed", "no supervisor")):
+        state = "absent"
+    elif any(
+        marker in said for marker in ("cannot be verified", "not addressable", "could not be")
+    ):
+        state = "unverified"
+    else:
+        state = "reported"
     return Result(
         "wake.status",
-        "PASS" if supported else "WARN",
-        text.splitlines()[0][:240] if text else "no output",
-        {"raw": text[:1200], "supervisor_available": supported},
+        "PASS" if state == "reported" else "WARN",
+        line[:240] or "no output",
+        {
+            "raw": text[:1200],
+            # A boolean for the readers that grep it, and False for BOTH
+            # non-answers: "no supervisor" and "could not be confirmed" are
+            # equally not a supervisor that can fire a wake with no TUI open.
+            "supervisor_available": state == "reported",
+            "supervisor_state": state,
+        },
     )
 
 
@@ -564,11 +769,35 @@ def probe_mobile_install(env: dict[str, str]) -> Result:
                 "macOS keychain is unreachable from the isolated HOME the probe uses",
                 {"raw": text[:600]},
             )
+        # A DOCUMENTED PREREQUISITE THAT IS ABSENT is a host state, not a
+        # defect -- the distinction `tunnel.status` already draws for "not
+        # configured". The portal bundle is built once, with Node >= 22, and the
+        # installer now names exactly that and how to get it. Reported as SKIP
+        # with the installer's own sentence so the reason travels; if the
+        # prerequisite IS present (`node` on PATH) and the install still fails,
+        # this stays a FAIL -- the case that must never be hidden behind a
+        # friendly message.
+        prerequisite_missing = "is not installed" in text and (
+            "nodejs.org" in text or "install node" in text.lower()
+        )
+        if prerequisite_missing and shutil.which("node") is None:
+            return Result(
+                "mobile.install",
+                "SKIP",
+                "portal bundle needs Node >= 22, absent on this host: " + _tail(text),
+                {"raw": text[:1200]},
+            )
         return Result(
             "mobile.install",
             "FAIL",
-            _first_line(text) or f"exit {proc.returncode}",
-            {"raw": text[:1200]},
+            # `_tail`, not `_first_line`: an installer prints its PROGRESS first,
+            # so the first line of a failed install is a step that SUCCEEDED. On
+            # the Linux leg that put "generated a new portal password (a 0600
+            # file ...)" in the artifact as the reason for a FAIL (reviewer B,
+            # A6) -- a detail line that actively misleads the reader about what
+            # broke.
+            _tail(text) or f"exit {proc.returncode}",
+            {"rc": proc.returncode, "raw": text[:2000]},
         )
     return Result("mobile.install", "PASS", _first_line(text) or "installed", {"raw": text[:1200]})
 
@@ -589,28 +818,31 @@ def probe_mobile_daemon_serve(env: dict[str, str]) -> Result:
     # it in the environment keeps this probe measuring THE DAEMON rather than
     # measuring the installer a second time.
     env = {**env, "LOP_MOBILE_PASSWORD": "xplat-probe-not-a-credential"}
-    proc = _spawn_cli(["mobile", "serve", "--port", str(port)], env)
-    try:
-        deadline = time.monotonic() + 45.0
+    window = BUDGET.window(45.0)
+    with _spawn_cli(
+        ["mobile", "serve", "--port", str(port)], env, log=_child_log(env, "mobile-serve")
+    ) as child:
+        deadline = time.monotonic() + window
         last = ""
         while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                out = proc.stdout.read() if proc.stdout else ""
+            if child.proc.poll() is not None:
                 return Result(
                     "mobile.daemon_serve",
                     "FAIL",
-                    f"daemon exited rc={proc.returncode}: {_tail(out or last)}",
+                    f"daemon exited rc={child.proc.returncode}: {child.output() or last}",
+                    child.extra(),
                 )
             for path in ("/healthz", "/health"):
                 try:
                     with urllib.request.urlopen(
                         f"http://127.0.0.1:{port}{path}", timeout=2
                     ) as response:
-                        body = response.read(200).decode(errors="replace")
+                        body = response.read(200).decode("utf-8", errors="replace")
                         return Result(
                             "mobile.daemon_serve",
                             "PASS",
                             f"{path} -> {response.status} {body[:80]}",
+                            child.extra(),
                         )
                 except urllib.error.HTTPError as exc:
                     # A 401 from the gate is a served daemon, not a failure.
@@ -618,13 +850,21 @@ def probe_mobile_daemon_serve(env: dict[str, str]) -> Result:
                         "mobile.daemon_serve",
                         "PASS",
                         f"{path} -> {exc.code} (auth gate answering)",
+                        child.extra(),
                     )
                 except Exception as exc:  # noqa: BLE001 - keep polling
                     last = f"{type(exc).__name__}: {exc}"
             time.sleep(0.5)
-        return Result("mobile.daemon_serve", "FAIL", f"no response in 45s ({last})")
-    finally:
-        _terminate(proc)
+        # On run 35405383805 this probe reported only the timeout, so the
+        # Windows failure it found ("mobile.install" registered the scheduled
+        # task and the daemon never came up) had no child output to read. The
+        # tail is what makes the NEXT run diagnostic rather than merely red.
+        return Result(
+            "mobile.daemon_serve",
+            "FAIL",
+            f"no response in {window:.0f}s ({last}){BUDGET.note()}",
+            child.extra(),
+        )
 
 
 def probe_tunnel_status(env: dict[str, str]) -> Result:
@@ -672,36 +912,45 @@ def probe_serve_health(env: dict[str, str]) -> Result:
     import urllib.request
 
     port = _free_port()
-    proc = _spawn_cli(["serve", "--port", str(port)], env)
-    try:
-        deadline = time.monotonic() + 60.0
+    window = BUDGET.window(60.0)
+    with _spawn_cli(
+        ["serve", "--port", str(port)], env, log=_child_log(env, "serve-health")
+    ) as child:
+        deadline = time.monotonic() + window
         last = ""
         while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                out = proc.stdout.read() if proc.stdout else ""
+            if child.proc.poll() is not None:
                 return Result(
                     "serve.health",
                     "FAIL",
-                    f"server exited rc={proc.returncode}: {_tail(out or last)}",
+                    f"server exited rc={child.proc.returncode}: {child.output() or last}",
+                    child.extra(),
                 )
             try:
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/health", timeout=2
                 ) as response:
-                    body = response.read(120).decode(errors="replace")
+                    body = response.read(120).decode("utf-8", errors="replace")
                     return Result(
                         "serve.health",
                         "PASS",
                         f"/health -> {response.status} {body}",
+                        child.extra(),
                     )
             except urllib.error.HTTPError as exc:
-                return Result("serve.health", "FAIL", f"/health -> HTTP {exc.code}")
+                return Result("serve.health", "FAIL", f"/health -> HTTP {exc.code}", child.extra())
             except Exception as exc:  # noqa: BLE001 - keep polling
                 last = f"{type(exc).__name__}: {exc}"
             time.sleep(0.5)
-        return Result("serve.health", "FAIL", f"no response in 60s ({last})")
-    finally:
-        _terminate(proc)
+        # The child's own output is the difference between "the port never
+        # answered" and WHY (a bind error, a missing dependency, a traceback):
+        # the tail is what run 35405383805's artifact could not supply.
+        return Result(
+            "serve.health",
+            "FAIL",
+            f"no response in {window:.0f}s ({last}){BUDGET.note()}",
+            child.extra(),
+        )
 
 
 def probe_tui_boot(env: dict[str, str]) -> Result:
@@ -850,13 +1099,13 @@ def probe_file_lock(env: dict[str, str]) -> Result:
                 print(json.dumps({"acquired": True}))
         """)
     session_dir = Path(env["HOME"]) / "lease-probe"
-    holder = subprocess.Popen(
+    # `_spawn_child`, not a raw Popen: the holder's output is what a FAIL here
+    # would have to be read against, and a `PIPE` this probe never drains is the
+    # shape that lost the daemon probes their evidence on the Windows runner.
+    holder = _spawn_child(
         [sys.executable, "-c", driver, str(session_dir), "hold"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=env,
-        cwd=str(REPO),
+        env,
+        log=_child_log(env, "lease-holder"),
     )
     try:
         time.sleep(1.0)
@@ -867,17 +1116,18 @@ def probe_file_lock(env: dict[str, str]) -> Result:
         )
         combined = (second.stdout or "") + (second.stderr or "")
         if "acquired" not in combined:
-            return Result("lock.exclusive", "FAIL", _tail(combined))
+            return Result("lock.exclusive", "FAIL", _tail(combined), holder.extra())
         granted = json.loads(combined.strip().splitlines()[-1]).get("acquired")
         if granted:
             return Result(
                 "lock.exclusive",
                 "FAIL",
                 "a second holder was granted the same lease while the first held it",
+                holder.extra(),
             )
-        return Result("lock.exclusive", "PASS", "second holder correctly refused")
+        return Result("lock.exclusive", "PASS", "second holder correctly refused", holder.extra())
     finally:
-        _terminate(holder)
+        holder.stop()
 
 
 def probe_static_posix_attributes(env: dict[str, str]) -> Result:
@@ -947,6 +1197,342 @@ def probe_static_posix_attributes(env: dict[str, str]) -> Result:
     )
 
 
+# --------------------------------------------------------------------------- #
+# The static scan's vocabulary and its platform-guard discovery
+# --------------------------------------------------------------------------- #
+
+#: Terms whose presence in a test says "this branch is about the platform".
+#: `hasattr` belongs here rather than with the capability probes below, because
+#: a `hasattr(os, "getuid")` test IS the platform question.
+PLATFORM_TERMS = (
+    "os.name",
+    "sys.platform",
+    "platform.system",
+    "_PLATFORM",
+    "IS_WINDOWS",
+    "is_windows",
+    "win32",
+    "on_windows",
+    "hasattr",
+)
+
+#: Strings that name a platform when something is COMPARED against them. Only a
+#: compared literal counts -- see `_compares_against_platform_literal` -- because
+#: every module here documents the platform it targets, and an unparsed docstring
+#: is indistinguishable from code.
+PLATFORM_STRING_LITERALS = frozenset({"win32", "posix", "nt", "darwin", "linux", "cygwin"})
+
+#: Attributes that are unambiguously ABSENT off POSIX and whose absence crashes
+#: or corrupts: `os.kill(pid, 0)` (which on Windows TERMINATES the process it is
+#: probing), `loop.add_signal_handler`, `os.killpg`, `os.getuid`/`geteuid`,
+#: `os.getpgid`, `os.setsid`, `os.fork`, `os.symlink`.
+FATAL_TARGETS = {
+    "killpg": "os.killpg",
+    "getuid": "os.getuid",
+    "geteuid": "os.geteuid",
+    "getgid": "os.getgid",
+    "setsid": "os.setsid",
+    "getpgid": "os.getpgid",
+    "fork": "os.fork",
+    "symlink": "os.symlink",
+}
+
+#: Absent off POSIX too, but not destructive where they are: a lead.
+LEAD_TARGETS = {
+    "SIGKILL": "signal.SIGKILL",
+    "SIGUSR1": "signal.SIGUSR1",
+    "SIGUSR2": "signal.SIGUSR2",
+    "SIGWINCH": "signal.SIGWINCH",
+    "SIGSTOP": "signal.SIGSTOP",
+    "chmod": "os.chmod",
+    "getlogin": "os.getlogin",
+    "nice": "os.nice",
+}
+
+#: Every attribute name above, as a vocabulary for `_platform_guard_names`: a
+#: capability probe that asks about one of THESE is a platform question, while
+#: `getattr(obj, "cr_frame", None)` is not, and treating the two alike would let
+#: any attribute probe in the tree silence a real POSIX hit.
+POSIX_ATTRIBUTE_NAMES = frozenset(FATAL_TARGETS) | frozenset(LEAD_TARGETS)
+
+
+def _atom_text(node: ast.AST) -> str:
+    """The dotted name a `Name`/`Attribute` spells, or "" for anything else.
+
+    Deliberately not `ast.unparse`: unparsing (or worse, copying a subtree to
+    blank out its docstring) costs seconds on the large files where reading an
+    attribute chain costs nothing. It also cannot be fooled the way a text match
+    can: a docstring is not an `Attribute`, so prose about "posix" is invisible
+    here by construction rather than by a rule that has to be remembered.
+    """
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+def _compare_has_platform_literal(node: ast.Compare) -> bool:
+    """Does this comparison test something against a platform literal?
+
+    The comparison is what makes the literal a question about the platform:
+    `if host == "win32":` asks one, while the sentence "posix has no such call"
+    in a docstring or a log message merely contains the word.
+    """
+    for operand in [node.left, *node.comparators]:
+        if (
+            isinstance(operand, ast.Constant)
+            and isinstance(operand.value, str)
+            and operand.value.strip().lower() in PLATFORM_STRING_LITERALS
+        ):
+            return True
+    return False
+
+
+def _mentions_posix_attribute(node: ast.AST) -> bool:
+    """Does this subtree name one of the POSIX-only attributes, as a string?"""
+    return any(
+        isinstance(child, ast.Constant)
+        and isinstance(child.value, str)
+        and child.value in POSIX_ATTRIBUTE_NAMES
+        for child in ast.walk(node)
+    )
+
+
+def _call_is_capability_probe(node: ast.Call) -> bool:
+    """Does this call ASK whether a POSIX-only attribute exists here?
+
+    Two spellings, both of them in this tree: `hasattr(os, "getuid")` and
+    `getattr(signal, "SIGUSR1", None)` -- the `None` default IS the test.
+    Recognising only the first is how `session/runtime/process.py`'s guarded
+    `loop.add_signal_handler` still read as an unguarded POSIX use.
+
+    The attribute name is required, so that `getattr(obj, "cr_frame", None)` --
+    which this package uses constantly for other reasons -- cannot silence a
+    real POSIX hit.
+    """
+    if not (isinstance(node.func, ast.Name) and _mentions_posix_attribute(node)):
+        return False
+    if node.func.id == "hasattr":
+        return True
+    return node.func.id == "getattr" and any(
+        isinstance(arg, ast.Constant) and arg.value is None for arg in node.args
+    )
+
+
+class _Span(NamedTuple):
+    """A node's (start, end) positions -- see `_span`."""
+
+    start: tuple[int, int]
+    end: tuple[int, int]
+
+
+#: A position that cannot be contained by anything and contains nothing. Used for
+#: the synthetic nodes that carry no position, so "unknown" reads as "no guard"
+#: and "not a platform test" rather than as "everywhere".
+_NO_SPAN = _Span((1 << 30, 1 << 30), (1 << 30, 1 << 30))
+
+
+class _Query(NamedTuple):
+    """One place in the file that answers part of the platform question.
+
+    `kind` is "code" (a name that mentions the platform), "literal" (a comparison
+    against a platform word), "capability" (a `hasattr`/`getattr` probe about a
+    POSIX-only attribute) or "name" (any name, for the guard-chain lookup).
+    """
+
+    span: _Span
+    kind: str
+    name: str = ""
+
+
+class _Candidate(NamedTuple):
+    """Something that can BE a platform test: an assignment or a function.
+
+    `span` is the assignment's VALUE, or the whole function definition, so that
+    containment asks the question the discovery means: "does the thing this name
+    is defined as ask the platform question?"
+    """
+
+    span: _Span
+    names: tuple[str, ...]
+    kind: str  # "const" for an assignment, "pred" for a function
+
+
+class _Hit(NamedTuple):
+    """A POSIX use found by the traversal, with its guard REASONS not yet read.
+
+    The guards are kept as spans and resolved after the traversal, because which
+    name is a platform constant is only known once every node has been seen --
+    and resolving it by walking the tree again is the cost this design exists to
+    avoid (see `note`).
+    """
+
+    lineno: int
+    pattern: str
+    fatal: bool
+    guards: tuple[_Span, ...]
+    in_try: bool
+
+
+def _span(node: ast.AST) -> _Span:
+    """A node's start and end position, for the containment tests below.
+
+    Every node of a parsed tree carries these, which is what lets the analysis
+    ask "is this question inside that candidate?" without walking the candidate's
+    subtree again.
+    """
+    start_line = getattr(node, "lineno", None)
+    start_col = getattr(node, "col_offset", None)
+    end_line = getattr(node, "end_lineno", None)
+    end_col = getattr(node, "end_col_offset", None)
+    if start_line is None or start_col is None:
+        return _NO_SPAN
+    return _Span(
+        (start_line, start_col),
+        (
+            end_line if end_line is not None else start_line,
+            end_col if end_col is not None else start_col,
+        ),
+    )
+
+
+def _index_queries(queries: list[_Query]) -> tuple[list[_Query], list[tuple[int, int]]]:
+    """Queries ordered by start position, plus their starts, for `bisect`."""
+    ordered = sorted(
+        (query for query in queries if query.span.start != _NO_SPAN.start),
+        key=lambda query: query.span.start,
+    )
+    return ordered, [q.span.start for q in ordered]
+
+
+def _candidate_facts(
+    ordered: list[_Query],
+    starts: list[tuple[int, int]],
+    span: _Span,
+    interesting: frozenset[str] | set[str],
+) -> tuple[bool, frozenset[str]]:
+    """What the code inside `span` says: (platform question?, guard names used).
+
+    The ONE place containment is turned into an answer, and it is deliberately
+    O(queries inside the span), not O(queries in the file): `ordered` is sorted,
+    so the scan starts at `bisect.bisect_left` and stops at the first query past
+    the span. `interesting` filters name references down to the names that can
+    matter (the module's own bindings, or its guard names), which is what keeps
+    these sets small on a 40 000-line module.
+    """
+    static = False
+    names: set[str] = set()
+    index = bisect.bisect_left(starts, span.start)
+    while index < len(ordered) and ordered[index].span.start <= span.end:
+        query = ordered[index]
+        if query.span.end <= span.end:
+            if query.kind in _QUESTION_KINDS:
+                static = True
+            elif query.kind == "name" and query.name in interesting:
+                names.add(query.name)
+        index += 1
+    return static, frozenset(names)
+
+
+#: Query kinds that make a candidate a platform question all by themselves.
+_QUESTION_KINDS = ("code", "literal", "capability")
+
+
+class _GuardAnalysis(NamedTuple):
+    """The module's platform guards, with the query index they were read from.
+
+    Kept together so that every later question ("is this test a platform
+    question?") is answered against the same reading of the file, and so a caller
+    that already holds the index does not pay for it twice.
+    """
+
+    constants: frozenset[str]
+    predicates: frozenset[str]
+    ordered: list[_Query]
+    starts: list[tuple[int, int]]
+
+    def guarded(self, span: _Span) -> bool:
+        """Does whatever sits at `span` ask the platform question?"""
+        guards = self.constants | self.predicates
+        static, names = _candidate_facts(self.ordered, self.starts, span, guards)
+        return static or bool(names & guards)
+
+
+def _assign_names(node: ast.Assign | ast.AnnAssign) -> list[str]:
+    """The plain names an assignment binds (attribute/subscript targets skipped)."""
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    names: list[str] = []
+    for target in targets:
+        if isinstance(target, ast.Name):
+            names.append(target.id)
+        elif isinstance(target, ast.Tuple):
+            names.extend(elt.id for elt in target.elts if isinstance(elt, ast.Name))
+    return names
+
+
+def _platform_guards(candidates: list[_Candidate], queries: list[_Query]) -> _GuardAnalysis:
+    """Which candidates ARE platform tests, discovered from the module itself.
+
+    The scan's other rules are syntactic, and this repository's convention is to
+    ask the platform question ONCE, give it a name, and then branch on the name:
+
+        _UID_IS_MEANINGFUL = os.name == "posix"
+        ...
+        if not _UID_IS_MEANINGFUL:
+            return 0
+        return os.getuid()
+
+    Nothing in that branch mentions a platform, so a scan that only reads terms
+    reports the FIX as the defect -- measured on the Windows runner as the audit's
+    own `_UID_IS_MEANINGFUL` guard coming back as one of six "fatal" hits, and as
+    `static.posix_attributes` FAILing on every OS, which made both new CI legs
+    fail by construction (reviewer B, A1).
+
+    DISCOVERED from the module's own source rather than listed in this file: a
+    list would be a second place for the convention to drift, and it would need
+    editing every time a module asked its question differently. The chain is
+    followed to a fixpoint, so `PEER_AUTHENTICATION_SUPPORTED = _IS_DARWIN or
+    _IS_LINUX` is understood through the two constants it is derived from, with
+    none of the three named anywhere here.
+
+    Everything is interval arithmetic over positions the caller collected in its
+    ONE traversal. An earlier version re-walked each candidate's subtree per
+    round, which is quadratic in nesting and measured at minutes on one large
+    module -- a battery slow enough to die on its own job ceiling.
+    """
+    ordered, starts = _index_queries(queries)
+    # The names that can MATTER are the module's own bindings: a reference to
+    # anything else cannot be part of a guard chain, and carrying every name in
+    # the file through the fixpoint is what made this quadratic.
+    candidate_names = frozenset(name for candidate in candidates for name in candidate.names)
+    # One containment pass per candidate, ONCE, not once per round: a module-level
+    # statement's span covers the whole statement (nested definitions included),
+    # and re-doing that per round is where the time went.
+    facts = [
+        (candidate, *_candidate_facts(ordered, starts, candidate.span, candidate_names))
+        for candidate in candidates
+    ]
+
+    constants: set[str] = set()
+    predicates: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        known = constants | predicates
+        for candidate, static, refs in facts:
+            if not (static or (refs & known)):
+                continue
+            target = constants if candidate.kind == "const" else predicates
+            for name in candidate.names:
+                if name not in target:
+                    target.add(name)
+                    changed = True
+    return _GuardAnalysis(frozenset(constants), frozenset(predicates), ordered, starts)
+
+
 def _module_posix_gate(source: str) -> str | None:
     """The module-level platform refusal, if this module has one."""
     for line in source.splitlines()[:200]:
@@ -968,72 +1554,67 @@ def _scan_posix_uses(tree: "ast.Module") -> list[tuple[int, str, bool, bool]]:
     shape this scan cannot distinguish from a defect, and a FAIL that is wrong
     once stops being read.
 
-    Two precision rules are implemented, both from false positives seen on the
-    first run against this tree: an `if` TEST is scanned with that same `if`'s
-    guard active (``if not hasattr(os, "geteuid") or info.st_uid != os.geteuid()``
-    is guarded), and a capability check that RAISES on the preceding line
-    guards the rest of its block (``store.py:196-198``).
+    Three precision rules, all of them shapes this codebase actually uses, and
+    all of them narrowing the scan to the unreachability question it is really
+    asking:
+
+    * an `if` TEST is scanned with that same `if`'s guard active
+      (``if not hasattr(os, "geteuid") or info.st_uid != os.geteuid()``);
+    * a platform question that TERMINATES its block guards the rest of it
+      (``store.py:196-198``, and the ``if not _UID_IS_MEANINGFUL: return 0``
+      convention above);
+    * a branch on a name the module itself computed FROM the platform is a
+      platform branch -- see :func:`_platform_guards`.
+
+    ``guarded`` still means "unreachable off POSIX as far as a syntax tree can
+    tell". Nothing here can see a helper that is only CALLED from the launchd
+    arm, so such a helper must state its own guard to be read as guarded.
     """
-    import ast
+    hits: list[_Hit] = []
+    # Everything the guard analysis needs is collected in the SAME traversal that
+    # finds the hits: a second pass over this package (600 000 nodes) measured at
+    # ~40 s, which is most of what a CI leg has to spend.
+    candidates: list[_Candidate] = []
+    queries: list[_Query] = []
 
-    hits: list[tuple[int, str, bool, bool]] = []
-
-    platform_terms = (
-        "os.name",
-        "sys.platform",
-        "platform.system",
-        "_PLATFORM",
-        "IS_WINDOWS",
-        "is_windows",
-        "win32",
-        "on_windows",
-        "hasattr",
-    )
-
-    fatal_targets = {
-        "killpg": "os.killpg",
-        "getuid": "os.getuid",
-        "geteuid": "os.geteuid",
-        "getgid": "os.getgid",
-        "setsid": "os.setsid",
-        "getpgid": "os.getpgid",
-        "fork": "os.fork",
-        "symlink": "os.symlink",
-    }
-    lead_targets = {
-        "SIGKILL": "signal.SIGKILL",
-        "SIGUSR1": "signal.SIGUSR1",
-        "SIGUSR2": "signal.SIGUSR2",
-        "SIGWINCH": "signal.SIGWINCH",
-        "SIGSTOP": "signal.SIGSTOP",
-        "chmod": "os.chmod",
-        "getlogin": "os.getlogin",
-        "nice": "os.nice",
-    }
-
-    def guarded_by_test(node: ast.AST) -> bool:
-        try:
-            text = ast.unparse(node)
-        except Exception:  # noqa: BLE001 - an unparseable test is not a guard
-            return False
-        return any(term in text for term in platform_terms)
-
-    def raises(node: ast.AST) -> bool:
-        return any(isinstance(child, ast.Raise) for child in ast.walk(node))
+    def note(node: ast.AST) -> None:
+        """Record what this node contributes to the guard analysis."""
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if node.value is not None:
+                targets = _assign_names(node)
+                if targets:
+                    candidates.append(_Candidate(_span(node.value), tuple(targets), "const"))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            candidates.append(_Candidate(_span(node), (node.name,), "pred"))
+        elif isinstance(node, ast.Name):
+            if any(term in node.id for term in PLATFORM_TERMS):
+                queries.append(_Query(_span(node), "code"))
+            queries.append(_Query(_span(node), "name", node.id))
+        elif isinstance(node, ast.Attribute):
+            text = _atom_text(node)
+            if any(term in text for term in PLATFORM_TERMS):
+                queries.append(_Query(_span(node), "code"))
+            queries.append(_Query(_span(node), "name", node.attr))
+        elif isinstance(node, ast.Compare):
+            if _compare_has_platform_literal(node):
+                queries.append(_Query(_span(node), "literal"))
+        elif isinstance(node, ast.Call):
+            if _call_is_capability_probe(node):
+                queries.append(_Query(_span(node), "capability"))
 
     def _terminates(node: ast.AST) -> bool:
         """Does any branch of this `if` leave the enclosing block entirely?"""
         terminators = (ast.Return, ast.Raise, ast.Continue, ast.Break)
         return any(isinstance(child, terminators) for child in ast.walk(node))
 
-    def visit(node: ast.AST, platform_guarded: bool, in_try: bool = False) -> None:
-        guarded = platform_guarded or in_try
+    def visit(node: ast.AST, guards: tuple[_Span, ...], in_try: bool = False) -> None:
+        note(node)
         if isinstance(node, ast.Try):
             for child in node.body + node.handlers + node.orelse + node.finalbody:
-                visit(child, platform_guarded, True)
+                visit(child, guards, True)
             return
         if isinstance(node, ast.If):
-            nested = platform_guarded or guarded_by_test(node.test)
+            nested = guards + (_span(node.test),)
             # `in_try` must be threaded into the TEST too: an `if` inside a
             # `try:` whose condition itself calls a POSIX-only function is
             # guarded by that `try`, and dropping the flag here is what made
@@ -1056,27 +1637,27 @@ def _scan_posix_uses(tree: "ast.Module") -> list[tuple[int, str, bool, bool]]:
                 if isinstance(child, ast.AST)
             ]
             for child in extras:
-                visit(child, platform_guarded, in_try)
+                visit(child, guards, in_try)
             # The BODY goes through visit_block, so a capability check that
             # raises early in the function guards the rest of it.
-            visit_block(node.body, platform_guarded, in_try)
+            visit_block(node.body, guards, in_try)
             return
         if isinstance(node, (ast.ClassDef, ast.With)):
             for child in ast.iter_child_nodes(node):
-                visit(child, platform_guarded, in_try)
+                visit(child, guards, in_try)
             return
         if isinstance(node, ast.Module):
-            visit_block(node.body, platform_guarded, in_try)
+            visit_block(node.body, guards, in_try)
             return
         if isinstance(node, ast.Attribute):
             owner = ast.unparse(node.value) if isinstance(node.value, ast.Name) else ""
             name = node.attr
-            is_fatal = name in fatal_targets
-            pattern = fatal_targets.get(name) or lead_targets.get(name)
+            is_fatal = name in FATAL_TARGETS
+            pattern = FATAL_TARGETS.get(name) or LEAD_TARGETS.get(name)
             if pattern and (owner in ("os", "signal") or name == "add_signal_handler"):
-                hits.append((node.lineno, pattern, is_fatal, guarded))
+                hits.append(_Hit(node.lineno, pattern, is_fatal, guards, in_try))
             elif name == "add_signal_handler":
-                hits.append((node.lineno, "loop.add_signal_handler", True, guarded))
+                hits.append(_Hit(node.lineno, "loop.add_signal_handler", True, guards, in_try))
         if isinstance(node, ast.Call):
             func = node.func
             if (
@@ -1091,42 +1672,41 @@ def _scan_posix_uses(tree: "ast.Module") -> list[tuple[int, str, bool, bool]]:
                 # process and raises nothing for the handler to catch, so a
                 # `try: os.kill(pid, 0) except OSError:` reads as protected to
                 # every other rule and is the exact shape that ships.
-                hits.append((node.lineno, "os.kill(pid, 0)", True, platform_guarded))
+                hits.append(_Hit(node.lineno, "os.kill(pid, 0)", True, guards, False))
         for child in ast.iter_child_nodes(node):
-            visit(child, platform_guarded, in_try)
+            visit(child, guards, in_try)
 
-    def visit_block(body: list[ast.stmt], platform_guarded: bool, in_try: bool = False) -> None:
-        """Visit statements in order, honouring a preceding capability check."""
-        blocked = platform_guarded
+    def visit_block(body: list[ast.stmt], guards: tuple[_Span, ...], in_try: bool = False) -> None:
+        """Visit statements in order, honouring a preceding platform check."""
+        blocked = guards
         for stmt in body:
             visit(stmt, blocked, in_try)
-            # `if not hasattr(x, "y"): raise ...` guards everything AFTER it in
-            # this block, which is how the evidence store states its Windows
-            # refusal. Without this rule the scan reports it as unguarded.
-            if isinstance(stmt, ast.If) and raises(stmt):
-                try:
-                    test_text = ast.unparse(stmt.test)
-                except Exception:  # noqa: BLE001
-                    test_text = ""
-                if "hasattr" in test_text:
-                    blocked = True
-            # A platform test that TERMINATES the block guards the rest of it,
-            # which is how the repo's existing Windows arms are written:
-            #     if _PLATFORM == "win32":\n    return True
-            #     os.kill(pid, 0)
-            # Seen on the first run as four false positives (resume.py,
-            # session/retention.py, session_lease.py, procname.py).
+            # A platform question that TERMINATES the block guards everything
+            # AFTER it in that block, which is how this repository states both
+            # its Windows refusals and its platform-constant early returns:
+            #     if not _UID_IS_MEANINGFUL:
+            #         return 0
+            #     return os.getuid()
+            # This is ONE rule, not two. The `hasattr` case it used to be
+            # spelled for (`if not hasattr(os, "getuid"): raise ...`, the
+            # evidence store's Windows refusal) fires here as well, because
+            # `hasattr` is a platform term and a `raise` terminates.
             if isinstance(stmt, ast.If) and _terminates(stmt):
-                try:
-                    test_text = ast.unparse(stmt.test)
-                except Exception:  # noqa: BLE001
-                    test_text = ""
-                if any(term in test_text for term in platform_terms):
-                    blocked = True
+                blocked = blocked + (_span(stmt.test),)
 
     for node in ast.iter_child_nodes(tree):
-        visit(node, False)
-    return sorted(hits)
+        visit(node, ())
+
+    analysis = _platform_guards(candidates, queries)
+    return sorted(
+        (
+            hit.lineno,
+            hit.pattern,
+            hit.fatal,
+            hit.in_try or any(analysis.guarded(span) for span in hit.guards),
+        )
+        for hit in hits
+    )
 
 
 def probe_os_attributes(env: dict[str, str]) -> Result:
@@ -1166,19 +1746,32 @@ def probe_serve_double_bind(env: dict[str, str]) -> Result:
     import urllib.request
 
     port = _free_port()
-    first = _spawn_cli(["serve", "--port", str(port)], env)
-    try:
-        deadline = time.monotonic() + 60.0
+    window = BUDGET.window(60.0)
+    with _spawn_cli(
+        ["serve", "--port", str(port)], env, log=_child_log(env, "double-bind-first")
+    ) as first:
+        deadline = time.monotonic() + window
         while time.monotonic() < deadline:
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2):
                     break
             except Exception:  # noqa: BLE001 - keep polling
-                if first.poll() is not None:
-                    return Result("serve.double_bind", "FAIL", "the first server never came up")
+                if first.proc.poll() is not None:
+                    return Result(
+                        "serve.double_bind",
+                        "FAIL",
+                        f"the first server never came up (rc={first.proc.returncode}): "
+                        f"{first.output()}",
+                        first.extra(),
+                    )
                 time.sleep(0.5)
         else:
-            return Result("serve.double_bind", "FAIL", "the first server never came up")
+            return Result(
+                "serve.double_bind",
+                "FAIL",
+                f"the first server never came up in {window:.0f}s{BUDGET.note()}",
+                first.extra(),
+            )
 
         second = run(_cli_argv("serve", "--port", str(port)), env, timeout=60.0)
         text = ((second.stdout or "") + (second.stderr or "")).strip()
@@ -1187,24 +1780,32 @@ def probe_serve_double_bind(env: dict[str, str]) -> Result:
                 "serve.double_bind",
                 "FAIL",
                 "a SECOND server accepted the same port while the first held it",
-                {"second_rc": second.returncode, "raw": text[:600]},
+                first.extra(second_rc=second.returncode, raw=text[:600]),
             )
         return Result(
             "serve.double_bind",
             "PASS",
             f"second bind refused (rc={second.returncode}): {_first_line(text)}",
-            {"second_rc": second.returncode},
+            first.extra(second_rc=second.returncode),
         )
-    finally:
-        _terminate(first)
 
 
 def probe_daemon_supervisors(env: dict[str, str]) -> Result:
-    """One row per daemon: does this OS have a way to keep it running?
+    """One row per daemon: does its INSTALLER SURFACE render on this OS?
 
     Reported as four separate facts rather than one PASS, because the useful
     reading is which of them is missing -- on Linux the answer was "two of
     four", which a single aggregate verdict would have hidden.
+
+    WHAT THIS MEASURES, exactly, because its old docstring asked the larger
+    question and answered the smaller one: it runs `install --help` and reports
+    whether the parser renders. That is true on every platform -- the subcommand
+    exists everywhere the installer is registered -- and says nothing about
+    whether THIS HOST has a supervisor binary to hand the unit to (reviewer B,
+    A4). So the reading is named for what it is (`renders`), the result name is
+    the surface list rather than a supervisor claim, and the claim itself is
+    carried in `extra["measured"]` so a reader of the artifact is not left to
+    infer it from a PASS.
     """
     daemons = ("mobile", "wake", "tunnel", "browser")
     per_daemon: dict[str, str] = {}
@@ -1221,7 +1822,11 @@ def probe_daemon_supervisors(env: dict[str, str]) -> Result:
         "daemon.surfaces",
         "PASS" if all(v == "renders" for v in per_daemon.values()) else "FAIL",
         ", ".join(f"{k}={v}" for k, v in per_daemon.items()),
-        per_daemon,
+        {
+            **per_daemon,
+            "measured": "each installer's `install --help` renders; this is not a "
+            "check that a supervisor exists on this host",
+        },
     )
 
 
@@ -1284,9 +1889,47 @@ PROBES = (
 # --------------------------------------------------------------------------- #
 
 
-def _spawn_cli(
-    args: list[str], env: dict[str, str], *, stdout: int | None = subprocess.PIPE
-) -> subprocess.Popen[str]:
+@dataclass
+class ChildRun:
+    """A long-lived child whose output goes to a FILE, not to a pipe.
+
+    Three failures in run 35405383805 could not be explained from the artifact
+    (`serve.health`, `serve.double_bind`, `mobile.daemon_serve` -- all "no
+    response in Ns"), because a long-lived child's stdout went to a `PIPE` that
+    this harness never drained. That is two defects in one: the output is LOST
+    when the probe gives up, and a child that fills the 64 KiB pipe buffer BLOCKS
+    on its next log line -- a plausible cause of the very timeouts the artifact
+    could not explain, since `lop serve` and `lop mobile serve` both log on the
+    way to binding. A file answers both: nothing blocks on a full pipe, and the
+    tail travels in the artifact as evidence the next reader can act on.
+    """
+
+    proc: subprocess.Popen[Any]
+    log: Path
+
+    def output(self, limit: int = 400) -> str:
+        """The tail of everything the child has written so far (never raises)."""
+        try:
+            return _tail(self.log.read_text(encoding="utf-8", errors="replace"), limit)
+        except OSError:  # the file is created by `_spawn_child`; absent only on a bug
+            return ""
+
+    def extra(self, **more: Any) -> dict[str, Any]:
+        """`Result.extra` fields that make a long-lived child diagnosable."""
+        return {"child_log": str(self.log), "child_output": self.output(), **more}
+
+    def stop(self) -> None:
+        """Kill the child and everything it spawned, then reap it."""
+        _terminate(self.proc)
+
+    def __enter__(self) -> "ChildRun":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.stop()
+
+
+def _spawn_child(argv: list[str], env: dict[str, str], *, log: Path) -> ChildRun:
     """Start a long-lived child in its OWN process group / session.
 
     `start_new_session` is load-bearing, not tidiness. A daemon child that
@@ -1296,21 +1939,45 @@ def _spawn_cli(
     the moment it reached `serve.health`, having already printed everything
     before it. Windows has no process groups in that sense; it gets a new
     console process group instead so its own children can be signalled.
+
+    Output goes to `log` rather than a pipe -- see `ChildRun` for why -- and the
+    parent's own descriptor is closed as soon as the child has its duplicate, so
+    a battery that starts a child per probe does not leak one descriptor each.
     """
     kwargs: dict[str, Any] = {}
     if os.name == "posix":
         kwargs["start_new_session"] = True
     else:  # pragma: no cover - exercised on the Windows runner
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    return subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-        _cli_argv(*args),
-        stdout=stdout,
-        stderr=subprocess.STDOUT,
-        text=True,
-        env=env,
-        cwd=str(REPO),
-        **kwargs,
-    )
+    log.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(log, "wb")  # noqa: SIM115 - inherited by the child, closed below
+    try:
+        proc = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            argv,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            env=env,
+            cwd=str(REPO),
+            **kwargs,
+        )
+    finally:
+        handle.close()
+    return ChildRun(proc, log)
+
+
+def _spawn_cli(args: list[str], env: dict[str, str], *, log: Path) -> ChildRun:
+    """`_spawn_child` for a `lop` subcommand (see `_cli_argv`)."""
+    return _spawn_child(_cli_argv(*args), env, log=log)
+
+
+def _child_log(env: dict[str, str], name: str) -> Path:
+    """Where a long-lived child's output is written, inside the sandbox.
+
+    Under `$HOME`, not `TMPDIR`: the sandbox root is the one directory this
+    battery owns end to end, and a run that keeps its sandbox (`--keep`) then
+    keeps the child logs beside everything else the probes wrote.
+    """
+    return Path(env["HOME"]) / "child-logs" / f"{name}.log"
 
 
 def _platform_unavailable(text: str) -> str | None:
@@ -1438,6 +2105,39 @@ def _tui_driver(out: str) -> int:
 # --------------------------------------------------------------------------- #
 
 
+def _host_facts() -> dict[str, Any]:
+    """The environment a run's numbers have to be read against."""
+    return {
+        "platform": sys.platform,
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "python": sys.version.split()[0],
+    }
+
+
+def _write_matrix(path: Path, results: list[Result]) -> None:
+    """Write the artifact, rebuilt from the results accumulated so far.
+
+    Rebuilt rather than appended to because the caller writes it after EVERY
+    probe: one function that describes the state, called as often as the state
+    changes, cannot drift from it. That is also what makes a PARTIAL run
+    evidence -- see the call site for why the upload step needs it.
+    """
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.status] = counts.get(result.status, 0) + 1
+    payload = {
+        "host": _host_facts(),
+        "counts": counts,
+        "results": [
+            {"name": r.name, "status": r.status, "detail": r.detail, "extra": r.extra}
+            for r in results
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1445,6 +2145,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", metavar="PATH", help="write the full result matrix as JSON")
     parser.add_argument(
         "--only", nargs="*", default=None, help="run only probes whose name contains one of these"
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="stop STARTING probes once this much wall clock has been spent (0 = no "
+        "aggregate bound). CI sets it BELOW each job's timeout-minutes: a battery that "
+        "returns with a partial matrix is evidence, while a job killed at its ceiling "
+        "prints no matrix and uploads nothing",
     )
     parser.add_argument("--list", action="store_true", help="print probe names and exit")
     parser.add_argument(
@@ -1468,6 +2178,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.driver == "tui":
         return _tui_driver(args.rest[0])
+
+    # Before the first probe, and only in the parent: the `--driver tui` child
+    # above is a probe's own subprocess and inherits no budget of its own.
+    BUDGET.start(args.budget)
 
     if args.list:
         for probe in PROBES:
@@ -1513,14 +2227,29 @@ def main(argv: list[str] | None = None) -> int:
         name = probe.__name__.replace("probe_", "").replace("_", ".")
         started = time.monotonic()
         try:
+            # Checked BEFORE the probe runs: a probe started on borrowed time
+            # reports an instant timeout, which reads as a defect in the surface
+            # it was about to measure.
+            if BUDGET.spent():
+                raise BudgetSpent(f"the battery's {int(args.budget)}s budget was spent")
             result = probe(env)
+        except BudgetSpent as exc:
+            # SKIP, not FAIL: the surface was never asked anything.
+            result = Result(name, "SKIP", f"not run: {exc}")
         except subprocess.TimeoutExpired as exc:
-            result = Result(name, "FAIL", f"timed out: {exc}")
+            result = Result(name, "FAIL", f"timed out: {exc}{BUDGET.note()}")
         except Exception as exc:  # noqa: BLE001 - a probe must never kill the battery
             result = Result(name, "FAIL", f"probe raised {type(exc).__name__}: {exc}")
         result.extra.setdefault("seconds", round(time.monotonic() - started, 1))
         results.append(result)
         print(f"  {result.status:4}  {result.name:22}  {result.detail}", flush=True)
+        if args.json:
+            # Rewritten after EVERY probe, not once after the loop. A battery
+            # SIGKILLed at the job's ceiling, or killed by a crash out of the
+            # loop, used to leave no artifact at all -- the opposite of what the
+            # `if: always()` upload step names as its reason for existing, on
+            # exactly the run that needed the artifact (reviewer B, A2).
+            _write_matrix(Path(args.json), results)
 
     counts: dict[str, int] = {}
     for result in results:
@@ -1532,23 +2261,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{platform.system()} {platform.machine()} py{sys.version.split()[0]}: {summary}")
 
     if args.json:
-        payload = {
-            "host": {
-                "platform": sys.platform,
-                "system": platform.system(),
-                "release": platform.release(),
-                "machine": platform.machine(),
-                "python": sys.version.split()[0],
-            },
-            "counts": counts,
-            "results": [
-                {"name": r.name, "status": r.status, "detail": r.detail, "extra": r.extra}
-                for r in results
-            ],
-        }
-        Path(args.json).write_text(
-            json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8"
-        )
+        _write_matrix(Path(args.json), results)
         print(f"wrote {args.json}")
 
     if args.keep:

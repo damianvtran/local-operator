@@ -33,7 +33,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from local_operator import launchd, procname, supervisors
+from local_operator import launchd, procname, procstate, supervisors
 from local_operator.mobile.auth import (
     generate_password,
     load_password,
@@ -134,7 +134,20 @@ def _build_bundle() -> str | None:
     batch file that a bare argv never reaches (audit C10).
     """
     if shutil.which("node") is None:
-        return "node is not installed; the bundle needs a one-time `pnpm build`"
+        # Named with its REMEDY rather than with its mechanism. This is the one
+        # refusal an operator meets on a fresh Linux or Windows box, and the
+        # previous text ("the bundle needs a one-time `pnpm build`") named a
+        # command that cannot be run without the thing that is missing —
+        # measured in the Ubuntu and Mint containers, where `mobile.install`
+        # failed with exactly that and the container reading could not say what
+        # to install. The wheel ships the built bundle, so this is a source
+        # checkout (a container, a dev machine), and Node is a one-time cost
+        # there rather than a runtime dependency of the daemon.
+        return (
+            "node is not installed, and the portal bundle is built once with it "
+            "(Node >=22; `apt install nodejs`, `brew install node`, or "
+            "https://nodejs.org); re-run `lop mobile install` afterwards"
+        )
     try:
         runner = _shim_argv("pnpm")
         if runner is None:
@@ -366,8 +379,16 @@ def _our_daemon_listening(port: int) -> bool:
         # No pid to cross-check: Task Scheduler's own Running status is the
         # strongest signal schtasks gives, and health + the auth gate below
         # still have to pass before an install reports success.
+        #
+        # ``running is not False`` rather than a truth test, because the status
+        # word is localized: an unrecognised spelling comes back as ``None``
+        # rather than as a definite "not running", and treating that as a
+        # refusal made this loop unable to ever pass on such a host — a daemon
+        # that was up and serving was reported as "daemon did not come up
+        # healthy". Where the state cannot be read, the two signals that CAN be
+        # — the unauth health endpoint and the auth gate — are what decide.
         registered, running, _detail = supervisors.task_state(TASK_NAME)
-        return registered and running
+        return registered and running is not False
     pid = _supervised_pid()
     if pid is None:
         return False
@@ -378,8 +399,18 @@ def _our_daemon_listening(port: int) -> bool:
 
 
 def _domain() -> str:
-    import os
+    """``gui/<uid>`` — the launchd domain every caller feeds to ``launchctl``.
 
+    The platform guard is INSIDE this function rather than at its call sites,
+    each of which is behind ``if kind == supervisors.LAUNCHCTL``: ``os.getuid``
+    does not exist off POSIX, so an unguarded call was an ``AttributeError``
+    waiting for any arm that forgot the check, and a guard at the call site is
+    invisible to a reader — and to the static scan that grades this branch —
+    which cannot see that the arm is unreachable. Guarded here, the function is
+    safe to call anywhere on its own merits.
+    """
+    if procstate.is_windows():
+        raise RuntimeError("launchd domains exist only on macOS")
     return f"gui/{os.getuid()}"
 
 
@@ -427,7 +458,14 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
     image = procname.supervised_image() or Path(sys.executable)
     return supervisors.render_systemd_unit(
         description="Local Operator mobile daemon",
-        exec_start=f"{image} -m local_operator.mobile.service --port {port}",
+        # The image is quoted for systemd's own grammar, not shell quoting: this
+        # is the same rule ``tunnels.install`` uses, hoisted into
+        # ``supervisors.quoted``. Measured on systemd 255: an interpreter under
+        # a path with a space produced a unit that could never start ("Command
+        # /home/a is not executable").
+        exec_start=(
+            f"{supervisors.quoted(str(image))} -m local_operator.mobile.service --port {port}"
+        ),
         # ``Restart=on-failure``: an exit-code-2 (no password) stays down so a
         # refused start does not flap, exactly what the plist's
         # KeepAlive{SuccessfulExit: false} buys on macOS.
@@ -477,17 +515,32 @@ def gate_closed(port: int = DEFAULT_PORT, timeout: float = 3.0) -> bool:
 
 
 def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, object]:
-    """Idempotent one-shot: password (kept if present), unit, load, verify.
+    """Idempotent one-shot: bundle, password (kept if present), unit, load, verify.
 
-    One shared prefix — generate/keep the password, guarantee the UI bundle —
+    One shared prefix — guarantee the UI bundle, generate/keep the password —
     then one arm per supervisor. The arms differ only in HOW the daemon is made
     to run at login; the verification at the end is shared, because "a unit file
     exists" was never the question.
+
+    The BUNDLE comes first, before anything is written. It is the only step that
+    can fail for a reason the operator has to go and fix (no Node on a source
+    checkout), and running it after the password left a store mutated by an
+    install that then reported failure — visible in the Ubuntu/Mint container
+    readings, whose FAIL detail was the password progress line rather than the
+    reason. A preflight that refuses changes nothing on disk.
     """
     steps: list[str] = []
     kind = supervisors.supervisor()
     if kind is None:
         return {"ok": False, "steps": [], "error": NO_SUPERVISOR_ERROR}
+
+    # The UI is half the product. A missing bundle means every authed GET
+    # 503s, so install builds it rather than leaving the phone on a dead
+    # page — the wheel normally ships it, a source checkout does not.
+    bundle_ok, bundle_detail = ensure_bundle(build=not dry_run)
+    steps.append(bundle_detail)
+    if not bundle_ok:
+        return {"ok": False, "steps": steps, "error": f"web bundle unavailable: {bundle_detail}"}
 
     password = load_password()
     if password is None:
@@ -497,14 +550,6 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
         steps.append(f"generated a new portal password ({store_description()})")
     else:
         steps.append(f"kept the existing portal password ({store_description()})")
-
-    # The UI is half the product. A missing bundle means every authed GET
-    # 503s, so install builds it rather than leaving the phone on a dead
-    # page — the wheel normally ships it, a source checkout does not.
-    bundle_ok, bundle_detail = ensure_bundle(build=not dry_run)
-    steps.append(bundle_detail)
-    if not bundle_ok:
-        return {"ok": False, "steps": steps, "error": f"web bundle unavailable: {bundle_detail}"}
 
     if kind == supervisors.LAUNCHCTL:
         plist_path().parent.mkdir(parents=True, exist_ok=True)
@@ -650,8 +695,23 @@ def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object
             systemd_path().unlink(missing_ok=True)
             steps.append(f"removed {systemd_path()}")
         elif kind == supervisors.SCHTASKS:
+            # ``/Delete`` deregisters the task WITHOUT interrupting a running
+            # program — Microsoft's own wording for the verb is "This command
+            # doesn't delete the program that the task runs or interrupt a
+            # running program" — so an uninstall that only deletes leaves the
+            # portal daemon serving on its port with the password still loaded.
+            # ``/End`` first is the Windows spelling of the ``bootout`` the
+            # launchd arm issues and of Linux's ``disable --now``; it is the
+            # shape ``service_action`` already uses for ``stop``.
+            supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
             deleted, detail = supervisors.delete_task(TASK_NAME)
-            steps.append(f"removed the scheduled task ({detail})" if deleted else detail)
+            if not deleted:
+                # REFUSED rather than quietly successful: the daemon is still
+                # registered, so reporting ``ok: True`` told a caller the
+                # opposite of the state it left behind.
+                steps.append(detail)
+                return {"ok": False, "steps": steps, "error": detail}
+            steps.append(f"removed the scheduled task ({detail})")
             task_record_path().unlink(missing_ok=True)
         else:
             # REFUSED rather than quietly successful: nothing here could have

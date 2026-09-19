@@ -31,6 +31,7 @@ import pytest
 from local_operator import procstate
 from local_operator.browser_bridge import state as bridge_state
 from local_operator.mobile import resources as mobile_resources
+from local_operator.session import retention
 from local_operator.session.runtime import registry
 
 
@@ -160,6 +161,13 @@ def test_an_unexpected_posix_probe_error_is_uncertain_not_dead(
         pytest.param(lambda pid: registry.pid_alive(pid), id="registry.pid_alive"),
         pytest.param(bridge_state.pid_alive, id="browser_bridge.state.pid_alive"),
         pytest.param(mobile_resources._pid_exists, id="mobile.resources._pid_exists"),
+        # A7: the retention sweep's own ``os.kill`` + ``_PLATFORM`` branch. It was
+        # correct, and it was still a second copy of a decision this module owns —
+        # the copy that asked the question with the primitive this file exists to
+        # keep away from win32.
+        pytest.param(
+            lambda pid: retention._process_alive(pid), id="session.retention._process_alive"
+        ),
     ],
 )
 def test_every_shared_liveness_probe_avoids_os_kill_on_windows(
@@ -167,6 +175,56 @@ def test_every_shared_liveness_probe_avoids_os_kill_on_windows(
 ) -> None:
     monkeypatch.setattr(procstate, "_windows_liveness", lambda pid: True)
     assert probe(4242) is True
+    assert as_windows == []
+
+
+def test_live_runtime_pid_routes_through_the_shared_liveness_probe(
+    tmp_path: Path, as_windows: list[tuple[int, int]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A7: ``resume`` had its own handler, and it read ``sys.platform`` inline.
+
+    The behaviour was right — it refused on win32 before probing, so a
+    ``/resume`` could not kill the phone-started child it was trying to share —
+    but it was a second copy of the platform branch, spelled with the one
+    constant the rest of the tree deliberately replaced with a patchable name.
+    Routed through ``procstate.pid_liveness``, the win32 answer comes from
+    ``OpenProcess`` and ``os.kill`` is never reached at all.
+    """
+    from local_operator import resume
+
+    monkeypatch.setattr(procstate, "_windows_liveness", lambda pid: True)
+    session = tmp_path / "sessions" / "abc"
+    session.mkdir(parents=True)
+    (session / ".session.pid").write_text("4242", encoding="utf-8")
+
+    assert resume.live_runtime_pid(tmp_path, "abc", check_zombie=False) == 4242
+    assert as_windows == [], "os.kill was reached on the Windows branch"
+
+
+@pytest.mark.parametrize(
+    "module_path",
+    ["browser_bridge.install", "mobile.install", "tunnels.install", "wakes.install"],
+)
+def test_every_launchd_domain_helper_refuses_off_macos(
+    module_path: str, as_windows: list[tuple[int, int]]
+) -> None:
+    """The four ``gui/<uid>`` helpers, each guarded inside itself (item 8).
+
+    ``os.getuid`` does not exist off POSIX, so each of these was an
+    ``AttributeError`` for any caller whose arm was not checked — and the arms
+    that DO check (``if kind == supervisors.LAUNCHCTL``) are invisible to a
+    reader, and to the branch's static scan, which cannot see that the arm is
+    unreachable. Asserted by CALLING the helper with the platform flipped to
+    win32: without the guard it would happily build ``gui/<uid>`` from a uid the
+    platform has no notion of, which is the state the guard exists to make
+    unreachable rather than merely unused.
+    """
+    import importlib
+
+    module = importlib.import_module(f"local_operator.{module_path}")
+
+    with pytest.raises(RuntimeError, match="macOS"):
+        module._domain()
     assert as_windows == []
 
 

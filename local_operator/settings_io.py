@@ -982,13 +982,21 @@ def _bash_shell_help(windows: bool) -> str:
     from ``tools.builtin`` for the reason the row's ``path`` is pinned by test
     instead of imported: this module must stay cheap for the CLI, and
     ``tools.builtin`` is not (see the module docstring on Textual).
+
+    THE WINDOWS SPELLING IS 72 CELLS, and that is a constraint rather than a
+    coincidence (design round 1, D1). This field does not wrap, its shed ladder
+    has no rung below "help alone", and the floor cuts the sentence mid-clause
+    with a visible ``…`` — so the 163-cell spelling this replaces was clipped at
+    `else the bash.exe` at 80 columns AND at `with neit` at 120, i.e. unreadable
+    on the platform it was written for at every width the page supports. The
+    clause it drops is not information lost: "with neither, the tool refuses and
+    says how to install one" is the first line of that module's own refusal
+    (``tools.builtin.WINDOWS_NO_BASH_MESSAGE``), which the tool card renders with
+    room around it. `Git for Windows` also had to go — the cells are the budget
+    here, and the refusal's install hint is where a user reads the product name.
     """
     if windows:
-        return (
-            "Interpreter for the bash tool. Empty uses bash on PATH, else the "
-            "bash.exe of a Git for Windows install; with neither, the tool "
-            "refuses and says how to install one."
-        )
+        return "Interpreter for the bash tool. Empty: bash on PATH, else Git's bash.exe."
     return "Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh."
 
 

@@ -88,8 +88,31 @@ STARTUP_TIMEOUT_S = 5.0
 #: winner's socket rather than block on the lock (#401).
 _LOCK_POLL_S = 0.05
 
+#: ``socket.AF_UNIX`` is POSIX-only, so the name does not resolve on Windows.
+#:
+#: Kept as a module constant, and consulted BEFORE the socket is constructed,
+#: because the failure it prevents is not a refusal but an ``AttributeError``
+#: escaping a call whose every caller expects a graded answer: on the real
+#: Windows runner the whole secret store was dead there — ``secret.roundtrip``
+#: reported ``module 'socket' has no attribute 'AF_UNIX'`` — and it took
+#: ``lop secret status``, ``get`` and ``set`` down with it. Behind this check
+#: the same situation arrives as :class:`BrokerUnavailable`, which is the
+#: answer the tree is already built around: ``is_running`` returns ``False``,
+#: ``broker_status`` returns ``None``, ``ensure_broker`` declines to spawn, and
+#: the keyfile tier serves the request with no broker involved at all.
+#:
+#: Capability, not ``os.name``: what matters is whether this interpreter's
+#: ``socket`` module has the address family, which is the thing that would be
+#: dereferenced.
+_AF_UNIX_AVAILABLE = hasattr(socket, "AF_UNIX")
+
 
 def _connect(path: Path, timeout: float = CONNECT_TIMEOUT_S) -> socket.socket:
+    if not _AF_UNIX_AVAILABLE:
+        raise BrokerUnavailable(
+            "this platform has no AF_UNIX sockets, so the secret broker cannot be "
+            "reached; the keyfile tier needs no broker"
+        )
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(timeout)
     try:

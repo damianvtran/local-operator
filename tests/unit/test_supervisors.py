@@ -260,7 +260,9 @@ def test_the_task_xml_is_well_formed_and_carries_the_launchd_contract() -> None:
     assert root.find(f"{_NS}Triggers/{_NS}CalendarTrigger") is None
     settings = root.find(f"{_NS}Settings")
     assert settings is not None
-    assert settings.findtext(f"{_NS}RestartOnFailure/{_NS}Count") == "999"
+    assert (
+        settings.findtext(f"{_NS}RestartOnFailure/{_NS}Count") == "255"
+    ), "<Count> is xs:unsignedByte (max 255); a larger value is outside the schema"
     assert settings.findtext(f"{_NS}MultipleInstancesPolicy") == "IgnoreNew"
     assert settings.findtext(f"{_NS}ExecutionTimeLimit") == "PT0S"
     exec_node = root.find(f"{_NS}Actions/{_NS}Exec")
@@ -383,10 +385,68 @@ def test_an_absent_task_is_not_an_error_on_delete(monkeypatch: pytest.MonkeyPatc
     assert detail == "no such task"
 
 
+def test_quoted_is_systemds_own_grammar_not_shell_escaping() -> None:
+    """The one quoting rule the four daemons share, pinned in one place.
+
+    Percent is doubled because systemd expands unit specifiers even inside a
+    quoted string; the quotes are its own, not the shell's. This lived in
+    ``tunnels.install`` and was missing from the wakes and mobile units until
+    A5 measured what an unquoted value does on real systemd 255.
+    """
+    assert supervisors.quoted("plain") == '"plain"'
+    assert supervisors.quoted("/home/a b/store") == '"/home/a b/store"'
+    assert supervisors.quoted("100%") == '"100%%"'
+    assert supervisors.quoted('a"b') == '"a\\"b"'
+
+
 def test_task_state_reads_status_out_of_the_query(monkeypatch: pytest.MonkeyPatch) -> None:
-    body = "TaskName:      \\Local Operator test\nStatus:        Running\n"
+    """``/FO CSV``: the data row is found by SHAPE, the status by POSITION."""
+    body = '"TaskName","Next Run Time","Status"\n"\\Local Operator test","N/A","Running"\n'
     monkeypatch.setattr(supervisors, "schtasks", lambda *a, **k: _completed(list(a), 0, body))
 
     assert supervisors.task_state("Local Operator test") == (True, True, "Running")
+
+    idle = '"TaskName","Next Run Time","Status"\n"\\Local Operator test","N/A","Ready"\n'
+    monkeypatch.setattr(supervisors, "schtasks", lambda *a, **k: _completed(list(a), 0, idle))
+    assert supervisors.task_state("Local Operator test") == (True, False, "Ready")
+
     monkeypatch.setattr(supervisors, "schtasks", lambda *a, **k: _completed(list(a), 1, "", "no"))
     assert supervisors.task_state("Local Operator test")[0] is False
+
+
+def test_a_localized_status_word_is_never_read_as_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The defect: a definite "not running" for a task that is running.
+
+    ``Status`` is localized, so on a German or Japanese Windows the old
+    ``"status:"`` label match found nothing at all and ``mobile.install``'s
+    verification loop could never pass — a working daemon reported as "daemon
+    did not come up healthy". The CSV column order is fixed by the format, so
+    the field is STILL found here; the word is reported with no verdict rather
+    than as a confident ``False``.
+    """
+    localized = (
+        '"Aufgabenname","Nächste Ausführungszeit","Status"\n'
+        '"\\Local Operator test","N/V","Wird ausgeführt"\n'
+    )
+    monkeypatch.setattr(supervisors, "schtasks", lambda *a, **k: _completed(list(a), 0, localized))
+
+    registered, running, detail = supervisors.task_state("Local Operator test")
+
+    assert registered is True
+    assert running is None, "a status word we cannot read is not a verdict"
+    assert detail == "Wird ausgeführt"
+
+
+def test_an_unparseable_query_body_is_not_a_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No status field at all: registered, with ``running`` unstated."""
+    monkeypatch.setattr(
+        supervisors, "schtasks", lambda *a, **k: _completed(list(a), 0, "something else\n")
+    )
+
+    assert supervisors.task_state("Local Operator test") == (
+        True,
+        None,
+        "registered; the status field could not be read",
+    )
