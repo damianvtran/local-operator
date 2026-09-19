@@ -5801,23 +5801,58 @@ class AttachedSession:
             self._maybe_start_gate(pending)
 
     def _maybe_start_gate(self, pending: PendingRequest | None = None) -> None:
+        # Every early return below drops a pending gate SILENTLY: no card, no
+        # notice, nothing on screen saying the turn is still blocked. Diagnosing
+        # the lost-gate-card bug needed a monkeypatched probe to learn which
+        # guard had returned, which is a fact the code should carry itself.
+        # Each drop names its guard (G1-G5) so the next reader reads a log line
+        # instead of re-deriving the ladder.
         if self._disposed or not self._ready_for_events:
+            logger.debug(
+                "gate ladder G1: dropped (disposed=%s, ready_for_events=%s)",
+                self._disposed,
+                self._ready_for_events,
+            )
             return
         if pending is None:
             pending = _pending_request(self.pending_gate)
-        if pending is None or self._gate_task is not None:
+        if pending is None:
+            logger.debug("gate ladder G2a: no pending gate")
+            return
+        if self._gate_task is not None:
+            logger.debug(
+                "gate ladder G2b: a bridge is already running for %s/%s",
+                pending.kind,
+                pending.request_id,
+            )
             return
         if self._gate_identity(pending) == self._gate_answered_key:
+            logger.debug(
+                "gate ladder G3: %s/%s was already answered",
+                pending.kind,
+                pending.request_id,
+            )
             return
         background = (
             self._gates_detached and self._background_approval and pending.kind == "approval"
         )
         if self._gates_detached and not background:
+            logger.debug(
+                "gate ladder G4: gates are detached, dropping %s/%s",
+                pending.kind,
+                pending.request_id,
+            )
             return
         if pending.kind == "approval" and (self._approval_handler is not None or background):
             self._gate_task = asyncio.create_task(self._run_approval(pending))
         elif pending.kind == "ask" and self._ask_handler is not None:
             self._gate_task = asyncio.create_task(self._run_ask(pending))
+        else:
+            logger.debug(
+                "gate ladder G5: no handler attached for %s/%s",
+                pending.kind,
+                pending.request_id,
+            )
 
     def _gate_reply_is_current(self, pending: PendingRequest, client: Any) -> bool:
         # Cancelling a bridge requests cooperation; even a handler that swallows
