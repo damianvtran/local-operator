@@ -1171,6 +1171,50 @@ async def test_a_stalled_leg_reports_its_error_class_not_an_empty_reason(
     assert "duckduckgo: ;" not in message
 
 
+@pytest.mark.asyncio
+async def test_the_failure_message_fits_the_card_reason_budget(tmp_path, monkeypatch) -> None:
+    """Round-3 D3-2: the message must fit the card, with real reasons on six legs.
+
+    Quoting each leg's FULL reason (a provider's 503 HTML body is ~200 cells) made
+    the message ~1400 cells against the card's 432-cell reason budget, so the
+    expansion folded at `… 11 more lines` and the reader could not see which other
+    legs failed. The caps are what keep the whole diagnosis visible.
+    """
+    from local_operator.tui.widgets.tool_card import REASON_MAX_CELLS
+    from local_operator.web_search.service import WebSearchService
+
+    body = (
+        "Tavily returned HTTP 503: <html><head><title>503 Service Unavailable</title>"
+        "</head><body><h1>503 Service Unavailable</h1><p>No server is available to "
+        "handle this request.</p></body></html>"
+    )
+
+    async def boom(*_args: object, **_kwargs: object):
+        raise RuntimeError(body)
+
+    providers = ("duckduckgo", "tavily", "perplexity", "exa", "parallel", "deepseek")
+    for provider_id in providers:
+        monkeypatch.setitem(PROVIDERS, provider_id, SimpleNamespace(search=boom))
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    service = WebSearchService(
+        WebSearchSettings(
+            providers=["duckduckgo", "tavily", "perplexity", "deepseek"], strategy="ordered"
+        ),
+        credentials,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await service.search("x")
+
+    message = str(raised.value)
+    assert len(message) <= REASON_MAX_CELLS, (len(message), message)
+    # Every leg is still named, and its reason is recognisable rather than dropped.
+    for provider_id in ("duckduckgo", "tavily", "perplexity", "exa", "parallel"):
+        assert f"{provider_id}: " in message
+
+
 def test_the_copy_helpers_are_total_for_an_id_outside_the_catalogue() -> None:
     """Round-2 N6: the refusal path must not raise a KeyError of its own.
 
@@ -1200,13 +1244,83 @@ def test_chain_markers_name_paid_unready_and_best_effort_legs(tmp_path) -> None:
     assert "Perplexity (best-effort)" in label
 
 
-def test_the_legend_defines_the_words_and_the_meanings_agree_with_the_code() -> None:
-    """Round-2 U2-5/D2-4: the legend printed the vocabulary without its meanings."""
-    from local_operator.web_search.providers import STATE_MEANINGS, state_legend
+def test_the_two_best_effort_words_match_the_placements_the_resolver_makes(tmp_path) -> None:
+    """Round-3 D3-1: each word describes ONE placement, so neither sentence is false.
 
-    legend = state_legend()
-    for word, meaning in STATE_MEANINGS.items():
-        assert f"{word} = {meaning}" in legend
+    Only a METERED listed leg is hoisted out of the prefix, so a listed best-effort
+    leg is always inside the rotating pool, and an auto-joined one is always in the
+    fallback band after it. That is what lets the two meanings be properties of
+    their words rather than a guess about where a given leg landed -- and this pins
+    the resolver rule they depend on, so a future change to the hoisting rule fails
+    here instead of shipping a legend that contradicts the chain row.
+    """
+    from local_operator.web_search.providers import (
+        STATE_MEANINGS,
+        provider_state_label,
+        provider_statuses,
+        resolve_provider_bands,
+    )
+
+    credentials = _credentials(tmp_path)
+
+    listed_settings = WebSearchSettings(providers=["duckduckgo", "perplexity"])
+    bands = resolve_provider_bands(listed_settings, credentials)
+    assert "perplexity" in bands.prefix and "perplexity" not in bands.fallback
+    listed = next(
+        status
+        for status in provider_statuses(listed_settings, credentials)
+        if status.id == "perplexity"
+    )
+    assert provider_state_label(listed) == "enabled (best-effort)"
+    assert "after the free pool" not in STATE_MEANINGS["enabled (best-effort)"]
+
+    unlisted_settings = WebSearchSettings(providers=["duckduckgo"])
+    bands = resolve_provider_bands(unlisted_settings, credentials)
+    assert "perplexity" in bands.fallback and "perplexity" not in bands.prefix
+    unlisted = next(
+        status
+        for status in provider_statuses(unlisted_settings, credentials)
+        if status.id == "perplexity"
+    )
+    assert provider_state_label(unlisted) == "auto best-effort"
+    assert "after the free pool" in STATE_MEANINGS["auto best-effort"]
+
+
+def test_the_legend_defines_the_painted_words_and_only_those(tmp_path) -> None:
+    """Round-2 U2-5/D2-4, round-3 D3-3: meanings, scoped to what is on screen.
+
+    The full table is 477 cells and mostly defines states the install does not have,
+    while the header rows of the same listing are what a narrow terminal folds away
+    (round-3 measured 6 of 26 painted rows at 110x44, 8 of 15 at 80x24).
+    """
+    from local_operator.web_search.providers import (
+        STATE_MEANINGS,
+        provider_state_label,
+        provider_statuses,
+        state_legend,
+    )
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    statuses = provider_statuses(
+        WebSearchSettings(providers=["duckduckgo"], excluded_providers=["tavily"]),
+        credentials,
+    )
+    legend = state_legend(statuses)
+    painted = [provider_state_label(status) for status in statuses]
+
+    for word in painted:
+        assert f"{word} = {STATE_MEANINGS[word]}" in legend
+    # Nothing on screen is undefined, and nothing undefined is on the line.
+    assert "enabled (paid)" not in legend or "enabled (paid)" in painted
+    assert "excluded = " in legend  # tavily is excluded in this fixture
+
+    # Scoping is real: drop the exclusion and the word leaves the line with it.
+    without = state_legend(
+        provider_statuses(WebSearchSettings(providers=["duckduckgo"]), credentials)
+    )
+    assert "excluded = " not in without
+    assert len(without) < len(legend)
 
 
 @pytest.mark.asyncio
@@ -1967,11 +2081,18 @@ def test_the_landing_line_reuses_the_status_vocabulary(tmp_path) -> None:
         "`local-operator search setup brave` (BRAVE_API_KEY)"
     )
 
-    # The legend is the vocabulary, so no state word can be printed without one.
-    legend = state_legend()
-    for state in STATE_MEANINGS:
-        assert state in legend
+    # The legend is the vocabulary this listing paints, so no state word can be
+    # printed without one (and none is defined that is not printed).
+    legend = state_legend(list(statuses.values()))
+    for state in {provider_state_label(status) for status in statuses.values()}:
+        assert f"{state} = {STATE_MEANINGS[state]}" in legend
+    # Every word the vocabulary can emit has a meaning, and the two placements of a
+    # listed leg are distinguished by the word itself (paid = hoisted to the paid
+    # band; best-effort = stays in the pool where the user put it), so the legend
+    # cannot describe one of them with the other's placement.
     assert set(STATE_MEANINGS) == {provider_state_label(status) for status in statuses.values()} | {
         "enabled (paid)",
         "enabled (best-effort)",
     }
+    assert "after the free pool" not in STATE_MEANINGS["enabled (best-effort)"]
+    assert "pool" in STATE_MEANINGS["enabled (best-effort)"]

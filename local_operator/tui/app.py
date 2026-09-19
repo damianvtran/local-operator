@@ -33468,7 +33468,7 @@ class OperatorApp(App[None]):
                         # logged in reads this surface first and would otherwise
                         # have to infer what `auto paid` means from the word
                         # "auto" (round-1 U5, D5).
-                        ("states", state_legend().removeprefix("States: ")),
+                        ("states", state_legend(statuses).removeprefix("States: ")),
                     ]
                 )
                 self._append_block(RichBlock(_tree_listing(items, "web search")))

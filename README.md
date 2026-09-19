@@ -585,9 +585,11 @@ lop search setup searxng --endpoint https://search.example.com
 ```
 
 `web_search.providers` is a **priority prefix, not an allowlist**, and its
-authority is over order **within a band**: a named free provider is tried first, in
-the order you named it, and every other usable provider joins automatically behind
-the ones you named.
+authority is over order **within a band**: a named free provider joins the free
+pool where you put it — and with the default `round_robin` that pool is rotated, so
+"where you put it" is its position in the pool rather than a promise it is tried
+first on every call (`search balance ordered` is the strict version). Every other
+usable provider joins automatically behind the ones you named.
 `web_search.excluded_providers` is the only way to say never — an id there is
 skipped in the prefix *and* in the automatic bands. A provider that becomes
 usable mid-session (a DeepSeek login, an Exa key) joins its band on the next

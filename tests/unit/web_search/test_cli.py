@@ -201,11 +201,16 @@ def test_search_list_states_the_chain_bands_and_the_new_vocabulary(
     # A provider that cannot serve and was never excluded is the `needs setup`
     # state: no readiness column repeats it any more (round-1 D6).
     assert "serpapi      needs setup" in table
-    # The legend carries the MEANINGS, not just the words (round-2 U2-5/D2-4), and
-    # there is no readiness column left to repeat the state word (round-1 D6).
+    # The legend carries the MEANINGS, not just the words (round-2 U2-5/D2-4), scoped
+    # to the states these rows paint (round-3 D3-3), and there is no readiness column
+    # left to repeat the state word (round-1 D6).
     assert "States: enabled = in your priority order" in table
-    assert "enabled (paid) = listed, and tried in the paid band after every free leg" in table
+    assert "auto free = with the free providers" in table
     assert "needs setup = cannot serve yet; a listed one is still tried" in table
+    assert "excluded = never used, whatever else is configured" in table
+    # No deepseek credential in this fixture, so its paid words are not printed -- and
+    # not defined either.
+    assert "enabled (paid)" not in table and "auto paid" not in table
     assert "setup needed" not in table
 
 
