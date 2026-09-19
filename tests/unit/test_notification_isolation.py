@@ -466,23 +466,28 @@ def test_a_walk_that_raised_is_not_memoised(
     assert len(walks) == 2, walks
 
 
-def test_a_walk_whose_own_open_failed_is_not_memoised(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Q1: the walk takes a SECOND descriptor, and that one was still collapsed.
+def test_a_failed_reopen_is_not_memoised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Q1: the REOPEN the reader takes was still collapsed into a cached verdict.
 
-    ``_settled_selection`` answers ``None`` for a journal it cannot OPEN, the
-    same answer it gives for one that opens fine and has no v2 row — so a
-    failure in that window (the caller's pre-open succeeded, the walk's did not:
-    the EMFILE shape QA round 3 reproduced) was folded into the tolerant
-    ``False`` and MEMOISED, serving a stale "not test-hosted" verdict for the
-    life of the journal. The wrong ANSWER is pre-existing in the parent module;
-    the PERMANENCE is what this change adds, which is why it is closed here.
+    Named for what it arms. There are three descriptors on this path — the
+    caller's pre-open (#1), the reader's reopen (#2), and ``_settled_selection``'s
+    own open (#3) — and this cell fails #2, which is the route the reopen
+    exists to cover: the caller saw the journal readable and it was not by the
+    time the reader looked, the EMFILE window QA round 3 reproduced. That
+    failure used to be folded into the tolerant ``False`` and MEMOISED, serving
+    a stale "not test-hosted" verdict for the life of the journal.
 
-    The failure is armed on the SECOND open of the journal — exactly the
-    descriptor the walk takes, since the first is the caller's pre-open — and
-    the cell asserts on the cache and on the count of real walks rather than on
-    the answer alone, so it cannot pass vacuously.
+    IT DOES NOT COVER #3 (QA round 4, Q5): ``_settled_selection`` answers
+    ``None`` for a journal it cannot open AND for one that opens with no v2 row,
+    so a failure of the walk's own open is still collapsed and memoised. Closing
+    that needs the conflation in ``_settled_selection`` changed, whose second
+    caller relies on ``None`` meaning "fall back to the fold"; the reader's
+    docstring states the limit.
+
+    The assertions are on the cache, on the count of opens and on the count of
+    real walks rather than on the answer alone, so the cell cannot pass
+    vacuously: `walks == []` after the failed read is itself the evidence that
+    the walk was never reached.
     """
     from local_operator.session import model_selection
 
@@ -510,8 +515,8 @@ def test_a_walk_whose_own_open_failed_is_not_memoised(
     monkeypatch.setattr(model_selection, "_settled_selection", counted_settled)
     model_selection._HOSTING_VERDICT_CACHE.clear()
 
-    # The walk's own open fails. The walk is never reached, the tolerant
-    # `False` is answered, and NOTHING is memoised.
+    # The reopen fails (the first open was the caller's pre-open). The walk is
+    # never reached, the tolerant `False` is answered, and NOTHING is memoised.
     assert session_uses_test_hosting(directory) is False
     opened_for_the_failed_read = len(opens)
     assert opened_for_the_failed_read == 2, opens
