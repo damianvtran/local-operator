@@ -1,0 +1,166 @@
+# Design: operator authority for gate-loosening control requests
+
+Status: implemented (Stage 1 + 1b). Issue:
+`damianvtran/local-operator#1310`. Predecessor: #1282 / PR #1291, which closed
+the *settings-write* half of the same invariant.
+
+## 0. The invariant
+
+```text
+a constrained subject must not be able to mint the authority
+that removes its own approval requirement
+```
+
+#1282 enforced it for `config.yml` writes: `tool_approval_mode` is live, a model
+tool can write the file, so a loosening is authorised on the write's
+**provenance** (`ConfigChange.source == "local"` in the process holding the
+gate) rather than on its value.
+
+This document covers the other boundary, which #1282 does not touch: the
+**control plane**. A running session publishes a discovery record at
+`<config>/run/mobile/<pid>.json`, mode 0600 under a 0700 directory, carrying
+`control_key` and `control_port`. The runtime used to accept
+`{"op": "slash", "command": "approvals", "args": "auto"}` — and
+`{"op": "approval_answer", "approved": true}` — on that key alone. A
+model-authored `bash` tool call runs as the **same uid**, so it could read the
+record (it is 0600 *under its own account*), dial loopback and remove its own
+gate. Same invariant, same subject, one route over.
+
+The distinction #1310 draws, in one sentence: **same-account process identity is
+not operator consent when the operation expands that process's own authority.**
+
+## 1. The class
+
+Exactly one predicate, `harness/approval.transition_authority`, beside
+`loosening_is_authorised`:
+
+```python
+def transition_authority(command, args, *, approved=None) -> Authority
+```
+
+- **Authority-increasing** — the request removes or answers the gate that
+  constrains the caller:
+  - `/approvals auto|off|yolo` → `ServingSessionHandle._auto_approve = True`
+    (or the app's `_set_approve_all` for the gate a TUI owns);
+  - `approval_answer(approved=True)` → resolves the parked card.
+- **Ordinary** — everything else: `ask|on|prompt`, any unknown word, a bare
+  `/approvals`, `default …`, `read`/`status`/`stop`/`prompt`/`model`/`rename`,
+  `peer_message`, `ask_answer`. An `approval_answer(approved=False)` is
+  ordinary **on purpose**: a deny settles the card in the safe direction, so it
+  must keep working from every surface that can reach the session.
+
+Aliases resolve through `primary_slash_name` before matching — the same
+resolution both dispatch hosts already perform — so an alias cannot slip past
+the seam and reach a sink that would have honoured it.
+
+The class is machine-testable rather than inferred from UI wording, which was
+an explicit acceptance requirement: the predicate is a pure function, and the
+seam's op table is re-derived from `session/runtime/server.py`'s own dispatch
+source by `tests/unit/session/runtime/test_approval_authority_seam.py`.
+
+## 2. The mechanism: one seam, one in-memory capability
+
+**One seam.** `RuntimeServer._on_request` already holds both the connection and
+the frame, and every route in the tree — the desktop
+`POST /v1/desktop/sessions/{id}/commands` surface, the phone relay, a peer send,
+a follower terminal, the CLI — reaches the handle through it, or through
+`TuiSessionHandle` in the TUI's own process. So the guard lives there, before
+dispatch: `harness/approval.AUTHORITY_OPS` names the ops in the class, and an
+increasing frame is refused unless it presents the capability. The refusal
+reuses the existing `{"op": "error"}` reply, carrying
+`OPERATOR_CAP_REQUIRED_NOTICE`.
+
+**One capability.** 32 random bytes (`secrets.token_bytes(32)`), hex on the
+wire, present in exactly two places: the memory of the gate-owning process (a
+`RuntimeServer` field) and the memory of the console that started it (a
+process-local pid → capability table in `harness/approval.py`). It is **never**
+written to the record, the environment, argv, a log file, or `lop info`.
+
+**Handoff.** `session/runtime/launch._spawn_runtime` mints it, opens a
+`socketpair`, passes the child's end with `pass_fds` and its *number* (not a
+secret) in a new argv flag `--operator-fd`, writes the 32 bytes and closes both
+ends immediately. `process.main` reads the descriptor, closes it, and hands the
+value to the `RuntimeServer`. Tool subprocesses are spawned later with
+`close_fds=True` and `start_new_session=True`, by which time the descriptor is
+gone from this process's table too.
+
+The console half is a **pid → capability** table rather than a field threaded
+through every console object, because the question is a property of the process,
+not of any one object: "did I start the runtime behind this record?".
+`AttachClient.connect` resolves it from `record.pid`, and `_request_frame` /
+`_request_payload` attach it to exactly the frames `frame_authority` classes as
+increasing. That is what makes the surface table below fall out of *one* rule
+instead of five special cases.
+
+**Windows.** `pass_fds` is POSIX-only, so the Windows path uses an inheritable
+anonymous pipe with `close_fds=False`. The boundary is weaker there regardless
+(any same-user process may read another's memory), so the runtime **reports the
+level it can detect** rather than implying one
+(`harness/approval.operator_cap_guarantee`): macOS `strong`, Linux `strong`
+unless `/proc/sys/kernel/yama/ptrace_scope` is `0` (`not-a-boundary`), Windows
+`weak`, Linux without `yama` `unreported`. The refusal copy names remedies; it
+never claims a boundary the host does not have.
+
+**Wire.** One optional frame field, `operator_cap`, admitted by the validator in
+`mobile/types.py` and attachable by `AttachClient`'s request helper. Additive,
+so `PROTOCOL_VERSION` does not move: ordinary ops never carry it. A **rolling
+upgrade fails closed** — an old console cannot loosen a new runtime (it sends no
+capability) and a new console cannot loosen an old runtime's gate any more than
+it could before (the old runtime simply ignores the field). The daemon's HTTP
+boundary drops the field from request bodies outright: the relay is a local
+process that attaches the capability itself, so a value arriving over HTTP can
+only be a forgery.
+
+## 3. Surface by surface
+
+| surface | ordinary ops | authority-increasing |
+| --- | --- | --- |
+| TUI pane that OWNS the session (in-process gate) | unchanged | works, one step (the operator's own keyboard; not routed) |
+| TUI pane viewing a runtime IT spawned | unchanged | works (presents the capability) |
+| TUI pane viewing a runtime spawned by ANOTHER process (wake supervisor, peer send, `lop sessions refresh`) | unchanged | refused; the copy names the remedies |
+| TUI-hosted app reached by a follower (phone) | unchanged | refused |
+| Desktop app | unchanged | works iff its backend spawned that runtime; else refused |
+| Phone relay | unchanged | works iff the relay spawned that runtime; else refused |
+| `lop` CLI / one-shot front ends | unchanged | only if this process spawned the runtime |
+| headless / `--yolo` / exec-control | unchanged | n/a (the gate is born `auto`) |
+| tightening `auto → ask`, any route | unchanged | unchanged |
+
+Operator-visible regressions, stated plainly: a phone loses `/approvals auto`
+**and card approval** for sessions whose runtime another live process started; a
+pane attached to a background-started runtime cannot loosen it. The remedies are
+`lop sessions refresh`, `/approvals default auto` plus a new session, `--yolo`,
+or typing the command in the terminal that started it. Tightening, reporting and
+everything else are untouched — the routes that may loosen are a proper subset
+of the routes that may tighten.
+
+## 4. The residual
+
+The capability is a real boundary only where the operating system makes it one.
+It does **not** defend against a process that can read the console's memory or
+file descriptors: Linux with `ptrace_scope=0`, Windows, or an attached debugger.
+That is the honest statement of what this closes and what it does not — it
+removes "read a world-readable-under-this-uid record and dial a port" as an
+attack, which is what a model-authored tool call can actually do today.
+
+Also deliberately not fixed here, recorded so it is not mistaken for covered:
+
+- **background-spawned runtimes have no console**, so nothing may loosen them
+  until someone attaches one that does (a wake supervisor's runtime is exactly
+  case 3 in the table);
+- **the phone relay's own password** remains the authority for reaching a
+  runtime the relay started, over a remote transport — Stage 3 replaces it with
+  a device-bound credential;
+- **the desktop `claim` handshake and the serve record's `claim_key`** are a
+  different plane (governing a *daemon*, not a session gate) and are unchanged.
+
+## 5. Staged plan
+
+- **Stage 1 (this change)** — the class, the seam, the in-memory capability, the
+  handoff, the surface table above.
+- **Stage 1b (this change)** — the guarantee-level report, the daemon's
+  HTTP-boundary drop, and the not-at-rest probes.
+- **Stage 2** — an OS boundary confining the model-code spawn sites, so the
+  residual above stops being reachable by construction: macOS `sandbox-exec`,
+  Linux Landlock/`bwrap`, Windows restricted token plus a deny ACE.
+- **Stage 3** — a device-bound credential for the phone, replacing the relay's
+  password as the authority for the remote path.
