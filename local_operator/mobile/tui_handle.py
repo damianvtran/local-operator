@@ -88,16 +88,26 @@ async def _await_future(future: asyncio.Future[Any]) -> Any:
     return await future
 
 
-def _app_hop_timeout_note() -> str:
+#: Marks "the caller passed no ``budget``", so the INTERACTIVE budget is read from
+#: :data:`_APP_HOP_TIMEOUT_S` at CALL time rather than captured in the signature.
+#: The constant is the single knob — callers and tests patch it, and round 1's
+#: budget test did exactly that — and a default evaluated at import time would
+#: quietly ignore every later change to it.
+_BUDGET_FROM_CONSTANT: Any = object()
+
+
+def _app_hop_timeout_note(budget: float = _APP_HOP_TIMEOUT_S) -> str:
     """The sentence a hop that ran out of its budget reports.
 
     Names the budget and the two things a reader needs to act on it (the app is
     busy, the budget is the client's patience divided by one and a half) rather
     than a bare ``TimeoutError``, because this message is what reaches a
-    follower's terminal through an error frame.
+    follower's terminal through an error frame. Named for the BUDGET rather than
+    read from the module constant so a caller that passed its own still gets a
+    sentence that is true.
     """
     return (
-        f"the terminal did not answer within {_APP_HOP_TIMEOUT_S:.0f}s "
+        f"the terminal did not answer within {budget:.0f}s "
         "(the app is busy with a turn; retry when it settles)"
     )
 
@@ -196,6 +206,9 @@ class TuiSessionHandle(SessionHandle):
         self._detail_tasks: dict[str, asyncio.Task[None]] = {}
         self._detail_generations: dict[str, int] = {}
         self._detail_fingerprints: dict[str, tuple[int, int]] = {}
+        #: Awaitable hop results in flight on the app loop (see ``_on_app``):
+        #: held so they cannot be collected before they settle the caller.
+        self._late_hop_tasks: set[asyncio.Task[Any]] = set()
         # The in-flight app-loop hop of a ``request_stop``, held so the loop
         # cannot collect it before it lands — the receipt is returned WITHOUT
         # waiting for it (see ``_detach_stop_hop``).
@@ -415,9 +428,27 @@ class TuiSessionHandle(SessionHandle):
     async def subscribe_frontend(
         self, on_update, *, display_window=False
     ):  # type: ignore[no-untyped-def]
-        """Capture snapshot+subscription atomically on Textual's owner loop."""
+        """Capture snapshot+subscription atomically on Textual's owner loop.
+
+        UNBOUNDED ON PURPOSE (``budget=None``), and the reason is the defect UX
+        round 2 measured. This bind is the one hop whose caller is not a client
+        waiting for an answer: it runs in the runtime's ``_serve_frontend_sync``
+        task, no request is parked on it, and the connection is already usable
+        without it — the welcome is on the wire, health checks and the four
+        control verbs are admitted while it is pending, and
+        ``frontend_sync_pending`` keeps everything heavier refused until it
+        lands. Giving it the interactive budget therefore bought nothing and cost
+        the session: with a busy terminal, a viewer was welcomed in 0.00 s and
+        then KILLED at exactly 10.01 s (the bind's expiry took the whole
+        connection down with it, and the person was told their session had
+        died), measured twice, the second time with no other client attached. The
+        parent had no bound here and its viewer was still served at +26.6 s into
+        a 25 s freeze, so bounding it was a regression in this PR's own case.
+        The budget protects callers who are waiting; nobody waits for this.
+        """
         return await self._on_app(
-            lambda: self._session().subscribe_frontend(on_update, display_window=display_window)
+            lambda: self._session().subscribe_frontend(on_update, display_window=display_window),
+            budget=None,
         )
 
     async def record_shell(self, command: str, result: Any) -> None:
@@ -1139,7 +1170,12 @@ class TuiSessionHandle(SessionHandle):
 
     # -- internals ---------------------------------------------------------------------
 
-    async def _on_app(self, fn: Callable[[], Any]) -> Any:
+    async def _on_app(
+        self,
+        fn: Callable[[], Any],
+        *,
+        budget: Any = _BUDGET_FROM_CONSTANT,
+    ) -> Any:
         """Run ``fn`` on the Textual thread and await its result, BOUNDED —
         and WITHOUT parking the runtime's loop on the way there.
 
@@ -1198,12 +1234,34 @@ class TuiSessionHandle(SessionHandle):
         pre-existing rather than new here), and ``record_shell``'s write silently
         never ran at all. An awaitable result is therefore scheduled as a task ON
         the app loop and this caller is settled with ITS result.
+
+        ``budget=None`` MEANS NO BUDGET, and it is for the one caller that is
+        not a client waiting for an answer: the canonical frontend bind
+        (:meth:`subscribe_frontend`, reached from the runtime's
+        ``_serve_frontend_sync``). See that method for why an interactive budget
+        must not apply there — UX round 2 measured what applying it costs
+        (a viewer welcomed in 0.00 s and then killed at exactly 10.01 s because
+        the terminal was busy, with the product reporting its session as dead).
         """
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
 
         def settle(value: Any, error: BaseException | None) -> None:
             loop.call_soon_threadsafe(_set_unless_done, future, value, error)
+
+        def expired(error: BaseException | None = None) -> TimeoutError:
+            """Give up on this hop, and DISARM the answer slot on the way out.
+
+            Marking the future done is what makes a late result safe: the callback
+            runs anyway (Textual cannot cancel a queued one), and
+            ``_set_unless_done`` releases anything IT owns rather than stashing an
+            unread value — see ``_release_orphan_result`` for the subscription
+            that leaked without this. All three expiry paths go through here so
+            none of them can forget.
+            """
+            if not future.done():
+                future.cancel()
+            return TimeoutError(_app_hop_timeout_note())
 
         def wrapped() -> None:
             # RUNS ON THE APP LOOP: ``call_from_thread`` invokes it there, so
@@ -1219,34 +1277,59 @@ class TuiSessionHandle(SessionHandle):
                 return
 
             def finish(completed: asyncio.Task[Any]) -> None:
+                # HELD UNTIL IT LANDS, like every other task this file keeps a
+                # reference to (``_detail_tasks``, ``_stop_hop_task``): an
+                # unreferenced task can be collected mid-await, and this one
+                # carries the ANSWER the caller is waiting for — losing it would
+                # leave the hop parked to its deadline. Mutated only on the app
+                # loop (``wrapped`` and this callback both run there).
+                self._late_hop_tasks.discard(completed)
                 if completed.cancelled():
                     settle(None, asyncio.CancelledError())
                     return
                 error = completed.exception()
                 settle(None if error else completed.result(), error)
 
-            asyncio.ensure_future(result).add_done_callback(finish)
+            task = asyncio.ensure_future(result)
+            self._late_hop_tasks.add(task)
+            task.add_done_callback(finish)
 
         # ``fn`` still runs on the Textual loop — only the WAIT moved off this
         # one. That distinction is load-bearing: the admission sections these
         # callbacks perform (``CommandReservations.reserve`` and friends) are
         # documented as "mutated only on the session runtime's loop", and the
         # runtime's loop here IS Textual's, so they must keep running there.
-        deadline = loop.time() + _APP_HOP_TIMEOUT_S
+        if budget is _BUDGET_FROM_CONSTANT:
+            budget = _APP_HOP_TIMEOUT_S
+        if budget is None:
+            # No deadline at all: the caller is background setup, not a client.
+            await asyncio.to_thread(self._app.call_from_thread, wrapped)
+            return await future
+        deadline = loop.time() + budget
         try:
             await asyncio.wait_for(
                 asyncio.to_thread(self._app.call_from_thread, wrapped),
-                timeout=_APP_HOP_TIMEOUT_S,
+                timeout=budget,
             )
         except (asyncio.TimeoutError, TimeoutError):
-            raise TimeoutError(_app_hop_timeout_note()) from None
+            raise expired() from None
         remaining = deadline - loop.time()
         if remaining <= 0:
             # The enqueue answered, but there is nothing left of the budget for
             # the callback's own result — the same failure, reported the same
             # way rather than as a second full wait.
-            raise TimeoutError(_app_hop_timeout_note())
-        return await asyncio.wait_for(future, timeout=remaining)
+            raise expired()
+        try:
+            # THE THIRD EXPIRY PATH, and it needs the same name as the other two
+            # (review round 2, MINOR 1). Without this, an enqueue serviced inside
+            # the budget whose callback then did not resolve in what remained
+            # raised a bare ``TimeoutError`` with an EMPTY message — reproduced
+            # with a 0.3 s budget, and it is the one shape a caller cannot act
+            # on, because the sentence naming the busy terminal is the whole
+            # difference between "retry when it settles" and a mystery.
+            return await asyncio.wait_for(future, timeout=remaining)
+        except (asyncio.TimeoutError, TimeoutError):
+            raise expired() from None
 
     def _cancel_detail_tasks(self) -> None:
         for task in self._detail_tasks.values():
@@ -1374,10 +1457,42 @@ class TuiSessionHandle(SessionHandle):
             logger.debug("mobile todo refresh failed", exc_info=True)
 
 
+def _release_orphan_result(value: Any) -> None:
+    """Release a hop result that arrived after its caller gave up.
+
+    An expired hop leaves its callback RUNNING — Textual cannot cancel a queued
+    callback — so the value it eventually produces has no owner: the caller has
+    already unwound. For most callbacks that is harmless, because the value is a
+    dict the garbage collector takes. For the one that is not, the canonical
+    frontend bind, the value is a live FRONTEND SUBSCRIPTION: dropping it leaves
+    the session pushing canonical state at a subscriber for the life of the app.
+    That is the leak UX round 2 measured — one per timed-out bind, compounding
+    with each redial (baseline subscribers 2 → 3, and it stayed 3 after the
+    viewer closed).
+
+    Releasing a subscription nobody received is always correct, and it is the
+    same rule the runtime applies on its side of the hop
+    (``RuntimeServer._release_when_landed``). Probing for ``unsubscribe`` rather
+    than naming ``FrontendSubscription`` keeps this file free of a session-layer
+    import for one call, and the only results that carry one are subscriptions.
+    """
+    unsubscribe = getattr(value, "unsubscribe", None)
+    if not callable(unsubscribe):
+        return
+    try:
+        unsubscribe()
+    except Exception:  # noqa: BLE001 — releasing must never break the hop
+        logger.debug("a late hop result could not be released", exc_info=True)
+
+
 def _set_unless_done(
     future: "asyncio.Future[Any]", value: Any, error: BaseException | None
 ) -> None:
     if future.done():
+        # THE CALLER IS GONE. Settling is impossible, so the value is dropped —
+        # but anything IT owns has to be released first, or the drop is a leak.
+        # See ``_release_orphan_result`` for the measured shape.
+        _release_orphan_result(value)
         return
     if error is not None:
         future.set_exception(error)
