@@ -29,7 +29,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -73,10 +72,6 @@ class _Recommendation:
     output_tokens: int | None = None
     latency_s: float = 0.0
     skipped: str | None = None
-    #: §4's per-resource attribution. Part of "field for field": the renderer reads it,
-    #: and a stand-in without it makes the shipped ``notice`` raise, which the wiring
-    #: swallows — so the missing field showed up as a notice that never appeared.
-    late_urls: tuple[str, ...] = ()
 
 
 @dataclass
@@ -90,7 +85,12 @@ class _Candidate:
 
 
 class _FakeClassifier:
-    """The seam double: ``recommend_resources`` + ``notice``, that is all."""
+    """The seam double: ``recommend_resources``, and nothing else.
+
+    It used to carry a ``notice`` half as well, because the harness called one; the
+    render path is deleted, so a double that still published it would be testing a
+    contract nothing asks for.
+    """
 
     def __init__(
         self,
@@ -98,23 +98,15 @@ class _FakeClassifier:
         *,
         delay: float = 0.0,
         timeout_s: float | None = None,
-        notice_line: str | None = None,
         raises: BaseException | None = None,
         events: list[str] | None = None,
-        render_with: Any = None,
     ) -> None:
         self.recommendation = recommendation or _Recommendation()
         self.delay = delay
         self.timeout_s = timeout_s
-        self.notice_line = notice_line
         self.raises = raises
         self.events = events if events is not None else []
         self.requests: list[Any] = []
-        #: A real service whose ``notice`` renders the line, when the COPY is what a test
-        #: is about. ``notice_line`` is a canned string, so a test that asserts how the
-        #: sentence reads has to render it with the shipped renderer or it asserts its
-        #: own fixture.
-        self.render_with = render_with
 
     async def recommend_resources(self, request: Any) -> _Recommendation:
         self.requests.append(request)
@@ -125,11 +117,6 @@ class _FakeClassifier:
         if self.raises is not None:
             raise self.raises
         return self.recommendation
-
-    def notice(self, recommendation: _Recommendation) -> str | None:
-        if self.render_with is not None:
-            return self.render_with.notice(recommendation)
-        return self.notice_line
 
 
 class _FakeIndex:
@@ -280,7 +267,6 @@ async def test_the_recommendation_block_is_additive_and_deduped() -> None:
             cost_usd=0.000042,
             latency_s=0.31,
         ),
-        notice_line="Classification: 2 via typesafe",
     )
     on = _hooks(
         _FakeIndex(picked=picked),
@@ -325,205 +311,6 @@ async def test_the_block_is_capped_by_the_configured_maximum() -> None:
     # ...and the REQUEST carries the same number, because the package takes the
     # field as an upper bound over its own settings read (``min`` of the two).
     assert classifier.requests[0].max_recommendations == 2
-
-
-@pytest.mark.asyncio
-async def test_the_notice_rides_the_session_notice_path_once_per_message() -> None:
-    """One line per admitted user message, through the bound sink, at info.
-
-    ONCE PER MESSAGE is the sentence the contract states, and it is what this now
-    checks at the seam: a message that delivers a LATE answer and its own prints ONE
-    line for both, because the resources of the whole prompt are announced together
-    (review round 2, MINOR 1 — the previous shape printed two).
-
-    The second half is D7: the same resource set two messages running says nothing
-    the line before it did not, so the line is suppressed while the BLOCK still goes
-    into the prompt. The set has to be identical AND consecutive — a different set
-    speaks again.
-    """
-    classifier = _FakeClassifier(
-        _Recommendation(
-            resources=(_Candidate("guide", "tunnel", "tunnel guide", "guide://tunnel"),),
-            vendor="typesafe",
-        ),
-        notice_line="Suggestion added for this message: guide://tunnel",
-    )
-    hooks = _hooks(
-        _FakeIndex(picked=[_skill("alpha", "Alpha skill.")]),
-        classifier=classifier,
-    )
-    delivered: list[tuple[str, str]] = []
-    hooks.notice_sink = lambda text, kind="warning": delivered.append((text, kind))
-
-    first = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
-    # Same task, tool continuation: frozen, so no second call and no second line.
-    await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
-    # "info", and the pinned kind is the point: the design round's D1 proposed
-    # `note` for its contrast (`info`'s `dim` ink measures 3.77:1 on the light
-    # theme), and `note` is NOT a legal ``NoticeEvent.kind`` — a real Session
-    # rejects it and the line never reaches the user (agent review round 2,
-    # blocker). This assertion is what would catch that attempt again.
-    assert delivered == [("Suggestion added for this message: guide://tunnel", "info")]
-    assert "guide://tunnel" in first
-
-    # The SAME set on the next message: the prompt still gains the block, the line
-    # stays quiet (D7 — four identical rows is what the design round saw).
-    second = await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
-    assert len(delivered) == 1
-    assert "guide://tunnel" in second
-
-    # A DIFFERENT set speaks again.
-    classifier.recommendation = _Recommendation(
-        resources=(_Candidate("skill", "beta", "Beta skill.", "skill://beta"),),
-        vendor="typesafe",
-    )
-    await session_factory._select_knowledge_block(hooks, "third", task_id="t3")
-    assert len(delivered) == 2
-    assert len(classifier.requests) == 3
-
-
-@pytest.mark.asyncio
-async def test_one_message_gaining_both_sets_announces_them_without_lying(tmp_path: Path) -> None:
-    """A late answer AND this message's own: one line, each resource attributed.
-
-    THE TEST THE DOCSTRING ABOVE DESCRIBED WITHOUT CHECKING (QA round 4, Q1). The line
-    used to be built from the answer that arrived LAST and labelled from it, so a
-    message that gained both sets announced the union as "for your previous message" —
-    telling the user a resource chosen for the question they had just asked came from
-    the one before it. Neither whole-line label is true of a union, so each resource
-    carries its own; the two uniform cases keep the short sentence the row budget wants.
-
-    Rendered with the SHIPPED renderer (``ClassificationService.notice``) rather than a
-    canned string: the finding is about what the sentence says, so a fixture that
-    returns its own text would assert nothing.
-    """
-    from local_operator.classification.service import ClassificationService
-    from local_operator.credentials import CredentialManager
-
-    renderer = ClassificationService(
-        manager=CredentialManager(tmp_path), settings={"classification": {"auto": True}}
-    )
-    classifier = _FakeClassifier(
-        _Recommendation(
-            resources=(_Candidate("guide", "tunnel", "Tunnel guide.", "guide://tunnel"),),
-        ),
-        delay=0.3,
-        render_with=renderer,
-    )
-    hooks = _hooks(classifier=classifier)
-    hooks.classification_wait_s = 0.05
-    delivered: list[str] = []
-    hooks.notice_sink = lambda text, kind="warning": delivered.append(text)
-
-    await session_factory._select_knowledge_block(hooks, "first", task_id="t1")
-    await asyncio.sleep(0.35)  # call 1 lands, late — nothing announced yet
-
-    # This message's OWN call answers inside the wait, so the prompt gains both sets.
-    classifier.delay = 0.0
-    classifier.recommendation = _Recommendation(
-        resources=(_Candidate("skill", "beta", "Beta skill.", "skill://beta"),),
-    )
-    block = await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
-
-    assert "guide://tunnel" in block and "skill://beta" in block
-    assert len(delivered) == 1, delivered
-    line = delivered[0]
-    assert "guide://tunnel (your previous message)" in line, line
-    assert "skill://beta (this message)" in line, line
-    # …and the whole-line label of the uniform case is what would have lied here.
-    assert "for your previous message:" not in line, line
-
-    await renderer.aclose()
-
-
-@pytest.mark.asyncio
-async def test_a_silent_seam_emits_no_notice() -> None:
-    """The seam owns the gate: ``notice()`` returning ``None`` means say nothing."""
-    hooks = _hooks(
-        classifier=_FakeClassifier(
-            _Recommendation(
-                resources=(_Candidate("guide", "tunnel", "g", "guide://tunnel"),),
-                vendor="typesafe",
-            ),
-            notice_line=None,
-        )
-    )
-    delivered: list[str] = []
-    hooks.notice_sink = lambda text, kind="warning": delivered.append(text)
-
-    await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
-
-    assert delivered == []
-
-
-@pytest.mark.asyncio
-async def test_a_provider_without_a_session_binds_no_sink() -> None:
-    """The benchmark preflight renders the prompt without a facade; nothing breaks."""
-    hooks = _hooks(
-        classifier=_FakeClassifier(
-            _Recommendation(
-                resources=(_Candidate("guide", "tunnel", "g", "guide://tunnel"),),
-                vendor="typesafe",
-            ),
-            notice_line="Classification: 1 via typesafe",
-        )
-    )
-    session_factory.attach_classification_notices(cast(Any, object()), hooks)
-
-    assert hooks.notice_sink is None
-    block = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
-    assert "guide://tunnel" in block
-
-
-def test_a_bound_sink_is_the_real_sessions_own_notice_event() -> None:
-    """The bound sink is ``Session.queue_notice``, the REAL attribute.
-
-    WHY this is asserted against the class and not against a stand-in: the first
-    version of this test hand-built an object with the method assigned to it, which
-    proves the binder's shape and NOT that the facade has that attribute — rename
-    or drop it and every test in this file kept passing while notices silently never
-    appeared, because ``attach_classification_notices`` fails soft on purpose
-    (``getattr(..., None)``, for a benchmark preflight that renders a prompt with no
-    facade at all). This is the assertion that can fail: reach for the attribute on
-    the real class, then check the binder put THAT callable on the hooks, bound to
-    THIS session.
-
-    ``queue_notice`` and not ``_stream_notice`` since design round 1's D1: emitting
-    during prompt build put the line in the ANSWER's slot, so the sink is the
-    session's post-turn queue. The fallback is pinned too, because a facade-shaped
-    double without the queue must still get its notice.
-
-    ``Session.__new__`` rather than a constructed session: neither method needs
-    construction state, and paying for a real boot here would tempt the next reader
-    into driving a turn to observe the notice. The end-to-end half — a session built
-    by the composition root, with the layer on — is
-    ``test_the_classification_seam_is_closed_on_dispose`` in the factory suite.
-    """
-    from local_operator.session.session import Session
-
-    assert hasattr(Session, "queue_notice"), (
-        "the notice path the wiring binds (Session.queue_notice) must still exist; "
-        "without it a recommendation is delivered silently"
-    )
-    session = Session.__new__(Session)
-    hooks = session_factory._KnowledgeHooks()
-
-    session_factory.attach_classification_notices(session, hooks)
-
-    assert hooks.notice_sink is not None
-    assert hooks.notice_sink.__func__ is Session.queue_notice  # type: ignore[attr-defined]
-    assert hooks.notice_sink.__self__ is session  # type: ignore[attr-defined]
-
-    # A double with only the stream method still gets the line, just unparked.
-    plain = cast(Any, SimpleNamespace(_stream_notice=lambda text, kind="info": None))
-    fallback = session_factory._KnowledgeHooks()
-    session_factory.attach_classification_notices(plain, fallback)
-    assert fallback.notice_sink is plain._stream_notice
-
-
-# ---------------------------------------------------------------------------
-# §7 step 2 and the latency budget: concurrent, bounded, roster built once
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -864,7 +651,7 @@ def test_a_skipped_pass_logs_nothing_at_info(caplog: pytest.LogCaptureFixture) -
 
 
 # ---------------------------------------------------------------------------
-# §5a rule 6: the wait is bounded, and a late answer rides the next message
+# §5a rule 6: the wait is bounded, and a late answer is carried, not lost
 # ---------------------------------------------------------------------------
 
 
@@ -877,6 +664,9 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget() -> None:
     model time on the critical path. So the turn waits ``values.classification.waitMs``
     and no longer, and what it gave up on is not lost: the call keeps running, and the
     next admitted user message re-renders the knowledge block WITH the late answer.
+    (That is the case this test covers — the turn had ENDED. An answer that lands while
+    its own turn is still running is delivered into that turn's next model step
+    instead, which is the sibling test below.)
     That re-render is the delivery mechanism (a changed knowledge section is
     journaled by the harness as a ``[session-state]`` update), which is why nothing
     here writes a bespoke host-state row.
@@ -890,12 +680,9 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget() -> None:
         ),
         delay=0.35,
         timeout_s=1.5,
-        notice_line="Classification: 1 resource recommendation via typesafe",
     )
     hooks = _hooks(_FakeIndex(picked=[_skill("alpha", "Alpha skill.")]), classifier=classifier)
     hooks.classification_wait_s = 0.05
-    delivered: list[str] = []
-    hooks.notice_sink = lambda text, kind="warning": delivered.append(text)
 
     started = time.monotonic()
     first = await session_factory._select_knowledge_block(hooks, "first task", task_id="t1")
@@ -905,8 +692,6 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget() -> None:
     # what it would have been with no layer at all.
     assert waited < 0.2, waited
     assert first == off
-    # ...and NO notice: nothing was delivered to that prompt.
-    assert delivered == []
 
     await asyncio.sleep(0.4)  # the call lands after its own turn ended
 
@@ -914,8 +699,7 @@ async def test_a_hanging_seam_costs_the_turn_only_the_wait_budget() -> None:
 
     assert "guide://tunnel" in second
     assert second.count("guide://tunnel") == 1
-    # Announced once, at delivery — by the turn that actually carries it.
-    assert delivered == ["Classification: 1 resource recommendation via typesafe"]
+    # DELIVERED ONCE, by the turn that actually carries it (the second one).
 
 
 @pytest.mark.asyncio
@@ -927,12 +711,9 @@ async def test_a_late_answer_is_delivered_once_and_only_when_it_exists() -> None
             vendor="typesafe",
         ),
         delay=0.3,
-        notice_line="Classification: 1 via typesafe",
     )
     hooks = _hooks(classifier=classifier)
     hooks.classification_wait_s = 0.05
-    delivered: list[str] = []
-    hooks.notice_sink = lambda text, kind="warning": delivered.append(text)
 
     await session_factory._select_knowledge_block(hooks, "first", task_id="t1")
     await asyncio.sleep(0.35)  # call 1 lands, late
@@ -943,13 +724,11 @@ async def test_a_late_answer_is_delivered_once_and_only_when_it_exists() -> None
 
     second = await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
     assert second.count("guide://tunnel") == 1
-    assert delivered == ["Classification: 1 via typesafe"]
-
     await asyncio.sleep(0.35)  # call 2 lands, empty
 
     third = await session_factory._select_knowledge_block(hooks, "third", task_id="t3")
     assert "guide://tunnel" not in third, "a delivered answer must never be delivered twice"
-    assert delivered == ["Classification: 1 via typesafe"], "and never announced twice"
+    assert "guide://tunnel" not in third
 
 
 @pytest.mark.asyncio
@@ -1018,44 +797,6 @@ async def test_the_breaker_counts_the_vendor_deadline_once_per_call(
 
 
 @pytest.mark.asyncio
-async def test_a_line_its_own_gate_suppressed_is_not_remembered() -> None:
-    """A notice nobody painted must not silence the next message's identical set.
-
-    ``classification_last_announced`` means "the set the user last SAW". Recording it
-    before the paint made a suppressed line — the seam's own gate, or a sink that
-    failed — read as delivered, so the next message with the same resources stayed
-    quiet about something the user had never been told. Two messages, same one-resource
-    set: the first says nothing (its seam renders no line), the second must speak.
-    """
-    classifier = _FakeClassifier(
-        _Recommendation(
-            resources=(_Candidate("guide", "tunnel", "tunnel guide", "guide://tunnel"),),
-        ),
-        notice_line=None,
-    )
-    hooks = _hooks(_FakeIndex(picked=[]), classifier=classifier)
-    delivered: list[str] = []
-    hooks.notice_sink = lambda text, kind="info": delivered.append(text)
-
-    await session_factory._select_knowledge_block(hooks, "first", task_id="t1")
-    assert delivered == [], "the seam's gate said nothing to announce"
-    assert (
-        hooks.classification_last_announced is None
-    ), "a line nobody saw must not be recorded as announced"
-
-    classifier.notice_line = "Suggestion added for this message: guide://tunnel"
-    await session_factory._select_knowledge_block(hooks, "second", task_id="t2")
-
-    assert delivered == ["Suggestion added for this message: guide://tunnel"], delivered
-
-
-# ---------------------------------------------------------------------------
-# Freshness: a skill installed while the session is RUNNING (operator
-# requirement, 2026-09-18). Resolved per message, so it is a candidate on the
-# very next one -- mid-conversation, after a steer, and for later subagents.
-# ---------------------------------------------------------------------------
-
-
 def _write_skill(root: Path, name: str, description: str) -> Path:
     """A real skill tree entry, so the fingerprint and the scanner both see it."""
     directory = root / name
@@ -1205,18 +946,9 @@ def test_a_skill_named_like_a_guide_does_not_evict_the_guide(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def _slow_classifier(recommendation: _Recommendation, captured: list[Any]) -> _FakeClassifier:
-    """A seam whose answer outlives the wait, recording the view it is asked to notice."""
-    classifier = _FakeClassifier(recommendation, delay=0.25)
-
-    def _notice(rec: Any) -> str:
-        captured.append(rec)
-        return "Suggestion added for this message: " + ", ".join(
-            str(getattr(resource, "resource_url", "")) for resource in getattr(rec, "resources", ())
-        )
-
-    classifier.notice = _notice  # type: ignore[method-assign]
-    return classifier
+def _slow_classifier(recommendation: _Recommendation) -> _FakeClassifier:
+    """A seam whose answer outlives the wait, so the turn has to carry it."""
+    return _FakeClassifier(recommendation, delay=0.25)
 
 
 def _slack_recommendation() -> _Recommendation:
@@ -1229,12 +961,9 @@ def _slack_recommendation() -> _Recommendation:
 async def test_an_answer_that_misses_the_wait_lands_in_the_same_turn() -> None:
     """The model must see it on its NEXT STEP of the same turn, not next message."""
     index = _FakeIndex(picked=[])
-    captured: list[Any] = []
-    classifier = _slow_classifier(_slack_recommendation(), captured)
+    classifier = _slow_classifier(_slack_recommendation())
     hooks = _hooks(index, classifier=classifier)
     hooks.classification_wait_s = 0.01
-    delivered: list[tuple[str, str]] = []
-    hooks.notice_sink = lambda text, kind="info": delivered.append((text, kind))
 
     first = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
     assert "mcp://slack" not in first, "the turn gave up before the vendor answered"
@@ -1243,20 +972,14 @@ async def test_an_answer_that_misses_the_wait_lands_in_the_same_turn() -> None:
 
     second = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
     assert "mcp://slack" in second, "the answer must reach its own message"
-    assert (
-        captured and captured[-1].late_urls == ()
-    ), "an answer delivered inside its own turn is not late"
-    assert delivered and "this message" in delivered[-1][0]
 
     # Delivered once: the following step of the SAME task re-renders the frozen block.
     third = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t1")
     assert "mcp://slack" in third
-    assert len(delivered) == 1, "one notice per user message"
 
     # And a NEW message does not repeat it: the pending slot was consumed.
     fourth = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t2")
     assert "mcp://slack" not in fourth
-    assert len(delivered) == 1
 
 
 @pytest.mark.asyncio
@@ -1267,12 +990,9 @@ async def test_an_answer_for_an_older_message_still_rides_the_next_one() -> None
     to reach, so it is carried — and labelled — as an answer to the previous message.
     """
     index = _FakeIndex(picked=[])
-    captured: list[Any] = []
-    classifier = _slow_classifier(_slack_recommendation(), captured)
+    classifier = _slow_classifier(_slack_recommendation())
     hooks = _hooks(index, classifier=classifier)
     hooks.classification_wait_s = 0.01
-    delivered: list[tuple[str, str]] = []
-    hooks.notice_sink = lambda text, kind="info": delivered.append((text, kind))
 
     assert "mcp://slack" not in await session_factory._select_knowledge_block(
         hooks, OFF_QUERY, task_id="t1"
@@ -1281,9 +1001,6 @@ async def test_an_answer_for_an_older_message_still_rides_the_next_one() -> None
 
     later = await session_factory._select_knowledge_block(hooks, OFF_QUERY, task_id="t2")
     assert "mcp://slack" in later
-    assert captured and captured[-1].late_urls == (
-        "mcp://slack",
-    ), "a carried answer must be labelled as the previous message's"
 
 
 @pytest.mark.asyncio
@@ -1306,8 +1023,6 @@ async def test_a_service_with_no_provider_is_not_waited_on_and_logs_nothing(
     classifier = _NoProvider(_slack_recommendation())
     hooks = _hooks(index, classifier=classifier)
     hooks.classification_wait_s = 5.0  # a wait this test would time out on
-    delivered: list[tuple[str, str]] = []
-    hooks.notice_sink = lambda text, kind="info": delivered.append((text, kind))
 
     started = time.monotonic()
     with caplog.at_level(logging.INFO, logger="local_operator.session_factory"):
@@ -1318,7 +1033,6 @@ async def test_a_service_with_no_provider_is_not_waited_on_and_logs_nothing(
     assert classifier.requests == []
     assert elapsed < 0.5, f"the probe must not be followed by a wait (took {elapsed:.2f}s)"
     assert [record for record in caplog.records if record.levelno >= logging.INFO] == []
-    assert delivered == []
     assert block == await _off_block(_FakeIndex(picked=[]))
 
 
@@ -1334,8 +1048,7 @@ async def test_superseding_the_freeze_keeps_what_the_frozen_block_selected() -> 
     was trying to deliver, and it fires on essentially every tool-using turn.
     """
     index = _FakeIndex(picked=[_skill("alpha", "Alpha skill.")])
-    captured: list[Any] = []
-    classifier = _slow_classifier(_slack_recommendation(), captured)
+    classifier = _slow_classifier(_slack_recommendation())
     hooks = _hooks(index, classifier=classifier)
     hooks.classification_wait_s = 0.01
 
@@ -1400,8 +1113,7 @@ async def test_an_invalidated_freeze_does_not_ask_for_the_same_message_twice(
     root = tmp_path / "skills"
     _write_skill(root, "alpha", "Alpha skill.")
     index = _FakeIndex([_skill("alpha", "Alpha skill.")], picked=[_skill("alpha", "Alpha skill.")])
-    captured: list[Any] = []
-    classifier = _slow_classifier(_slack_recommendation(), captured)
+    classifier = _slow_classifier(_slack_recommendation())
     hooks = _hooks(index, classifier=classifier)
     hooks.skill_roots = [root]
     # ``knowledge_fingerprint`` is what the freshness check compares against, and the real
