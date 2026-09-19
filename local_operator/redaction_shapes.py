@@ -65,6 +65,14 @@ the word "token" blinds the agent to ordinary output and teaches it to
 distrust tool results. ``tests/unit/secrets/test_credential_shapes.py`` pins
 both directions: the corpus carries a large NEGATIVE set that must survive
 byte-identical, and it is as much a part of the contract as the positive set.
+
+
+INVARIANT: **a mask is all of the credential or none of it** — never a masked prefix
+with the remainder readable. A notice that says a credential was masked has to be
+true, because the operator's next action is a rotation. `_close_partial_masks`
+enforces it for every rule, and `tests/unit/secrets/test_credential_shapes.py`
+sweeps it over the corpus with a frozen, ratcheted residual (three rules, each with
+its reason recorded beside the table).
 """
 
 from __future__ import annotations
@@ -1239,7 +1247,10 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # ``.npmrc``: ``//registry.npmjs.org/:_authToken=npm_…``.
     Shape(
         "npmrc-auth-token",
-        re.compile(r"(?i)(_auth(?:token)?=)([^\s\"']{6,})"),
+        re.compile(
+            # A quote INSIDE the token does not end it (round 3's partial-mask class).
+            r"(?i)(_auth(?:token)?=)(?=[^\s]{6})([^\s]+(?:[\x27\x22][^\s]+)*)"
+        ),
         r"\1" + REDACTION_MARKER,
         2,
     ),
@@ -1349,12 +1360,17 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     ),
     Shape(
         "github-pat",
-        re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+        re.compile(
+            # A quote injected anywhere in the prefix must not orphan it: the whole
+            # `github_pat_…` run is the credential, prefix included.
+            r"\bgithub[_\x27\x22]?p[_\x27\x22]?at[_\x27\x22]?"
+            r"[A-Za-z0-9_]{19,}(?:[\x27\x22][A-Za-z0-9_]+)*\b"
+        ),
         REDACTION_MARKER,
     ),
     Shape(
         "aws-access-key-id",
-        re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]+(?:[\x27\x22][0-9A-Z]+)*\b"),
+        re.compile(r"\bA(?:[\x27\x22])?(?:KIA|SIA)[0-9A-Z]+(?:[\x27\x22][0-9A-Z]+)*\b"),
         REDACTION_MARKER,
     ),
     Shape(
@@ -1561,7 +1577,11 @@ _INCOMPLETE_MASK_RE = re.compile(
 #: The mirror case: a mask whose LEFT side is a readable run followed by a quote
 #: (``_authToken=npm_abcd'[redacted]``). The run is credential material the rule
 #: could not see, and it is masked for the same reason as the tail.
-_INCOMPLETE_MASK_LEFT_RE = re.compile(r"(?<=[\s,;:(\[=])(['\"])([\w.~+/=@%$!:,-]+)\[redacted\]")
+_INCOMPLETE_MASK_LEFT_RE = re.compile(
+    # `^` as well as a delimiter: a credential at the start of a line has nothing
+    # before it, and that is where a prefix-orphaning split lands most often.
+    r"(?:(?<=[\s,;:(\[=])|^)([\w.~+/=@%$!:,-]+)(['\"])\[redacted\]"
+)
 
 
 def _close_partial_masks(text: str) -> str:
