@@ -31,7 +31,9 @@ import pytest
 from local_operator.harness import wire
 from local_operator.harness.types import (
     AgentEndEvent,
+    AgentEvent,
     AgentMessage,
+    AgentToolUpdate,
     ImageContent,
     Message,
     NoticeEvent,
@@ -166,7 +168,7 @@ class _StubSession:
         return lambda: None
 
 
-def _ndjson_line(event: AgentEndEvent, *, session_id: str | None = SESSION_ID) -> bytes:
+def _ndjson_line(event: AgentEvent, *, session_id: str | None = SESSION_ID) -> bytes:
     """The NDJSON line ``lop exec --json`` writes, through the real renderer."""
     renderer = PrintRenderer(json_mode=True)
     # ``cast`` rather than a real session: the renderer touches only
@@ -244,6 +246,94 @@ def _tui_socket_payload(event: AgentEndEvent) -> dict[str, Any]:
 
 def _size_of(payload: Any) -> int:
     return len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+#: Examples for the minimal instance of each event class, keyed by FIELD name.
+#: Kept here rather than inline so a new event type whose required field is
+#: unfamiliar fails with a message naming the field instead of a stack trace.
+_FIELD_EXAMPLES: dict[str, Any] = {
+    "message": Message(id="m1", role="assistant", content=[TextContent(text="hi")]),
+    "result": ToolResult(tool_call_id="c1", tool_name="Read", content=[]),
+    "partial_result": AgentToolUpdate(content=[TextContent(text="hi")]),
+    "tool_call_id": "c1",
+    "tool_name": "Read",
+    "text": "hi",
+    "body": "hi",
+    "reason": "auto",
+    "success": True,
+    "attempt": 1,
+    "error": "boom",
+    "provider": "test",
+    "model_id": "m",
+    "job_id": "j1",
+    "label": "l",
+    "status": "ok",
+    "progress": "50%",
+}
+
+
+def _minimal_event(cls: type) -> Any:
+    """The smallest valid instance of an event class, or ``None`` with a reason."""
+    kwargs: dict[str, Any] = {}
+    for name, field in cls.model_fields.items():
+        if not field.is_required() or name == "type":
+            continue
+        if name not in _FIELD_EXAMPLES:
+            return f"no example for required field {name!r}"
+        kwargs[name] = _FIELD_EXAMPLES[name]
+    try:
+        return cls(**kwargs)
+    except Exception as exc:  # noqa: BLE001 - the message is the point
+        return str(exc)
+
+
+def _agent_event_classes() -> list[type]:
+    """Every concrete ``AgentEvent`` subclass the printer can be handed."""
+    from local_operator.harness import types as harness_types
+
+    return [
+        value
+        for value in vars(harness_types).values()
+        if isinstance(value, type) and issubclass(value, AgentEvent) and value is not AgentEvent
+        # ``vars`` also exposes the parametrised aliases (``AgentEvent[...]``).
+        and "[" not in value.__name__
+    ]
+
+
+def test_every_emitted_line_carries_the_session_id() -> None:
+    """The stamp is a per-LINE contract, so every line must carry it (Q1).
+
+    External supervisors parse this stream line-by-line and statelessly (a
+    per-line jq filter), so a line without the session id is unrecoverable for
+    them — and the id is what lets them resume. The stamp used to be applied at
+    the call site AFTER this function shaped the payload, which covered every
+    event type; when it moved inside, the collapsed ``message_update`` early
+    return skipped it, and ``message_update`` is the most frequent line on the
+    stream. This test would have caught that: it drives the real renderer for
+    EVERY event class in ``harness.types`` and asserts on the emitted line, not
+    on the payload builder.
+    """
+    built: list[str] = []
+    unbuildable: list[tuple[str, Any]] = []
+    for cls in _agent_event_classes():
+        event = _minimal_event(cls)
+        if not isinstance(event, AgentEvent):
+            unbuildable.append((cls.__name__, event))
+            continue
+        payload = json.loads(_ndjson_line(event))
+        assert (
+            payload.get("session_id") == SESSION_ID
+        ), f"{cls.__name__} emitted a line with no session id: {sorted(payload)[:6]}"
+        built.append(cls.__name__)
+
+    assert not unbuildable, (
+        "no minimal instance could be built for every event class, so the sweep "
+        f"above is not complete: {unbuildable}"
+    )
+    # The sweep is only meaningful if it covers the classes that matter, and it
+    # must fail loudly if a future refactor stops enumerating them.
+    assert "MessageUpdateEvent" in built
+    assert len(built) >= 20, f"only {len(built)} event classes were exercised"
 
 
 def test_a_small_turn_is_returned_by_identity() -> None:

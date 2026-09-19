@@ -93,13 +93,20 @@ def printable_event(event: AgentEvent, *, session_id: str | None = None) -> dict
     elision marker name the session whose transcript holds what was cut.
     """
     if isinstance(event, MessageUpdateEvent):
-        return {
+        payload: dict[str, Any] = {
             "type": "message_update",
             "message_id": event.message.id,
             "delta": event.delta,
         }
-    data = event.model_dump(mode="json")
-    payload = strip_provider_payload(data)
+    else:
+        payload = strip_provider_payload(event.model_dump(mode="json"))
+    # THE STAMP GOES ON WHATEVER THIS FUNCTION RETURNS, on every branch. It used
+    # to live at the call site, after shaping; moving it in here without moving
+    # it past the early return above dropped the session id from exactly the
+    # most frequent line type on the stream — the one a supervisor's per-line
+    # filter sees most — which is unrecoverable for a stateless reader and is
+    # what `test_every_emitted_line_carries_the_session_id` now pins (it would
+    # have caught that).
     if session_id:
         payload.setdefault("session_id", session_id)
     return bound_agent_end_for_wire(payload, session_id=session_id)
