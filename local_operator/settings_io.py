@@ -2652,7 +2652,13 @@ SETTINGS: tuple[Setting, ...] = (
         # switch — the per-call cost line the guide points at is at INFO in the
         # session log, so the diagnostic is not lost, and nothing draws into the
         # transcript any more.
-        help="Deprecated. The layer is silent in the chat; see the session log.",
+        #
+        # The copy names the feature the way EVERY other name on that screen does
+        # ("Smart hints" — the section title, the live row's label, the tips, and the
+        # guide, which says in as many words that all three use that name). "the layer"
+        # is this codebase's word, not the user's; design round 1 (D1) measured that a
+        # user who once saw a suggestion line has no anchor for it.
+        help="Deprecated. Smart hints is silent in the chat; the call is in the log.",
     ),
     Setting(
         key="desktop.launch_command",
