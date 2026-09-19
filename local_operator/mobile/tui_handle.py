@@ -9,6 +9,14 @@ Two rules shape everything here:
 - **Textual owns its thread.** Every mutation of app state goes through
   ``app.call_from_thread`` (the registrant's methods run on its own loop);
   reads of plain Python session state are safe directly.
+- **The runtime's loop never waits on another thread.** ``call_from_thread``
+  ENQUEUES the callback and then blocks until Textual runs it, so calling it
+  directly from a coroutine parks the runtime's loop — and with it the accept,
+  the welcome, ``ping`` and the heartbeat, all of which that one loop owns —
+  for as long as the app is busy. Every hop therefore goes through
+  :meth:`TuiSessionHandle._on_app`, which performs the blocking enqueue on a
+  worker thread (``asyncio.to_thread``) and awaits the *bound* result
+  (:meth:`_on_app` states the measured failure this prevents).
 - **The phone is a second front end, not a second session.** Prompts,
   interrupts, model switches and slash commands route through the app's own
   code paths (``_submit_prompt``, ``_interrupt``, ``_run_slash_command`` …)
@@ -715,7 +723,11 @@ class TuiSessionHandle(SessionHandle):
 
             task.add_done_callback(finish)
 
-        self._app.call_from_thread(schedule)
+        # Same reason as :meth:`_on_app`: this hop is taken by a follower's
+        # ``route_shared_slash``, i.e. from the runtime's loop, and a direct
+        # ``call_from_thread`` would park that loop — accept, ``ping`` and
+        # heartbeat included — until the app services the enqueue.
+        await asyncio.to_thread(self._app.call_from_thread, schedule)
         result = await done
         return result if isinstance(result, dict) else {"kind": "notice", "text": f"ran /{command}"}
 
@@ -1043,12 +1055,46 @@ class TuiSessionHandle(SessionHandle):
     # -- internals ---------------------------------------------------------------------
 
     async def _on_app(self, fn: Callable[[], Any]) -> Any:
-        """Run ``fn`` on the Textual thread and await its result, BOUNDED:
-        ``call_from_thread`` enqueues, and an app inside a modal's nested pump
-        or a blocked handler never runs the callback — an unbounded await here
-        would wedge this session's whole serialized dispatch behind one stuck
-        command. Ten seconds is generous for a UI hop and turns the wedge
-        into an error the phone can show."""
+        """Run ``fn`` on the Textual thread and await its result, BOUNDED —
+        and WITHOUT parking the runtime's loop on the way there.
+
+        ``call_from_thread`` does not merely enqueue: it ENQUEUES AND THEN
+        BLOCKS until Textual runs the callback. Called directly from this
+        coroutine, that blocking enqueue happens on whichever thread is awaiting
+        us — and for a TUI-hosted runtime that thread is the runtime's own
+        event loop, so the loop stops accepting connections, stops answering
+        ``ping``, stops pushing projections and stops writing the heartbeat for
+        as long as the app is busy. Measured on 2026-09-18 (a real
+        ``OperatorApp`` + ``RuntimeServer(kind="tui")``, the app loop held with
+        a synchronous ``time.sleep``): with one client registered, the control
+        thread sat inside this function's enqueue for 49.6 s while the app was
+        held 50.5 s; a fresh dial got no welcome within 20 s (and the client's
+        own ``ACK_TIMEOUT_S`` is 15 s), and the discovery record's heartbeat
+        crossed the 45 s timeout into ``wedged`` at hold+43 s, peaking at
+        52.5 s — on a pid that was alive and idle. With NO client registered the
+        same 20 s hold was harmless (beat 5.1 s, ``live``), which is what
+        identifies the hop — not a slow turn — as the cause.
+
+        ``asyncio.to_thread`` is what puts the blocking enqueue INSIDE the
+        bound: the runtime's loop only awaits the worker thread, so it stays
+        runnable and keeps serving every OTHER connection and its own loops
+        while this one hop waits. The pattern is the same one already used two
+        modules away for the viewer-resume hop (``tui/app.py``: "`to_thread` is
+        what puts the blocking enqueue INSIDE the bound").
+
+        The ``wait_for`` below is therefore a real bound, which it never was
+        before: previously the await was only reached AFTER the block, so the
+        ten seconds described the half that was already bounded. It still does
+        not RECALL the enqueue — Textual cannot cancel a queued callback, so on
+        expiry the callback runs anyway on the app loop and
+        ``_set_unless_done`` drops its result. What it bounds is how long THIS
+        caller waits, which is what the phone needs: ten seconds is generous
+        for a UI hop and turns a stuck app into an error the phone can show
+        instead of a wedge. The residual cost is one parked worker thread per
+        expired hop until the app drains its queue, bounded by the executor's
+        own ``max_workers``; before this change that same wait was paid by the
+        runtime's loop instead, taking the control socket down with it.
+        """
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Any] = loop.create_future()
 
@@ -1058,7 +1104,12 @@ class TuiSessionHandle(SessionHandle):
             except Exception as exc:  # noqa: BLE001 — the error IS the answer
                 loop.call_soon_threadsafe(_set_unless_done, future, None, exc)
 
-        self._app.call_from_thread(wrapped)
+        # ``fn`` still runs on the Textual loop — only the WAIT moved off this
+        # one. That distinction is load-bearing: the admission sections these
+        # callbacks perform (``CommandReservations.reserve`` and friends) are
+        # documented as "mutated only on the session runtime's loop", and the
+        # runtime's loop here IS Textual's, so they must keep running there.
+        await asyncio.to_thread(self._app.call_from_thread, wrapped)
         return await asyncio.wait_for(future, timeout=10.0)
 
     def _cancel_detail_tasks(self) -> None:
