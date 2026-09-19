@@ -42,6 +42,21 @@ class TurnInteraction:
     #: never left the machine (design round 1, D3). Holding the blocks is what
     #: lets that echo be withdrawn; ``_withdraw_user_echo_for`` is the consumer.
     submitted_blocks: tuple[Any, list[Any]] | None = None
+    #: Prompts this surface has sent into a DRAINING runtime's spool, keyed by the
+    #: message id the successor will announce them under — the one identity that
+    #: survives the handover. This is what backs the row's queued marker (taken
+    #: down by that announcement), the recall (Esc addresses the spool row by the
+    #: same id) and the "esc takes it back" offer's own answer when the spool has
+    #: already released the row. Values are ``_QueuedPrompt`` in ``app.py``; typed
+    #: ``Any`` here for the reason ``pending_echoes`` is — this module is imported
+    #: by the app and must not import it back.
+    queued_prompts: dict[str, Any] = field(default_factory=dict)
+    #: The row that names messages this surface did NOT send (``peek_inbox`` at
+    #: a bind), held so it can be taken down when the spool stops holding them —
+    #: a state row that is only ever added outlives the state it describes
+    #: (design round 2, D7; the same reason ``_retire_unsent_runtime_notice``
+    #: exists). ``None`` when it went to the off-screen store instead.
+    queued_elsewhere_notice: Any = None
     completion_deferred: bool = False
     settled_child_ids: set[str] = field(default_factory=set)
     waiting_kind: str | None = None

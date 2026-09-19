@@ -413,8 +413,11 @@ async def test_the_receipt_row_is_inked_as_chrome_not_as_the_user_s_prose() -> N
 
         rendered = block._build()
         assert isinstance(rendered, Text)
-        assert block._receipt_row is not None
-        receipt = rendered.split("\n")[block._receipt_row]
+        # A SET of receipt rows since the queued marker wraps: the image receipt
+        # is one row and the set is the block's own index of them, which is what
+        # `copy_row_is_chrome` and the ink pass read.
+        assert len(block._receipt_rows) == 1, sorted(block._receipt_rows)
+        receipt = rendered.split("\n")[next(iter(block._receipt_rows))]
         assert "image attached" in receipt.plain
         muted = theme_mod.semantic_color("muted")
         prose = theme_mod.semantic_color(UserBlock.TEXT_TOKEN)
