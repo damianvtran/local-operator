@@ -121,7 +121,7 @@ def format_search_status(manager: ConfigManager, credentials: CredentialManager)
         )
     rows.append("Setup: local-operator search setup <provider>")
     # The legend is scoped to the states these rows actually paint: the full table
-    # is 477 cells and defines states this install does not have (round-3 D3-3).
+    # costs 526 cells and defines states this install does not have (round-3 D3-3).
     rows.append(state_legend(statuses))
     return "\n".join(rows)
 

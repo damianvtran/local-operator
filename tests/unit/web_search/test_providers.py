@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from rich.cells import cell_len
 
 from local_operator.credentials import CredentialManager
 from local_operator.web_search.models import (
@@ -1209,10 +1210,72 @@ async def test_the_failure_message_fits_the_card_reason_budget(tmp_path, monkeyp
         await service.search("x")
 
     message = str(raised.value)
-    assert len(message) <= REASON_MAX_CELLS, (len(message), message)
+    # CELLS, not characters: the budget the assertion is about is the card's own,
+    # and it measures cells (round-4 N8 fixed the same confusion in the crop).
+    assert cell_len(message) <= REASON_MAX_CELLS, (cell_len(message), message)
     # Every leg is still named, and its reason is recognisable rather than dropped.
     for provider_id in ("duckduckgo", "tavily", "perplexity", "exa", "parallel"):
         assert f"{provider_id}: " in message
+
+
+@pytest.mark.asyncio
+async def test_the_failure_budget_holds_for_a_double_width_reason(tmp_path, monkeypatch) -> None:
+    """Round-4 N8: the caps are a CELL budget, and a CJK reason is where that bites.
+
+    The crop sliced with `len()` while the card measures with `cell_len`, so a
+    character-counted 30-cell cap kept 30 CJK characters -- 60 cells -- and six such
+    legs put the digest at 636 cells against the card's 432-cell budget: the
+    expansion folded at `… 5 more lines` with only 2 of 6 legs visible, in the one
+    case where the reader cannot fall back on the raw text. The fix is the card's own
+    measurement, so the two cannot disagree about what fits, and this test asserts the
+    outcome the reader sees: the message fits, and the expanded card names all six
+    legs with no fold marker.
+    """
+    from local_operator.tui.widgets.tool_card import REASON_MAX_CELLS, ToolCard
+    from local_operator.web_search.service import WebSearchService
+
+    # A Chinese-language 503 body, three times over: the reason a CJK provider
+    # returns is long, and every character of it costs two cells.
+    body = (
+        "搜索引擎返回 HTTP 503：服务暂时不可用，上游节点全部过载，请稍后重试。"
+        "错误详情：网关无法连接到搜索后端集群，正在自动降级；本次请求未被计费，"
+        "可以安全重试；如果问题持续存在，请检查服务状态页或联系支持团队。"
+    ) * 3
+    # Most of the body is double-width (the ASCII bits -- "HTTP 503" -- are not), so
+    # the guard asks for a large gap rather than an exact doubling.
+    assert cell_len(body) - len(body) >= 200, (cell_len(body), len(body))
+
+    async def boom(*_args: object, **_kwargs: object):
+        raise RuntimeError(body)
+
+    providers = ("duckduckgo", "tavily", "perplexity", "exa", "parallel", "deepseek")
+    for provider_id in providers:
+        monkeypatch.setitem(PROVIDERS, provider_id, SimpleNamespace(search=boom))
+
+    credentials = _credentials(tmp_path)
+    credentials.set_credential("DEEPSEEK_API_KEY", "stored")
+    service = WebSearchService(
+        WebSearchSettings(
+            providers=["duckduckgo", "tavily", "perplexity", "deepseek"], strategy="ordered"
+        ),
+        credentials,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        await service.search("x")
+    message = str(raised.value)
+
+    assert cell_len(message) <= REASON_MAX_CELLS, (cell_len(message), cell_len(body))
+    # (b) the expansion the reader opens: every leg named, nothing folded away.
+    card = ToolCard("t", "web_search", {"query": "x"})
+    card.mark_failed(message)
+    card.toggle_expanded()
+    for width in (110, 80):
+        content = card._build_content(width).plain
+        assert "more line" not in content, (width, content)
+        for provider_id in providers:
+            assert provider_id in content, (width, provider_id)
+        assert all(cell_len(row) <= width for row in content.splitlines()), width
 
 
 def test_the_copy_helpers_are_total_for_an_id_outside_the_catalogue() -> None:

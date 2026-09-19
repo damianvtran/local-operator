@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 from pydantic import ValidationError
+from rich.cells import cell_len, set_cell_size
 
 from local_operator.config import ConfigManager
 from local_operator.credentials import CredentialManager
@@ -406,14 +407,17 @@ class WebSearchService:
 
 #: How much of a reason the failure digest keeps, per part of the message.
 #:
-#: The tool card renders the whole message inside `REASON_MAX_CELLS` (432 cells /
-#: 8 rows, `tui/widgets/tool_card.py`). Six legs quoting their FULL reason is
-#: ~1400 cells, so round 3's expansion truncated at `… 11 more lines` and the
-#: reader could not see which other legs failed (round-3 D3-2). The two caps below
-#: keep the message inside that budget on the longest real reason -- a provider's
-#: 503 HTML body, ~200 cells -- with the arithmetic measured, not guessed: the
-#: fixed text is ~31 cells, six legs cost `len(id) + 2 + cap + 2`, and the lead
-#: gets the rest, so 128 + 6x30 lands at ~424 of 432.
+#: The tool card renders the whole message inside `REASON_MAX_CELLS` (432 CELLS /
+#: 8 rows, `tui/widgets/tool_card.py`), so every figure here -- and the crop that
+#: honours it -- is in CELLS, never characters: a double-width script spends two
+#: cells per character, and a character-counted crop left a CJK reason at roughly
+#: twice the budget (round-4 N8). Six legs quoting their FULL reason is ~1400
+#: cells, which is what truncated round 3's expansion at `… 11 more lines` and hid
+#: which other legs failed (round-3 D3-2). Measured, not guessed: the fixed text is
+#: 32 cells, a leg costs `cell_len(id) + 2 + cap + 2`, and the lead gets the rest --
+#: six legs on the operator's chain measure 406 of 432 cells for an ASCII 503 body
+#: and 407 for a CJK one, where the character-counted crop measured 636 and the
+#: card folded again.
 #:
 #: The lead keeps the most room because it is what the collapsed card shows; the
 #: per-leg cap is 30 because that is exactly the common transport reason
@@ -423,10 +427,24 @@ PER_LEG_REASON_CELLS = 30
 
 
 def _short_reason(reason: str, cap: int) -> str:
-    """A reason cut to ``cap`` cells, with an ellipsis when it was cut."""
-    if len(reason) <= cap:
+    """A reason cut to ``cap`` CELLS, with an ellipsis when it was cut.
+
+    Cells rather than characters because the budget this exists to respect is the
+    card's ``REASON_MAX_CELLS``, and the card measures it with ``cell_len``: a
+    character-counted crop spent 1 cell per CJK character where the terminal paints
+    2, so a six-leg digest in a double-width script measured 636 cells against the
+    432-cell budget and folded again -- the exact failure the caps were added to
+    fix, surviving in the one case where the reader is furthest from the source
+    (round-4 N8; the same digest measures 402 after this crop). Measuring here with
+    the card's own function is what keeps the two from disagreeing about what fits.
+
+    ``set_cell_size`` is rich's cell-aware crop (it never adds an ellipsis of its
+    own, and the early return above rules out its padding branch), so the result is
+    ``cap`` cells including the ellipsis.
+    """
+    if cell_len(reason) <= cap:
         return reason
-    return reason[: cap - 1].rstrip() + "…"
+    return set_cell_size(reason, cap - 1).rstrip() + "…"
 
 
 def search_settings_dict(settings: WebSearchSettings) -> dict[str, Any]:
