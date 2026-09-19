@@ -588,6 +588,16 @@ def test_the_committed_manifest_belongs_to_the_tree_that_reads_it(job: str) -> N
         f"{tree}'s manifest weighs {len(dead)} file(s) the tree never collects, " f"e.g. {dead[:5]}"
     )
 
+    # A zero weight is WORSE than an absent one: absent files are scheduled at
+    # `fallback_seconds`, while zero tells LPT the file is free. JUnit reports
+    # 0.0 for a file whose tests all skipped, which is how one gets in there --
+    # `gen_test_durations.py` floors the value, and this pins the floor.
+    nonpositive = sorted(f for f, v in weights.items() if v <= 0)
+    assert not nonpositive, (
+        f"{tree}'s manifest has {len(nonpositive)} non-positive weight(s), e.g. "
+        f"{nonpositive[:3]}; the partitioner would treat them as free"
+    )
+
 
 def test_gen_refuses_a_report_from_the_other_tree(tmp_path: Path) -> None:
     """`--tree X` must refuse a JUnit report of tree Y, before writing.

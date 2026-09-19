@@ -87,6 +87,29 @@ legs per OS instead of one serial leg, which is what took ~19 minutes of
 critical path off a green run (see tests/durations-e2e.json for the measured
 weights and the PR that added this for the per-shard wall times).
 
+WHAT THIS SCRIPT IS AND IS NOT RESPONSIBLE FOR
+----------------------------------------------
+Worth reading before adding a shard or a new term to the weight, because the
+2026-09-19 measurements separate the two cleanly (the numbers and their run ids
+are in ``scripts/gen_test_durations.py``):
+
+- **The partition is exact on the weights it is given.** LPT equalised the
+  measured per-file cost of the pre-regeneration split from 1.086x to 1.000x
+  once the manifest was current -- five shards at 42.2 test-min each.
+- **That is a weaker claim than it sounds, and the walls show why.** Measured
+  out of sample, the same partitions scored 1.196x and 1.205x, because a few
+  dominant files swing 0.6-1.6x between runs; and two runs of ONE manifest gave
+  shard walls 634-785 s (1.24x) and 461-846 s (1.84x), with the slowest shard of
+  the first the fastest of the second. More RUNS of junit timings are what
+  shrink that; more shards only divide it.
+- **A tree that outgrows its job's ceiling fails a test, not a runner.**
+  ``tests/unit/test_ci_hygiene.py`` asserts the ceiling against the projection
+  printed below, in minutes, at the worker count the job really gets.
+
+So when a shard is slow, read the projection against the pytest summary line in
+the same log FIRST: if they agree, the shard is doing the work the manifest
+says, and the answer is more shards or less suite -- not a better partition.
+
 THE ALGORITHM
 -------------
 Longest-processing-time-first (LPT): sort files by descending weight, assign
