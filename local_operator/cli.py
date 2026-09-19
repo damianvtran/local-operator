@@ -4500,7 +4500,12 @@ def wake_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "uninstall", False):
         outcome = uninstall()
-        print(f"supervisor: {outcome.reason}")
+        # `_wrap_status`, not a bare f-string: an unwrapped reason that runs
+        # past the terminal width continues at column 0 and reads as a new
+        # line of output rather than as the rest of this one, and it sits a
+        # cell out of line with the wrapped status lines below it (design
+        # round 2, D12). Every reason here can be long: they name a path.
+        print(_wrap_status(f"supervisor: {outcome.reason}"))
         return 0
 
     # NOT `harness.wake.format_duration` here: the status lines use this
@@ -4517,7 +4522,7 @@ def wake_command(args: argparse.Namespace) -> int:
     wants_install = command == "install" or getattr(args, "install", False)
     if wants_install:
         outcome = ensure_supervisor_installed(config_dir())
-        print(f"supervisor: {outcome.reason}")
+        print(_wrap_status(f"supervisor: {outcome.reason}"))
 
     # RUNNING, not merely present. `plist_path().exists()` was an even weaker
     # test than the install hook's `_is_loaded()` — it reported "installed"

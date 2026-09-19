@@ -42,17 +42,17 @@ fact:
 
 | Surface | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| Startup and package import | reading: every module imports | reading: same | contract: the module-level POSIX imports are gone (`fcntl` and friends are imported inside the POSIX-only function that uses them), so an import-time `ImportError` cannot be the Windows failure mode |
-| `lop serve` (HTTP API) | reading: `/health` 200, second bind refused | reading: same | contract: the collision guard uses `SO_EXCLUSIVEADDRUSE` instead of `SO_REUSEADDR`, because on Windows a second bind to the same port with `SO_REUSEADDR` silently succeeds |
-| TUI (interactive) | reading: booted in-process **and** driven through a real pty | reading: same | contract: Textual boots. The battery's pty probe `SKIP`s here by construction — Windows has no `pty` module, ConPTY is a different API — so **do not** read that row as an exercised terminal driver |
-| `lop exec` (headless) | reading: runs, and fails without a traceback when it has no provider | reading: same | contract |
-| `bash` tool | reading: real bash, `/bin/sh` last resort | reading: same | **gap → refusal**: `no bash on this Windows host, and Windows has no /bin/sh. Install Git for Windows …, or point this tool at one you have: lop config edit bash.shell '<path>'`. It does **not** silently run the command under `cmd.exe`/PowerShell: this tool advertises bash, and executing another language would be a wrong answer the model cannot see. When bash exists only in Git for Windows' own directories, those are searched, because `which` misses `Git\cmd` |
-| Paths, config, sessions | reading: roots resolve, config round-trips, sessions list | reading: same | contract: roots derive from `USERPROFILE`, and the session/lease lock is a `msvcrt` byte lock where `flock` does not exist |
-| Secret store | reading: round-trip | reading: round-trip | contract, with one **gap** inside it: the default keyfile tier works. The passphrase tier's broker refuses up front — `the secret broker cannot run on win32: peer authentication is not implemented there, so the broker could not tell one caller from another …`. `lop secret status` also states what protects the store at rest, because a Windows store is usable rather than broken and a tier line that reads like a POSIX store's would be a lie |
-| Unattended wake service | reading: LaunchAgent plist written | contract: `systemctl --user` unit; the baseline reading was a `FAIL` ("no supervisor installer for this platform") that this branch's supervisor work replaces | contract: Task Scheduler via `schtasks` (no elevation, no new dependency). Placement is **not** exercised on a Windows host here; every `schtasks` call is checked and its stderr reported verbatim, so a wrong guess fails loudly at install time |
-| Mobile portal (`lop mobile`) | reading: daemon serves, `/healthz` 200; install via launchd; password in the login Keychain | reading: daemon serves; install via `systemctl --user`; password in the Secret Service, or a `0600` file when libsecret is absent | contract: install via Task Scheduler, password in a DPAPI blob keyed to the user. Where no supervisor exists at all, the answer is the refusal below — and `lop mobile serve` still runs in the foreground |
-| Tunnels | reading: `SKIP` — no tunnel configured on that host | reading: same `SKIP` | contract: `cloudflared` is resolved from `PATH` (never downloaded by `lop`); the service arm is the same three supervisors |
-| Single-owner locks | reading: a second holder is refused | reading: same | contract: `msvcrt` lock. Every "one owner" invariant in `lop` rests on this row |
+| Startup and package import | reading: every module imports | reading: same | reading: `497/502` modules import; the other five refuse off POSIX with a named reason rather than breaking. The module-level POSIX imports are gone (`fcntl` and friends are imported inside the POSIX-only function that uses them), so an import-time `ImportError` is not the Windows failure mode |
+| `lop serve` (HTTP API) | reading: `/health` 200, second bind refused | reading: same | reading: `/health` 200 and the second bind **refused** — the collision guard uses `SO_EXCLUSIVEADDRUSE` instead of `SO_REUSEADDR`, because on Windows a second bind to the same port with `SO_REUSEADDR` silently succeeds |
+| TUI (interactive) | reading: booted in-process **and** driven through a real pty | reading: same | reading, half of it: Textual boots and writes a settled frame (`tui.boot`, 47 KB SVG). The pty probe `SKIP`s here **by construction** — Windows has no `pty` module, ConPTY is a different API — so **do not** read that half as an exercised terminal driver |
+| `lop exec` (headless) | reading: runs, and fails without a traceback when it has no provider | reading: same | reading: same |
+| `bash` tool | reading: real bash, `/bin/sh` last resort | reading: same | **gap → refusal**: `no bash on this Windows host, and Windows has no /bin/sh. Install Git for Windows …, or point this tool at one you have: lop config edit bash.shell \"<path>\"`. It does **not** silently run the command under `cmd.exe`/PowerShell: this tool advertises bash, and executing another language would be a wrong answer the model cannot see. When bash exists only in Git for Windows' own directories, those are searched, because `which` misses `Git\cmd` |
+| Paths, config, sessions | reading: roots resolve, config round-trips, sessions list | reading: same | reading: roots resolve from `USERPROFILE` (15 of them), 241 config options round-trip, sessions list |
+| Secret store | reading: round-trip | reading: round-trip | reading, with one **gap** inside it: the default keyfile tier works. The passphrase tier's broker refuses up front — `the secret broker cannot run on win32: peer authentication is not implemented there, so the broker could not tell one caller from another …`. `lop secret status` also states what protects the store at rest, because a Windows store is usable rather than broken and a tier line that reads like a POSIX store's would be a lie |
+| Unattended wake service | reading: LaunchAgent plist written | reading: a `systemctl --user` unit whose timer is enabled and active, measured on real systemd 255 (the container image cannot run systemd at all — even a control unit exits 255 under emulation); the before-reading was a `FAIL` ("no supervisor installer for this platform") | reading: the task is registered and started via `schtasks` (no elevation, no new dependency), and `wake.install` reports `supervisor: installed`. Placement across a real logoff/logon cycle is **not** covered by any runner |
+| Mobile portal (`lop mobile`) | reading: daemon serves, `/healthz` 200; install via launchd; password in the login Keychain | reading: daemon serves; install writes and would enable a `systemctl --user` unit, but a redirected `HOME` cannot reach the real user manager, so the battery records `SKIP` rather than pretending | reading: install registered the task, started it, and the daemon served `/healthz` 200 with `dist: true`; password in a DPAPI blob keyed to the user. All three arms now carry `LOCAL_OPERATOR_CONFIG_DIR` — without it the daemon read the DEFAULT store and exited 2 |
+| Tunnels | reading: `SKIP` — no tunnel configured on that host | reading: same `SKIP` | reading: same `SKIP` (no tunnel configured on the runner). `cloudflared` is resolved from `PATH` (never downloaded by `lop`); the service arm is the same three supervisors, unit-tested on Windows |
+| Single-owner locks | reading: a second holder is refused | reading: same | reading: a second holder is refused, through the `msvcrt` lock where `flock` does not exist. Every "one owner" invariant in `lop` rests on this row |
 | Orphan-process reaping | reading: reaper active | reading: reaper active | **gap, announced**: `process-group ledgers are POSIX-only … a shell command that outlives a HARD death of this process … is NOT reclaimed at the next startup`. Logged once per process, at the first command, because a safety net that is absent looks exactly like one that works |
 | No supervisor at all (Devuan, Alpine, containers, WSL2 without systemd) | n/a | **gap → refusal**, one sentence per daemon: `no supported user service supervisor found (launchctl on macOS, systemctl --user on Linux, Task Scheduler via schtasks on Windows); run <that daemon's foreground command>` | same refusal |
 | Notifications / focus / `/fork` | richest: `osascript`, window focus, terminal protocols | terminal-mediated protocols, `notify-send` when the desktop has it | thinner: notification is the terminal's own protocol (a bare BEL cannot carry text), window focus is macOS-only and says so, and no `/fork` terminal backend exists — the fork is still created and durable and the receipt names the command that reaches it, which is why that message is a note rather than a warning |
@@ -70,7 +70,7 @@ branch.
 | Ubuntu 24.04, arm64, in a container | 3.12.3 | `PASS=19 WARN=2 SKIP=2 FAIL=3` | **`PASS=21 WARN=2 SKIP=3 FAIL=0`** |
 | Linux Mint 22, amd64 under emulation | 3.12.3 | same set — the two distros agreed on every probe | **`PASS=21 WARN=2 SKIP=3 FAIL=0`** |
 | macOS, arm64 (the release platform, and the one that must not regress) | 3.13.12 | `PASS=21 WARN=2 SKIP=3 FAIL=0` with the pre-fix count of 11 unguarded POSIX attributes | **`PASS=21 WARN=2 SKIP=3 FAIL=0`** |
-| Windows Server 2025, AMD64, `windows-latest` runner | 3.12.10 | `PASS=13 WARN=1 SKIP=3 FAIL=9` | the `xplat-probe-windows` artifact on this PR — see below |
+| Windows Server 2025, AMD64, `windows-latest` runner | 3.12.10 | `PASS=13 WARN=1 SKIP=3 FAIL=9` | **`PASS=21 WARN=2 SKIP=3 FAIL=0`** |
 
 What the before-readings were not passing:
 
@@ -90,13 +90,17 @@ What the before-readings were not passing:
 * **macOS** was already green on behaviour; what moved there was the static
   reading, 11 unguarded POSIX attributes to 0.
 
-The two `WARN`s that remain on every platform are honest and deliberate:
-`static.posix_attributes` reports 0 **fatal** and 16 *leads* (uses it cannot
-prove are guarded — a lead is for reading, not for acting on), and `wake.status`
-says it cannot be verified for an isolated store. The three `SKIP`s are: no
-tunnel configured on the host (×2), and `mobile.install`, which on macOS is not
-run at all because the installer writes to the login keychain an isolated
-`HOME` does not have, and on Linux refuses legibly for a missing `Node >= 22`.
+The two `WARN`s that remain are honest and deliberate, and they are not the same
+two everywhere: `static.posix_attributes` reports 0 **fatal** and a count of
+*leads* (uses it cannot prove are guarded — a lead is for reading, not for
+acting on), and `wake.status` reports what it could not establish — `cannot be
+verified for this store` on macOS and Linux, where an isolated `HOME` cannot
+reach the real user manager, and `not installed` on Windows, where there is no
+registration to find. The three `SKIP`s are: no tunnel configured on the host
+(×2), and `mobile.install`, which on macOS is not run at all because the
+installer writes to the login keychain an isolated `HOME` does not have, on a
+container without `Node >= 22` refuses legibly, and on a redirected `HOME`
+declines to enable a unit the real home does not own.
 
 Where the readings come from:
 
@@ -109,9 +113,10 @@ Where the readings come from:
   make;
 * the Windows row comes from the `xplat-probe-windows` job in
   `.github/workflows/ci.yml`, which runs the same battery on `windows-latest`
-  with PowerShell steps; its artifact is the only Windows evidence there is.
-  **Nothing in the matrix above should be read as a Windows measurement** —
-  every Windows cell is `contract` or `gap` for exactly that reason.
+  with PowerShell steps; its artifact is the Windows evidence. The rows above
+  that say `reading` for Windows are backed by it; the rows that still say
+  `contract` or `gap` are the ones no runner exercises at all (notifications,
+  window focus, `/fork`, the orphan reaper's hard-death gap), and they say so.
 
 A note on the Linux Mint row: the Mint image is `amd64`-only and this host is
 `arm64`, so its userland runs under emulation. That is fine for the things the

@@ -23,6 +23,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from pathlib import Path
 from typing import Any
@@ -665,7 +666,16 @@ def _status(args: argparse.Namespace) -> int:
     print(f"directory   {payload['directory']}")
     print(f"key mode    {mode}")
     if payload["at_rest_protection"] is not None:
-        print(f"NOTE        {payload['at_rest_protection']}")
+        # Wrapped to this block's own 12-column gutter. It printed as a single
+        # 367-cell line, so on any real terminal the reader got one sentence
+        # fragment and a wall -- while every other value in this block is short
+        # enough to need nothing (design round 2, D10). Continuation lines are
+        # indented to the same column as the value they continue, which is what
+        # makes them read as one field rather than as new output.
+        note_lines = textwrap.wrap(payload["at_rest_protection"], width=68)
+        print(f"NOTE        {note_lines[0]}")
+        for continuation in note_lines[1:]:
+            print(f"{'':12}{continuation}")
     if inconsistency is not None:
         print(f"WARNING     {inconsistency}")
     if broker is None:

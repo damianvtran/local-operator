@@ -49,9 +49,12 @@ from __future__ import annotations
 import argparse
 import ast
 import bisect
+import csv
+import io
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -181,6 +184,12 @@ def isolated_env(root: Path) -> dict[str, str]:
     # what moves `open()` as well, and it is the half the comment above this
     # paragraph already claimed was handled.
     env["PYTHONUTF8"] = "1"
+    # AND UNBUFFERED, so a long-lived child's log is evidence WHILE it runs. A
+    # child whose stdout is a FILE gets block buffering, so `lop serve` on its
+    # way to binding writes nothing until it flushes or exits -- which is why
+    # the failure detail for a timing-out server carried an EMPTY child output
+    # and could not separate "still importing" from "crashed" (QA round 1, Q1).
+    env["PYTHONUNBUFFERED"] = "1"
     # A child whose stdout is a FILE (see `ChildRun`) is block-buffered, so
     # everything it printed on the way to a crash or a timeout would still be
     # sitting in its buffer -- which is exactly the evidence the daemon and
@@ -505,11 +514,49 @@ def probe_import_package(env: dict[str, str]) -> Result:
     )
 
 
+def _source_version() -> str | None:
+    """The version the SOURCE under test declares, from `pyproject.toml`.
+
+    Read with a regex rather than `tomllib` so this stays stdlib-only on every
+    Python the battery runs on, and read from `pyproject.toml` rather than
+    `local_operator.__version__` because the file is what a release bumps.
+    """
+    try:
+        root = Path(__file__).resolve().parent.parent
+        text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
 def probe_cli_version(env: dict[str, str]) -> Result:
+    """The CLI's own version, AND the version of the code actually under test.
+
+    `lop --version` reports the INSTALLED distribution's metadata. On this
+    harness that is a separate non-editable `uv tool` install, so on exactly the
+    runs this battery exists for -- a worktree, a branch, a container -- the
+    command can print a version that is NOT the source being exercised (QA round
+    1, Q2 measured `lop --version` printing 0.59.2 while the battery exercised
+    0.59.9). Version is the one line a reader compares across operating systems,
+    so a mismatch is reported rather than printed as though it settled the
+    question.
+    """
     proc = run(_cli_argv("--version"), env, timeout=120.0)
     if proc.returncode != 0:
         return Result("cli.version", "FAIL", _tail(proc.stderr), {"rc": proc.returncode})
-    return Result("cli.version", "PASS", _first_line(proc.stdout + proc.stderr))
+    reported = _first_line(proc.stdout + proc.stderr)
+    source = _source_version()
+    extra: dict[str, object] = {"reported": reported, "source": source}
+    if source is not None and source not in reported:
+        return Result(
+            "cli.version",
+            "WARN",
+            f"{reported} — the CLI reports the INSTALLED distribution, and this "
+            f"checkout declares {source}; the reading above is not about this source",
+            extra,
+        )
+    return Result("cli.version", "PASS", reported, extra)
 
 
 def probe_cli_help(env: dict[str, str]) -> Result:
@@ -759,18 +806,44 @@ def _mobile_daemon_log_tail(env: dict[str, str], limit: int = 2000) -> str:
     return "\n".join(kept)[-limit:]
 
 
+#: The mobile daemon's Task Scheduler name. Spelled here rather than imported
+#: because this script stays stdlib-only and must run without the package it is
+#: measuring; the installer's `TASK_NAME` is the authority and the two are a
+#: pair, so a rename has to touch both.
+MOBILE_TASK_NAME = "Local Operator Mobile"
+
+#: The `schtasks /V /FO CSV` columns worth carrying. Read by HEADER NAME out of
+#: a positional CSV rather than by matching localized field labels, and a header
+#: that matches none of them is reported rather than silently returning nothing
+#: (agent review round 2, n2 -- the same defect class as the product's own
+#: status parse, A6).
+_TASK_STATE_FIELDS = (
+    "Status",
+    "Last Run Time",
+    "Last Result",
+    "Task To Run",
+    "Run As User",
+    "Scheduled Task State",
+)
+
+
 def _supervised_task_state(env: dict[str, str]) -> str:
     """What Task Scheduler thinks of the task, when there is one to ask about.
 
     The daemon log answers "what did it say"; this answers "is it even still
-    running", which is the difference between a daemon that died and one that
-    is merely slow on a cold runner.
+    running", which is the difference between a daemon that died and one that is
+    merely slow on a cold runner.
+
+    `/FO CSV` rather than `/FO LIST` because the LIST field NAMES are localized
+    ("Statut:", "Estado:", ":") and matching them in English makes a
+    non-English Windows read as "no fields at all" -- answering a question it
+    could not read. CSV fixes the field ORDER across locales.
     """
     if sys.platform != "win32":
         return ""
     try:
         query = subprocess.run(
-            ["schtasks", "/Query", "/TN", "Local Operator Mobile", "/V", "/FO", "LIST"],
+            ["schtasks", "/Query", "/TN", MOBILE_TASK_NAME, "/V", "/FO", "CSV"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -779,15 +852,25 @@ def _supervised_task_state(env: dict[str, str]) -> str:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return f"(schtasks query failed: {exc})"
-    interesting = [
-        line.strip()
-        for line in (query.stdout or "").splitlines()
-        if any(
-            key in line
-            for key in ("Status", "Last Run", "Last Result", "Task To Run", "Run As User")
-        )
+    body = (query.stdout or "").strip()
+    if not body:
+        stderr = (query.stderr or "").strip()[:200]
+        return f"(schtasks returned nothing; stderr: {stderr or 'empty'})"
+    try:
+        rows = list(csv.reader(io.StringIO(body)))
+    except csv.Error as exc:
+        return f"(schtasks output was not CSV: {exc})"
+    if len(rows) < 2:
+        return f"(schtasks output had no data row: {body[:200]})"
+    headers, values = rows[0], rows[1]
+    pairs = [
+        f"{header.strip()}={value.strip()}"
+        for header, value in zip(headers, values, strict=False)
+        if header.strip() in _TASK_STATE_FIELDS
     ]
-    return "; ".join(interesting[:6])
+    if not pairs:
+        return f"(no recognised fields; headers: {headers[:8]})"
+    return "; ".join(pairs)
 
 
 def probe_mobile_install(env: dict[str, str]) -> Result:
@@ -895,7 +978,17 @@ def probe_mobile_install(env: dict[str, str]) -> Result:
             detail,
             extra,
         )
-    return Result("mobile.install", "PASS", _first_line(text) or "installed", {"raw": text[:1200]})
+    # The LAST step, not the first: a successful install prints its progress in
+    # order, so `_first_line` reported "generated a new portal password" -- a
+    # step that happens BEFORE the bundle is built and the task registered --
+    # as the outcome (agent review round 2, n1).
+    steps = [line.strip() for line in text.splitlines() if line.strip()]
+    return Result(
+        "mobile.install",
+        "PASS",
+        steps[-1] if steps else "installed",
+        {"raw": text[:1200]},
+    )
 
 
 def probe_mobile_daemon_serve(env: dict[str, str]) -> Result:
@@ -914,7 +1007,7 @@ def probe_mobile_daemon_serve(env: dict[str, str]) -> Result:
     # it in the environment keeps this probe measuring THE DAEMON rather than
     # measuring the installer a second time.
     env = {**env, "LOP_MOBILE_PASSWORD": "xplat-probe-not-a-credential"}
-    window = BUDGET.window(45.0)
+    window = BUDGET.window(120.0)
     with _spawn_cli(
         ["mobile", "serve", "--port", str(port)], env, log=_child_log(env, "mobile-serve")
     ) as child:
@@ -958,7 +1051,7 @@ def probe_mobile_daemon_serve(env: dict[str, str]) -> Result:
         return Result(
             "mobile.daemon_serve",
             "FAIL",
-            f"no response in {window:.0f}s ({last}){BUDGET.note()}",
+            _no_response(child, window, last),
             child.extra(),
         )
 
@@ -1008,7 +1101,13 @@ def probe_serve_health(env: dict[str, str]) -> Result:
     import urllib.request
 
     port = _free_port()
-    window = BUDGET.window(60.0)
+    # 180 and not 60: a fixed 60s window produced a FALSE FAIL on the release
+    # platform under host load (QA round 1, Q1). `lop serve` was measured
+    # healthy at 25.7s on this hardware, and on a machine running ~25 sessions
+    # the same code and the same command read "no response in 60s" on one run
+    # and FAIL=0 on the next. A window that can go red under load alone is a
+    # gate nobody will keep, and the budget still bounds it.
+    window = BUDGET.window(180.0)
     with _spawn_cli(
         ["serve", "--port", str(port)], env, log=_child_log(env, "serve-health")
     ) as child:
@@ -1044,7 +1143,7 @@ def probe_serve_health(env: dict[str, str]) -> Result:
         return Result(
             "serve.health",
             "FAIL",
-            f"no response in {window:.0f}s ({last}){BUDGET.note()}",
+            _no_response(child, window, last),
             child.extra(),
         )
 
@@ -1842,7 +1941,8 @@ def probe_serve_double_bind(env: dict[str, str]) -> Result:
     import urllib.request
 
     port = _free_port()
-    window = BUDGET.window(60.0)
+    # Same 180s window and the same reason as `probe_serve_health`.
+    window = BUDGET.window(180.0)
     with _spawn_cli(
         ["serve", "--port", str(port)], env, log=_child_log(env, "double-bind-first")
     ) as first:
@@ -1865,7 +1965,7 @@ def probe_serve_double_bind(env: dict[str, str]) -> Result:
             return Result(
                 "serve.double_bind",
                 "FAIL",
-                f"the first server never came up in {window:.0f}s{BUDGET.note()}",
+                _no_response(first, window, "the first server never answered"),
                 first.extra(),
             )
 
@@ -2023,6 +2123,26 @@ class ChildRun:
 
     def __exit__(self, *exc: object) -> None:
         self.stop()
+
+
+def _no_response(child: "ChildRun", window: float, last: str) -> str:
+    """A poll that ran out of window, in the terms that separate the causes.
+
+    "no response in 60s" cannot tell a reader whether the daemon crashed on
+    startup, is still importing, or was starved by the host -- and those need
+    different responses from whoever reads the artifact. The process's own state
+    at the deadline answers the first two, and `extra`'s `child_output` answers
+    the third (QA round 1, Q1: the same code and the same command read FAIL=2
+    under load and FAIL=0 on the next run, and the artifact could not say which
+    it had been).
+    """
+    alive = child.proc.poll() is None
+    state = (
+        "the process was STILL RUNNING at the deadline"
+        if alive
+        else f"the process had exited rc={child.proc.returncode}"
+    )
+    return f"no response in {window:.0f}s ({state}; last error {last or 'none'}){BUDGET.note()}"
 
 
 def _spawn_child(argv: list[str], env: dict[str, str], *, log: Path) -> ChildRun:

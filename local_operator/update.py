@@ -52,6 +52,7 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from local_operator.interpreter import SAFE_PATH_FLAG
+from local_operator.procstate import PLATFORM_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -1803,7 +1804,7 @@ def generation_layout_refusal() -> str:
     that genuinely cannot do the thing: a legible EARLY refusal, never a
     traceback and never a half-built layout.
     """
-    where = "Windows" if os.name == "nt" else sys.platform
+    where = PLATFORM_LABEL
     return (
         f"the generation layout needs POSIX symlinks, and this is {where}: `lop update` "
         "installs each build into its own generation, points `current` at it, and links "
@@ -3801,7 +3802,7 @@ def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
                 name,
                 lines=(
                     "service daemons: not refreshed — this step rewrites launchd "
-                    f"agents, which only macOS has (this host is {sys.platform}); "
+                    f"agents, which only macOS has (this host is {PLATFORM_LABEL}); "
                     "re-run each supervised daemon's own installer to move its "
                     "unit or task onto this build",
                 ),

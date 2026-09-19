@@ -53,6 +53,23 @@ from typing import Any, TypedDict
 # startup path and ``session_lease``/``resume`` must stay consultable without
 # the engine (see the module docstring).
 
+#: How this platform is spelled in a sentence a USER reads, as opposed to the
+#: identifier the runtime uses.
+#:
+#: ``sys.platform`` is ``win32`` there -- a CPython identifier that appears
+#: nowhere else an operator can see -- so a refusal that interpolates it tells
+#: them the feature "cannot run on win32", and an upgrade summary announces
+#: "(this host is win32)". The mapping was spelled in two modules and MISSING
+#: from the third message this branch added, which is the drift a single home
+#: exists to stop; ``secrets/peer.py`` and ``update.py`` both read THIS.
+#:
+#: A module constant rather than a function, because it is patched by tests and
+#: ``os.name`` cannot be: ``pathlib`` reads it at call time, so patching it to
+#: ``nt`` makes the next ``Path(...)`` a ``WindowsPath`` and the host that is
+#: running the test cannot construct one.
+PLATFORM_LABEL = "Windows" if os.name == "nt" else sys.platform
+
+
 #: The platform, read ONCE and through :func:`is_windows` rather than inline.
 #: ``sys.platform`` rather than ``os.name`` because a test that flips the
 #: platform must patch ONE name: patching ``os.name`` process-wide makes
@@ -324,9 +341,16 @@ def terminate_process_tree(pid: int, *, force: bool = False) -> bool:
     try:
         pgid = os.getpgid(pid)
     except OSError:
-        # The pid is gone, or is not one we may ask about. Fall through and let
-        # the pid signal report the same thing rather than inventing an answer.
-        pgid = pid
+        # The pid is gone, or is not one we may ask about. Signal the PID and
+        # let it report the same thing rather than inventing an answer.
+        #
+        # NOT ``pgid = pid`` (agent review round 2, recorded item): that makes
+        # the comparison below true and takes the ``killpg`` branch, which is
+        # the OPPOSITE of this comment -- and `killpg` on a pid we could not
+        # prove leads a group may signal the group THIS CALLER belongs to,
+        # killing the caller and its siblings. The comment stated the intent;
+        # the code did something else. None here means "signal the pid alone".
+        pgid = None
     try:
         if pgid == pid:
             # The pid LEADS its own group: a shell command spawned
