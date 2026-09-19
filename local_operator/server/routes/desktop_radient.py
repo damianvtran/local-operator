@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from typing import Annotated, Any, Literal
 
 import httpx
@@ -15,9 +16,12 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import Field, StrictBool, model_validator
 
 from local_operator.providers.auth_store import (
+    DEFAULT_BLOCK_MS,
+    AuthStore,
     AuthStoreError,
     CredentialInvalidError,
     OAuthAccess,
+    StoredCredential,
 )
 from local_operator.providers.registry import get_provider_definition
 from local_operator.server.desktop import require_desktop
@@ -94,6 +98,43 @@ STATUS_BATCH_TIMEOUT = 30.0
 #: buffered bodies costs six times the memory one op would use.
 MAX_UPSTREAM_BYTES = 2_000_000
 
+#: How long a request waits for a PEER's refresh to land, and how often it looks.
+#:
+#: The credential is refreshed single-flight behind a CROSS-PROCESS lease, and the
+#: store's own peer path waits one 0.05 s slice before handing back the stored row
+#: (``auth_store.py``, the ``if not force: return now_data`` branch). That is right
+#: for a model request, which a stale bearer may still serve, and too short here:
+#: measured (review round 1; QA R2/R29) a peer with a 500 ms token endpoint turned a
+#: request issued 50 ms into its refresh into a 502 for the whole window, where the
+#: base answered 200 off the stale bearer. A peer that is going to land at all does
+#: so well inside a second, so this is a BOUNDED join and not a wait on the lease:
+#: the lease itself lives ``AUTH_REFRESH_LEASE_MS`` (30 s) and a holder that died must
+#: not hold a renderer's page open for it. Past the bound the answer is the retryable
+#: ``refresh_did_not_land`` refusal — the same class as before this join, now paid
+#: only when the peer really did not land.
+PEER_REFRESH_WAIT_S = 1.0
+
+#: How often that wait re-reads the row. A read of the stored row, not a refresh
+#: call: see :func:`_await_peer_refresh` for why polling the refresh entry point
+#: would POST the token endpoint once per slice.
+PEER_REFRESH_POLL_S = 0.1
+
+#: How long a nameable diagnosis of "why nothing was usable" may be reused.
+#:
+#: ``_unusable_credential`` cannot learn that answer cheaply: ``list_oauth_accesses``
+#: is the store's ONE place that separates a dead grant from a transient miss, and it
+#: refreshes EVERY stored OAuth row to do it. Paid once that is what makes a dead
+#: grant visible to the user; paid per request it is a token-endpoint POST against a
+#: credential already known to fail — measured (QA round 1, R31) SEVEN failed
+#: refreshes for six refusals where the base paid one, and against a hanging endpoint
+#: every page load waits out the timeout the previous one already hit. So the verdict
+#: is remembered for ``DEFAULT_BLOCK_MS``: the window the cascade's own failed refresh
+#: has the row out of rotation for (``block_credential``'s default, the same failure
+#: and the same window), which is exactly the window in which re-asking can learn
+#: nothing new. A row that CHANGED is diagnosed again whatever the clock says — see
+#: :func:`_diagnosis_key` — so a re-login or a peer's landed refresh is never masked.
+DIAGNOSIS_TTL_S = DEFAULT_BLOCK_MS / 1000
+
 #: The upstream statuses the single-op path passes through to the renderer
 #: unchanged; anything else becomes a 502, because an upstream answer this proxy
 #: does not recognise leaves the caller with the same move as an unreachable
@@ -130,6 +171,30 @@ REFUSAL_MESSAGE = "Radient could not complete this operation"
 #: remedy for a grant Radient has declared dead are the SAME single action. The
 #: two stay distinguishable by ``code`` and by status, not by prose.
 NO_CREDENTIAL_MESSAGE = "Sign in to Radient to access your account"
+
+#: The ``details.reason`` for "this ACCOUNT's sign-in is refused" — the IdP has
+#: declared the grant dead, so a re-login is the only move. Named once because three
+#: arms reach it (the store's own diagnosis, and this process's own refresh attempt on
+#: either of its error types) and a client keys on the string.
+REASON_GRANT_INVALID = "grant_invalid"
+
+#: The ``details.reason`` for "a stored credential is not usable right now", whose
+#: move is to retry. ONE reason for one client class, discovered at two points: the
+#: store's diagnosis could not name a dead grant (the row is temporarily
+#: unrefreshable), or this process attempted the refresh itself and it failed
+#: transiently. The spelling is shared deliberately — a client that keys ``reason``
+#: must not see the same remedy under two names, which is what the arm that answered
+#: ``refresh_failed`` did for every token-endpoint 5xx the cascade caught one call up.
+REASON_UNAVAILABLE = "credential_unavailable"
+
+#: The ``details.reason`` for "a PEER holds the refresh lease and its token had not
+#: landed when this request stopped waiting": nothing is known to be wrong with the
+#: grant, the account is mid-refresh somewhere else. Its own spelling, because it is
+#: the one class whose remedy is "ask again in a moment" rather than "sign in" or
+#: "the upstream is unhappy" — minus the caller-visible difference from
+#: :data:`REASON_UNAVAILABLE`, which is that a retry here is expected to succeed off
+#: the peer's write rather than to wait out the store's backoff.
+REASON_REFRESH_DID_NOT_LAND = "refresh_did_not_land"
 
 
 def status_ids(body: RadientRequest) -> list[str]:
@@ -486,6 +551,70 @@ def _upstream_failure(status: int, agent_id: str, relation: str) -> HTTPExceptio
     return _upstream_refusal(status, upstream_status=status, agent_id=agent_id, relation=relation)
 
 
+def _credential_refusal(reason: str, **details: Any) -> HTTPException:
+    """The refusal for a diagnosis ``reason``, in the class that reason's remedy is.
+
+    One place maps the reason vocabulary (:data:`REASON_GRANT_INVALID`,
+    :data:`REASON_UNAVAILABLE`, :data:`REASON_REFRESH_DID_NOT_LAND`) onto status,
+    ``code`` and the sentence a user reads, so no arm can answer the right
+    ``reason`` under the wrong class — the failure mode the review found, where a
+    token-endpoint 5xx reached two arms that spelled it differently.
+    """
+    if reason == REASON_GRANT_INVALID:
+        return _failure(
+            401, "radient_credential_refused", NO_CREDENTIAL_MESSAGE, reason=reason, **details
+        )
+    return _failure(502, "radient_upstream_failed", REFUSAL_MESSAGE, reason=reason, **details)
+
+
+#: The last "why nothing was usable" verdict, keyed by the rows it was made about.
+#:
+#: Module state, and deliberately: it memoises the STORE's reading, is keyed by the
+#: store's own database (see :func:`_diagnosis_key`) and expires on its own within
+#: :data:`DIAGNOSIS_TTL_S`, so it caches no fact this process is not allowed to know
+#: and cannot outlive the condition it describes. Purging is opportunistic on write.
+_DIAGNOSIS: dict[tuple[str, tuple[tuple[int, int], ...]], tuple[str, float]] = {}
+
+
+def _diagnosis_key(
+    store: AuthStore, rows: list[StoredCredential]
+) -> tuple[str, tuple[tuple[int, int], ...]]:
+    """What a remembered verdict is ABOUT: one store's rows, as they stand now.
+
+    ``updated_at`` is what the store writes on every change to a row, so a re-login
+    or a refresh another process landed composes a different key and the verdict is
+    computed again; a FAILED refresh writes nothing, which is what lets the verdict
+    hold across the very failures it describes. The store's own database path is in
+    the key because this memo outlives one request while two daemons can share this
+    process: credential ids restart at 1 in every config dir.
+    """
+    return (str(store.db_path), tuple(sorted((row.id, row.updated_at) for row in rows)))
+
+
+def _remembered_diagnosis(store: AuthStore, rows: list[StoredCredential]) -> str | None:
+    """The verdict still in force for these rows, or ``None`` to diagnose again."""
+    key = _diagnosis_key(store, rows)
+    entry = _DIAGNOSIS.get(key)
+    if entry is None:
+        return None
+    reason, expires = entry
+    if time.monotonic() >= expires:
+        _DIAGNOSIS.pop(key, None)
+        return None
+    return reason
+
+
+def _remember_diagnosis(store: AuthStore, rows: list[StoredCredential], reason: str) -> None:
+    """Keep ``reason`` for these rows for the store's own block window."""
+    now = time.monotonic()
+    # Purge first: an entry is dead within DIAGNOSIS_TTL_S and there is never a reason
+    # to keep one, so a row that keeps changing cannot grow this dict without bound.
+    for key, (_reason, expires) in list(_DIAGNOSIS.items()):
+        if expires <= now:
+            _DIAGNOSIS.pop(key, None)
+    _DIAGNOSIS[_diagnosis_key(store, rows)] = (reason, now + DIAGNOSIS_TTL_S)
+
+
 async def _unusable_credential(auth: DesktopAuth) -> HTTPException:
     """WHY the cascade had no usable Radient credential, in the client's classes.
 
@@ -503,23 +632,83 @@ async def _unusable_credential(auth: DesktopAuth) -> HTTPException:
     for reporting. The cost is one refresh attempt per stored OAuth row, paid only
     on the path where the resolver already had nothing to serve, and it is what
     makes the dead-grant state visible instead of silent.
+
+    PAID ONCE PER BLOCK WINDOW, NOT ONCE PER REQUEST. That attempt is a POST to a
+    token endpoint the cascade has just spent and failed, so asking again on the
+    next request learns nothing and pays again — measured (QA round 1, R31) seven
+    failed refreshes for six refusals against the base's one, and, against an
+    endpoint that HANGS rather than fails, one page load's worth of timeout per
+    page load. So the verdict is remembered for the window the row is blocked for:
+    see :data:`DIAGNOSIS_TTL_S` and :func:`_diagnosis_key` for why that is the right
+    bound, and why a changed row is never masked by it.
     """
-    if not auth.store.list_credentials("radient"):
+    stored = auth.store.list_credentials("radient")
+    if not stored:
         return _failure(409, "radient_no_credential", NO_CREDENTIAL_MESSAGE)
-    accesses = await auth.store.list_oauth_accesses("radient")
-    if any(access.credential_invalid for access in accesses):
-        return _failure(
-            401,
-            "radient_credential_refused",
-            NO_CREDENTIAL_MESSAGE,
-            reason="grant_invalid",
+    rows = [row for row in stored if row.credential_type == "oauth"]
+    reason = _remembered_diagnosis(auth.store, rows)
+    if reason is None:
+        accesses = await auth.store.list_oauth_accesses("radient")
+        reason = (
+            REASON_GRANT_INVALID
+            if any(access.credential_invalid for access in accesses)
+            else REASON_UNAVAILABLE
         )
-    return _failure(
-        502, "radient_upstream_failed", REFUSAL_MESSAGE, reason="credential_unavailable"
-    )
+        _remember_diagnosis(auth.store, rows, reason)
+    return _credential_refusal(reason)
 
 
-async def radient_bearer(auth: DesktopAuth, *, classify: bool = True) -> str:
+def _is_due(auth: DesktopAuth, access: OAuthAccess) -> bool:
+    """Whether the store's own rule says the bearer it just served is due a refresh.
+
+    False for an api_key row (no expiry to be due) and for a row the store considers
+    current. Asking the store rather than reading ``expires`` here is on purpose: the
+    skew and the never-expires case live with the store, and a second spelling of
+    them is what this route's change is removing.
+    """
+    if access.kind != "oauth" or not access.credential_id:
+        return False
+    row = auth.store.get_credential(access.credential_id)
+    return row is not None and bool(auth.store._needs_refresh(dict(row.data)))
+
+
+async def _await_peer_refresh(auth: DesktopAuth, access: OAuthAccess) -> str | None:
+    """Wait BOUNDEDLY for a peer's in-flight refresh to land; ``None`` if it did not.
+
+    Reached only with a bearer the store has just handed back still due AFTER an
+    attempt of our own that did not raise, which cross-process means the refresh
+    lease is held by another runtime: the store's peer path re-reads once, finds the
+    row still due, and returns it rather than waiting for its peer to finish
+    (``auth_store.py``, the ``if not force: return now_data`` branch). For a model
+    request that is right — the stale bearer may still serve. For this route it was
+    a measured 502 for the whole duration of a legitimately refreshing peer, where
+    the base answered 200, so the wait happens here, where the caller's alternative
+    is a refusal rather than a token.
+
+    The wait is a READ of the row, not another refresh call. Polling the refresh
+    entry point instead would POST the token endpoint once per slice the moment the
+    lease freed: against an endpoint that has just failed, or for a refresh the peer
+    already finished. So each slice looks for the peer's WRITE, and the token is only
+    resolved through the cascade once the row it left behind is current — which is
+    also what keeps the store the only thing that decides what a live bearer is.
+    """
+    if not access.credential_id:
+        return None
+    deadline = time.monotonic() + PEER_REFRESH_WAIT_S
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        await asyncio.sleep(min(PEER_REFRESH_POLL_S, remaining))
+        row = auth.store.get_credential(access.credential_id)
+        if row is None or auth.store._needs_refresh(dict(row.data)):
+            continue
+        live = await auth.store.get_oauth_access("radient")
+        if live is not None and not _is_due(auth, live):
+            return live.access_token
+
+
+async def radient_bearer(auth: DesktopAuth, *, classify: bool = True, join: bool = True) -> str:
     """The bearer to spend on Radient — or the classified refusal that says not to.
 
     THE ACCOUNT'S CREDENTIAL IS NOT THE APP'S. Everything else on this transport
@@ -547,35 +736,57 @@ async def radient_bearer(auth: DesktopAuth, *, classify: bool = True) -> str:
     IT USES THE STORE'S OWN MACHINERY, NOT A SECOND READING OF IT. The refresh
     goes through ``AuthStore.ensure_oauth_fresh_or_raise``, the public per-row
     entry point that keeps the store's own types on the way out: single-flight
-    through the same lease every other caller uses, so a concurrent attempt is
-    JOINED rather than raced — two processes POSTing one rotating refresh token is
-    how a live grant earns a real ``invalid_grant`` (see the race guard in
-    ``_ensure_oauth_fresh``). It also deliberately does NOT block the credential:
-    blocking is the routing decision ``_resolve`` makes for a request in flight,
-    and a read route is not entitled to take an account out of the rotation. The
-    freshness QUESTION has no public predicate — the two public entry points wrap
-    the refresh, not the rule — so ``_needs_refresh`` is reached for, on purpose:
-    re-deriving ``expires`` against ``now`` here would be exactly the second
-    spelling of the store's rule that this change removes (the skew and the
-    never-expires case live with the store). When the store grows that predicate,
-    this is its first caller.
+    through the same lease every other caller uses, so two processes cannot POST
+    one rotating refresh token and earn a real ``invalid_grant`` against a live
+    grant (see the race guard in ``_ensure_oauth_fresh``). JOINED, THOUGH, ONLY
+    INSIDE THIS PROCESS: the lock that single-flight is built on is an ``asyncio``
+    one, so a PEER runtime holding the cross-process lease is not joined by that
+    call — the store's peer path re-reads once and returns the stored row — and this
+    function waits for the peer itself, bounded, in :func:`_await_peer_refresh`,
+    before it refuses.
+
+    WHO TAKES THE ACCOUNT OUT OF ROTATION. Not this function: the row is blocked one
+    call up, where ``_resolve`` catches a failed refresh as ``AuthStoreError`` and
+    blocks it (``auth_store.py``, tier 3), which a dead grant reaches too because
+    ``CredentialInvalidError`` is a subclass. So a failed refresh DOES cost the
+    account its place for the store's block window, and that is a routing decision
+    this route inherits rather than one a read is making. What the per-row call buys
+    is that the refusal is about THIS account instead of about the pool, and that it
+    never rotates a session onto a sibling. The freshness QUESTION has no public
+    predicate — the two public entry points wrap the refresh, not the rule — so
+    ``_needs_refresh`` is reached for, on purpose: re-deriving ``expires`` against
+    ``now`` here would be exactly the second spelling of the store's rule that this
+    change removes (the skew and the never-expires case live with the store). When
+    the store grows that predicate, this is its first caller.
 
     THE CLASSES ARE REMEDIES, NOT VENDORS. A dead grant
     (:class:`CredentialInvalidError`, an ``invalid_grant`` the IdP has declared
     terminal) leaves exactly one move, a fresh sign-in, so it answers as
     ``radient_credential_refused`` with ``details.reason = "grant_invalid"`` — the
     same class an upstream refusal of the credential earns, because it is the same
-    remedy. A refresh that failed transiently (:class:`AuthStoreError`: a 5xx or
-    unreachable token endpoint, or a peer's attempt still in flight) leaves the
-    move "try again", so it answers as ``radient_upstream_failed``, the class
-    already reserved for "this page has no viewer state to show" and retry is
-    the caller's move. No fourth code is invented for the distinction: the class
-    vocabulary is the remedies, and the reason for the answer rides in ``details``.
+    remedy. Everything whose move is "try again" answers as
+    ``radient_upstream_failed``, the class already reserved for "this page has no
+    viewer state to show", and ``details.reason`` names which condition it was:
+    ``credential_unavailable`` (a stored credential cannot be produced right now —
+    the store's diagnosis could not name a dead grant, or this process's own refresh
+    attempt failed transiently; ONE reason for that one class however it was
+    discovered, which is why the arm that used to answer ``refresh_failed`` for a
+    token-endpoint 5xx no longer has a spelling of its own) or
+    ``refresh_did_not_land`` (a PEER holds the lease and its token did not land
+    inside the bounded wait). No fourth code is invented for those distinctions: the
+    class vocabulary is the remedies, and which one it was rides in ``details``.
 
     ``classify=False`` is for :func:`radient_bearer_optional`, which discards the
-    reason: the diagnosis costs the store a refresh attempt per stored OAuth row
-    (and a log line), and the credentialless op is served bare regardless of what
-    it would have said.
+    reason: a diagnosis costs the store a refresh attempt per stored OAuth row (and a
+    log line), and the credentialless op is served bare regardless of what it would
+    have said.
+
+    ``join=False`` is that op's other half, and it is separate on purpose. Waiting for
+    a peer's refresh is worth a second to a caller whose alternative is a refusal the
+    user has to act on; it is a second of a public price read that needed no
+    credential in the first place. So the wait is taken only by the callers that
+    refuse — the batch and the single-op path — and a credentialless op still falls
+    back to running bare the moment the store has nothing current.
 
     Raises:
         HTTPException: 409 ``radient_no_credential`` when nothing is stored, 401
@@ -583,17 +794,6 @@ async def radient_bearer(auth: DesktopAuth, *, classify: bool = True) -> str:
             ``radient_upstream_failed`` when no live bearer could be produced
             right now.
     """
-
-    def is_due(access: OAuthAccess) -> bool:
-        """Whether the store's own rule says the bearer it just served is due a refresh.
-
-        False for an api_key row (no expiry to be due) and for a row the store
-        considers current.
-        """
-        if access.kind != "oauth" or not access.credential_id:
-            return False
-        row = auth.store.get_credential(access.credential_id)
-        return row is not None and bool(auth.store._needs_refresh(dict(row.data)))
 
     access = await auth.store.get_oauth_access("radient")
     if access is None:
@@ -603,7 +803,7 @@ async def radient_bearer(auth: DesktopAuth, *, classify: bool = True) -> str:
             else await _unusable_credential(auth)
         )
         raise failure
-    if not is_due(access):
+    if not _is_due(auth, access):
         return access.access_token
     try:
         await auth.store.ensure_oauth_fresh_or_raise(access.credential_id)
@@ -611,42 +811,31 @@ async def radient_bearer(auth: DesktopAuth, *, classify: bool = True) -> str:
         # Terminal: the refresh token is dead and only a re-login revives the
         # account, so the refusal names that remedy instead of relaying a bare
         # 401 the user cannot act on.
-        raise _failure(
-            401,
-            "radient_credential_refused",
-            NO_CREDENTIAL_MESSAGE,
-            reason="grant_invalid",
-            cause=type(error).__name__,
-        ) from error
+        raise _credential_refusal(REASON_GRANT_INVALID, cause=type(error).__name__) from error
     except AuthStoreError as error:
-        # Transient: the token endpoint answered a 5xx, timed out, or could not
-        # be reached. Nothing is wrong with the stored grant as far as anyone
-        # knows, so the caller's move is to retry rather than to sign in.
-        raise _failure(
-            502,
-            "radient_upstream_failed",
-            REFUSAL_MESSAGE,
-            reason="refresh_failed",
-            cause=type(error).__name__,
-        ) from error
+        # Transient, and reachable only when THIS process held the lease and its
+        # own POST failed — the cascade eats the same failure one call up and
+        # answers it as ``credential_unavailable``. It gets that same reason rather
+        # than a spelling of its own: one remedy must not arrive under two names.
+        raise _credential_refusal(REASON_UNAVAILABLE, cause=type(error).__name__) from error
     refreshed = await auth.store.get_oauth_access("radient")
     if refreshed is None:
         # Still nothing selectable: a verdict written by an earlier failure (the
         # block the cascade sets) is what hides the row, and that is "not right
         # now", not "you are signed out".
-        raise _failure(
-            502, "radient_upstream_failed", REFUSAL_MESSAGE, reason="credential_unavailable"
-        )
-    if is_due(refreshed):
-        # The refresh call came back without a live bearer — the store's last
-        # resort (a peer holds the lease and its attempt has not landed) or a
-        # cascade that picked another due row. Both are "not right now", which is
-        # retryable, and neither is a token worth spending: this is the round
-        # trip that cannot be classified afterwards.
-        raise _failure(
-            502, "radient_upstream_failed", REFUSAL_MESSAGE, reason="refresh_did_not_land"
-        )
-    return refreshed.access_token
+        raise _credential_refusal(REASON_UNAVAILABLE)
+    if not _is_due(auth, refreshed):
+        return refreshed.access_token
+    if not join:
+        raise _credential_refusal(REASON_REFRESH_DID_NOT_LAND)
+    # The refresh call came back without a live bearer, which cross-process means a
+    # peer holds the lease and its attempt has not landed. A peer that is
+    # SUCCEEDING is the case the base answered 200 off the stale bearer, so give it
+    # the bounded wait and refuse only once its token really did not land.
+    landed = await _await_peer_refresh(auth, access)
+    if landed is None:
+        raise _credential_refusal(REASON_REFRESH_DID_NOT_LAND)
+    return landed
 
 
 async def radient_bearer_optional(auth: DesktopAuth) -> str:
@@ -661,7 +850,7 @@ async def radient_bearer_optional(auth: DesktopAuth) -> str:
     is precisely the unclassifiable 401 this change removes.
     """
     try:
-        return await radient_bearer(auth, classify=False)
+        return await radient_bearer(auth, classify=False, join=False)
     except HTTPException:
         return ""
 
@@ -925,7 +1114,12 @@ async def radient(
         except httpx.TimeoutException as error:
             # The batch's own spelling for "the upstream did not answer", so the
             # renderer has ONE path for it rather than a per-op guess: a per-read
-            # timeout there produces this same code and status.
+            # timeout there produces this same code and status. `ConnectTimeout` — a
+            # connection that never opened, which reads more like "unreachable" —
+            # stays in this class on purpose (review n3): it is a `TimeoutException`
+            # subclass, the batch's read checks the same class in the same order, and
+            # the caller's move is identical either way, so splitting the spelling on
+            # one path would buy nothing and cost the parity the two ops share.
             raise _failure(
                 502,
                 "radient_upstream_timeout",

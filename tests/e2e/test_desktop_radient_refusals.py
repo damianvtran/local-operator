@@ -13,6 +13,7 @@ Nothing here contacts Radient: the host is a labelled stub on loopback and the
 credential is fabricated in the test's own isolated config dir.
 """
 
+import asyncio
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -46,12 +47,29 @@ class Stub:
     bearer was worth spending at all, and why "serve it and see" was tempting.
     """
 
-    def __init__(self, *, refresh: str = "ok", me_status: int = 200) -> None:
+    def __init__(
+        self, *, refresh: str = "ok", me_status: int = 200, hold_token: bool = False
+    ) -> None:
         self.refresh = refresh
         self.me_status = me_status
+        #: Set the moment a refresh POST ARRIVES, before it is answered.
+        #:
+        #: The join case needs a peer to be provably MID-REFRESH when the proxied
+        #: request arrives, and a sleep cannot establish that: under load the request
+        #: slides to one side of the window and the case stops testing what it names.
+        #: So the test waits on this instead of on the clock.
+        self.token_started = asyncio.Event()
+        #: When set, the endpoint does not ANSWER until the test says so, which lets
+        #: the test hold a peer inside its refresh for as long as the case needs.
+        self.token_gate = asyncio.Event() if hold_token else None
         #: (method, path, bearer-or-"" ) for every request that reached the stub.
         self.calls: list[tuple[str, str, str]] = []
         self.app = self._build()
+
+    def release_token(self) -> None:
+        """Answer the refresh POST a gate is holding; a no-op without one."""
+        if self.token_gate is not None:
+            self.token_gate.set()
 
     def _build(self) -> FastAPI:
         fake = FastAPI()
@@ -69,6 +87,9 @@ class Stub:
             if self.refresh == "500":
                 return JSONResponse({"error": "server_error"}, status_code=500)
             assert body["grant_type"] == "refresh_token"
+            self.token_started.set()
+            if self.token_gate is not None:
+                await self.token_gate.wait()
             return JSONResponse(
                 {"access_token": FRESH, "refresh_token": REFRESH, "expires_in": 3600}
             )
@@ -100,6 +121,18 @@ class Stub:
         """The bearers that actually reached upstream, in order — "<none>" excluded."""
         return [bearer for _method, _path, bearer in self.calls if bearer and bearer != "<none>"]
 
+    def token_posts(self) -> int:
+        """How many refresh POSTs the token endpoint received.
+
+        A COUNT, not an assertion about the count: what the store paid to answer a
+        request is invisible to the client, and this change is what makes it visible
+        — one refresh per failure was the base's cost, one per FAILING REQUEST was the
+        regression, and one per block window is what the memo buys back.
+        """
+        return sum(
+            1 for method, path, _bearer in self.calls if method == "POST" and path == "/token"
+        )
+
 
 @asynccontextmanager
 async def proxy(
@@ -108,6 +141,7 @@ async def proxy(
     *,
     refresh: str = "ok",
     me_status: int = 200,
+    hold_token: bool = False,
     seed: str = "expired",
     lease: bool = False,
 ) -> AsyncIterator[tuple[httpx.AsyncClient, Stub]]:
@@ -123,7 +157,7 @@ async def proxy(
     token = secrets.token_hex(32)
     monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
     (config_dir / "config.yml").write_text("version: 0.0.0\nvalues: {}\n")
-    stub = Stub(refresh=refresh, me_status=me_status)
+    stub = Stub(refresh=refresh, me_status=me_status, hold_token=hold_token)
     peer: AuthStore | None = None
     async with serve(stub.app) as upstream_url, serve(app) as desktop_url:
         monkeypatch.setattr(desktop_radient, "base_url", lambda: upstream_url + "/v1")
@@ -176,6 +210,16 @@ async def test_a_dead_grant_answers_the_sign_in_class_and_spends_nothing(
         )
         assert batch.status_code == 401
         assert batch.json()["detail"]["code"] == "radient_credential_refused"
+        # Six sequential refusals, the shape QA measured the cost in (R31): the base spent
+        # ONE refresh on this, the first cut of this change spent one per REQUEST — seven
+        # for six — against a token endpoint already known to refuse this grant. Two is
+        # the floor: the first request's cascade spends one and the diagnosis spends one
+        # naming it, and the rest are answered from the memoised verdict.
+        for _ in range(4):
+            again = await client.post("/v1/desktop/radient", json={"operation": "account"})
+            assert again.status_code == 401
+            assert again.json()["detail"]["details"]["reason"] == "grant_invalid"
+        assert stub.token_posts() == 2, stub.calls
 
 
 async def test_a_transient_refresh_failure_answers_the_retry_class(
@@ -183,11 +227,17 @@ async def test_a_transient_refresh_failure_answers_the_retry_class(
 ) -> None:
     """A 5xx from the token endpoint is not the account's fault: retry, do not re-sign-in."""
     async with proxy(headless_tui_env, monkeypatch, refresh="500") as (client, stub):
-        response = await client.post("/v1/desktop/radient", json={"operation": "account"})
-        assert response.status_code == 502
-        assert response.json()["detail"]["code"] == "radient_upstream_failed"
-        assert response.json()["detail"]["details"]["reason"] == "credential_unavailable"
+        for _ in range(2):
+            response = await client.post("/v1/desktop/radient", json={"operation": "account"})
+            assert response.status_code == 502
+            assert response.json()["detail"]["code"] == "radient_upstream_failed"
+            assert response.json()["detail"]["details"]["reason"] == "credential_unavailable"
         assert "GET /v1/me" not in stub.paths()
+        # The second request is answered from the diagnosis the first one paid for —
+        # the block the cascade wrote is the window in which re-asking learns nothing,
+        # and against an endpoint that HANGS rather than fails that is the difference
+        # between one page load's timeout and one per page load.
+        assert stub.token_posts() == 2, stub.calls
 
 
 async def test_a_peer_leased_refresh_never_spends_the_stale_bearer(
@@ -219,6 +269,72 @@ async def test_a_peer_leased_refresh_never_spends_the_stale_bearer(
         prices = await client.post("/v1/desktop/radient", json={"operation": "prices"})
         assert prices.status_code == 200
         assert "GET /v1/prices <none>" in stub.paths()
+
+
+async def test_a_peer_refresh_that_lands_is_joined_not_refused(
+    headless_tui_env, monkeypatch
+) -> None:
+    """THE LIVING HALF OF THE PEER CASE, and the one this suite was missing.
+
+    A peer holding the lease is not a refusal: it is a refresh that is going to
+    succeed. This test drives a REAL one — a genuine `get_oauth_access` in a second
+    store on the same `auth.db` — and holds its refresh POST open, so our request is
+    provably inside the peer's window rather than racing it, then lets the peer land
+    while our request is waiting.
+
+    The join is then asserted in the two directions that matter: our request has NOT
+    refused while the peer is still in flight, and once the peer's token is written
+    the same request answers 200 off THAT token. Before the bounded join it answered
+    502 `refresh_did_not_land` for the whole peer window, where the base answered 200
+    off the stale bearer (review round 1: a 500 ms endpoint, a request issued 50 ms
+    in, measured 502, then 200 once the peer landed). The lease-holds-and-never-lands
+    case above passes either way, which is exactly why this one has to exist.
+    """
+    async with proxy(headless_tui_env, monkeypatch, hold_token=True) as (client, stub):
+        peer = AuthStore(headless_tui_env / "auth.db")
+        try:
+            # The peer takes the cross-process lease and blocks inside the token
+            # endpoint. `token_started` is set by the endpoint itself, so when it fires
+            # the lease IS held — no sleep is asked to prove that.
+            peer_refresh = asyncio.create_task(peer.get_oauth_access("radient"))
+            await asyncio.wait_for(stub.token_started.wait(), timeout=60)
+            request = asyncio.create_task(
+                client.post("/v1/desktop/radient", json={"operation": "account"})
+            )
+            # The credentialless op, asked inside the SAME window, must not be made to wait
+            # for a credential it never needed: it falls back to running bare at once, so
+            # its line reaches the ledger before the join above can finish, and it spends
+            # no bearer even once the peer's token exists — the proof for that is below,
+            # in the ledger's ORDER rather than in a clock reading.
+            prices = await asyncio.wait_for(
+                client.post("/v1/desktop/radient", json={"operation": "prices"}), timeout=30
+            )
+            assert prices.status_code == 200
+            # Long past the one 0.05 s peer slice the store's own path waits, and past
+            # everything a refusal would have needed: a proxy that refused here would
+            # have answered already, and the window is still open because the peer's
+            # POST is gated.
+            await asyncio.sleep(0.7)
+            assert not request.done(), "the proxy refused while a peer's refresh was in flight"
+            stub.release_token()
+            response = await asyncio.wait_for(request, timeout=30)
+            assert response.status_code == 200, response.text
+            assert await peer_refresh is not None
+        finally:
+            stub.release_token()
+            peer.close()
+        # Joined, and proven joined by what the endpoint was asked: ONE refresh for the
+        # pair of us — the peer's — and the bearer we spent is the token it minted. A
+        # request that had raced the peer would have POSTed a second time, and one that
+        # had refused would have spent nothing at all.
+        assert stub.token_posts() == 1, stub.calls
+        # The peer's refresh POST, then the credentialless read that did not wait for it,
+        # then OUR read — which is on the ledger only because the peer's token exists.
+        assert stub.paths() == [
+            "POST /token <none>",
+            "GET /v1/prices <none>",
+            f"GET /v1/me {FRESH}",
+        ], stub.paths()
 
 
 async def test_an_upstream_refusal_of_a_live_bearer_is_the_credential_class(
@@ -276,5 +392,11 @@ async def test_the_apps_own_bearer_refusal_carries_no_radient_code(
         client.headers.pop("Authorization")
         response = await client.post("/v1/desktop/radient", json={"operation": "account"})
         assert response.status_code == 401
+        # Asserted as a SHAPE and as the sentence, not as "not a dict carrying a
+        # radient_ code": that form also passes for a dict with no code at all, so it
+        # would not have pinned the thing its name claims (review n1). This matters
+        # because the desktop client keys on `code` — a refusal that quietly became
+        # typed here would move this class into Radient's on the client for no reason.
         detail = response.json()["detail"]
-        assert not isinstance(detail, dict) or "radient_" not in str(detail.get("code", ""))
+        assert isinstance(detail, str)
+        assert detail == "Desktop authorization is required."
