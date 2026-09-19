@@ -17,14 +17,20 @@ the record.
 
 WHY A CLASS AND NOT A BARE ``asyncio.Event``. The latch is created on the
 SESSION's loop (``spawn_owned_session``, where the deferred task is dispatched)
-and opened by the RUNTIME. In the production path those are the same loop
-(``process.amain`` -> ``start_in_process``), and a plain ``Event`` would do. They
-are NOT the same thread under ``RuntimeServer.start()`` — thread mode runs
-``_serve`` on the runtime's own thread — and ``Event.set()`` from another thread
-sets the flag without waking the waiting loop, so the parked task would never
-run and MCP would silently never be wired. That is the exact failure this latch
-exists to prevent, so the loop is bound here and a cross-thread open hops with
+and opened by the RUNTIME. ``Event.set()`` from another thread sets the flag
+without waking the waiting loop, so the parked task would never run and MCP
+would silently never be wired. That is the exact failure this latch exists to
+prevent, so the loop is bound here and a cross-thread open hops with
 ``call_soon_threadsafe``. The contract is structural rather than a comment.
+
+AND THE TWO ARE NOT THE SAME THREAD IN PRODUCTION EITHER — that is no longer a
+contingency this latch covers on ``start()``'s behalf. ``process.amain`` reaches
+its runtime through ``RuntimeServer.start()``, so ``_serve`` runs on the
+runtime's own thread while this latch's waiter sits on the session's: the
+cross-thread branch is the one every daemon boot takes, and the paragraph above
+used to call the single-loop case "the production path". See
+``server.RuntimeServer.wait_until_published`` for the same class used the other
+way round (the waiter on the caller's loop, the open on the runtime's).
 
 Nothing in-tree pairs a gated handle with thread mode today
 (``spawn_owned_session`` is the only source of a gated handle, and its only user

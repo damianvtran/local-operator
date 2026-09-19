@@ -32,8 +32,9 @@ named as such.
   have `PPID` pointing at one other process.
 - The runtime's lifetime, socket and discoverability are **already independent
   of the spawner**: it binds its own loopback control socket
-  (`process.py:683-684` `RuntimeServer(handle, kind="daemon")` +
-  `start_in_process()`), publishes its own record
+  (`process.py` `amain`: `RuntimeServer(handle, kind="daemon")` +
+  `start()` — a thread of its own, since the serving plane was decoupled from
+  the workload), publishes its own record
   (`session/runtime/registry.py:61-79`, `<pid>.json` under `run/mobile`), holds
   its own transcript lease, and decides its own exit (`process.py:265-296`
   `_should_exit`, reaper at `:330-359`).
