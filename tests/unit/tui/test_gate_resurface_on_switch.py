@@ -39,6 +39,7 @@ import pytest
 
 from local_operator.harness.types import AskOption, AskQuestion, Message, TextContent
 from local_operator.session.attached import AttachedSession, _pending_request
+from local_operator.session.protocol import SessionProtocol
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
 from local_operator.tui import app as app_module
@@ -94,7 +95,27 @@ async def _remote(tmp_path: Path, name: str):
         await handle.dispose()
 
 
+def _attached(session: SessionProtocol | None) -> AttachedSession:
+    """The app's current session, as the concrete viewer the rig handed it.
+
+    ``OperatorApp._session`` is typed ``SessionProtocol | None`` because the app
+    accepts any session facade, but every case in these files drives a real
+    ``AttachedSession`` over an in-process runtime and probes its gate internals
+    (``_gates_detached``, ``_gate_task``) — which no protocol declares, and which
+    ``_install_probe`` needs the concrete class for.
+
+    So this is the narrowing AND a real premise check, not a cast: a rig that
+    left the app holding anything else has not set up the scenario under test,
+    and saying so here beats an ``AttributeError`` sixty lines later.
+    """
+    assert isinstance(
+        session, AttachedSession
+    ), f"expected the app to hold an AttachedSession, got {type(session).__name__}"
+    return session
+
+
 # --- instrumentation ---------------------------------------------------------
+
 
 #: The ladder in ``AttachedSession._maybe_start_gate`` (attached.py:5588-5605),
 #: in evaluation order. Each entry is (name, source line, predicate) and the
@@ -363,8 +384,7 @@ async def test_a_live_gate_resurfaces_when_the_user_switches_back(
                 assert resurfaced, (
                     f"REPRODUCED: the live {kind} card did not come back when the "
                     "user returned to the session holding it. The turn is still "
-                    "blocked and there is no surface to answer it through."
-                    + diagnosis
+                    "blocked and there is no surface to answer it through." + diagnosis
                 )
 
                 # Answerable, not merely present: a disabled card is the same
@@ -490,6 +510,10 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                 return (app._approval if kind == "approval" else app._ask_screen) is not None
 
             alpha_source = sources[alpha.session_id]
+            # Bound BEFORE the `try` because the `finally` releases it: created at
+            # its point of use below, it is unbound on any early failure and the
+            # cleanup then depends on catching `NameError` to notice.
+            release_sync = asyncio.Event()
             try:
                 assert mounted, f"the {kind} card never mounted; the premise is unmet"
                 assert not alpha_source.display_only, (
@@ -518,7 +542,6 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                 # own logic is patched.
                 client = alpha._client
                 assert client is not None
-                release_sync = asyncio.Event()
                 sync_entered = asyncio.Event()
                 real_sync = client.frontend_sync
 
@@ -635,8 +658,7 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                     "clean round trip below is not clean" + clean_diagnosis
                 )
                 assert not gate_task.done(), (
-                    "the gate resolved without the user answering it"
-                    + clean_diagnosis
+                    "the gate resolved without the user answering it" + clean_diagnosis
                 )
                 assert healed_in_place, (
                     f"REPRODUCED (H1): the user returns to the session holding the "
@@ -645,8 +667,7 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                     "session does not bring the prompt back: the commit saw "
                     "source.display_only and skipped resume_viewer_gates() "
                     "(app.py:7537), so _gates_detached stayed True and guard "
-                    "G4:5600 dropped every re-arm attempt."
-                    + clean_diagnosis
+                    "G4:5600 dropped every re-arm attempt." + clean_diagnosis
                 )
                 assert clean_resurfaced, (
                     f"REPRODUCED (H1), display_only is a PERMANENT latch: the "
@@ -656,14 +677,10 @@ async def test_a_display_only_source_never_rearms_its_gate_bridge(
                     "card back. source.display_only stayed True, so the commit at "
                     "app.py:7537 skipped resume_viewer_gates(), _gates_detached "
                     "stayed True, and guard G4:5600 dropped the gate again. The "
-                    "turn is blocked with no surface to answer it, permanently."
-                    + clean_diagnosis
+                    "turn is blocked with no surface to answer it, permanently." + clean_diagnosis
                 )
             finally:
-                try:
-                    release_sync.set()
-                except NameError:
-                    pass
+                release_sync.set()
                 gate_task.cancel()
                 await asyncio.gather(gate_task, return_exceptions=True)
 
@@ -812,9 +829,7 @@ async def test_a_local_owner_session_refuses_the_switch_before_unmounting_its_ca
                     "app.py:7328 -- a local owner has no gate bridge, so a card "
                     "destroyed here can never be rebuilt by anything."
                 )
-                assert not gate_task.done(), (
-                    "the refused switch answered the gate"
-                )
+                assert not gate_task.done(), "the refused switch answered the gate"
             finally:
                 monkeypatch.undo()
                 gate_task.cancel()

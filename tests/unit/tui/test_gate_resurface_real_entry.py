@@ -81,6 +81,7 @@ from tests.e2e.harness import ScriptedStream, build_session, seed_transcript
 # The instrumentation IS the sibling file's. Imported rather than copied so the
 # guard ladder replay cannot drift into two versions that disagree.
 from tests.unit.tui.test_gate_resurface_on_switch import (
+    _attached,
     _format,
     _install_probe,
     _pump,
@@ -172,7 +173,11 @@ def _app(rig: _Rig, boot: str, *, viewer: bool = False) -> OperatorApp:
     exercised in this file, because D turns on exactly that difference.
     """
 
-    async def resume(session_id: str) -> AttachedSession:
+    async def resume(session_id: str | None) -> AttachedSession:
+        # `str | None` because that is `OperatorApp`'s `resume_factory` contract
+        # (app.py:3419): None asks for a brand new conversation. This rig only
+        # ever resumes a seeded runtime, so None here is a bug in the test.
+        assert session_id is not None
         return await AttachedSession.connect(
             rig.servers[session_id]._record,
             session_id,
@@ -326,7 +331,7 @@ async def test_a_rapid_switching_still_rearms_the_gate_bridge(
                 assert await _pump_until(
                     pilot, lambda: app._session is not None, tries=300
                 ), "the app never adopted a session; the rig never reached its premise"
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
@@ -465,7 +470,7 @@ async def test_a_commit_that_fails_after_suspending_gates_heals_on_the_next_clic
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
@@ -583,7 +588,7 @@ async def test_a_gate_raised_while_the_session_is_backgrounded_mounts_on_return(
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 # Explicitly OFF, so the background-approval arm cannot answer
                 # for the user and turn this into a vacuous pass.
                 app._set_approve_all(False)
@@ -728,7 +733,7 @@ async def test_a_source_that_can_never_bind_loses_its_gate_card(tmp_path, monkey
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
@@ -855,7 +860,7 @@ async def test_a_second_question_in_the_same_ask_resurfaces_across_a_switch(
         with patch("local_operator.mobile.attach_client.find_runtime_record", rig.find_owner):
             async with app.run_test(size=(100, 30)) as pilot:
                 assert await _pump_until(pilot, lambda: app._session is not None, tries=300)
-                alpha, source = app._session, app._interaction
+                alpha, source = _attached(app._session), app._interaction
                 app._set_approve_all(False)
                 probe = _install_probe(monkeypatch, alpha)
 
