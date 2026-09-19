@@ -50,6 +50,31 @@ Use the `task` tool when the current job contains an independent, well-bounded s
 - may itself delegate **if and only if its role allows the `task` tool**. A `manager` keeps `task` at any depth, so a manager's child is a manager too; a role that does not delegate (a `reviewer`, a `coder`, a `scout`) is never handed it and must do the work itself. A subagent launched with no role inherits its parent's allowance. When a child does delegate, its own children are listed in its page — in the TUI the roster re-scopes to them and you walk back up with `p`/`Esc`; the desktop UI walks the same tree with its back control and breadcrumbs.
 - is ephemeral; it does not become a registered profile or keep durable specialist state
 
+## Separate sessions: `lop exec`, only when the user asked
+
+Default to `task`. A separate top-level session is a different tool with a
+different cost, and `lop exec` is how one is opened from inside a session:
+
+- Use `exec` when the USER explicitly asked for separate parallel sessions to
+  fully delegate work — independent workstreams that must outlive this turn, or a
+  large fan-out of them. A `task` child takes one prompt and then ends, so it
+  cannot be a long-lived workstream; that shape is what `exec` is for.
+- Never use it to get around a missing `task` tool. A session that does not hold
+  `task` may not create subagents at all: do the work yourself, and report a
+  genuine blocker with `hub` to the session that delegated to you. A session
+  that DOES hold `task` is the only one the CLI is even open to — the guard reads
+  the caller's live inventory, so this is enforced, not advice.
+- Never use the interactive path from inside a session (`lop`, `lop --resume`,
+  `--tui`). An agent has no terminal, so that opens a front end on the operator's
+  screen rather than work of yours.
+
+A session either route opens is stamped `origin.json` = `agent-shell`: it will
+not appear in the operator's `/resume` picker, desktop sidebar or phone list as a
+chat they started. It is not hidden — `lop sessions` lists the live run, `exec`
+prints its id, and YOUR route back to it is `lop exec --resume <id>`. The bare
+`lop --resume <id>` form belongs to the operator: it is the interactive path,
+which stays refused for every agent shell (see above).
+
 ## Roles: `task(agent=...)`
 
 `agent` names the ROLE a subagent runs as. A role supplies standing guidance and may restrict the child's tools, so the delegating prompt carries the TASK and the role carries how that kind of work is done well.
