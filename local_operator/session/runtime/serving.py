@@ -38,6 +38,15 @@ from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
 )
+from local_operator.harness.approval import (
+    LOOSENING_KEPT_BY_ASK_NOTICE as _LOOSENING_KEPT_BY_ASK_NOTICE,
+)
+from local_operator.harness.approval import (
+    LOOSENING_REFUSED_NOTICE as _LOOSENING_REFUSED_NOTICE,
+)
+from local_operator.harness.approval import (
+    loosening_is_authorised as _loosening_is_authorised,
+)
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
 from local_operator.harness.wire import bound_agent_end_for_wire
@@ -316,6 +325,17 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
         return [phase.model_dump(mode="json") for phase in phases]
     except (OSError, ValueError, TypeError):
         return None
+
+
+#: What a ROUTED approvals change must disclose about the pane's persistent
+#: marker (UX round 2, U6). The marker is fed by the pane's own `_approve_all`
+#: (`tui/app.py`), a routed command cannot move it, and after #1282 a routed
+#: `/approvals auto` is the only route that loosens a running session — so the
+#: one indicator built to survive a scrolling receipt is dark for exactly the
+#: state that route creates. Fixing the MECHANISM is a change of its own
+#: (deferred, with the measurements, on the PR); telling the operator is one
+#: clause, on the surface where the state changes, and that is what this is.
+_GATE_MARKER_CLAUSE = "; the band's ! will not follow this — /approvals re-reports the gate"
 
 
 class ServingSessionHandle(SessionHandle):
@@ -764,31 +784,42 @@ class ServingSessionHandle(SessionHandle):
         A ``config.yml`` write is the operator's machine-wide intent ("if I
         change a setting I want it to go into effect for all my agents"), so a
         session that never made a choice of its own follows the file in BOTH
-        directions. ``source`` is ignored on purpose: the runtime is never the
-        process that wrote, so every delivery is another process's edit.
+        directions — with ONE exception, the loosening rule below, which is what
+        makes the SOURCE of a policy change part of the authorization decision
+        and not merely its value.
 
-        **The rule is asymmetric, and only for a session that chose** (review
-        round 1 R1, UX round 1 U1):
+        **The rule is asymmetric, and its loosening half has two refusal
+        reasons** (review round 1 R1, UX round 1 U1; issue #1282):
 
         * **Tightening (``auto`` → ``ask``) always follows the file**,
           unconditionally, in every session. Safety propagates without
           exception; a user ends up safer than they asked, which is never the
           wrong surprise.
-        * **Loosening (``ask`` → ``auto``) does not move a session whose human
-          typed ``/approvals ask`` in it.** That session keeps its gate and
-          reads a keep notice naming the way to adopt the file instead. It is
-          the CHOSEN MODE that is consulted, not merely the fact of a choice:
-          a session whose human chose ``auto`` has no hardening to protect and
-          follows the file in both directions like any other.
+        * **Loosening (``ask`` → ``auto``) is refused unless it is attributed**
+          (#1282). Only a write THIS process made through the operator's own
+          settings facade (``source="local"``) is an operator action; a model
+          tool's own file write, an editor, another pane, the settings API in
+          another process, and ``lop config edit`` are all unattributable from
+          here, and unattributed writes may only tighten. See
+          :func:`local_operator.harness.approval.loosening_is_authorised` for
+          the rule itself and why it is `source == "local"` rather than "not
+          disk".
+        * **Loosening does not move a session whose human typed ``/approvals
+          ask`` in it** either, and that branch is checked FIRST so the more
+          specific reason is the one printed. It is the CHOSEN MODE that is
+          consulted, not merely the fact of a choice: a session whose human
+          chose ``auto`` has no hardening to protect, but this process still
+          refused the unattributed write that would have moved it.
 
         The asymmetry is the whole point. The operator asked for settings to
         REACH running sessions, which was broken and is what this change fixes;
         they did not ask for a file write to revoke a hardening a human typed
-        into a specific pane thirty seconds earlier. The parked-prompt rule
-        below already encodes that principle — a card on screen is not
-        auto-answered *because the human's presence outranks the file* — and it
-        applies one step earlier to a human who typed the mode. This mirrors
-        the model half of the same change exactly (``Session.
+        into a specific pane thirty seconds earlier, and they did not ask for a
+        model-run shell command to remove the gate from its own later calls.
+        The parked-prompt rule below already encodes the same principle — a card
+        on screen is not auto-answered *because the human's presence outranks
+        the file* — and it applies one step earlier to a human who typed the
+        mode. This mirrors the model half of the same change exactly (``Session.
         _on_configured_model_changed``, ``_explicit_model_choice``, and its
         ``keeping …`` notice), and approvals is the more dangerous of the two
         keys: an explicit ``/model`` pick was already protected while an
@@ -838,9 +869,53 @@ class ServingSessionHandle(SessionHandle):
             # opinion about the same key, but refusing a loosening on its
             # behalf would pin a session to a mode its human never asked for.
             self._emit_notice(
-                "keeping tool approvals: ask — set with /approvals in this session; "
-                "config.yml now says auto, /approvals auto adopts it",
-                "info",
+                _LOOSENING_KEPT_BY_ASK_NOTICE,
+                # `warning`, one rung above the routine `config.yml changed:`
+                # receipt's `info`: this sentence is the whole user-visible trace
+                # of a refused policy change, and `info` renders `dim` — the same
+                # ink as the routine receipt it must be told apart from (design
+                # round 1, D2). `note` would be the designer's preferred rung and
+                # is NOT available to a runtime notice: `NoticeEvent.kind` is
+                # ``Literal["info", "warning", "error"]``, so a `note` refusal
+                # would be representable only in the embedded topology — and in
+                # production (`lop` always attaches) the sentence below is the
+                # one the user actually reads. Both keep notices carry the same
+                # rung so the two refusal reasons cannot look like two events.
+                "warning",
+                headline="Approvals unchanged",
+            )
+            return
+        if wanted_auto and not _loosening_is_authorised(
+            source=getattr(change, "source", "disk"), gate_is_here=True
+        ):
+            # LOOSENING that this process cannot attribute to an operator (see
+            # ``loosening_is_authorised``): keep the gate and say so. This is
+            # the branch that makes "the party being gated is not the authority
+            # that may lower its own gate" true in the runtime, and it is why
+            # the keep sentence above is deliberately NOT reused — there, a
+            # human's own typed ``ask`` is what refused the file; here nobody
+            # in this session asked for anything.
+            #
+            # The sentence names the RULE and not the author (design round 1,
+            # D3): this process cannot know who wrote the file, and in the
+            # attached-pane case the person reading it is the one who just
+            # clicked the row — an earlier revision said "without an operator
+            # write in this session", which was simply false to them. "From
+            # outside this session" is true of an editor, of ``lop config
+            # edit``, of a model-run shell command and of that same operator's
+            # click a process away.
+            #
+            # Checked AFTER the explicit-`ask` branch so that branch keeps
+            # meaning "the human typed ask" and so the more specific reason is
+            # the one printed. Refusing means exactly one thing: ``_auto_approve``
+            # does not move and no ``tool approvals: auto`` receipt is emitted.
+            # Nothing in this process writes this key through the settings
+            # facade today (`/approvals auto` here sets the flag directly), so
+            # in practice every file-originated loosening is refused here.
+            self._emit_notice(
+                _LOOSENING_REFUSED_NOTICE,
+                # `warning` for the reason the sibling keep notice documents.
+                "warning",
                 headline="Approvals unchanged",
             )
             return
@@ -5047,17 +5122,46 @@ class ServingSessionHandle(SessionHandle):
             # asks reports a matched pair while the two genuinely disagree.
             on_disk = self._configured_approval_mode()
             if on_disk is not None and on_disk != live:
+                # The remedy is named (UX round 1, U3): this is the surface whose
+                # job is "what is in effect and why", and a divergence it
+                # discloses without naming the command that resolves it leaves
+                # the user to work out the direction themselves. `/approvals
+                # {on_disk}` is the one that MATCHES the file, so it is right in
+                # both directions — `/approvals auto` for the divergence this
+                # change makes common (a live `ask` over a file that says
+                # `auto`), and `/approvals ask` for the mirror case.
                 return SlashResult(
                     kind="notice",
                     text=(
                         f"tool approvals: {live} (this session) — {effect}; "
-                        f"config.yml says {on_disk}"
+                        f"config.yml says {on_disk} — /approvals {on_disk} adopts it in "
+                        "this session"
                     ),
                     style="warning" if self._auto_approve else "info",
                 )
+            # The matched pair, worded as the app words it (UX round 2, U10):
+            # the app-local report has always ended "new sessions open the same
+            # way" here and the runtime's stopped one clause short, which is the
+            # divergence U5 closed for the receipts. The clause is only added
+            # when the FILE was actually read and agrees — with no watcher
+            # snapshot (`None`) the runtime has nothing to say about new
+            # sessions, and inventing it would be the class of claim this whole
+            # change is about.
+            matched = f"tool approvals: {live} — {effect}"
+            if on_disk == live:
+                matched += "; new sessions open the same way"
+            # A DISARMED gate the pane's marker cannot show (UX round 2, U6):
+            # with this change a routed `/approvals auto` is the only route that
+            # loosens a running session, and the routed command cannot move the
+            # pane's `_approve_all`, which is the marker's only input — so the
+            # operator's persistent indicator stays dark and only this sentence
+            # says so. Only for `auto`: a routed tightening leaves the marker
+            # correctly dark, and the clause would be noise there.
+            if live == "auto":
+                matched += _GATE_MARKER_CLAUSE
             return SlashResult(
                 kind="notice",
-                text=f"tool approvals: {live} — {effect}",
+                text=matched,
                 style="warning" if self._auto_approve else "info",
             )
         if argument in ("ask", "on", "prompt"):
@@ -5078,12 +5182,23 @@ class ServingSessionHandle(SessionHandle):
         # hardening a file loosening must not revoke.
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._notify()
+        # "(this session)" on the LIVE half, matching the app's own receipt word
+        # for word (UX round 1, U5): the two hosts answer the same gesture, and
+        # two sentences for it read as two different facts, one of which is
+        # always the wrong half — this half governs THIS session, whatever
+        # config.yml says about the next one. The app's ASK receipt said "will
+        # prompt again" until round 2 and this one said "prompt before running"
+        # — one noun apart, which made the "word for word" above untrue for that
+        # direction (agent review round 2, nit); the app now uses this phrase,
+        # the one the reports use for the same state.
         return SlashResult(
             kind="notice",
             text=(
-                "tool approvals: auto — every tool runs without asking"
+                "tool approvals: auto — every tool runs without asking (this session)"
+                + _GATE_MARKER_CLAUSE
                 if wanted_auto
-                else "tool approvals: ask — write and command tools prompt before running"
+                else "tool approvals: ask — write and command tools prompt before running "
+                "(this session)"
             ),
             style="warning" if wanted_auto else "info",
         )

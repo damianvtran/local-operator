@@ -1832,3 +1832,95 @@ def test_the_real_validator_is_what_marks_the_shape(tmp_path, monkeypatch) -> No
     assert value == quoted.split('"')[1], value
     assert " " in value
     assert advice == settings_io.ADVICE_NOT_FOUND, advice
+
+
+class TestTheApprovalsCopyIsTrueOnBothSurfaces:
+    """The one approvals string the TUI paints, and the one the desktop paints.
+
+    ``Section.description`` has exactly ONE consumer in this repository — the
+    desktop settings header (``server/routes/settings.py``) — while the TUI page
+    paints the section TITLE and its scope tag, then the row and the row HELP.
+    The caveat #1282 adds therefore cannot live in the description alone: in the
+    production topology (``lop`` always attaches, so the gate is a runtime
+    process) the row the operator edits would go on promising that a config write
+    reaches every running session, which the runtime refuses on the next poll
+    (design round 1, D1; agent review round 1, m1).
+    """
+
+    def test_the_help_fits_the_detail_ladder_beside_its_default_clause(self) -> None:
+        """74 cells is the detail line at 80x24, and the ladder sheds WHOLE rungs.
+
+        So the budget that decides whether this sentence is on the frame at all is
+        74 minus the ``· default: ask`` suffix — the off-default state is exactly
+        the one the user is in after writing this key. Measured on the head with
+        the real page: the first cut (72 cells) painted nothing off-default at
+        80x24, and the ladder fell through to ``default: ask  tool_approval_mode``.
+        """
+        setting = settings_io.resolve_key("tool_approval_mode")
+        assert setting is not None
+        assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help
+
+    def test_the_help_drops_the_promise_that_made_it_false(self) -> None:
+        """The old help promised ``every running session … from its next call``,
+        which no longer holds in the loosening direction, and it names the route
+        that does loosen one."""
+        setting = settings_io.resolve_key("tool_approval_mode")
+        assert setting is not None
+        assert "every running session" not in setting.help, setting.help
+        assert "/approvals auto" in setting.help, setting.help
+
+    def test_the_section_description_does_not_over_claim_the_command(self) -> None:
+        """It must not say a loosening ALWAYS needs the command.
+
+        In the embedded pane the page's own write IS the gate-holding process's
+        write, so it is authorised and does loosen the session — pinned by
+        ``tests/unit/tui/test_config_change_notice.py::
+        test_the_page_says_nothing_when_its_own_write_is_authorised``. The first
+        wording said "loosening a running one needs /approvals auto in it", which
+        that test falsifies (agent review round 1, m1).
+        """
+        section = next(entry for entry in settings_io.SECTIONS if entry.name == "approvals")
+        assert "tightens every running session" in section.description, section.description
+        assert "that session's own process" in section.description, section.description
+
+
+class TestConfigEditQualifiesALoosening:
+    """``lop config edit tool_approval_mode auto`` must not read as "ungated now".
+
+    Since #1282 a ``config.yml`` write can only TIGHTEN a session that is already
+    running, and this command's process holds no gate at all, so the unqualified
+    "Successfully updated …" line was the only account of a change that reaches
+    no live agent (UX round 1, U4).
+    """
+
+    def test_the_loosening_receipt_names_the_route(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="auto"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated tool_approval_mode to auto" in out, out
+        assert "Running sessions are unchanged" in out, out
+        assert "/approvals auto in each session" in out, out
+
+    def test_a_tightening_receipt_carries_no_such_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A tightening really does reach every running session — the safe
+        direction — so the same warning there would be a false alarm."""
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        ConfigManager(tmp_path).set_config_value("tool_approval_mode", "auto")
+        code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="ask"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated tool_approval_mode to ask" in out, out
+        assert "Running sessions are unchanged" not in out, out

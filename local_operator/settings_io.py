@@ -136,11 +136,15 @@ class Scope(enum.Enum):
     #: Takes effect immediately in every running session on this machine —
     #: on the same call stack in the process that wrote it, and within
     #: ``ConfigWatcher.POLL_INTERVAL_S`` for sessions in other processes (see
-    #: :mod:`local_operator.config_watch`). Per-key caveats live on the
-    #: SECTION description (``model``: a session that chose with ``/model``
-    #: keeps its choice; ``web_tools``: the inventory catches up at the next
-    #: turn while execution refuses at once) — the scope says WHEN, the
-    #: description says what "applied" means for that key.
+    #: :mod:`local_operator.config_watch`) — SUBJECT to the per-key caveats on
+    #: the SECTION description, which is where "applied" is spelled out for a
+    #: key whose live half is conditional: ``model`` (a session that chose with
+    #: ``/model`` keeps its choice), ``web_tools`` (the inventory catches up at
+    #: the next turn while execution refuses at once), and ``approvals`` (a
+    #: LOOSENING reaches only the session whose own process wrote it, while a
+    #: tightening is unconditional — see the section description and
+    #: :func:`local_operator.harness.approval.loosening_is_authorised`). The
+    #: scope says WHEN, the description says what "applied" means for that key.
     LIVE = "live"
     #: Read when a session is built — a ``/new`` or ``/reload`` picks it up.
     #: Only ``local_providers`` carries it now: ``approvals``, ``model`` and
@@ -372,23 +376,42 @@ SECTIONS: tuple[Section, ...] = (
         "Keys for starting and resuming conversations. Press enter on a row, "
         "then press the key you want.",
     ),
-    # LIVE — a reversal of the original design, which kept the approval mode
-    # build-time on the theory that a gate flipping under a running turn is a
-    # security-relevant surprise. The operator's actual request ("if I change
-    # a setting I want it to go into effect for all my agents") is the
-    # opposite: a disk write IS the machine-wide intent, and it overrides any
-    # per-session ``/approvals`` toggle. Two rules keep it safe: the new mode
-    # applies at the next approval DECISION (``ServingSessionHandle`` reads its
-    # flag per gate call), so a prompt already parked on screen is left for
-    # the human — never auto-answered, never auto-denied; and every viewer
-    # prints the amber "tool approvals now auto" notice. ``--yolo`` is an
-    # explicit pin that outranks the key. Its own section because ``session``
-    # (autosave + cleanup) is launch-time and scope is uniform per section.
+    # LIVE — the SCOPE is right (a config write reaches every running session
+    # within a poll) and the description below carries the key's one caveat, so
+    # it is not a lie on a section header. Two rules keep the live half safe:
+    # the new mode applies at the next approval DECISION (``ServingSessionHandle``
+    # reads its flag per gate call), so a prompt already parked on screen is left
+    # for the human — never auto-answered, never auto-denied; and a LOOSENING is
+    # only honoured when the process holding the gate made the write itself
+    # through this facade (issue #1282, ``harness.approval
+    # .loosening_is_authorised``) — a model-run shell command rewriting
+    # ``config.yml``, an editor, another pane, the settings API elsewhere, and
+    # ``lop config edit`` may all TIGHTEN a running session and none may loosen
+    # one. ``--yolo`` is an explicit pin that outranks the key. Its own section
+    # because ``session`` (autosave + cleanup) is launch-time and scope is
+    # uniform per section.
+    #
+    # THE DESCRIPTION BELOW IS THE ONLY APPROVALS CAVEAT THIS REGISTRY CARRIES,
+    # and it has exactly ONE consumer: the desktop settings header
+    # (``server/routes/settings.py`` -> the section header component). The TUI
+    # ``/settings`` page paints the section TITLE and its scope tag, then the
+    # ROW and the row HELP (``Tool approval mode`` / ``tool_approval_mode``'s
+    # own ``help``) — never this sentence — so the row help has to stand on its
+    # own and say the same thing in its own cell budget (58 cells of the 74-cell
+    # detail line, which must still fit its ``· default: ask`` clause; the
+    # measurement is at that row. Design round 1, D1; agent review round 1,
+    # m1). Keep the two in step: both must be TRUE for the embedded
+    # pane (whose own page write IS the gate-holding process's write, and so
+    # does loosen) and for the attached one (where only ``/approvals auto`` in
+    # the session loosens).
     Section(
         "approvals",
         "Approvals",
         Scope.LIVE,
-        "Whether write and command tools prompt, in every running session.",
+        "Whether write and command tools prompt, in every running session. A config "
+        "write tightens every running session at once; loosening one needs a write "
+        "from that session's own process (/approvals auto in it, or a /settings page "
+        "in that process).",
     ),
     # NEW_LAUNCH, honestly: ``auto_save_conversation`` is read ONCE by the CLI
     # at process start (``cli.py`` sets ``args.train``) to pick the transcript
@@ -1696,8 +1719,26 @@ SETTINGS: tuple[Setting, ...] = (
         label="Tool approval mode",
         kind=Kind.ENUM,
         default="ask",
-        # 74 cells — see the note on `hosting`.
-        help="How every running session treats write and exec tools, from its next call.",
+        # 58 cells, and the number is the LADDER's, not a taste call. The detail
+        # line composes ``<help> · default: <default>`` when the row is off its
+        # default and sheds whole rungs to fit — so the budget that decides
+        # whether this sentence is on the frame at all is 74 cells MINUS the
+        # 15-cell ``· default: ask`` suffix, i.e. 59. Measured on the head with
+        # the real page: the 72-cell sentence I first wrote (design round 1,
+        # D1's recommendation, which was measured against the width with no
+        # clause) painted NOTHING off-default at 80x24 — the ladder fell through
+        # to ``default: ask   tool_approval_mode``, which is exactly the state the
+        # operator is in after the write this change is about. Verified again
+        # after this edit: 80x24 off-default shows the help and the clause, and
+        # only 60 cols ellipsizes (today's string already did).
+        #
+        # The sentence is the SECTION description's rule in the TUI's own words —
+        # one clause, no head — because that description is painted by the desktop
+        # header alone and this is the only approvals copy the TUI page shows
+        # (design round 1, D1; agent review round 1, m1). Both must stay true for
+        # the embedded pane (whose own page write IS the gate-holding process's
+        # write) and for the attached one.
+        help="Loosening needs a write in this session — /approvals auto.",
         choices=(
             Choice("ask", "ask", "prompt before write/exec tools"),
             Choice("auto", "auto", "run them without asking"),
