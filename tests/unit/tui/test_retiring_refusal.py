@@ -37,10 +37,12 @@ from typing import Any
 import pytest
 
 from local_operator.session.errors import RuntimeRetiring, admission_error
+from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 from local_operator.tui.app import (
     DRAIN_NOTICE,
     DRAIN_NOTICE_OTHER,
+    PROMPT_QUEUED_NOTICE,
     RESTORE_SEAM,
     SIGNAL_DRAIN_NOTICE,
     OperatorApp,
@@ -579,3 +581,107 @@ def test_the_facade_only_acts_on_a_draining_frame() -> None:
         LEAVING_FOR_BUILD,
         "",
     ], fired
+
+
+# -- the THIRD outcome: the message is queued for the build replacing this one -----
+#
+# The refusal above is the fallback, not the ordinary path any more. A draining
+# runtime spools the user's own prompt for its successor (memo §4.2), and the
+# answer it gives is a receipt rather than an exception — so the two behaviours
+# the refusal branch exists for are exactly WRONG here: there is nothing to hand
+# back (the successor has the message) and nothing to retract (the row stands for
+# a message that will run). What the operator cannot see without help is WHERE it
+# went, which is what these cells pin.
+
+
+def _queued_session() -> FakeSession:
+    """A session whose runtime queued the message for the build taking over."""
+    session = FakeSession()
+
+    async def prompt(text: str, images: Any = None, **kwargs: Any) -> str:
+        return SPOOL_RECEIPT_PROMPT
+
+    session.prompt = prompt  # type: ignore[assignment]
+    return session
+
+
+def _admitting_session() -> FakeSession:
+    """The ordinary case, which must stay silent."""
+    session = FakeSession()
+
+    async def prompt(text: str, images: Any = None, **kwargs: Any) -> str:
+        return "prompt admitted"
+
+    session.prompt = prompt  # type: ignore[assignment]
+    return session
+
+
+async def _send_expecting_a_notice(pilot: Any, editor: Editor, text: str) -> None:
+    """Submit, then wait for the row the prompt worker paints.
+
+    ``_send``'s own wait is on the composer refilling, which is precisely what
+    must NOT happen for a queued message.
+    """
+    editor.text = text
+    await pilot.pause()
+    await pilot.press("enter")
+    for _ in range(100):
+        await pilot.pause()
+        await asyncio.sleep(0.01)
+        if _notices(pilot.app):
+            return
+
+
+@pytest.mark.asyncio
+async def test_a_queued_prompt_keeps_its_row_and_is_never_shown_as_refused() -> None:
+    """The receipt the drain hands back is not a refusal, and must not be read as one.
+
+    Everything the refusal branch does here would be a falsehood: the draft is
+    not returned (the successor holds the message, and a composer copy invites
+    the user to send it twice), the echo row is not withdrawn (the message is
+    real and the successor runs it), and the standing row says where it went.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_expecting_a_notice(pilot, editor, "deploy the fix")
+
+        assert editor.text == "", "a queued message was handed back as unsent"
+        assert _user_texts(app) == ["deploy the fix"], "the row for a queued message was retracted"
+
+        notices = _notices(app)
+        assert [n._text for n in notices] == [PROMPT_QUEUED_NOTICE], [n._text for n in notices]
+        # `note`, not the refusal's `warning`: nothing has gone wrong and nothing
+        # is being asked of the user (the drain notice it continues uses the same
+        # ink for the same reason).
+        assert (notices[0]._token, notices[0]._glyph) == ("muted", "\u00b7"), (
+            notices[0]._token,
+            notices[0]._glyph,
+        )
+        assert "queued" in notices[0]._text
+        # The refusal's own copy must not appear: this message is not coming back.
+        assert "back in the composer" not in notices[0]._text
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_prompt_paints_no_handover_row() -> None:
+    """The receipt is matched by IDENTITY, so the ordinary answer stays silent.
+
+    ``prompt admitted`` is the durable append and needs no explanation; a viewer
+    that painted the handover row for it (or for any other receipt) would tell the
+    user their message was deferred when it was already in the history.
+    """
+    session = _admitting_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        editor.text = "an ordinary message"
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+
+        assert _notices(app) == [], [n._text for n in _notices(app)]
+        assert _user_texts(app) == ["an ordinary message"]
