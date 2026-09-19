@@ -391,7 +391,13 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     # round 1, U3): the runtime's report used to stop at the divergence, leaving
     # the one surface whose job is "what is in effect and why" to describe a
     # problem without its answer.
-    assert "/approvals auto adopts it in this session" in text, text
+    #
+    # ...AND IT NAMES WHERE THE REMEDY WORKS (design round 1 D3, UX round 1
+    # U1/U2): this handle cannot see which connection asked, so naming
+    # `/approvals auto` alone sent a follower pane to a command the same pane
+    # refuses. The sentence therefore carries the place with it.
+    assert "/approvals auto adopts it, typed in the terminal or app window" in text, text
+    assert "started this session" in text, text
     await handle.dispose()
 
 

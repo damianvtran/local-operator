@@ -98,10 +98,14 @@ session at once, which is the safe direction.
 **The command route can tighten a running gate but cannot loosen one** (issue
 #1310). `/approvals auto` over
 `POST /v1/desktop/sessions/{id}/commands` is refused unless this backend is the
-process that started the session's runtime; the refusal names the remedies
-(`/approvals default auto` before starting, `--yolo`, or typing it in the
-console). `/approvals ask`, a bare `/approvals`, every other command and every
-non-approval op are unaffected. The app must present the refusal as an ordinary
+process that started the session's runtime; the refusal is **422** with
+`{"code": "operator_authority_required", "message": <copy>}`, and the copy names
+the remedies (`--yolo` or `tool_approval_mode: auto` for the next session, or
+typing it in the terminal or app window that started this one). `/approvals ask`,
+a bare `/approvals`, every other command and every non-approval op are
+unaffected. The CARD route answers the same 422 with `still_pending: true`,
+because the card is still parked — it is not `409 no longer pending`, which
+would say the question expired. The app must present the refusal as an ordinary
 command error rather than retrying, and must not imply the mode changed.
 The frontend must obtain explicit default scope and premium-pricing consent in
 its forms. Retain locally selected images while presenting an interactive action.

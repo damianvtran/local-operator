@@ -45,6 +45,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from local_operator.mobile.attach_client import AttachClient
 
+from local_operator.harness.approval import (
+    frame_authority,
+    handshake_proof_ok,
+    is_wire_hex,
+    operator_cap_for,
+    operator_nonce,
+    request_proof,
+)
 from local_operator.mobile.auth import (
     COOKIE_NAME,
     check_password,
@@ -259,6 +267,16 @@ class SessionEntry:
         self.record = record
         self.projection: SessionProjection | None = None
         self.writer: asyncio.StreamWriter | None = None
+        #: The operator handshake's state for THIS connection (issue #1310). The
+        #: relay is a legitimate console exactly when it spawned the runtime —
+        #: the phone's "new session" path does that, a relay watching a
+        #: terminal's session does not — so the capability is resolved per dial
+        #: and the proof is only ever attached on an authority-increasing frame.
+        #: Set by ``_dial`` (auth + welcome) and read by ``request``.
+        self.operator_cap: bytes | None = None
+        self.operator_nonce = ""
+        self.operator_salt = ""
+        self.authority_bearing = False
         self.ready = asyncio.Event()
         self.next_dial_at: float = 0.0
         self.degraded = False
@@ -935,6 +953,47 @@ class _OversizedControlFrames:
 _OVERSIZED_CONTROL_FRAMES = _OversizedControlFrames()
 
 
+def _adopt_operator_handshake(entry: SessionEntry, frame: dict[str, Any]) -> None:
+    """Verify the runtime's proof that it holds the capability this relay holds.
+
+    The welcome is the only frame that carries it (see
+    ``RuntimeServer._welcome_operator_proof``), and it is checked BEFORE any
+    authority-increasing request is written for this connection. A record
+    rewritten to point this dial at an impostor gets no proof, so nothing is
+    presented to it — the harness/approval ``_proof`` rationale, applied to the
+    relay's own socket rather than only to the attach client's.
+    """
+    entry.operator_salt = ""
+    entry.authority_bearing = False
+    if entry.operator_cap is None or not entry.operator_nonce:
+        return
+    salt = frame.get("operator_salt")
+    if is_wire_hex(salt) and handshake_proof_ok(
+        supplied=frame.get("operator_proof"),
+        held=entry.operator_cap,
+        client_nonce=entry.operator_nonce,
+        server_salt=str(salt),
+    ):
+        entry.operator_salt = str(salt)
+        entry.authority_bearing = True
+
+
+def _operator_request_proof(entry: SessionEntry, op: str, fields: dict[str, Any]) -> str | None:
+    """This connection's proof for an authority-increasing frame, else ``None``.
+
+    ``None`` covers every ordinary request — leaving the frame byte-identical to
+    what an older runtime served — and every connection whose runtime never
+    proved it holds the same capability.
+    """
+    if not entry.authority_bearing or entry.operator_cap is None:
+        return None
+    if frame_authority({"op": op, **fields}) != "authority-increasing":
+        return None
+    return request_proof(
+        entry.operator_cap, client_nonce=entry.operator_nonce, server_salt=entry.operator_salt
+    )
+
+
 async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
     """Open (or re-open) the control socket to one registrant and pump its
     frames until the connection dies. One task per session."""
@@ -966,7 +1025,22 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         # PERSON is (`ClientLocality`). The daemon is the one client today for
         # which those differ, and `mobile/types.py` already admits
         # ``slash_result``, so the phone can reach `/mcp reauth` through it.
-        writer.write(json.dumps({"key": record.control_key, "locality": "remote"}).encode() + b"\n")
+        # THE RELAY'S HALF OF THE OPERATOR HANDSHAKE (issue #1310, UX round 1
+        # U3). The relay is a console for the sessions IT started — the phone's
+        # "new session" path spawns the runtime from this process — and a
+        # follower for everyone else's. Resolving that here, per dial, is what
+        # makes the surface table's "works iff the relay spawned that runtime"
+        # true rather than aspirational: this frame carried no nonce before, so
+        # NO phone command could ever loosen a gate its own relay owned.
+        entry.operator_cap = operator_cap_for(record.pid)
+        entry.operator_nonce = operator_nonce() if entry.operator_cap is not None else ""
+        entry.operator_salt = ""
+        entry.authority_bearing = False
+        auth: dict[str, Any] = {"key": record.control_key, "locality": "remote"}
+        if entry.operator_nonce:
+            # A nonce, never the capability: see ``harness/approval._proof``.
+            auth["operator_nonce"] = entry.operator_nonce
+        writer.write(json.dumps(auth).encode() + b"\n")
         await writer.drain()
         while True:
             try:
@@ -999,6 +1073,7 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
                 continue
             op = frame.get("op")
             if op in ("projection", "welcome"):
+                _adopt_operator_handshake(entry, frame)
                 try:
                     data = frame.get("data") or {}
                     incoming = _projection_from_json(data, record)
@@ -1890,7 +1965,11 @@ class MobileDaemon:
         # never written.
         from local_operator.mobile.attach_client import fit_request_frame
 
-        frame = await fit_request_frame({"op": op, "req": req, **fields})
+        frame: dict[str, Any] = {"op": op, "req": req, **fields}
+        proof = _operator_request_proof(entry, op, fields)
+        if proof is not None:
+            frame["operator_cap"] = proof
+        frame = await fit_request_frame(frame)
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_reqs[(pid, req)] = future
         try:
@@ -1900,6 +1979,15 @@ class MobileDaemon:
         finally:
             self._pending_reqs.pop((pid, req), None)
         if reply.get("op") == "error":
+            # A TYPED refusal when the frame names one, so the phone's HTTP layer
+            # can carry the copy verbatim (its ``ValueError`` arm answers 422) and
+            # a client can key on the category rather than on the sentence; any
+            # other error keeps the bare message it always had.
+            from local_operator.session.errors import admission_error
+
+            known = admission_error(str(reply.get("error_code", "")))
+            if known is not None:
+                raise known
             raise RuntimeError(str(reply.get("message", "request failed")))
         return reply
 

@@ -1860,3 +1860,102 @@ def test_the_search_route_names_the_store_it_could_not_read(tmp_path, monkeypatc
         "the screen the operator actually looks at must be able to tell an "
         "unreadable store from an empty one"
     )
+
+
+class _SlashHandle(FakeHandle):
+    """``FakeHandle`` plus the one op the authority seam guards (issue #1310)."""
+
+    async def run_slash_authoritative(  # noqa: ANN001, ANN202
+        self, command, args, images, locality=None, consumers=None
+    ):
+        return await self._record("slash_result", command, args)
+
+
+@pytest.mark.asyncio
+async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
+    operator_cap: bytes,
+) -> None:
+    """THE PHONE'S HALF, and the surface table's claim made true (UX round 1, U3).
+
+    ``MobileDaemon.request`` writes its own frames rather than going through
+    ``AttachClient._present_authority``, so before this the phone could never
+    loosen or approve ANYTHING — including a session whose runtime the relay
+    itself had started, which is the one case the table promises works. The
+    relay is a legitimate console exactly when it spawned the runtime, so the
+    capability is resolved per dial (``_dial``) and the proof attached per
+    request (``_operator_request_proof``).
+
+    Three claims, and the third is what stops the first from being vacuous:
+
+    * a relay dialling a runtime IT started completes the handshake and its
+      ``/approvals auto`` reaches the sink — a receipt, not a refusal;
+    * the same relay dialling a runtime another process started completes no
+      handshake, so its request is refused with the typed category rather than
+      a bare message (which is what the phone's HTTP layer renders as 422);
+    * an ORDINARY request still works on the refused connection, because the
+      seam guards one class and nothing else.
+    """
+    from local_operator.harness.approval import reset_operator_caps_for_tests
+    from local_operator.session.errors import OperatorAuthorityRequired
+
+    handle = _SlashHandle()
+    # ``operator_cap`` registers the value under THIS process's pid, which is
+    # the key ``_dial`` resolves against — i.e. "this relay started it".
+    registrant = RuntimeServer(handle, kind="tui", operator_cap=operator_cap)
+    registrant.start()
+    try:
+        deadline = asyncio.get_running_loop().time() + 5
+        record = None
+        while asyncio.get_running_loop().time() < deadline:
+            found = registry.scan()
+            if found and found[0][1] == "live":
+                record = found[0][0]
+                break
+            await asyncio.sleep(0.1)
+        assert record is not None
+
+        daemon = MobileDaemon(port=0, password="pw")
+        entry = SessionEntry(record)
+        daemon.table.entries[record.pid] = entry
+        dial = asyncio.ensure_future(_dial(daemon, entry))
+        try:
+            for _ in range(50):
+                if entry.authority_bearing:
+                    break
+                await asyncio.sleep(0.1)
+            assert entry.authority_bearing, "the relay did not complete the handshake it owns"
+
+            reply = await daemon.request(
+                record.pid, "slash_result", command="approvals", args="auto", images=[]
+            )
+            assert reply["op"] == "result", reply
+            assert handle.calls[-1][0] == "slash_result"
+        finally:
+            dial.cancel()
+
+        # THE SAME RELAY, A RUNTIME IT DID NOT START: nothing to present. The
+        # capability table is dropped rather than the registrant restarted,
+        # because the two ends of this claim are "this process holds a value for
+        # that pid" and "it does not" — which is exactly what the table is.
+        reset_operator_caps_for_tests()
+        entry2 = SessionEntry(record)
+        daemon.table.entries[record.pid] = entry2
+        dial = asyncio.ensure_future(_dial(daemon, entry2))
+        try:
+            for _ in range(50):
+                if entry2.projection is not None:
+                    break
+                await asyncio.sleep(0.1)
+            assert entry2.authority_bearing is False
+            with pytest.raises(OperatorAuthorityRequired):
+                await daemon.request(
+                    record.pid, "slash_result", command="approvals", args="auto", images=[]
+                )
+            # An ORDINARY op is unaffected on the same connection: the seam
+            # guards one class, and the phone keeps everything else.
+            reply = await daemon.request(record.pid, "prompt", text="hello")
+            assert reply["op"] == "ack"
+        finally:
+            dial.cancel()
+    finally:
+        registrant.close()
