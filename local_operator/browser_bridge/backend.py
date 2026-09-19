@@ -561,9 +561,35 @@ class HostCapabilities:
     #: predates the field), and this is the only thing that separates them
     #: (design §6.4; review round 1, R4).
     capabilities_known: bool = False
+    #: The methods this build CAN serve but whose OPERATOR switch is off.
+    #:
+    #: Read from the same record as `methods`, and the reason the three states are
+    #: distinguishable at all: `methods` alone says a method is unavailable, and
+    #: this says WHY when the reason is a consent the user can change (design
+    #: §17.13). Empty when the peer never reported switches, so a pre-switch build
+    #: reads exactly as it did before.
+    #:
+    #: Declared AFTER ``capabilities_known`` on purpose: the three fields above are
+    #: positional at their call sites, and a field inserted in the middle would
+    #: silently reassign a test's third argument to "disabled".
+    disabled: tuple[str, ...] = ()
+    #: Whether that peer's record carries a switch answer at all — the daemon's own
+    #: stamp (state.BridgeState.switches_known). Without it an empty `disabled`
+    #: would be indistinguishable from "this build has no switches", and the copy
+    #: would offer a switch to a user who has no such switch to turn on.
+    switches_known: bool = False
 
     def serves(self, method: str) -> bool:
         return method in self.methods
+
+    def switched_off(self, method: str) -> bool:
+        """Whether the peer REPORTED this method as switched off by its operator.
+
+        Separate from ``serves`` on purpose: a caller that only asked "is it
+        available" would lose the difference between a build that cannot and a
+        consent that is absent, which is the whole distinction the record carries.
+        """
+        return method in self.disabled
 
 
 #: The remedy sentence for a capability refusal, per host. Two hosts, two
@@ -599,6 +625,8 @@ def capability_refusal(
             "advertised": sorted(current.methods),
             "extension_version": current.version,
             "capabilities_known": current.capabilities_known,
+            "disabled": sorted(current.disabled),
+            "switches_known": current.switches_known,
             "host": host,
         },
     )
@@ -607,18 +635,22 @@ def capability_refusal(
 def _capability_message(error: BridgeError, *, host: str) -> str:
     """The model-facing sentence for a `capability_unsupported`.
 
-    Four cases, and they must not be merged: a method NO build of this host can
-    serve (an extension cannot choose a download destination at all — see
-    ``EXTENSION_CANNOT_SERVE``), a host that predates the feature (its build can
-    be updated), a BRIDGE that predates the advertisement (so the extension was
-    never asked what it can do — restart the bridge), and a current host that did
-    not advertise it (which is a wedge, not a version). Getting this wrong sends
-    the user to a remedy that cannot help, which is the defect
-    `OWNERSHIP_MIN_EXTENSION_VERSION` exists to stop repeating.
+    Five cases, and they must not be merged. The extension host's two
+    unavailability answers are the ones this function exists to keep apart, because
+    only one of them is about VERSION: a build that cannot serve the method at all
+    (update it — `CAPABILITY_MIN_EXTENSION_VERSION`), and a build that can serve it
+    while its OPERATOR has not turned the capability's switch on (send the user to
+    the switch; no update can help). The rest are a BRIDGE that predates the
+    advertisement (so the extension was never asked what it can do — restart the
+    bridge), a host that is not attached at all, and a current host that did not
+    advertise it and did not report a switch (which is a wedge, not a version).
+    Getting this wrong sends the user to a remedy that cannot help, which is the
+    defect `OWNERSHIP_MIN_EXTENSION_VERSION` exists to stop repeating.
     """
     from local_operator.browser_bridge.protocol import (
         CAPABILITY_MIN_EXTENSION_VERSION,
-        EXTENSION_CANNOT_SERVE,
+        CAPABILITY_SWITCH_LABEL,
+        CAPABILITY_SWITCH_LOCATION,
     )
 
     method = str(error.data.get("method") or "that action")
@@ -630,20 +662,22 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
             f"the app that answered was built before this action existed. Please {remedy}; "
             "every other browser action still works."
         )
-    if method in EXTENSION_CANNOT_SERVE:
-        # Measured, and NOT a version problem: Chrome refuses the only two CDP
-        # primitives that could put a file where the harness chooses to a
-        # tab-scoped `chrome.debugger` session, so no extension build can serve
-        # this — telling the user to update would send them to a fix that does
-        # not exist. The desktop app's host can (Electron's `will-download` plus
-        # `setSavePath`), and `bash` + `curl` covers a URL the agent already has.
-        return (
-            f"the browser extension cannot serve '{method}': Chrome does not let an extension "
-            "choose where a download goes, so no extension build can offer it. Use the Local "
-            "Operator desktop app's browser tab instead (open a browser tab there and retry), "
-            "or fetch the file directly with bash + curl. Nothing else about this tab is "
-            "affected."
-        )
+    if str(error.data.get("method") or "") in (error.data.get("disabled") or []):
+        # The OPERATOR'S consent, not a version: this build serves the method and
+        # the switch is off. Named by its own label and located, because a refusal
+        # that says "not enabled" without saying WHERE leaves the user hunting
+        # through a popup, an options page and Chrome's own extension page. The
+        # switch label comes from `CAPABILITY_SWITCH_LABEL` and the same generated
+        # table backs the extension's copy, so the user reads the same words in
+        # both places.
+        label = CAPABILITY_SWITCH_LABEL.get(method)
+        if label:
+            return (
+                f"'{method}' is switched off in the browser extension: the operator has not "
+                f'turned on "{label}" in {CAPABILITY_SWITCH_LOCATION}. Ask the user to turn '
+                f"it on there, then retry — nothing else about this tab is affected. (No "
+                "update is involved: this build can already serve it.)"
+            )
     if not peer:
         return (
             f"no browser is attached, so '{method}' cannot run. Ask the user to open their "
@@ -664,10 +698,21 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         )
     minimum = CAPABILITY_MIN_EXTENSION_VERSION.get(method)
     if minimum and extension_older(peer, minimum):
+        # The update remedy, plus the switch hint when the first build that serves
+        # this method ALSO gates it: without the hint the user updates, retries, and
+        # meets the same refusal for a different reason — the second misdiagnosis in
+        # a row, which is the thing this function is written to avoid.
+        label = CAPABILITY_SWITCH_LABEL.get(method)
+        hint = (
+            f' After updating, turn on "{label}" in {CAPABILITY_SWITCH_LOCATION}; the '
+            "capability is off until the operator enables it there."
+            if label
+            else ""
+        )
         return (
             f"the attached browser extension (version {peer}) does not provide '{method}': the "
             f"first version that does is {minimum}. Please {remedy}; nothing else about this "
-            "tab is affected."
+            f"tab is affected.{hint}"
         )
     return (
         f"the attached browser extension reports version {peer} but did not advertise "
@@ -814,13 +859,19 @@ class HostClient:
             getattr(current, "extension_version", "") or getattr(current, "app_version", "")
         )
         return HostCapabilities(
-            tuple(str(name) for name in methods),
-            version,
+            methods=tuple(str(name) for name in methods),
+            version=version,
             # Only the bridge writes this, and only a bridge at or after the
             # advertisement sets it true (state.BridgeState.capabilities_known).
             # The app host has no equivalent and needs none: its remedy
             # ("update the app") is correct whether or not it knew the field.
-            bool(getattr(current, "capabilities_known", False)),
+            capabilities_known=bool(getattr(current, "capabilities_known", False)),
+            # The switch answer, read the same way and blank-safe: an absent key is
+            # the empty tuple, which is what a pre-switch record must read as.
+            disabled=tuple(
+                str(name) for name in (getattr(current, "disabled_capabilities", None) or [])
+            ),
+            switches_known=bool(getattr(current, "switches_known", False)),
         )
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:

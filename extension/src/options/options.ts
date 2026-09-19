@@ -1,5 +1,11 @@
 import { DEFAULT_PORT, getLocal } from "../state";
 import { PROTO_VERSION } from "../protocol.gen";
+import {
+  capabilityEnabled,
+  permissionHeld,
+  switchPermission,
+  writeSwitch,
+} from "../consent";
 import { allowAllView, nextAllowAllView, type AllowAllAction, type AllowAllView } from "./allow-all-flow";
 import { grantRows, removeGrantAccessibleName, revokeMessageFor } from "./grant-list";
 import { runWorkerMutation } from "./mutation-flow";
@@ -98,6 +104,7 @@ async function render(): Promise<void> {
   allowAllStored = local.allowAllSites === true;
   paintAllowAll(allowAllView(allowAllStored));
   await renderStatus();
+  await renderConsent();
   sites.replaceChildren();
   const entries = grantRows(origins, local.hostGrants, local.siteGrants);
   // While every website is allowed these rows grant nothing extra, so the
@@ -151,6 +158,159 @@ document.getElementById("sites-superseded-off")?.addEventListener("click", async
   await applyAllowAll({ type: "turn_off" });
   await render();
 });
+
+const allowDownloads = document.getElementById("allow-downloads") as HTMLInputElement;
+const allowUploads = document.getElementById("allow-uploads") as HTMLInputElement;
+const downloadsNotice = document.getElementById("downloads-notice") as HTMLParagraphElement;
+const uploadsNotice = document.getElementById("uploads-notice") as HTMLParagraphElement;
+
+/* The two file-transfer switches.
+ *
+ * THE PAGE IS THE ONLY WRITER (`consent.ts` rule 1) and the ONLY place the
+ * optional `downloads` permission is requested. Both switches paint from the
+ * EFFECTIVE state — flag AND permission — never from the flag alone, which is
+ * what stops the page showing "on" for a capability Chrome has since revoked.
+ */
+
+function notice(target: HTMLParagraphElement, message: string): void {
+  target.textContent = message;
+  target.classList.toggle("hidden", message === "");
+}
+
+/** Paint both switches (and their notices) from live state. */
+async function renderConsent(): Promise<void> {
+  const [downloadsOn, uploadsOn] = await Promise.all([
+    capabilityEnabled("download"),
+    capabilityEnabled("upload"),
+  ]);
+  allowDownloads.checked = downloadsOn;
+  allowUploads.checked = uploadsOn;
+  // A notice is only ever painted by an ACTION (a denial, a revocation, a
+  // refusal to drop the grant), so painting clears nothing on a plain render:
+  // the state the user has to read must survive a repaint, but a stale notice
+  // about an action they have since answered must not.
+}
+
+/** Turn `Allow downloads` on: the permission request happens HERE, on the click.
+ *
+ * `chrome.permissions.request` must be called from a user gesture, which is
+ * exactly why the switch — and not a background path — is the only way to turn
+ * this capability on: there is no code path from the daemon, a page or a tool
+ * call to this function's input. A refusal leaves the switch OFF and says so;
+ * the stored flag is written only AFTER the grant, so the state the user sees is
+ * never the state they were denied (the failure mode consent.ts rule 2 exists
+ * for). */
+async function enableDownloads(): Promise<void> {
+  const permission = switchPermission("download");
+  const api = chrome.permissions;
+  let granted = true;
+  if (permission && api?.request) {
+    try {
+      granted = await api.request({
+        permissions: [permission as chrome.runtime.ManifestPermissions],
+      });
+    } catch {
+      // A thrown request is not a grant. Same direction as a denial, because the
+      // only safe reading of "we could not ask" is "not granted".
+      granted = false;
+    }
+  } else if (permission) {
+    granted = false;
+  }
+  if (!granted) {
+    // The switch must not stay where the user put it: Chrome refused, so the
+    // capability is not available and a switch reading ON would be a lie the
+    // very next refusal would contradict.
+    await writeSwitch("download", false);
+    await renderConsent();
+    notice(
+      downloadsNotice,
+      `Chrome did not grant the '${permission}' permission, so downloads stay off. You can turn this on again — Chrome will ask once more.`,
+    );
+    return;
+  }
+  await writeSwitch("download", true);
+  await renderConsent();
+  notice(downloadsNotice, "Downloads are on. Turn this off to stop the agent saving files.");
+  flash("Downloads are now allowed.");
+}
+
+/** Turn `Allow downloads` off, and hand the permission back.
+ *
+ * The grant is RELEASED, not merely ignored: the switches are the consent
+ * boundary, and leaving an extension holding a permission none of its switches
+ * justifies is the state a user revoking access in Chrome is trying to leave. A
+ * failed removal is reported rather than hidden — the capability is still off
+ * (the flag decides), but the browser still lists the grant, and only the user
+ * can remove it from there. */
+async function disableDownloads(): Promise<void> {
+  await writeSwitch("download", false);
+  const permission = switchPermission("download");
+  const api = chrome.permissions;
+  let removed = true;
+  if (permission && api?.remove) {
+    try {
+      removed = await api.remove({
+        permissions: [permission as chrome.runtime.ManifestPermissions],
+      });
+    } catch {
+      removed = false;
+    }
+  }
+  await renderConsent();
+  notice(
+    downloadsNotice,
+    removed
+      ? "Downloads are off, and the downloads permission has been handed back to Chrome."
+      : `Downloads are off. Chrome still lists the '${permission}' permission for this extension — remove it in chrome://extensions if you want it gone as well.`,
+  );
+  flash("Downloads are no longer allowed.");
+}
+
+async function applyUploads(checked: boolean): Promise<void> {
+  await writeSwitch("upload", checked);
+  await renderConsent();
+  notice(
+    uploadsNotice,
+    checked
+      ? "Uploads are on. Turn this off to stop the agent attaching your files."
+      : "Uploads are off, so the agent cannot attach any local file to a page.",
+  );
+  flash(checked ? "Uploads are now allowed." : "Uploads are no longer allowed.");
+}
+
+allowDownloads.addEventListener("change", () => {
+  // While the request is in flight, and again if it is refused, the switch shows
+  // the state the capability is REALLY in rather than the click's optimism.
+  allowDownloads.disabled = true;
+  const action = allowDownloads.checked ? enableDownloads() : disableDownloads();
+  void action.finally(() => {
+    allowDownloads.disabled = false;
+  });
+});
+allowUploads.addEventListener("change", () => void applyUploads(allowUploads.checked));
+
+// A grant can be removed from OUTSIDE this page — chrome://extensions, an
+// enterprise policy, another window — and the switch must follow immediately
+// rather than keep claiming a capability that is gone. The stored flag is
+// repaired too, so a later repaint cannot resurrect the "on" reading.
+chrome.permissions?.onRemoved?.addListener((removed) => {
+  void (async () => {
+    const permission = switchPermission("download");
+    if (permission && removed.permissions?.includes(permission as chrome.runtime.ManifestPermissions)) {
+      await writeSwitch("download", false);
+      await renderConsent();
+      notice(
+        downloadsNotice,
+        "Chrome removed the downloads permission, so downloads are off. Turn the switch on again to ask for it once more.",
+      );
+    }
+  })();
+});
+// The other direction, for completeness: a grant added in chrome://extensions
+// leaves the switch off (the switch is the consent, not the grant), but the page
+// re-reads so its notices cannot describe a state that has moved.
+chrome.permissions?.onAdded?.addListener(() => void renderConsent());
 
 document.getElementById("unpair")?.addEventListener("click", async () => {
   const beforeUnpair = await getLocal();

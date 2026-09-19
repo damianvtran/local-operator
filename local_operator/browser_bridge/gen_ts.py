@@ -37,8 +37,9 @@ from pathlib import Path
 
 from local_operator import browser_files
 from local_operator.browser_bridge.protocol import (
+    CAPABILITY_SWITCH_LABEL,
+    CAPABILITY_SWITCH_PERMISSION,
     EXPECTED_EXTENSION_VERSION,
-    EXTENSION_CANNOT_SERVE,
     EXTENSION_UPDATE_NOTE,
     METHODS,
     ORIGIN_PROMPT_TIMEOUT_MS,
@@ -88,7 +89,11 @@ def _protocol_body() -> str:
     """
     error_values = "\n".join(f"  {item.name} = {item.value!r}," for item in ErrorCode)
     methods = " | ".join(repr(item) for item in METHODS)
-    cannot_serve = ", ".join(repr(item) for item in sorted(EXTENSION_CANNOT_SERVE))
+    switches = "\n".join(
+        '  "%s": { label: %r, permission: %r },'
+        % (method, CAPABILITY_SWITCH_LABEL[method], CAPABILITY_SWITCH_PERMISSION.get(method, ""))
+        for method in sorted(CAPABILITY_SWITCH_LABEL)
+    )
     return f"""export const PROTO_VERSION = {PROTO_VERSION} as const;
 // The extension version this runtime was developed and released alongside.
 // ADVISORY ONLY: nothing is refused for being older (`MIN_SUPPORTED_PROTO` is
@@ -110,15 +115,17 @@ export enum ErrorCode {{
 {error_values}
 }}
 
-// Methods NO build of this extension can serve, and the reason each is in the
-// vocabulary anyway: `download` needs a destination the harness chooses, and
-// Chrome refuses a tab-scoped `chrome.debugger` session the only two CDP
-// primitives that could give it one (`Page.setDownloadBehavior` answers
-// -32000 "Cannot not access browser-level commands", `Browser.setDownloadBehavior`
-// -32601; no browser target is attachable). Measured on Chrome 153.0.8010.53 —
-// docs/design/browser-file-transfer.md §17.1. Generated, so a method added there
-// cannot silently become "the extension forgot a handler".
-export const EXTENSION_CANNOT_SERVE: string[] = [{cannot_serve}];
+// The capabilities the OPERATOR owns, and the ONE spelling of each switch. Off
+// by default, and only a human gesture in the extension's options page can turn
+// one on (`consent.ts`). Generated from Python's `CAPABILITY_SWITCH_LABEL` and
+// `CAPABILITY_SWITCH_PERMISSION` so the options page, the extension's refusal
+// copy and the harness's refusal copy cannot name different switches. `permission`
+// is the Chrome permission the switch must request before it can be on (empty
+// when the capability needs none), which is what makes a switch that READS ON
+// while its permission is missing impossible to report as available.
+export const CAPABILITY_SWITCHES: Record<string, {{ label: string; permission: string }}> = {{
+{switches}
+}};
 
 export type Method = {methods};
 // One buffered console/runtime log line, as `logs` returns it (newest last).
@@ -190,6 +197,14 @@ export interface Pong {{ event: 'pong'; }}
 export interface Capabilities {{
   event: 'capabilities'; methods: string[]; version: string;
 }}
+// Which servable methods the OPERATOR has switched off, in a SEPARATE event
+// because every envelope is extra="forbid": a new key on an existing event is
+// closed by an already-released daemon, while an unknown event is dropped. An
+// empty `methods` has three remedies (update / turn the switch on / un-wedge)
+// and this is what separates the middle one.
+export interface CapabilitySwitches {{
+  event: 'capability_switches'; disabled: string[]; version: string;
+}}
 export interface TabClosed {{ event: 'tab_closed'; tab: string; }}
 export interface TabUpdate {{ event: 'tab_update'; tab: string; url: string; title: string; }}
 export interface AwaitingOrigin {{ event: 'awaiting_origin'; id: string; origin: string; }}
@@ -200,7 +215,7 @@ export interface OriginDecision {{
 }}
 export type ExtensionEvent =
   | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | AwaitingOriginCleared
-  | Unpair | OriginDecision | Capabilities;
+  | Unpair | OriginDecision | Capabilities | CapabilitySwitches;
 export type DaemonMessage = HelloAck | PairResult | Ping | Request | Role;
 """
 

@@ -8914,10 +8914,17 @@ BROWSER_ACTIONS = (
     "tabs",
     # File transfer. `upload` is served by BOTH non-cmux hosts (it needs only the
     # tab-scoped CDP session they already hold); `download` is served by the
-    # desktop app's host only, because Chrome refuses an extension the
-    # browser-level commands that would let it choose a destination — see
-    # EXTENSION_CANNOT_SERVE, and the extension host answers with a typed
-    # capability refusal that names where to go instead of failing obscurely.
+    # desktop app's host and, from extension 0.1.19, by the extension itself
+    # through `chrome.downloads` — Chrome refuses a tab-scoped debugger session
+    # the CDP primitives that would let an extension choose a destination
+    # (design §17.1), so the extension's file lands in the user's own download
+    # directory and the harness moves it into quarantine afterwards (§11.5 R7).
+    # On an extension host BOTH methods additionally need the operator's own
+    # switch (protocol.CAPABILITY_SWITCH_LABEL): `download` also needs the
+    # optional `downloads` permission, and `upload` has no permission at all, so
+    # its switch is the only control that direction has. A switched-off
+    # capability is refused with copy that names the switch, a build that cannot
+    # serve it with copy that names the update.
     # Both are ACTIONS so they ride the same schema, approval tier and dispatch as
     # everything else, and both are in CMUX_UNSUPPORTED_BROWSER_ACTIONS below.
     "download",
@@ -11532,8 +11539,44 @@ async def _browser_download(
         for item in (result.get("files") or [])
         if isinstance(item, dict) and item.get("name")
     }
+    # The extension host cannot write into `directory` (Chrome refuses it a
+    # download path outside the user's own download directory — §17.5), so what it
+    # landed is relocated HERE, before the before/after diff below runs: every
+    # later step (classification, the content-earned rename, the 0600 mode, the
+    # audit rows) then treats an extension download exactly like an app-host one,
+    # which is the point — the harness is the judge on both hosts.
+    intake = files.intake_landed(result.get("files") or [], directory)
+    refused_intake: list[str] = []
+    for entry in intake.refused:
+        # The same two words every other refusal uses, from the same function: a
+        # cancelled transfer, an uncorroborated path and a name already in the
+        # session all have to say what happened to the entry (review round 2, N7).
+        word, trail = _delete_outcome(entry.deleted)
+        refused_intake.append(f"{entry.name}: {word} — {entry.reason}")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=entry.name,
+            path="",
+            verdict="deny",
+            reason=f"{entry.reason}; {trail}",
+            redact=True,
+        )
     landed = files.snapshot(directory)
     candidates = sorted(name for name in landed if name not in before)
+    if not candidates and refused_intake:
+        # Nothing is in the quarantine directory and the reason is known, so the
+        # generic "nothing started" sentence would be a lie about a call that
+        # watched a transfer fail. The refusals are the answer, and they are what
+        # the audit rows above already recorded.
+        return _error(
+            tool_call_id,
+            "browser",
+            "nothing was saved: " + "; ".join(refused_intake) + ".",
+        )
     if not candidates:
         wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
         _download_audit(
@@ -11555,7 +11598,7 @@ async def _browser_download(
         )
 
     kept: list[dict[str, Any]] = []
-    refused: list[str] = []
+    refused: list[str] = list(refused_intake)
     # Artifacts whose 0600 mode could not be set (Linux has no `lchmod`, so a
     # symlink ENTRY is never settable there). Reported rather than implied.
     unhardened: list[str] = []

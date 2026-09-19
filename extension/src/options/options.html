@@ -66,6 +66,43 @@
         </p>
       </section>
 
+      <!-- The file-transfer consent. Both capabilities are OFF until a human
+           turns them on HERE: the worker only ever READS these flags, and no
+           daemon frame, tool call or page can write one (consent.ts rule 1 — the
+           switch is the consent boundary, and the copy the user reads here is the
+           same string a refusal carries). Turning `Allow downloads` on also
+           requests the optional `downloads` permission from this page, on that
+           click: it is deliberately NOT declared at install time, so installing
+           or updating the extension never widens what it may do. -->
+      <section class="card">
+        <h2>File transfer</h2>
+        <label class="switch" for="allow-downloads">
+          <input id="allow-downloads" type="checkbox" role="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-text">Allow downloads</span>
+        </label>
+        <p class="hint">
+          Lets the agent save a file a page offers into this session's private folder. Chrome
+          asks for permission to manage downloads the first time you turn this on. The file
+          appears briefly in your normal Downloads folder before Local Operator moves it, so
+          expect to see it there and then not.
+        </p>
+        <p class="consent-note hidden" id="downloads-notice" role="status" aria-live="polite"></p>
+
+        <label class="switch switch--stacked" for="allow-uploads">
+          <input id="allow-uploads" type="checkbox" role="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-text">Allow uploads</span>
+        </label>
+        <p class="hint">
+          Lets the agent attach local files to a page's file input. Files that look like
+          credentials (SSH keys, <code>.env</code> files) and Local Operator's own configuration
+          are refused whatever this switch says. This direction needs no new permission: it uses
+          the debugging access the extension already has.
+        </p>
+        <p class="consent-note hidden" id="uploads-notice" role="status" aria-live="polite"></p>
+      </section>
+
       <section class="card">
         <h2>Allowed sites</h2>
         <p class="hint">
