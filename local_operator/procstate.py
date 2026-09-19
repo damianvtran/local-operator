@@ -338,6 +338,9 @@ def terminate_process_tree(pid: int, *, force: bool = False) -> bool:
     import signal
 
     sig = signal.SIGKILL if force else signal.SIGTERM
+    # Declared with its Optional BEFORE the probe, so the fallback below is an
+    # assignment rather than a second declaration of the same name.
+    pgid: int | None
     try:
         pgid = os.getpgid(pid)
     except OSError:
@@ -352,7 +355,7 @@ def terminate_process_tree(pid: int, *, force: bool = False) -> bool:
         # the code did something else. None here means "signal the pid alone".
         pgid = None
     try:
-        if pgid == pid:
+        if pgid is not None and pgid == pid:
             # The pid LEADS its own group: a shell command spawned
             # `start_new_session` is exactly this, and killing only the leader
             # would leave the children it spawned behind. `killpg` is what the
