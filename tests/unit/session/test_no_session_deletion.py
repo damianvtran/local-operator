@@ -145,6 +145,29 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only this call's own mkstemp sidecar temp file after a failed replace",
     ),
+    # The browser file-transfer quarantine. Every path these two calls touch is
+    # composed by `browser_files.session_dir()` as
+    # `<config_dir>/browser/downloads/<stamp>-<session8>/` — a SIBLING of
+    # `sessions/` under the config root, never a descendant of it — and the
+    # candidate names are produced by listing THAT directory (`browser_files.
+    # snapshot`). The unlink is the refusal's tidy-up of one direct child entry
+    # (the entry, never a resolved target: review round 1's R1), and the rename
+    # is the content-corrected name of one landed file, with BOTH sides direct
+    # children of the same quarantine directory. Neither can name a session
+    # directory, and no path here is derived from a session id beyond the eight
+    # characters sanitised into the directory's own label.
+    (
+        "local_operator/tools/builtin.py::_unlink_quietly",
+        "<path>.unlink",
+        "Deletes one refused ENTRY inside the browser download quarantine "
+        "(<config_dir>/browser/downloads/<stamp>-<session8>/), never a session directory",
+    ),
+    (
+        "local_operator/tools/builtin.py::_browser_download",
+        "<path>.rename",
+        "Renames one landed file WITHIN that same quarantine directory to its "
+        "content-corrected name; both sides are direct children of it",
+    ),
     (
         "local_operator/tui/session_drafts.py::SessionDraftStore._write",
         "os.replace",
