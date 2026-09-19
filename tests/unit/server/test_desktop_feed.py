@@ -2824,6 +2824,40 @@ def test_a_silenced_process_composes_no_banner(tmp_path, monkeypatch) -> None:
     assert _bannered(feed, subscription) == []
 
 
+def test_the_stored_hosting_read_stays_off_the_event_loop(tmp_path, monkeypatch) -> None:
+    """R1-2: the journal walk is 0.6 ms warm and up to ~745 ms cold, and this
+    backend polls on its own loop.
+
+    Asserted on the THREAD the reader ran in rather than on a duration: a
+    wall-clock bound on a loaded box is a flake, while "not the loop's thread"
+    is the property the fix is about (the neighbouring store reads in this same
+    method already hop threads for the same reason). The reader is doubled so
+    the assertion is about WHERE it ran, not about what it answered.
+    """
+    import threading
+
+    root = tmp_path
+    sid = "d" * 12
+    _session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    threads: list[threading.Thread] = []
+
+    def probe(directory: Path) -> bool:
+        threads.append(threading.current_thread())
+        return False
+
+    monkeypatch.setattr("local_operator.server.utils.desktop_feed.session_uses_test_hosting", probe)
+    _publish(root, sid)
+    announced = _bannered(feed, subscription)
+
+    assert threads, "the candidate filter never asked the reader; the cell proved nothing"
+    assert all(thread is not threading.main_thread() for thread in threads), threads
+    assert [frame["session_id"] for frame in announced] == [sid], announced
+
+
 def test_a_stored_mock_session_is_never_bannered_by_another_process(tmp_path) -> None:
     """A scratch store outlives the rig that filled it.
 

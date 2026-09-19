@@ -934,6 +934,43 @@ async def test_a_stored_mock_session_emits_no_notification(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_the_stored_hosting_read_stays_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2 on the bridge's side: the same reader, the same reason.
+
+    Asked on the THREAD it ran in rather than against a duration — a wall-clock
+    bound on a loaded box is a flake, and "not the loop's thread" is exactly
+    what the fix buys (every neighbouring store read in this bridge's poll loop
+    already hops threads). The reader is doubled, so the assertion is about
+    where it ran; the notification frame in the same cell proves it was asked
+    for this row at all.
+    """
+    import threading
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="A real answer.", title="Real work")
+    bridge = await _baselined(tmp_path, sid)
+
+    threads: list[threading.Thread] = []
+
+    def probe(directory: Path) -> bool:
+        threads.append(threading.current_thread())
+        return False
+
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_sessions.session_uses_test_hosting", probe
+    )
+    _publish(tmp_path, sid, "result-1")
+    await bridge.refresh_attention()
+
+    assert threads, "the bridge never asked the reader; the cell proved nothing"
+    assert all(thread is not threading.main_thread() for thread in threads), threads
+    assert bridge.kinds == ["attention", "notification"], bridge.kinds
+
+
+@pytest.mark.asyncio
 async def test_a_silenced_process_offers_no_banner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
