@@ -1079,19 +1079,21 @@ takes seriously:
 - **R5** An agent can still exfiltrate via `bash` + `curl`; this design does not
   defend that, and pretending otherwise would be worse than saying it. The upload
   policy makes the *browser* path safe, not the machine.
-- **R6** A NON-REGULAR entry in the session directory — a dangling symlink, or a
-  symlink to a directory — is invisible to `snapshot` (§5.3), because the
-  candidate set is built from entries that `is_file()` follows to a real file. So
-  the containment rule can never reach such an entry: it is neither refused nor
-  deleted, and it stays in the session directory. Nothing escapes the root and no
-  quota is inflated (`dir_size`/`session_bytes` count regular files only), so the
-  impact is a stray entry where a refusal was meant, against the same premise the
-  containment rule is written for (a hostile or buggy WRITER — the page cannot
-  create entries in the quarantine directory itself; only the host can).
-  Pre-existing selection code, recorded rather than fixed (review round 2's R9)
-  and deferred as a PR-thread `deferred — ` line; the widening, if it is wanted,
-  is "candidate set = `lexists`, delete the entry, then judge", which is a
-  change to the download half at a moment the feature does not need it.
+- **NR1** (this list numbers its own residuals — it already had an R6, and the
+  review rounds number their findings separately) A NON-REGULAR entry in the
+  session directory — a dangling symlink, or a symlink to a directory — is
+  invisible to `snapshot` (§5.3), because the candidate set is built from entries
+  that `is_file()` follows to a real file. So the containment rule can never reach
+  such an entry: it is neither refused nor deleted, and it stays in the session
+  directory. Nothing escapes the root and no quota is inflated
+  (`dir_size`/`session_bytes` count regular files only), so the impact is a stray
+  entry where a refusal was meant, against the same premise the containment rule
+  is written for (a hostile or buggy WRITER — the page cannot create entries in
+  the quarantine directory itself; only the host can). Pre-existing selection
+  code, recorded rather than fixed (review round 2's R9) and deferred as a
+  PR-thread `deferred — ` line; the widening, if it is wanted, is "candidate set
+  = `lexists`, delete the entry, then judge", which is a change to the download
+  half at a moment the feature does not need it.
 - **R6** The DeepSeek end-to-end scenario needs a logged-in session in the
   operator's browser. If QA cannot get one, that scenario is BLOCKED and reported
   as such rather than substituted with a fixture (§12.1, E1).
@@ -1655,9 +1657,9 @@ does, so a later reader does not have to reconstruct it from the diff.
 | finding | what changed |
 |---|---|
 | **R6** — the upload read-back comparison was gated on the host's MARKER, so a host that reported a real byte count AND a marker lost the only check a page that ignored the attach is caught by | the gate is the `-1` SENTINEL (`if count >= 0: compare`), never the marker. "I could not read it back" now only makes the UNREPORTED count unverifiable: with a count present the comparison runs whether or not a marker came with it, and with no count and no marker the call is still refused (the marker is what makes the unreported shape legitimate, not the absence of a comparison). The fact is also marked `verified: false` in `details` |
-| **R7** — `readback` was the one host-supplied string in the new code reaching the transcript uncapped and unsanitised (`\r\n` inside it grew the tool result by a line the host chose) | it goes through `browser_files.readback_label`, the same door as the declared type: one `_outside_text` strip (C0/C1 controls and the bidi/zero-width overrides removed) then a byte cap (`MAX_READBACK_BYTES = 120`, above the extension's own 120-character cap so an honest marker is never clipped — a cap that cut our own 93-byte marker would cost the diagnosis the marker exists to give). Its PRESENCE is kept apart from its TEXT: a marker made only of control characters sanitises to nothing but still marks the attach unverified (`no detail`, the extension's own fallback wording), because sanitising must not be able to turn a failed read into a verified attach |
+| **R7** — `readback` was the one host-supplied string in the new code reaching the transcript uncapped and unsanitised (`\r\n` inside it grew the tool result by a line the host chose) | it goes through `browser_files.readback_label`, the same door as the declared type: one `_outside_text` strip (C0/C1 controls and the bidi/zero-width overrides removed) then a byte cap (`MAX_READBACK_BYTES`, raised to 200 in round 3 — §17.11 — because round 2's 120 clipped the honest composed marker). Its PRESENCE is kept apart from its TEXT: a marker made only of control characters sanitises to nothing but still marks the attach unverified (`no detail`, the extension's own fallback wording), because sanitising must not be able to turn a failed read into a verified attach |
 | **R8** — the over-cap deny row omitted the delete outcome the sentence carries, while the round-1 remediation reply claimed it "got the same treatment" | the row carries it, in the same words as the containment row: `over the N files per call limit; the entry was removed` / `… could NOT be removed — it is still on disk`. The claim and the code now agree, and this is the branch where the claim was false: a 0500 session directory makes the unlink fail, and the row is what a later reader answers "what did this session keep?" from |
-| **R9** — non-regular entries (dangling symlinks, symlinks to a directory) are invisible to `snapshot`, so the containment rule can never reach them | **recorded, not coded**: §11.5's residual R6. No escape, no quota effect, pre-existing selection code — and deferred as a `deferred — ` line on the PR rather than widened in this commit |
+| **R9** — non-regular entries (dangling symlinks, symlinks to a directory) are invisible to `snapshot`, so the containment rule can never reach them | **recorded, not coded**: §11.5's residual **NR1**. No escape, no quota effect, pre-existing selection code — and deferred as a `deferred — ` line on the PR rather than widened in this commit |
 | **N6** — an unverified attach was indistinguishable from a verified one in the structured result | every fact in `details["files"]` carries `verified`, true only when the host's own read completed and agreed with Python's stat |
 | **N7** — the delete outcome was stated only when it FAILED, and several deny reasons deleted the artifact silently | one vocabulary for the fact, in one function (`_delete_outcome`), used by the containment rule, the per-call cap and the content refusals alike. The deny REASONS in `browser_files` are therefore rule text only — they no longer open with `refused and deleted:`/`refused:`, because only the caller knows what happened to the entry; §7.4's rows are updated to the shipped sentences |
 | **N8** — `chmod_private` used `os.chmod`, which follows a symlink, so an in-root symlink artifact tightened its TARGET | a symlink entry takes `lchmod`, and is skipped where the platform has none (Linux), rather than firing the mode change at whatever it points at. The containment check already bounded the target to the root, so this was never an escape — it is R1's "the artifact it is about to report" rule applied to the mode change |
@@ -1668,3 +1670,19 @@ UNVERIFIED (`verified: false`, with the note in the text). That is deliberate:
 the marker is the host's word that its read failed, and the cheap failure is a
 caveat the operator can dismiss, where the expensive one is a model that reads
 "attached" over an attach nobody checked.
+
+### 17.11 The round-3 review and QA round, and what each finding changed
+
+Round 3 (`### Agent review — round 3`, `### QA report — round 3` on the PR, both
+scoped to the round-2 delta) came back **terminal and PASS on that delta** — the
+round-2 fixes were verified by execution, not from the remediation message — and
+both streams independently corroborated two new findings on the lines that delta
+touched. `### Agent review remediation — round 3` / `### QA remediation — round 3`
+carry the per-finding answer.
+
+| finding | what changed |
+|---|---|
+| **MINOR-2 / Q-1** — the host's byte count reached a bare `int()`, so a contract-violating host (`null`, `{}`, a non-numeric string, a float-shaped string) raised out of `_browser_upload` and surfaced as `Tool raised: ...` instead of a typed answer | `_host_byte_count` accepts an `int` or a digit string and returns `(-1, label)` for anything else — including a JSON FLOAT, which `int()` would silently truncate into a count nobody sent. The caller decides the shape: with NO marker the call is refused naming what the host sent, and WITH a marker it stays the unverified attach it already was (a refusal there would say "the file input did not take the attach" over bytes the host reported setting — the double-send harm round 1's Q-1 exists to prevent), with the bad value carried into the note and the audit row |
+| **MINOR-1 / Q-2** — `MAX_READBACK_BYTES = 120` clipped the honest composed marker (~158-159 bytes: the extension caps the error TEXT at 120 *characters*, not the marker it composes around it) silently, on exactly the branch that carries the diagnostic | the ceiling is **200**, above the composed bound with headroom, and any clip is now **visible**: `readback_label` cuts the tail on a character boundary and appends `CLIP_MARK` (`…`). Both, because no fixed ceiling can bound an honest marker whose message is multibyte. The clip also stops using `_truncate_bytes`, which preserves a filename's EXTENSION — over a sentence it kept a fragment of the TAIL and dropped the middle |
+| **relabel** — the round-2 residual was labelled `R6` in §11.5, colliding with both an existing §11.5 residual and §17.10's R6 finding | relabelled **NR1**, with the list's numbering stated as its own |
+| **Q-3 (nit, pre-existing)** — `\ufeff` survives `_outside_text` (the shared door's bidi/zero-width set covers U+200B–U+200F, U+202A–U+202E, U+2066–U+2069) | **recorded, not fixed**: it is a property of the door that predates this PR, the delta's requirement was that the marker gets the sibling treatment and it does, and widening the shared regex is a change to `safe_name`'s inputs — which the conformance fixture replays in TypeScript — that this round has no reason to make |
