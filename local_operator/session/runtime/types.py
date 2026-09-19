@@ -340,6 +340,65 @@ HEARTBEAT_TIMEOUT_S = 45.0
 #: that the ladder's escalation cannot land inside this window.
 SIGNAL_DRAIN_S = 120.0
 
+#: How long a BUILD drain may hold with NO MOVEMENT in the work it is holding
+#: for, before it stops waiting and leaves through the signal drain's own
+#: bounded exit (``process._drain_for``).
+#:
+#: WHY THE DRAIN NEEDS ONE AT ALL. ``_drain_for``'s promise is the honest one —
+#: no new work is admitted and the work in flight FINISHES — and it deliberately
+#: draws no clock of its own, because a bound on time would cut a turn merely for
+#: being long. That promise is only as good as the work's willingness to finish,
+#: and ``is_busy()`` counts two things that can hold for hours: a gate parked on a
+#: user's answer (30 s to 24 h, by design) and a lane parked behind a child
+#: process. Nothing in the drain bounds STALENESS of work, and the state it leaves
+#: behind is not a slow exit but a permanent one — measured on the reporting host:
+#: a runtime latched a stale-build drain at 20:32:29 and two hours later still
+#: refused every prompt, reporting ``state=wedged`` with three subagent lanes
+#: stalled behind a bash child that had been running 23 minutes, RSS falling
+#: 134 MB -> 33 MB at 0.1% CPU. A successor has nothing to take while the
+#: predecessor holds the transcript lease, so the session is uncontrollable for
+#: exactly as long as the drain holds.
+#:
+#: WHAT THIS BOUND IS NOT. It is not a clock on the drain, and it does not
+#: resurrect the rejected "bound the drain by time": the clock it feeds is reset by
+#: every observable sign of movement (``process._work_motion``: the turn's durable
+#: footprint, the subagent roster generation, the job rows — status, live output
+#: offset and activity — and the spool), so a turn that is stepping, a lane that is
+#: reporting, a job that is PRINTING or settling, or a peer message reaching the
+#: successor all push it out again however long the hold runs.
+#:
+#: IT BOUNDS REPORTS OF MOVEMENT, NOT WORK, and that distinction is the whole
+#: honesty of the bound (agent review round 1, R1). What the clock sees is what
+#: reaches this process: a foreground tool call commits nothing until its result
+#: lands, so a long `bash`/build/test step that prints the whole time still looks
+#: still — only a BACKGROUNDED job mirrors its output into its row as it arrives.
+#: The runtime therefore cannot tell a silently-running step from a hung one, which
+#: is why the phrase it publishes says "no movement in 15 min" rather than
+#: "stalled", and why the caller's docstring states the residual rather than
+#: implying a diagnosis. Only a hold that has gone silent at EVERY one of those
+#: layers for the whole bound is cut.
+#:
+#: CALIBRATION, and the basis is stated because there is no distribution of
+#: silent-step lengths to size it from. It must sit well beyond a legitimately slow
+#: SILENT step, because a tool call that runs for minutes without emitting anything
+#: is normal work rather than a stall: the repo's own boot-bound suite slices
+#: measure 171-313 s wall at real fleet depth, and the headless agent tasks on this
+#: host (``logs/exec-jobs.jsonl``, the eight rows with both ends) ran 4.5, 5.0, 7.5,
+#: 8.3 and 9.2 min with a tail of 44.6. It must also sit well under a human's
+#: patience for "my session is locked", because the alternative to firing is what
+#: the incident measured: unbounded, and it ended in a wedge nobody could clear.
+#: 15 min clears the longest silent step evidenced here, tolerates a silent model
+#: stream of the same order, and hands a stuck session over a quarter of an hour
+#: after its work stopped rather than never. Force-cutting something that was
+#: merely slow is the residual risk, accepted deliberately: it costs the turn in
+#: flight, while not firing costs the whole session.
+#:
+#: HERE, beside ``SIGNAL_DRAIN_S``, for that constant's own reason: the phrase that
+#: NAMES this bound is published on the record two front ends read
+#: (:data:`LEAVING_FOR_BUILD_OVERDUE`), and a number rendered in one module from a
+#: constant in another is one rename away from describing a wait nobody waits.
+BUILD_DRAIN_PROGRESS_S = 15 * 60.0
+
 
 def bound_text(seconds: float) -> str:
     """One bound, as a person reads it: ``2 min``, ``2.5 min``, ``30s``.
@@ -403,12 +462,78 @@ LEAVING_ON_SIGNAL = f"signalled; leaving when its turn ends (up to {bound_text(S
 #: the reason has to be the trigger's own words, because "signalled" would be
 #: false here and "leaving" alone would not say why.
 #:
-#: NO BOUND IS NAMED, and that is the one substantive difference:
-#: ``process._drain_for`` waits for this runtime's work and nothing else (the
-#: build path draws no clock), while the signal path is cut by
-#: ``SIGNAL_DRAIN_S`` and says so. A bound in this phrase would be a promise
-#: nothing enforces.
+#: NO BOUND IS NAMED HERE, and that is the one substantive difference from
+#: ``LEAVING_ON_SIGNAL``: the build drain waits for this runtime's work and
+#: nothing else — the signal path is cut by ``SIGNAL_DRAIN_S`` and says so — and a
+#: bound in this sentence would promise a wait nothing imposes on an ordinary
+#: handover. It stays the phrase for the ordinary case even after the backstop
+#: below exists, because the backstop does not change what the drain promises: it
+#: only says how long that promise may go unhonoured before the runtime gives up
+#: on it and publishes the OVERDUE phrase instead.
 LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
+
+#: What a runtime publishes when its build drain has held with NO MOVEMENT
+#: REPORTED for the whole of ``BUILD_DRAIN_PROGRESS_S`` and has therefore stopped
+#: waiting (``process._leave_overdue``). The third phrase beside the two above,
+#: and the only one that reports a bound already SPENT rather than a wait still
+#: running.
+#:
+#: WHY IT EXISTS SEPARATELY, AND WHY EVERY FRONT END KEYS ON IT.
+#: ``LEAVING_FOR_BUILD`` promises that the turn in flight finishes, and for the
+#: whole window that promise is the truth — so a runtime that CUTS the turn while
+#: still wearing that phrase publishes the opposite of what it is doing, and the
+#: one sentence the operator gets at the moment their work is abandoned would be
+#: the reassurance people act on. The phrase is the primary carrier of WHICH
+#: trigger a departure belongs to (:func:`drain_phrase_for_frame`), so a third
+#: sentence is a third trigger to every reader — and a trigger every reader has
+#: to be TAUGHT. The four consumers are ``tui.app._DRAIN_NOTICES`` (the notice a
+#: viewer paints), ``tui.widgets.info_panel._LEAVING_SHORT`` (the narrow-frame
+#: form), ``session.errors._TRIGGER_FOR_LEAVING`` (the refusal's head) and
+#: ``cli.LEAVING_COLUMN_WIDTH`` (the fleet column's width);
+#: ``tests/unit/session/runtime/test_leaving_vocabulary.py`` pins all four
+#: against :data:`PUBLISHED_LEAVING_PHRASES`, so the next phrase cannot be added
+#: without them. A phrase with no entry paints the FALLBACK, which for this
+#: trigger is a sentence about in-flight work finishing at the instant the
+#: runtime gave up on it (design round 1, D1/D2/D3; QA round 1, Q-1).
+#:
+#: WHAT IT SAYS, AND WHAT IT DELIBERATELY DOES NOT. "no movement (15 min)" is
+#: the OBSERVATION the clock made — nothing was reported at any of the layers
+#: ``process._work_motion`` reads, over the last 15 min — and not a diagnosis: the
+#: runtime cannot tell a step running silently (a foreground tool call commits
+#: nothing until its result lands, and only a backgrounded job mirrors its output
+#: as it prints) from a step that is hung. That is exactly why the sentence must
+#: not say "stalled", which would assert the half the runtime cannot establish
+#: (agent review round 1, R1). The bound is rendered from the constant beside it,
+#: never typed, and the parenthetical states it the way ``LEAVING_ON_SIGNAL``'s
+#: does: the clause in front is what happened, the bracket is how long.
+#:
+#: WIDTH IS A CONSTRAINT, NOT A PREFERENCE. It is held exactly AT
+#: ``cli.LEAVING_COLUMN_WIDTH`` — measured 51, which is the same cell count the
+#: signal phrase takes and therefore does not widen the fleet column — so the
+#: clause is never the thing ``lop sessions`` silently cuts, and inside the
+#: ``/info`` card-67 budget of 53, which is where the wide rung draws. The
+#: explicit "reported" half lives on the prose surfaces
+#: (``tui.app.OVERDUE_DRAIN_NOTICE`` and the refusal), which are not width-bound.
+LEAVING_FOR_BUILD_OVERDUE = (
+    f"leaving for the build on disk; no movement ({bound_text(BUILD_DRAIN_PROGRESS_S)})"
+)
+
+#: Every phrase a runtime publishes on ``SessionRecord.leaving``, in the one
+#: place a test can enumerate them.
+#:
+#: IT EXISTS SO THE CONSUMERS CANNOT DRIFT. Four front-end tables turn a phrase
+#: into words a person reads, and each is keyed BY the phrase (see the note above
+#: ``LEAVING_FOR_BUILD_OVERDUE``); a phrase missing from one of them is not a
+#: missing entry but a WRONG SENTENCE, because every one of those readers falls
+#: back to a sentence about a trigger it does not have. The pin is
+#: ``tests/unit/session/runtime/test_leaving_vocabulary.py``, which walks this
+#: tuple: adding a phrase here without teaching all four consumers fails there
+#: rather than on an operator's screen.
+PUBLISHED_LEAVING_PHRASES: tuple[str, ...] = (
+    LEAVING_ON_SIGNAL,
+    LEAVING_FOR_BUILD,
+    LEAVING_FOR_BUILD_OVERDUE,
+)
 
 #: The CAUSE token the SIGNAL drain commits with: ``process._drain_for_signal``
 #: passes it to ``begin_drain``, ``_drain_for`` re-passes it to the exit rung that
@@ -432,6 +557,26 @@ LEAVING_FOR_BUILD = "leaving for the build on disk when its turn ends"
 #: drain could not save — so the spelling is already load-bearing beyond this
 #: pair.
 SIGNAL_DRAIN_CAUSE = "runtime-shutdown"
+
+#: The CAUSE token the BOUNDED build handover cuts with: ``process._leave_overdue``
+#: passes it to ``_clean_exit``, whose journal row is what a successor reads to
+#: learn how the turn it finds open ended, and ``incidents.CUT_OFF_CAUSES``
+#: renders it as the sentence every surface repeats ("Stopped with an error — …").
+#:
+#: WHY IT IS NOT ``runtime-retired``. The build drain's own token is true of this
+#: exit — the runtime IS leaving so the next engage runs the build on disk — but it
+#: is the SAME token an ordinary build handover leaves and the same sentence the
+#: fleet already sees for one, so a handover that had to be forced was
+#: indistinguishable, in every durable record, from one that waited its turn out
+#: (QA round 1, Q-2: `lop sessions --json` returns an empty list because the
+#: process leaves ~97 ms after the escalation, so the journal row and the
+#: successor's incident are the only places left to look). The bound has to be
+#: legible there or nowhere.
+#:
+#: IT IS NOT A ``DELIBERATE_CUT_OFF_CAUSE``: the user did not ask for this, and
+#: the taxonomy's deliberate set exists precisely to keep an involuntary cut from
+#: being narrated as a stop.
+BUILD_DRAIN_OVERDUE_CAUSE = "runtime-overdue"
 
 #: The ``reason`` a drain frame is announced with, as the producers write it, and
 #: neither literal is the one you would guess: ``process._commit_to_leaving``

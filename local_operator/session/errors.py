@@ -10,7 +10,11 @@ socket addresses, credentials or another conversation's identity.
 # table below is keyed on them, and a reworded phrase must fail at import time
 # rather than silently stop matching. Safe to import here (no cycle):
 # ``session.runtime.types`` reaches ``session.retention`` and the stdlib only.
-from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
+from local_operator.session.runtime.types import (
+    LEAVING_FOR_BUILD,
+    LEAVING_FOR_BUILD_OVERDUE,
+    LEAVING_ON_SIGNAL,
+)
 
 
 class AttachmentUnavailable(ValueError):
@@ -174,12 +178,25 @@ _HEADS: dict[str, str] = {
 }
 
 #: The departure a phrase establishes, for a raiser that could not name one.
-#: Only the two phrases the runtime publishes are keys: anything else — an empty
+#: Only the phrases the runtime publishes are keys: anything else — an empty
 #: phrase, or a phrase written by a build this one has never heard of — is
 #: evidence about nothing, and the unnamed sentence is the answer for it.
+#:
+#: THE BOUNDED HANDOVER RESOLVES TO ``BUILD`` (agent review round 1, N1). It is a
+#: build departure in every clause the build head states — the install on disk
+#: moved under this runtime, it is leaving for the newer build, and the successor
+#: that answers the refusal is that build — so the alternative, no token at all,
+#: gave the MOST serious departure the VAGUEST sentence ("This session is
+#: leaving…") while an ordinary handover named the build. What the head does not
+#: say is that the turn was cut rather than finished; that fact is the phrase's
+#: (``types.LEAVING_FOR_BUILD_OVERDUE``, which this table is keyed by and the
+#: refusal's receipt quotes) and the record's, and the refusal sentence holds only
+#: the token its own category enumerates — a third trigger value would be a wire
+#: change to say it twice.
 _TRIGGER_FOR_LEAVING: dict[str, str] = {
     LEAVING_ON_SIGNAL: RuntimeRetiring.SIGNAL,
     LEAVING_FOR_BUILD: RuntimeRetiring.BUILD,
+    LEAVING_FOR_BUILD_OVERDUE: RuntimeRetiring.BUILD,
 }
 
 

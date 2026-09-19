@@ -50,7 +50,9 @@ from local_operator.info.model import (
 )
 from local_operator.info.render import build_export, not_answering_clause, plural
 from local_operator.session.runtime.types import (
+    BUILD_DRAIN_PROGRESS_S,
     LEAVING_FOR_BUILD,
+    LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
     SIGNAL_DRAIN_S,
     bound_text,
@@ -210,6 +212,13 @@ def _model(value: str, width: int) -> str:
 _LEAVING_SHORT: dict[str, str] = {
     LEAVING_ON_SIGNAL: f"leaving (≤{bound_text(SIGNAL_DRAIN_S)})",
     LEAVING_FOR_BUILD: "leaving for build",
+    # The bounded handover, and the SHELF IS `no movement {bound}` rather than a
+    # cut of the long phrase: ``no movement`` is the runtime's own observation
+    # (see ``types.LEAVING_FOR_BUILD_OVERDUE`` for why it does not say "stalled")
+    # and the bound is what a narrow reader most needs of a departure that has
+    # already spent it. Rendered from the constant, like the signal rung's, so the
+    # compact form cannot disagree with the long one.
+    LEAVING_FOR_BUILD_OVERDUE: f"no movement {bound_text(BUILD_DRAIN_PROGRESS_S)}",
 }
 
 #: The fallback above: no trigger named, no bound claimed, nothing false.
