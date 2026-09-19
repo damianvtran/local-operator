@@ -211,6 +211,7 @@ async def test_the_live_stream_of_a_real_command_carries_no_shape(
 
 
 @pytest.mark.e2e
+@pytest.mark.asyncio
 async def test_an_output_only_credential_still_files_its_incident(
     headless_tui_env: Path, workspace: Path
 ) -> None:
