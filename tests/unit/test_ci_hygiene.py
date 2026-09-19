@@ -981,7 +981,9 @@ def test_ci_shard_matrix_covers_every_shard_the_partitioner_is_told_to_make(
 
 # ===========================================================================
 # Change-scope gating: the classifier in scripts/ci_scope.py, and the wiring in
-# ci.yml's `changes` job that reads it. Assertions A1-A15 of the design review.
+# ci.yml's `changes` job that reads it. Assertions A1-A14 and A16-A17 of the
+# design review — A15 is cited by name in two comments below but is an assertion
+# of the scope-gating change, not one in this file.
 # ===========================================================================
 
 
@@ -1558,6 +1560,140 @@ def test_local_commands_are_safe_and_track_the_ci_steps_they_mirror() -> None:
                 "console script (`.venv/bin/flake8`, an absolute `black`) is the "
                 "#423 path — a stale shebang exits 126 and a pipeline reports 0."
             )
+
+
+def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
+    """A16. The typed gate is bounded and reaped, and never narrowed.
+
+    `pyright` is a Python wrapper around an npm/node analyzer that runs as a
+    SEPARATE process, and the fleet measured what a group nobody reaps leaves
+    behind: node children re-parented to `ppid 1` holding 2.28 GB and 1.50 GB,
+    one alive 81 minutes after its parent died. The tidy "`timeout` kills only the
+    wrapper" story is NOT what was measured — GNU `timeout(1)` signals the group
+    here, and no `timeout` spelling left an orphan on demand; what IS measured,
+    and what the wrapper's own tests drive, is a leader that exits while a
+    descendant lives on. So the local command must go through
+    `scripts/run_bounded.py`, the bound must be at least ci.yml's own provision
+    for the job AND at least the measured whole-tree range — a local bound tighter
+    than either reds a loaded host, which is the worse failure — the wrapped
+    command must still be the WHOLE-TREE one, and the wrapper must exist: a typo
+    in the path would otherwise surface only on a real run.
+
+    Mutations that must fail this: drop the wrapper from the command; drop the
+    bound below ci.yml's own provision; narrow the wrapped command; or point the
+    command at a wrapper path that is not there.
+    """
+    scope = _scope()
+    command = scope.JOB_COMMANDS["type-check"][0]
+    assert f"scripts/{scope.BOUNDED_WRAPPER_NAME}" in command, command
+    wrapper = REPO / "scripts" / scope.BOUNDED_WRAPPER_NAME
+    assert wrapper.is_file(), "the local gate names a wrapper script that does not exist"
+
+    minutes = _ci_jobs()["type-check"].get("timeout-minutes")
+    assert isinstance(minutes, int), "type-check has no timeout-minutes to mirror"
+    tokens = shlex.split(command)
+    assert "--timeout" in tokens, tokens
+    bound = float(tokens[tokens.index("--timeout") + 1])
+    assert bound >= minutes * 60, (
+        f"the local bound {bound!r} is TIGHTER than ci.yml's provision for this job "
+        f"({minutes} min, which also covers checkout, install and the protocol-sync "
+        "step) — host load alone would then red a gate CI passes, which is a worse "
+        "failure than a slow gate"
+    )
+    assert bound >= 1800.0, (
+        f"the local bound ({bound}s) leaves no headroom over the measured whole-tree "
+        "range (508 s quiet, 1170 s under load) on this fleet"
+    )
+    tool = scope._invoked_tool(command)
+    assert tool == "pyright", "the drift assertion must see the wrapped tool, not the wrapper"
+    assert "pyright" in tokens, "the wrapper must still wrap pyright itself"
+    wrapper_at = next(
+        index
+        for index, token in enumerate(tokens)
+        if Path(token).name == scope.BOUNDED_WRAPPER_NAME
+    )
+    inner = ci_scope._unwrap_bounded(tokens[wrapper_at + 1 :])
+    # The reader splits at the SEPARATOR. The flag-counting body it replaced came
+    # out right for flags BEFORE the separator and wrong once the PAYLOAD carried
+    # one of its own — the two shapes asserted below — which is how a directory
+    # (`tests`) once got compared against ci.yml.
+    assert scope._unwrap_bounded(
+        ["--timeout", "10", "--grace", "2", "--", ".venv/bin/python", "-m", "pyright", "tests"]
+    ) == [".venv/bin/python", "-m", "pyright", "tests"]
+    assert scope._unwrap_bounded(["--timeout", "10", "--grace", "2"]) == []
+    # The shapes that actually mis-sliced: a wrapper invoked with NO flags (the
+    # payload's own `--timeout` used to be treated as the wrapper's), and a payload
+    # carrying its own `--grace`. Both returned `[]`/`tests` through the flag-counting
+    # version, so these are the assertions that fail if it ever comes back.
+    assert scope._unwrap_bounded(["--", ".venv/bin/python", "-m", "pyright", "--timeout", "5"]) == [
+        ".venv/bin/python",
+        "-m",
+        "pyright",
+        "--timeout",
+        "5",
+    ]
+    assert scope._unwrap_bounded(["--timeout", "10", "--", "pyright", "tests", "--grace", "2"]) == [
+        "pyright",
+        "tests",
+        "--grace",
+        "2",
+    ]
+    # rc=124 is only attributable to the bound when the command really is wrapped:
+    # anything else returning 124 must NOT be told to raise this bound (review
+    # round 2, N3), so the remedy is gated on this answer rather than on the code.
+    assert scope._command_bound("/bin/sh -c 'exit 124'") is None
+    assert scope._command_bound(".venv/bin/python scripts/run_bounded.py -- cmd") is None
+    assert str(scope._command_bound(command)).startswith("--timeout ")
+    assert inner[-1] == ".", f"the bound wraps a whole-tree pyright, not a file list: {inner!r}"
+    assert not any(token.endswith(".py") and "/" in token for token in inner), inner
+
+
+def test_the_makefile_typed_gate_is_the_same_command_as_the_job() -> None:
+    """A17. The Makefile target is a SECOND copy of the command, so it is guarded.
+
+    `make type-check` spells the bounded pyright out itself; `JOB_COMMANDS` spells
+    it for `make check-changed`. Two spellings of one gate is exactly the drift
+    this file exists to prevent, and de-wrapping the recipe alone used to leave
+    both A16 and A11 green (review round 1, MINOR 2). The forms are compared with
+    the bound value abstracted, so a change to either the wrapper, the flags, the
+    payload or the bound fails here, and the two DEFAULTS are asserted equal so the
+    Makefile cannot quietly bound itself differently from the runner.
+
+    Mutations that must fail this: textually unwrap the recipe; change its
+    `BOUND_TIMEOUT` default; add a SECOND `BOUND_TIMEOUT` assignment (which wins
+    silently, since the token comparison abstracts the value); or narrow its
+    payload to a file list.
+    """
+    scope = _scope()
+    job_tokens = shlex.split(scope.JOB_COMMANDS["type-check"][0])
+    job_tokens[job_tokens.index(str(scope.BOUNDED_GATE_TIMEOUT))] = "BOUND"
+
+    # Read from the file rather than through `make -n`: `make` would resolve the
+    # override and print whatever it was given, not the default a developer gets.
+    # `_makefile_recipe_blocks` keeps the target association a flat list loses.
+    recipe = _makefile_recipe_blocks()["type-check"].replace("\\\n", " ")
+    make_tokens = shlex.split(recipe)
+    assert "$(BOUND_TIMEOUT)" in make_tokens, make_tokens
+    make_tokens[make_tokens.index("$(BOUND_TIMEOUT)")] = "BOUND"
+
+    assert make_tokens == job_tokens, (
+        "the Makefile target and JOB_COMMANDS have drifted apart: "
+        f"make={' '.join(make_tokens)!r} job={' '.join(job_tokens)!r}"
+    )
+    text = MAKEFILE.read_text()
+    assignments = re.findall(r"^BOUND_TIMEOUT\s*[:?+]?=", text, re.MULTILINE)
+    assert len(assignments) == 1, (
+        f"the Makefile assigns BOUND_TIMEOUT {len(assignments)} times: a second "
+        "assignment silently wins, and the token comparison above abstracts the "
+        "value away (review round 2, M2)"
+    )
+    default = re.search(r"^BOUND_TIMEOUT \?= (\d+)$", text, re.MULTILINE)
+    assert default, "the Makefile has no BOUND_TIMEOUT default"
+    assert int(default.group(1)) == scope.BOUNDED_GATE_TIMEOUT, (
+        f"the Makefile bounds itself at {default.group(1)}s while the runner uses "
+        f"{scope.BOUNDED_GATE_TIMEOUT}s"
+    )
+    assert job_tokens[-1] == ".", "both spellings stay whole-tree"
 
 
 def test_ci_and_make_share_one_classifier_module() -> None:
