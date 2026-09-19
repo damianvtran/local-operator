@@ -50,6 +50,21 @@ SIDEBAR_WIDTH = 30
 #: is unaffected and nothing here can squeeze the conversation.
 SIDEBAR_MAX_WIDTH = 44
 
+#: The remedy clause a wedged row's tooltip carries, after the backend's own
+#: state sentence. The STATE WORDS are not the client's to change —
+#: ``session/catalog.py`` owns them (``WEDGED_STATUS``, and with it the heartbeat
+#: age), and a second spelling here would be the drift the surface map forbids.
+#: The remedy is different in kind: it names an affordance, and each client has
+#: its own. This surface's user is at a terminal, where ``lop stop`` is the rung
+#: that asks a runtime to stop and signals it only if it will not answer — the
+#: patient option, which matters because a stale beat is usually a busy session
+#: rather than a dead one, and this whole row exists because a WORKING session
+#: can produce it. "If it stays silent" is a condition, not a forecast:
+#: ``registry.classify`` is explicit that a stale beat establishes no diagnosis,
+#: and this codebase has already removed one promise of recovery for exactly
+#: that reason.
+WEDGED_REMEDY = "lop stop if it stays silent"
+
 #: The main lane's COMFORT width, which growth may not eat into.
 #:
 #: Distinct from :data:`SIDEBAR_MAIN_MIN_WIDTH`, and the distinction is what
@@ -948,7 +963,25 @@ class SessionSidebar(Widget, can_focus=True):
         event.stop()
 
     def _describe(self, entry: CatalogEntry | None) -> str | None:
-        return f"{entry.row.name}\n{entry.status}\n{entry.id}" if entry else None
+        """Hover text: who, in what state, and which session id.
+
+        The state line is the BACKEND's sentence verbatim — see
+        ``session/catalog.py``'s ``status`` for the wording's own argument — plus,
+        for ``wedged`` only, one client-owned remedy clause (``WEDGED_REMEDY``,
+        and its comment for why the two halves have different owners).
+
+        Keyed on ``status_code == "wedged"`` rather than on the sentence, because
+        that is the value the app and the catalogue share; a row that is ALSO
+        holding a gate keeps its gate words and gets no remedy, which is right —
+        the remedy names what to do about SILENCE, and a row asking a question is
+        not silent.
+        """
+        if entry is None:
+            return None
+        status = entry.status
+        if entry.status_code == "wedged":
+            status = f"{status} · {WEDGED_REMEDY}"
+        return f"{entry.row.name}\n{status}\n{entry.id}"
 
     def _set_hover(self, y: int | None) -> bool:
         """Point the hover affordance and the tooltip at the row under `y`.
