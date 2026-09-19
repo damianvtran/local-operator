@@ -3608,6 +3608,12 @@ def sessions_command(args: argparse.Namespace) -> int:
     # the turn the drain is finishing (U1/U2, PR #1141).
     leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
     show_leaving = any(leaving.values())
+    # The same rule as LEAVING and WHY above, and the same reason it must be a
+    # SEPARATE column rather than part of that one: a session mid-update is alive,
+    # accepting messages, and about to run them (``types.UPDATING``) — the operator
+    # reading that row must not be told to re-send what is already queued.
+    updating = {row["session_id"]: (row.get("updating") or "") for row in rows}
+    show_updating = any(updating.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3620,6 +3626,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
+    if show_updating:
+        header += f" {'UPDATING':<{UPDATING_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3664,8 +3672,33 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
+        if show_updating:
+            # The cell is RENDERED from the record pair rather than printed raw,
+            # because the raw pair is data ("0.59.9 → 0.59.11@ead71b6") and this
+            # column is prose: it says what is happening and to which build, in the
+            # one vocabulary the TUI and the phone also read (``update_short``). A
+            # pair this build cannot parse renders as the phase alone rather than as
+            # nothing, so a row mid-update is never a blank cell.
+            cell = _updating_cell(updating.get(row["session_id"]) or "")
+            line += f" {_pad_cell(_fit_cell(cell, UPDATING_COLUMN_WIDTH), UPDATING_COLUMN_WIDTH)}"
         print(line)
     return 0
+
+
+def _updating_cell(pair: str) -> str:
+    """The fleet cell for a record's ``updating`` pair. ``""`` when there is none.
+
+    The IMPORT IS FUNCTION-LOCAL on purpose, for the reason the column widths are
+    not imported at all: this module keeps session internals out of its module
+    scope so ``lop``'s CLI can start without paying for the runtime (see the
+    header). One string formatter reached only on the arm that has a moving session
+    is the whole cost of that here.
+    """
+    if not pair:
+        return ""
+    from local_operator.session.runtime.types import UPDATING, update_short
+
+    return update_short(UPDATING, pair)
 
 
 def _clamp_reason_cell(summary: str) -> str:
@@ -5023,6 +5056,31 @@ WHY_COLUMN_WIDTH = 48
 #: header) — so a reword of the phrase fails loudly there instead of silently
 #: cutting the new clause off the row.
 LEAVING_COLUMN_WIDTH = 51
+
+#: Width of `lop sessions`' trailing UPDATING column, in display CELLS.
+#:
+#: A SECOND COLUMN RATHER THAN A WORD IN ``LEAVING``, and that is the feature rather
+#: than a layout choice: the two fields are opposite promises. A ``leaving`` row says
+#: this runtime will not take a message ("send it again once the new build is up");
+#: an ``updating`` row says it ALREADY HAS it and runs it when the successor
+#: boots. Folding them into one cell would make the operator re-send a message that
+#: is queued — the exact harm the window exists to prevent (``types.UPDATING``).
+#:
+#: Sized from ``types.update_short``, whose pair is the wide part and which is why
+#: the cell names only the NEW build: 26 is ``"updating → "`` (11 cells) plus the
+#: longest label ``BuildStamp.label()`` can produce — ``0.59.11`` and ``@`` and the
+#: 7-character ref git itself abbreviates to, so 15. The failed phase's cell is
+#: shorter and carries no pair on purpose (see that function): its move did not
+#: happen, so naming a build there would read as one that did.
+#:
+#: Like ``LEAVING_COLUMN_WIDTH`` the number is written out rather than imported
+#: (this module keeps session internals out of its module scope on purpose, see the
+#: header) and is pinned against the vocabulary by
+#: ``tests/unit/session/runtime/test_updating_vocabulary.py``.
+#:
+#: Appears only when some row carries one, exactly like LEAVING and WHY: a listing
+#: with no runtime mid-update is byte-for-byte what it was before.
+UPDATING_COLUMN_WIDTH = 26
 
 
 #: Widths of `lop sessions`' three TEXT columns, in display CELLS.

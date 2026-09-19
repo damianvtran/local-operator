@@ -163,6 +163,14 @@ class SessionLine:
     #: working and otherwise indistinguishable from an ordinary busy one, which
     #: is what made a plain ``lop stop`` on it destructive (U1/U2, PR #1141).
     leaving: str = ""
+    #: An UPDATE WINDOW is open — this IDLE runtime is moving to the build on disk
+    #: and QUEUEING admissions for the successor — and this is the build pair it is
+    #: moving to (``SessionRecord.updating``), or ``""``. The drain's sibling field
+    #: one line up, and the reason it is a second field rather than another value of
+    #: ``leaving``: the two states promise opposite things to the person reading the
+    #: row. A drain will not take a message; a window already has it and will run it
+    #: one second later, which is the difference between "send it again" and "wait".
+    updating: str = ""
     detached: bool = False
     version: str = ""
     source_ref: str = ""

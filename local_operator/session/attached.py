@@ -987,7 +987,9 @@ class AttachedSession:
         #: ``LEAVING_ON_SIGNAL``, because the frame's own ``reason``/``to`` decide
         #: (:func:`types.drain_phrase_for_frame`) and have done since design round
         #: 4, D9 (agent review round 5, MINOR-2).
-        self._drain_callback: Callable[[str], Any] | None = None
+        #: The drain/window callback: the frame's leaving PHRASE, plus the update
+        #: window's build pair as a keyword ("" when the frame carries no window).
+        self._drain_callback: Callable[..., Any] | None = None
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -6178,7 +6180,7 @@ class AttachedSession:
         """
         self._refresh_callback = callback
 
-    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
+    def set_drain_callback(self, callback: Callable[..., Any] | None) -> None:
         """Told when the runtime announces a departure that is REFUSING work.
 
         Fired from the ``retiring`` frame itself, so the operator hears it
@@ -6203,11 +6205,13 @@ class AttachedSession:
     def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
         """A ``retiring`` frame arrived; act on it while the runtime is alive.
 
-        The frame is additive twice over: a runtime older than the ``draining``
+        The frame is additive three times over: a runtime older than the ``draining``
         field is therefore read as the idle handover, which is the pre-change
-        behaviour and paints nothing, and a runtime older than ``leaving`` has
-        its trigger read off the frame's ``reason``/``to`` by
-        :func:`types.drain_phrase_for_frame`.
+        behaviour and paints nothing, a runtime older than ``leaving`` has its
+        trigger read off the frame's ``reason``/``to`` by
+        :func:`types.drain_phrase_for_frame`, and a runtime older than ``updating``
+        has no window to announce — an idle handover from it is as silent as it was
+        before this key existed.
 
         THAT SECOND FALLBACK USED TO CLAIM MORE THAN IT KNEW. It handed the host
         ``""`` on the grounds that an absent phrase is "the build handover, the
@@ -6220,7 +6224,7 @@ class AttachedSession:
         they decide; a frame that names neither trigger still yields ``""``, and
         the host paints the sentence that is true of any drain.
         """
-        if not frame.get("draining"):
+        if not frame.get("draining") and not frame.get("updating"):
             return
         callback = self._drain_callback
         if callback is None:
@@ -6232,7 +6236,16 @@ class AttachedSession:
             # (agent review round 5, NIT-1). The client remembers the same phrase
             # for the refusals it decodes, from the same helper — see
             # ``AttachClient._raise_for_reply_error``.
-            callback(drain_phrase_for_frame(frame))
+            #
+            # ``updating`` RIDES ALONGSIDE THE PHRASE rather than through it. The
+            # idle handover announces with ``draining=False`` — it is not draining
+            # anything, it is moving — so before this key it never reached the host
+            # at all, and the one handover that QUEUES the operator's message was
+            # the one they were told nothing about (``types.UPDATING``).
+            callback(
+                drain_phrase_for_frame(frame),
+                updating=str(frame.get("updating") or ""),
+            )
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 
