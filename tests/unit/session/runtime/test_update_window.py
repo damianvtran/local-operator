@@ -383,17 +383,22 @@ def test_the_record_carries_the_window_and_the_failure() -> None:
     """
     from local_operator.session.runtime.types import PROTOCOL_VERSION, SessionRecord
 
-    base = dict(
-        pid=1,
-        kind="exec",
-        session_id="s",
-        conversation_name="c",
-        cwd="/tmp",
-        model_label="m",
-        control_port=1,
-        control_key="k",
-    )
-    record = SessionRecord(**base)
+    def _record() -> SessionRecord:
+        """A fresh record from LITERALS: the dataclass is typed, and a
+        ``dict[str, int | str]`` splatted into it reads to the type checker as
+        thirty errors rather than as the one field this cell is about."""
+        return SessionRecord(
+            pid=1,
+            kind="exec",
+            session_id="s",
+            conversation_name="c",
+            cwd="/tmp",
+            model_label="m",
+            control_port=1,
+            control_key="k",
+        )
+
+    record = _record()
     assert record.updating == "" and record.update_failed == "" and record.updated == ""
 
     record.updating = PAIR
@@ -407,7 +412,7 @@ def test_the_record_carries_the_window_and_the_failure() -> None:
     )
     assert round_tripped.updated == PAIR
     assert (
-        PROTOCOL_VERSION == SessionRecord(**base).protocol
+        PROTOCOL_VERSION == _record().protocol
     ), "an additive field must not spend the one number that gates frames"
 
 
