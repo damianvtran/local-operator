@@ -59,6 +59,8 @@ from local_operator.session.runtime.types import (
     UPDATING,
     UPDATING_DONE,
     bound_text,
+    update_phase,
+    update_short,
 )
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
@@ -855,6 +857,17 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # disagree about whether this row is draining at all.
         if line.leaving:
             bits.append(line.leaving)
+        # THE UPDATE WINDOW, IN THE SAME PLACE AND FOR THE SAME REASON (design review
+        # round 1, D2). It was on the SHELF only (``short_meta``), which exists where
+        # the meta ladder has been shed wholesale — so at a normal terminal width a
+        # session mid-move rendered as an ordinary idle row, one screen away from a TUI
+        # telling the operator their message is queued, while the sibling ``leaving``
+        # field showed at 110 columns. Appended here it sheds LAST, with the drain's
+        # phrase, which is where a fact that changes what the reader may safely do next
+        # belongs.
+        phase, pair = update_phase(line.updating, "", line.update_failed)
+        if phase:
+            bits.append(update_short(phase, pair))
         bits.append(format_duration(line.uptime_s))
         # BOTH of these are shed on a row that is not answering, not merely
         # ordered after the facts (design round 2, D4): usage is sampled for
@@ -894,12 +907,11 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # told both that it is leaving and how long that can take.
         if line.state == "wedged":
             short_meta = "not answering"
-        elif line.updating:
-            # The WINDOW outranks the departure on the shelf, because it is the
-            # newer fact about this row: a runtime that opened a window after a drain
-            # latched is leaving as well, and only one of the two tells the reader
-            # that their message is queued rather than refused.
-            short_meta = _UPDATING_SHORT.get(UPDATING, _UPDATING_SHORT_OTHER)
+        elif phase:
+            # The SHELF form, keyed by the PHASE the row is in — the failed phase
+            # included, so a fleet whose only news is an abandoned update says so at
+            # the narrowest width too (design review round 1, D1/D2).
+            short_meta = _UPDATING_SHORT.get(phase, _UPDATING_SHORT_OTHER)
         elif line.leaving:
             short_meta = _LEAVING_SHORT.get(line.leaving, _LEAVING_SHORT_OTHER)
         else:

@@ -3613,7 +3613,12 @@ def sessions_command(args: argparse.Namespace) -> int:
     # accepting messages, and about to run them (``types.UPDATING``) — the operator
     # reading that row must not be told to re-send what is already queued.
     updating = {row["session_id"]: (row.get("updating") or "") for row in rows}
-    show_updating = any(updating.values())
+    failed = {row["session_id"]: (row.get("update_failed") or "") for row in rows}
+    # THE COLUMN PRINTS WHENEVER ANY ROW HAS SOMETHING TO SAY ABOUT A MOVE, and a
+    # FAILED one counts. A fleet whose only news is an abandoned update used to drop
+    # the column entirely and list that session exactly as an ordinary idle one — the
+    # defect design review round 1 (D1) measured against this renderer.
+    show_updating = any(updating.values()) or any(failed.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3673,35 +3678,46 @@ def sessions_command(args: argparse.Namespace) -> int:
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
         if show_updating:
-            # The cell is RENDERED from the record pair rather than printed raw,
-            # because the raw pair is data ("0.59.9 → 0.59.11@ead71b6") and this
-            # column is prose: it says what is happening and to which build, in the
-            # one vocabulary the TUI and the phone also read (``update_short``). A
-            # pair this build cannot parse renders as the phase alone rather than as
-            # nothing, so a row mid-update is never a blank cell.
-            cell = _updating_cell(updating.get(row["session_id"]) or "")
-            line += f" {_pad_cell(_fit_cell(cell, UPDATING_COLUMN_WIDTH), UPDATING_COLUMN_WIDTH)}"
+            # The cell is RENDERED from the row's pair through the ONE phase reader
+            # (``types.update_phase``/``update_short``), so the copy here, the info
+            # panel and the phone cannot drift into three vocabularies for one state —
+            # and so the FAILED phase reaches this surface at all (design review round
+            # 1, D1, where the row rendered blank).
+            cell = _updating_cell(
+                updating.get(row["session_id"]) or "", failed.get(row["session_id"]) or ""
+            )
+            # MARKED, unlike the cells above: the value here is a BUILD LABEL, so a
+            # silent cut hands the reader a plausible version for a session that is on
+            # a different one (design review round 1, D3 — ``updating →
+            # 0.59.11.dev3+g1`` cut to a real-looking ``0.59.11``). ``_clamp_reason_cell``
+            # already carries that argument for WHY; this is the same mark applied to
+            # the one column whose text is an identifier rather than prose.
+            said = _clamp_reason_cell(cell, UPDATING_COLUMN_WIDTH)
+            line += f" {_pad_cell(said, UPDATING_COLUMN_WIDTH)}"
         print(line)
     return 0
 
 
-def _updating_cell(pair: str) -> str:
-    """The fleet cell for a record's ``updating`` pair. ``""`` when there is none.
+def _updating_cell(updating: str, failed: str = "") -> str:
+    """The fleet cell for a row's update fields. ``""`` when it carries no move.
 
     The IMPORT IS FUNCTION-LOCAL on purpose, for the reason the column widths are
     not imported at all: this module keeps session internals out of its module
     scope so ``lop``'s CLI can start without paying for the runtime (see the
     header). One string formatter reached only on the arm that has a moving session
     is the whole cost of that here.
+
+    THE PHASE IS READ, NOT ASSUMED. Both fields go through ``types.update_phase``, so
+    a FAILED window renders its own cell instead of a blank one and the precedence
+    between an open window, a failed one and an applied one lives in one place.
     """
-    if not pair:
-        return ""
-    from local_operator.session.runtime.types import UPDATING, update_short
+    from local_operator.session.runtime.types import update_phase, update_short
 
-    return update_short(UPDATING, pair)
+    phase, pair = update_phase(updating, "", failed)
+    return update_short(phase, pair) if phase else ""
 
 
-def _clamp_reason_cell(summary: str) -> str:
+def _clamp_reason_cell(summary: str, width: int | None = None) -> str:
     """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
 
     A silent slice is indistinguishable from a complete sentence, and this
@@ -3749,13 +3765,23 @@ def _clamp_reason_cell(summary: str) -> str:
     and a value nothing had to cut is not edited at all (review round 2, N2 —
     recorded as the rule, not changed, because trimming it would be a second,
     invisible edit on a cell that is already correct).
+
+    ``width`` IS A PARAMETER because a second column needs the same mark (design
+    review round 1, D3): the UPDATING cell is a BUILD LABEL, and a silent cut of
+    ``updating → 0.59.11.dev3+g1`` hands the reader a real-looking ``0.59.11`` for a
+    session that is on a different build. Everything above is about the WHY column,
+    which is where the mark was first argued; the arithmetic is the same one, which
+    is why this is a parameter rather than a second function. It defaults to
+    ``WHY_COLUMN_WIDTH`` at CALL time rather than in the signature, because this
+    function is defined above that constant.
     """
-    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
+    if _cell_len(summary) <= (WHY_COLUMN_WIDTH if width is None else width):
         return summary
     # The marker's OWN measured width, not a hard-coded 1: the budget is
     # arithmetic, so a future marker must not be able to push the cell over.
     marker = "…"
-    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+    budget = WHY_COLUMN_WIDTH if width is None else width
+    return _cut_to_cells(summary, budget - _cell_len(marker)) + marker
 
 
 def _cut_to_cells(text: str, budget: int) -> str:

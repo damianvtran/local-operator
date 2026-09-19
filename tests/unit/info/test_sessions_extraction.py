@@ -62,6 +62,11 @@ class _Record:
     #: The update window's pair (``SessionRecord.updating``), same additive contract
     #: as the field above.
     updating: str = ""
+    #: The FAILED half of the same window (``SessionRecord.update_failed``). Absent
+    #: from ``_OldRecord`` below for the same reason ``updating`` is: a record
+    #: written by an older runtime has no such field, and listing must render the
+    #: row as an ordinary one rather than raising (design review round 1, D1).
+    update_failed: str = ""
 
 
 @dataclass
@@ -181,6 +186,7 @@ EXPECTED = [
         # its own cells below.
         "leaving": "",
         "updating": "",
+        "update_failed": "",
     },
     {
         "state": "live",
@@ -212,6 +218,7 @@ EXPECTED = [
         # NOT LEAVING — present on every row so the published shape is stable.
         "leaving": "",
         "updating": "",
+        "update_failed": "",
     },
     {
         "state": "stale",
@@ -248,6 +255,7 @@ EXPECTED = [
         # rather than raising.
         "leaving": "",
         "updating": "",
+        "update_failed": "",
     },
 ]
 
@@ -488,11 +496,13 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     assert [row["leaving"] for row in rows[1:]] == ["", ""]
     # THE TRAILING KEY IS THE CONTRACT, so this asserts the rule rather than one
     # column: a field is APPENDED to the published row and never inserted, so the
-    # key order every existing consumer reads is unchanged by it. ``updating`` is the
-    # newest extension (the update window, ``types.UPDATING``) and therefore the last
-    # one; ``leaving`` must still be present and before it.
+    # key order every existing consumer reads is unchanged by it. ``update_failed``
+    # is the newest extension (the third phase of the window, design review round 1,
+    # D1) and therefore the last one; ``leaving`` and ``updating`` must still be
+    # present and before it, in that order.
     assert "leaving" in rows[0] and list(rows[0]).index("leaving") < list(rows[0]).index("updating")
-    assert list(rows[0])[-1] == "updating"
+    assert list(rows[0]).index("updating") < list(rows[0]).index("update_failed")
+    assert list(rows[0])[-1] == "update_failed"
 
     assert (
         cli.sessions_command(
@@ -553,6 +563,46 @@ def test_an_update_window_is_published_in_the_rows_and_named_in_the_table(
     # what a rotation script reads, so a raw pair or a bare phase would both be wrong.
     assert "updating → 0.59.11@ead71b6" in out, out
     assert "LEAVING" not in out, "the column appears only when a row carries one"
+
+
+#: ``FIXTURE`` with one session whose last update FAILED — the third phase, which
+#: rendered nowhere on this surface until design review round 1 (D1).
+FAILED_WINDOW = [
+    (replace(record, update_failed=UPDATE_PAIR) if index == 0 else record, state)
+    for index, (record, state) in enumerate(FIXTURE)
+]
+
+
+def test_a_failed_window_is_named_in_the_fleet_table(monkeypatch: Any, capsys: Any) -> None:
+    """D1: a fleet whose only news is an abandoned update must say so.
+
+    The design reviewer seeded exactly this record into an isolated root and ran the
+    real CLI: the UPDATING cell was BLANK, and with no open window anywhere in the
+    fleet the whole column was dropped — so the session listed byte-identically to an
+    ordinary idle one. Both halves are asserted here, against the same renderer.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch, FAILED_WINDOW)
+    rows = session_rows()
+    assert rows[0]["update_failed"] == UPDATE_PAIR
+    assert rows[0]["updating"] == "", "a failed window is not an open one"
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "UPDATING" in out, "the column must print when the only news is a failure"
+    assert "update failed" in out, out
+    # AND NOTHING CLAIMS THE MOVE HAPPENED: the failed cell carries no build label,
+    # because naming one there would read as "went to it".
+    failed_row = next(line for line in out.splitlines() if line.startswith("live"))
+    assert UPDATE_PAIR not in failed_row, failed_row
 
 
 def test_the_leaving_column_fits_the_shipped_phrase() -> None:
