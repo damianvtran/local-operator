@@ -86,7 +86,7 @@ BOOT_RECORD_KIND = "runtime-boot"
 #: sentence (``"leaving after SIGTERM"``). Matching the raw spellings would make
 #: the escalated-sweep rung hold only by WHICH writer happened to run last —
 #: and a mislabel there hands the operator ``runtime-killed``, whose sentence
-#: ends "and nothing recorded a stop", for a death where a signal was recorded.
+#: ends "and no stop was asked for", for a death where a signal was recorded.
 _SIGNAL_TOKEN = re.compile(
     r"\bSIG(?:HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|"
     r"TERM|CHLD|CONT|STOP|TSTP|TTIN|TTOU|URG|XCPU|XFSZ|VTALRM|PROF|WINCH|IO|PWR|SYS)\b"
@@ -374,6 +374,26 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     kept one cycle longer. That costs a file, not an answer — a zombie's record
     is still a true statement about a pid that booted on a build, and the next
     boot after its parent reaps it prunes it.
+
+    A RECORD THAT CANNOT BE PARSED IS AGED OUT LIKE A DEAD ONE, on the file's own
+    mtime, and this is what keeps the namespace from wedging the prune (review
+    round 2, MAJOR 1). This is the only reaper ``run/host`` has, and the reader
+    that decides what a prune must keep reports its answer INCOMPLETE while any
+    entry in the namespace is unreadable (``update._boot_records_under``) — so a
+    single non-record ``*.json`` here used to stop generation reclamation on every
+    later ``lop update``, permanently and silently. The previous shape could not
+    clear it in either direction: a payload the parser could not use raised OUT of
+    this function (a wrong-typed field is a ``TypeError``, and the probe that
+    found this measured the exception escaping ``_bind_boot_instrumentation`` into
+    the BOOT of every session — the pre-existing #1175 defect this closes), and a
+    payload that parses to ``None`` (``{}``, a JSON array) was ``continue``d and
+    never aged out. Both are ``None`` here now, and both carry their mtime as the
+    age the policy below is applied to, which is exactly what
+    ``registry._prune_reaped`` does for the sidecar that has no readable pid
+    either: evidence is worth one look soon after it lands, not indefinite
+    storage. A torn record younger than the retention window is KEPT and logged —
+    the age is what makes ageing a decision rather than a deletion of fresh
+    evidence, and the log line is what keeps the condition from being silent.
     """
     directory = (root or config_dir()) / HOST_RUN_DIRNAME
     try:
@@ -387,9 +407,21 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     for path in paths:
         try:
             record = BootRecord.from_json(json.loads(path.read_text()))
-        except (OSError, ValueError):
-            continue
+        except Exception:  # noqa: BLE001 — see the docstring: an entry costs itself
+            record = None
         if record is None:
+            try:
+                landed = path.stat().st_mtime
+            except OSError:  # pragma: no cover — vanished under us, nothing to age
+                continue
+            logger.warning(
+                "unreadable boot record %s: keeping it for %s, then ageing it out like "
+                "a dead runtime's record (an unreadable entry keeps every generation "
+                "until it goes)",
+                path,
+                _ttl_label(),
+            )
+            dead.append((landed, path))
             continue
         if registry.pid_alive(record.pid):
             continue
@@ -414,6 +446,12 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
         except OSError:
             continue
     return removed
+
+
+def _ttl_label() -> str:
+    """``registry.REAPED_MAX_AGE_S`` in the words the log line reads: ``24h``."""
+    hours = registry.REAPED_MAX_AGE_S / 3600
+    return f"{hours:g}h" if hours >= 1 else f"{hours * 60:g}m"
 
 
 # ---------------------------------------------------------------------------
@@ -643,7 +681,7 @@ class TurnJournal:
         # which of them runs last is an ordering accident: a later writer with
         # no signal to report must not unname a signal that was recorded, or an
         # escalated sweep would be reported as a crash whose sentence claims
-        # nothing recorded a stop.
+        # no stop was asked for.
         if row.get("exit_cause") and signal_exit_token(str(row["exit_cause"])):
             row["still_open_at_exit"] = True
             self._write("exit")
@@ -791,13 +829,23 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
        (this turn was in flight and never ended) instead of by the absence of a
        record.
 
+    RUNG 3 IS EXPLICITLY UNATTRIBUTED, and the word is part of the answer rather
+    than a decoration. Nothing that reads this arm has seen a marker — a marker
+    covering this run is consumed by ``attention._classify_orphaned_run`` before
+    the row is ever consulted — so "this turn died and no act was recorded" is
+    exactly what the evidence supports, and saying so is what turns a fleet-wide
+    event from "we cannot tell you why" into "none of these deaths had a recorded
+    actor". ``incidents.KILL_UNATTRIBUTED`` is the same word the classifier's
+    marker arms use when a marker names no actor, so a reader comparing a
+    marked death with an unmarked one sees one vocabulary rather than two.
+
     ``CUT_OFF_UNKNOWN`` is unreachable from this function and that is the point:
     it is the taxonomy's statement that nothing on disk could say what happened,
     and an open row is something. The token is still the answer for a death that
     left no row at all, which is what "keep the legacy path working when the
     evidence is absent" means.
     """
-    from local_operator.incidents import render_cut_off_reason
+    from local_operator.incidents import KILL_UNATTRIBUTED, render_cut_off_reason
 
     signal = signal_exit_token(row.exit_cause)
     if signal:
@@ -818,7 +866,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
     return (
         "error",
         "runtime-killed",
-        render_cut_off_reason("runtime-killed", detail=row_detail(row)),
+        render_cut_off_reason("runtime-killed", detail=row_detail(row, lead=KILL_UNATTRIBUTED)),
     )
 
 

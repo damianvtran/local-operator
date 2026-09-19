@@ -483,6 +483,19 @@ def scan(
     file has no pid to key a sidecar on and nothing an "why did this die"
     reader could use. ``reap=False`` leaves it alone too (see below).
 
+    THE RESCUE IS ``except Exception``, PER ENTRY, and the list it replaced was a
+    latent version of the round-1 BLOCKER one layer down (review round 2, MINOR 3).
+    ``(OSError, ValueError, TypeError)`` covers every ``from_json`` in the tree
+    today, but the contract this function offers is per record — one entry costs
+    itself — and a parser that raised ``KeyError`` (the exact shape
+    ``update._entries_in_directory`` was widened for) would walk out of here and be
+    swallowed by the caller's outer handler, losing the WHOLE namespace's records
+    rather than one. Measured with such a parser: the reader reported
+    ``complete=False`` AND ``roots=[]``. The direction was safe — nothing was
+    deleted that the missing roots had protected — but "held by a live session"
+    went silent for every session, and the asymmetry with the other reader had no
+    reason behind it.
+
     It stays the one implementation of the state rule — the tuple shape is
     deliberate, because ~15 call sites read it positionally and most want
     only the state. A caller that also wants the AGE asks the same record's
@@ -543,7 +556,7 @@ def scan(
     for path in sorted(directory.glob("*.json")):
         try:
             record = parse(json.loads(path.read_text()))
-        except (OSError, ValueError, TypeError):
+        except Exception:  # noqa: BLE001 — one entry costs itself, never its neighbours
             # READER MODE REMOVES NOTHING (see ``reap`` below), including a file
             # it could not parse: a reader that deleted what it could not read
             # would be the only mutator on this path, and the record is the one

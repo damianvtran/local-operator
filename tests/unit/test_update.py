@@ -483,6 +483,117 @@ def test_installer_invocation_leaves_third_party_binaries_named() -> None:
     )
 
 
+def test_an_in_place_install_attests_before_it_rewrites_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I3: pip and pipx have no generation to install into, so they rewrite in place.
+
+    This is the one install path that still takes runtimes with it (see
+    ``perform_upgrade``'s own docstring), and the reason the attestation lives in it:
+    the site-packages tree under a running fleet is rewritten where it stands, the
+    runtimes importing from it die mid-turn and cannot record anything themselves —
+    and a measured install did exactly that to every session on this machine on
+    2026-09-15, with the unwatched half staying down until they were resumed by hand.
+
+    The ORDER is the assertion that matters: the marker must be on disk BEFORE the
+    installer runs, because afterwards the party that could say what happened is the
+    party that was killed. The marker itself must name the mechanism and the front end
+    that asked for it.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord, session_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".local-operator"
+    record = SessionRecord(
+        pid=4246,
+        kind="daemon",
+        session_id="pipsession",
+        conversation_name="pipsession",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+        install_root=sys.prefix,
+    )
+    registry.publish(record, root)
+    session_dir(root, record.session_id).mkdir(parents=True)
+
+    order: list[str] = []
+    real_attest = update_mod.note_doomed_runtimes
+
+    def observing_attest(tree: Path, **kwargs: object) -> object:
+        order.append("attest")
+        return real_attest(tree, **kwargs)  # type: ignore[arg-type]
+
+    def observing_installer(argv: list[str], *, executable: str | None = None) -> int:
+        order.append("install")
+        return 0
+
+    monkeypatch.setattr(update_mod, "note_doomed_runtimes", observing_attest)
+    monkeypatch.setattr(update_mod, "_run_installer", observing_installer)
+
+    perform_upgrade(
+        target="0.28.0",
+        kind=InstallKind.PIP,
+        prefix=sys.prefix,
+        executable=sys.executable,
+    )
+
+    assert order == ["attest", "install"], order
+    marker = registry.read_stop_marker(session_dir(root, record.session_id))
+    assert marker is not None, "the install must attest for the runtimes it displaces"
+    assert marker["deliberate"] is False
+    assert marker["mechanism"] == "in-place-install"
+    assert marker["actor"] == "lop update"
+    assert marker["session_id"] == "pipsession"
+    assert marker["pid"] == 4246
+
+
+def test_a_failed_in_place_install_withdraws_the_attestation_it_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR 2 on the install path: a failed install leaves no verdict behind.
+
+    The marker is staged before the installer runs, and a non-zero exit means the
+    upgrade did NOT happen — the caller raises ``UpdateError``, so the operator is
+    told it failed. The marker would say the opposite, for the whole RUN it is keyed
+    to: an unrelated crash an hour later would render as "its install was being
+    replaced in place". The report wins, and the artifact has to agree with it.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord, session_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".local-operator"
+    record = SessionRecord(
+        pid=4247,
+        kind="daemon",
+        session_id="pipfailed",
+        conversation_name="pipfailed",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+        install_root=sys.prefix,
+    )
+    registry.publish(record, root)
+    session_dir(root, record.session_id).mkdir(parents=True)
+    monkeypatch.setattr(update_mod, "_run_installer", lambda *a, **k: 1)
+
+    with pytest.raises(UpdateError):
+        perform_upgrade(
+            target="0.28.0",
+            kind=InstallKind.PIP,
+            prefix=sys.prefix,
+            executable=sys.executable,
+        )
+
+    assert (
+        registry.read_stop_marker(session_dir(root, record.session_id)) is None
+    ), "an install that failed must not leave a verdict saying it took the tree"
+
+
 def test_perform_upgrade_refuses_editable_and_unknown() -> None:
     with pytest.raises(UpdateError, match="repo .venv"):
         perform_upgrade(target="0.28.0", kind=InstallKind.EDITABLE, run=lambda _: 0)

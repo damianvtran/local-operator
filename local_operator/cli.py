@@ -4893,7 +4893,7 @@ def _state_cell(state: str) -> str:
 #: Width of `lop sessions`' trailing WHY column, in display CELLS.
 #:
 #: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
-#: exiting cleanly while this turn was running, and nothing recorded a stop``
+#: exiting cleanly while this turn was running, and no stop was asked for``
 #: is 104 cells — and an unbounded column re-flows the whole table on a normal
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.

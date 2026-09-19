@@ -809,14 +809,22 @@ def _stopped_line(
     return f'{verb} "{name}"{rung}{proof}{wakes_part}'
 
 
-def _stop_marker_payload(record: SessionRecord, rung: Method, *, command: str) -> dict[str, Any]:
-    """The durable evidence ONE rung of the ladder leaves behind.
+def _stop_marker_payload(
+    record: Any,
+    rung: Method,
+    *,
+    command: str,
+    deliberate: bool = True,
+    actor: str = "",
+    mechanism: str = "",
+) -> dict[str, Any]:
+    """The durable evidence ONE act on a runtime leaves behind.
 
-    Written by the KILLER (this process), never by the target: at the SIGKILL
-    rung the target is not executing and cannot record anything, which is why
-    the 2026-09-13 wave could only be described as a runtime that "disappeared
-    without exiting cleanly". The fields are exactly the facts a reader needs
-    to attribute the death in one look:
+    Written by the PARTY THAT ACTS (this process), never by the target: at the
+    SIGKILL rung the target is not executing and cannot record anything, which is
+    why the 2026-09-13 wave could only be described as a runtime that
+    "disappeared without exiting cleanly". The fields are exactly the facts a
+    reader needs to attribute the death in one look:
 
     * ``session_id`` / ``pid`` / ``started_at`` — the RUN KEY. The classifier
       refuses a marker that does not match the run it is classifying, so a
@@ -824,16 +832,33 @@ def _stop_marker_payload(record: SessionRecord, rung: Method, *, command: str) -
       later, involuntary death as the user's own act.
     * ``rung`` — which rung actually acted, and therefore how hard the target
       resisted: ``socket`` is the runtime's own clean exit, ``sigterm`` its
-      handler, ``sigkill`` nothing at all (state orphaned).
-    * ``deliberate`` — always true HERE, and only here. A kill by a supervisor
-      or by anything outside this ladder must not set it; the flag is what
+      handler, ``sigkill`` nothing at all (state orphaned). Empty on an
+      involuntary act, which has no rung — nothing asked the runtime to stop.
+    * ``deliberate`` — what the act WAS, and the one field the classifier reads
+      to decide which sentence this death gets. True from the ladder and only
+      from the ladder (a stop a person asked for); false from every other party
+      that can take a runtime away (see :func:`note_involuntary_stop`). A kill
+      by a supervisor or by a stray shell must not set it — the flag is what
       keeps an involuntary death reading as one.
     * ``killer`` — pid, argv0 and the front end's command name, so "who did
       this" is answered by the artifact rather than by the operator's shell
       history — being unrecoverable from the artifacts on this host is
       exactly what made one incident read as three different stories.
+    * ``actor`` / ``mechanism`` — present ONLY on an involuntary act (see
+      :func:`note_involuntary_stop`): the acting component's own name and the
+      machine token for what it did. Absent rather than empty on a deliberate
+      stop, so a marker of that kind stays byte-identical to what every reader
+      has already been taught.
     * ``build`` — the TARGET's ``version@source_ref``, because the question
       this answers is which runtime died.
+
+    ``Any`` rather than ``SessionRecord`` because two record kinds carry the same
+    run: a ``SessionRecord`` for a runtime that is up, and the ``BootRecord`` of
+    one that is still booting (which is exactly the window the harness can take a
+    tree away in). Both spell the build differently — ``version``/``source_ref``
+    against ``build_version``/``build_ref`` — and duck-typing the four reads here
+    keeps ONE payload shape for both instead of a second builder that could
+    disagree.
 
     NO FREE-TEXT ``reason`` FIELD, and its absence is deliberate (design round
     1, D7): a constant sentence ("a deliberate stop was requested through the
@@ -841,25 +866,167 @@ def _stop_marker_payload(record: SessionRecord, rung: Method, *, command: str) -
     load-bearing, and the next agent to touch this schema would have assumed
     something rendered it. Every reader that needs a sentence renders one from
     the fields above on the spot — ``incidents.render_stop_attribution`` takes
-    exactly the rung and the killer — so a stored copy could only drift from
+    exactly the rung and the killer, ``incidents.render_involuntary_attribution``
+    exactly the mechanism, actor and pid — so a stored copy could only drift from
     them. ``deliberate`` is what says an act was asked for, and it does so
     without prose.
     """
-    if record.version and record.source_ref:
-        build = f"{record.version}@{record.source_ref}"
+    version = str(getattr(record, "version", "") or getattr(record, "build_version", "") or "")
+    source_ref = str(getattr(record, "source_ref", "") or getattr(record, "build_ref", "") or "")
+    if version and source_ref:
+        build = f"{version}@{source_ref}"
     else:
-        build = record.version or record.source_ref or ""
+        build = version or source_ref or ""
     argv0 = os.path.basename(sys.argv[0] or "") or sys.executable
-    return {
+    payload: dict[str, Any] = {
         "session_id": record.session_id,
         "pid": record.pid,
         "started_at": record.started_at,
         "at": time.time(),
         "rung": rung,
-        "deliberate": True,
+        "deliberate": bool(deliberate),
         "killer": {"pid": os.getpid(), "argv0": argv0, "command": command},
         "build": build,
     }
+    if not deliberate:
+        payload["actor"] = actor
+        payload["mechanism"] = mechanism
+    return payload
+
+
+def note_involuntary_stop(
+    record: Any,
+    root: Path,
+    *,
+    mechanism: str,
+    actor: str = "",
+    command: str = "",
+) -> bool:
+    """Stage the durable stop marker for a runtime an INVOLUNTARY act is about to take away.
+
+    WHY EVERY HARNESS-CAUSED DEATH NEEDS ONE. The marker schema above already
+    exists, is already read by the classifier, and is already written by the
+    ladder that stops a session a person asked to stop — so an involuntary death,
+    which is the kind that comes in waves, was the only kind that stayed
+    anonymous. That is the gap the operator's requirement names: "nothing should
+    kill runtimes en masse, ever; and if it does happen, it must be attributable."
+    On 2026-09-18 twenty-five runtimes on one machine vanished inside thirteen
+    seconds, each one leaving a record whose pid was gone and no statement about
+    who took its tree — so an investigation could prove the wave happened and
+    could not name a single actor.
+
+    Called BEFORE the act, by the party that is about to perform it — the same
+    ordering invariant :func:`_write_stop_marker` documents, and for the same
+    reason: at the moment this matters the runtime cannot record anything, so the
+    acting process is the only party that can. Two fields make the act nameable
+    (``incidents.INVOLUNTARY_MECHANISM_LABELS`` renders the token): ``mechanism``
+    is the machine token for WHAT was done, and ``actor`` the acting component's
+    own name.
+
+    ``deliberate: False`` IS WHAT KEEPS THIS OUT OF THE USER-STOP CLASS, and the
+    run key is spelled from the same three fields a deliberate marker uses, so
+    ``attention._stop_marker_covers_run`` needs no change: a marker that does not
+    describe the run being classified is refused exactly as before, and one that
+    does can never be read as the user's own stop, because the classifier asks
+    ``deliberate`` before it renders anything.
+
+    ``command`` defaults to ``actor`` because for this writer the two ARE the same
+    fact — the front end's own name for what it is doing — and a reader that found
+    ``killer.command`` empty beside a populated ``actor`` would be looking at two
+    fields meaning one thing.
+
+    BEST-EFFORT, like every other evidence write: a stop the harness is taking
+    must not be abandoned because a sidecar could not be written. Returns whether
+    a marker is on disk, for the caller that wants to say so — and the caller
+    should say so, because a runtime that could NOT be attested is a gap in the
+    artifact rather than an absence of victims.
+
+    LAST WRITER WINS, as it already does between the ladder's own rungs: one marker
+    file serves the whole conversation, and this one describes the most recent act
+    on it. The run key is what keeps the two losses asymmetric in the right
+    direction — an older run's marker can never narrate a newer death (it is refused
+    for not covering the run), whereas a newer act's marker displaces an older run's.
+    That direction is the one to prefer: the displaced verdict was published into
+    ``attention.db`` when its successor re-engaged, while an unattested NEWER death
+    is the whole failure this function exists to end.
+
+    ``record`` is anything carrying the run key — an ``update``-side caller has a
+    ``SessionRecord`` (live or reaped) or a ``BootRecord`` (a runtime still in its
+    first second, which is the window a prune used to leave unprotected).
+    """
+    session_id = str(getattr(record, "session_id", "") or "")
+    if not session_id:
+        # No conversation to attest into. Not an error: a ``lop serve`` record is
+        # a daemon, not a session, and it has no transcript of its own.
+        return False
+    payload = _stop_marker_payload(
+        record,
+        "",
+        command=command or actor,
+        deliberate=False,
+        actor=actor,
+        mechanism=mechanism,
+    )
+    try:
+        registry.write_stop_marker(session_dir(root, session_id), payload)
+    except OSError:
+        return False
+    return True
+
+
+def withdraw_involuntary_stop(record: Any, root: Path, *, mechanism: str) -> bool:
+    """Take back OUR involuntary marker when the act it attests does not complete.
+
+    The counterpart of :func:`note_involuntary_stop`, and the same shape
+    :func:`_withdraw_staged_stop_marker` already takes for the ladder. A marker is
+    written BEFORE an irreversible step so it survives the process the step is done
+    to; when the step is then not taken — a prune whose ``_remove_tree`` reports the
+    tree still there, an in-place install whose installer exited non-zero — the
+    marker is the only artifact left saying otherwise. It is keyed to the live RUN,
+    so it covers every later death of that same process, and an unrelated crash an
+    hour later would be narrated as this act (review round 1, MINOR 2). The
+    command's own report says the act failed; the evidence has to agree with it.
+
+    WHAT IS REMOVED IS OURS — decided by READING the file rather than by
+    remembering that we wrote one, exactly as the ladder's withdrawal does: the run
+    key must match the record, ``rung`` must be the empty one an involuntary act
+    carries (a deliberate rung's marker is never this call's to take), ``deliberate``
+    must be ``False``, ``killer.pid`` must be ours, and ``mechanism`` must be the act
+    this withdrawal speaks for. So a marker another front end staged for the same
+    run survives, and so does a marker for a different mechanism.
+
+    ``root`` is the CONFIG ROOT the record was read under, because that is where the
+    conversation directory — and therefore the marker — lives; the run key names the
+    session, not the root.
+
+    Best-effort and never raises, like every other evidence write here: a failure to
+    clean up must not fail the act's own error report. Returns whether a marker was
+    removed, for a caller that wants to say so.
+    """
+    session_id = str(getattr(record, "session_id", "") or "")
+    if not session_id:
+        return False
+    conversation = session_dir(root, session_id)
+    staged = registry.read_stop_marker(conversation)
+    if not staged or staged.get("rung") != "" or staged.get("deliberate") is not False:
+        return False
+    if staged.get("mechanism") != mechanism:
+        return False
+    # The whole run key, for the reason ``_withdraw_staged_stop_marker`` states: the
+    # marker's own three fields are what the classifier compares against a dead
+    # record, so they are what decides whether this file is a statement about the
+    # run whose act just failed.
+    if staged.get("session_id") != session_id or staged.get("pid") != record.pid:
+        return False
+    if staged.get("started_at") != record.started_at:
+        return False
+    killer = staged.get("killer")
+    if not isinstance(killer, dict) or killer.get("pid") != os.getpid():
+        return False
+    # ``remove_stop_marker`` is best-effort by its own contract (a withdrawal must
+    # not fail over evidence cleanup), so there is no OSError to catch here.
+    registry.remove_stop_marker(conversation)
+    return True
 
 
 def _write_stop_marker(record: SessionRecord, root: Path, rung: Method, *, command: str) -> None:
