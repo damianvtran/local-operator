@@ -15,6 +15,7 @@ guarantee — plus the fixture's own self-check.
 
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -475,3 +476,207 @@ def test_check_upload_does_not_confine_the_caller_to_the_workspace(tmp_path: Pat
     key.parent.mkdir()
     key.write_text("-----BEGIN OPENSSH PRIVATE KEY-----\n")
     assert bf.check_upload(str(key), cwd=str(workspace))[0] is None
+
+
+# --- intake: the extension host's landed file, moved into quarantine ----------
+#
+# The extension cannot write into the session directory (Chrome refuses it a
+# download path outside the user's own download folder), so its file exists in
+# `~/Downloads` under the page's name until the harness moves it. These are the
+# rules that decide which reported path may be believed, and — the half no later
+# step could do — that the ORIGINAL is gone afterwards, including when the
+# content is refused.
+
+
+def _quarantine(tmp_path: Path) -> Path:
+    directory = tmp_path / "config" / "browser" / "downloads" / "20260919-120000-sess0001"
+    directory.mkdir(parents=True)
+    return directory
+
+
+def _downloaded(tmp_path: Path, name: str = "receipt.pdf", body: bytes = b"%PDF-1.4\n") -> Path:
+    """A file in the user's real download directory, freshly written."""
+    landing = tmp_path / "Downloads"
+    landing.mkdir(exist_ok=True)
+    path = landing / name
+    path.write_bytes(body)
+    return path
+
+
+def _item(path: Path, **overrides: object) -> dict[str, object]:
+    item: dict[str, object] = {
+        "name": path.name,
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "state": "complete",
+        "cancelled": "",
+    }
+    item.update(overrides)
+    return item
+
+
+def test_intake_moves_the_landed_file_in_and_leaves_nothing_behind(tmp_path: Path) -> None:
+    """The operator's decision, asserted literally: saved here, gone from there."""
+    directory = _quarantine(tmp_path)
+    source = _downloaded(tmp_path)
+
+    outcome = bf.intake_landed([_item(source)], directory)
+
+    assert outcome.refused == ()
+    assert outcome.moved == ("receipt.pdf",)
+    assert (directory / "receipt.pdf").read_bytes() == b"%PDF-1.4\n"
+    assert not source.exists(), "the original must be gone from the user's Downloads"
+
+
+def test_intake_skips_an_item_with_no_path_which_is_the_app_host(tmp_path: Path) -> None:
+    """The app host writes into `directory` itself and reports no path at all.
+
+    Skipping is what keeps the two hosts' shapes apart: the app host's files are
+    found by the ordinary directory diff, and a rule that demanded a path would
+    have refused every download on the host where the destination works.
+    """
+    directory = _quarantine(tmp_path)
+    (directory / "receipt.pdf").write_bytes(b"%PDF-1.4\n")
+
+    outcome = bf.intake_landed([{"name": "receipt.pdf", "bytes": 9}], directory)
+
+    assert outcome == bf.IntakeOutcome((), ())
+    assert (directory / "receipt.pdf").exists()
+
+
+def test_intake_deletes_a_cancelled_partial_and_says_which_cancel(tmp_path: Path) -> None:
+    """An over-cap transfer leaves a partial file in the user's Downloads.
+
+    Nothing later in the pipeline ever looks outside the quarantine root, so if
+    this step does not remove it the operator's own decision ("the original is
+    gone afterwards") is simply not implemented for the case that most needs it.
+    """
+    directory = _quarantine(tmp_path)
+    source = _downloaded(tmp_path, "big.bin", b"x" * 64)
+
+    outcome = bf.intake_landed(
+        [_item(source, state="interrupted", cancelled="over_cap")], directory
+    )
+
+    assert not source.exists()
+    assert outcome.moved == ()
+    (refusal,) = outcome.refused
+    assert refusal.deleted is True
+    # The reason names the CEILING'S VALUE as the constant defines it, not a
+    # rounded figure a second table could contradict: the cap is data
+    # (`DOWNLOAD_MAX_BYTES`), and a message that said "256 MiB" would keep saying
+    # it after someone raised the cap.
+    assert str(bf.DOWNLOAD_MAX_BYTES) in refusal.reason and "cancelled" in refusal.reason
+
+
+def test_intake_never_deletes_a_file_it_cannot_corroborate(tmp_path: Path) -> None:
+    """A size mismatch means the file is NOT this download, so it is not ours to touch.
+
+    The asymmetry is the control: a path we can corroborate is ours and a failed
+    one is probably the user's, and removing a file we cannot show we watched
+    arrive is the one outcome worse than a stray file.
+    """
+    directory = _quarantine(tmp_path)
+    source = _downloaded(tmp_path, "thesis.pdf", b"the user's own file")
+
+    outcome = bf.intake_landed([_item(source, bytes=999_999)], directory)
+
+    assert source.exists(), "an uncorroborated file must survive"
+    (refusal,) = outcome.refused
+    assert refusal.deleted is False
+    assert "999999" in refusal.reason and "19 bytes" in refusal.reason
+
+
+def test_intake_refuses_a_stale_file_but_leaves_it_alone(tmp_path: Path) -> None:
+    """An old mtime is not this call's download, however the host labelled it."""
+    directory = _quarantine(tmp_path)
+    source = _downloaded(tmp_path, "screenshot.png")
+    stale = source.stat().st_mtime - (bf.DOWNLOAD_TIMEOUT_MAX_S + 600)
+    os.utime(source, (stale, stale))
+
+    outcome = bf.intake_landed([_item(source)], directory)
+
+    assert source.exists()
+    (refusal,) = outcome.refused
+    assert refusal.deleted is False
+    assert "not written during this call" in refusal.reason
+
+
+def test_intake_unlinks_a_symlink_entry_and_not_its_target(tmp_path: Path) -> None:
+    """R1's rule, applied to the one path source a page cannot steer but a build could."""
+    directory = _quarantine(tmp_path)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("private key material")
+    link = tmp_path / "Downloads"
+    link.mkdir()
+    entry = link / "innocent.pdf"
+    entry.symlink_to(secret)
+
+    outcome = bf.intake_landed([_item(entry)], directory)
+
+    assert not entry.exists()
+    assert secret.read_text() == "private key material", "the target is untouched"
+    (refusal,) = outcome.refused
+    assert refusal.deleted is True
+    assert "not a regular file" in refusal.reason
+
+
+def test_intake_refuses_a_relative_path_and_a_missing_file(tmp_path: Path) -> None:
+    directory = _quarantine(tmp_path)
+
+    outcome = bf.intake_landed(
+        [
+            {"name": "a.pdf", "path": "Downloads/a.pdf", "state": "complete"},
+            {"name": "b.pdf", "path": str(tmp_path / "Downloads" / "b.pdf"), "state": "complete"},
+        ],
+        directory,
+    )
+
+    assert outcome.moved == ()
+    assert "not absolute" in outcome.refused[0].reason
+    assert "not there" in outcome.refused[1].reason
+    assert outcome.refused[0].deleted is False
+
+
+def test_intake_refuses_a_path_inside_our_own_config_root(tmp_path: Path) -> None:
+    """Local Operator's own files must never be relocated by a host's claim."""
+    directory = _quarantine(tmp_path)
+    ours = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"]) / "config.yml"
+    ours.parent.mkdir(parents=True, exist_ok=True)
+    ours.write_text("models: {}\n")
+
+    outcome = bf.intake_landed(
+        [{"name": "config.yml", "path": str(ours), "state": "complete"}], directory
+    )
+
+    assert outcome.moved == ()
+    assert ours.exists()
+    assert "config directory" in outcome.refused[0].reason
+
+
+def test_intake_refuses_a_name_the_session_already_holds(tmp_path: Path) -> None:
+    """No silent overwrite (§11.4): both files survive and the caller is told."""
+    directory = _quarantine(tmp_path)
+    (directory / "receipt.pdf").write_bytes(b"%PDF-1.4\nthe first one")
+    source = _downloaded(tmp_path)
+
+    outcome = bf.intake_landed([_item(source)], directory)
+
+    assert outcome.moved == ()
+    assert (directory / "receipt.pdf").read_bytes() == b"%PDF-1.4\nthe first one"
+    (refusal,) = outcome.refused
+    assert "already holds a file with that name" in refusal.reason
+    assert refusal.deleted is True, "the duplicate is removed rather than piled up"
+
+
+def test_intake_accepts_a_file_already_in_the_session_directory(tmp_path: Path) -> None:
+    """A host that DID write into the directory is reported as moved, not moved again."""
+    directory = _quarantine(tmp_path)
+    landed = directory / "receipt.pdf"
+    landed.write_bytes(b"%PDF-1.4\n")
+
+    outcome = bf.intake_landed([_item(landed)], directory)
+
+    assert outcome.moved == ("receipt.pdf",)
+    assert outcome.refused == ()
+    assert landed.exists()

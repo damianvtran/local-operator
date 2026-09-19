@@ -40,6 +40,7 @@ from local_operator.browser_bridge.protocol import (
     ORIGIN_PROMPT_WINDOW_S,
     PROTO_VERSION,
     Capabilities,
+    CapabilitySwitches,
     ErrorCode,
     ErrorDetail,
     Hello,
@@ -850,6 +851,17 @@ class ExtensionLink:
         # `capability_unsupported` rather than burning a 120 s budget on a
         # method the worker answers with a bare `internal`.
         self.capabilities: list[str] = []
+        # The servable methods the OPERATOR has switched off in the extension's own
+        # options, learned from its `capability_switches` event and kept per-socket
+        # for the same reason `capabilities` is: a consent reported by a peer that
+        # has gone must not keep answering for its replacement.
+        #
+        # A separate list rather than an absence from `capabilities`, because the
+        # two absences have opposite remedies — a build that cannot serve a method
+        # needs an update, and a build whose switch is off needs the operator — and
+        # conflating them sends the user to a fix that cannot work
+        # (protocol.CapabilitySwitches states the same rule from the other side).
+        self.disabled_capabilities: list[str] = []
         self.paired = False
         self.pending: dict[str, asyncio.Future[Response]] = {}
         # Request ids the extension has told us are blocked on a human origin
@@ -1167,6 +1179,11 @@ class ExtensionLink:
         # a list outliving its socket would let a method be sent to a peer that
         # never advertised it.
         self.capabilities = []
+        # …and so is the operator's own answer. Kept with the advertisement it
+        # qualifies: a stale "switch off" would name a consent the peer that
+        # replaced this one never gave, which is a lie about the USER rather than
+        # about a build.
+        self.disabled_capabilities = []
         for future in self.pending.values():
             if not future.done():
                 future.set_exception(RuntimeError("extension disconnected"))
@@ -1214,6 +1231,11 @@ class BridgeService:
             # not the link: it stays true while no peer is attached, which is
             # exactly when the refusal copy is most likely to be read.
             capabilities_known=True,
+            # …and the same stamp for the switch answer: without it an empty
+            # `disabled_capabilities` cannot be told from a daemon that predates the
+            # field, and the refusal copy would offer a switch to a user whose
+            # extension build has none.
+            switches_known=True,
             started_at=self.started_at,
         )
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -1653,6 +1675,11 @@ class BridgeService:
             # read by a human in `lop browser status`; blanked with the version
             # above so a proven-only fact stays proven.
             self.state.capabilities = sorted(self.link.capabilities)
+            # The operator's answer, published with the advertisement it
+            # qualifies and blanked with it for the same reason: `disabled`
+            # outliving its socket would name a consent given by a peer that is no
+            # longer talking.
+            self.state.disabled_capabilities = sorted(self.link.disabled_capabilities)
             # The ONE advisory predicate, shared with `/health`: a KNOWN version
             # strictly below the one this runtime ships with. Unparseable is not
             # "older" and an extension AHEAD is not behind, so neither nags.
@@ -1666,6 +1693,7 @@ class BridgeService:
             # what makes the session-side capability check refuse rather than
             # send into a socket nobody is reading.
             self.state.capabilities = []
+            self.state.disabled_capabilities = []
             self.state.extension_update_available = False
         state_store.publish(self.state, self.root)
 
@@ -2825,6 +2853,29 @@ class BridgeService:
                     # new action as unavailable on a host that serves it.
                     self.publish_safely()
                     continue
+                if frame.get("event") == "capability_switches":
+                    # Which servable methods the operator has switched OFF
+                    # (protocol.CapabilitySwitches). A SECOND event rather than a
+                    # field on `capabilities` because every envelope here is
+                    # extra="forbid": a new key on an existing event is closed by
+                    # an already-released daemon, while an unknown event is dropped
+                    # — which is why the extension sends both and this branch
+                    # tolerates an old peer that sends only the first.
+                    #
+                    # Validated rather than trusted, and dropped on failure rather
+                    # than blanking a working answer: a malformed frame must not be
+                    # able to claim the operator enabled a capability.
+                    try:
+                        switches = CapabilitySwitches.model_validate(frame)
+                    except ValidationError:
+                        continue
+                    link.disabled_capabilities = [str(name) for name in switches.disabled]
+                    # Published immediately, for the same reason the advertisement
+                    # is: the harness decides from the FILE, and a switch the user
+                    # has just flipped must not keep reading as off — or as on —
+                    # for the next 30 s of heartbeats.
+                    self.publish_safely()
+                    continue
                 if frame.get("event") == "awaiting_origin":
                     # The extension paused this request on a human origin
                     # decision. Record it so the RPC wait extends its deadline
@@ -3205,6 +3256,31 @@ class BridgeService:
         # Only methods that ARE capability-gated are checked: every other method
         # predates the advertisement, and refusing them on a pre-feature peer
         # would break the whole tool for a host that works today.
+        # The operator's switch, refused at the SAME place the advertisement is
+        # enforced — so a session that somehow got past the file check (a record
+        # read a moment too early) still cannot reach a switched-off capability, and
+        # the wire refusal carries the same three-state payload the file path does.
+        if (
+            request.method in CAPABILITY_GATED_METHODS
+            and request.method in self.link.disabled_capabilities
+        ):
+            # The operator's switch, refused at the SAME place the advertisement is
+            # enforced — so a session that somehow got past the file check (a record
+            # read a moment too early) still cannot reach a switched-off capability,
+            # and the refusal carries the same three-state payload the file path
+            # carries.
+            return self._error_response(
+                request.id,
+                ErrorCode.CAPABILITY_UNSUPPORTED,
+                f"the operator has switched off {request.method} in the extension's options",
+                {
+                    "method": request.method,
+                    "advertised": sorted(self.link.capabilities),
+                    "extension_version": self.link.extension_version,
+                    "disabled": sorted(self.link.disabled_capabilities),
+                    "switches_known": True,
+                },
+            )
         if (
             request.method in CAPABILITY_GATED_METHODS
             and request.method not in self.link.capabilities
@@ -3217,6 +3293,8 @@ class BridgeService:
                     "method": request.method,
                     "advertised": sorted(self.link.capabilities),
                     "extension_version": self.link.extension_version,
+                    "disabled": sorted(self.link.disabled_capabilities),
+                    "switches_known": True,
                 },
             )
         if request.id in self.link.pending:
