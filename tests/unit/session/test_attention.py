@@ -984,7 +984,17 @@ def test_our_own_record_does_not_block_the_classification(tmp_path: Path) -> Non
 
 
 def test_a_dead_record_names_the_runtime_that_died(tmp_path: Path) -> None:
-    """Design test 3: the record's build, pid and start time ride the detail."""
+    """Design test 3: the record's build, pid and start time ride the detail.
+
+    AND THE DETAIL OPENS BY SAYING NOBODY WAS NAMED (QA round 1, Q4/Q5). The
+    bracket on this rung carries the DEAD runtime's own identity, while every
+    other ``runtime-killed`` reason on the same arm carries an ACTOR in the same
+    place (``… pruned by lop install prune, killer pid N``) — so a reader who has
+    seen one of those reads a bare pid here as the party that acted. The word the
+    other rung uses for the gap leads the parenthetical, and the victim's facts
+    follow it.
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED
     from local_operator.session.attention import bootstrap_transcript
     from local_operator.session.transcript import Transcript
 
@@ -999,6 +1009,11 @@ def test_a_dead_record_names_the_runtime_that_died(tmp_path: Path) -> None:
     assert (kind, cause) == ("error", "runtime-killed")
     assert f"pid {dead_pid}" in reason
     assert "1.2.3@abcdef0" in reason
+    # The gap is stated BEFORE the victim's facts, so the pid cannot be misread as
+    # an actor; the victim is still fully named behind it.
+    marker = reason.index("(")
+    assert reason[marker:].startswith(f"({KILL_UNATTRIBUTED},"), reason
+    assert f"pid {dead_pid}" in reason[marker:], reason
 
 
 def test_the_started_at_is_one_token_so_a_wrap_cannot_split_it() -> None:

@@ -975,6 +975,61 @@ def note_involuntary_stop(
     return True
 
 
+def withdraw_involuntary_stop(record: Any, root: Path, *, mechanism: str) -> bool:
+    """Take back OUR involuntary marker when the act it attests does not complete.
+
+    The counterpart of :func:`note_involuntary_stop`, and the same shape
+    :func:`_withdraw_staged_stop_marker` already takes for the ladder. A marker is
+    written BEFORE an irreversible step so it survives the process the step is done
+    to; when the step is then not taken — a prune whose ``_remove_tree`` reports the
+    tree still there, an in-place install whose installer exited non-zero — the
+    marker is the only artifact left saying otherwise. It is keyed to the live RUN,
+    so it covers every later death of that same process, and an unrelated crash an
+    hour later would be narrated as this act (review round 1, MINOR 2). The
+    command's own report says the act failed; the evidence has to agree with it.
+
+    WHAT IS REMOVED IS OURS — decided by READING the file rather than by
+    remembering that we wrote one, exactly as the ladder's withdrawal does: the run
+    key must match the record, ``rung`` must be the empty one an involuntary act
+    carries (a deliberate rung's marker is never this call's to take), ``deliberate``
+    must be ``False``, ``killer.pid`` must be ours, and ``mechanism`` must be the act
+    this withdrawal speaks for. So a marker another front end staged for the same
+    run survives, and so does a marker for a different mechanism.
+
+    ``root`` is the CONFIG ROOT the record was read under, because that is where the
+    conversation directory — and therefore the marker — lives; the run key names the
+    session, not the root.
+
+    Best-effort and never raises, like every other evidence write here: a failure to
+    clean up must not fail the act's own error report. Returns whether a marker was
+    removed, for a caller that wants to say so.
+    """
+    session_id = str(getattr(record, "session_id", "") or "")
+    if not session_id:
+        return False
+    conversation = session_dir(root, session_id)
+    staged = registry.read_stop_marker(conversation)
+    if not staged or staged.get("rung") != "" or staged.get("deliberate") is not False:
+        return False
+    if staged.get("mechanism") != mechanism:
+        return False
+    # The whole run key, for the reason ``_withdraw_staged_stop_marker`` states: the
+    # marker's own three fields are what the classifier compares against a dead
+    # record, so they are what decides whether this file is a statement about the
+    # run whose act just failed.
+    if staged.get("session_id") != session_id or staged.get("pid") != record.pid:
+        return False
+    if staged.get("started_at") != record.started_at:
+        return False
+    killer = staged.get("killer")
+    if not isinstance(killer, dict) or killer.get("pid") != os.getpid():
+        return False
+    # ``remove_stop_marker`` is best-effort by its own contract (a withdrawal must
+    # not fail over evidence cleanup), so there is no OSError to catch here.
+    registry.remove_stop_marker(conversation)
+    return True
+
+
 def _write_stop_marker(record: SessionRecord, root: Path, rung: Method, *, command: str) -> None:
     """Stage the durable stop marker BEFORE the step it attests to.
 

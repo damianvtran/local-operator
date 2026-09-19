@@ -534,7 +534,7 @@ def _marker_postdates_run(marker: dict[str, Any], run_started_at: float | None) 
     return float(marker["at"]) >= float(run_started_at)
 
 
-def _record_detail(record: Any) -> str:
+def _record_detail(record: Any, *, lead: str = "") -> str:
     """A parenthetical naming the record that outlived its process, or ``""``.
 
     Kept to the record's own facts (build, pid, started-at) rather than prose,
@@ -542,6 +542,18 @@ def _record_detail(record: Any) -> str:
     from the log to answer "which runtime was this". The started-at is ONE
     token rather than two — see the note on its format below (design round 3,
     D7).
+
+    ``lead`` IS HOW THE VICTIM IS TOLD APART FROM AN ACTOR (QA round 1, Q4/Q5).
+    Every other ``runtime-killed`` reason on this arm carries a marker's
+    ATTRIBUTION in the same brackets (``(its install generation was pruned by lop
+    install prune, killer pid N)``), so a bare ``(pid N, started …)`` — which is
+    the DEAD runtime's own identity — reads one word away from naming the process
+    that did it. This rung has no actor to name, and ``incidents.KILL_UNATTRIBUTED``
+    is how a verdict says so: the same affirmative statement about the gap that
+    ``journal.death_verdict``'s open-row rung makes, so a marked death and an
+    unmarked one are not read as the same sentence. Comma-separated rather than a
+    second set of brackets, exactly as ``journal.row_detail`` takes its own
+    ``lead``.
     """
     build = str(getattr(record, "version", "") or "")
     ref = str(getattr(record, "source_ref", "") or "")
@@ -562,7 +574,9 @@ def _record_detail(record: Any) -> str:
     parts = [
         part for part in (stamp, f"pid {record.pid}", f"started {when}" if when else "") if part
     ]
-    return f" ({', '.join(parts)})" if parts else ""
+    if lead:
+        parts.insert(0, lead)
+    return f" ({', '.join(parts)})" if parts else "" if parts else ""
 
 
 def _classify_orphaned_run(
@@ -594,8 +608,9 @@ def _classify_orphaned_run(
       marker is a killer's attestation that someone asked for this, and nothing
       about an unfinished turn may outrank a record that the stop was ordered;
     * a record on disk whose pid is dead → ``error`` / ``runtime-killed``, with
-      the record's build, pid and start time as the detail — the legacy path,
-      reached unchanged when no journal row survives;
+      the record's build, pid and start time as the detail, prefixed by
+      ``incidents.KILL_UNATTRIBUTED`` because the only party this rung can name is
+      the victim — the legacy path, reached unchanged when no journal row survives;
     * nothing at all → ``error`` / no cause, saying plainly that the cause could
       not be determined.
 
@@ -645,6 +660,7 @@ def _classify_orphaned_run(
     from local_operator.incidents import (
         CUT_OFF_UNKNOWN,
         DELIBERATE_CUT_OFF_CAUSE,
+        KILL_UNATTRIBUTED,
         involuntary_kill_detail,
         render_cut_off_reason,
         render_stop_attribution,
@@ -734,10 +750,16 @@ def _classify_orphaned_run(
     except Exception:  # noqa: BLE001 — unreadable evidence is not a dead session
         logger.debug("turn journal evidence unreadable for %s", directory.name, exc_info=True)
     if dead is not None:
+        # ONLY THE VICTIM IS KNOWN HERE, so that is what the bracket says before it
+        # names anything: this rung is reached when no marker, no row and no wake
+        # index entry survives, and an aside that opens with a bare pid sits one
+        # word away from the marker arms' actor (QA round 1, Q4/Q5).
         return (
             "error",
             "runtime-killed",
-            render_cut_off_reason("runtime-killed", detail=_record_detail(dead)),
+            render_cut_off_reason(
+                "runtime-killed", detail=_record_detail(dead, lead=KILL_UNATTRIBUTED)
+            ),
         )
     return "error", "", CUT_OFF_UNKNOWN
 

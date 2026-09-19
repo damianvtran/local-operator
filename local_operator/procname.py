@@ -87,6 +87,16 @@ on the link broke an unrelated worktree's ``local-operator`` console script with
 ``bad interpreter: Permission denied``. Nothing in this module writes modes, and
 nothing added to it should. Unlinking is safe (it only drops one name).
 
+A TEMP NAME IS THE LINK'S INODE TOO, so the same rule covers WRITING THROUGH one:
+the plant's ``.<brand>.<pid>.<thread>.tmp`` is a second name for whatever the
+``os.replace`` is about to install, and before that replace it is a second name
+for the interpreter the link already resolves to. Measured 2026-09-18, the hard
+way: a write through a LEAKED temp truncated a uv-managed, machine-wide
+interpreter — ``~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12``
+— to a 12-byte text file reachable under 23 different names, breaking every 3.12
+venv on the host until ``uv`` re-materialised it. "Unlinking is safe" holds for a
+temp precisely because it only drops one name.
+
 STALENESS
 ---------
 The hardlink pins an **inode**, not a version. When ``uv tool install --force``
@@ -455,7 +465,7 @@ def _needs_replant(link: Path, real: Path, libpython: Path | None) -> bool:
 
 
 def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
-    """Remove ``.<prefix>.<pid>.tmp`` entries left by a plant that was killed.
+    """Remove ``.<prefix>.<pid>[.<thread>].tmp`` entries left by a plant that was killed.
 
     The plant is link-to-temp + ``os.replace``, which is atomic and cleans up
     after itself on an ``OSError`` — but NOT when the process is killed between
@@ -514,7 +524,11 @@ def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
         gone: list[Path] = []
         unproven: dict[int, Path] = {}
         for entry in directory.glob(f".{prefix}.*.tmp"):
-            pid_text = entry.name[len(prefix) + 2 : -4]
+            # THE PID, NOT THE WHOLE TAIL: a temp is ``.<brand>.<pid>.<thread>.tmp``
+            # (see ``_plant_hardlink`` on why the thread is there), and the thread
+            # component is what this sweep does NOT need to answer its question —
+            # the pid is the planter either way.
+            pid_text = entry.name[len(prefix) + 2 : -4].split(".", 1)[0]
             if not pid_text.isdigit():
                 continue
             # POSIX semantics preserved exactly: a gone pid is False and is
@@ -541,6 +555,27 @@ def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
         logger.debug("orphan temp sweep skipped", exc_info=True)
 
 
+def _temp_thread_token() -> str:
+    """The thread component of a plant's temp name (see :func:`_plant_hardlink`).
+
+    WHY THE NAME NEEDS A SECOND COMPONENT AT ALL: the plant unlinks its own
+    ``.<brand>.<pid>.tmp`` before linking, which is right for one thread and wrong
+    for two — a second plant in the same process would drop the first's freshly
+    written temp, its ``os.link`` would then fail ``ENOENT``, and one plant would
+    have cost a sibling its rung 1 (review round 1, NIT 2). All four
+    ``ensure_branded_interpreter()`` call sites are single-threaded startup paths
+    today, so that collision is unreachable rather than impossible, and a name that
+    cannot collide is cheaper than the reasoning that keeps re-proving it cannot.
+
+    Isolated at this seam to keep ``threading`` out of the common startup, which is
+    this module's standing house rule: the plant runs only on the REPLANT path, and
+    everything above it is a stat probe and no writes.
+    """
+    import threading
+
+    return str(threading.get_ident())
+
+
 def _plant_hardlink(link: Path, real: Path) -> bool:
     """Create/refresh ``link`` as a hardlink to ``real``. Atomic, never raises.
 
@@ -554,7 +589,7 @@ def _plant_hardlink(link: Path, real: Path) -> bool:
     hardlinked, and the caller falls back to rung 2 — the interpreter, with no
     label on either axis (see the ladder in the module docstring).
     """
-    tmp = link.with_name(f".{BRAND}.{os.getpid()}.tmp")
+    tmp = link.with_name(f".{BRAND}.{os.getpid()}.{_temp_thread_token()}.tmp")
     try:
         link.parent.mkdir(parents=True, exist_ok=True)
         try:
