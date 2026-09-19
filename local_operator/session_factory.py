@@ -3321,18 +3321,24 @@ async def _prepare(
     claim_session(transcript_dir)
     transcript_dir.mkdir(parents=True, exist_ok=True)
     if transcript_dir.parent.name == "sessions":
-        # A session opened by a harness under the escape hatch
-        # (`agent_shell.py`) is marked as machine-started, so it can never be
-        # offered as a chat the operator opened. HERE rather than in the exec
-        # path, where it started: this is the one place every session gets its
-        # directory — foreground exec, the detached worker, the interactive
-        # viewer's runtime, the server — and the exec-only version left the
-        # interactive path unstamped while the docs promised it (review round
-        # 2, F1). ``fresh_directory`` keeps `--resume` honest: adopting the
-        # operator's own conversation must not hide their chat.
-        from local_operator.agent_shell import stamp_escaped_session
+        # A session an AGENT'S SHELL opened (`agent_shell.py`) is marked as
+        # machine-started, so it can never be offered as a chat the operator
+        # opened. Two routes reach here that way — the documented escape hatch
+        # for harness/QA runs, and an ALLOWED `lop exec` from a session whose
+        # role may delegate (operator, 2026-09-19) — and since the relaxation
+        # the second is unremarkable enough that this stamp is the only thing
+        # keeping such a run out of the picker, sidebar and phone list.
+        #
+        # HERE rather than in the exec path, where it started: this is the one
+        # place every session gets its directory — foreground exec, the detached
+        # worker, the interactive viewer's runtime, the server — and the
+        # exec-only version left the interactive path unstamped while the docs
+        # promised it (review round 2, F1). ``fresh_directory`` keeps
+        # `--resume` honest: adopting the operator's own conversation must not
+        # hide their chat.
+        from local_operator.agent_shell import stamp_agent_shell_session
 
-        stamp_escaped_session(transcript_dir, created_here=fresh_directory)
+        stamp_agent_shell_session(transcript_dir, created_here=fresh_directory)
 
         # Stamp the store as ours. The cleanup policy refuses to remove
         # anything from an unmarked ``sessions/`` directory, and this is the
