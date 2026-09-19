@@ -362,16 +362,46 @@ async def test_the_attached_session_is_not_announced_by_the_observer(
     This is also the focus gate, evaluated: an event is suppressed only when the
     user is demonstrably looking at the session that produced it, and for the
     attached row the in-app ``Notifier`` on ``TurnEnded`` already answers.
+
+    BOTH ARMS IN ONE CELL, for two reasons that are both about this cell being
+    able to fail (QA round 2, Q4). The first is NON-VACUITY: ``spawned == []``
+    is also what a scan that never ran produces, so a background session that
+    IS announced is what proves the scan happened at all. The second is
+    DETERMINISM: the app dispatches its first scan at boot, and a scan whose
+    worker read ``self._session`` before adoption finished sees no attached id
+    and may announce the very row this cell is about — so the boot-time scans
+    are settled and discarded BEFORE the completions under test are published,
+    and what is asserted is the steady state rather than a race with boot.
     """
     current = _make_session(store_root, "current", "Current conversation")
+    background = _make_session(store_root, "bg0000000001", "Background work")
     store = AttentionStore(store_root / "attention.db")
-    store.publish(conversation_identity(current), str(uuid.uuid4()), "fresh", "complete")
+    attached_identity = conversation_identity(current)
+    background_identity = conversation_identity(background)
+    # An ESTABLISHED store for BOTH rows: a prior, already-read completion, so
+    # the baseline is installed and the publishes below are news rather than a
+    # first reading.
+    for identity in (attached_identity, background_identity):
+        seed = str(uuid.uuid4())
+        store.publish(identity, seed, "old", "complete")
+        store.acknowledge(identity, seed)
 
     app = OperatorApp(lambda: _factory(AttachedSession()))
     async with app.run_test(size=(120, 40)) as pilot:
         await _booted(app, pilot)
         await _settle(app, pilot, rounds=8)
-        assert spawned == []
+        spawned.clear()
+
+        store.publish(attached_identity, str(uuid.uuid4()), "attached-completion", "complete")
+        store.publish(background_identity, str(uuid.uuid4()), "background-completion", "complete")
+        await _settle(app, pilot, rounds=10)
+
+        assert len(spawned) == 1, spawned
+        argv = " ".join(spawned[0])
+        # The control: a row nobody is looking at IS announced, so the scan ran.
+        assert "bg0000000001" in argv, spawned
+        # The subject: the attached row is not, and nothing named it.
+        assert "Current conversation" not in argv, spawned
 
 
 @pytest.mark.asyncio

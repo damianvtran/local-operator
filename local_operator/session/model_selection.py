@@ -395,18 +395,42 @@ def session_uses_test_hosting(directory: Path) -> bool:
     SO IT IS MEMOISED, on the journal's own ``(st_mtime_ns, st_size)`` — the
     same key and the same argument ``resume.py`` makes for its ``origin.json``
     verdict cache: a verdict read out of a file whose bytes and timestamp are
-    unchanged cannot differ from the next read of it, and any write to the
-    journal moves the key. A steady poll therefore pays a ``stat`` per row
-    (~0 ms) and re-scans only when something was appended. The cache is
-    per-process and bounded (:data:`_HOSTING_VERDICT_CACHE_MAX`), because both
-    readers are long-lived and nothing here is a source of truth.
+    unchanged cannot differ from the next read of it. The key is the whole
+    truth about that claim, and it is worth being exact about what it covers:
+    every writer in this codebase moves the SIZE — a journal grows by appending,
+    and the only path that preserves an mtime is
+    ``transcript.Transcript._restore_mtime`` on a bookkeeping batch, which is
+    restoring the clock for a write that already grew the file. That path also
+    cannot restore ``st_mtime_ns`` EXACTLY (``os.utime`` takes float seconds;
+    measured +106 ns), so such an append re-scans once — harmless, and not
+    something to "fix" by making the restore precise: the size half of the key
+    has already invalidated the entry, and a key that leaned on a
+    precision-lossy mtime would be the weaker one. A hypothetical EXTERNAL
+    writer that rewrote the journal in place to the same byte length AND
+    restored the mtime to the nanosecond would serve a stale verdict; no writer
+    in this repository can do that, and the readers here are one process's
+    caches rather than a source of truth.
 
-    TWO THINGS ARE NEVER CACHED, for the reason ``resume.py`` gives for not
-    caching an unreadable marker: a missing journal and an unreadable one
-    describe the MOMENT — a store mid-write, EMFILE under descriptor pressure,
-    a network volume blip — and caching that as "not a test session" would
-    serve a transient outage for the life of the file. They answer ``False``
-    (the tolerant direction below) and are re-derived next time.
+    A steady poll therefore pays a ``stat`` per row (~0 ms) and re-scans only
+    when the journal actually changed. The cache is per-process and bounded
+    (:data:`_HOSTING_VERDICT_CACHE_MAX`), because both readers are long-lived
+    and nothing here is a source of truth.
+
+    THREE THINGS ARE NEVER CACHED, for the reason ``resume.py`` gives for not
+    caching an unreadable marker: they describe the MOMENT rather than the file.
+
+    * A MISSING journal, and one that exists but cannot be OPENED — a store
+      mid-write, an unmounted volume, EMFILE under descriptor pressure. Both
+      answer ``False`` (the tolerant direction below) and are re-derived next
+      time.
+    * A WALK THAT RAISED. The failure can land after the file opened — an
+      ``OSError(24)`` on a read under descriptor pressure, a volume that goes
+      away mid-scan — and memoising it would be the operator's banner back
+      again: the verdict for that file is then stuck at ``False`` for as long
+      as its bytes and timestamp stand, so a MOCK session stops being seen as
+      one and banners (review round 2, R2-1). ``_read_test_hosting`` reports
+      that case as ``None`` rather than as a bool, the caller answers ``False``
+      without memoising, and the next tick re-walks.
 
     TOLERANT, AND FAILS TOWARD NOTIFYING. ``False`` for a missing, unreadable
     or selection-free journal, and for an unusable row. Two reasons that is the
@@ -447,6 +471,16 @@ def session_uses_test_hosting(directory: Path) -> bool:
     except OSError:
         return False
     verdict = _read_test_hosting(directory)
+    if verdict is None:
+        # INDETERMINATE: the walk raised after the file opened. Answered the
+        # tolerant direction WITHOUT memoising it, because the alternative is
+        # the operator's banner back — a transient read failure memoised as
+        # "not a test session" stays that way for as long as the journal's bytes
+        # and timestamp stand, so a MOCK session stops being recognised as one
+        # and banners (review round 2, R2-1: one injected `OSError(24)` did
+        # exactly that). Nothing is lost by re-walking: the caller's own process
+        # switch still applies, and the next tick re-derives this.
+        return False
     if len(_HOSTING_VERDICT_CACHE) >= _HOSTING_VERDICT_CACHE_MAX:
         # Insertion-ordered, so the oldest insert is the first key: a plain FIFO
         # bound is enough here (the callers touch the same handful of rows every
@@ -456,12 +490,18 @@ def session_uses_test_hosting(directory: Path) -> bool:
     return verdict
 
 
-def _read_test_hosting(directory: Path) -> bool:
-    """The uncached read behind :func:`session_uses_test_hosting`."""
+def _read_test_hosting(directory: Path) -> bool | None:
+    """The uncached read behind :func:`session_uses_test_hosting`.
+
+    ``None`` means INDETERMINATE — the walk raised, so this call cannot say
+    whether the session is on the test hosting. The caller answers the tolerant
+    direction and does NOT memoise it; the distinction is why this has three
+    answers rather than two (see the caller's docstring).
+    """
     try:
         from local_operator.providers.registry import is_mock_provider
 
         settled = _settled_selection(directory)
     except Exception:  # noqa: BLE001 — a banner decision never fails on a store read
-        return False
+        return None
     return settled is not None and is_mock_provider(settled.provider)
