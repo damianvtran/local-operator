@@ -143,18 +143,35 @@ def _build_bundle() -> str | None:
         # to install. The wheel ships the built bundle, so this is a source
         # checkout (a container, a dev machine), and Node is a one-time cost
         # there rather than a runtime dependency of the daemon.
+        # THE REMEDY HAS TO BE ONE THE READER CAN ACTUALLY RUN (design round 2,
+        # D7). This sentence used to lead with `apt install nodejs`, which was
+        # measured wrong on the very host this branch's own leg runs on: Ubuntu
+        # 24.04's archive package is `nodejs 18.19.1`, and Debian freezes it at
+        # the distro release, so the operator runs the remedy and gets this
+        # identical refusal back. What the reader needs is the version check and
+        # the routes that give them a current Node.
         return (
             "node is not installed, and the portal bundle is built once with it "
-            "(Node >=22; `apt install nodejs`, `brew install node`, or "
-            "https://nodejs.org); re-run `lop mobile install` afterwards"
+            "(Node >=22, and the archive package is usually older than that -- "
+            "Ubuntu 24.04 ships 18 -- so check `node --version`; "
+            "https://nodejs.org, or `nvm install 22`); "
+            "re-run `lop mobile install` afterwards"
         )
     try:
         runner = _shim_argv("pnpm")
         if runner is None:
             corepack = _shim_argv("corepack")
             if corepack is None:
+                # SAME DEFECT AS THE NODE ARM ABOVE (design round 2, D8): the
+                # old sentence's only instruction was `pnpm build`, which is
+                # the command that cannot run BECAUSE pnpm is the missing
+                # thing. Name how to get pnpm instead.
                 return (
-                    "neither pnpm nor corepack found; run `pnpm build` in local_operator/mobile/web"
+                    "neither pnpm nor corepack is on PATH, and the portal bundle "
+                    "is built with pnpm: enable Corepack (`corepack enable`; it "
+                    "ships with Node) or install pnpm "
+                    "(https://pnpm.io/installation), then re-run "
+                    "`lop mobile install`"
                 )
             subprocess.run(
                 [*corepack, "enable"],

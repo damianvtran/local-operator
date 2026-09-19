@@ -53,11 +53,12 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
-import os
 import socket
 import struct
 import sys
 from dataclasses import dataclass
+
+from local_operator.procstate import PLATFORM_LABEL
 
 #: Ceiling on the ancestry walk. Deep enough for any real chain here (session →
 #: shell → wrapper → interpreter is 4) and bounded so a pathological or
@@ -112,14 +113,14 @@ PEER_AUTHENTICATION_SUPPORTED = _IS_DARWIN or _IS_LINUX
 
 #: How this platform is spelled in a message a USER reads.
 #:
-#: ``sys.platform`` is ``win32`` there — a CPython identifier that appears
-#: nowhere else an operator can see — so the refusal below would tell them the
-#: broker "cannot run on win32". The mapping is ``update.py``'s, applied to its
-#: own refusal; kept as a module constant rather than spelled inline because
-#: ``os.name`` cannot be patched in a test (``pathlib`` reads it at call time, so
-#: setting it to ``nt`` makes the next ``Path(...)`` a ``WindowsPath``), which is
-#: the same reason the two platform constants above are constants.
-_PLATFORM_LABEL = "Windows" if os.name == "nt" else sys.platform
+#: ``sys.platform`` is ``win32`` -- a CPython identifier that appears nowhere
+#: else an operator can see -- so the refusal below would tell them the broker
+#: "cannot run on win32". The mapping now has ONE home
+#: (:data:`local_operator.procstate.PLATFORM_LABEL`, which the upgrade summary
+#: reads too); this name is kept because tests patch it rather than
+#: ``os.name``, which cannot be patched -- ``pathlib`` reads it at call time, so
+#: setting it to ``nt`` makes the next ``Path(...)`` a ``WindowsPath``.
+_PLATFORM_LABEL = PLATFORM_LABEL
 
 
 def broker_unsupported_reason() -> str | None:

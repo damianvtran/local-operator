@@ -649,7 +649,10 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
             # exists".
             return InstallOutcome(
                 installed=False,
-                reason="plist already written; launchd not addressable from here",
+                reason=(
+                    "plist already written; launchd not addressable from here; "
+                    "it takes effect at your next login"
+                ),
             )
         if current == wanted and addressable:
             state = supervisor_state(config_dir)
@@ -712,7 +715,11 @@ def ensure_supervisor_installed(config_dir: Path) -> InstallOutcome:
             # verifiable, but loading it would install a real unit into the
             # developer's own launchd session. See `_launchd_is_addressable`.
             return InstallOutcome(
-                installed=False, reason="plist written; launchd not addressable from here"
+                installed=False,
+                reason=(
+                    "plist written; launchd not addressable from here; "
+                    "it takes effect at your next login"
+                ),
             )
         # bootout first so a reinstall replaces a loaded stale unit; a missing
         # unit makes this a no-op, which is why `reload_job` ignores that
@@ -779,7 +786,10 @@ def _ensure_systemd_installed(config_dir: Path) -> InstallOutcome:
         if current == wanted and not addressable:
             return InstallOutcome(
                 installed=False,
-                reason="unit already written; the user manager is not addressable from here",
+                reason=(
+                    "unit already written; the user manager is not addressable from here; "
+                    "it takes effect at your next login"
+                ),
             )
         if current == wanted and addressable:
             state = _systemd_supervisor_state(config_dir)
@@ -820,7 +830,10 @@ def _ensure_systemd_installed(config_dir: Path) -> InstallOutcome:
         if not addressable:
             return InstallOutcome(
                 installed=False,
-                reason="unit written; the user manager is not addressable from here",
+                reason=(
+                    "unit written; the user manager is not addressable from here; "
+                    "it takes effect at your next login"
+                ),
             )
         # Lingering BEFORE enable --now: without a user manager the enable fails
         # with the bus error, and enabling linger is what spawns one. Best-effort,
