@@ -3922,7 +3922,7 @@ async def _dial_frontend(
 
 @pytest.mark.asyncio
 async def test_a_viewer_can_be_health_checked_and_controlled_while_its_bind_is_in_flight() -> None:
-    """The socket is usable BEFORE the sync lands — and for exactly four ops.
+    """The socket is usable BEFORE the sync lands — and for exactly five ops.
 
     This is the operator's "prioritize health check and interface connection
     requests", as a socket-level assertion. Before it, ``_on_connection`` ran
@@ -3975,6 +3975,44 @@ async def test_a_viewer_can_be_health_checked_and_controlled_while_its_bind_is_i
         await writer.drain()
         await _until(reader, "ack", 4)
         assert ("prompt", ("hello",), {}) in handle.calls
+    finally:
+        handle.bind_gate.set()
+        if writer is not None:
+            writer.close()
+        runtime.close()
+
+
+class _CancelableHeldBindHandle(_HeldBindHandle):
+    """A held-bind handle that can also answer the graceful ``cancel`` rung."""
+
+    async def cancel_gracefully(self):  # noqa: ANN202
+        return await self._record("cancel_gracefully")
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_is_admitted_pre_sync() -> None:
+    """``cancel`` is one of the ops a still-binding connection may run.
+
+    Review round 2, NIT: ``cancel`` joined :data:`_SYNC_PRIORITY_OPS` in round 1
+    (review F2) and nothing tested it, so the next person to prune that set would
+    have had no signal. It is admitted for the same reason ``abort`` is — it is
+    how a supervisor stops a runaway turn, and refusing it pre-sync would deny
+    that exactly when the connection is least able to do anything else. Asserted
+    over a real socket with the bind held, like its neighbour above.
+    """
+    handle = _CancelableHeldBindHandle()
+    runtime = RuntimeServer(handle, kind="tui")
+    runtime.start()
+    writer = None
+    try:
+        record = await _wait_record()
+        reader, writer = await _dial_frontend(record)
+        assert await asyncio.to_thread(handle.bind_entered.wait, 5), "the bind never started"
+
+        writer.write(json.dumps({"op": "cancel", "req": 1}).encode() + b"\n")
+        await writer.drain()
+        assert (await _until(reader, "ack", 1))["detail"] == "cancel_gracefully ok"
+        assert ("cancel_gracefully", (), {}) in handle.calls
     finally:
         handle.bind_gate.set()
         if writer is not None:
