@@ -63,6 +63,7 @@ from local_operator.mobile.types import SessionProjection
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
+from local_operator.session.runtime.publication import PublicationGate
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
     ATTACH_MAX_CLIENTS,
@@ -634,6 +635,10 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
 # healthy viewer and synthesising a false "interrupted".
 _SEND_TIMEOUT_S = 1.0
 _TUI_SEND_TIMEOUT_S = 5.0
+#: How long shutdown waits for a shielded frontend bind to land before the
+#: runtime's loop can disappear — see ``RuntimeServer._drain_abandoned_binds``.
+#: The same order as ``RuntimeServer.close``'s own bounded join (2.0s).
+_ABANDONED_BIND_DRAIN_S = 2.0
 # Raw events are lossless only while a follower keeps pace. One bounded FIFO per
 # event client prevents a non-reader from retaining an unbounded stream before
 # its active drain reaches the timeout; overflow drops that client so it can
@@ -683,6 +688,24 @@ _ANNOUNCE_WRITE_TIMEOUT_S = 0.25
 #: ``close()`` and leave the listener bound, so the wait keeps a timeout.
 _CLOSE_WAIT_BACKSTOP_S = 0.2
 
+#: How long ``wait_until_published`` waits for ``start()``'s record to land.
+#: ``start()`` hands the work to a thread and returns, so the caller's next
+#: statement still sees ``control_port == 0`` and a record file that does not
+#: exist yet. This is therefore a bound on a FAILURE rather than on the normal
+#: path — the thread's first act is a loopback bind, measured in single-digit
+#: milliseconds — and it is deliberately generous, because the two errors are
+#: not symmetric: a caller that gives up early reports a control surface that is
+#: about to exist, while one that waits an extra few seconds only delays a boot
+#: that is already broken.
+_PUBLISH_WAIT_TIMEOUT_S = 15.0
+
+#: Sentinel for ``_retire_if_pristine``'s single-hop re-check. The re-check and
+#: the stop go to the session's loop TOGETHER (see that method), so "work
+#: arrived" has to come back as a value rather than as an early return, and the
+#: value crosses a thread boundary — a module-level singleton is comparable by
+#: identity from either side, where a local one would only work by luck.
+_WORK_ARRIVED = object()
+
 _PAYLOAD_OPS = {
     "slash_result",
     "cancel_subagents",
@@ -709,6 +732,89 @@ _PAYLOAD_OPS = {
     "frontend_sync",
     "record_shell",
 }
+
+#: Ops a connection may run while its canonical ``frontend_sync`` is still being
+#: built and is not on the wire yet.
+#:
+#: The bind is a cross-thread hop onto the session's loop, so a session inside a
+#: synchronous step of a turn parks it for the length of that step. Running the
+#: bind inline therefore made a follower's socket DEAF rather than slow: the
+#: reader loop had not started, so nothing the client sent was read at all — not
+#: even a ``ping`` — while a daemon or phone dial to the same runtime kept
+#: answering (measured: review round 2, UX U6). ``_on_connection`` now starts the
+#: bind as a task and enters the reader loop first, which is what makes this set
+#: necessary: a connection that is reachable but not yet AUTHORITATIVE must not be
+#: allowed to act on state it has not been told about.
+#:
+#: So: health, and the three ways to regain control of a turn. ``stop``/``abort``/
+#: ``cancel`` are the kill switch in its three rungs, and withholding them until a
+#: sync lands would deny a supervisor the ability to stop a runaway session
+#: precisely when its loop is stuck — the situation this set exists for.
+_SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
+
+#: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
+#: of it: each mutates only this connection's own relay state and never touches
+#: the session, so none can act on a connection that has not yet been made
+#: authoritative — which is the whole reason the priority set is closed. They must
+#: be admitted, because the dial path itself sends three of them immediately after
+#: reading the welcome and BEFORE it awaits the sync frame
+#: (``session/attached.py``: the event-mute, ``viewer_watch`` and
+#: ``desktop_watch`` re-asserts), each with its own bound; refusing them would
+#: turn every reconnect of a parked viewer into three error frames.
+#:
+#: SIX of the eight are already treated as connection-local by ``_dispatch``'s
+#: push exemption — ``watch``, ``unwatch``, ``watch_job``, ``unwatch_job``,
+#: ``event_mute``, ``event_unmute`` — which is what makes those a mirror of an
+#: existing decision rather than a second one. ``desktop_watch`` and
+#: ``viewer_watch`` are NOT in that tuple (it exempts an op from the post-ack
+#: repaint, and those two answer with a receipt instead), so they are admitted
+#: on their own reason: their ``_dispatch`` arms touch only this connection's own
+#: watch/presence state and notify this connection, never the session.
+_SYNC_LOCAL_OPS = frozenset(
+    {
+        "watch",
+        "unwatch",
+        "watch_job",
+        "unwatch_job",
+        "desktop_watch",
+        "viewer_watch",
+        "event_mute",
+        "event_unmute",
+    }
+)
+
+
+def _running_loop() -> asyncio.AbstractEventLoop | None:
+    """The loop this thread is running, or ``None`` on a plain thread.
+
+    The single spelling of "which loop am I on" for the two places on
+    ``RuntimeServer`` that must answer it — ``_on_runtime_loop`` (is the caller
+    THIS runtime's owner?) and ``_handle_call_on_session_loop`` (is the caller
+    already on the SESSION's?). A bare ``get_running_loop()`` in either would
+    raise on a plain thread, and both have legitimate plain-thread callers:
+    ``announce_stop`` documents one, and any synchronous wrapper around a
+    handle call is another.
+    """
+    try:
+        return asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+
+
+async def _maybe_await(result: Any) -> Any:
+    """``result``, awaited first if it is awaitable.
+
+    A handle method may be a plain ``def`` returning a value (``subscribe``
+    hands back an unsubscribe closure) or an ``async def`` (``subscribe_frontend``
+    hands back a subscription). The code that HOPS a call has to preserve
+    whichever shape it was given, and it must not impose one on the other: a
+    hop that returned a coroutine object to be awaited by the caller would run
+    the body on the wrong loop, and a hop that insisted on an awaitable would
+    break the synchronous half of the same protocol.
+    """
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 def _accepts_kw(fn: Any, name: str) -> bool:
@@ -872,6 +978,20 @@ class _ClientConn:
     # events begin behind that boundary on the same FIFO, so a joining client
     # cannot see transcript animation ahead of the snapshot that seeded it.
     events_ready: bool = False
+    #: The canonical frontend sync for this connection is still being built and is
+    #: not on the wire yet. Distinct from ``frontend_ready``, which is the
+    #: RECIPIENT set's gate ("frontend frames may be enqueued now"): this one is the
+    #: ADMISSION gate, and it is what ``_on_request`` consults to decide whether a
+    #: connection may run a session-facing op at all. Set before the sync task is
+    #: created and cleared when that task settles, so the two can never disagree
+    #: about a LIVE connection (a failed sync drops the client).
+    frontend_sync_pending: bool = False
+    #: The task that binds this viewer and queues its sync frame — see
+    #: ``RuntimeServer._serve_frontend_sync``. Held so ``_drop_client`` can cancel
+    #: it, the same contract ``event_writer_task`` keeps, because a connection that
+    #: goes away mid-bind owes the session an unsubscribe and must not queue a
+    #: frame onto a socket nobody owns.
+    frontend_sync_task: asyncio.Task[None] | None = None
     event_queue: asyncio.Queue[dict[str, Any]] = field(
         default_factory=lambda: asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
     )
@@ -1280,6 +1400,16 @@ class RuntimeServer:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._unsubscribe: Callable[[], None] | None = None
         self._closed = threading.Event()
+        #: Publication latch state, set by ``_serve`` once its boot prologue has
+        #: SETTLED — the record is on disk with its bound port, or the prologue
+        #: failed and there will never be one. Guarded by ``_publication_lock``
+        #: because the reader is the CALLER's thread and the writer is the
+        #: runtime's own; see :meth:`wait_until_published` for why a caller needs
+        #: either, and :meth:`_settle_publication` for why the waiters are
+        #: ``PublicationGate``s rather than executor threads.
+        self._publication_settled = False
+        self._publication_gates: list[PublicationGate] = []
+        self._publication_lock = threading.Lock()
         #: Loop-side wake for ``_closed``. Created ON the runtime loop by
         #: ``_closed_wait``, awaited there and set by ``_request_close`` from
         #: whatever thread latches the close, via ``call_soon_threadsafe`` — an
@@ -1293,6 +1423,13 @@ class RuntimeServer:
         # frame: a busy session repaints ~30x/s and a per-frame warning is the
         # log flood the cap exists to prevent. Reset when a frame fits again.
         self._frame_cap_warned = False
+        #: Frontend binds whose connection went away MID-BIND, held until they
+        #: land so their registration can be released — see
+        #: ``_release_when_landed``. Nothing else awaits these tasks, and an
+        #: unreferenced task can be collected mid-flight, in which case its
+        #: release never fires and the session keeps a subscriber for the life of
+        #: the process.
+        self._abandoned_binds: set[asyncio.Task[Any]] = set()
         # The delayed repaint must be owned like the heartbeat. A bare task can
         # still be sleeping when close tears down the runtime loop, producing
         # an orphan warning and proving teardown returned before its work ended.
@@ -1353,7 +1490,14 @@ class RuntimeServer:
 
     def start(self) -> None:
         """Bind the listener, publish the record, start the heartbeat and the
-        event feed — on a dedicated thread with its own loop. Idempotent."""
+        event feed — on a dedicated thread with its own loop. Idempotent.
+
+        This is the path for EVERY kind whose session lives in this process:
+        the TUI (which started here because Textual owns its loop) and, since
+        the serving plane was decoupled from the workload, the daemon and exec
+        children too (:func:`process.amain`, ``exec_control``). Their callers
+        owe a :meth:`wait_until_published` before reading the record.
+        """
         if self._thread is not None:
             return
         # PIN THE DISCOVERY DIRECTORY HERE, at the moment the caller asks this
@@ -1374,10 +1518,23 @@ class RuntimeServer:
         self._thread.start()
 
     async def start_in_process(self) -> None:
-        """The same startup as :meth:`start` but on the CALLER'S running
-        loop — for hosts whose session already lives on that loop (the
-        mobile child process), where a second loop would force every handle
-        call through a cross-thread hop for no benefit."""
+        """The same startup as :meth:`start` but on the CALLER'S running loop.
+
+        For a host whose session already lives on that loop and which is not a
+        daemon or exec child: an in-process TUI host, ``lop serve``'s reload
+        worker, a test. Those two kinds USED to choose this path, and reversing
+        that choice is the whole of this change — the docstring here read "a
+        second loop would force every handle call through a cross-thread hop for
+        no benefit", which was measured and is wrong: the hop IS the benefit,
+        because in process one synchronous step of a turn parks the listener,
+        the welcome, ``ping`` and the heartbeat together, so a working session
+        reads as ``wedged`` and a fresh dial is never served. See
+        :func:`process.amain` for the readings.
+
+        Kept rather than deleted, deliberately: the TUI's and the suite's
+        in-process hosts are real, and the two modes share ``_serve`` so this
+        is a caller-side choice rather than a second implementation.
+        """
         if self._server is not None:
             return
         # The pin is LOAD-BEARING on this path too, not defence in depth:
@@ -1390,6 +1547,105 @@ class RuntimeServer:
         self._config_root = config_dir()
         self._loop = asyncio.get_running_loop()
         await self._serve()
+
+    async def wait_until_published(self, *, timeout: float = _PUBLISH_WAIT_TIMEOUT_S) -> bool:
+        """Wait for :meth:`start`'s record, and answer whether it exists.
+
+        ``start()`` only HANDS the work to a thread. Everything the record
+        carries — the listener's port above all — is stamped on that thread, so
+        a caller that reads ``record.control_port`` (or ``record_path``) on the
+        next line reads the constructor's ``0`` and names a file nothing has
+        written. That is not theoretical: ``exec_control.start_exec_control``
+        builds the endpoint line a SUPERVISOR is handed from exactly those two
+        fields, and the line exists so a supervisor can find this session —
+        ``port=0`` plus a record path that may not exist breaks the one thing
+        it is for. ``process.amain`` reads the record less eagerly (its parent
+        polls ``launch.py``'s wait-for-record loop), but it asks for the same
+        ordering and gets it from the same call rather than from a second
+        convention.
+
+        Returns True when the record was published, False when the boot
+        prologue settled without publishing (a bind failure) or the bound
+        expired. The two are ONE answer on purpose: both mean "there is no
+        control surface to talk to", and a caller that needs to tell them apart
+        has the runtime's own log for it.
+
+        IT SETTLES AT THE END OF THE BOOT PROLOGUE, not at the instant the
+        record lands, and that is a deliberately stronger guarantee: by the time
+        this returns on the success path the boot registrations have come back
+        from the session's loop and the heartbeat has been started. "The record
+        exists" is not the same claim — a caller released at publication could
+        hand the loop straight to a turn, starving the registration hop that
+        ``_serve`` is still awaiting, and the runtime would publish a record and
+        then never beat (measured: `wedged` at t=46 s with no client attached,
+        i.e. the defect this change removes). ``_serve`` states the ordering
+        where it is enforced.
+
+        THE WAIT COSTS NO THREAD, which is a correction rather than a nicety.
+        The obvious spelling — ``asyncio.to_thread(settled.wait, timeout)`` on a
+        ``threading.Event`` — was measured at fleet depth and left a SECOND
+        thread parked in the loop's default executor for the life of the
+        process: 12 runtimes went from 1 thread each to 3, not 2, which is
+        exactly the per-runtime cost §5.2 of the audit exists to watch. A
+        ``PublicationGate`` binds the WAITER's loop and hops the open onto it
+        with ``call_soon_threadsafe`` — the same class the deferred MCP wiring
+        already uses for this exact cross-thread latch — so the wait is one
+        parked coroutine and no thread at all. It is awaited here with
+        ``asyncio.wait_for``, so a runtime that never publishes cannot park its
+        caller for the life of the process either.
+        """
+        gate: PublicationGate | None = None
+        with self._publication_lock:
+            # Registered under the lock, and the settle path CLEARS the list
+            # under the same lock, so a gate handed over here is guaranteed to
+            # be opened: there is no window in which the prologue settles
+            # between this check and this append.
+            if not self._publication_settled:
+                gate = PublicationGate()
+                self._publication_gates.append(gate)
+        if gate is not None:
+            try:
+                await asyncio.wait_for(gate.wait(), timeout=timeout)
+            except TimeoutError:
+                # A TIMED-OUT WAITER TAKES ITS GATE BACK OUT. The settle path
+                # clears the list wholesale, so a gate left behind here is not a
+                # leak in the ordinary case — but it IS one on the timeout path
+                # this branch exists for: a runtime whose prologue never settles
+                # keeps the list it was never cleared from, and a host that
+                # starts many runtimes that never publish walks a list of dead
+                # gates on every one of them. Under the same lock, and only
+                # while the latch is still closed, so a concurrent settle cannot
+                # race the removal.
+                with self._publication_lock:
+                    if not self._publication_settled:
+                        with contextlib.suppress(ValueError):
+                            self._publication_gates.remove(gate)
+                return False
+        # ``_publisher`` is written on the runtime's own thread BEFORE the latch
+        # settles, so a settled latch is a read of it that has already happened
+        # — the latch is the synchronisation, not a hint.
+        return self._publisher is not None
+
+    def _settle_publication(self) -> None:
+        """Open the publication latch, from the runtime's own loop.
+
+        Called on EVERY way out of ``_serve``'s boot prologue, a failed bind
+        included: a caller waiting here must be released by a runtime that will
+        never serve as well as by one that is about to, or it waits out its
+        whole bound for an answer ``_serve`` already has. Which of the two it
+        was is ``_publisher``'s business, not this latch's.
+
+        The gates are taken OUT of the list under the lock before they are
+        opened, so a second settle (a re-entered prologue cannot happen today,
+        but a latch that only works once is a latch nobody can reuse) cannot
+        open them twice, and a late waiter cannot be added to a list no one will
+        walk again.
+        """
+        with self._publication_lock:
+            self._publication_settled = True
+            gates, self._publication_gates = self._publication_gates, []
+        for gate in gates:
+            gate.set()
 
     def announce_stop(self) -> None:
         """Tell every attached viewer this session is ending DELIBERATELY.
@@ -1532,8 +1788,49 @@ class RuntimeServer:
         cold the slow way. ON that loop, not from anywhere: the send path below
         owns the loop's ``send_lock`` and the connections' writers, and
         ``_send_to`` refuses a foreign-loop caller outright rather than parking
-        it forever — so any new caller (a test included) hops to the owner's
-        loop.
+        it forever — so this method HOPS, and a caller may now sit on either
+        plane.
+
+        THE HOP IS NEW, and it is a repair rather than a convenience. Its
+        callers (``process._commit_to_leaving``, ``process._refresh_for``) run
+        on the SESSION's loop — the reaper and the signal drain both do — which
+        was the owner loop only while ``daemon``/``exec`` served in process.
+        Once the serving plane moved to its own thread (``start()``), the send
+        below met ``_send_to``'s foreign-loop refusal, and the refusal was
+        SWALLOWED: ``_commit_to_leaving`` catches it at DEBUG ("a viewer that
+        misses this goes cold the slow way"). Viewers would simply stop
+        learning that a runtime was retiring, and the drain would proceed — the
+        quietest possible failure, which is why the hop lives here rather than
+        in a caller's discipline. ``announce_stop`` already carries this
+        contract; the two announces now behave the same from any thread.
+        """
+        loop = self._loop
+        if loop is not None and not loop.is_closed() and not self._on_runtime_loop():
+            # Hop, never block: ``run_coroutine_threadsafe`` plus an awaited
+            # ``wrap_future``, so the session's loop is not parked for as long
+            # as the owner's is busy draining viewers. A caller with no owner
+            # loop to hop to (a server that never started, and therefore has no
+            # connections to reach) falls through to the body, which is what
+            # that case did before this hop existed.
+            await asyncio.wrap_future(
+                asyncio.run_coroutine_threadsafe(
+                    self._announce_retiring_on_loop(
+                        reason, to=to, draining=draining, leaving=leaving
+                    ),
+                    loop,
+                )
+            )
+            return
+        await self._announce_retiring_on_loop(reason, to=to, draining=draining, leaving=leaving)
+
+    async def _announce_retiring_on_loop(
+        self, reason: str, *, to: str = "", draining: bool = False, leaving: str = ""
+    ) -> None:
+        """The retiring announcement, on the runtime's own loop.
+
+        Split from :meth:`announce_retiring` — which carries the reasoning — so
+        that exactly one place owns the thread question and the body below can
+        assume it is where it must be, as ``announce_stop``'s caller does.
         """
         if self._closed.is_set():
             return
@@ -1648,6 +1945,27 @@ class RuntimeServer:
             raise RuntimeError("RuntimeServer.aclose() must run on its owning event loop")
         await self._shutdown_on_loop()
 
+    async def aclose_remote(self) -> None:
+        """Tear down from a loop that does NOT own this runtime: a thread hop.
+
+        :meth:`aclose` is deliberately owner-loop-only — it raises off that
+        loop rather than parking a foreign caller forever — but the daemon and
+        exec runtimes now publish and serve from their OWN thread
+        (:meth:`start`), so their teardown callers are the SESSION's loop and
+        the raise is a regression rather than a guard. It was already latent at
+        all three call sites; one of them (``process._clean_exit``'s, which sits
+        on the path that withdraws the boot record) does not wrap it, so the
+        raise aborted the exit BEFORE the record was withdrawn — leaving a
+        record for the reaper to read as a runtime that stopped without running
+        its own exit ordering, which is exactly what that record is scanned as.
+
+        :meth:`close` already carries every property this needs: synchronous,
+        safe from any thread, safe twice, and bounded (a 2 s join of the
+        runtime thread, and a bounded coroutine wait on the in-process path).
+        Awaiting it off-loop is the whole of the difference.
+        """
+        await asyncio.to_thread(self.close)
+
     def _request_close(self) -> None:
         """Latch closure and detach the host feed exactly once."""
         if self._closed.is_set():
@@ -1687,10 +2005,91 @@ class RuntimeServer:
             loop.call_soon_threadsafe(event.set)
 
     def _on_runtime_loop(self) -> bool:
-        try:
-            return asyncio.get_running_loop() is self._loop
-        except RuntimeError:
-            return False
+        return self._loop is not None and _running_loop() is self._loop
+
+    async def _handle_call_on_session_loop(
+        self, call: Callable[..., Any], /, *args: Any, **kwargs: Any
+    ) -> Any:
+        """Run one SYNCHRONOUS handle call on the loop that owns the session.
+
+        The ``SessionHandle`` protocol has always specified this shape — *"every
+        method is awaited on the RUNTIME'S loop … the implementor guarantees any
+        hop the session needs"* — and ``ServingSessionHandle`` now keeps that
+        promise for its own asynchronous surface with ``@_on_session_loop``. A
+        ``def`` cannot: there is nowhere in a synchronous method to await, and
+        blocking on the other loop is exactly what this change forbids. So the
+        few ``def``s whose work belongs to the session's loop are hopped HERE,
+        by their caller, and this helper is the whole of that path:
+
+        * ``subscribe`` / ``subscribe_events`` — the two boot registrations,
+          whose bodies fold history and seed the projection's clocks and state;
+        * ``is_pristine`` / ``may_refresh`` / ``begin_retire`` / ``request_stop``
+          — the retire and kill-switch probes, where ``begin_retire`` in
+          particular is a latch whose value is that it commits in the same
+          synchronous step that checks, so it is hopped as ONE call rather than
+          sampled and then committed;
+        * ``has_admitted_command`` — the dedupe probe, which reads the
+          transcript;
+        * ``register_secret_redaction`` / ``cancel_subagents_count`` — the two
+          ``_dispatch`` arms that write session state. Added in review: the
+          first writes the redaction set the bash and eval redactors read, and
+          the second runs ``Session.cancel_subagents``, whose task creation and
+          loop-bound ``AsyncJobManager`` abort belong to the session's loop — on
+          the runtime's thread the cancel's execution ran on the wrong loop and
+          the manager swallowed its own cross-loop ``RuntimeError`` at WARNING
+          while the op still acked success. The completion the ``await task``
+          tracks is the manager's own, so what is lost is the caller's — the
+          count the user reads is not evidence the cancel ran where the job
+          lives.
+
+        ``reannounce_pending`` is the one named method that does NOT come
+        through here, deliberately: one of its four in-tree callers
+        (``_drop_client``) is synchronous, so it cannot await a hop, and it is a
+        read-then-NOTIFY whose notify path is the registrant's own
+        thread-safe-by-design callback surface (the same shape the TUI kind has
+        always used). See ``ServingSessionHandle.reannounce_pending``.
+
+        Hop, never block: ``run_coroutine_threadsafe`` plus ``await
+        asyncio.wrap_future`` — never ``.result()``, which would freeze the
+        runtime's loop for as long as the session's is busy and re-create the
+        coupling this whole change removes. An awaitable RESULT is awaited on
+        the session's loop too, so a caller may pass an ``async def`` handle
+        method (the TUI's ``request_stop`` is one) and receive its value.
+
+        A no-op in the two cases where there is nothing to hop: the caller is
+        already on the session's loop (an in-process host, where the note above
+        stays true), or the handle publishes no loop at all. That second case is
+        what keeps this additive — a handle that owns its own hopping (the TUI's,
+        which uses Textual's ``call_from_thread``) declares no ``session_loop``
+        and keeps the behaviour it shipped with, and a reduced test host is
+        driven inline exactly as before.
+        """
+        loop = getattr(self._handle, "session_loop", None)
+        if loop is None or loop.is_closed() or loop is _running_loop():
+            # THE CLOSED-LOOP CASE RUNS INLINE, deliberately, and it is what
+            # makes this helper and ``ServingSessionHandle._on_session_loop``
+            # agree: ``run_coroutine_threadsafe`` raises ``Event loop is closed``
+            # from the caller's side, which is a bare crash where the handle's
+            # own refusal is what the dispatcher knows how to render. So a dead
+            # loop takes the same path a handle without a loop takes — run it
+            # here and let the handle refuse it.
+            #
+            # WHICH MEANS EVERY BODY REACHABLE THROUGH HERE MUST REFUSE, and that
+            # is why the two ``def``s this helper hops for the ``_dispatch`` arms
+            # call ``_check_loop_thread`` in their own bodies (review round 2,
+            # MINOR-1 / QA Q4): a synchronous method cannot carry the decorator,
+            # so without that call the closed-loop case executed the write on the
+            # runtime's thread and acked success — the plane round 1 took these
+            # two off. ``_resolve_pending`` carries one for the same reason (UX
+            # U8): it is the body on the decorator half that touches the loop
+            # itself, and its ``call_soon_threadsafe`` was raising the asyncio
+            # internal in the middle of a gate tap.
+            return await _maybe_await(call(*args, **kwargs))
+
+        async def _invoke() -> Any:
+            return await _maybe_await(call(*args, **kwargs))
+
+        return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(_invoke(), loop))
 
     def _open_mcp_wiring_gate(self) -> None:
         """Tell the session's deferred MCP wiring that the record is published.
@@ -1748,6 +2147,51 @@ class RuntimeServer:
             port = self._server.sockets[0].getsockname()[1]
             self._record.control_port = port
             self._publisher = RecordPublisher(self._record, self._config_root)
+            # BOTH BOOT REGISTRATIONS ARE PERFORMED ON THE SESSION'S LOOP. The
+            # append itself is thread-tolerant, but the body of the same call is
+            # not: ``subscribe`` folds the session's history, reconciles the
+            # streaming flag and the clocks, and seeds the projection's state
+            # (``ServingSessionHandle.subscribe``), all of which read and write
+            # session state that belongs to the loop below. Under ``start()`` the
+            # two planes have different loops, so each registration is hopped and
+            # awaited here — one ``run_coroutine_threadsafe`` each, before the
+            # first beat is written, which is also what makes the projection
+            # correct from the first push rather than corrected by the first
+            # event.
+            #
+            # INSIDE THE GUARDED PROLOGUE ON PURPOSE, and that is load-bearing
+            # rather than tidy: the latch below is what a caller's
+            # ``wait_until_published`` waits on, and the hop here WAITS ON THE
+            # SESSION'S LOOP. Releasing the latch before this point would hand a
+            # caller a runtime whose registrations are still in flight, so a
+            # turn that blocks the session's loop immediately after boot —
+            # exactly what the regression test does — could starve this hop
+            # forever, and the runtime would then never start its heartbeat: the
+            # serving plane would be up, the record published, and the beat
+            # stale. Measured: that is a `wedged` reading at t=46 s with no
+            # client attached, i.e. the defect this change exists to remove.
+            self._unsubscribe = await self._handle_call_on_session_loop(
+                self._handle.subscribe, self._schedule_push
+            )
+            # v4: hosts that can serialize their event stream feed the relay.
+            # Probed, not required — a handle without the capability leaves
+            # attach clients on v3 projection-only behaviour, never broken.
+            subscribe_events = getattr(self._handle, "subscribe_events", None)
+            if callable(subscribe_events):
+                try:
+                    subscribe = cast(
+                        Callable[[Callable[[dict[str, Any]], None]], Callable[[], None]],
+                        subscribe_events,
+                    )
+                    self._unsubscribe_events = await self._handle_call_on_session_loop(
+                        subscribe, self._relay_event
+                    )
+                except Exception:  # noqa: BLE001 — relay is additive, never a gate
+                    logger.debug("event relay subscribe failed", exc_info=True)
+            heartbeat = asyncio.ensure_future(self._heartbeat_loop())
+            self._heartbeat_task = heartbeat
+            if hasattr(self._handle, "refresh_attention"):
+                self._attention_task = asyncio.create_task(self._attention_loop())
         finally:
             # RELEASE THE DEFERRED MCP WIRING ON EVERY WAY OUT OF THIS PROLOGUE,
             # not only the happy one. The record is written inside
@@ -1760,24 +2204,15 @@ class RuntimeServer:
             # still propagates.
             # See ``RuntimeServer._open_mcp_wiring_gate``.
             self._open_mcp_wiring_gate()
-        self._unsubscribe = self._handle.subscribe(self._schedule_push)
-        # v4: hosts that can serialize their event stream feed the relay.
-        # Probed, not required — a handle without the capability leaves attach
-        # clients on v3 projection-only behaviour, never broken.
-        subscribe_events = getattr(self._handle, "subscribe_events", None)
-        if callable(subscribe_events):
-            try:
-                subscribe = cast(
-                    Callable[[Callable[[dict[str, Any]], None]], Callable[[], None]],
-                    subscribe_events,
-                )
-                self._unsubscribe_events = subscribe(self._relay_event)
-            except Exception:  # noqa: BLE001 — relay is additive, never a gate
-                logger.debug("event relay subscribe failed", exc_info=True)
-        heartbeat = asyncio.ensure_future(self._heartbeat_loop())
-        self._heartbeat_task = heartbeat
-        if hasattr(self._handle, "refresh_attention"):
-            self._attention_task = asyncio.create_task(self._attention_loop())
+            # THE SERVING LATCH OPENS HERE, on every way out and in the same
+            # place. On the success path the plane is genuinely serving by now —
+            # the record is published, the registrations have returned from the
+            # session's loop and the heartbeat has been started — which is the
+            # stronger and more useful guarantee a ``start()`` caller needs; on
+            # the failure path it means the callers stop waiting for a runtime
+            # that is never coming up, and ``_publisher`` still tells the two
+            # apart. See ``RuntimeServer._settle_publication``.
+            self._settle_publication()
         if self._thread is not None:
             # Thread mode owns the loop: park here until closed. In-process
             # mode returns so the caller's loop keeps running its own work —
@@ -1846,9 +2281,45 @@ class RuntimeServer:
             await asyncio.gather(
                 *(conn.writer.wait_closed() for conn in clients), return_exceptions=True
             )
+        # A SHIELDED BIND OUTLIVES ITS CONNECTION, deliberately: the shield is what
+        # stops a cancel from aborting a registration halfway, so the bind is left
+        # to land and its done-callback releases what it registered
+        # (``_release_when_landed``). Give those a bounded chance to land BEFORE
+        # the loop goes away — a task still pending at loop close is destroyed
+        # with a warning, and its release never runs.
+        #
+        # THE RESIDUAL IS DISCLOSED RATHER THAN ARGUED AWAY: a bind parked on a
+        # session loop that is itself stuck cannot be made to land, and it must
+        # NOT be cancelled — cancelling it is the half-registered leak the shield
+        # exists to prevent (#1327 round 1, F3), since a cancelled bind's
+        # done-callback cannot tell whether a subscription got registered. So a
+        # shutdown that races a STUCK session loop can still destroy one bind
+        # pending and leave that one subscriber to the process's end. Bounded
+        # here so the ordinary case — a bind in flight, the session's loop
+        # healthy — always drains.
+        await self._drain_abandoned_binds()
         if self._publisher is not None:
             self._publisher.close()
             self._publisher = None
+
+    async def _drain_abandoned_binds(self, timeout: float = _ABANDONED_BIND_DRAIN_S) -> None:
+        """Let shielded binds land before the runtime's loop can disappear.
+
+        WAITERS, NOT CANCELLERS, and that is the whole design: see the call site
+        (and ``_release_when_landed``) for why a cancelled bind can leak the
+        subscription it registered. Bounded, because this runs during shutdown
+        and the loop a bind is waiting on may never answer.
+        """
+        pending = [task for task in self._abandoned_binds if not task.done()]
+        if not pending:
+            return
+        _done, still = await asyncio.wait(pending, timeout=timeout)
+        if still:
+            logger.debug(
+                "session runtime: %d frontend bind(s) still in flight at shutdown; each "
+                "releases its subscription when it lands, or is dropped with the process",
+                len(still),
+            )
 
     async def _await_push_shutdown(self) -> None:
         """Join the coalesced repaint before its owning loop can disappear."""
@@ -1945,6 +2416,248 @@ class RuntimeServer:
                 logger.debug("runtime heartbeat failed", exc_info=True)
 
     # -- connections -----------------------------------------------------------
+
+    async def _serve_frontend_sync(
+        self,
+        conn: _ClientConn,
+        frame: dict[str, Any],
+        subscribe_frontend: Callable[..., Any],
+    ) -> None:
+        """Bind one viewer and queue its canonical ``frontend_sync`` frame.
+
+        A per-connection task rather than inline work in ``_on_connection``; the
+        reason it is deferred at all is at its creation site. It owns two
+        invariants:
+
+        * **The frame order is the frame order it always was.** Registration and
+          snapshot capture still happen atomically inside the handle call, the
+          sync frame is queued *before* ``frontend_ready`` opens, and every
+          update that lands while this task is in flight waits in
+          ``conn.frontend_pending`` — so a repaint cannot overtake the state it is
+          a delta against. The task changes WHEN the bind runs, never the
+          sequence of frames it produces.
+        * **A failed bind does not leave a half-open connection.** Inline, a raise
+          here escaped ``_on_connection`` — there is no caller to catch it, this is
+          a ``client_connected_cb`` — so asyncio logged it as an unhandled
+          exception in the callback while the connection stayed registered, never
+          read and never dropped. As a task it has an owner: the failure drops the
+          connection and releases its subscription.
+
+        ``subscribe_frontend`` arrives as a PARAMETER, resolved and
+        capability-checked at the creation site: dropping a connection whose
+        handle cannot bind belongs on the connection path, where the socket still
+        exists to be closed, not inside a task.
+        """
+        try:
+
+            def on_update(update: Any) -> None:
+                payload = (
+                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
+                )
+                self._relay_frontend_to(conn, payload)
+
+            from local_operator.session.frontend_state import (
+                FrontendSubscription,
+                oversized_frame_report,
+                sync_wire_payload,
+            )
+            from local_operator.session.history_window import (
+                strip_audit_fields,
+                wire_payload,
+            )
+
+            window_requested = bool(frame.get("display_window")) and (
+                "display-history-window-v1" in self._record.capabilities
+            )
+            # Negotiated exactly like ``display_window``: the viewer opts in by
+            # declaring the flag, and an older viewer that cannot name it never
+            # receives the fields it would reject.
+            conn.audit_history = bool(frame.get("display_history_audit")) and (
+                "display-history-audit-v1" in self._record.capabilities
+            )
+
+            # THE FRONTEND BIND IS A SESSION-LOOP CALL, for a stronger reason
+            # than the two boot registrations: ``subscribe_frontend``'s first
+            # act is ``refresh_from_session``, a PUBLISH that moves canonical
+            # state and its sequence numbers, so running it on the runtime's
+            # thread is a write to the publishing store from the wrong plane.
+            # The handle's own seam takes care of it
+            # (``@_on_session_loop``), so this call needs no hop of its own —
+            # and deliberately has none, because two mechanisms for one hop is
+            # how a later reader concludes that one of them is redundant and
+            # removes the wrong one.
+            #
+            # It is also the one hop that can be SLOW, and that is the admitted
+            # cost of this change rather than an oversight: a guest joining
+            # mid-turn still waits for the turn's current synchronous step,
+            # exactly as the TUI kind does today. What this change buys is that
+            # the wait is a hop whose result is awaited, not the runtime's own
+            # loop parked — so the welcome, the `ping` and the heartbeat keep
+            # flowing while it happens (see ``_serve``'s registrations).
+            async def bind() -> Any:
+                outcome = (
+                    subscribe_frontend(on_update, display_window=True)
+                    if window_requested
+                    else subscribe_frontend(on_update)
+                )
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
+                return outcome
+
+            # THE BIND IS NOT CANCELLABLE ONCE IT IS RUNNING. The subscription is
+            # created INSIDE the awaited handle call — on the session's loop, one
+            # message before the reply that carries it back here — so cancelling
+            # this task mid-bind can land on either side of that registration.
+            # Shielding lets it land, and the handler below releases what it
+            # registered; with only one of the two halves a cancelled bind leaks a
+            # subscriber the session keeps for the life of the process. That is
+            # also what makes ``_drop_client``'s ordering — cancel this task, then
+            # release the recorded subscription — safe rather than lucky.
+            bind_task = asyncio.ensure_future(bind())
+            try:
+                subscription = cast(FrontendSubscription, await asyncio.shield(bind_task))
+            except asyncio.CancelledError:
+                self._release_when_landed(bind_task)
+                raise
+            sync = subscription.sync
+            # Trajectories are stripped here and re-fetched per job through
+            # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
+            # cannot carry them.
+            sync_payload = sync_wire_payload(sync)
+            # The sync frame carries the FIRST display page, so it is one of
+            # the THREE places the audit fields reach the wire (the others are
+            # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
+            # through the same helper; stripping in only some would produce a
+            # viewer that attaches cleanly and then fails on its first scroll
+            # or on its first post-append refresh.
+            if isinstance(sync_payload.get("display_history"), dict):
+                strip_audit_fields(
+                    sync_payload["display_history"], audit_capable=conn.audit_history
+                )
+            conn.frontend_unsubscribe = subscription.unsubscribe
+            # Registration and snapshot capture happened synchronously on the
+            # authoritative loop. Mark ready only after queuing that snapshot;
+            # later updates therefore cannot overtake it.
+            sync_frame = {"op": "frontend_sync", "data": sync_payload}
+            # An oversized sync is unreadable, not merely large: the client's
+            # readline raises and its pump dies, so the viewer waits out its
+            # full sync timeout and then degrades to a cold session with no
+            # roster and no todos. That looked exactly like a slow owner for
+            # one release. Say so loudly and name the field responsible, so
+            # the next unbounded list is one log line to find rather than a
+            # profiling session.
+            oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
+            if oversize is not None and sync.display_history is not None:
+                # The budget covers the WHOLE frame, not just history. A busy
+                # canonical state may leave too little room even for our page.
+                # Request the existing exact local replay, never truncate prose.
+                fallback = sync.display_history.model_copy(
+                    update={
+                        "status": "full_required",
+                        "messages": [],
+                        "durable_seed_ids": [],
+                        "before_token": None,
+                        "snapshot_token": None,
+                    }
+                )
+                sync_payload["display_history"] = wire_payload(
+                    fallback, audit_capable=conn.audit_history
+                )
+                oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
+            if oversize is not None:
+                # Still over the line limit even with the display window
+                # reduced. Nothing more can be shed HERE, and the guarantee the
+                # socket needs lives in ``_send_to``'s ceiling: it substitutes an
+                # ``error`` frame naming the size instead of writing a line this
+                # client cannot read (which used to kill its pump and cost the
+                # user the whole session). Reported here as well because this is
+                # where the field responsible is known — the next unbounded list
+                # should cost one log line to find, not a profiling session.
+                #
+                # What follows is deliberately unchanged and deliberately not
+                # prettier: the deltas queued below are applied against a base
+                # that never arrived, so the client refuses the first one by its
+                # own sequence rule (``attach_client`` raises "frontend state
+                # gap") and goes cold at once. That is the honest end for
+                # canonical state too large to send — fast, named, and no
+                # different in effect from the dead socket it replaces.
+                logger.error(
+                    "session runtime: frontend_sync does not fit — %s — and will be "
+                    "replaced by an error frame at the write",
+                    oversize,
+                )
+            await self._send_to(conn, sync_frame)
+            conn.frontend_ready = True
+            for pending in conn.frontend_pending:
+                self._enqueue_client_frame(conn, {"op": "frontend_update", "data": pending})
+            conn.frontend_pending.clear()
+            if conn.wants_events:
+                # Raw events ride the same FIFO as the canonical deltas and are
+                # seeded by the sync frame just queued, so the gate opens only
+                # now — a joiner must not receive transcript animation ahead of
+                # the snapshot it animates.
+                conn.events_ready = True
+        except asyncio.CancelledError:
+            # Cancellation is the connection going away (``_drop_client``), not a
+            # bind failure: re-raise so the task settles as cancelled and the
+            # subscription teardown stays in ``_drop_client``'s hands.
+            raise
+        except Exception:  # noqa: BLE001 — one client's bind must not take the runtime down
+            logger.warning(
+                "session runtime: frontend bind failed for %s — dropping the connection",
+                conn.surface,
+                exc_info=True,
+            )
+            self._drop_client(conn, reason="frontend bind failed")
+        finally:
+            # Opened by ``_on_connection`` before this task was created, and
+            # cleared on every exit — including the drop above, where the
+            # connection is gone and the gate no longer matters, and the
+            # cancellation case, where ``_drop_client`` has already removed it.
+            conn.frontend_sync_pending = False
+
+    def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
+        """Release a viewer subscription whose connection died MID-BIND.
+
+        ``_drop_client`` cancels this connection's bind task, and the reason a
+        cancelled bind cannot leave a live subscriber is STRUCTURAL rather than
+        argued: the bind is shielded, so the cancel cannot abort it
+        half-registered (``_serve_frontend_sync``), and this runs on the
+        cancellation path to release whatever did register. ``_drop_client``'s
+        ordering follows from it — cancel first, then release the recorded
+        subscription, so nothing is released twice.
+
+        A DONE-CALLBACK rather than an await, and the difference matters twice
+        over. ``_drop_client`` runs from the reader loop and from shutdown, so
+        awaiting the bind there would park the teardown — and the loop with it —
+        for as long as the abandoned hop takes, up to a whole hop budget, which is
+        exactly the coupling this change exists to remove. And a callback cannot be
+        skipped: a second cancellation racing the first would interrupt an await at
+        the moment the release has to happen, while a callback registered on the
+        task survives it.
+
+        The task is held in ``self._abandoned_binds`` until it lands, because
+        nothing else awaits it now: an unreferenced task can be collected
+        mid-flight, and then its release never fires.
+        """
+        self._abandoned_binds.add(bind_task)
+
+        def release(completed: asyncio.Task[Any]) -> None:
+            self._abandoned_binds.discard(completed)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                logger.debug("frontend bind failed after its connection went away", exc_info=error)
+                return
+            unsubscribe = getattr(completed.result(), "unsubscribe", None)
+            if callable(unsubscribe):
+                try:
+                    unsubscribe()
+                except Exception:  # noqa: BLE001 — connection cleanup must finish
+                    logger.debug("late frontend unsubscribe failed", exc_info=True)
+
+        bind_task.add_done_callback(release)
 
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -2065,115 +2778,39 @@ class RuntimeServer:
             if not callable(subscribe_frontend):
                 self._drop_client(conn, reason="frontend requested but unsupported")
                 return
-
-            def on_update(update: Any) -> None:
-                payload = (
-                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
-                )
-                self._relay_frontend_to(conn, payload)
-
-            from local_operator.session.frontend_state import (
-                FrontendSubscription,
-                oversized_frame_report,
-                sync_wire_payload,
+            # THE BIND RUNS IN ITS OWN TASK, so this connection's reader loop is
+            # already serving by the time the heavyweight part starts.
+            #
+            # It used to run inline, which made a follower's socket DEAF rather
+            # than slow: the bind is a cross-thread hop onto the session's loop,
+            # so a session inside a synchronous step of a turn held the connection
+            # before it could read anything at all — no ``ping``, no ``stop``, no
+            # ``steer`` — while a daemon dial and a phone dial to the same runtime
+            # both answered in 0.00 s (measured; review round 2, UX U6). The reader
+            # loop must therefore start FIRST.
+            #
+            # The welcome above stays synchronous and hop-free deliberately: it is
+            # an identity frame read from the cached seed, so it costs no
+            # session-loop access and there is nothing to defer.
+            #
+            # ``_on_request`` admits :data:`_SYNC_PRIORITY_OPS` while this task is
+            # pending and refuses everything else, so the connection is reachable
+            # without yet being authoritative.
+            conn.frontend_sync_pending = True
+            conn.frontend_sync_task = asyncio.create_task(
+                self._serve_frontend_sync(conn, frame, subscribe_frontend)
             )
-            from local_operator.session.history_window import (
-                strip_audit_fields,
-                wire_payload,
-            )
-
-            window_requested = bool(frame.get("display_window")) and (
-                "display-history-window-v1" in self._record.capabilities
-            )
-            # Negotiated exactly like ``display_window``: the viewer opts in by
-            # declaring the flag, and an older viewer that cannot name it never
-            # receives the fields it would reject.
-            conn.audit_history = bool(frame.get("display_history_audit")) and (
-                "display-history-audit-v1" in self._record.capabilities
-            )
-            outcome = (
-                subscribe_frontend(on_update, display_window=True)
-                if window_requested
-                else subscribe_frontend(on_update)
-            )
-            if inspect.isawaitable(outcome):
-                outcome = await outcome
-            subscription = cast(FrontendSubscription, outcome)
-            sync = subscription.sync
-            # Trajectories are stripped here and re-fetched per job through
-            # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
-            # cannot carry them.
-            sync_payload = sync_wire_payload(sync)
-            # The sync frame carries the FIRST display page, so it is one of
-            # the THREE places the audit fields reach the wire (the others are
-            # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
-            # through the same helper; stripping in only some would produce a
-            # viewer that attaches cleanly and then fails on its first scroll
-            # or on its first post-append refresh.
-            if isinstance(sync_payload.get("display_history"), dict):
-                strip_audit_fields(
-                    sync_payload["display_history"], audit_capable=conn.audit_history
-                )
-            conn.frontend_unsubscribe = subscription.unsubscribe
-            # Registration and snapshot capture happened synchronously on the
-            # authoritative loop. Mark ready only after queuing that snapshot;
-            # later updates therefore cannot overtake it.
-            sync_frame = {"op": "frontend_sync", "data": sync_payload}
-            # An oversized sync is unreadable, not merely large: the client's
-            # readline raises and its pump dies, so the viewer waits out its
-            # full sync timeout and then degrades to a cold session with no
-            # roster and no todos. That looked exactly like a slow owner for
-            # one release. Say so loudly and name the field responsible, so
-            # the next unbounded list is one log line to find rather than a
-            # profiling session.
-            oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
-            if oversize is not None and sync.display_history is not None:
-                # The budget covers the WHOLE frame, not just history. A busy
-                # canonical state may leave too little room even for our page.
-                # Request the existing exact local replay, never truncate prose.
-                fallback = sync.display_history.model_copy(
-                    update={
-                        "status": "full_required",
-                        "messages": [],
-                        "durable_seed_ids": [],
-                        "before_token": None,
-                        "snapshot_token": None,
-                    }
-                )
-                sync_payload["display_history"] = wire_payload(
-                    fallback, audit_capable=conn.audit_history
-                )
-                oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
-            if oversize is not None:
-                # Still over the line limit even with the display window
-                # reduced. Nothing more can be shed HERE, and the guarantee the
-                # socket needs lives in ``_send_to``'s ceiling: it substitutes an
-                # ``error`` frame naming the size instead of writing a line this
-                # client cannot read (which used to kill its pump and cost the
-                # user the whole session). Reported here as well because this is
-                # where the field responsible is known — the next unbounded list
-                # should cost one log line to find, not a profiling session.
-                #
-                # What follows is deliberately unchanged and deliberately not
-                # prettier: the deltas queued below are applied against a base
-                # that never arrived, so the client refuses the first one by its
-                # own sequence rule (``attach_client`` raises "frontend state
-                # gap") and goes cold at once. That is the honest end for
-                # canonical state too large to send — fast, named, and no
-                # different in effect from the dead socket it replaces.
-                logger.error(
-                    "session runtime: frontend_sync does not fit — %s — and will be "
-                    "replaced by an error frame at the write",
-                    oversize,
-                )
-            await self._send_to(conn, sync_frame)
-            conn.frontend_ready = True
-            for pending in conn.frontend_pending:
-                self._enqueue_client_frame(conn, {"op": "frontend_update", "data": pending})
-            conn.frontend_pending.clear()
-        if conn.wants_events:
-            # In-flight transcript state rides the same canonical sync as every
-            # other full-TUI field. Raw events begin only after that frame.
+        elif conn.wants_events:
+            # A client that asked for BOTH the frontend and events waits for the
+            # sync task to open this gate (``_serve_frontend_sync``); one that
+            # asked only for events has no snapshot to be seeded behind and starts
+            # now.
+            #
+            # THE STREAM ITSELF STAYS INLINE — the relay, its writer task and the
+            # ``epoch``/``sequence`` check a client closes a gapped connection over
+            # are untouched. What moved is only the moment this gate opens, because
+            # that is the part that has to be ordered after the sync frame: a
+            # joiner receiving events first would fail its own gap check.
             conn.events_ready = True
         # A FLOOR on the bytes discarded by the CURRENT oversized line, not the
         # exact figure — see where it is incremented. Doubles as the "already
@@ -2383,6 +3020,17 @@ class RuntimeServer:
         # the `attach` half above computes `detached`.
         if conn.kind == "daemon" and was_registered:
             self.phone_watchers = 0
+        # The frontend bind's own task goes first, and for the same reason as the
+        # writer above: it is a connection-owned task that must not outlive the
+        # connection. Ordering matters here — cancel it BEFORE releasing the
+        # recorded subscription, so the shielded bind cannot register an
+        # unsubscribe nobody will ever call. ``_release_when_landed`` is the other
+        # half of that guarantee, and ``is not current_task`` covers the bind
+        # dropping its own connection when it fails.
+        sync_task = conn.frontend_sync_task
+        conn.frontend_sync_task = None
+        if sync_task is not None and sync_task is not asyncio.current_task():
+            sync_task.cancel()
         task = conn.event_writer_task
         conn.event_writer_task = None
         if task is not None:
@@ -2574,7 +3222,12 @@ class RuntimeServer:
         """
         return sum(
             1
-            for c in self._clients.values()
+            # SNAPSHOT BEFORE ITERATING (C8): ``attach_clients`` is read by the
+            # reaper AND by the handle (``serving``'s attach-surface count) from
+            # the session's loop, while this dict is mutated on the runtime's.
+            # The reaper treats a raise as "no viewers", so the failure mode is a
+            # runtime that keeps itself alive forever rather than an error.
+            for c in list(self._clients.values())
             if c.kind == "attach"
             and (
                 c.surface != "desktop"
@@ -2619,9 +3272,17 @@ class RuntimeServer:
         carries that fact; a client that never sends it stays counted, so an
         older viewer behaves exactly as before.
         """
+        # SNAPSHOT BEFORE ITERATING. ``_clients`` is mutated by the runtime's
+        # own loop on every connect and disconnect, and this predicate is now
+        # reached from the SESSION's loop too (the handle's ``_republish`` and
+        # ``attach_clients`` callbacks), so a `RuntimeError: dictionary changed
+        # size during iteration` is reachable. The fallout would not look like a
+        # crash: the failure is caught by the caller and answers "no viewer",
+        # i.e. a RESIDENCY decision taken on a failed read, which is how a
+        # runtime with a viewer gets reaped.
         return {
             "desktop" if conn.surface == "desktop" else "attach"
-            for conn in self._clients.values()
+            for conn in list(self._clients.values())
             if conn.kind == "attach"
             and (
                 (conn.surface != "desktop" and conn.terminal_displaying)
@@ -2659,7 +3320,14 @@ class RuntimeServer:
             frozenset({"desktop"})
             if any(
                 conn.kind == "attach" and self._desktop_lease_live(conn) and conn.desktop_can_notify
-                for conn in self._clients.values()
+                # SNAPSHOT BEFORE ITERATING (C8). This reader is called BY THE
+                # HANDLE (``serving._notification_surfaces``), i.e. from the
+                # session's loop, while the runtime's loop registers and drops
+                # clients in the same dict. A ``RuntimeError: dictionary changed
+                # size during iteration`` is not a crash here — it is caught and
+                # answered as "nobody can be notified", which silently costs a
+                # parked approval its toast.
+                for conn in list(self._clients.values())
             )
             else frozenset()
         )
@@ -2749,6 +3417,33 @@ class RuntimeServer:
         op = str(frame.get("op") or "")
         req = frame.get("req")
         try:
+            # A CONNECTION THAT IS STILL BINDING IS REACHABLE BUT NOT YET
+            # AUTHORITATIVE. ``_on_connection`` starts this connection's reader
+            # loop before the canonical ``frontend_sync`` is on the wire (the why
+            # is there: the bind is a cross-thread hop onto the session's loop,
+            # and running it inline used to leave a follower's socket deaf, so a
+            # guest could neither steer nor stop the session it was looking at).
+            # The price of that reachability is this gate: while the sync is
+            # pending, the connection may run :data:`_SYNC_PRIORITY_OPS` — health,
+            # and the three ways to regain control of a turn — plus the
+            # connection-local bookkeeping in :data:`_SYNC_LOCAL_OPS` that the dial
+            # path itself sends before it awaits the sync.
+            #
+            # Everything else is REFUSED, through the ordinary error-frame path
+            # below rather than by running it or silently dropping it: a
+            # ``prompt`` or a ``slash`` admitted here would let a client act on a
+            # connection that has not yet been told what state it is acting on.
+            # Refusing is also not a dead end — the flag clears the moment the
+            # sync settles, so the client's retry succeeds.
+            if (
+                conn.frontend_sync_pending
+                and op not in _SYNC_PRIORITY_OPS
+                and op not in _SYNC_LOCAL_OPS
+            ):
+                raise ValueError(
+                    "this viewer is still connecting to the session; the request was not "
+                    "run — retry once the interface has connected"
+                )
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
             # owner. The error frame is the reply — the attach screen surfaces
@@ -3024,7 +3719,7 @@ class RuntimeServer:
                 await self._push()
                 return
             else:
-                duplicate = self._already_admitted(op, frame)
+                duplicate = await self._already_admitted(op, frame)
                 if duplicate:
                     # A retry of an errand this transcript already owns (a
                     # sender that crashed after the row was durable, a wake
@@ -3163,7 +3858,13 @@ class RuntimeServer:
             # probe. Unknown state is not an invitation to stop it.
             return "kept: this runtime cannot judge itself pristine"
         try:
-            if not pristine():
+            # HOPPED, all three of these: ``is_pristine`` and ``request_stop``
+            # read and mutate the session (`_note_deliberate_stop`,
+            # `_deny_pending_gates`, then the host hook), and this method runs on
+            # the RUNTIME's loop. For a handle that publishes no loop (the TUI's,
+            # a reduced test handle) the helper runs the call inline exactly as
+            # it did before.
+            if not await self._handle_call_on_session_loop(pristine):
                 return "kept: session has work or history"
         except Exception as exc:  # noqa: BLE001 — uncertainty keeps the runtime
             logger.debug("pristine probe failed; keeping runtime", exc_info=True)
@@ -3193,7 +3894,14 @@ class RuntimeServer:
         late = self._other_observers(leaving)
         if late > 0:
             return f"kept: {late} viewer(s) attached while stopping was announced"
-        try:
+        # ONE HOP, NOT TWO, and that is the point of the pair below rather than
+        # tidiness: the re-check and the stop have to happen in the same
+        # synchronous step on the session's loop, or a turn admitted between two
+        # hops is stopped without having been seen. The helper awaits a single
+        # callable, so the pair goes over together and the window the comment
+        # above describes stays exactly as wide as it was written to be.
+
+        def _recheck_and_stop() -> Any:
             if not pristine():
                 # Refusing AFTER announcing is safe: ``stopping`` only latches
                 # the disconnect REASON in an attach client (attach_client.py),
@@ -3201,13 +3909,16 @@ class RuntimeServer:
                 # attach client here is the leaving viewer (the caller counted
                 # the others and found none), and it is about to close its own
                 # socket anyway.
-                return "kept: work arrived while stopping was announced"
+                return _WORK_ARRIVED
+            return request_stop()
+
+        try:
+            result = await self._handle_call_on_session_loop(_recheck_and_stop)
         except Exception as exc:  # noqa: BLE001
             logger.debug("pristine re-check failed; keeping runtime", exc_info=True)
             return f"kept: pristine probe failed ({exc})"
-        result = request_stop()
-        if inspect.isawaitable(result):
-            await result
+        if result is _WORK_ARRIVED:
+            return "kept: work arrived while stopping was announced"
         return "retired"
 
     async def _refresh_if_idle(self) -> str:
@@ -3311,7 +4022,7 @@ class RuntimeServer:
         if not callable(may_refresh):
             return "kept: this runtime cannot judge itself idle"
         try:
-            reason = str(may_refresh() or "")
+            reason = str(await self._handle_call_on_session_loop(may_refresh) or "")
         except Exception as exc:  # noqa: BLE001 — uncertainty keeps the runtime
             return f"kept: idle probe failed ({exc})"
         if reason:
@@ -3346,7 +4057,16 @@ class RuntimeServer:
         # restored session renders.
         begin_retire = getattr(h, "begin_retire", None)
         if callable(begin_retire):
-            if not begin_retire("runtime-retired", self._retire_detail(to)):
+            # HOPPED, and the hop is what preserves the property the comment
+            # above claims: ``begin_retire`` commits in the same synchronous
+            # step that checks, and the helper hands the WHOLE call to the
+            # session's loop — so check-and-commit is still one step, just one
+            # step over there rather than over here. Splitting it into a
+            # sampled re-check followed by a separate commit would be the
+            # window this latch exists to close.
+            if not await self._handle_call_on_session_loop(
+                begin_retire, "runtime-retired", self._retire_detail(to)
+            ):
                 return "kept: work arrived while retiring was announced"
             # THE LATCH HAS COMMITTED, recorded here rather than derived by the
             # caller from this function's return value: the stop below can
@@ -3357,18 +4077,16 @@ class RuntimeServer:
             # A reduced/older handle without the latch keeps today's re-check
             # rather than retiring unguarded.
             try:
-                reason = str(may_refresh() or "")
+                reason = str(await self._handle_call_on_session_loop(may_refresh) or "")
             except Exception as exc:  # noqa: BLE001
                 return f"kept: idle probe failed ({exc})"
             if reason:
                 return f"kept: {reason} (arrived while retiring was announced)"
         logger.info("session runtime: retiring (%s)", reason_label)
-        result = request_stop()
-        if inspect.isawaitable(result):
-            await result
+        await self._handle_call_on_session_loop(request_stop)
         return "retiring"
 
-    def _already_admitted(self, op: str, frame: dict[str, Any]) -> bool:
+    async def _already_admitted(self, op: str, frame: dict[str, Any]) -> bool:
         """Is this a retry of a turn the transcript already carries?
 
         Only ``prompt`` carries a durable, append-only identity, so only it can
@@ -3377,7 +4095,13 @@ class RuntimeServer:
         an append-only user row to match against.
 
         Optional capability, probed — a reduced handle without it simply never
-        reports a duplicate, which is the pre-idempotency behaviour.
+        reports a duplicate, which is the pre-idempotency behaviour; the same
+        probe failing for any other reason answers ``False`` for the same
+        reason (never fail a turn over a dedupe probe).
+
+        ASYNC, and hopped, because the read is the transcript's and the
+        transcript belongs to the session's loop — the same rule as the retire
+        probes below, through the same helper.
         """
         if op != "prompt":
             return False
@@ -3388,7 +4112,7 @@ class RuntimeServer:
         if not callable(checker):
             return False
         try:
-            return bool(checker(command_id))
+            return bool(await self._handle_call_on_session_loop(checker, command_id))
         except Exception:  # noqa: BLE001 — never fail a turn over a dedupe probe
             logger.debug("admitted-command probe failed", exc_info=True)
             return False
@@ -3617,9 +4341,12 @@ class RuntimeServer:
             # hook runs because the hook's own teardown closes these sockets.
             # An old viewer ignores the unknown frame, so this stays additive.
             await self._broadcast({"op": "stopping", "session_id": self._record.session_id})
-            result = request_stop()
-            if inspect.isawaitable(result):
-                result = await result
+            # HOPPED: ``request_stop`` mutates the session (``_note_deliberate_stop``,
+            # ``_deny_pending_gates``) and then runs the host hook, so it belongs
+            # on the session's loop — a kill switch is the worst place to run a
+            # mutation from the wrong thread. For a handle that does not publish
+            # a loop (the TUI's) the helper runs it inline exactly as before.
+            result = await self._handle_call_on_session_loop(request_stop)
             # The host's own line when it gives one (a TUI owner names the
             # session and the reopen command), else the bare progress word.
             return str(result) if isinstance(result, str) and result else "stopping"
@@ -3815,17 +4542,35 @@ class RuntimeServer:
             register = getattr(h, "register_secret_redaction", None)
             if not callable(register):
                 raise ValueError("this owner cannot register a redaction")
-            outcome = register(str(frame.get("value", "")))
-            if inspect.isawaitable(outcome):
-                await outcome
+            # HOPPED. This body WRITES the session's redaction set — the one the
+            # bash and eval redactors read — so it belongs on the loop that owns
+            # it, like every other mutating handle call. The helper resolves an
+            # awaitable result too, so a handle whose registration is an
+            # ``async def`` still works.
+            await self._handle_call_on_session_loop(register, str(frame.get("value", "")))
             return True
         if op == "cancel_subagents":
             cancel = getattr(h, "cancel_subagents_count", None)
             if not callable(cancel):
                 raise ValueError("this owner cannot cancel subagents")
-            result = cancel()
-            if inspect.isawaitable(result):
-                result = await result
+            # HOPPED, and this one is not a tidiness call: the body runs
+            # ``Session.cancel_subagents``, which creates the cancellation task
+            # with ``asyncio.ensure_future`` and aborts a loop-bound
+            # ``AsyncJobManager`` signal. On the runtime's thread that is a task
+            # created on the wrong loop and a foreign-thread ``Event.set()``,
+            # and the manager's ``RuntimeError: got Future … attached to a
+            # different loop`` is SWALLOWED by its own
+            # ``logger.warning("job %s task raised on cancel")`` while this op
+            # still acks success — the cancel's execution left parked on the
+            # wrong loop with its failure swallowed, and the caller shown a
+            # count. NOT "cancels nothing": the instrument that found this
+            # watched the child's ``CancelledError`` land and the job row settle
+            # in BOTH arms, so the claim that survives is the plane and the
+            # swallowed failure (review round 2, QA Q3 / design D-8). The
+            # stronger reading needs a child parked on the manager's abort
+            # signal rather than on a sleep, which no rig here built. This is
+            # the operator's second-Esc path.
+            result = await self._handle_call_on_session_loop(cancel)
             return result if isinstance(result, int) else 0
         if op == "record_shell":
             from local_operator.harness.types import ToolResult
@@ -4042,9 +4787,13 @@ class RuntimeServer:
         # grade only, and turn boundaries, gates, notices and so on must keep
         # flowing or a parked viewer's state would silently rot while muted.
         event_type = str(data.get("type") or "")
+        # Snapshotted for the same reason as ``_visible_attach_surfaces``: this
+        # runs on the runtime's loop today, but the iteration is over a dict the
+        # session's loop can mutate (see that method), and one line is cheaper
+        # than the reasoning that would have to hold forever.
         recipients = [
             conn
-            for conn in self._clients.values()
+            for conn in list(self._clients.values())
             if conn.kind == "attach"
             and conn.wants_events
             and conn.events_ready
@@ -4335,7 +5084,7 @@ class RuntimeServer:
         """
         return [
             conn
-            for conn in self._clients.values()
+            for conn in list(self._clients.values())
             if not (conn.wants_events and conn.wants_frontend)
         ]
 
