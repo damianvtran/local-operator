@@ -12,7 +12,7 @@ cd ~/local-operator
 ISO=$(mktemp -d)   # every block in this file makes its own; see the note below
 env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" \
   PATH="$PATH" TERM=xterm-256color \
-  .venv/bin/python -m pytest tests/unit -q      # 22865 tests collected; a full run is minutes
+  .venv/bin/python -m pytest tests/unit -q      # 22865 tests collected; a full run is 40-55 min under fleet load
 ```
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
@@ -289,7 +289,8 @@ re-create the #426 disarm in a new costume. `tests/unit/test_ci_hygiene.py`
 asserts the implication (`types(tui-e2e) => types(lint)`), not the comment.
 
 Gates, all of which must be clean before a PR. These are the four command-shaped
-jobs of `.github/workflows/ci.yml`, spelled as they are for a full-tree run:
+jobs of `.github/workflows/ci.yml`, spelled as they are for a FULL-TREE run.
+They are what CI runs, and CI remains the authoritative gate:
 
 ```sh
 .venv/bin/python -m flake8 .
@@ -298,29 +299,31 @@ uvx isort==5.13.2 --check .
 .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
 
-**CI no longer runs all four over the whole tree on every PR.** Each job is
-gated on a scope flag computed by `scripts/ci_scope.py`, which classifies the
-diff and skips work a change provably cannot affect — a one-line `docs/**` edit
-runs two cheap checks instead of sixteen. The local equivalent of the whole CI
-job set is:
+**The inner loop does not run those whole-tree commands. It runs
+`make check-changed`, which narrows them to the files your diff can affect.**
 
 ```sh
 make check-changed      # scripts/ci_scope.py --since <merge-base origin/main> --run
 ```
 
-It selects its gates from the SAME module the workflow's `changes` job runs, so
-the local answer and CI's answer cannot drift into two opinions, and it runs
-only the jobs whose flags are true for your diff. **Four gated jobs are never
-part of a local run** — `filesystem-boundaries-windows` (native Windows
-junction semantics), `cli-sanity` and `server-sanity` (live-LLM: they need
-`OPENROUTER_API_KEY` and spend real tokens), and `pip-audit` (its CI shape is
-`pypa/gh-action-pip-audit`, which installs the project and then audits it inside
-a hermetic venv that cannot be reproduced here). `--run` prints each exclusion
-with its reason, so a local green is not evidence about those four — the audit in
-particular, since a dependency-touching PR is exactly where a local green and a
-red audit can coexist. Use the four commands above by hand when you want the
-whole-tree form regardless — a release PR, or a diff that touches `.github/**`,
-both of which set every flag true.
+It uses the SAME module as CI's `changes` job (`scripts/ci_scope.py`) and
+narrows only what a local run spends time on, so `make check-changed` is a fast
+signal about your diff and never a claim about the whole tree.
+
+**Four gated jobs are never part of a local run** —
+`filesystem-boundaries-windows` (native Windows junction semantics), `cli-sanity` and `server-sanity` (live-LLM:
+they need `OPENROUTER_API_KEY` and spend real tokens), and `pip-audit` (its CI
+shape is `pypa/gh-action-pip-audit`, which installs the project and then audits
+it inside a hermetic venv that cannot be reproduced here). `--run` prints each
+exclusion with its reason, so a local green is not evidence about those four —
+the audit in particular, since a dependency-touching PR is exactly where a local
+green and a red audit can coexist.
+
+**Run the four whole-tree commands by hand when the diff matches the trigger
+list below** (or when you simply want the whole-tree form: a release PR, or a
+diff touching `.github/**`). `make check-changed` prints which of these fired
+for your diff, or — for a jump straight to the manual path — `--no-scope` runs
+every selected job's whole-tree command.
 
 Do **not** invoke `.venv/bin/black`, `.venv/bin/flake8`, `.venv/bin/isort`, or
 `.venv/bin/pyright` directly. Those console scripts carry a shebang baked in
@@ -342,8 +345,15 @@ pyright's built-in defaults rather than extending them, so always restate
 `"**/node_modules"`, `"**/__pycache__"` and `"**/.*"` alongside whatever you
 are adding. Dropping `**/.*` makes pyright follow the `.venv` symlink every
 worktree has and type-check all of site-packages — 29466 files and a 30-minute
-run instead of 566 files and about 15 seconds. CI never creates a `.venv`, so
-it stays green while every local run of the gate becomes unusable.
+run instead of 566 files and **about 15 seconds on an idle host**. On this
+fleet that last number is stale by two orders of magnitude: measured 2026-09-19
+in a worktree on this host, whole-tree `pyright` took **508 s (8.5 min)** on a
+quiet box and **19.5 min** while the unit suite ran — 0 errors, rc=0, both times
+— where `flake8 .` took 28.7-49 s, `isort --check .` 15.6-25 s and
+`black --check .` 3.2-137 s. The spreads are what else the host was doing. CI
+never creates a `.venv`, so it stays green while every local run of the gate
+becomes unusable — and those minutes are what makes a killed analyzer an orphan
+worth reaping, which is the bound below.
 
 The venv is uv-managed and has the package installed **editable**, so source
 edits are live. After a pull that changes dependencies:
@@ -351,6 +361,116 @@ edits are live. After a pull that changes dependencies:
 ```sh
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
+
+### Scoping the inner loop, and the whole-tree triggers that stop it
+
+`scripts/ci_scope.py --run` decides at JOB granularity; the fourth section of
+that module narrows the *local* commands of three of those jobs at FILE
+granularity. What each one becomes for a diff of one changed module:
+
+| job | whole tree | scoped |
+|---|---|---|
+| `lint` | `flake8 .`, `black --check .`, `isort --check .` | the same three tools over the changed files |
+| `type-check` | `pyright … .` | `pyright … <the changed files plus their transitive reverse dependents>` |
+| `test` | `pytest tests/unit -q` | `pytest <the test files that transitively import the change> -q` |
+| `tui-e2e` | `pytest tests/e2e -m e2e -n0 -q` | the same, over the e2e files that reach the change — and nothing at all when no e2e file does |
+
+`type-check` narrows because a file-list `pyright` reports diagnostics **only for
+the files it is given** (measured: an error in an imported but unlisted module is
+not reported, while a signature change in a listed file's *dependency* IS
+reported in the listed file). The list is therefore the changed files plus every
+file that transitively depends on them, which is complete for "what this change
+can break", and it is also what the run costs. Its protocol-sync step has no file
+list to narrow and runs unchanged, which the report says out loud.
+
+The selection comes from a STATIC import graph (the ASTs of `local_operator/`,
+`tests/` and `scripts/`; nothing is imported). It is an under-approximation of
+"what this change can break", so it is only allowed to run when the
+approximation is safe — **the rule is a whitelist, and everything it does not
+name runs the whole-tree command and prints the path that stopped it.** A path
+narrows a gate only if it is a `.py` the graph covers, or documentation no gate
+reads. Named barriers:
+
+* any `conftest.py`, at any level;
+* `pyproject.toml`, `uv.lock`, `Makefile`, `.flake8`, `setup.cfg`, `tox.ini`;
+* anything under `.github/`, `extension/` (the suite reads it by PATH — see
+  `tests/unit/browser_bridge/test_extension_version_skew.py` — so no import edge
+  exists), or the vendored
+  `benchmarks/osworld_v2_adapter/src/evaluation_examples/`;
+* any package `__init__.py` (module surface, and pytest's collection semantics);
+* `local_operator/cli.py` and `local_operator/__main__.py` — the entry points;
+* `tests/helpers/**` — a shared helper tree no import edge is a contract for;
+* package data and test data (a `.tcss`, a `.md`, a `.json` under
+  `local_operator/` or `tests/`): read at run time, importing nothing;
+* a `.py` the graph cannot place — deleted, outside those three trees, or inside
+  a tree the graph could not parse — and any `.pyi`;
+* anything else that is neither such a `.py` nor a `.md` outside those two trees.
+* a selection over **25% of the suite's measured weight** or **50% of its test
+  files** (`tests/durations.json` supplies the weights; an unreadable manifest
+  holds the file arm to the weight fraction rather than loosening it), or a
+  `type-check` file list whose import closure would reach **more than 50% of the
+  program** — naming most of the tree is the whole-tree command with extra steps.
+
+**Where it pays, measured rather than assumed.** This suite's tests import the
+assembled app, so a change anywhere the app (or a conftest) imports selects most
+of the tree by construction, and **88% of `local_operator/**` is in that
+closure**: of its 503 modules, a change to 60 would scope and a change to 443
+falls back to whole-tree (`cli.py`, `tui/app.py` and `session_factory.py` are the
+roots of the boot closure). The shape is what decides it, not the file count:
+
+| a change to | `lint` | `type-check` | `test` | `tui-e2e` |
+|---|---|---|---|---|
+| `scripts/shard_tests.py` | 1 file | 2 files | 1 of 722 | nothing |
+| `local_operator/clients/tavily.py` (outside the boot closure) | 1 file | 4 files | 3 of 722 | nothing |
+| `local_operator/ansi.py`, `local_operator/server/models/schemas.py` (inside it) | 1 file | whole tree (closure 88%) | whole tree (598/722 files, 93% of the weight) | whole tree |
+
+Measured on a five-file diff here (two scripts, three test files): `lint` over
+the 5 changed files **16 s** against **211 s** whole-tree, `test` over the 3
+selected files **20 s** (80 passed) against a 40-55 min whole-tree suite, and
+`type-check` over the same 5 files **3 s** against **508 s** whole-tree (both
+`0 errors`) — with `tui-e2e` skipped outright, since no e2e file reaches a
+script. The graph itself is the fixed cost: **19.5-37.6 s** of wall time here for
+1532 files read and parsed, which is why lint is decided before the graph is
+built at all, and why the report prints the graph's own timing.
+
+**Two honest limits, both printed on a scoped run.** First, an import whose
+target is a computed name — `importlib.import_module(name)` — is invisible to
+the graph; resolvable ones are resolved (a literal string, or the literal head
+of an f-string), and the rest are listed by file on every scoped run. Second, a
+selected run is a subset: it cannot see cross-test pollution outside the
+selection. Neither makes a scoped run evidence about the whole tree — CI is, and
+CI is unchanged.
+
+### The local `pyright` gate is bounded and process-group-reaped
+
+The local `type-check` command is spelled
+`.venv/bin/python scripts/run_bounded.py --timeout 900 -- .venv/bin/python -m pyright …`
+— 900 s, mirroring that job's own `timeout-minutes: 15` in `ci.yml`.
+
+**Why a wrapper and not `timeout(1)`.** `pyright` is a Python wrapper around an
+npm/node analyzer, and node runs as a *separate* process: measured here, 845 MB
+of RSS within twelve seconds, a child of the Python wrapper. A bound that kills
+only the process it started is therefore relying on the child noticing its
+parent's death, and the fleet shows what happens when it does not — orphans
+re-parented to `ppid 1` holding **2.28 GB and 1.50 GB**, one of them still alive
+**81 minutes** after its parent died, ten analyzers alive at once at ~5 GB while
+sessions queued more behind them.
+
+Be precise about what was measured and what was not: with `timeout 8|25` — and
+even with `timeout -s KILL` — over a whole-tree `pyright`, the analyzer died with
+its wrapper in every attempt here, so the *prompt* trigger could not be
+reproduced on demand; the orphans above are real but their trigger was not
+captured. What IS measured is the third case, which `timeout(1)` cannot cover at
+all and which the unit tests drive with a real process tree: a leader that exits
+while a descendant lives on. `run_bounded.py` runs the command in its own process
+group and signals the GROUP — on the bound, on a signal to the wrapper, and as a
+sweep once the leader exits — so all three paths end with nothing left running.
+It keeps `timeout(1)`'s statuses (124 on a fired bound, 125 when the command
+could not start), writes diagnostics to stderr only, and reports what it reaped.
+
+Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
+nothing runs a sweep in that case — what protects the group there is that the
+members were signalled as a group in the first place.
 
 ### Every feature worktree owns its own venv. Never symlink one.
 
