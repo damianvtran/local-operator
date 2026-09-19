@@ -95,7 +95,6 @@ from local_operator.classification.service import (
     CACHE_SIZE,
     CIRCUIT_FAILURE_THRESHOLD,
     DEFAULT_AUTO,
-    DEFAULT_NOTICE,
     DEFAULT_TIMEOUT_MS,
     ClassificationService,
 )
@@ -178,7 +177,6 @@ __all__ = [
     "CACHE_SIZE",
     "CIRCUIT_FAILURE_THRESHOLD",
     "DEFAULT_AUTO",
-    "DEFAULT_NOTICE",
     "DEFAULT_TIMEOUT_MS",
     "ClassificationService",
     # -- §3: the legs themselves (tests and diagnostics) -------------------

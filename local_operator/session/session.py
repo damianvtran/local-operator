@@ -2035,6 +2035,13 @@ class Session:
         #: Notices that belong AFTER the running turn's answer (see
         #: :meth:`queue_notice`). A list, not a single slot: a turn can raise more
         #: than one, and their order is the order they were raised in.
+        #:
+        #: NO PRODUCER IN THIS TREE AT PRESENT. The classification layer's resource
+        #: line was the first caller and it is deleted — the layer no longer writes
+        #: into the transcript at all — so this queue is a facade facility a host may
+        #: still use, kept with its contract tests rather than removed with its first
+        #: caller. Anyone tempted to delete it should read ``queue_notice``'s docstring:
+        #: the deferral is turn-bookkeeping, not notice-specific.
         self._queued_notices: list[tuple[str, Literal["info", "warning", "error"]]] = []
         # Set by the composition root when MCP servers are wired in, and read
         # only for diagnostics — the session never drives the manager itself,
@@ -7577,8 +7584,10 @@ class Session:
         while a turn's prompt is being built lands between the user's question and
         the reply — the notice occupies the answer slot, and a reader takes the
         dimmest ink on screen for the first thing the model said (design round 1,
-        D1). The classification layer's resource line is exactly that case: it is
-        raised during prompt build, because that is where the resources are chosen.
+        D1). The classification layer's resource line used to be exactly that case,
+        raised during prompt build; that line is now DELETED (the layer writes
+        nothing into the transcript), so this method currently has no caller in the
+        tree and is kept as a facade facility for any future prompt-build-time line.
 
         Deferral is conditioned on a turn actually running, not on a flag the
         caller passes: outside a turn there is no answer to wait for, and holding

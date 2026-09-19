@@ -20,12 +20,13 @@ WHY ``vendor_status`` DOES NOT OPEN THE AUTH STORE
 §4 requires ``vendor_status`` to perform no I/O. Radient's primary credential is
 an OAuth session in ``AuthStore`` (a sqlite file), so a truthful answer for that
 leg needs a store read — which is exactly what this function may not do, since
-its callers are diagnostics and notices that run on synchronous paths. It
+its callers are diagnostics that run on synchronous paths. It
 therefore reports the tier it CAN see without touching the disk
 (``RADIENT_API_KEY`` in the credential store or the environment) and the
 docstring says so. The authority for "which leg will actually be used" is
-:func:`resolve_vendor`, which does the read once per session; the notice path
-reports ``Recommendation.vendor``, which came from that call.
+:func:`resolve_vendor`, which does the read once per session;
+``Recommendation.vendor`` on a delivered answer is that call's result, reported
+through the cost log rather than through a user-facing line.
 """
 
 from __future__ import annotations
@@ -85,7 +86,7 @@ def pinned_vendor(settings: Mapping[str, Any] | None) -> str:
     through a different leg would be a surprising outcome for a typo, but
     silently disabling the layer is worse: it is the failure mode this whole
     design is built to avoid, and the resolved leg is reported on every
-    recommendation and in the notice.
+    recommendation (and therefore in the cost log line).
     """
     raw = classification_section(settings).get("vendor")
     if isinstance(raw, str):
@@ -146,20 +147,20 @@ def vendor_status(
     manager: "CredentialManager",
     settings: Mapping[str, Any] | None = None,
 ) -> list[tuple[str, bool]]:
-    """``[(vendor_name, available)]`` for notices, tests and diagnostics. Never performs I/O.
+    """``[(vendor_name, available)]`` for diagnostics and tests. Never performs I/O.
 
     ``available`` means "the cascade would call this leg", so under a pin only
     the pinned leg can be ``True`` and the other two are reported ``False`` even
     when their credentials are present — that is the question this function
-    answers, and it is the one the notice and the diagnostics actually ask.
+    answers, and it is the one the diagnostics actually ask.
 
     The probe is the credential tiers a synchronous, disk-free read can see: the
     credential store and the environment (both of which ``CredentialManager``
     already holds in memory). Radient's OAuth session is therefore NOT visible
     here — see the module docstring — so ``radient`` reports ``False`` on a host
     whose only Radient credential is a signed-in session. :func:`resolve_vendor`
-    is the authority; this function exists so a notice or a ``/info`` line can
-    be produced without an ``await`` and without a store read.
+    is the authority; this function exists so a ``/info`` line or a login-status
+    read can be produced without an ``await`` and without a store read.
     """
     pin = pinned_vendor(settings)
     status: list[tuple[str, bool]] = []
