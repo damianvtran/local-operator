@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +41,10 @@ import pytest
 import local_operator
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.runtime import registry
-from local_operator.session.runtime.inbox import SPOOL_RECEIPT_WAKE
+from local_operator.session.runtime.inbox import (
+    SPOOL_RECEIPT_PROMPT,
+    SPOOL_RECEIPT_WAKE,
+)
 from local_operator.tui.app import OperatorApp
 from local_operator.update import BuildStamp
 from tests.e2e.harness import transcript_text, wait_for_adoption
@@ -497,8 +501,11 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
     with eight runtimes executing an install tree that was gone.
 
     What must hold, in order:
-    (i) admissions stop WHILE THE TURN IS STILL RUNNING — a prompt sent then is
-        refused with the retiring sentence rather than queued;
+    (i) admissions stop WHILE THE TURN IS STILL RUNNING — a caller asking for a
+        NEW TURN (``prompt_and_wait``, a loop's idiom) is told this runtime will
+        not run it and that a newer build is starting, while a prompt handed to
+        the runtime as the owner's own message is QUEUED for that successor and
+        answered with the spool receipt;
     (ii) nothing in flight is aborted: the turn's own reply lands, and nothing
         on screen says ``interrupted``/``stopped``;
     (iii) a peer message sent mid-drain is SPOOLED for the successor, not
@@ -578,24 +585,43 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                     viewer.frontend_state, "streaming", False
                 ), "the drain must have latched while the turn was STILL running"
 
-                # (i) a caller asking to run a NEW turn is refused, not queued.
+                # (i) a caller asking for a NEW TURN is told the truth, and the
+                # truth now includes where the message went.
                 # ``prompt_and_wait`` is the non-streaming prompt op (a loop's
                 # idiom): an interactive viewer's text becomes a steer while a
                 # turn is live, and a steer rides the turn already running —
-                # which is in-flight work, not an admission.
+                # which is in-flight work, not an admission, and stays admitted.
                 with pytest.raises(RuntimeError) as caught:
                     await asyncio.wait_for(
                         viewer.prompt_and_wait("a follow-up sent mid-drain"), timeout=60
                     )
-                # The refusal is the typed admission category now, and its
-                # sentence deliberately no longer contains the word "retiring":
-                # it named an internal token and the machinery rather than the
-                # session the operator is in (design round 1, D2). What the
-                # caller can act on is still named, and the category is what
-                # lets the viewer tell this refusal from any other failure —
-                # the same pair of pins `test_retiring_refusal.py` carries.
+                # The refusal is the typed admission category, and its sentence
+                # deliberately no longer contains the word "retiring": it named
+                # an internal token and the machinery rather than the session the
+                # operator is in (design round 1, D2). What it ALSO no longer
+                # says is "send it again" — this caller cannot watch a turn that
+                # another process will run, but the message it handed over is
+                # queued for exactly that process (memo §4.2 piece 3), so the
+                # sentence names the handover instead of asking for the operation
+                # the refusal just performed.
                 assert isinstance(caught.value, RuntimeRetiring), caught.value
-                assert "send it again" in str(caught.value), str(caught.value)
+                assert RuntimeRetiring.TAIL_HANDOVER in str(caught.value), str(caught.value)
+                assert "send it again" not in str(caught.value), str(caught.value)
+
+                # (i, continued) THE OWNER'S OWN MESSAGE IS QUEUED, NOT REFUSED.
+                # Sent as the raw prompt op a composer's submit issues (the
+                # interactive path routes to a steer while a turn streams, which
+                # is a different op and deliberately unchanged), so what this
+                # exercises is the admission itself: the runtime writes it to
+                # ``inbox.jsonl`` for the successor and answers with a receipt of
+                # its own rather than the durable-admission ACK — the weaker fact
+                # has to be visibly weaker.
+                queued_command = str(uuid.uuid4())
+                queued_receipt = await viewer._client.prompt(
+                    "run the report while the build moves",
+                    command_id=queued_command,
+                )
+                assert queued_receipt == SPOOL_RECEIPT_PROMPT, queued_receipt
 
                 # (iii) a peer message is spooled for the successor instead.
                 sent = subprocess.run(
@@ -668,6 +694,22 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                     if "hello from a peer" in durable:
                         break
                 assert "hello from a peer" in durable, "the spooled peer message was lost"
+                # AND THE OWNER'S MESSAGE RAN IN THE SUCCESSOR, as their own
+                # turn: the row carries the command id this viewer sent, so the
+                # message that was queued IS the message that ran — once (the
+                # durable index answers a twice-spooled row), and as a plain user
+                # message rather than a peer card (`inbox.SOURCE_USER`).
+                ours = [
+                    entry
+                    for entry in Transcript(config / "sessions" / session_id).entries()
+                    if "run the report while the build moves" in str(entry.payload)
+                ]
+                assert ours, "the queued message never ran in the successor"
+                assert [entry.id for entry in ours] == [queued_command], [
+                    entry.id for entry in ours
+                ]
+                assert ours[0].payload.get("kind") == "message", ours[0].payload
+                assert ours[0].payload.get("role") == "user", ours[0].payload
                 text = transcript_text(app)
                 assert "Hello from the mock provider!" in text, "the live turn never completed"
                 for word in FORBIDDEN:

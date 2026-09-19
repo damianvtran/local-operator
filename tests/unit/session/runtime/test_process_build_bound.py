@@ -662,7 +662,11 @@ async def test_the_boot_drain_runs_a_spooled_owner_prompt_as_the_users_own(
     transcript's append-only index, asked here through the same accessor
     ``server._already_admitted`` uses.
     """
-    from local_operator.session.runtime.inbox import SOURCE_USER, InboxLine, append_inbox
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
 
     append_inbox(
         tmp_path,
@@ -719,7 +723,11 @@ async def test_a_twice_spooled_owner_prompt_runs_once(tmp_path: Path) -> None:
     another lifetime. Both rows carry the append-only identity, so the answer is
     the same one a retried wire prompt gets — skip the second.
     """
-    from local_operator.session.runtime.inbox import SOURCE_USER, InboxLine, append_inbox
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
 
     for _ in range(2):
         append_inbox(
