@@ -394,6 +394,25 @@ async def test_exec_live_tui_attachment_and_settled_frames(exec_server, tmp_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approve", [False, True])
 async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
+    """A supervisor answers a parked ``--control`` gate — DENYING it, not allowing it.
+
+    The supervisor here is an ``OperatorApp`` in the TEST process and the run
+    whose gate it answers was started by a SEPARATE ``lop exec --control
+    --background`` process. Under issue #1310 that distinction is load-bearing:
+    `/approvals auto` and an APPROVED card remove the gate that constrains the
+    caller, so they additionally require the per-session operator capability,
+    which exists only in the memory of the process that started the runtime. The
+    supervisor did not start this one, so its ``y`` is refused — while its ``n``
+    (deny) is deliberately ordinary and must keep working, since a deny settles
+    the card in the safe direction.
+
+    This is the OPERATOR-VISIBLE consequence of the change on this surface, and
+    the design doc names it as such (`docs/design/approval-authority.md`, §3 and
+    §4: a background-spawned runtime has no console, so nothing may loosen it
+    until someone attaches one that does). The remedies the refusal names are
+    ``--yolo`` or ``tool_approval_mode: auto`` for the NEXT run; a run that must
+    be approved interactively has to be started where the approver is.
+    """
     import asyncio
     from argparse import Namespace
 
@@ -449,12 +468,24 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
             await pilot.pause()
             if job_status(job_id)["status"] not in ("starting", "running"):
                 break
-        assert job_status(job_id)["status"] == "succeeded"
+        if approve:
+            # REFUSED, and the refusal is not silent at the wire: the run stays
+            # parked with its gate unanswered, so the tool never runs and the
+            # job stays running. Asserted in both directions because "the job is
+            # still running" would also be true of a supervisor that never saw
+            # the card at all — the parked prompt above is what rules that out.
+            assert (
+                job_status(job_id)["status"] == "running"
+            ), "a supervisor that did not start this run settled its gate by approval"
+        else:
+            assert job_status(job_id)["status"] == "succeeded"
         if destination:
             app.save_screenshot(
                 str(Path(destination) / f"supervised-{'allow' if approve else 'deny'}-settled.svg")
             )
-    assert (tmp_path / "written.txt").exists() is approve
+    # NEITHER direction lets the write tool run: a deny denies it, and an
+    # approval from a process that did not start the run is refused.
+    assert not (tmp_path / "written.txt").exists(), "the gated tool ran anyway"
     assert requests
 
 
