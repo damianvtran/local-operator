@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_operator.paths import O_BINARY
+from local_operator.procstate import O_BINARY
 
 logger = logging.getLogger(__name__)
 

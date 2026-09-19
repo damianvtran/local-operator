@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from local_operator.paths import O_BINARY
+from local_operator.procstate import O_BINARY
 from local_operator.secrets.access import open_store, retrieve_secret, session_id
 from local_operator.secrets.errors import BrokerIncompatible, SecretStoreError
 from local_operator.secrets.keys import DIR_MODE, FILE_MODE, key_mode, secrets_dir

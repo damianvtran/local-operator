@@ -35,6 +35,32 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypedDict
 
+#: ``os.O_BINARY`` where the platform has it (Windows), ``0`` everywhere else.
+#:
+#: **Every ``os.open`` + ``os.write`` pair in this package must OR this into its
+#: flags**, and the reason is not style. On Windows ``os.open`` opens in the
+#: CRT's TEXT mode unless ``O_BINARY`` is given, and text mode TRANSLATES: a
+#: ``0x0A`` byte in the buffer handed to ``os.write`` is written as
+#: ``0x0D 0x0A``. Every caller here writes BYTES -- a master key, a sealed
+#: secret, a JSONL frame whose length a reader checks -- so the translation
+#: corrupts exactly the payloads that have to be byte-exact.
+#:
+#: It is INTERMITTENT, which is what kept it hidden: a 32-byte master key is
+#: only corrupted when the random key happens to CONTAIN ``0x0A`` (about one run
+#: in eight), so the Windows probe passed on most runs and then read back
+#: ``master.key is 33 bytes; a master key is 32`` on another. Off Windows this
+#: is ``0``, so ``flags | O_BINARY`` is bit-identical to ``flags`` and POSIX
+#: behaviour cannot change.
+#:
+#: It lives HERE, next to the rest of this package's platform facts, and not in
+#: :mod:`local_operator.paths` where it was first written: ``paths`` is on the
+#: runner core's FORBIDDEN_PREFIXES (tests/unit/evaluation/runner/
+#: test_isolation.py), so importing it from the evidence store broke the
+#: runner's isolation -- the suite caught that on the first CI run after the
+#: fix. This module is a stdlib-only leaf, so every layer may reach it.
+O_BINARY = getattr(os, "O_BINARY", 0)
+
+
 # ---------------------------------------------------------------------------
 # Platform process primitives
 # ---------------------------------------------------------------------------

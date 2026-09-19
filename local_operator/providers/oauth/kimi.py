@@ -25,8 +25,8 @@ from typing import Any
 import httpx
 
 from local_operator.harness.types import AbortSignal
-from local_operator.paths import O_BINARY
 from local_operator.paths import config_dir as _app_config_dir
+from local_operator.procstate import O_BINARY
 from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
