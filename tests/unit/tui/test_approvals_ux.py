@@ -433,6 +433,49 @@ async def test_the_list_marks_the_live_mode_and_the_saved_one_separately(
         assert marks["default ask"] == "every session"
 
 
+def test_the_option_list_marks_without_moving_a_column(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused row is marked by TINT, because words re-flow the list.
+
+    Design round 1 (D2) asked for the loosening rows to stop being offered as if
+    they would work on a surface that refuses them, and round 1's answer put a
+    suffix in the row's ``detail``. Round 2 (D7) measured what that cost: the
+    picker sizes its columns from the widest cell in the SET, so the mark took
+    the detail column from 22 cells to 47 — invisible at 44 columns, and at 60 it
+    dropped the scope column for ALL FOUR rows. ``alert`` paints the cell it
+    already has, so no width loses anything.
+
+    The property pinned here is exactly that: the two topologies offer
+    byte-identical rows, and only the mark moves. ``_may_loosen_gate_here`` is
+    the input the app reads for the decision, so staging it is staging the input
+    rather than the answer — the live topologies (owning pane, attached pane,
+    phone) are driven against real runtimes by
+    ``tests/unit/session/runtime/test_approval_authority_seam.py``.
+    """
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    owner = app._approval_choices()
+    monkeypatch.setattr(app, "_may_loosen_gate_here", lambda: False)
+    follower = app._approval_choices()
+
+    def shape(choices: list[ArgumentChoice]) -> list[tuple[str, str, str]]:
+        return [(choice.name, choice.description, choice.detail) for choice in choices]
+
+    # Nothing about the rows moves: not the names, not the descriptions, not the
+    # details, and therefore not the column widths the picker derives from them.
+    assert shape(follower) == shape(owner)
+    assert max(len(choice.detail) for choice in follower) == max(
+        len(choice.detail) for choice in owner
+    )
+
+    marks = {choice.name: choice.alert for choice in follower}
+    assert marks["auto"] is True, "the row that will be refused is not marked"
+    # `ask` is never marked: tightening works from every surface, and a warning
+    # tint on it would say the opposite.
+    assert marks["ask"] is False
+    assert {choice.name: choice.alert for choice in owner}["auto"] is False
+
+
 @pytest.mark.asyncio
 async def test_choosing_a_row_runs_the_command_it_spells(config_dir: Path) -> None:
     """The list completes into the ARGUMENT and submits the same line a typist

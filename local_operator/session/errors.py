@@ -314,11 +314,26 @@ class OperatorAuthorityRequired(ValueError, RuntimeError):
 
     code = "operator_authority_required"
 
-    def __init__(self, message: str | None = None) -> None:
-        if message is None:
-            from local_operator.harness.approval import OPERATOR_CAP_REQUIRED_NOTICE
+    #: The op a refusal came from, as one of the enumerated control ops that can
+    #: carry an increasing request. ``""`` means the raiser did not say, which
+    #: rebuilds the command's sentence — the pre-trigger behaviour.
+    CARD_OPS = frozenset({"approval_answer"})
 
-            message = OPERATOR_CAP_REQUIRED_NOTICE
+    def __init__(self, message: str | None = None, *, trigger: str = "") -> None:
+        # Kept so the transport can forward the TOKEN rather than any prose, and
+        # so the far side picks the same sentence locally.
+        self.trigger = trigger if trigger in ("slash", "slash_result", "approval_answer") else ""
+        if message is None:
+            from local_operator.harness.approval import (
+                CARD_APPROVAL_REFUSED_NOTICE,
+                OPERATOR_CAP_REQUIRED_NOTICE,
+            )
+
+            message = (
+                CARD_APPROVAL_REFUSED_NOTICE
+                if self.trigger in self.CARD_OPS
+                else OPERATOR_CAP_REQUIRED_NOTICE
+            )
         super().__init__(message)
 
 
@@ -520,9 +535,10 @@ def admission_error(
             leaving=leaving if isinstance(leaving, str) else "",
         )
     if code == OperatorAuthorityRequired.code:
-        # No arguments off the wire: the sentence is rebuilt from the constant,
-        # so a peer cannot put prose into an operator-facing refusal.
-        return OperatorAuthorityRequired()
+        # No PROSE off the wire: the sentence is rebuilt from the constant, and
+        # ``trigger`` — one token from a closed set — only chooses which of the
+        # two constants that is (a refused command vs a refused card).
+        return OperatorAuthorityRequired(trigger=trigger if isinstance(trigger, str) else "")
     if code == ProfileRegistryUnavailable.code:
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             count = None

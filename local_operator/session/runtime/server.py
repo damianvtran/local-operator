@@ -3601,7 +3601,12 @@ class RuntimeServer:
                 )
                 from local_operator.session.errors import OperatorAuthorityRequired
 
-                raise OperatorAuthorityRequired()
+                # WHICH REFUSAL, from the op rather than from prose: a card
+                # answer is refused as a card (the question is still parked, and
+                # a deny works from here), a slash is refused as a command. The
+                # far side rebuilds the same sentence from this token, so the
+                # copy never travels as text (UX round 2, U8).
+                raise OperatorAuthorityRequired(trigger=op)
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
             # owner. The error frame is the reply — the attach screen surfaces
@@ -3871,6 +3876,13 @@ class RuntimeServer:
                     conn.locality,
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
+                    # Whether THIS connection could loosen the gate, judged by
+                    # the seam's own predicate (design round 2 D10, UX round 2
+                    # U9): the reports a routed command returns must not offer a
+                    # command this connection would be refused.
+                    may_loosen=self._authority_admitted(
+                        {"op": "slash_result", "command": "approvals", "args": "auto"}, conn
+                    ),
                 )
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
@@ -3968,6 +3980,11 @@ class RuntimeServer:
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code
+                if isinstance(exc, OperatorAuthorityRequired) and exc.trigger:
+                    # A token from a closed set, never text: the far side picks
+                    # the sentence that matches the frame it refused (a refused
+                    # command vs a refused card).
+                    frame["error_trigger"] = exc.trigger
             if isinstance(exc, RuntimeRetiring) and exc.trigger:
                 # WHICH DEPARTURE, as one of the enumerated tokens — the same
                 # shape as ``error_count`` below, and for the same reason: the
@@ -4524,6 +4541,7 @@ class RuntimeServer:
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
         audit_capable: bool = False,
+        may_loosen: bool = True,
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data.
 
@@ -4581,6 +4599,11 @@ class RuntimeServer:
                 kwargs["locality"] = locality
             if _accepts_kw(run, "consumers"):
                 kwargs["consumers"] = consumers
+            if _accepts_kw(run, "may_loosen"):
+                # The connection's own property, read where the connection is
+                # known — the same reason ``consumers`` is (design round 2 D10,
+                # UX round 2 U9).
+                kwargs["may_loosen"] = may_loosen
             result = run(*args, **kwargs)
             if inspect.isawaitable(result):
                 result = await result

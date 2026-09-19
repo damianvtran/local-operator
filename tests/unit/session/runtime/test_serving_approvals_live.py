@@ -392,12 +392,45 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     # the one surface whose job is "what is in effect and why" to describe a
     # problem without its answer.
     #
-    # ...AND IT NAMES WHERE THE REMEDY WORKS (design round 1 D3, UX round 1
-    # U1/U2): this handle cannot see which connection asked, so naming
-    # `/approvals auto` alone sent a follower pane to a command the same pane
-    # refuses. The sentence therefore carries the place with it.
-    assert "/approvals auto adopts it, typed in the terminal or app window" in text, text
-    assert "started this session" in text, text
+    # The default answers for a connection that COULD loosen: only a caller that
+    # does not know its connection omits the flag, and every production caller
+    # (``RuntimeServer``'s payload dispatch) passes it.
+    assert text.endswith("/approvals auto adopts it in this session"), text
+    assert "typed in the terminal" not in text, text
+
+    # ...AND WHEN THE CONNECTION MAY NOT LOOSEN, IT SAYS WHERE THE REMEDY WORKS
+    # (design round 1 D3, UX round 1 U1/U2; design round 2 D10, UX round 2 U9).
+    # This is the half that used to be guessed from a handle that serves every
+    # connection alike: a follower pane was sent to `/approvals auto` — the very
+    # command the same pane refuses — and, worse, the REPAIR route (let the
+    # runtime retire and reopen the session here) was only discoverable by
+    # trying and failing first.
+    follower = handle._approvals_slash(session, "", SlashResult, may_loosen=False)
+    follower_text = getattr(follower, "text", "")
+    assert "/approvals auto adopts it, typed in the terminal or app window" in follower_text
+    assert "started this session" in follower_text, follower_text
+    assert (
+        "let this session's runtime retire and reopen the session here" in follower_text
+    ), follower_text
+
+    # `/approvals default …` is the other report that offered a refused command:
+    # the persist half is machine-locality (refused from ANY control connection)
+    # and the second clause promised `auto` "now" on a connection that is refused
+    # it (design round 2, D10 = UX round 2, U7).
+    from local_operator.session.frontend_state import SlashResult as _SlashResult
+
+    capable = getattr(handle._approvals_slash(session, "default auto", _SlashResult), "text", "")
+    assert "/approvals ask|auto switches this session now" in capable, capable
+    refused = getattr(
+        handle._approvals_slash(session, "default auto", _SlashResult, may_loosen=False), "text", ""
+    )
+    assert "/approvals ask switches this session now" in refused, refused
+    assert "/approvals auto has to come from the window that started it" in refused, refused
+    # The unactionable half of the old sentence is gone: this is a FILE (or the
+    # desktop app's settings), not something to go and type in a terminal — the
+    # surface the operator was already sitting at (UX round 2, U7).
+    assert "run it on a terminal" not in refused, refused
+    assert "this machine's config.yml" in refused, refused
     await handle.dispose()
 
 

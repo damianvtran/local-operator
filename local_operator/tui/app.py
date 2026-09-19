@@ -9441,6 +9441,17 @@ class OperatorApp(App[None]):
         )
         # Installing this hook is what makes the ask tool exist for a UI host.
         session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
+        # A gate reply the OWNER refuses (issue #1310) is not a race and must not
+        # vanish: this pane pressed the key and is owed the reason (design round
+        # 2, D9). The copy is the owner's own sentence, rendered as a notice so
+        # it does not look like a command the user typed.
+        #
+        # Optional hook, like ``detach_viewer_gates`` above: the channel only
+        # exists on a session that can have a reply refused — an attached one —
+        # and a session that answers its own gates has no owner to be refused by.
+        _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
+        if callable(_watch_refusals):
+            _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
         if reuse_controller and source.controller is not None:
             self._controller = source.controller
         else:
@@ -9829,6 +9840,9 @@ class OperatorApp(App[None]):
             partial(self._request_tool_approval_on_app_loop, source=source)
         )
         session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
+        _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
+        if callable(_watch_refusals):
+            _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
         source.controller = EventController(session, self)
         self._event_sources[source.controller] = source
         source.controller.subscribe()
@@ -9961,6 +9975,35 @@ class OperatorApp(App[None]):
                 )
             )
         )
+
+    def _note_gate_refusal_on_app_loop(
+        self, error: BaseException, *, source: SessionInteraction | None = None
+    ) -> None:
+        """Report an owner-refused gate reply to the operator (issue #1310).
+
+        Synchronous, and deliberately not a gate: this is the answer to a key
+        the operator already pressed, arriving after the widget has been
+        resolved. It goes through ``call_later`` like the gate paths do, so the
+        notice is composed inside Textual's active-app context rather than from
+        the socket task that delivered the refusal.
+
+        ``source`` is accepted for symmetry with the two handlers beside it and
+        guards against reporting a refusal that belongs to a session the user has
+        since left: a notice about another conversation's card is noise.
+        """
+        source = source or self._interaction
+
+        def show() -> None:
+            if not self._is_current(source):
+                return
+            self._system_notice(str(error), "warning")
+
+        try:
+            self.call_later(show)
+        except RuntimeError:
+            # No running app (a pilot's shutdown, an embed). The refusal is
+            # already logged by the session, which is the fallback channel.
+            logger.debug("gate refusal notice could not be scheduled", exc_info=True)
 
     async def _request_user_choice_on_app_loop(
         self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
@@ -21642,7 +21685,7 @@ class OperatorApp(App[None]):
             "warning" if self._approve_all else "info",
         )
 
-    def _adopt_remedy(self, saved: str) -> str:
+    def _adopt_remedy(self, saved: str, *, may_loosen: bool | None = None) -> str:
         """The command that matches ``config.yml``, and WHERE it has to be typed.
 
         Every remedy printed has to work where it is printed (design round 1 D3,
@@ -21656,12 +21699,19 @@ class OperatorApp(App[None]):
 
         The classification is the SAME predicate the refusals and the seam use,
         read through one call rather than a second word list.
+
+        ``may_loosen`` is WHO THE SENTENCE IS FOR, and it is passed rather than
+        inferred when the sentence is built for a FOLLOWER: ``_may_loosen_gate_here``
+        describes THIS pane, and a routed report is rendered in someone else's
+        (issue #1310; design round 2 D10, UX round 2 U9). ``None`` means "the
+        local pane is the audience", which is the only case a local caller has.
         """
         from local_operator.harness.approval import transition_authority
 
+        here = self._may_loosen_gate_here() if may_loosen is None else may_loosen
         remedy = f"/approvals {saved} adopts it in this session"
         loosens = transition_authority("approvals", saved) == "authority-increasing"
-        if loosens and not self._may_loosen_gate_here():
+        if loosens and not here:
             return (
                 f"/approvals {saved} adopts it, typed in the terminal or app window that "
                 "started this session"
@@ -36198,14 +36248,22 @@ class OperatorApp(App[None]):
         saved_auto = self._approvals_default_auto
         session_mark = " · current"
         saved_mark = " · saved"
-        # A ROW THAT WILL BE REFUSED SAYS SO (design round 1 D2, UX round 1 U5).
-        # The loosening half of this list removes a gate, and only the window
-        # that started the session's runtime may do that — so on any other
-        # surface the rows were offered, chosen, and refused afterwards, with
-        # the explanation arriving where the user had already committed. The
-        # marking is a suffix on the row's own description because the list is
-        # the last surface before the keystroke.
-        elsewhere = "" if self._may_loosen_gate_here() else " — needs the window that started it"
+        # A ROW THAT WILL BE REFUSED IS MARKED — WITHOUT MOVING ANY COLUMN
+        # (design round 1 D2, UX round 1 U5; design round 2 D7). The loosening
+        # half of this list removes a gate, and only the window that started the
+        # session's runtime may do that, so on any other surface the row was
+        # offered, chosen, and refused afterwards.
+        #
+        # The first attempt said so in WORDS, appended to the row's ``detail``.
+        # That re-flowed the whole set: the picker sizes its columns from the
+        # widest cell, so the mark took the detail column from 22 cells to 47 —
+        # invisible at 44 columns, and at 60 it dropped the scope column for ALL
+        # FOUR rows. ``alert`` is the per-row mark that costs nothing: it paints
+        # the existing ``detail`` in the danger tint, so no width loses a column
+        # and the owner pane is unchanged. WHAT is refused is still said —
+        # in the refusal copy, which names the remedies, rather than in a list
+        # that has no room to explain (measured at 100/80/60/44 columns).
+        may_loosen = self._may_loosen_gate_here()
         return [
             ArgumentChoice(
                 "ask",
@@ -36217,7 +36275,10 @@ class OperatorApp(App[None]):
                 "auto",
                 "Run every tool without asking",
                 aliases=("off", "yolo"),
-                detail="this session" + (session_mark if live_auto else "") + elsewhere,
+                detail="this session" + (session_mark if live_auto else ""),
+                # Not available from this pane: the same question the seam and
+                # ``_may_loosen_gate_here`` answer.
+                alert=not may_loosen,
             ),
             ArgumentChoice(
                 "default ask",
@@ -38147,6 +38208,7 @@ class OperatorApp(App[None]):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
+        may_loosen: bool = True,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -38172,7 +38234,7 @@ class OperatorApp(App[None]):
         ``consumers`` is which action-carrying receipts the invoking client
         renders itself; see :meth:`_complete_unconsumed_action`.
         """
-        result = await self._slash_result(command, args, images, locality)
+        result = await self._slash_result(command, args, images, locality, may_loosen)
         result = self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -38244,7 +38306,12 @@ class OperatorApp(App[None]):
         return result
 
     async def _slash_result(
-        self, command: str, args: str, images: list[Any] | None, locality: str = "local"
+        self,
+        command: str,
+        args: str,
+        images: list[Any] | None,
+        locality: str = "local",
+        may_loosen: bool = True,
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
@@ -38287,7 +38354,7 @@ class OperatorApp(App[None]):
         if command == "compact":
             return self._compact_slash_result(SlashResult)
         if command == "approvals":
-            return self._approvals_slash_result(args, SlashResult)
+            return self._approvals_slash_result(args, SlashResult, may_loosen=may_loosen)
         # Every authoritative capability must land on a producer ABOVE: a
         # success-shaped receipt for an operation that never ran is the round-2
         # MAJOR-1 defect, so an unhandled command answers with an honest
@@ -39082,7 +39149,9 @@ class OperatorApp(App[None]):
         )
         return SlashResult(kind="notice", text="compacting context…", style="info")
 
-    def _approvals_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    def _approvals_slash_result(
+        self, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
+    ) -> Any:
         """The routed ``/approvals``: report or switch the OWNER's gate.
 
         The approval gate the engine consults is the owner process's — a
@@ -39095,11 +39164,26 @@ class OperatorApp(App[None]):
         persist = argument == "default" or argument.startswith("default ")
         mode = argument[len("default ") :].strip() if persist else argument
         if persist:
+            # The same two-truths split the runtime makes (design round 2 D10 =
+            # UX round 2 U7). ``default`` writes a FILE on whichever machine this
+            # is — no control connection can do it — and the second half of the
+            # old sentence promised `auto` "now" to a follower whose connection
+            # may not loosen the shared session at all.
+            here = self._may_loosen_gate_here() if may_loosen is None else may_loosen
+            switch = (
+                "/approvals ask|auto switches the shared session now"
+                if here
+                else (
+                    "/approvals ask switches the shared session now; /approvals auto has "
+                    "to come from the window that started it"
+                )
+            )
             return SlashResult(
                 kind="notice",
-                text="/approvals default persists to the local machine's config — run it "
-                "on the terminal whose launches it should govern; /approvals ask|auto "
-                "switches the shared session now",
+                text=(
+                    "/approvals default writes this machine's config.yml — a file, not a "
+                    f"session command. {switch}"
+                ),
                 style="warning",
             )
         if mode in ("ask", "on", "prompt"):
@@ -39132,10 +39216,23 @@ class OperatorApp(App[None]):
                     text=f"tool approvals: {live} — {effect}; new sessions open the same way",
                     style="warning" if self._approve_all else "info",
                 )
+            from local_operator.harness.approval import transition_authority
+
+            here = self._may_loosen_gate_here() if may_loosen is None else may_loosen
+            remedy = self._adopt_remedy(saved, may_loosen=here)
+            if transition_authority("approvals", saved) == "authority-increasing" and not here:
+                # The route that DOES work belongs in the report too, not only in
+                # the refusal that arrives after the operator has tried and
+                # failed (UX round 2, U9) — and on the background-started case no
+                # owning window exists, which is exactly when they need it.
+                remedy += (
+                    "; or let this session's runtime retire and reopen the session here — "
+                    "the window that opens a runtime owns its gate"
+                )
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
-                f"config.yml says {saved} — {self._adopt_remedy(saved)}",
+                f"config.yml says {saved} — {remedy}",
                 style="warning" if self._approve_all else "info",
             )
         if wanted_auto:
