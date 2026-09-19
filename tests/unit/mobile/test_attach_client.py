@@ -906,3 +906,53 @@ def test_dialable_record_exists_is_unknown_when_the_registry_cannot_be_read(
     monkeypatch.setattr(attach_client, "scan", unreadable)
 
     assert dialable_record_exists(tmp_path, 91234) is None
+
+
+def test_the_report_frame_carries_the_handshake_proof() -> None:
+    """The CLIENT half of agent R3-1: a report says who it is written for.
+
+    ``slash_result`` returns reports whose wording depends on whether the READER
+    may loosen, and the runtime cannot know that from an ordinary frame — the
+    proof it verifies is bound to the frame it is on. So a console that proved
+    the runtime holds its capability sends the HANDSHAKE proof on those frames:
+    the same value it was already sent, bound to this connection's nonce and
+    salt, and authorising nothing (a frame that needed authority would still have
+    to carry ``operator_cap`` for itself).
+
+    Nothing is sent by a connection that never completed the handshake, and
+    nothing is sent on any other op — an ordinary frame stays byte-identical to
+    what an older runtime served, which is why no ``PROTOCOL_VERSION`` moves.
+    """
+    from local_operator.harness.approval import (
+        handshake_proof,
+        mint_operator_cap,
+        operator_nonce,
+    )
+    from local_operator.mobile.attach_client import AttachClient
+
+    cap = mint_operator_cap()
+    client = object.__new__(AttachClient)
+    client._operator_cap = cap
+    client._operator_nonce = operator_nonce()
+    client._operator_salt = operator_nonce()
+    client._authority_bearing = True
+
+    report = {"op": "slash_result", "command": "approvals", "args": "default auto"}
+    presented = client._present_authority(dict(report))
+    assert presented["operator_handshake"] == handshake_proof(
+        cap, client_nonce=client._operator_nonce, server_salt=client._operator_salt
+    )
+    # The report is ORDINARY: it carries no authority of its own.
+    assert "operator_cap" not in presented
+
+    # Any other op carries nothing.
+    assert "operator_handshake" not in client._present_authority({"op": "prompt", "text": "hi"})
+
+    # And a connection that never verified the runtime's proof presents nothing.
+    client._authority_bearing = False
+    assert "operator_handshake" not in client._present_authority(dict(report))
+
+    # The capability itself never travels on this path.
+    import json as _json
+
+    assert cap.hex() not in _json.dumps(presented)
