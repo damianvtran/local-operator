@@ -21521,7 +21521,7 @@ class OperatorApp(App[None]):
             "warning" if self._approve_all else "info",
         )
 
-    def _adopt_remedy(self, saved: str, *, may_loosen: bool | None = True) -> str:
+    def _adopt_remedy(self, saved: str, *, may_loosen: bool | None = None) -> str:
         """The command that matches ``config.yml``, and WHERE it has to be typed.
 
         Every remedy printed has to work where it is printed (design round 1 D3,
@@ -37917,7 +37917,10 @@ class OperatorApp(App[None]):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
-        may_loosen: bool | None = True,
+        # ``None`` = "not said", read conservatively: only the LOCAL path omits
+        # it, and that path is a pane that owns its gate, whose answer the local
+        # call sites pass explicitly (agent review round 4, R4-3).
+        may_loosen: bool | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -38020,7 +38023,7 @@ class OperatorApp(App[None]):
         args: str,
         images: list[Any] | None,
         locality: str = "local",
-        may_loosen: bool | None = True,
+        may_loosen: bool | None = None,
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
@@ -38859,7 +38862,7 @@ class OperatorApp(App[None]):
         return SlashResult(kind="notice", text="compacting context…", style="info")
 
     def _approvals_slash_result(
-        self, arg: str, SlashResult: Any, *, may_loosen: bool | None = True
+        self, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
     ) -> Any:
         """The routed ``/approvals``: report or switch the OWNER's gate.
 

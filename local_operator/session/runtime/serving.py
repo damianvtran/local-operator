@@ -3750,7 +3750,14 @@ class ServingSessionHandle(SessionHandle):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
-        may_loosen: bool | None = True,
+        #: ``None`` = "this caller has not said", which the sentence builders
+        #: read CONSERVATIVELY. The default is deliberately not permissive: every
+        #: production caller passes the connection's own answer explicitly
+        #: (``RuntimeServer`` for a runtime, ``OperatorApp._may_loosen_gate_here``
+        #: for the pane that owns its gate), and a future caller that forgets must
+        #: fail closed rather than be told a route it cannot walk (agent review
+        #: round 4, R4-3).
+        may_loosen: bool | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -3954,7 +3961,7 @@ class ServingSessionHandle(SessionHandle):
         args: str,
         SlashResult: Any,
         locality: str = "local",
-        may_loosen: bool | None = True,
+        may_loosen: bool | None = None,
     ) -> Any:
         """Dispatch one routed slash command. Mirrors ``OperatorApp._slash_result``.
 
@@ -5092,7 +5099,7 @@ class ServingSessionHandle(SessionHandle):
         return SlashResult(kind="notice", text=text, style="info")
 
     @staticmethod
-    def _adopt_remedy(saved: str, *, may_loosen: bool | None = True) -> str:
+    def _adopt_remedy(saved: str, *, may_loosen: bool | None = None) -> str:
         """The command that matches ``config.yml``, and where it has to be typed.
 
         The same sentence the TUI's report builds (``OperatorApp._adopt_remedy``)
@@ -5113,7 +5120,7 @@ class ServingSessionHandle(SessionHandle):
         return remedy
 
     def _approvals_slash(
-        self, session: Any, arg: str, SlashResult: Any, *, may_loosen: bool | None = True
+        self, session: Any, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
     ) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.
 
