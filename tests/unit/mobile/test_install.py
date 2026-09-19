@@ -340,6 +340,39 @@ def test_the_linux_unit_quotes_the_interpreter_path(monkeypatch, tmp_path) -> No
     assert 'ExecStart="/home/a b/python3" -m local_operator.mobile.service --port 4098' in text
 
 
+def test_every_supervisor_arm_carries_the_store(monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    """The daemon must read the store the INSTALLER wrote the password into.
+
+    Found by the Windows battery (`mobile.install`, PASS=20/FAIL=1 at the
+    round-1 head): the install stored the portal password under the redirected
+    store, the task it registered started a daemon that looked in the DEFAULT
+    one, and the daemon exited 2 with "no mobile password set. Run `lop mobile
+    install`" — naming the store the installer had just written to. A supervised
+    process inherits nothing from the installer, so every arm has to say which
+    store it serves; `wakes` and `tunnels` have always passed it and `mobile`
+    was the one daemon that did not. It was latent on macOS and Linux too, and
+    nothing in the mocked-platform suite could see it.
+    """
+    from local_operator import paths
+    from local_operator.paths import CONFIG_DIR_ENV
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path / "store"))
+    store = str(paths.config_dir())
+    assert store == str(tmp_path / "store"), "the override did not take"
+
+    plist = install.render_plist(4098)
+    assert plist["EnvironmentVariables"] == {CONFIG_DIR_ENV: store}
+
+    unit = install.render_systemd(4098)
+    environment_lines = [line for line in unit.splitlines() if line.startswith("Environment=")]
+    assert environment_lines, unit
+    assert f"{CONFIG_DIR_ENV}=" in environment_lines[0]
+    assert store in environment_lines[0], environment_lines[0]
+
+    task = install.render_task_xml(4098)
+    assert store in task, "Task Scheduler has no env element; the launcher must carry it"
+
+
 def test_the_node_refusal_names_node_and_where_to_get_it(monkeypatch) -> None:  # noqa: ANN001
     """Q6: the container reading said what was missing, not what to do.
 

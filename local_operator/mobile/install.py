@@ -41,7 +41,7 @@ from local_operator.mobile.auth import (
     store_password,
 )
 from local_operator.mobile.daemon import DEFAULT_PORT
-from local_operator.paths import config_dir, log_dir
+from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
 
 LABEL = "com.local-operator.mobile"
 
@@ -238,6 +238,18 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     ``Program`` is the STABLE shim on a machine with the generation layout, and
     the role label does not move with it — see ``procname.supervised_image`` for
     why a path inside this venv is unsafe for a unit launchd may restart.
+
+    ``EnvironmentVariables`` CARRIES THE STORE, and its absence was a bug on all
+    three platforms rather than a Windows one. ``install`` stores the portal
+    password under ``config_dir()`` and the daemon reads it back with the same
+    function, but a supervised process does NOT inherit the installer's
+    environment: with ``LOCAL_OPERATOR_CONFIG_DIR`` set, the installer wrote a
+    password into that store and the daemon looked in the default one, then
+    refused to start with "no mobile password set. Run `lop mobile install`" —
+    naming the store it had just written to. The Windows probe battery found it
+    (`mobile.install`, PASS=20/FAIL=1) and it is the same latent bug on macOS and
+    Linux. ``wakes`` and ``tunnels`` have always passed the store this way; this
+    daemon is the one that did not.
     """
     return {
         "Label": LABEL,
@@ -257,6 +269,7 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
         "StandardErrorPath": str(log_path()),
         # SSE-holding daemons must not be App Nap'd into suspending timers.
         "ProcessType": "Interactive",
+        "EnvironmentVariables": {CONFIG_DIR_ENV: str(config_dir())},
     }
 
 
@@ -469,22 +482,41 @@ def render_systemd(port: int = DEFAULT_PORT) -> str:
         # ``Restart=on-failure``: an exit-code-2 (no password) stays down so a
         # refused start does not flap, exactly what the plist's
         # KeepAlive{SuccessfulExit: false} buys on macOS.
-        post_lines=supervisors.output_redirect_lines(log_path()),
+        #
+        # ``Environment=`` carries the STORE, the ``EnvironmentVariables``
+        # analogue in the plist above and the same two reasons its siblings
+        # document: the store is part of the contract, and an UNQUOTED
+        # assignment truncates it at the first space — silently, so the daemon
+        # would read a different store than the installer wrote to and refuse to
+        # start.
+        post_lines=[
+            f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
+            *supervisors.output_redirect_lines(log_path()),
+        ],
     )
 
 
 def render_task_xml(port: int = DEFAULT_PORT) -> str:
     """The Windows Task Scheduler task for this daemon.
 
-    No ``environment``: this daemon's plist records no config dir either — the
-    label owns the port and the store is the default one — so the Windows arm
-    matches the macOS one rather than inventing a second contract.
+    ``environment=`` CARRIES THE STORE. It used to say that this daemon's plist
+    recorded no config dir either and the store was the default one — which was
+    true of the plist and wrong about the consequence: no supervised process
+    inherits the installer's environment, so an install from a store override
+    registered a task whose daemon read the DEFAULT store, found no password
+    there, and exited 2. The Windows battery reported exactly that
+    ("no mobile password set. Run `lop mobile install`" naming the store the
+    installer had just written to), and it is the same omission the plist and the
+    unit had. Task Scheduler has no native environment element, so
+    ``supervisors.render_task_xml`` expresses it through the launcher; see that
+    function for the shape.
     """
     image = procname.supervised_image() or Path(sys.executable)
     return supervisors.render_task_xml(
         description="Local Operator mobile daemon (serve the phone portal)",
         image=str(image),
         argv=["-m", "local_operator.mobile.service", "--port", str(port)],
+        environment={CONFIG_DIR_ENV: str(config_dir())},
         log=log_path(),
         user_id=supervisors.current_user_id(),
     )
