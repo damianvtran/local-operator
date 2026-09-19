@@ -465,8 +465,13 @@ def suppress_notifications_for_process(reason: str = "") -> None:
     direction is the safe one — every leg asks this switch FIRST, so a silenced
     process stays silent — but the honest statement is that such a completion is
     announced by ANOTHER surface on the machine (the operator's own TUI, the
-    desktop app) IF one is running, and otherwise not announced at all: the
-    banner is dropped with a debug log line and no user-visible signal.
+    desktop app) IF one is running, and otherwise not announced at all. Nothing
+    is lost by that, and nothing says so at the time: every switch site returns
+    silently — the ONE debug record is written when the switch is SET (see the
+    `logger.debug` below), never when a banner is skipped — and the durable
+    unseen mark SURVIVES, so a surface started later still reads the same
+    completion as unread and raises its own banner for it
+    (``session/runtime/serving.py::_announce_completion``, the SETTLED arm).
     Making the two agree was considered and rejected: it would mean re-reading a
     session's spec in the process that decides and clearing the switch when the
     spec left the mock — and a spawned child inherits the switch, so clearing it

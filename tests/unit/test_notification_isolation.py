@@ -466,6 +466,66 @@ def test_a_walk_that_raised_is_not_memoised(
     assert len(walks) == 2, walks
 
 
+def test_a_walk_whose_own_open_failed_is_not_memoised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q1: the walk takes a SECOND descriptor, and that one was still collapsed.
+
+    ``_settled_selection`` answers ``None`` for a journal it cannot OPEN, the
+    same answer it gives for one that opens fine and has no v2 row — so a
+    failure in that window (the caller's pre-open succeeded, the walk's did not:
+    the EMFILE shape QA round 3 reproduced) was folded into the tolerant
+    ``False`` and MEMOISED, serving a stale "not test-hosted" verdict for the
+    life of the journal. The wrong ANSWER is pre-existing in the parent module;
+    the PERMANENCE is what this change adds, which is why it is closed here.
+
+    The failure is armed on the SECOND open of the journal — exactly the
+    descriptor the walk takes, since the first is the caller's pre-open — and
+    the cell asserts on the cache and on the count of real walks rather than on
+    the answer alone, so it cannot pass vacuously.
+    """
+    from local_operator.session import model_selection
+
+    directory = _transcript_with_selection(tmp_path / "sessions" / "openfail01", "test/test-model")
+    journal = directory / "transcript.jsonl"
+    real_open = Path.open
+    opens: list[str] = []
+    walks: list[Path] = []
+    armed = {"fail_next": True}
+
+    def counted_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == journal:
+            opens.append("open")
+            if armed["fail_next"] and len(opens) == 2:
+                raise OSError(24, "Too many open files")
+        return real_open(self, *args, **kwargs)
+
+    real_settled = model_selection._settled_selection
+
+    def counted_settled(path: Path) -> Any:
+        walks.append(path)
+        return real_settled(path)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    monkeypatch.setattr(model_selection, "_settled_selection", counted_settled)
+    model_selection._HOSTING_VERDICT_CACHE.clear()
+
+    # The walk's own open fails. The walk is never reached, the tolerant
+    # `False` is answered, and NOTHING is memoised.
+    assert session_uses_test_hosting(directory) is False
+    opened_for_the_failed_read = len(opens)
+    assert opened_for_the_failed_read == 2, opens
+    assert walks == [], walks
+    assert directory not in model_selection._HOSTING_VERDICT_CACHE
+
+    # Healthy again: a FRESH walk happens on the byte-identical journal and the
+    # mock session is recognised — which a memoised `False` would have hidden.
+    armed["fail_next"] = False
+    assert session_uses_test_hosting(directory) is True
+    assert len(opens) > opened_for_the_failed_read, opens
+    assert len(walks) == 1, walks
+
+
 def test_an_unreadable_or_selection_free_journal_fails_toward_notifying(tmp_path: Path) -> None:
     """Silencing a REAL session's banner is worse than bannering a test one."""
     assert session_uses_test_hosting(tmp_path / "missing") is False

@@ -401,15 +401,16 @@ def session_uses_test_hosting(directory: Path) -> bool:
     and the only path that preserves an mtime is
     ``transcript.Transcript._restore_mtime`` on a bookkeeping batch, which is
     restoring the clock for a write that already grew the file. That path also
-    cannot restore ``st_mtime_ns`` EXACTLY (``os.utime`` takes float seconds;
-    measured +106 ns), so such an append re-scans once — harmless, and not
-    something to "fix" by making the restore precise: the size half of the key
-    has already invalidated the entry, and a key that leaned on a
-    precision-lossy mtime would be the weaker one. A hypothetical EXTERNAL
-    writer that rewrote the journal in place to the same byte length AND
-    restored the mtime to the nanosecond would serve a stale verdict; no writer
-    in this repository can do that, and the readers here are one process's
-    caches rather than a source of truth.
+    cannot restore ``st_mtime_ns`` EXACTLY — ``os.utime`` takes float seconds,
+    and the residual is sub-microsecond and of EITHER SIGN (measured at -97…+84
+    ns across ten files, -53 ns on the first) — so such an append re-scans once.
+    That is harmless, and not something to "fix" by making the restore precise:
+    the size half of the key has already invalidated the entry, and a key that
+    leaned on a precision-lossy mtime would be the weaker one. A hypothetical
+    EXTERNAL writer that rewrote the journal in place to the same byte length
+    AND restored the mtime to the nanosecond would serve a stale verdict; no
+    writer in this repository can do that, and the readers here are one
+    process's caches rather than a source of truth.
 
     A steady poll therefore pays a ``stat`` per row (~0 ms) and re-scans only
     when the journal actually changed. The cache is per-process and bounded
@@ -493,15 +494,32 @@ def session_uses_test_hosting(directory: Path) -> bool:
 def _read_test_hosting(directory: Path) -> bool | None:
     """The uncached read behind :func:`session_uses_test_hosting`.
 
-    ``None`` means INDETERMINATE — the walk raised, so this call cannot say
-    whether the session is on the test hosting. The caller answers the tolerant
-    direction and does NOT memoise it; the distinction is why this has three
-    answers rather than two (see the caller's docstring).
+    ``None`` means INDETERMINATE — the journal could not be read, so this call
+    cannot say whether the session is on the test hosting. The caller answers
+    the tolerant direction and does NOT memoise it; the distinction is why this
+    has three answers rather than two (see the caller's docstring).
+
+    IT OPENS THE JOURNAL ITSELF, though the caller already did, because that
+    open cannot stand in for this one: the descriptor can go between the two —
+    the EMFILE window QA round 3 reproduced — and ``_settled_selection``
+    reports a failure to open as ``None``, the SAME answer it gives for a
+    journal that opens fine and simply has no v2 row. Only the second of those
+    is a verdict, so readability is re-established here instead of being folded
+    into the tolerant ``False`` that the caller would then memoise for the life
+    of the file.
+
+    The whole body is inside the ``try``: the import, the walk and the provider
+    lookup are one decision, and a raise from any of them is the same
+    INDETERMINATE. Only the provider lookup is unreachable today (a pure dict
+    lookup), but a guard that stops one statement short of the body it claims is
+    the shape that silently stops being true.
     """
     try:
         from local_operator.providers.registry import is_mock_provider
 
+        with (directory / "transcript.jsonl").open("rb"):
+            pass
         settled = _settled_selection(directory)
+        return settled is not None and is_mock_provider(settled.provider)
     except Exception:  # noqa: BLE001 — a banner decision never fails on a store read
         return None
-    return settled is not None and is_mock_provider(settled.provider)
