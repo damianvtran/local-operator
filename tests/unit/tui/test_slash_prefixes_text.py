@@ -136,6 +136,13 @@ PREFIXES_TEXT_POLICY = {
     # the single token `read` is the control. The shape below is what draws that
     # line; this flag would erase it.
     "notifications": False,
+    # FALSE, all three, for `/notifications`' reason: the text these own is a
+    # WORD the handler reads (`yes`), and a sentence after it must stay a
+    # message — `/delete yes please tell me what happened` is prose a user is
+    # entitled to send. The shapes below are what draw that line.
+    "archive": False,
+    "unarchive": False,
+    "delete": False,
 }
 
 
@@ -243,6 +250,16 @@ ARGUMENT_SHAPE_POLICY = {
     # reached the model as a paid turn. ANY rather than WORD because a secret is
     # arbitrary text — `/credential my pass phrase` must not be admitted either.
     "credential": ArgumentShape.ANY,
+    # The two that act on the CURRENT session, so the text after them is nothing
+    # at all: whatever followed the word would be a message, not this command's
+    # argument.
+    "archive": ArgumentShape.NONE,
+    "unarchive": ArgumentShape.NONE,
+    # ...and ONE row shaped like `/new`: a single selector word the handler reads
+    # and compares — `yes` is the confirmation, and anything else is the
+    # rehearsal. WORD rather than ANY, so `/delete yes please explain` stays a
+    # message instead of being planned as a control the route would then run.
+    "delete": ArgumentShape.WORD,
 }
 
 

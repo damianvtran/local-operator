@@ -30,10 +30,12 @@ from local_operator.server.desktop import require_desktop
 from local_operator.server.models.desktop_sessions import (
     AdmissionStatus,
     AnswerReceipt,
+    ArchiveState,
     AttentionState,
     ChildTranscriptPage,
     CommandReceipt,
     CreatedSession,
+    DeletedSession,
     DraftPreviewPayload,
     HistoryPage,
     InterruptReceipt,
@@ -62,6 +64,7 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
     LegacySubscriberDuringMove,
+    SessionDeletionRefused,
     SubagentChildUnavailable,
     move_session,
     resolve_working_directory,
@@ -508,6 +511,51 @@ class Pin(Input):
     """
 
     pinned: StrictBool
+
+
+class Archive(Input):
+    """The ARCHIVE state the caller wants this session to be in.
+
+    ``Pin``'s shape and ``Pin``'s reasons: a desired state rather than a toggle
+    verb (a retried toggle flips the archive back, which the user reports as
+    "the archive keeps un-archiving itself"), ``extra="forbid"`` so an omitted
+    ``archived`` is a 422 rather than a silent false, and ``StrictBool`` so a
+    client whose serialiser produces ``"yes"`` or ``1`` gets a signal instead of
+    a 200 over state it did not mean to set.
+    """
+
+    archived: StrictBool
+
+
+class ConfirmDeletion(Input):
+    """The explicit confirmation a PERMANENT deletion requires.
+
+    THE FIELD IS THE WHOLE REQUEST, which is why it is required and why
+    ``extra="forbid"`` is inherited: a delete that dispatch sends without a
+    confirmation must not be a delete. ``confirmed: true`` is the only accepted
+    value — see :meth:`_require_confirmation` for why ``false`` is a 422 rather
+    than a quieter refusal.
+    """
+
+    confirmed: StrictBool
+
+    @model_validator(mode="after")
+    def _require_confirmation(self) -> "ConfirmDeletion":
+        """Refuse ``confirmed: false`` as a malformed request, not as a decision.
+
+        ``StrictBool`` alone is not enough: it accepts ``False``, and a body that
+        explicitly says it is NOT confirming would then reach the handler, where
+        the only honest things to do are refuse it (a 409 that says the user
+        withholds consent for something they never asked to withhold) or delete
+        (silence, and the worst possible reading). Recognising it HERE makes it a
+        422 — the status this ladder already uses for a body it cannot honour,
+        the same one an omitted field gets — so a client bug reads as a client
+        bug. The UI only ever sends ``true``; this is the guard for the day it
+        does not.
+        """
+        if not self.confirmed:
+            raise ValueError("confirmed must be true")
+        return self
 
 
 class PresenceWindow(Input):
@@ -1223,6 +1271,15 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
             # renderer take that path quietly instead of backing off as if the
             # store had refused (the `code` field of its control error).
             raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
+        if isinstance(error, SessionDeletionRefused):
+            # A DELETION THE MACHINE REFUSED, and it is a 409 rather than the
+            # generic ``str(error)`` arm below for the one reason that matters to
+            # the client: the sentence is a REMEDY (stop the session, cancel the
+            # wake, read the mail) and the code is what lets a renderer offer
+            # that control instead of retrying a call that cannot succeed. The
+            # conversation exists, so 404 would be a lie about the user's own
+            # work, and nothing failed, so 500 would be a lie about the machine.
+            raise HTTPException(409, {"code": error.code, "message": str(error)}) from None
         raise HTTPException(409, str(error)) from None
     except sqlite3.Error as error:
         # THREE CONDITIONS, THREE ANSWERS, and the split is the point: this arm
@@ -1301,7 +1358,11 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
 
 
 @router.get("/v1/desktop/sessions", response_model=CRUDResponse[SessionList])
-async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, le=500)):
+async def list_sessions(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+    include_archived: bool = Query(default=False),
+):
     # Wrapped like its neighbours: the list gained a receipt-store read, and an
     # unmapped failure there answered the app's primary navigation surface with
     # a bare 500. The decoration is already omitted per row inside `list()`;
@@ -1318,7 +1379,9 @@ async def list_sessions(request: Request, limit: int = Query(default=100, ge=1, 
         # contract an older backend's rows carry.
         engine = getattr(request.app.state, "desktop_feed", None)
         stamps = engine.status_stamps() if engine is not None else None
-        page = await host(request).list(limit, status_stamps=stamps)
+        page = await host(request).list(
+            limit, status_stamps=stamps, include_archived=include_archived
+        )
         # THE PAGE, THEN THE PINNED CONVERSATIONS IT DID NOT CARRY, as ONE list.
         # DECIDED, not left open: concatenated on the wire rather than published
         # as a second field, because of what the client does with this array — it
@@ -1373,6 +1436,7 @@ async def search_sessions(
     request: Request,
     q: str = Query(default="", max_length=256),
     limit: int = Query(default=100, ge=1, le=500),
+    include_archived: bool = Query(default=False),
 ):
     """Past conversations matching ``q`` by name, id, or what was SAID in them.
 
@@ -1395,11 +1459,19 @@ async def search_sessions(
     session directory's head and one cache file — while ``q`` is bounded at 256
     characters because the query is only ever a user's typing, and an unbounded
     one would be projected into every digest comparison.
+
+    ``include_archived`` defaults FALSE and the default is the contract: an
+    archived conversation is not a search result, which is why the archive had
+    to be threaded through the scanning layer rather than filtered here — the
+    index is built from the rows the scan returned, so an archived id is never
+    handed to it and cannot be reached by a body match. Raising the flag is a
+    deliberate act for a surface that has already revealed them (the picker's
+    reveal toggle), and every hit carries its own ``archived`` either way.
     """
     async with errors(request):
         return reply(
             {
-                "sessions": await host(request).search(q, limit),
+                "sessions": await host(request).search(q, limit, include_archived=include_archived),
                 "query": q,
                 "limit": limit,
             }
@@ -2239,6 +2311,74 @@ async def pin(session_id: str, body: Pin, request: Request):
     """
     async with errors(request):
         return reply(await host(request).set_pin(session_id, body.pinned))
+
+
+@router.post("/v1/desktop/sessions/{session_id}/archive", response_model=CRUDResponse[ArchiveState])
+async def archive(session_id: str, body: Archive, request: Request):
+    """Set a session's durable archive to the state the caller asked for.
+
+    THE PIN ROUTE'S SHAPE, field for field, and for the same reasons — read that
+    docstring before changing either, because the two are one convention:
+    desired state rather than a toggle (a retry of a toggle flips the archive
+    back and the user reports "the archive keeps un-archiving itself"),
+    receipt-free because the call is idempotent by construction, last-writer-wins
+    on the whole index across processes, and ID SHAPE AND IS-DIR as the only
+    admission — deliberately NOT ``is_user_session``, because the sidebar can
+    show a delegated run and a state the user can see must be a state the user
+    can change.
+
+    WHAT IT DOES NOT DO, because the pin route's silence about it was reasoned:
+    archiving NEVER removes anything, so there is no guard, no refusal and no
+    409 — the worst case is a flag on a conversation that is still on disk and
+    still resumable by id. It also does not make the archived flag reachable in a
+    listing: every surface that offers rows filters them out through the scan
+    unless its own ``include_archived`` asked for them, so a client cannot
+    archive a conversation and keep seeing it in a list it did not ask to change.
+    """
+    async with errors(request):
+        return reply(await host(request).set_archived(session_id, body.archived))
+
+
+@router.delete("/v1/desktop/sessions/{session_id}", response_model=CRUDResponse[DeletedSession])
+async def delete_session_route(session_id: str, body: ConfirmDeletion, request: Request):
+    """Permanently remove ONE conversation. Irreversible, so it is guarded.
+
+    A DELETE WITH A BODY, which is unusual enough to state: the body is not
+    parameters, it is the CONFIRMATION — the request is refused without it (422,
+    see :class:`ConfirmDeletion`), so a client cannot reach this route by
+    accident with the right URL and the wrong method. The alternative spellings
+    were considered and rejected: a query parameter is invisible to anyone
+    reading a log or a URL, and a header is a convention with no precedent in
+    this API.
+
+    THREE ANSWERS:
+
+    * **200** — ``{"session_id", "deleted": true}``. The removal happened.
+    * **404** — an unknown or malformed id, including a session the user did not
+      open (a delegated subagent run). One generic answer for all of them, the
+      pin route's rule: separate refusals would let an authenticated renderer
+      enumerate the machine's store by the difference between them.
+    * **409** — a hard guard refused, carrying the sentence that names the
+      condition and its remedy (a live session, an armed wake, unread spooled
+      mail, or a guard that could not be read). Not 404: the conversation exists
+      and the user can see it. Not 500: nothing failed.
+
+    WHAT IT REMOVES, exactly: the addressed session's own directory and nothing
+    else. Subagent runs it launched live as SIBLINGS under ``sessions/`` and are
+    not touched — the client is told that in the confirmation it shows BEFORE
+    this call (the TUI states it in words), because a receipt is the wrong place
+    to learn the blast radius of an irreversible act.
+
+    Consistency for the two stores that mention sessions is FREE rather than
+    handled here, and deliberately so: the pin and archive indexes both PRUNE AT
+    READ against the store, so an id whose directory is gone reads back as
+    neither pinned nor archived, and deletion needs no cooperation from either.
+    The wake index is pruned by the deletion path itself (``cleanup``), and the
+    search cache is keyed by ids the caller lists, so a stale entry is never
+    consulted for a conversation that no longer exists.
+    """
+    async with errors(request):
+        return reply(await host(request).delete(session_id))
 
 
 @router.post("/v1/desktop/sessions/{session_id}/watch", response_model=CRUDResponse[WatchReceipt])
