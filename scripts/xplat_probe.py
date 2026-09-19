@@ -173,6 +173,14 @@ def isolated_env(root: Path) -> dict[str, str]:
     # via `run()`/`_spawn_child()` -- because the battery measures platform
     # mechanisms, and a console codec is not one of them.
     env["PYTHONIOENCODING"] = "utf-8"
+    # AND THE FILE-OPENING CODEC, which is a DIFFERENT knob. `PYTHONIOENCODING`
+    # names the stdio codec only: `open()` with no `encoding=` still asks the
+    # locale, so the `tui.boot` child's `save_screenshot` write died on Windows
+    # with `UnicodeEncodeError: 'charmap' codec can't encode character '\u2584'`
+    # while every `print()` in the same child was already UTF-8. UTF-8 mode is
+    # what moves `open()` as well, and it is the half the comment above this
+    # paragraph already claimed was handled.
+    env["PYTHONUTF8"] = "1"
     # A child whose stdout is a FILE (see `ChildRun`) is block-buffered, so
     # everything it printed on the way to a crash or a timeout would still be
     # sitting in its buffer -- which is exactly the evidence the daemon and
@@ -725,6 +733,63 @@ def probe_mobile_status(env: dict[str, str]) -> Result:
     )
 
 
+def _mobile_daemon_log_tail(env: dict[str, str], limit: int = 2000) -> str:
+    """The supervised daemon's OWN log, for when the installer says it never came up.
+
+    ``lop mobile install`` verifies the daemon by polling ``/healthz`` and, on
+    timeout, answers ``daemon did not come up healthy; see <log>`` — a pointer,
+    not the evidence. On the Windows runner that pointer was the whole of what
+    the artifact carried, so a real failure arrived with no readable cause and
+    the probe's own detail line degenerated into a slice of a PATH dump.
+    Derived from ``LOCAL_OPERATOR_CONFIG_DIR`` rather than imported from
+    ``local_operator.paths``, because this script stays stdlib-only.
+    """
+    config = env.get("LOCAL_OPERATOR_CONFIG_DIR")
+    if not config:
+        return ""
+    path = Path(config) / "logs" / "mobile.log"
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"(no daemon log at {path}: {exc})"
+    # Lines a reader cannot use are dropped rather than truncated: the Windows
+    # daemon logs the registry PATH it retrieved, several hundred characters on
+    # one line, and keeping it pushed the actual failure out of the tail.
+    kept = [line for line in raw.splitlines() if len(line) <= 300]
+    return "\n".join(kept)[-limit:]
+
+
+def _supervised_task_state(env: dict[str, str]) -> str:
+    """What Task Scheduler thinks of the task, when there is one to ask about.
+
+    The daemon log answers "what did it say"; this answers "is it even still
+    running", which is the difference between a daemon that died and one that
+    is merely slow on a cold runner.
+    """
+    if sys.platform != "win32":
+        return ""
+    try:
+        query = subprocess.run(
+            ["schtasks", "/Query", "/TN", "Local Operator Mobile", "/V", "/FO", "LIST"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"(schtasks query failed: {exc})"
+    interesting = [
+        line.strip()
+        for line in (query.stdout or "").splitlines()
+        if any(
+            key in line
+            for key in ("Status", "Last Run", "Last Result", "Task To Run", "Run As User")
+        )
+    ]
+    return "; ".join(interesting[:6])
+
+
 def probe_mobile_install(env: dict[str, str]) -> Result:
     """Install the phone-portal daemon -- the background-runner surface.
 
@@ -777,6 +842,24 @@ def probe_mobile_install(env: dict[str, str]) -> Result:
         # prerequisite IS present (`node` on PATH) and the install still fails,
         # this stays a FAIL -- the case that must never be hidden behind a
         # friendly message.
+        # AN INSTALL THAT REFUSED TO ADDRESS THE *REAL* SUPERVISOR is the same
+        # class as the macOS keychain above: correct behaviour that an isolated
+        # HOME makes unavoidable. `systemctl --user` has no sandbox -- it reaches
+        # the calling user's live manager whatever $HOME says -- so the installer
+        # deliberately declines to enable a unit the real home does not own, and
+        # a redirected-home run therefore can never reach the enable step. The
+        # file half is still proven (the step lines are in the detail); the
+        # enable half is proven by the sibling `wake.install` probe and by the
+        # real-systemd run recorded in docs/XPLATFORM.md. Reported as SKIP with
+        # the installer's own sentence, so the reason travels with the reading.
+        if "refusing to enable it from a redirected home" in text:
+            return Result(
+                "mobile.install",
+                "SKIP",
+                "the installer wrote its unit and declined to enable it from a "
+                "redirected HOME, which cannot reach the real user manager: " + _first_line(text),
+                {"raw": text[:1200]},
+            )
         prerequisite_missing = "is not installed" in text and (
             "nodejs.org" in text or "install node" in text.lower()
         )
@@ -787,17 +870,30 @@ def probe_mobile_install(env: dict[str, str]) -> Result:
                 "portal bundle needs Node >= 22, absent on this host: " + _tail(text),
                 {"raw": text[:1200]},
             )
+        # THE DAEMON'S OWN LOG, not just the pointer to it. "did not come up
+        # healthy; see <path>" is a location, and the artifact is read on
+        # another machine days later; without the log a supervised start that
+        # failed is indistinguishable from one that was slow, and the reader has
+        # nothing to act on. `_tail` of the log (the end is where a crash is),
+        # plus Task Scheduler's own view of the task on Windows.
+        extra: dict[str, object] = {"rc": proc.returncode, "raw": text[:2000]}
+        detail = _tail(text) or f"exit {proc.returncode}"
+        if "did not come up healthy" in text:
+            daemon_log = _mobile_daemon_log_tail(env)
+            if daemon_log:
+                extra["daemon_log"] = daemon_log
+            task_state = _supervised_task_state(env)
+            if task_state:
+                extra["task_state"] = task_state
+            # The LAST meaningful daemon line is the cause; the installer's own
+            # progress lines and the registry PATH dumps are not.
+            cause = _tail(daemon_log, limit=400) if daemon_log else "(no daemon log)"
+            detail = f"the supervised daemon never became healthy: {cause}"
         return Result(
             "mobile.install",
             "FAIL",
-            # `_tail`, not `_first_line`: an installer prints its PROGRESS first,
-            # so the first line of a failed install is a step that SUCCEEDED. On
-            # the Linux leg that put "generated a new portal password (a 0600
-            # file ...)" in the artifact as the reason for a FAIL (reviewer B,
-            # A6) -- a detail line that actively misleads the reader about what
-            # broke.
-            _tail(text) or f"exit {proc.returncode}",
-            {"rc": proc.returncode, "raw": text[:2000]},
+            detail,
+            extra,
         )
     return Result("mobile.install", "PASS", _first_line(text) or "installed", {"raw": text[:1200]})
 

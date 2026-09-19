@@ -1965,6 +1965,8 @@ def test_parallel_is_a_providers_member(manager: ConfigManager) -> None:
 
     assert settings_io.validate(providers, ["parallel"]) is None
     assert settings_io.coerce(providers, "exa, parallel") == ["exa", "parallel"]
+
+
 # ---------------------------------------------------------------------------
 # Two rows whose answer is a PLATFORM question (B26 and D23).
 # ---------------------------------------------------------------------------

@@ -19,10 +19,13 @@ class of default Windows has), asserted rather than assumed.
 
 from __future__ import annotations
 
+import codecs
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,7 +35,19 @@ VALUE_WITH_UNENCODABLE_CHARACTER = "s\u00e9cr\u00e8t-\u2713"
 def _run(
     tmp_path: Path, statement: str, *, ascii_default: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``statement``, by default with ``US-ASCII`` as the text-encoding default."""
+    """Run ``statement``, by default with ``US-ASCII`` as the text-encoding default.
+
+    THE SCRIPT GOES IN A FILE, NOT IN ``-c``. An argument is bytes on POSIX,
+    encoded by the PARENT with its filesystem encoding and ``surrogateescape``,
+    so a value this test exists to make unrepresentable (``\u2713``) reaches the
+    child as a lone surrogate and dies in ``-c``'s decoder with
+    ``'utf-8' codec can't encode characters ... surrogates not allowed`` — the
+    test failing for a reason that has nothing to do with the credential store.
+    Writing the script UTF-8 to a file keeps every byte of the value inside the
+    file and the argv pure ASCII, which is also the shape a real caller has.
+    Python reads a source file as UTF-8 regardless of the locale, so the child's
+    ASCII default still governs everything the test is about.
+    """
     environment = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
     environment.update(
         HOME=str(tmp_path / "home"),
@@ -48,8 +63,10 @@ def _run(
         )
     (tmp_path / "home").mkdir(exist_ok=True)
     (tmp_path / "config").mkdir(exist_ok=True)
+    script = tmp_path / "statement.py"
+    script.write_text(statement, encoding="utf-8")
     return subprocess.run(
-        [sys.executable, "-c", statement],
+        [sys.executable, str(script)],
         capture_output=True,
         text=True,
         env=environment,
@@ -58,10 +75,19 @@ def _run(
 
 
 def test_the_forced_default_encoding_is_ascii(tmp_path: Path) -> None:
-    """The premise of every test below, checked rather than assumed."""
+    """The premise of every test below, checked rather than assumed.
+
+    Asserted through the CODEC, not through the locale name: glibc answers
+    ``ANSI_X3.4-1968`` for the C locale and macOS answers ``US-ASCII``, and a
+    test that pins one spelling fails on the other for no reason that concerns
+    this file. ``codecs.lookup`` names both ``ascii``.
+    """
     result = _run(tmp_path, "import locale; print(locale.getencoding())")
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "US-ASCII", result.stdout
+    encoding = result.stdout.strip()
+    assert codecs.lookup(encoding).name == "ascii", encoding
+    with pytest.raises(UnicodeEncodeError):
+        VALUE_WITH_UNENCODABLE_CHARACTER.encode(encoding)
 
 
 def test_a_credential_outside_that_code_page_can_still_be_saved(tmp_path: Path) -> None:
