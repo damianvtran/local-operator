@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import inspect
 import logging
 import secrets
@@ -32,7 +33,16 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Iterable, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    TypeVar,
+    cast,
+)
 
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
@@ -338,14 +348,123 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
 _GATE_MARKER_CLAUSE = "; the band's ! will not follow this — /approvals re-reports the gate"
 
 
-class ServingSessionHandle(SessionHandle):
-    """SessionHandle over an in-process Session living on ``loop``.
+#: The decorated method's own type, returned unchanged. A decorator that instead
+#: declared ``Coroutine[Any, Any, _R]`` would widen every decorated method's
+#: signature: ``async def`` methods are ``CoroutineType``, which is a SUBCLASS of
+#: ``Coroutine``, so the override stops matching the ``SessionHandle`` protocol it
+#: implements (pyright: ``reportIncompatibleMethodOverride``) — the invariant is
+#: "this runs the same method somewhere else", so the type is the same type.
+_F = TypeVar("_F", bound=Callable[..., Coroutine[Any, Any, Any]])
 
-    The registrant drives handle methods on the OWNING loop here — the child
-    process runs the registrant's socket server as a task on its one asyncio
-    loop, so no cross-thread hop is needed and ``run_coroutine_threadsafe``
-    never appears. The registrant's ``start_in_process`` classmethod is the
-    entry point that wiring uses.
+
+def _on_session_loop(method: _F) -> _F:
+    """Run a handle method's WHOLE BODY on the loop that owns the session.
+
+    WHY A WRAPPER AND NOT A SYNCHRONOUS CALL. The failure this replaces was not a
+    slowdown, it was a turn run on the wrong thread. Measured on a naive
+    thread-hosted runtime (``probe_daemon_threaded.py``, before this seam): a
+    ``prompt`` reached the handle from the runtime's thread, created its
+    ``admitted`` future with ``self._loop.create_future()`` — the SESSION's loop
+    — and then scheduled the drain task with ``asyncio.ensure_future``, which
+    binds to the CALLER's. So the client got an asyncio cross-loop error while
+    the turn ran on ``lop-mobile-registrant``, and the session was left
+    un-disposable. Every ``self._loop``-bound object the body creates has to be
+    created where it belongs, and the only way to guarantee that for the whole
+    body — including the sync prefix before the first await — is to run the body
+    there.
+
+    WHAT IT GUARANTEES. Nothing of the body executes on the caller's thread: the
+    coroutine is handed to the owner loop with
+    ``asyncio.run_coroutine_threadsafe`` and awaited back through
+    ``asyncio.wrap_future``, never ``.result()``. The result is unchanged, and
+    every synchronous read the body makes — session state, the transcript, the
+    reservation map — is made where that state lives.
+
+    CALLING IT FROM THE SESSION'S LOOP IS A NO-OP, deliberately: a hop from the
+    loop you are hopping TO would be a round trip to the thread already
+    executing, which is the shape this class's original docstring was right
+    about for an in-process host. That also covers a nested call — a decorated
+    method calling another one — and every in-process runtime, so no caller has
+    to know which plane it is on.
+
+    WHAT IT DOES NOT DO. A caller that is cancelled while waiting leaves the
+    remote body running: ``run_coroutine_threadsafe``'s future cannot tear down a
+    coroutine already executing on another loop, and pretending otherwise for a
+    ``prompt`` would mean cancelling a turn the session has begun (the same
+    choice ``TuiSessionHandle`` makes through Textual's ``call_from_thread``).
+    And it hops only when there is a loop to hop to: a handle whose loop is gone
+    runs the body inline so that teardown paths (``dispose``) still work, and
+    ``_check_loop_thread`` refuses the mutating ones that would then be executed
+    off-loop rather than silently running them on the wrong thread.
+    """
+
+    @functools.wraps(method)
+    async def marshalled(self: "ServingSessionHandle", *args: Any, **kwargs: Any) -> Any:
+        # ``getattr``, not ``self._loop``: a reduced host may BORROW a bound
+        # method without the attribute (``test_serving_drain``'s ``DrainHost``
+        # takes ``begin_drain``/``begin_retire`` off the class to test the latch
+        # they write). A host with no loop has no other plane to hop to, so it
+        # runs inline — which is exactly the behaviour it had before the seam.
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed() or loop is asyncio.get_running_loop():
+            return await method(self, *args, **kwargs)
+        return await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(method(self, *args, **kwargs), loop)
+        )
+
+    return cast(_F, marshalled)
+
+
+class ServingSessionHandle(SessionHandle):
+    """SessionHandle over a Session that the process hosting ``loop`` owns.
+
+    THE SEAM LIVES IN :func:`_on_session_loop`, which decorates every mutating
+    method below, and the premise it repairs is worth keeping visible because it
+    is how this handle came to be the one implementation that did not marshal:
+    *"the child process runs the registrant's socket server as a task on its one
+    asyncio loop, so no cross-thread hop is needed and ``run_coroutine_threadsafe``
+    never appears."* That was true while ``daemon`` and ``exec`` served in
+    process.
+
+    It is not true now. ``process.amain`` and ``exec_control.start_exec_control``
+    both reach the runtime through ``RuntimeServer.start()``, which puts the
+    registrant on its OWN thread, so every handle call from the registrant crosses
+    threads. The contract this class now implements is the one the
+    ``SessionHandle`` protocol always stated — *"every method is awaited on the
+    RUNTIME'S loop … the implementor guarantees any hop the session needs"* — and
+    the invariant it holds, stated once so no method has to restate it:
+
+        No coroutine on the runtime's loop performs a synchronous cross-thread
+        wait, and no code on the session's loop is called from the runtime's
+        thread except through a hop whose result is awaited.
+
+    Which is enforced where:
+
+    * every ``async def`` that touches session state carries
+      ``@_on_session_loop``, so its WHOLE BODY runs on the session's loop and the
+      caller awaits the result — futures, tasks and the prompt queue included;
+    * the ``def``s that mutate or read session state cannot hop themselves (a
+      synchronous method has nowhere to await), so the REGISTRANT hops them
+      through ``server.RuntimeServer._handle_call_on_session_loop``: that is
+      ``subscribe``/``subscribe_events`` (boot registrations) and
+      ``is_pristine``/``may_refresh``/``begin_retire``/``request_stop``/
+      ``has_admitted_command``;
+    * ``reannounce_pending`` is the one named method that is deliberately NOT
+      hopped: one of its in-tree callers (the registrant's ``_drop_client``) is
+      synchronous and cannot await a hop, and it is a read-then-NOTIFY whose
+      notify path is the registrant's own thread-safe-by-design callback
+      surface — the same shape the TUI kind has always used, and the reason its
+      own docstring says the registrant calls it;
+    * plain reads of session state (``is_busy``, ``is_conversationally_active``,
+      ``subagent_counts``, ``session_projection_seed``) are read directly, which
+      is what the TUI handle documents as safe and what the heartbeat has always
+      done;
+    * ``_check_loop_thread`` is the enforcement on the other side of the seam:
+      it raises if a body reaches it from a thread that does not own the session,
+      which can now only mean the hop was impossible (no loop, or a closed one).
+
+    ``spawn_owned_session`` is the only constructor, and it binds ``loop`` to the
+    loop the session lives on.
     """
 
     #: The latch ``RuntimeServer._serve`` opens once this runtime's record is
@@ -1048,6 +1167,7 @@ class ServingSessionHandle(SessionHandle):
             except Exception:  # noqa: BLE001 — teardown must not fail on a deregistration
                 logger.debug("secret session deregistration failed", exc_info=True)
 
+    @_on_session_loop
     async def dispose(self) -> None:
         """Dispose the underlying session (release the claim, flush, abort).
 
@@ -1830,6 +1950,31 @@ class ServingSessionHandle(SessionHandle):
     # -- SessionHandle -----------------------------------------------------------
 
     @property
+    def session_loop(self) -> asyncio.AbstractEventLoop:
+        """The loop this handle's session lives on: what a registrant must hop to.
+
+        Published because the runtime cannot infer it. ``RuntimeServer`` hosts
+        itself on its own thread (``start()``), and the handle is constructed on
+        the SESSION's loop, so from the runtime's side "the session's loop" is
+        otherwise unknowable — and the ``SessionHandle`` protocol has always said
+        the implementor must make the hop possible rather than require the
+        registrant to guess.
+
+        Two callers, both in ``server.py`` and both registrations that MOVE
+        rather than merely hop: ``RuntimeServer._handle_call_on_session_loop``
+        (the two boot registrations in ``_serve`` plus the per-connection frontend
+        bind in ``_on_connection``) and the loop comparison in that helper, which
+        turns an in-process host into a no-op.
+
+        A handle that does NOT publish this keeps the behaviour it shipped with,
+        and that is load-bearing rather than lenient: the TUI handle owns its own
+        hopping (Textual's ``call_from_thread``, ``tui_handle.py``) and must not
+        be handed the runtime's ``run_coroutine_threadsafe`` instead. Its absence
+        is therefore the signal "this handle marshals for itself".
+        """
+        return self._loop
+
+    @property
     def session_projection_seed(self) -> SessionProjection:
         """The projection skeleton: identity fields the runtime folds onto.
 
@@ -1862,17 +2007,31 @@ class ServingSessionHandle(SessionHandle):
     # no message could be sent in any session. Round 1 QA (Q2) and UX (U1)
     # both found it independently against the real binary.
     #
-    # The delegation is DIRECT where the mobile bridge hops threads. That
-    # bridge adapts a session living on Textual's loop from a foreign thread,
-    # so it must marshal; this handle IS constructed on the runtime's own loop
-    # and owns its session outright (see ``spawn_owned_session``), so the hop
-    # would be a round trip to the thread already executing.
+    # The delegation is DIRECT where the mobile bridge hops threads. That bridge
+    # adapts a session living on Textual's loop from a foreign thread, so it must
+    # marshal; this handle was written against the opposite premise — *"this
+    # handle IS constructed on the runtime's own loop … so the hop would be a
+    # round trip to the thread already executing"* — which held only while
+    # ``daemon``/``exec`` served in process.
+    #
+    # IT NO LONGER HOLDS, and the premise stays visible because it is how this
+    # handle came to be the one implementation that does not marshal.
+    # ``RuntimeServer.start()`` puts the runtime on its own thread, so every
+    # method below is called ACROSS threads by the daemon and exec kinds, and
+    # every ``async def`` out of the reachable surface now carries
+    # ``@_on_session_loop`` — that decorator, and the six synchronous methods the
+    # registrant hops through ``server._handle_call_on_session_loop``, ARE the
+    # marshalling. The class docstring states the contract and which method is
+    # served by which mechanism; :meth:`_check_loop_thread` states what happens
+    # when a hop is impossible.
 
+    @_on_session_loop
     async def refresh_attention(self) -> dict[str, Any]:
         state = await self._session.refresh_attention()
         self._projection.attention = state
         return state
 
+    @_on_session_loop
     async def acknowledge_attention(self, token: str) -> dict[str, Any]:
         state = await self._session.acknowledge_attention(token)
         self._projection.attention = state
@@ -1883,6 +2042,7 @@ class ServingSessionHandle(SessionHandle):
         """Canonical state seed for full-TUI attach clients."""
         return self._session.frontend_state
 
+    @_on_session_loop
     async def subscribe_frontend(
         self, on_update: Callable[[Any], None], *, display_window: bool = False
     ) -> Any:
@@ -1895,9 +2055,11 @@ class ServingSessionHandle(SessionHandle):
         """
         return self._session.subscribe_frontend(on_update, display_window=display_window)
 
+    @_on_session_loop
     async def record_shell(self, command: str, result: Any) -> None:
         await self._session.record_shell(command, result)
 
+    @_on_session_loop
     async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
         return self._session.history_page(before, anchor)
 
@@ -1980,6 +2142,7 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         return unsubscribe
 
+    @_on_session_loop
     async def prompt(
         self,
         text: str,
@@ -2134,6 +2297,7 @@ class ServingSessionHandle(SessionHandle):
                 self._goal_loop.state = dict(store.state.loop)
         return self._goal_loop
 
+    @_on_session_loop
     async def run_headless_prompt(self, text: str) -> bool:
         """Submit through the owner queue so live viewers cannot race exec.
 
@@ -2158,6 +2322,7 @@ class ServingSessionHandle(SessionHandle):
         """Why the last admitted turn failed, or "" — see the drain's handler."""
         return self._last_prompt_failure
 
+    @_on_session_loop
     async def run_headless_loop(self, *, count: int | None, goal: str | None) -> bool:
         """Await the same owner-local driver used by /loop, not another runner."""
         driver = self._loop_driver()
@@ -2174,6 +2339,7 @@ class ServingSessionHandle(SessionHandle):
             raise asyncio.CancelledError
         return driver.state.get("status") in {"completed", "achieved"}
 
+    @_on_session_loop
     async def cancel_headless_loop(self) -> None:
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
@@ -2400,6 +2566,7 @@ class ServingSessionHandle(SessionHandle):
                 self._prompt_queue.popleft()
                 self._prompt_commands.pop(command.command_id, None)
 
+    @_on_session_loop
     async def steer(
         self,
         text: str,
@@ -2459,6 +2626,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return "steering queued"
 
+    @_on_session_loop
     async def receive_peer_message(
         self,
         text: str,
@@ -2496,6 +2664,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return detail
 
+    @_on_session_loop
     async def abort(self) -> str:
         """Stop this session's turn AND its children, and say what was stopped.
 
@@ -2712,6 +2881,7 @@ class ServingSessionHandle(SessionHandle):
             if getattr(job, "type", "") == "bash" and getattr(job, "status", "") == "running"
         )
 
+    @_on_session_loop
     async def cancel_gracefully(self, reason: str = "cancelled by supervisor") -> str:
         """Stop at the next post-tool boundary, leaving in-flight work intact.
 
@@ -2745,6 +2915,7 @@ class ServingSessionHandle(SessionHandle):
         request(reason)
         return "cancelling at the next tool boundary"
 
+    @_on_session_loop
     async def set_model(self, provider: str, model_id: str) -> str:
         """Switch the owner onto ``provider``/``model_id`` at the model's own level.
 
@@ -2754,6 +2925,7 @@ class ServingSessionHandle(SessionHandle):
         """
         return await self.set_model_effort(provider, model_id, None)
 
+    @_on_session_loop
     async def set_model_effort(self, provider: str, model_id: str, effort: str | None) -> str:
         """Switch the owner onto ``provider``/``model_id`` AT ``effort``.
 
@@ -2792,6 +2964,7 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         return f"model: {self._projection.model_label}"
 
+    @_on_session_loop
     async def set_effort(self, effort: str) -> str:
         self._check_loop_thread()
         spec = self._session.model
@@ -2808,6 +2981,7 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         return f"effort: {effort}"
 
+    @_on_session_loop
     async def slash(self, command: str, args: str) -> str:
         """Session-level slash commands — the ones with meaning off-terminal.
         TUI chrome (/help tables, /usage panels) is the phone UI's own job."""
@@ -2819,16 +2993,20 @@ class ServingSessionHandle(SessionHandle):
             return "compacting context"
         raise ValueError(f"/{command} is terminal-only here")
 
+    @_on_session_loop
     async def new_conversation(self) -> str:
         raise ValueError("start a new session from the session list")
 
+    @_on_session_loop
     async def resume_session(self, session_id: str) -> str:
         raise ValueError("pick the session from the session list instead")
 
+    @_on_session_loop
     async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
         await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
+    @_on_session_loop
     async def ask_answer(
         self, request_id: str, value: str, question_index: int | None = None
     ) -> str:
@@ -3552,6 +3730,7 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("could not resolve the gate's session name", exc_info=True)
             return ""
 
+    @_on_session_loop
     async def fork_snapshot(self, message: str) -> dict[str, Any]:
         """Snapshot THIS authenticated owner, never a client-supplied path/id."""
         busy = self.is_busy()
@@ -3560,6 +3739,7 @@ class ServingSessionHandle(SessionHandle):
         result["busy"] = busy
         return result
 
+    @_on_session_loop
     async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
         """Run an off-record provider request against this session.
 
@@ -3586,6 +3766,7 @@ class ServingSessionHandle(SessionHandle):
             )
         return await complete(messages)
 
+    @_on_session_loop
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
         """Fork a viewer's aside exchange into the durable conversation."""
         from local_operator.harness.types import Message
@@ -3595,6 +3776,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
 
+    @_on_session_loop
     async def recall_steer(self, command_id: str) -> str:
         """Recall one queued steer by the Message id its producer supplied.
 
@@ -3613,6 +3795,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return "steering recalled"
 
+    @_on_session_loop
     async def slash_images(
         self,
         command: str,
@@ -3635,6 +3818,7 @@ class ServingSessionHandle(SessionHandle):
         result = await self.run_slash_authoritative(command, args, images)
         return str(result.get("text") or f"ran /{command}")
 
+    @_on_session_loop
     async def credential_op(self, action: str, key: str, value: str) -> dict[str, Any]:
         """Run one ``/credential`` verb against the session's variable store.
 
@@ -3680,11 +3864,13 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the credential is already stored
             logger.warning("could not announce credential change", exc_info=True)
 
+    @_on_session_loop
     async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
         from local_operator.mcp.credentials import MCPCredentials, store_credentials
 
         return await store_credentials(self._session, MCPCredentials.model_validate(body))
 
+    @_on_session_loop
     async def variables_op(
         self, action: str, key: str = "", value: str = "", value_type: str = ""
     ) -> dict[str, Any]:
@@ -3741,6 +3927,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return stopped
 
+    @_on_session_loop
     async def run_slash_authoritative(
         self,
         command: str,
@@ -5308,6 +5495,7 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the refusal still stands
             logger.debug("could not record the compaction refusal", exc_info=True)
 
+    @_on_session_loop
     async def job_trajectory(self, job_id: str, offset: int, limit: int) -> dict[str, Any]:
         """One page of a child job's retained event window.
 
@@ -5391,6 +5579,7 @@ class ServingSessionHandle(SessionHandle):
             **details,
         }
 
+    @_on_session_loop
     async def refresh(self) -> None:
         self._refresh_state()
         self._refresh_todos()
@@ -5533,11 +5722,46 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("could not publish the subagent counts", exc_info=True)
 
     def _check_loop_thread(self) -> None:
-        """The registrant calls handle methods on its own loop; owned sessions
-        live on the daemon loop. The registrant hops via ``run_coroutine_threadsafe``
-        in the daemon's spawn path, so reaching here means we ARE on the right
-        loop — assert it in dev, and let the call proceed (asyncio detects real
-        cross-loop misuse loudly)."""
+        """Enforce that a body below this line is on the loop owning the session.
+
+        THIS IS NOW A REAL INVARIANT, and it was a lie for as long as
+        ``daemon``/``exec`` served in process: a docstring over an empty body
+        asserting a hop that did not exist (the only ``run_coroutine_threadsafe``
+        in ``server.py`` was ``close()``'s bounded join). An invariant that
+        nothing enforces is worse than an absent one — the caller reads the
+        claim, believes it, and the mistake ships as a wrong-thread TURN rather
+        than as an error.
+
+        Measured, which is why the enforcement matters (``probe_daemon_threaded.py``,
+        the naive thread-hosted runtime): a ``prompt`` reached here from the
+        runtime's thread and did two things at once — replied with an asyncio
+        cross-loop error (``prompt`` created its ``admitted`` future on the
+        session's loop and then ``asyncio.ensure_future``d the drain on the
+        CALLER's, so the turn ran on the wrong thread) AND mutated the session
+        anyway, leaving it un-disposable (the probe had to be killed at 150 s
+        with the session's loop parked in ``select()``).
+
+        WHO KEEPS IT TRUE: :func:`_on_session_loop`, which puts every public
+        async body on the session's loop before this line runs, and
+        ``RuntimeServer._handle_call_on_session_loop`` for the six synchronous
+        methods the registrant drives. So reaching here off-loop is now the
+        EXCEPTION rather than the rule, and it means exactly one thing: the hop
+        could not be made — no loop, or a loop already closed. That is not a
+        state to run a session-mutating op in, so it is refused.
+
+        A plain ``RuntimeError`` is the refusal, which is what the dispatcher's
+        existing error-frame path already renders for a handle refusal — no new
+        category, no ``error_code``, no wire change — and the sentence names the
+        SITUATION rather than the machinery, because a person reads it. Nothing
+        below this line runs.
+        """
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            return
+        raise RuntimeError("this session cannot accept that op right now")
 
     def _refresh_state(self) -> None:
         self._fold.set_state(
@@ -5776,7 +6000,7 @@ async def spawn_owned_session(
         # MCP WIRING RIDES THE RECORD, NOT THE BOOT PATH. Everything this
         # session does before ``RecordPublisher`` runs (``process.amain``:
         # spawn_owned_session -> _drain_inbox_into -> async_init ->
-        # start_in_process) is invisible to the viewer, which is sitting on
+        # ``RuntimeServer.start``) is invisible to the viewer, which is sitting on
         # the status band's `starting…` with nothing to bind to. Eager wiring
         # put MCP discovery, every configured server's connect and the 250 ms
         # startup gate — plus whatever a hanging or 401-answering server costs
