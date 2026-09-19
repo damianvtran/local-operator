@@ -11306,6 +11306,10 @@ async def _browser_upload(
     # which is also the fallback the extension uses for an empty error detail.
     readback_note = readback or "no detail"
     facts: list[dict[str, Any]] = []
+    # What a contract-violating host sent in place of a count, one entry per file,
+    # carried into the note AND the audit row below so the two cannot disagree
+    # (review round 3's MINOR-2 / QA's Q-1).
+    malformed_counts: list[str] = []
     for path in resolved:
         fact = files.stat_fact(files.safe_name(path.name), path)
         seen = by_path.get(str(path))
@@ -11317,7 +11321,9 @@ async def _browser_upload(
                 "the file input did not take the attach: nothing came back for "
                 f"{path}, and the file on disk is {fact['bytes']} bytes. Nothing was sent.",
             )
-        count = int(seen.get("bytes", -1))
+        # Never a bare `int()`: a count the host typed wrong must not raise out of
+        # the tool (review round 3's MINOR-2).
+        count, malformed = _host_byte_count(seen.get("bytes", -1))
         # Gated on the SENTINEL, never on the marker (review round 2, R6). The
         # marker is the host's word about its own read and means "I could not read
         # it back"; treating it as "do not check" let one field that the host
@@ -11342,6 +11348,18 @@ async def _browser_upload(
                     f"{count} bytes for {path}, and the file "
                     f"on disk is {fact['bytes']} bytes. Nothing was sent.",
                 )
+        elif malformed and not readback_reported:
+            # A count the host typed wrong, with nothing to explain it: refused
+            # with the value NAMED, because "no byte count" would be a lie about a
+            # field the host did send — and the sentence is what tells a reader
+            # which writer is broken.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: the host reported a malformed "
+                f"byte count ({malformed}) for {path}, and the file on disk is "
+                f"{fact['bytes']} bytes. Nothing was sent.",
+            )
         elif not readback_reported:
             # No count AND no marker: the host claims a read that reported nothing
             # it measured, and there is no unverified note to carry either, so the
@@ -11355,6 +11373,14 @@ async def _browser_upload(
                 f"count for {path}, and the file on disk is {fact['bytes']} bytes. "
                 "Nothing was sent.",
             )
+        elif malformed:
+            # A marker says the read failed, so the count is unusable either way —
+            # that is the unverified attach this branch already reports, NOT a
+            # refusal: the host listed the file as accepted, so "the file input did
+            # not take the attach" would be false over bytes that went, which is
+            # the double-send harm Q-1 exists to prevent (round 1). The bad value
+            # is recorded rather than swallowed.
+            malformed_counts.append(malformed)
         # A fact is VERIFIED only when the host's own read completed and agreed
         # with Python's stat: an unverified attach must be discriminable by a
         # consumer reading `details` and not only by one reading the prose
@@ -11373,10 +11399,15 @@ async def _browser_upload(
             verdict="allow",
             # Empty in the ordinary case; the unverified marker otherwise, so the
             # trail carries the same caveat the model was given.
-            reason=readback_note if readback_reported else "",
+            reason=_readback_reason(readback_note if readback_reported else "", malformed),
             sha256=str(fact["sha256"]),
         )
     accept = str(result.get("accept") or "")
+    # The same construction as each row above, so the note and the trail cannot
+    # drift apart (review round 2, N7's rule).
+    readback_reason = _readback_reason(
+        readback_note if readback_reported else "", ", ".join(malformed_counts)
+    )
     where = f" to {origin}" if origin else " to the page in this tab"
     lines = [f"attached {len(facts)} file(s){where}:"]
     lines.extend(
@@ -11387,15 +11418,58 @@ async def _browser_upload(
         # REPORTED, never obeyed: a site's `accept` filter protects nothing and
         # honouring it would let the page steer which local files we try.
         lines.append(f"the input declares accept='{accept}'; it was not applied to the attach")
-    if readback_reported:
+    if readback_reason:
         # Never silent: an unverified attach that reads like a confirmed one is
         # how a model ends up re-sending files that already left.
         lines.append(
-            f"note: the attach could not be read back ({readback_note}). The bytes above are "
+            f"note: the attach could not be read back ({readback_reason}). The bytes above are "
             "what is on disk and were handed to the page; whether the page kept or sent them "
             "is not something this call can confirm — check before re-sending."
         )
     return _text(tool_call_id, "browser", "\n".join(lines), details={"files": facts})
+
+
+def _host_byte_count(raw: Any) -> tuple[int, str]:
+    """The host's reported byte count, or the sentinel plus what was wrong with it.
+
+    `bytes` is a field the HOST chooses the type of, and this is the boundary
+    that must not take that on trust: `null`, `{}`, a non-numeric string or a
+    float-shaped one used to reach a bare `int()`, which raised straight out of
+    `_browser_upload` and surfaced as `Tool raised: ...` — an internal-error card
+    and a warning traceback where the design says the call is refused with a
+    sentence (review round 3's MINOR-2 / QA's Q-1).
+
+    Returns `(count, "")` for an integer count, and `(-1, label)` for everything
+    else — including a JSON float, which `int()` would silently TRUNCATE into a
+    count nobody sent. `-1` is the documented "unknown here" sentinel, so the
+    CALLER decides the shape: with a marker it is the unverified attach the
+    sentinel already means, and with no marker it is a refusal that names what the
+    host sent instead.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw, ""
+    if isinstance(raw, str) and raw.strip().lstrip("+-").isdigit():
+        return int(raw.strip()), ""
+    from local_operator import browser_files as files
+
+    # The offending value lands in the transcript and the audit row, so it goes
+    # through the same sanitiser as every other host-supplied string.
+    return -1, files.readback_label(repr(raw)) or "empty value"
+
+
+def _readback_reason(note: str, malformed: str) -> str:
+    """One string for the unverified note and the audit row: they cannot disagree.
+
+    `note` is the sanitised marker (empty when the host sent none) and `malformed`
+    is the count it sent instead of a number, if any — both are host-supplied, so
+    both are already sanitised by the time they arrive here. Round 2's N7 is the
+    rule: a reader of the trail and a reader of the transcript are looking at the
+    same fact, so they get the same sentence.
+    """
+    parts = [note] if note else []
+    if malformed:
+        parts.append(f"the host's byte count was malformed ({malformed})")
+    return "; ".join(parts)
 
 
 def _delete_outcome(removed: bool) -> tuple[str, str]:

@@ -132,8 +132,12 @@ the digest is always the harness's own. The comparison runs whenever the host
 REPORTED a byte count: a marker saying the read could not be taken makes only an
 *unreported* count unverifiable, and can never suppress the check of a count that
 came back. The marker is a string from outside, so it is sanitised (control and
-bidi characters out) and length-capped before it reaches the transcript or the
-audit row, and each fact carries a `verified` flag alongside it.
+bidi characters out) and length-capped, and a cap that had to cut it says so with
+an ellipsis rather than passing a fragment off as the whole value; each fact
+carries a `verified` flag alongside it. The byte count itself is never coerced
+blindly: a host that sends something that is not an integer count gets a refusal
+naming the value (or an unverified attach, when it also said its read failed)
+instead of an internal error.
 
 **Which host can do what, and why they differ.** `upload` is served by both
 non-cmux hosts: the extension attaches files with `DOM.setFileInputFiles` over the

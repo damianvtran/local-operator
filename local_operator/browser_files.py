@@ -623,13 +623,18 @@ _GENERIC_MIMES = frozenset(
 #: The declared type lands in model-facing text AND in an audit row, so it is
 #: capped like a name is; 80 bytes is far past any real `Content-Type`.
 MAX_MIME_BYTES = 80
-#: The host's read-back marker is a SENTENCE rather than a type — our own longest
-#: one is 93 bytes — so this ceiling sits deliberately above the 120-character cap
-#: the extension puts on the error text it embeds. A cap that clipped the honest
-#: marker would cost the diagnosis the marker exists to give; its job is to bound
-#: a hostile host, and the harness cannot assume which build is on the other end
-#: (review round 2, R7).
-MAX_READBACK_BYTES = 120
+#: The host's read-back marker is a composed SENTENCE rather than a type: the
+#: extension builds `"unavailable — the read-back failed (" + describeError(e) +
+#: ")"`, and `describeError` caps the ERROR TEXT at 120 *characters* — so an
+#: honest marker reaches ~158-159 bytes for an ASCII error, and more when the
+#: error text is multibyte (120 characters is not 120 bytes). This ceiling sits
+#: above that composed bound with headroom, and :func:`readback_label` marks any
+#: clip visibly, because no fixed ceiling can bound an honest marker whose message
+#: is multibyte (review round 3's MINOR-1 / QA's Q-2).
+MAX_READBACK_BYTES = 200
+#: Appended when a host-supplied diagnostic had to be clipped, so a truncated
+#: value is never read as the whole one (review round 3's Q-2).
+CLIP_MARK = "\u2026"
 
 
 def redact_name(name: str) -> str:
@@ -673,17 +678,34 @@ def declared_mime_label(raw: str) -> str:
     return _truncate_bytes(label, MAX_MIME_BYTES)
 
 
+def _clip_text(text: str, limit: int) -> str:
+    """``text`` cut to at most ``limit`` UTF-8 bytes, keeping its HEAD, marked.
+
+    Deliberately not :func:`_truncate_bytes`: that one preserves a filename's
+    EXTENSION, which a diagnostic sentence does not have — run over a marker it
+    keeps a fragment of the tail and drops the middle, so
+    `... failed (timeout waiting for promise.js)` would come back as
+    `... promise.js`. A sentence loses its tail instead, on a character boundary
+    (never mid-codepoint), and says it was cut.
+    """
+    if len(text.encode("utf-8")) <= limit:
+        return text
+    room = max(limit - len(CLIP_MARK.encode("utf-8")), 0)
+    return text.encode("utf-8")[:room].decode("utf-8", "ignore") + CLIP_MARK
+
+
 def readback_label(raw: str) -> str:
     """The host's read-back marker, sanitised and capped, or "" when absent.
 
     The same discipline as :func:`declared_mime_label`, for the same reason: it
     is a string from outside that is interpolated into the model-facing note and
     into the audit row's `reason`, and it is the one field of the upload result a
-    HOST chooses the length and content of. The extension caps its own marker,
-    but the harness is the boundary that must not take that on trust (review
-    round 2, R7).
+    HOST chooses the length and content of. The extension caps the error TEXT it
+    embeds, not the marker it composes around it, so the harness is the boundary
+    that must not take either on trust (review round 2, R7) — and a clip is shown
+    rather than silent (review round 3's MINOR-1 / QA's Q-2).
     """
-    return _truncate_bytes(_outside_text(raw), MAX_READBACK_BYTES)
+    return _clip_text(_outside_text(raw), MAX_READBACK_BYTES)
 
 
 # ---------------------------------------------------------------------------

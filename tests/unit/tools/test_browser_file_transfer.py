@@ -1031,6 +1031,119 @@ def test_a_marker_that_sanitises_away_still_marks_the_attach_unverified(
     assert str(rows[0]["reason"]) == "no detail"
 
 
+@pytest.mark.parametrize(
+    "count",
+    [None, "abc", {}, "12.5", 12.5],
+    ids=["null", "non-numeric-string", "dict", "float-shaped-string", "json-float"],
+)
+@pytest.mark.parametrize("marker", [False, True], ids=["no-marker", "marker"])
+def test_a_malformed_host_byte_count_never_raises_out_of_the_tool(
+    tmp_path: Path, count: Any, marker: bool
+) -> None:
+    """Q-1: a count the host typed wrong is a typed answer, not an exception.
+
+    `bytes` is a field the host chooses the type of, and `int()` on it raised
+    straight out of `_browser_upload`, so the loop's generic handler turned a
+    policy answer into `Tool raised: ...` plus a warning traceback. The shapes are
+    driven through the REAL flow, in both marker shapes: with no marker the call
+    is REFUSED naming what the host sent, and with a marker it stays the
+    unverified attach it already was — a refusal there would say "the file input
+    did not take the attach" over bytes the host reported setting, which is the
+    double-send harm round 1's Q-1 exists to prevent.
+    """
+    deck = _uploadable(tmp_path)
+    result = _flow(
+        "upload",
+        FakeHost(
+            methods=("upload",),
+            result={
+                "inputs": ["#f"],
+                "accepted": [{"name": "deck.pptx", "path": str(deck.resolve()), "bytes": count}],
+                "refused": [],
+                "accept": "",
+                "readback": "unavailable — the read-back was lost" if marker else "",
+            },
+        ),
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(deck)]),
+        context=_ctx(),
+    )
+    if not marker:
+        assert result.is_error, result.text
+        assert "malformed byte count" in result.text
+        assert repr(count) in result.text
+        assert not (result.details or {}).get("files")
+        return
+    assert not result.is_error, result.text
+    assert "malformed" in result.text
+    facts = (result.details or {}).get("files") or []
+    assert facts and facts[0]["verified"] is False
+    rows = [
+        json.loads(line)
+        for line in (bf.downloads_root() / bf.AUDIT_FILENAME).read_text().splitlines()
+    ]
+    assert "malformed" in str(rows[0]["reason"])
+
+
+def test_the_honest_composed_marker_survives_intact(tmp_path: Path) -> None:
+    """Q-2: the marker the extension really composes is not clipped.
+
+    `upload.ts` builds `"unavailable — the read-back failed (" + describeError(e) +
+    ")"`, and `describeError` caps the ERROR TEXT at 120 characters — so the
+    composed marker is ~159 bytes, above round 2's 120-byte ceiling, which dropped
+    the closing paren and the tail of the diagnostic on exactly the branch that
+    carries it. Measured here through the real flow, on the composed shape.
+    """
+    deck = _uploadable(tmp_path)
+    marker = "unavailable — the read-back failed (" + "net::ERR_ABORTED " + "d" * 100 + ")"
+    assert len(marker.encode("utf-8")) > 120
+    assert len(marker.encode("utf-8")) <= bf.MAX_READBACK_BYTES
+    result = _flow(
+        "upload",
+        FakeHost(
+            methods=("upload",),
+            result={
+                "inputs": ["#f"],
+                "accepted": [{"name": "deck.pptx", "path": str(deck.resolve()), "bytes": -1}],
+                "refused": [],
+                "accept": "",
+                "readback": marker,
+            },
+        ),
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(deck)]),
+        context=_ctx(),
+    )
+    assert not result.is_error, result.text
+    assert f"could not be read back ({marker})" in result.text
+    rows = [
+        json.loads(line)
+        for line in (bf.downloads_root() / bf.AUDIT_FILENAME).read_text().splitlines()
+    ]
+    assert rows[0]["reason"] == marker
+
+
+def test_a_clipped_marker_says_that_it_was_clipped() -> None:
+    """Q-2: the ceiling still bounds a hostile host, and a cut is visible.
+
+    No fixed ceiling can bound an honest marker whose error text is multibyte
+    (the extension caps 120 CHARACTERS), so what must hold is that a clipped value
+    never reads as the whole one: the tail goes, the head stays, and an ellipsis
+    says so — where `_truncate_bytes` would have kept a fragment of the tail.
+    """
+    label = bf.readback_label("unavailable — the read-back failed (" + "e" * 500 + ")")
+    assert label.endswith(bf.CLIP_MARK)
+    assert len(label.encode("utf-8")) <= bf.MAX_READBACK_BYTES
+    assert "e" * 500 not in label
+    # Under the ceiling nothing is added, and an absent marker stays absent.
+    assert bf.readback_label("unavailable — the read-back was lost") == (
+        "unavailable — the read-back was lost"
+    )
+    assert bf.readback_label("") == ""
+
+
 def test_an_ordinary_attach_is_marked_verified_in_details(tmp_path: Path) -> None:
     """N6: the structured result distinguishes a verified attach from an unverified one."""
     deck = _uploadable(tmp_path)
