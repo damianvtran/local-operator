@@ -1,6 +1,6 @@
 # A Console tab inside `local-operator-ui`, driven by lop agents
 
-Status: **proposal (architect), revision 1** — the design authority for the
+Status: **proposal (architect), revision 3** — the design authority for the
 implementation that follows. Scope: two repos — `local-operator-ui` (the pty
 host, the terminal of record, the pane, the theme, the notification) and
 `local-operator` (the `console` tool, its prompt guidance, its docs and its
@@ -16,31 +16,40 @@ carried forward:
 
 | repo | ref | notes |
 |---|---|---|
-| `local-operator` | `a8fe0c1d66896ff4843092a708adef9464eafed2` (`origin/main`, the merge of PR #1326) | read in the worktree `~/local-operator-worktrees/console-tab-design`, branch `design/console-tab` |
-| `local-operator-ui` | `db615bd46d55f9375911d2359af5b4feff27a1cd` (`origin/main`) | read through `git show origin/main:<path>` from `~/local-operator-ui`, which is checked out on `chore/release-0.25.11` at `0f76af9e1` and is **1,355 commits behind** `origin/main` (656 files differ) |
+| `local-operator` | `e65548e994f2b573b94def0987bb927108ef7627` (`origin/main`) | read with `git -C ~/local-operator show <ref>:<path>`; the root checkout's *working tree* is the divergent thing below and is never the source of a number in this document |
+| `local-operator-ui` | `db615bd46d55f9375911d2359af5b4feff27a1cd` (`origin/main`) | read with `git show <ref>:<path>` from `~/local-operator-ui`, which is checked out on `chore/release-0.25.11` at `0f76af9e1` and is **1,355 commits behind** `origin/main` (656 files differ) |
+
+**Refs move, and this derivation has a date.** Both SHAs above are `origin/main`
+as fetched on **2026-09-19**, which is when every `file:line` in this revision
+was re-derived; the numbers below are true at *those* commits and are not meant
+to survive the branches moving. The `local-operator` ref moved during review:
+revision 1 cited `a8fe0c1d66896ff4843092a708adef9464eafed2` (the merge of PR
+#1326), which is no longer `origin/main`, so a number that was right in revision
+1 can be wrong here and vice versa. A reader re-checking this document later
+must fetch `origin/main` and re-derive — the rule is to read the ref, never to
+trust the number.
 
 **Both checkouts on this machine are behind `origin/main`, and no implementation
 branch may be cut from either.** Measured at the time of writing:
-`~/local-operator`'s working tree is HEAD `0e287be0` with **295 staged changes**
-that are not on `origin/main` (`a8fe0c1d`), including deleted modules; and
+`~/local-operator`'s working tree is HEAD `0e287be0`, **295 changes** away from
+`origin/main` by `git status --porcelain | wc -l` (including deleted modules —
+`local_operator/classification/`, `local_operator/agent_shell.py`); and
 `~/local-operator-ui` sits on a *release branch*, 1,355 commits behind its
 `origin/main`. Every PR in §17.1 must branch from `origin/main` in a fresh
-worktree — the same rule `AGENTS.md:482-520` states, and the reason this
+worktree — the same rule `AGENTS.md:593-682` states, and the reason this
 document's citations are all resolved at a ref rather than from the disk.
 
 **The recon line numbers in the design brief are stale, and not by a little.**
-The brief cites `builtin.py:10775` for `build_browser_tool`; at `lop@a8fe0c1d`
-it is `local_operator/tools/builtin.py:12716`. It cites `protocol.py:342/354`
+The brief cites `builtin.py:10775` for `build_browser_tool`; at `lop@e65548e9`
+it is `local_operator/tools/builtin.py:12780`. It cites `protocol.py:342/354`
 for the `Request`/`Response` envelopes; at that ref they are `:422`/`:434`. The
-brief's numbers match neither `origin/main` nor the UI repo's HEAD: they match
-the *working tree* of `~/local-operator`, which is a divergent checkout (HEAD
-`0e287be0`, **273 staged changes**, including deleted modules —
-`local_operator/classification/`, `local_operator/agent_shell.py`). Every
-citation in this document was therefore re-derived at the refs above, and §2
-says where each one moved. This is the same failure the browser design
-authority records about its own revision 1 (`docs/design/ui-browser-tab.md:21-26`),
-and the same one `AGENTS.md` names ("Read the committed ref, not the working
-tree", `AGENTS.md:482-520`).
+brief's numbers match neither ref: they match the *working tree* of
+`~/local-operator`, the divergent checkout above. Every citation in this
+document was therefore re-derived at the refs above, and §2 says where each one
+moved. This is the same failure the browser design authority records about its
+own revision 1 (`docs/design/ui-browser-tab.md:21-26`), and the same one
+`AGENTS.md` names ("Read the committed ref, not the working tree",
+`AGENTS.md:593-682`).
 
 ### 0.2 Honesty conventions (copied from the browser authority, and load-bearing)
 
@@ -79,7 +88,7 @@ satisfied and what it produces.
 | **R12** | Theme aware to the selected UI theme (all twelve palettes; roles only, never hex) | **§9** | `shared/themes/terminal-theme.ts`, the contrast block, the honest gap |
 | **R13** | The terminal keeps running while the tab is closed — surfaces inside the session workspace; cmux as the inspiration | **§6.4**, §8.3 | the surface=pane separation, the no-resize-on-attach rule |
 | **R14** | Blip on the console icon; a native clickable notification that opens the session with the surface focused; e2e exemptions | **§12** | the completion ladder, the click payload, the exemption path |
-| **R15** | Implement end to end, then release once validated in a thorough QA matrix | **§18**, §19 | merge order, the matrix, the release note |
+| **R15** | Implement end to end, then release once validated in a thorough QA matrix | **§18**, §19 | merge order, the matrix (§19.5), the probe list (§19.1) |
 | **R16** | The tool appears in traces as `console` with a console icon; usable only when the UI is available | **§14.2-14.4** | the createIf gate, the label, the TUI glyph, the UI icon |
 | **R17** | Self-describing methods: screenshot, read stdout/stderr, send input, send keys | **§10.2** | the method vocabulary, with the key set named |
 | **R18** | If a user says they ran something in the console, the agent can read that surface; the surface must be distinguishable as the Local Operator console | **§6.5**, §13.4 | provenance (`owner`, `origin`), the `con:` handle prefix, the visible marker |
@@ -96,12 +105,22 @@ spike has since run on this machine (macOS 26.6.2 / Darwin 25.6.0, arm64, Electr
 moved; every other decision, section and citation stands unless the table says
 otherwise.**
 
+**Revision 3 — this commit — re-derived every `file:line` at the refs now named
+in §0.1 and answers the agent-review round 1. No decision moved.** Revision 2's
+table below stands as written; what changed is the ref basis (the
+`local-operator` ref moved, so every number whose file drifted moved with it),
+the review's one-paragraph and one-line corrections (§10.6 gains
+`console_capture_full`; §19.1's lead sentence now matches its own MEASURED rows;
+§6.1 fixes the user-initiated create path and its `reveal` default; §10.4 states
+it per actor; §12.3 and §11.4 define `exit_epoch` and qualify what the
+secure-input span drops), and the dangling cross-references.
+
 | area | revision 1 | revision 2 |
 |---|---|---|
 | D1 emulator | xterm.js, ghostty assessed from licences and packaging | **unchanged decision, now evidence-backed** — and the ghostty path is recorded as *measured-viable*, with its sha256, its minisign verification and a named switch trigger (§5.5) |
 | the capture path | `capturePage()` offscreen; no renderer chosen | **the capture view pins the DOM renderer**, `canvas.toDataURL()` is forbidden on the WebGL canvas, and every capture asserts a non-blank frame and retries once (§13.2) — three measured traps |
 | the pty | N-API prebuilds "expected" to work | **measured**: the same `pty.node` loads under ABI 147 and 149, with spawn/echo/24-bit round-trip/resize/exit verified (§5.3) |
-| packaging | `asarUnpack` "sufficient" | **two measured traps**: the shipped `spawn-helper` is mode 0644 and nothing chmods it, and a packed asar fails to spawn until the prebuilds are actually unpacked (§5.3, §18.1) |
+| packaging | `asarUnpack` "sufficient" | **two measured traps**: the shipped `spawn-helper` is mode 0644 and nothing chmods it, and a packed asar fails to spawn until the prebuilds are actually unpacked (§5.3, §18 risk 1) |
 | fonts (R5) | the app bundles a Nerd-patched face, so glyphs are available | **the pane is fine; the machine is not** — no Nerd Font is installed here at all, the app ships the face with **no font licence notice**, and the box-drawing join was measured as broken at that size (§6.6) |
 | probes | P1-P12, all unrun | **P1 and the capture half of P4 are measured**; P3 stays open; two new probes (P13 packaging, P14 VT conformance against ghostty's own VT) (§19.1) |
 
@@ -222,22 +241,22 @@ Read at the refs of §0.1:
   skips unknown names rather than crashing session startup (`:117-118`), and
   injects the `i` intent property at one choke point (`:121-128`) because the
   tool array rides in the prompt cache prefix.
-- `local_operator/tools/builtin.py:12716 build_browser_tool` returns `None`
+- `local_operator/tools/builtin.py:12780 build_browser_tool` returns `None`
   unless a browsable host is reachable — one line, three probes:
   `if not (cmux_browser_available() or bridge_browser_advertisable() or ui_browser_advertisable()): return None`
-  (`builtin.py:12758`), with the comment at `:12755-12758` naming the rule this
+  (`builtin.py:12822`), with the comment at `:12819-12822` naming the rule this
   document must not break: "Three checks on ONE `createIf` entry, rather than a
   second gating convention beside it".
-- The returned `AgentTool` (`builtin.py:12761-12815`) sets `approval_tier="write"`
+- The returned `AgentTool` (`builtin.py:12825-12879`) sets `approval_tier="write"`
   with a **per-call** `call_approval_tier` that escalates `upload` to `exec`
-  (`:12809-12811`), `concurrency="shared"`, `interruptible=False`, and a
+  (`:12873-12875`), `concurrency="shared"`, `interruptible=False`, and a
   `description` whose first sentence says what the surface *is* — measured: a
   session that needed before/after screenshots wrote a playwright script and
   spent 23 s on `playwright install chromium` while the tool sat in its inventory
   unused, and then, told outright to use the cmux browser, still shelled the CLI
-  through `bash` (`:12729-12738`).
+  through `bash` (`:12793-12802`).
 - **The description is now deliberately SHORT, and that is a binding constraint
-  on §14.3.** The `Footprint:` comment at `:12766-12773` says the per-action
+  on §14.3.** The `Footprint:` comment at `:12830-12837` says the per-action
   detail "lives in `guide://browser` … and in the parameter descriptions, and this
   string carries only what a model needs to CHOOSE the tool and call it
   correctly. The context-budget guard measures the whole surface and it is why
@@ -245,15 +264,15 @@ Read at the refs of §0.1:
   first drafted" — the guard being `scripts/bench_context_budget.py`, which CI
   runs for the `context-budget` scope (`scripts/ci_scope.py:178-182`).
 - **The approval tier is not the protection, and the code says so.** At
-  `:12800-12808`: "today the gate is ONE callback for both tiers and
+  `:12864-12872`: "today the gate is ONE callback for both tiers and
   `tool_approval_mode: auto` / `--yolo` installs no gate at all, so the tier
   records intent and future-proofs a tier-sensitive host — it is NOT the
   protection." §14.6 is written against that fact rather than the convenient one.
-- `local_operator/harness/types.py:1223 AgentTool` carries `name` (`:1239`),
-  `approval_tier` (`:1243`), `concurrency` (`:1244`) and `resource_keys`
-  (`:1247-1249`), `interruptible` (`:1250`), **`hidden`** (`:1251`), `execute`
-  (`:1252`), `describe_approval` (`:1253`) and the per-call `call_approval_tier`
-  hook (`:1258-1260`).
+- `local_operator/harness/types.py:1242 AgentTool` carries `name` (`:1258`),
+  `approval_tier` (`:1262`), `concurrency` (`:1263`) and `resource_keys`
+  (`:1266-1268`), `interruptible` (`:1269`), **`hidden`** (`:1270`), `execute`
+  (`:1271`), `describe_approval` (`:1272`) and the per-call `call_approval_tier`
+  hook (`:1277-1279`).
 - `hidden` means "not listed in the prompt inventory", not "not callable":
   `local_operator/prompts_api.py:365` renders `- {name}` only for
   `not tool.hidden`, and the one shipped user of it is the structured-reply
@@ -268,13 +287,13 @@ Read at the refs of §0.1:
   (`pid`, `port`, `session_key: str = Field(min_length=32)`, `proto`, `host`,
   `app_version`, `profile_dir`, `tabs`, `agent_tabs`), extending the bridge's
   `HeartbeatState` for `heartbeat_at`/`started_at`.
-- `:81-83 state_path` is "Pure path arithmetic: creates NOTHING"; `:86-94 publish`
-  is the test-side writer; `:97-99 read` uses the UI host's own model "so no
+- `:87-89 state_path` is "Pure path arithmetic: creates NOTHING"; `:92-95 publish`
+  is the test-side writer; `:103-105 read` uses the UI host's own model "so no
   field is dropped". The module deliberately has **no** `run_dir`/`remove`
-  wrappers (`:102-106`).
+  wrappers (`:108-112`).
 - `:120-136 liveness` → `ABSENT` (no file, or dead pid) / `FRESH` (heartbeat
   inside `HEARTBEAT_TIMEOUT_S`) / `STALE`; `:145-146 available` is FRESH only;
-  `:150-158 advertisable` is FRESH-or-STALE, because "advertising only promises
+  `:150-157 advertisable` is FRESH-or-STALE, because "advertising only promises
   the agent can ASK". The heartbeat constants are shared with the bridge
   (`:37-41`) rather than re-declared.
 - `local_operator/ui_browser/backend.py:34 UiHostClient` is
@@ -306,7 +325,7 @@ Read at the refs of §0.1:
 - `local_operator/browser_bridge/backend.py:718 HostClient` — "one host's
   authenticated loopback leg, over that host's discovery file… A subclass rather
   than a parameter so the extension's call sites keep their `BridgeClient()`
-  spelling" (`:737-746`); `:679 client_timeout` sizes the HTTP budget as
+  spelling" (`:727-730`); `:679 client_timeout` sizes the HTTP budget as
   `base + ORIGIN_PROMPT_WINDOW_S + margin` so a human-prompted wait inside the
   host never reads as "unreachable" (`:531-553` at the older ref, same text);
   `:829 BridgeClient`.
@@ -321,35 +340,35 @@ Read at the refs of §0.1:
 
 - `src/main/browser/rpc.ts:29-46` states the four rules that make the endpoint
   safe, and they are enforced, not documented: bind `127.0.0.1` only
-  (`:70 LOOPBACK_HOST`), require `X-Bridge-Key` on **every** request with a
+  (`:68 LOOPBACK_HOST`), require `X-Bridge-Key` on **every** request with a
   constant-time compare (`:58 KEY_HEADER`, `keysMatch` from `state-file.ts`),
   send **no CORS headers** (the app renderer runs `webSecurity: true`, so a
   page inside the app cannot reach the port), and expose no CDP. `:50 RPC_PATH`,
-  `:51 HEALTH_PATH`, `:64 MAX_BODY_BYTES = 1 << 20`.
+  `:53 HEALTH_PATH`, `:62 MAX_BODY_BYTES = 1 << 20`.
 - `src/main/browser/state-file.ts:31 RUN_DIRNAME`, `:32 STATE_FILENAME`,
-  `:38-39 STATE_DIR_MODE 0o700 / STATE_FILE_MODE 0o600`, `:43-44` heartbeat
-  15 s / timeout 45 s mirroring the Python side, `:47-59` the record shape.
+  `:36-37 STATE_DIR_MODE 0o700 / STATE_FILE_MODE 0o600`, `:42-43` heartbeat
+  15 s / timeout 45 s mirroring the Python side, `:48-60` the record shape.
   "`session_key` in a readable file IS the authorization — anything able to read
   it already owns the agent's browser" (`:24-27`).
 - `src/main/browser/protocol.ts:53-78 METHODS` is a **closed** list and `:81
   isMethod` refuses anything else; `COMMAND_TIMEOUTS_S` mirrors
   `protocol.py`'s numbers "because inventing a second constant beside the one
-  the Python side already publishes is how the two drift" (`:80-86`).
+  the Python side already publishes is how the two drift" (`:90-93`).
 - `src/main/browser/host.ts:383` the dispatch switch; `:369` at the older ref,
   same shape.
 - `src/main/browser/ipc.ts` — the per-feature renderer namespace, with its three
   rules (`:20-35`): every handler authorizes the sender; **this namespace is NOT
   routed through `desktop-request`** because "that vocabulary maps to backend
   HTTP paths"; and the renderer never receives a surface nonce. The channel
-  list is one exported literal, "so a test can enumerate them" (`:57-75`).
+  list is one exported literal, "so a test can enumerate them" (`:56-78`).
 - `src/main/browser/registry.ts` — the tab registry. `:116 MAX_AGENT_TABS = 8`;
   **`:120-125 BACKGROUND_VIEWPORT` (1280x720) with the rationale that matters
   most to this document**: "Background rendering must not depend on a foreground
   route's measurement. The fleet cap and bounded viewport bound raster memory
-  without activating views." `:527 setContentRect`, `:514-529 applyLayout`
+  without activating views." `:527 setContentRect`, `:546-557 applyLayout`
   (a non-active or invisible view takes `BACKGROUND_VIEWPORT` and
-  `setVisible(false)`), `:507-540 forget`/`destroy`.
-- `src/main/browser/index.ts:182 startBrowserHost`; `:164-167 browserHostEnabled`
+  `setVisible(false)`), `:609 forget`/`:664 destroy`.
+- `src/main/browser/index.ts:182 startBrowserHost`; `:175-180 browserHostEnabled`
   reading `LOCAL_OPERATOR_UI_BROWSER_HOST` — on by default, "because the state
   file is how a session DISCOVERS the host", and present so an isolated run "can
   assert 'no host, no state file'". A hidden `WebContentsView` is also already
@@ -391,11 +410,11 @@ already absorbed a third.
   they are mutually exclusive in the STORE rather than here: each setter clears
   the other two", with a measured note about the 12px the badge earns and the
   `gap-3`/`gap-2` switch that pays for it (`:303-338`, the switch at `:335`), and a focus-return effect
-  when the pane closes (`browserPaneWasOpen`, `:200-208`).
+  when the pane closes (`browserPaneWasOpen`, `:199-207`).
 - `src/renderer/src/features/browser/components/browser-pane.tsx` is the pane
   component to copy: `:86` the FC, `:117` `data-tour-tag="browser-pane"`, a
   **40px `bg-sunken` header** matching the slot's other two panes
-  (`canvas/index.tsx:502`, `run-details/run-panel.tsx:583-587`), `bg-surface`
+  (`canvas/index.tsx:542`, `run-details/run-panel.tsx:688-695`), `bg-surface`
   as the pane ground "so the three occupants of this slot read as one slot with
   three modes", a close button, and a `*.stories.tsx` beside it with the
   store-driven open state.
@@ -410,15 +429,15 @@ already absorbed a third.
 ### 2.6 Three renderer↔main transports, and why a pty needs a fourth noun
 
 - `desktop-request`: a zod discriminated union of ops mapped to backend HTTP
-  paths (`src/shared/desktop-contract.ts:290` the union, `:1542 desktopEndpoint`),
-  bounded at `MAX_DESKTOP_REQUEST_BYTES` (`:1182`) and documented as
+  paths (`src/shared/desktop-contract.ts:678` the union, `:2617 desktopEndpoint`),
+  bounded at `MAX_DESKTOP_REQUEST_BYTES` (`:2173`) and documented as
   "value-sized" — it is a request/response channel to the *backend*, not a
   stream, and the browser's namespace exists precisely because it is not.
-- The session event stream: `src/main/desktop-ipc.ts:266` subscribe /
-  `:293` unsubscribe, relayed to the owned window only, with the renderer never
-  seeing the bearer; `src/preload/index.ts:114-162` is the renderer half
-  (`desktop-stream-event`, and `desktop-open-conversation` with its explicit
-  `null` handling for a digest banner).
+- The session event stream: `src/main/desktop-ipc.ts:297` subscribe /
+  `:321` unsubscribe, relayed to the owned window only, with the renderer never
+  seeing the bearer; `src/preload/index.ts:108-124` is the renderer half of
+  `desktop-open-conversation` (its explicit `null` handling for a digest banner)
+  and `:163-182` of `desktop-stream-event`.
 - The per-feature namespace: `src/main/browser/ipc.ts` (§2.4).
 - **A pty is a high-rate byte stream with a request/response control plane on
   top**, which is none of the three: `desktop-request` is the wrong size class
@@ -436,8 +455,8 @@ already absorbed a third.
   OTF. Only the two weights the app actually asks for are declared"), with
   `font-display: swap` and a recorded incident about what a blocking font did to
   the composer's session strip.
-- `src/renderer/src/styles/index.css:114` — `--font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;`
-  with the comment above it (`:100-110`) explaining why the stack is bundled
+- `src/renderer/src/styles/index.css:130` — `--font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;`
+  with the comment above it (`:117-121`) explaining why the stack is bundled
   rather than named ("CSP is `font-src 'self' data:`, so a remote face cannot
   load — naming one is not a graceful degradation, it is a silent
   substitution").
@@ -464,10 +483,10 @@ already absorbed a third.
 - The backend-composed contract is `docs/DESKTOP_API.md`'s notification frame:
   emitted iff a newly published unseen `completions` row is observed, live-only
   and never replayed, one banner per `completion_token` claimed through
-  `POST .../{id}/notified`, and the eligibility ladder (`:1229-1265`) whose rung
+  `POST .../{id}/notified`, and the eligibility ladder (`:1314-1342`) whose rung
   1 is "a surface is WATCHING the session — the predicate is the VISIBILITY
   one… NEVER `notification_surfaces()`".
-- The click ladder is Python-side and desktop-first (`docs/DESKTOP_API.md:1259-1318`,
+- The click ladder is Python-side and desktop-first (`docs/DESKTOP_API.md:1344-1403`,
   `lop resume-click`), which is why R14's click can ride an existing path rather
   than a new one.
 - **The e2e kill switch exists and is already wired:** `LOCAL_OPERATOR_NO_NOTIFICATIONS`
@@ -478,23 +497,23 @@ already absorbed a third.
   (`local_operator/tui/notify.py:115 _ENV_DISABLE`, `:404`). `pnpm test:desktop`
   injects it through `scripts/run-desktop-tests.mjs`. §12.4 reuses it rather
   than inventing a second switch.
-- **`headless` suppresses native banners entirely** (`AGENTS.md:710-713`: "the
+- **`headless` suppresses native banners entirely** (`AGENTS.md:758-762`: "the
   notifier's delivery gate… a banner's own click handler is a path that raises a
   window"), and `headless` is the wrong mode for anything about read receipts or
-  the notifier's focus gate (`AGENTS.md:701-705`). §19.2 turns that into a cell.
+  the notifier's focus gate (`AGENTS.md:749-754`). §19.2 turns that into a cell.
 
 ### 2.9 Themes: twelve palettes, roles with floors, and a scope claim to respect
 
 - Twelve themes from eleven palette files plus the two brand entries
-  (`src/renderer/src/shared/themes/index.ts:4-17`, `themes` at `:52`,
-  `DEFAULT_THEME` at `:67`).
+  (`src/renderer/src/shared/themes/index.ts:4-17`, `themes` at `:202`,
+  `DEFAULT_THEME` at `:217`).
 - `palette-contract.ts` owns the role set and the reason roles exist ("a palette
   that omits one no longer compiles"): grounds `canvas`/`surface`/`elevated`/`sunken`
-  (`:61-67`), ink `ink`/`inkMuted`/`inkDim`/`inkDisabled` (`:72-85`, with
+  (`:186-211`), ink `ink`/`inkMuted`/`inkDim`/`inkDisabled` (`:429-453`, with
   `inkDisabled` the single exemption from the floors), lines `hairline`/`borderControl`
-  (`:93`, `:104`), the accent ramp (`:109-115`), `chartBarHover` (`:138`), and
+  (`:477`, `:494`), the accent ramp (`:520-522`), `chartBarHover` (`:719`), and
   the semantic triples `success`/`warning`/`danger`/`info` each with a `Wash` and
-  a `Border` (`:147-158`), `overlayShadow`/`scrim` (`:167-169`).
+  a `Border` (`:776-787`), `overlayShadow`/`scrim` (`:796-798`).
 - `scripts/contrast-contract.mjs`: `FLOOR = { strongText: 7.0, text: 4.5, nonText: 3.0 }`
   (`:69`), component **triples** not pairs (`:30-38`), and — the part that
   governs a terminal grid — the scope claim at `:40-56`: "It cannot see… a colour
@@ -520,10 +539,10 @@ already absorbed a third.
 
 ### 2.10 Tool traces: one label table in the TUI, one icon table in the UI
 
-- Python: `local_operator/tui/glyphs.py:82-108 NERD_TOOL_ICONS` (glyph per tool
+- Python: `local_operator/tui/glyphs.py:82-112 NERD_TOOL_ICONS` (glyph per tool
   name, taken **exclusively from the Font Awesome block U+F000-U+F2E0**, "the
-  one region present in BOTH Nerd Fonts v2 and v3"), `:111 NERD_ICON_MCP`,
-  `:113 NERD_ICON_DEFAULT` (wrench), `:121-149 PLAIN_TOOL_ICONS` (the ASCII
+  one region present in BOTH Nerd Fonts v2 and v3"), `:116 NERD_ICON_MCP`,
+  `:118 NERD_ICON_DEFAULT` (wrench), `:123-149 PLAIN_TOOL_ICONS` (the ASCII
   fallback: `bash` is `$`, "the shell prompt sigil"). `bash: "\uf120"` is
   `nf-fa-terminal`, i.e. **the terminal glyph is already taken**.
 - `nerd_icons_enabled()` (`:228-241`) is TRI-STATE — env kill switch, then an
@@ -563,7 +582,7 @@ Read at `ui@db615bd46`:
 - `pnpm-workspace.yaml` carries `onlyBuiltDependencies` (biome, core-js, electron,
   electron-winstaller, esbuild, sharp) — pnpm 10 does **not** run a dependency's
   install script unless it is listed there.
-- `AGENTS.md:929-961` pins pnpm to **10.29.2** because 10.29.3+ drops dependency
+- `AGENTS.md:1096-1127` pins pnpm to **10.29.2** because 10.29.3+ drops dependency
   edges from the command electron-builder uses to build the asar, and the failure
   is silent until launch.
 
@@ -637,7 +656,7 @@ verifiable grounds:
 ### (c) A Python-side pty in the session runtime — rejected
 
 Rejected on ownership, not on capability: `local_operator` *can* fork a pty
-(§2.1.3), but the surface must exist when the app is open and die with it (R13,
+(§1.2.3), but the surface must exist when the app is open and die with it (R13,
 R16), the discovery record is the app's (§2.2), and the browser precedent puts
 the surface in the app. A Python-owned pty would also give the surface a second
 possible owner whenever a session runs without the app, which is exactly the
@@ -659,7 +678,7 @@ the move.
 
 | | cost per surface | R7 with no view | R13 while closed | one authority | packaging |
 |---|---|---|---|---|---|
-| **(a) main: node-pty + headless core, pane mirror** | one JS `Terminal` (~2 MB installed once) | **satisfied** | satisfied (the log + the core keep running) | **yes** (main) | one native dep (§5.3) — its pty half is now measured (§19.1 P1), its packing traps are §18.1 |
+| **(a) main: node-pty + headless core, pane mirror** | one JS `Terminal` (~2 MB installed once) | **satisfied** | satisfied (the log + the core keep running) | **yes** (main) | one native dep (§5.3) — its pty half is now measured (§19.1 P1), its packing traps are §18 risk 1 |
 | (b) emulator in the renderer, view per surface | one renderer process + GL context | **not satisfiable** | satisfied only if the view stays alive | no — the copy and the view can differ | none |
 | (c) Python pty | n/a | no (app may be closed) | no | no — two owners | none in the app |
 | (d) `utilityProcess` | one JS core + one helper process | satisfied | satisfied | yes | one native dep |
@@ -963,9 +982,9 @@ Specifics this document fixes, so the implementation is reviewable against them:
   `minWidth={480}`; and leave the *surface's* 40-column floor to main, not to
   the divider. The PR must print the measured px-per-column it used.
 - **Default grid: 100×30.** Rationale, all citable: the project's own visual
-  evidence is produced at 100×30 and 150×40 (`AGENTS.md:1332-1340` names
+  evidence is produced at 100×30 and 150×40 (`AGENTS.md:1574-1582` names
   `scripts/ask_shot.py out.svg 100x30` etc.); the TUI's own regressions are
-  recorded at 80×24 and 120×36 (`local_operator/tui/app.py:2779`, `:10599-10607`);
+  recorded at 80×24 and 120×36 (`local_operator/tui/app.py:2878`, `:10794-10802`);
   and 100×30 is wide enough for the interface this feature exists to display
   while staying under the 120 columns that would force an unnecessarily wide
   panel. Floor **40×10**, ceiling **500×200** (the ceiling is a resource bound,
@@ -974,6 +993,28 @@ Specifics this document fixes, so the implementation is reviewable against them:
   `chat-header.tsx`'s cluster, `aria-label="Open console"`, carrying the
   attention blip (§12.4) with the same 12px-earning discipline the browser
   button's badge already documents, and the same focus-return effect on close.
+- **The user-initiated create path, fixed here rather than left to PR B.** The
+  header control opens the *pane*; a human then needs a way to make an ordinary
+  surface, and that is a second entry point with its own defaults. They are:
+  - **Affordance**: a `+` button in the pane's own header (the pane's chrome, not
+    the app's) beside the surface list, present in the empty state too, because
+    the empty state is the one a first-run user actually meets.
+  - **`command`**: the user's login shell with no arguments — `$SHELL`, else
+    `zsh`, else `/bin/sh` — resolved as §6.5 describes for the marker text. The
+    same object the agent's `console_create` makes, sized by the same rule (§8.4).
+  - **`cwd`**: the session's own working directory, the same value the agent's
+    create uses, so a user who opens a console to run what the agent just
+    described lands where the agent was.
+  - **`env`**: §6.6's environment, unchanged. A user-initiated surface does not
+    get a second, thinner environment, and the three variables §6.6 says must
+    survive must survive here too.
+  - **Grid**: **100×30**, §6.1's default, from the same pure sizing function —
+    the user's surface and the agent's differ only in who asked.
+  - **`reveal`**: defaults to **`"open"`** for a user-initiated create, against
+    `"none"` for an agent (§10.4). The human clicked a control inside the pane,
+    so the pane is what they are already looking at; §10.4's rule still binds,
+    so an `"open"` in an unfocused window opens the pane and does **not** raise,
+    activate or focus the OS window.
 - **Icon**: `SquareTerminal` in `tool-glyphs.ts`'s spirit — a terminal *inside a
   frame*, distinct from `bash`'s bare `Terminal` at 16px, which is the size this
   control is drawn at (the two must be told apart at a glance in one 56px bar).
@@ -1092,7 +1133,7 @@ An agent told "I ran it in the console" must be able to (a) find the surface and
   `is_local_operator_console(env)` (the `LOCAL_OPERATOR_CONSOLE_SURFACE` marker
   §6.5 already sets), and `glyphs.py`'s `_nerd_capable_terminal` gains one clause
   for it, because the app is an emulator that *does* render PUA glyphs and the
-  detector's own rule is "a positive emulator marker wins" (`:205-207`). That is
+  detector's own rule is "a positive emulator marker wins" (`:201-206`). That is
   a two-line Python change in PR C, it is testable with an injected env (the
   module already accepts one), and it leaves every existing decision intact.
   `console_status` reports the marker it set and the glyph decision, so the
@@ -1196,7 +1237,7 @@ always a tap, because main is the pty's only reader.
   follows the discovery namespace's discipline (0700/0600, §2.2, §2.4) and the
   project's config-root conventions rather than inventing a second root.
 - **A read never creates anything** — the rule the state modules state explicitly
-  (`ui_browser/state.py:81-83`) — so a listing on a machine with no history does
+  (`ui_browser/state.py:87-89`) — so a listing on a machine with no history does
   not leave a directory behind.
 - **Reconstruction is replay, not serialization.** At relaunch a retained surface
   is shown by feeding its persisted bytes into a fresh core (§5.4's caveat: there
@@ -1403,7 +1444,7 @@ and its **existing** session key, and adds a method namespace:
 |---|---|
 | a second endpoint + a second record | **rejected.** The record's *lifecycle* does not differ (same process, same heartbeat, same teardown), which is the only argument that justifies a second namespace (`ui_browser/state.py:8-14` argues the browser's separate namespace because a *different process* — the bridge daemon — owns that directory). A second listener would also mean a second key, a second heartbeat and a second set of the four safety rules to keep true. |
 | **extend the existing host** | **recommended.** One key, one heartbeat, one `isMethod` list, one dispatch. The four rules at `rpc.ts:29-46` protect the console verbatim, and the Python side reuses `HostClient` unchanged (`backend.py:718`). |
-| a second gating convention in the harness | **forbidden** by the design authority (`builtin.py:12754-12757`, `AGENTS.md`'s tool ladder: "Adding a second gating convention beside `createIf` is itself a footprint regression"). |
+| a second gating convention in the harness | **forbidden** by the design authority (`builtin.py:12818-12821`, `AGENTS.md`'s tool ladder: "Adding a second gating convention beside `createIf` is itself a footprint regression"). |
 
 Three consequences, each a small explicit change:
 
@@ -1414,7 +1455,7 @@ Three consequences, each a small explicit change:
    (`extra="ignore"`, `state.py:68`) is unaffected.
 2. **The enable flag is split, additively.** `LOCAL_OPERATOR_UI_BROWSER_HOST`
    keeps its current meaning for the whole host — a rig that sets it to assert
-   "no host, no state file" must keep working (`index.ts:164-167`) — and a new
+   "no host, no state file" must keep working (`index.ts:175-180`) — and a new
    `LOCAL_OPERATOR_UI_CONSOLE_HOST` (default on) disables the console feature
    alone. Without the split, the browser host would be able to take the console
    down with it, and the console tool's gate would be a lie.
@@ -1486,12 +1527,14 @@ carries session frames with `seq`/`epoch` semantics the console has no use for).
   an agent cannot yank the user's viewport to another conversation.
 - `"open"` — the pane is claimed in the right slot (closing whichever pane held
   it) and the console pane is focused, **if and only if the app's window is
-  already focused**.
+  already focused**. This is also the default for a **user-initiated** create
+  (§6.1), where the human is already inside the pane and `"none"` would make the
+  button they pressed appear to do nothing.
 
 **No value of `reveal` may raise, activate or focus the OS window.** The app's
 only module allowed to call `show`/`showInactive`/`focus` on a window is
 `src/main/window-raise.ts`, and `scripts/window-mode.test.mjs` asserts it
-(`AGENTS.md:676-683`). A `reveal` that would have to raise a window is downgraded
+(`AGENTS.md:729-735`). A `reveal` that would have to raise a window is downgraded
 to `"none"` and reported as `revealed: false`, which is the same rule the
 notification click obeys (`desktop-notifier.ts:1195-1208`).
 
@@ -1537,6 +1580,7 @@ with the reason the existing value would be a lie:
 | secure input active | `secure_input_active` (**new**) | refused read/screenshot, with the reason |
 | capability off / pty unavailable | `console_unavailable` (**new**) | names which of the three conditions failed (§10.1) |
 | grid out of range | `invalid_grid` (**new**) | carries the clamp it applied |
+| a second capture requested while the capture view is busy | `console_capture_full` (**new**) | names the surface whose capture holds the view; the caller's own surface is never the one named, because §13.3's one-at-a-time rule is what makes this reachable at all |
 
 **Proto rule this design follows:** every addition above is *additive* — new
 methods, new `ErrorCode` values that an old peer never emits (and that a peer
@@ -1564,9 +1608,9 @@ becomes either annoying or unsafe:
    `console_list`/`console_status`/`console_read`/`console_screenshot` and
    **`"exec"`** for `console_create`/`console_input`/`console_keys`/`console_resize`/
    `console_secure`/`console_close`. `bash` is `exec` unconditionally
-   (`builtin.py:3217` and its `approval_tier="exec"`), so this is *not* a
+   (`builtin.py:3281` and its `approval_tier="exec"`), so this is *not* a
    differentiation mechanism — §14's discouragement is.
-   `describe_approval` is set (`types.py:1229`: "without one the loop falls back
+   `describe_approval` is set (`types.py:1250-1251`: "without one the loop falls back
    to a JSON dump"), and it names the surface, the session and the exact bytes
    or keys about to be written.
 2. **The user's consent for the privileged command itself** — this is R19's
@@ -1658,8 +1702,12 @@ mechanism:
    because the *human* wants certainty: `console_secure {surface, on: true}`
    (togglable from the pane with a visible lock marker) makes
    `console_read` (either mode) and `console_screenshot` fail with
-   `secure_input_active` for as long as it is on, drops the byte log for that
-   window, and suppresses the surface's completion notification. It is the
+   `secure_input_active` for as long as it is on, stops appending to the byte log
+   for that window (bytes already retained are **kept**, and §7.2's cap and GC
+   still age them out; what the span suspends is *new* retention, not the
+   history that is already on disk — otherwise turning the toggle on and off
+   would be a way to erase the log, which is the opposite of what it is for),
+   and suppresses the surface's completion notification. It is the
    design's explicit "do not capture this" switch, and its boundary is that it
    is **advisory against a cooperating agent**: a session that ignores the typed
    refusal has no other lever, because the app cannot distinguish "a read that
@@ -1742,7 +1790,7 @@ First match wins, and each rung says what it cannot see:
   dot on the surface's title in the pane's own list.
 - **When cleared**: when the pane is displayed *and focused* on that surface, the
   same predicate family the notifier's rung 1 uses
-  (`docs/DESKTOP_API.md:1229-1245`: the **visibility** predicate, never
+  (`docs/DESKTOP_API.md:1314-1342`: the **visibility** predicate, never
   "could a banner reach them"). An uncleared blip survives a session switch and
   an app relaunch (it is a mark on recorded history, not on a live process).
 - **Colour**: `inkMuted` for the resting dot, `accent` for the pulsing one — the
@@ -1762,7 +1810,7 @@ First match wins, and each rung says what it cannot see:
 - **Eligibility**, in order, mirroring the backend's ladder so the two cannot
   disagree about the same user:
   1. the app is in `headless` → **nothing** (`desktop-notifier.ts`'s own delivery
-     gate; `AGENTS.md:710-713`);
+     gate; `AGENTS.md:758-762`);
   2. the console pane is displayed on that surface and the window is focused →
      **no banner**, the blip is the whole signal;
   3. otherwise → the banner.
@@ -1772,16 +1820,20 @@ First match wins, and each rung says what it cannot see:
   window (the reviewed fix at `desktop-notifier.ts:1189`), then delivers
   `{session_id, surface}` to the renderer. The payload gains **one additive
   field** on a channel that already exists (`desktop-open-conversation`,
-  `preload/index.ts:100-113`), which already admits an explicit `null` for the
+  `preload/index.ts:108-124`), which already admits an explicit `null` for the
   digest case — so a new optional `surface` is additive in both skew directions.
   The renderer then: navigates to the session, claims the right slot for the
   console pane, and selects that surface. A surface that no longer exists (the
   app restarted) selects the session's console pane with its recorded history and
   the "ended" state (§7.3) — an honest landing, not a no-op.
 - **One banner per completion**, claimed before delivery, in the notifier's own
-  dedupe map (`:1101 claim(key)`), keyed on `(surface, exit_epoch)` — the same
-  "claim-then-deliver" discipline the backend's `/notified` uses, so the blip and
-  the banner can never both be counted twice.
+  dedupe map (`:1101 claim(key)`), keyed on `(surface, exit_epoch)`. `exit_epoch`
+  is the exit *generation* of the surface — the counter §7.2's record already
+  keeps and §10.2's `console_status` already returns, incremented once per
+  `process_exited` — so a surface that is restarted with the same id gets a new
+  epoch and can therefore banner again, while a re-notification for one exit
+  cannot. It is the same "claim-then-deliver" discipline the backend's
+  `/notified` uses, so the blip and the banner can never both be counted twice.
 
 ### 12.4 The e2e exemption path (no new switch)
 
@@ -1849,7 +1901,7 @@ them** (all from the compatibility spike, §0.4):
   consumer that cares about that difference can see it.
 - **Never `screencapture`.** macOS `screencapture` photographs the frontmost
   window and requires the focus theft the window modes exist to remove
-  (`AGENTS.md:762-768`); `capturePage` is the app photographing itself, which is
+  (`AGENTS.md:810-816`); `capturePage` is the app photographing itself, which is
   also what `docs/agent-driver.md` builds on.
 - **The capture view is the same page as the pane** (one component, §13.3), so
   the two paths cannot drift in font, theme or renderer.
@@ -1923,7 +1975,7 @@ properties, each inherited rather than invented:
   the machine" (`ui_browser/backend.py:43-49`).
 - **The weaker `advertisable` commitment**, because "advertising only promises
   the agent can ASK" and a host whose heartbeat writer died must not hide the tool
-  (`ui_browser/state.py:149-158`).
+  (`ui_browser/state.py:150-157`).
 - **Never raises** — an unreadable record degrades to "no console", which is the
   honest answer and the one `createIf` exists for.
 
@@ -1939,11 +1991,11 @@ a TUI must know it can).
 ### 14.3 The description: short by policy, with the playbook in a guide
 
 The description is code and is reviewed as code. Two rules govern its length and
-its content, both read from the browser tool at `lop@a8fe0c1d` rather than
+its content, both read from the browser tool at `lop@e65548e9` rather than
 invented here:
 
 1. **The string carries only what a model needs to CHOOSE the tool and call it
-   correctly** (`builtin.py:12766-12773`), and the per-method detail lives in
+   correctly** (`builtin.py:12830-12837`), and the per-method detail lives in
    **parameter descriptions** and in a `guide://console` playbook — the same
    split the browser tool now uses, and the reason its download/upload sentence
    is one clause "rather than the four the design first drafted".
@@ -2052,7 +2104,7 @@ tier records *intent*, and the browser tool's own comment says why that is not
 protection — "today the gate is ONE callback for both tiers and
 `tool_approval_mode: auto` / `--yolo` installs no gate at all, so the tier
 records intent and future-proofs a tier-sensitive host — it is NOT the
-protection" (`builtin.py:12800-12808`). A session in `auto` mode will not be
+protection" (`builtin.py:12864-12872`). A session in `auto` mode will not be
 prompted for `console_create`, so this design does not claim an approval gate as
 its discouragement, only as its tier bookkeeping.
 
@@ -2085,10 +2137,10 @@ is how a feature produces "it just didn't work".
 Two rules the table encodes and prose does not:
 
 1. **Absence is reported as absence, never as failure.** The house rule is the
-   browser tool's: a host that cannot do the thing offers no tool (`builtin.py:12754-12757`),
+   browser tool's: a host that cannot do the thing offers no tool (`builtin.py:9067-9070`),
    because "advertising a tool whose every action errors is worse".
 2. **Every mid-flight failure is typed**, so a caller never substring-matches a
-   message (`protocol.py:349`'s own rationale for `OWNER_REFUSED`).
+   message (`protocol.py:377-383`'s own rationale for `OWNER_REFUSED`).
 
 ---
 
@@ -2100,19 +2152,19 @@ Two rules the table encodes and prose does not:
 |---|---|---|
 | `scripts/renderer-driver.mjs` scenes for the pane | `headless` | the supported driving path (`docs/agent-driver.md`) |
 | the console host's own proof rig | `headless` | a launch that captures nothing needs no window |
-| a frame that must show focus-dependent rendering (caret, `:focus-visible` ring on the close button) | `inactive` | `AGENTS.md:696-700` |
-| any cell about the notification or the blip's cleared state | **`inactive`, never `headless`** | native banners are suppressed entirely in `headless` and the notifier's focus gate reads `visible && focused`, which a headless run never is (`AGENTS.md:701-713`) |
+| a frame that must show focus-dependent rendering (caret, `:focus-visible` ring on the close button) | `inactive` | `AGENTS.md:744-748` |
+| any cell about the notification or the blip's cleared state | **`inactive`, never `headless`** | native banners are suppressed entirely in `headless` and the notifier's focus gate reads `visible && focused`, which a headless run never is (`AGENTS.md:749-762`) |
 | the release-smoke of a packaged build | `headless` | packaging evidence, not a UI frame |
 
 **And the assertion behind all of them:** nothing a capture does may raise the
 app. The measurement is outside the app, by pid, over a dense sample, with the
 control run in `normal` — the discipline and the numbers are already recorded
-(`AGENTS.md:669-674`), and §19.2 makes it a cell for this feature.
+(`AGENTS.md:717-723`), and §19.2 makes it a cell for this feature.
 
 ### 16.2 Evidence rules this feature inherits, verbatim
 
 - **Capture from inside the app** (`capturePage`/CDP), never `screencapture`
-  (`AGENTS.md:762-768`).
+  (`AGENTS.md:810-816`).
 - **When an Electron binary is launched by a rig, it gets an absolute app path
   and its process group is reaped by exact pid on exit** — the
   `app-tree-teardown.mjs` pattern — and a visible window is only ever produced by
@@ -2190,7 +2242,7 @@ capability and a new native dependency into the app for a feature nobody can
 reach. That is why §19.6's gate for A includes a *proof rig* and why A's PR
 description says plainly that the feature is not user-visible until B lands. If
 the operator prefers a single user-visible PR, the fallback is to keep the split
-but merge A and B in one window (§18's release mechanics) — **not** to make one
+but merge A and B in one window (§17.3's release mechanics) — **not** to make one
 PR, which would put a native-dependency change behind a design round.
 
 ### 17.3 Effort, and where the cut list is
@@ -2312,19 +2364,25 @@ Ordered by expected cost.
 ### 19.1 The empirical probes, named as experiments
 
 Each is a cell an independent QA pass can run and report PASS/FAIL/BLOCKED with
-its actual output. **None of these has been run**; they are the plan.
+its actual output. **None has been run to completion**; they are the plan. Two
+rows are partly done, and both were done by the compatibility spike rather than
+by the harness or the emulator's own suite: **P1** was measured end to end, and
+**P4** and **P9** are partly measured. Each of the three says so in its own row,
+and §0.4 counts the same way — a reader who takes the lead sentence alone must
+not conclude that §5.5's D1 decision was made without evidence, because it was
+not.
 
 | probe | question | exact experiment | settles |
 |---|---|---|---|
 | **P1** | Does `node-pty`'s prebuilt binary load under the pinned Electron (44.3.0) on this arm64 host, with no `electron-rebuild`? | **MEASURED — PASS** by the compatibility spike: the same 85,496 B `pty.node` loads under node 26.5.0 (ABI 147) and Electron 44.3.0 (ABI 149); `/bin/zsh -f -i` spawned, prompt read back, echo round-tripped, 24-bit/UTF-8 byte-exact, `resize(100,30)` reflected in `stty size`, `exit 42` → `exitCode 42` | §5.3's N-API claim; risk 1 |
 | **P2** | Does `@xterm/headless` work in the main process of the packaged app (no DOM)? | feed a recorded ANSI stream, assert `translateToString("scrollback")` and `modes.bracketedPasteMode` | §3(a)'s core |
 | **P3** | Does a byte flood starve the main thread? | `yes` into a surface for 30 s; sample main-thread responsiveness (an IPC echo's round trip) and the surface's dropped-byte count | risk 3; the `utilityProcess` trigger |
-| **P4** | Does `capturePage()` on a **hidden, unattached** `WebContentsView` return a complete frame of a terminal grid? | **PARTLY MEASURED**: on a hidden `BrowserWindow` the first capture was stale/blank (9,866 B) and the second correct (27,869 B) — hence §13.2's assert-and-retry-once — and the **DOM renderer captured correctly first attempt** while the WebGL canvas could not be read at all (`toDataURL()` blank white, identical 26,791 B either way). **Still open:** the *unattached `WebContentsView`* variant, and whether an unattached view paints at all under Chromium's visibility rules. Run the grid capture against the capture view itself and compare with the pane's capture of the same record | §13.2 and §13.3 |
+| **P4** | Does `capturePage()` on a **hidden, unattached** `WebContentsView` return a complete frame of a terminal grid? | **PARTLY MEASURED — by the compatibility spike**: on a hidden `BrowserWindow` the first capture was stale/blank (9,866 B) and the second correct (27,869 B) — hence §13.2's assert-and-retry-once — and the **DOM renderer captured correctly first attempt** while the WebGL canvas could not be read at all (`toDataURL()` blank white, identical 26,791 B either way). **Still open:** the *unattached `WebContentsView`* variant, and whether an unattached view paints at all under Chromium's visibility rules. Run the grid capture against the capture view itself and compare with the pane's capture of the same record | §13.2 and §13.3 |
 | **P5** | Do the mirror and the record agree? | replay a 2 MB recorded stream into both, compare scrollback text, cursor, and grid cells per row/column | risk 2 |
 | **P6** | Does the pane's first frame after a replay equal the record's viewport text? | the conformance harness of P5, extended to the paint path | §7.3's replay claim |
 | **P7** | Does the operator's shell emit OSC 133 marks (and with which integration)? | run their shell in a surface, print the surface's raw byte log, grep for `\x1b]133;` | §12.1's rung 2 |
 | **P8** | What does the console tool's schema cost? | `scripts/bench_context_budget.py` (the guard CI already runs for the `context-budget` scope, `scripts/ci_scope.py:178-182`) plus `/context` in the live session, with the tool present and absent | risk 10; the §14.3 description budget |
-| **P9** | Does the shipped GeistMono Nerd Font cover the recommended glyphs (`\uf108`, and every glyph in `NERD_TOOL_ICONS`), and do its box-drawing glyphs join at the pane's size? | **PARTLY MEASURED**: this machine has **no Nerd Font installed at all** (`~/Library/Fonts` empty, `/Library/Fonts` = `Arial Unicode.ttf`), so a `"…Nerd Font Mono", Menlo, monospace` stack resolved to Menlo and every PUA codepoint tried was **tofu**; Menlo's `─` also showed visible gaps at size. **Still open:** the same sweep *inside the pane*, where the bundled face is what renders — the glyph table, the UI trace icon, and the box-drawing continuity at the chosen font step, in a rendered frame | §6.1's icon choice; §6.6; risk 9 |
+| **P9** | Does the shipped GeistMono Nerd Font cover the recommended glyphs (`\uf108`, and every glyph in `NERD_TOOL_ICONS`), and do its box-drawing glyphs join at the pane's size? | **PARTLY MEASURED — by the compatibility spike**: this machine has **no Nerd Font installed at all** (`~/Library/Fonts` empty, `/Library/Fonts` = `Arial Unicode.ttf`), so a `"…Nerd Font Mono", Menlo, monospace` stack resolved to Menlo and every PUA codepoint tried was **tofu**; Menlo's `─` also showed visible gaps at size. **Still open:** the same sweep *inside the pane*, where the bundled face is what renders — the glyph table, the UI trace icon, and the box-drawing continuity at the chosen font step, in a rendered frame | §6.1's icon choice; §6.6; risk 9 |
 | **P10** | Is the frame reproducible? | capture the same surface twice, 30 s apart, with no output in between; assert byte equality | §13.3's evidence claim |
 | **P11** | Does a signed, notarized, packaged build fork a pty and capture a frame — with the helper executable and the prebuilds unpacked? | `pnpm exec electron-builder --dir --arm64` → **assert `stat` mode 0755 on `app.asar.unpacked/**/spawn-helper`** → assert the packaged tree is inside `check-packaged-closure` → the signed smoke with a console scene, forking a real pty and capturing one frame | risk 1, release gate |
 | **P12** | Does an agent-driven capture leave the app non-frontmost? | dense external sampling of the frontmost process by pid during a full console capture sequence, in `headless`, with a `normal` control | R21 |
@@ -2429,7 +2487,7 @@ build if the artifact is in scope this window).
 
 ### 19.6 What "done" means per PR
 
-- **A**: probes P1-P5, P11 pass; the RPC transcript; the rig; the closure gates;
+- **A**: probes P1-P5, P11 and **P13** pass; the RPC transcript; the rig; the closure gates;
   a PR description that says the feature is not yet user-visible.
 - **B**: the frames, the design round (D-findings clean), the UX round (U-findings
   clean), the stories, `check-evidence` re-stamped, `check-themes` green.
@@ -2494,38 +2552,63 @@ implemented against a document that is not yet in the repository.
 ## Appendix A: claims checked, and things I could not verify
 
 **Verified in this session, from the trees.** Every `file:line` above was read at
-the refs of §0.1 — including the ones the brief's numbers miss:
-`builtin.py:12716`/`:12758`/`:3217`/`:8992`/`:9940`/`:9954`/`:12102`;
-`registry.py:32`/`:60`/`:70`/`:100`; `types.py:1223` and its fields;
-`ui_browser/state.py:34`/`:47`/`:53`/`:81`/`:120`/`:145`/`:150`;
-`ui_browser/backend.py:34`/`:43`/`:56`/`:80`/`:103`;
-`browser_bridge/protocol.py:16`/`:20-45`/`:45`/`:200`/`:288`/`:349`/`:422`/`:434`;
-`browser_bridge/backend.py:159`/`:679`/`:718`/`:829`;
-`prompts_api.py:184`/`:304`/`:333`/`:365`/`:379`/`:401`/`:411`/`:489-513`;
-`prompts_md/system.md:264`/`:287`; `session.py:6120`/`:14001`;
-`glyphs.py:82`/`:111`/`:113`/`:121`/`:191-224`/`:228-241`; `terminals.py`'s marker predicates
-(`is_ghostty`/`is_kitty`/`is_wezterm` at `:44-58` and their callers);
-`agent_seeds/architect.md:6` and `manifest.json`'s `tools` lists;
-`tests/e2e/conftest.py:1-20`; `test_terminal_close_survives_e2e.py:166`;
-`test_browser_ownership.py:111`/`:148`; `scripts/visual_capture.py:259`;
-`variables.py:255`/`:442`/`:489`/`:523`; `redaction_shapes.py:1-60`/`:84`;
-UI: `ui-preferences-store.ts:51`/`:72`/`:92`/`:198`/`:264`/`:380`/`:413`/`:422`/`:434`;
-`chat-content.tsx:1206`/`:1285`/`:1383`; `chat-header.tsx:200`/`:271-341`;
-`browser-pane.tsx:86`/`:117`; `chat-page.tsx:2231`;
-`main/browser/rpc.ts:29-46`/`:50`/`:51`/`:58`/`:70`; `protocol.ts:53`/`:81`;
-`state-file.ts:31`/`:38`/`:43`; `host.ts:383`; `ipc.ts:20-35`/`:57`;
-`registry.ts:96`/`:120`/`:473`/`:490`; `index.ts:164`/`:182`;
-`desktop-notifier.ts:205`/`:267`/`:304`/`:395`/`:707`/`:721`/`:1101`/`:1155`/`:1174`/`:1210`;
-`notification-launch.ts:75`; `preload/index.ts:100-162`; `desktop-ipc.ts:266`/`:293`;
-`desktop-contract.ts:290`/`:1182`/`:1542`; `tool-glyphs.ts:55-96`;
-`fonts.css:33-45`; `styles/index.css:114`; `palette-contract.ts` (all role keys);
-`code-mirror-theme.ts:20-70`; `contrast-contract.mjs:30-56`/`:69`;
-`scripts/bench_context_budget.py`; `scripts/ci_scope.py:178-182`;
-`package.json` (`build`, `dependencies`, `optionalDependencies`, the `test:desktop`
-list); `pnpm-workspace.yaml`; `scripts/check-runtime-deps.mjs:1-60`;
-`docs/CODE_SIGNING.md`; `docs/design/panel-views.md:1-120`;
-`docs/design/browser-approval-ux.md:1-80`/`:539-640`;
-`docs/agent-driver.md:1-200`.
+the refs of §0.1 — `local-operator` at `e65548e9` and `local-operator-ui` at
+`db615bd46`, both read with `git show <ref>:<path>` and never off the disk —
+including the ones the brief's numbers miss. The two repos are listed separately
+because a citation list that silently mixed them is what the round-1 review
+caught; where a name is ambiguous between them (`AGENTS.md` exists in both) the
+repo is named:
+
+- **`local-operator` @ `e65548e9`:**
+  `builtin.py:12780`/`:12822`/`:3281`/`:9056`/`:10004`/`:10018`/`:12166`;
+  `registry.py:32`/`:60`/`:70`/`:100`; `harness/types.py:1242` and its fields
+  (`:1258`-`:1279`);
+  `ui_browser/state.py:34`/`:47`/`:53`/`:87`/`:120`/`:145`/`:150`;
+  `ui_browser/backend.py:34`/`:43`/`:56`/`:80`/`:103`;
+  `browser_bridge/protocol.py:16`/`:20-45`/`:45`/`:200`/`:288`/`:349`/`:422`/`:434`;
+  `browser_bridge/backend.py:159`/`:679`/`:718`/`:829`;
+  `prompts_api.py:184`/`:304`/`:333`/`:365`/`:379`/`:401`/`:411`/`:489-513`;
+  `prompts_md/system.md:264`/`:287`; `session/session.py:6120`/`:14001`;
+  `tui/glyphs.py:82`/`:116`/`:118`/`:123`/`:191-224`/`:228-241`; `tui/notify.py:115`/`:404`;
+  `terminals.py`'s marker predicates (`is_kitty`/`is_ghostty`/`is_wezterm` at
+  `:103`/`:115`/`:131` and their callers);
+  `agent_seeds/{architect,manager,reviewer,scout}.md:6` and `manifest.json`'s
+  `tools` lists;
+  `tests/e2e/conftest.py:1-20`; `test_terminal_close_survives_e2e.py:166`;
+  `test_browser_ownership.py:111`/`:148`; `scripts/visual_capture.py:259`;
+  `variables.py:255`/`:442`/`:489`/`:523`; `redaction_shapes.py:1-60`/`:84`;
+  `scripts/bench_context_budget.py`; `scripts/ci_scope.py:178-182`;
+  `docs/DESKTOP_API.md:1314-1342`/`:1344-1403`; `docs/design/ui-browser-tab.md:21-26`.
+  LO `AGENTS.md:593-682` ("Read the committed ref, not the working tree") and
+  `AGENTS.md:1574-1582` (the `ask_shot.py out.svg 100x30` block).
+- **`local-operator-ui` @ `db615bd46`:**
+  `ui-preferences-store.ts:51`/`:72`/`:92`/`:198`/`:264`/`:380`/`:413`/`:422`/`:434`;
+  `chat-content.tsx:1206`/`:1285`/`:1383`; `chat-header.tsx:199`/`:271-341`;
+  `browser-pane.tsx:86`/`:117`; `chat-page.tsx:2231`;
+  `main/browser/rpc.ts:29-46`/`:50`/`:53`/`:58`/`:68`; `protocol.ts:53`/`:81`;
+  `state-file.ts:31`/`:36`/`:42`; `host.ts:383`; `ipc.ts:20-35`/`:56`;
+  `registry.ts:96`/`:120`/`:473`/`:490`/`:527`/`:546-557`/`:609`/`:664`;
+  `index.ts:175`/`:182`;
+  `desktop-notifier.ts:205`/`:267`/`:304`/`:395`/`:707`/`:721`/`:1101`/`:1155`/`:1174`/`:1210`;
+  `notification-launch.ts:75`; `preload/index.ts:108-182`;
+  `desktop-ipc.ts:297`/`:321`;
+  `desktop-contract.ts:678`/`:2173`/`:2617`; `tool-glyphs.ts:54-97`;
+  `fonts.css:33-45`; `styles/index.css:117`/`:130`;
+  `palette-contract.ts:186`/`:429`/`:477`/`:494`/`:520`/`:719`/`:776`/`:796` (all role
+  keys); `themes/index.ts:4-17`/`:202`/`:217`;
+  `code-mirror-theme.ts:20-70`; `contrast-contract.mjs:30-56`/`:69`;
+  `package.json` (`build`, `dependencies`, `optionalDependencies`, the `test:desktop`
+  list); `pnpm-workspace.yaml`; `scripts/check-runtime-deps.mjs:1-60`;
+  `docs/CODE_SIGNING.md`; `docs/design/panel-views.md:1-120`;
+  `docs/design/browser-approval-ux.md:1-80`/`:539-640`;
+  `docs/agent-driver.md:1-200`; UI `AGENTS.md:61-65`/`:32-35`/`:717-723`/`:729-735`/
+  `:744-748`/`:758-762`/`:810-816`/`:1096-1127`.
+
+**One citation set is deliberately *not* claimed as re-derived:** the `file:line`
+references in `docs/design/ui-console-tab.md` itself (this document's own internal
+cross-references) are prose, not citations, and no number in this appendix refers
+to them.
+
 
 **Verified from the web, with the source named:** ghostty's `spdx_id: MIT`
 (GitHub API); the `tip` release's asset list including
@@ -2541,8 +2624,8 @@ helper-path rewrite in `lib/unixTerminal.js`), `ghostty-web` 0.4.0 (MIT),
 `@coder/libghostty-vt-node` 0.1.0-beta.0 (MIT, `engines.node >= 20.19`).
 
 **Measured on this machine, by me:** the two refs and their divergence (§0.1 —
-`~/local-operator`'s working tree is HEAD `0e287be0` with **295 staged changes**
-not on `origin/main`, and `~/local-operator-ui` is checked out on
+`~/local-operator`'s working tree is HEAD `0e287be0` with **295 changes** away
+from `origin/main` by `git status --porcelain | wc -l`, and `~/local-operator-ui`
 `chore/release-0.25.11` at `0f76af9e1`, **1,355 commits behind** its `origin/main`,
 656 files differing); `node-pty`'s tarball contents (286 files, no Linux prebuild,
 `prebuilds/darwin-arm64/spawn-helper`); `@xterm/headless`'s tarball size
