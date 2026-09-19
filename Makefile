@@ -15,7 +15,7 @@
 #
 
 # Declare all targets as phony (not representing files)
-.PHONY: server dev-server cli openapi test coverage format lint type-check adapter-osworld security clean help setup-python install
+.PHONY: server dev-server cli openapi test coverage format lint type-check check-changed adapter-osworld security clean help setup-python install
 
 # Default target when running 'make' without arguments
 .DEFAULT_GOAL := help
@@ -112,9 +112,50 @@ format: ## Format code with black and isort
 lint: ## Run linting with flake8
 	.venv/bin/python -m flake8 .
 
+# Run exactly the CI gates this branch's diff can affect. The selector is
+# `scripts/ci_scope.py` — the SAME module the workflow's `changes` job runs and
+# whose flags gate its jobs — so the local answer and CI's answer cannot drift
+# into two opinions about which gates a diff needs.
+#
+# `--since` is the merge base with `origin/main`, not `origin/main` itself: a
+# plain two-dot diff against a moved `origin/main` sweeps in every commit main
+# landed since this branch was cut and would run gates for work this branch
+# never wrote (the same staleness `version-bump-guard` documents in ci.yml).
+# The module adds the index, the working tree and untracked files on top.
+#
+# `.venv/bin/python ...` goes through the interpreter, and every gate the module
+# then runs is spelled `python -m` or `uvx` for the #423 reason above: a bare
+# `.venv/bin/flake8` can exit 126 and be swallowed by a pipeline.
+check-changed: ## Run the CI gates this branch's diff can affect
+	@base="$$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse origin/main)"; \
+	echo "checking changes since $$base"; \
+	.venv/bin/python scripts/ci_scope.py --since "$$base" --run
+
 # Run type checking with pyright
+#
+# Through `scripts/run_bounded.py`, not a bare `timeout`, and never unbounded.
+# pyright is a Python wrapper around an npm/node analyzer that runs as a
+# SEPARATE process, and the fleet has shown analyzers re-parented to launchd
+# holding 1-2 GB each, one alive 81 minutes after its parent died. The wrapper
+# puts the command in its own process group and signals the whole group on every
+# exit path — including the two a bare `timeout` cannot cover: a descendant alive
+# when the leader exits by itself, and a group that ignores SIGTERM (measured over
+# a SIGTERM-ignoring tree: `timeout 3` fires at 3 s and then WAITS THE TREE OUT —
+# 30 s for a 30 s tree, 300 s in an earlier run for a 300 s one — where the
+# wrapper's SIGKILL escalation cleared the same tree in 5 s with `--grace 2`; the
+# shipped `--grace` default of 10 takes ~13 s for it).
+#
+# The bound is generous on purpose: a whole-tree pyright measures 508 s quiet and
+# 1170 s under load on this fleet, so a bound mirroring ci.yml's
+# `timeout-minutes: 15` — which also covers checkout, install and the protocol-sync
+# step — would red a gate CI passes. Timing out a legitimately slow host is worse
+# than waiting for it, and the bound is overridable for a machine that needs more:
+# `make type-check BOUND_TIMEOUT=3600`.
+BOUND_TIMEOUT ?= 1800
+
 type-check: ## Run type checking with pyright
-	.venv/bin/python -m pyright --pythonpath .venv/bin/python .
+	.venv/bin/python scripts/run_bounded.py --timeout $(BOUND_TIMEOUT) -- \
+		.venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 # Build the OSWorld V2 evaluation adapter: lock, wheel, and the workspace
 # materialisation command. Deliberately NOT wired into CI's default job — the

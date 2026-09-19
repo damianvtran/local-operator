@@ -29,8 +29,9 @@ child IS a :class:`~local_operator.session.session.Session`:
   summary. It is the same mechanism as the CLI's ``--resume``.
 
 The asymmetry is deliberate. A parent addresses children by job id (or by
-unique label); a child addresses exactly one peer, its parent, because
-local-operator children are one level deep and have no siblings to talk to.
+unique label); a child addresses exactly one peer, its parent — delegation is a
+tree walked from the top, so a child that needs something from a sibling says
+so to the parent rather than talking sideways to it.
 
 Reply resolution has two paths on purpose. The child is told to answer with
 its ``hub`` tool, which resolves the waiting future exactly; but a model that

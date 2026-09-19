@@ -120,4 +120,74 @@ async def ask_approval(
     return bool(await narrow(tool_name, description))
 
 
-__all__ = ["ApprovalGate", "ask_approval"]
+def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:
+    """Whether a write may LOOSEN a live approval gate (``ask`` -> ``auto``).
+
+    The gate's own boundary, and the whole of it: a loosening is an operator
+    action only when it is a write this process made through the operator's own
+    settings facade (``settings_io`` -> ``config_watch.notify_local``, which
+    delivers ``source="local"``) *in the process that holds the gate*.
+    Everything else is unattributed from here and may only tighten:
+
+    * a model tool's own file write (the party being gated is not the authority
+      that may lower its own gate -- the reason this predicate exists);
+    * an editor, a second pane, or any other process's edit;
+    * the settings API or ``lop config edit`` in ANOTHER process, which is a
+      genuine operator action but happened where this gate is not, so this
+      process cannot tell it apart from the first case;
+    * the embedded TUI's ``/settings`` page while an attached runtime owns the
+      gate (``gate_is_here=False``): the file write is attributed in the app's
+      own process, but the engine consults the runtime's flag.
+
+    ``source`` is ``ConfigChange.source`` and ``gate_is_here`` is whether the
+    caller is the process whose flag the engine reads -- ``True`` for the
+    runtime/daemon host, ``not self._gate_is_owned_elsewhere()`` for the TUI.
+    Spelled ``source == "local"`` rather than "not disk" so widening what
+    counts as ``local`` in ``config_watch`` widens who may loosen the gate;
+    that is the direction the literal deliberately makes visible at the
+    call site rather than absorbing here.
+
+    Tightening is NOT this predicate's business: ``auto`` -> ``ask`` and every
+    other hardening path stay live and unconditional. Nor is ``--yolo``, which
+    is an explicit pin on the run rather than a transition of the gate.
+    """
+    return source == "local" and gate_is_here
+
+
+#: The ONE sentence both hosts print when a write tried to loosen a live gate
+#: without being authorised to (see :func:`loosening_is_authorised`).
+#:
+#: Lives here for the same reason :data:`GATE_TIMEOUT_CUSTOM_TYPE` does: two
+#: layers emit it and neither may import the other — the runtime
+#: (``session/runtime/serving.py``) as a ``NoticeEvent``, the embedded TUI
+#: (``tui/app.py``) into its own transcript — and a second copy is a second
+#: chance for one surface to describe the rule differently from the other. The
+#: wording is also load-bearing rather than decorative: it names the RULE ("a
+#: write from outside this session") rather than the author, because the
+#: emitting process cannot know who wrote the file, and in the attached-pane
+#: case the person reading it is the one who just clicked the row (design round
+#: 1, D3). ``/approvals auto`` is the route that does loosen the gate.
+LOOSENING_REFUSED_NOTICE = (
+    "keeping tool approvals: ask — config.yml now says auto, but a write from outside "
+    "this session cannot loosen it; /approvals auto loosens it here"
+)
+
+
+#: The sibling sentence, and the reason it is a constant too (agent review round
+#: 2, n2's family): the same event — the file says ``auto``, this session keeps
+#: its typed ``ask`` — is emitted by the runtime and by the embedded pane, and
+#: round 1 left the two copies inline in each host. Two copies of one sentence is
+#: the drift U5 found for the receipts, one surface over.
+LOOSENING_KEPT_BY_ASK_NOTICE = (
+    "keeping tool approvals: ask — set with /approvals in this session; config.yml "
+    "now says auto, /approvals auto adopts it"
+)
+
+
+__all__ = [
+    "ApprovalGate",
+    "LOOSENING_KEPT_BY_ASK_NOTICE",
+    "LOOSENING_REFUSED_NOTICE",
+    "ask_approval",
+    "loosening_is_authorised",
+]

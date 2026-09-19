@@ -131,7 +131,23 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     DIRECT providers outrank aggregators: `openrouter/anthropic/claude-opus-5` and
     `anthropic/claude-opus-5` are the same model, and after logging in to Anthropic
     the direct route is the one the user meant.
+
+    DECISION-ONLY PROVIDERS ARE DROPPED, in both branches, before any scoring.
+    This is the surface ``/model`` offers the catalogue THROUGH, and ranking is
+    the last gate before a row becomes a choice: a decision model (TypeSafe's Jev)
+    rejects ``chat/completions`` on every host, so selecting one would open a
+    session that cannot answer a turn — the failure the user has no way to read
+    as "that model was never offerable". The controller's catalogue already
+    excludes them (``_chat_providers``); this keeps the promise for a caller that
+    builds rows from somewhere else, which is exactly how the phone's sheet and
+    the desktop picker came to rank the same list two ways.
     """
+    # Imported at CALL time, like the sibling helpers in ``providers.failover``:
+    # ``providers.registry`` is a heavier module and this one is stdlib-only by
+    # design (it is imported by the mobile daemon, which renders no terminal).
+    from local_operator.providers.registry import is_decision_only
+
+    rows = [row for row in rows if not is_decision_only(row.provider)]
     needle = query.strip().lower()
     if not needle:
         return sorted(

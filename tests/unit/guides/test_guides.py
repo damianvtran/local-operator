@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -26,6 +27,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
     assert [guide.name for guide in guides] == [
         "agents",
         "browser",
+        "classification",
         "configuration",
         "credentials",
         "extensions",
@@ -34,6 +36,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "mobile",
         "peer-messaging",
         "qwencloud",
+        "scratchpad",
         "teams",
         "tunnel",
     ]
@@ -78,6 +81,10 @@ def test_guide_listing_never_contains_guide_body() -> None:
         ("set up phone access so I can drive lop from my mobile", "mobile"),
         ("create a Radient personal tunnel with OpenCode routes and billing", "tunnel"),
         ("why is my usage blank", "qwencloud"),
+        (
+            "turn on the smart agent hints and check which vendor served the call",
+            "classification",
+        ),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -193,6 +200,49 @@ def test_mobile_guide_requires_a_password_delivery_ask() -> None:
     assert "context window" in body
 
 
+def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:
+    """The properties that belong to the guide: the lifetime (claimed once),
+    the text-only rule, that a one-off SCRIPT and a data file are as much at
+    home here as a note, the naming rule the desktop canvas depends on, the
+    fallback when the host has no session folder, and the fact that every
+    result carries the absolute path a shell needs.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+
+    assert body is not None
+    assert body.count("deleted with the session") == 1
+    assert "one-off script" in body
+    assert "Data you are still shaping" in body
+    assert "real extension" in body
+    assert "absolute path" in body
+    assert "mktemp" in body
+    assert "do not put scratch in the user's" in body
+    # The guide is the authority on the five calls, and must list five.
+    assert "Five calls" in body
+    assert body.count("| `") == 5
+
+
+def test_scratchpad_guide_prints_no_absolute_path_shaped_example() -> None:
+    """A guide is prompt text that lands in a transcript, and the desktop Files
+    panel infers its tiles from absolute paths found in transcript text. An
+    ELIDED or templated path in prose therefore produced phantom tiles on the
+    real app — two of them reproduced from a guide's own example lines
+    (measured against the desktop build). So examples are URL-shaped, and a
+    resolved path is described in words rather than templated.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    assert "/…" not in body
+    assert "<id>" not in body
+    # No bare absolute path of any kind: every example must carry the scheme.
+    assert (
+        re.search(r"(?<![\w./:-])/(Users|home|tmp|var|private|sessions|scratchpad)/", body) is None
+    )
+
+
 def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:
     guides = {guide.name: guide for guide in discover_guides()}
     resolver = make_guide_resolver(guides)
@@ -205,6 +255,31 @@ def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:
     assert "close failed and the handle was dropped" in browser
     assert "Before a subagent's terminal handoff" in agents
     assert "put child disposal in `finally`" in agents
+
+
+def test_classification_guide_names_the_switch_the_logins_and_the_log_line() -> None:
+    """The facts a reader cannot infer from the code they are standing in.
+
+    The switch is off by default and the section is new-session-scoped, so an
+    agent asked "why are there no hints" needs the exact key; the cascade is
+    three legs with three separate logins, and the guide is the only place that
+    says which command buys which one. The provider ids are asserted against the
+    live registry rather than merely spelled, because a renamed leg would
+    otherwise leave the guide advertising a login that no longer exists — the
+    one failure mode this guide can have that costs a user a round trip.
+    """
+    from local_operator.providers.registry import known_provider_ids
+
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://classification")
+
+    assert body is not None
+    assert "lop config edit classification.auto true" in body
+    assert "values.classification" in body
+    assert "classification: vendor=" in body
+    for leg in ("radient", "typesafe", "openrouter"):
+        assert leg in known_provider_ids()
+        assert f"lop login {leg}" in body
 
 
 def test_configuration_guide_names_the_real_instructions_file() -> None:

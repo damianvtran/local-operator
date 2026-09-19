@@ -342,7 +342,13 @@ def test_all_on_a_tty_prompts_and_n_aborts(monkeypatch: pytest.MonkeyPatch, caps
 
 def test_resolver_is_the_send_resolver() -> None:
     """One target vocabulary: `lop stop` resolves through the same function
-    `lop send` does, with the stop parser's own flag names as hints."""
+    `lop send` does, with the stop parser's own flag names as hints.
+
+    ``require_started=False`` is the KILL-SWITCH carve-out and is pinned here
+    rather than left to the resolver's default: a session that has not run a
+    turn yet (a fresh ``/new`` in the composer) must still be stoppable — that
+    is a session someone may need to end — while `lop send` keeps refusing it.
+    """
     from local_operator.cli import _resolve_stop_target
 
     with patch("local_operator.mobile.peer_send.resolve_peer_target") as resolve:
@@ -355,4 +361,5 @@ def test_resolver_is_the_send_resolver() -> None:
         pid_hint="--pid",
         session_hint="--session",
         include_wedged=True,
+        require_started=False,
     )

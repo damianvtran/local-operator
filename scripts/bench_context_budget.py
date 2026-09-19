@@ -139,7 +139,41 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the second will call ``web_fetch`` instead and pay a network round trip for
 #: every page. Headroom at 27,800 is 71 tokens, and the next context reduction
 #: tightens it.
-BUDGET_BILLED_TOKENS = 27_800
+#: RAISED 27,800 -> 28,000 for the ``scratchpad://`` pointer in ``system.md``,
+#: stated here because the guard exists to make this an explicit decision, and
+#: with the THREE measurements rather than two, because the first revision of
+#: this comment derived a delta from a contaminated base (review round 1, R4).
+#: All three are this script, this machine, and the same deterministic char
+#: arithmetic CI runs — CI's reading on the pre-remediation head was 27,998, to
+#: the token, so there is no local-vs-CI gap to leave slack for:
+#:
+#:   base, ``origin/main`` ba225070        27,787   (13 tokens under the old
+#:                                                   ceiling: no room for a new
+#:                                                   pointer at all)
+#:   + the ``system.md`` pointer            27,950   (+163)
+#:   + ``ReadParams.path``'s scheme clause  27,998   (+48)
+#:
+#: The 48 was measured into the "base" the first revision compared against — a
+#: tree with the schema change already in it — so that comment called 163 "the
+#: whole of the increase" when the branch's real delta was 211. Round 1 then
+#: removed the duplication that clause created (the pointer says the scheme, the
+#: schema field does not have to), which gives the current head 27,949 — net
+#: +162 against the base: pointer +163 tokens, schema -1 token (44,228 -> 44,225
+#: characters, a 3-character edit). The round-1 trim was the LARGER step and it is
+#: not the -1: it ran 44,362 -> 44,228, i.e. -137 characters = -49 tokens measured
+#: against the pre-trim head. The ceiling is
+#: set 51 above that, the same order of headroom as the ``secret`` (49) and
+#: ``web_read`` (71) raises, so the ratchet stays tight — and the tighten band
+#: below (1,200) is nowhere near tripped.
+#:
+#: The alternative to paying the pointer is not a smaller number: an agent that
+#: does not know the scheme exists has nowhere to put its own scratch work and
+#: puts it in the user's working directory, where it is indistinguishable from
+#: an output the user asked for. The pointer is the only discovery channel that
+#: costs nothing extra — the guide body is progressive disclosure and never
+#: rides the start context, and its description only rides a turn that selects
+#: it.
+BUDGET_BILLED_TOKENS = 28_000
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

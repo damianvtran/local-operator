@@ -162,3 +162,42 @@ def test_the_guard_would_have_caught_the_variables_bug(tmp_path) -> None:
     assert session._build_tool_context().variables is store
     session._variables = None  # exactly what the pre-fix code amounted to
     assert session._build_tool_context().variables is not store
+
+
+# ---------------------------------------------------------------------------
+# scratchpad_dir: DERIVED from the transcript, which is why it is not in the table
+# ---------------------------------------------------------------------------
+
+
+def _session_for(tmp_path, transcript_dir) -> Session:
+    return Session(
+        model=MODEL,
+        stream_fn=never_streams,
+        tools=[],
+        transcript=Transcript(transcript_dir),
+        system_blocks_provider=lambda: ["sys"],
+    )
+
+
+def test_scratchpad_dir_follows_the_transcript_directory(tmp_path) -> None:
+    """``scratchpad://`` resolves under the session's OWN directory, so the value
+    is derived per turn rather than accepted as a constructor argument — a
+    derived value cannot be configured by a host and then dropped, which is the
+    failure this whole module exists to catch."""
+    session = _session_for(tmp_path, tmp_path / "sessions" / "abc123")
+
+    assert session._build_tool_context().scratchpad_dir == str(
+        tmp_path / "sessions" / "abc123" / "scratchpad"
+    )
+
+
+def test_scratchpad_dir_is_none_for_an_agent_directory(tmp_path) -> None:
+    """``--train`` (and a named agent) keeps its transcript in ``agents/<id>/``,
+    which ``AgentRegistry.export_agent`` zips whole and publishes — a scratch
+    folder there would ship to strangers. No scratchpad root, and none
+    created."""
+    transcript_dir = tmp_path / "agents" / "abc123"
+    session = _session_for(tmp_path, transcript_dir)
+
+    assert session._build_tool_context().scratchpad_dir is None
+    assert not (transcript_dir / "scratchpad").exists()

@@ -421,6 +421,65 @@ async def _until(predicate, timeout_s: float = 3.0) -> None:
     raise AssertionError("the condition never became true")
 
 
+#: Slack the ladder guard carries over the ladder's own schedule. The guard is
+#: derived, never a literal: see `_ladder_exhausted`.
+_LADDER_GUARD_SLACK_S = 10.0
+
+
+async def _ladder_exhausted(
+    handle: ServingSessionHandle, *, timeout_s: float | None = None
+) -> None:
+    """Wait until the announcement ladder has STOPPED, or fail loudly.
+
+    The ladder runs one attempt per task and REPLACES ``handle._completion_task``
+    when it schedules the next rung — see the comment at that assignment in
+    ``serving.py``, which is the contract this rests on — so a slot still holding
+    the task that just finished is the ladder's own end-of-ladder signal: no
+    successor was scheduled, and that attempt's handback landed inside the task
+    before it returned. Awaiting those tasks IS awaiting the event R7 is about; a
+    banner CALL COUNT is only a proxy for it, and a wrong one in both directions:
+
+    - ``len(calls) >= 4`` goes true the moment the fourth attempt ENTERS its
+      sink — inside ``detached_notify``, BEFORE that attempt's
+      ``release_delivery`` — so the read lands on the claim the attempt is still
+      holding (CI run 35377466211 died on the same line, and the base rate is
+      measured at 8 in 120 runs under CI-like concurrency).
+    - A count is still a wall-clock bet even when it is not read too early:
+      ``_until``'s 3 s bound expires before a slowed ladder runs out its rungs,
+      and that is the SAME defect reported as the other signature,
+      ``AssertionError: the condition never became true``.
+
+    ``timeout_s`` defaults to the ladder's OWN schedule plus slack, read from the
+    module the ladder schedules from, so a caller that compresses the delays
+    (``_fast_ladder``) compresses the guard with them and a caller that does not
+    gets one wider than the production 2 + 8 + 30 s. A literal here would be a
+    bound a caller could silently undercut: the compressed test would be guarded
+    by 30 s while standing in for a 40 s schedule.
+    """
+    if timeout_s is None:
+        import local_operator.session.runtime.serving as serving_module
+
+        timeout_s = sum(serving_module._COMPLETION_RETRY_DELAYS_S) + _LADDER_GUARD_SLACK_S
+    guard = asyncio.timeout(timeout_s)
+    try:
+        async with guard:
+            while True:
+                task = handle._completion_task
+                if task is None:
+                    # NEVER SCHEDULED, which from here is indistinguishable from
+                    # an exhausted ladder — the slot is the only handle this
+                    # helper has on it. The caller pins which one it is: the rung
+                    # count below, so this cannot pass vacuously either way.
+                    return
+                await task
+                if handle._completion_task is task:
+                    return
+    except TimeoutError as error:
+        if not guard.expired():
+            raise
+        raise AssertionError("the completion ladder never exhausted") from error
+
+
 def _fast_ladder(monkeypatch, *delays: float) -> None:
     """Compress the ladder's DELAYS, never its shape.
 
@@ -570,9 +629,30 @@ async def test_an_exception_after_the_claim_hands_it_back(
         session_id = handle._session_id_for_resume()
         token = _publish("complete", session_id)
         handle._schedule_completion_announce()
-        await _until(lambda: calls)
         # Every attempt fails, so the ladder exhausts and the claim is free.
-        await _until(lambda: len(calls) >= 4)
+        #
+        # Wait for the LADDER, never for a count of banner calls: `len(calls) >= 4`
+        # becomes true as the fourth attempt ENTERS its sink, inside
+        # `detached_notify` and before that attempt hands the claim back, so the
+        # assertion below can read the watermark the attempt is still holding.
+        # Both reported signatures are that one defect — see `_ladder_exhausted`.
+        await _ladder_exhausted(handle)
+        # ...and then pin the RUNG COUNT the wait no longer proves. Waiting on the
+        # ladder's own end makes the wait honest, but a ladder whose successor is
+        # created and never stored in `_completion_task` also looks exhausted after
+        # ONE rung — QA round 1's `leakslot` mutation, which this test passed — and
+        # so does a completion that rung 2 or 3 answers, where no delivery is ever
+        # attempted and the claim assertion below would pass vacuously because
+        # nothing took the claim. The count is the effective schedule, so a
+        # compressed ladder (`_fast_ladder`) expects its own number of rungs.
+        import local_operator.session.runtime.serving as serving_module
+
+        rungs = 1 + len(serving_module._COMPLETION_RETRY_DELAYS_S)
+        assert len(calls) == rungs, (
+            f"the ladder ran {len(calls)} rung(s), expected {rungs}: either no delivery "
+            f"was attempted at all, or a rung scheduled a successor the handle never "
+            f"stored in `_completion_task`"
+        )
         assert _delivered(session_id, token) is False, "the claim survived a raise"
     finally:
         await session.dispose()

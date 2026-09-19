@@ -26,14 +26,32 @@ export function WorkingLine({
 	startedS,
 }: {
 	activity: string;
-	startedS: number;
+	startedS: number | null;
 }) {
 	const [frame, setFrame] = useState(0);
-	const [elapsed, setElapsed] = useState(startedS);
+	const [elapsed, setElapsed] = useState(startedS ?? 0);
+	/* The wire says whether an instant EXISTS, and that is the whole gate: `null`
+	 * is a phase the server has no honest instant for (a label joined mid-flight
+	 * whose producer stated none) and renders no digits, while `0.0` is a KNOWN
+	 * zero — the phase edge the server watched begin — and renders `0s` from the
+	 * first frame and counts up, exactly as the TUI's working block does
+	 * (`transcript.py` `_clock = self._clock_text() if self._clock_known else ""`,
+	 * with the zero being the phase's own start).
+	 *
+	 * The previous head gated on `startedS > 0` instead, which conflated the two:
+	 * every phase edge publishes 0.0, so the band went blank for the whole life of
+	 * any phase the phone watched begin — including a single running tool call,
+	 * the "is this stuck?" reading the clock exists for (review round 2, MAJOR 1).
+	 * Withholding is now exactly "the server said it has no instant".
+	 *
+	 * Either way the SLOT stays reserved by the width class below, so withholding
+	 * cannot reflow the label beside it — the same cells the TUI keeps reserved
+	 * when its own clock is withheld. */
+	const hasClock = startedS !== null;
 
 	/* Re-seed the clock when the server sends a new phase or a fresh age. */
 	useEffect(() => {
-		setElapsed(startedS);
+		setElapsed(startedS ?? 0);
 	}, [activity, startedS]);
 
 	useEffect(() => {
@@ -64,8 +82,17 @@ export function WorkingLine({
 			<span className="lo-shimmer min-w-0 flex-1 truncate text-ink-muted">
 				{activity}
 			</span>
-			<span className="shrink-0 font-mono text-mono-sm text-ink-dim tabular-nums">
-				{formatElapsed(elapsed)}
+			{/* The clock's SLOT is reserved, not measured: ``w-[6ch]`` is the width of
+			 * the widest form the formatter can produce (``59m59s``/``41d16h``/
+			 * ``100d+``), right-aligned so the digits grow leftward into their own
+			 * space. The TUI reserves ``WorkingBlock._CLOCK_COL`` for exactly this
+			 * reason — an unreserved clock re-clips the label as the number changes
+			 * form, so at 320px the label read 38 characters at ``1h`` and 28 at
+			 * ``1000h 40m`` and jumped 5 characters in the single tick across the
+			 * ``59m 59s`` → ``1h`` crossing (design round 1 D2). Reserved cells also
+			 * make withholding free: an empty slot is the same width as a full one. */}
+			<span className="w-[6ch] shrink-0 text-right font-mono text-mono-sm text-ink-dim tabular-nums">
+				{hasClock ? formatElapsed(elapsed) : ""}
 			</span>
 		</div>
 	);

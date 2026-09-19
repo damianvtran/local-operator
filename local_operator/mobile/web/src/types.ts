@@ -136,7 +136,14 @@ export interface SubagentRow {
 	status: SubagentStatus;
 	/** Latest step line while running. */
 	progress: string;
-	elapsed_s: number;
+	/** The child's age in seconds, or `null` when this roster has no age for it.
+	 *
+	 * `null` is NOT `0`: the roster computes an age only for a child whose job row
+	 * carries a start, and the drill-in renders whatever it gets through the
+	 * `WorkingLine` gate — where a plain `0` from an ageless child used to license
+	 * a `0s` clock counting from the viewer's own mount, while the TUI withholds
+	 * that number (design round 3, D8). Withholding is now expressible. */
+	elapsed_s: number | null;
 	model_label: string;
 	/** Settled outcome, one line. */
 	result_text: string;
@@ -212,8 +219,14 @@ export interface SessionProjection {
 	/** What the turn is doing right now, TUI-working-line style: "thinking",
 	    "responding", or a running tool's intent. Empty when idle. */
 	activity: string;
-	/** Seconds since the activity began (server-computed). */
-	activity_started_s: number;
+	/** Seconds since the activity began (server-computed), or `null` when the
+	    server has no instant it can honestly date the phase from — a label the
+	    fold joined mid-flight whose producer stated none. `null` means WITHHOLD
+	    the digits, not `0`: a known zero is a real reading (`0.0`, the phase edge
+	    the server watched begin) and paints `0s` and counts up. One nullable
+	    number carries both because the client's only question is whether an
+	    instant exists, and a value-plus-flag pair could disagree with itself. */
+	activity_started_s: number | null;
 	/** Why streaming last stopped — "completed" | "aborted" | "" before the
 	    first turn ends. The resume affordance reads this, never an inference
 	    from the streaming flag flipping. */

@@ -219,6 +219,22 @@ def test_system_md_teaches_eval_digest_pipeline() -> None:
     assert "spill://" in text
 
 
+def test_system_md_points_scratch_work_at_the_scratchpad() -> None:
+    """The pointer must name the scheme, say what it is FOR, and name the guide
+    explicitly — guides are selected semantically per task, so a bare "read the
+    notes guide" would be unresolvable on a turn that did not select one.
+    """
+    # Normalized: the source is hard-wrapped, so an asserted phrase may
+    # straddle a line break.
+    text = " ".join(render_template("system.md", {}).split())
+    assert "`scratchpad://`" in text
+    assert "read scratchpad://" in text
+    assert "guide://scratchpad" in text
+    # It rides the cached prefix of every call, so the paragraph stays small:
+    # the guide carries the detail.
+    assert text.count("scratchpad://") <= 6
+
+
 def test_system_md_frames_the_web_as_a_verification_surface() -> None:
     """Verification must not be defined as a closed set of LOCAL actions.
 

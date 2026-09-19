@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any
 
 import pytest
 
@@ -37,11 +37,9 @@ from local_operator.harness.types import (
 )
 from local_operator.jobs import JobManager, JobStatus
 from local_operator.scheduler_service import SchedulerService
+from local_operator.server.utils.event_broker import EventBroker, job_channel
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.types import OperatorType, Schedule, ScheduleUnit
-
-if TYPE_CHECKING:
-    from local_operator.server.utils.websocket_manager import WebSocketManager
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -197,16 +195,6 @@ class SlowSessionFactory(FakeSessionFactory):
         return session
 
 
-class RecordingWebSocketManager:
-    """Captures broadcast calls (websocket-manager shaped)."""
-
-    def __init__(self):
-        self.broadcasts: list[tuple[str, dict[str, Any]]] = []
-
-    async def broadcast(self, message_id: str, data: dict[str, Any], connection_type=None):
-        self.broadcasts.append((message_id, dict(data)))
-
-
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
 # ---------------------------------------------------------------------------
@@ -258,7 +246,7 @@ def _add_schedule(registry: AgentRegistry, agent_id: str, **overrides: Any) -> S
 def _make_service(
     registry: AgentRegistry,
     job_manager: JobManager | None = None,
-    websocket_manager: Any = None,
+    event_broker: EventBroker | None = None,
 ) -> SchedulerService:
     return SchedulerService(
         agent_registry=registry,
@@ -268,9 +256,7 @@ def _make_service(
         operator_type=OperatorType.CLI,
         verbosity_level=VerbosityLevel.QUIET,
         job_manager=job_manager or JobManager(),
-        websocket_manager=cast(
-            "WebSocketManager", websocket_manager if websocket_manager is not None else object()
-        ),
+        event_broker=event_broker,
     )
 
 
@@ -311,8 +297,8 @@ async def test_one_time_fires_once_and_pops(registry, monkeypatch):
     factory = FakeSessionFactory()
     monkeypatch.setattr(session_factory, "create_session", factory)
     job_manager = JobManager()
-    ws_manager = RecordingWebSocketManager()
-    service = _make_service(registry, job_manager, ws_manager)
+    broker = EventBroker()
+    service = _make_service(registry, job_manager, broker)
     agent = _make_agent(registry)
     schedule = _add_schedule(
         registry,
@@ -344,12 +330,15 @@ async def test_one_time_fires_once_and_pops(registry, monkeypatch):
         state = registry.load_agent_state(agent.id)
         assert all(s.id != schedule.id for s in state.schedules)
 
-        # Ledger + broadcast captured the outcome
+        # Ledger + SSE stream captured the outcome. The socket fan-out that
+        # used to be asserted here was the second destination for the same
+        # frame; the SSE broker is now the only one (the /v1/ws transport was
+        # removed).
         job = job_manager.jobs[job_id]
         assert job.result is not None
         assert job.result.response and "scheduled response" in job.result.response
-        broadcasts = ws_manager.broadcasts
-        assert any(b[0] == job_id and b[1].get("status") == "completed" for b in broadcasts)
+        streamed = broker.retained(job_channel(job_id))
+        assert any(ev.data.get("status") == "completed" for ev in streamed)
 
         # Extra scheduler ticks: a one-time schedule never fires twice
         await asyncio.sleep(2.0)
@@ -553,11 +542,18 @@ async def test_run_timeout_records_failed_and_disposes(registry, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_websocket_shape_mismatch_degrades_gracefully(registry, monkeypatch):
+async def test_a_missing_event_broker_still_completes_the_run(registry, monkeypatch):
+    """The scheduler's SSE fan-out is optional: absent, the run must still land.
+
+    This replaces the case that asserted graceful degradation against a
+    websocket manager shaped wrong - that manager, and the fan-out it stood in
+    for, no longer exist. The surviving optional dependency is the broker, so
+    this pins the same property for the one that is left.
+    """
     factory = FakeSessionFactory()
     monkeypatch.setattr(session_factory, "create_session", factory)
     job_manager = JobManager()
-    service = _make_service(registry, job_manager, websocket_manager=object())
+    service = _make_service(registry, job_manager, event_broker=None)
     agent = _make_agent(registry)
     schedule = _add_schedule(
         registry, agent.id, one_time=False, interval=5, unit=ScheduleUnit.MINUTES

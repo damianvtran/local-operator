@@ -818,7 +818,10 @@ def project_settled_rows(
         COMPACTION_REFUSED_TYPE,
     )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
-    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.harness.message_types import (
+        PEER_MESSAGE_MESSAGE_TYPE,
+        SESSION_INCIDENT_MESSAGE_TYPE,
+    )
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
     # hosts so neither owns them: every divergence the convergence review
@@ -1035,6 +1038,22 @@ def project_settled_rows(
                 self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
                 appended = True
                 continue
+            # A credential-shape incident — the operator's rotation ticket for a
+            # credential that reached a tool result. It has its own branch for the
+            # reason every row above does: a custom message with no branch falls
+            # through all of them and past the role-based handling below, so the
+            # row rendered NOWHERE. Measured on the live run before this branch:
+            # the persisted row folded to a blank frame, and the model was the
+            # only reader that ever saw it.
+            #
+            # `warning` ink: the text asks the operator to rotate a credential.
+            if getattr(message, "custom_type", None) == SESSION_INCIDENT_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                text = str(details.get("text", "")).strip()
+                if text:
+                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    appended = True
+                continue
             # The compaction boundary itself. The replay layer has always
             # emitted this row, and it rendered as NOTHING: it is a custom
             # message, so it fell past every branch above and then past the
@@ -1151,10 +1170,18 @@ def project_settled_rows(
             # rather than mounting-then-removing: it has the settled message in
             # hand and no streaming to show, so not mounting avoids the
             # multi-block arrangement seam the live path cannot avoid.
-            hidden = hide_narration and is_intermediate_narration(
+            #
+            # Classified ONCE for this message and read twice below: the mount
+            # decision (`display.narration` OFF) and the RAIL mark. The rail
+            # marks the ANSWER, so a resumed session has to reproduce the
+            # un-railed progress sentence the live one painted — a second read
+            # of these two fields here is how the two surfaces come to disagree
+            # about which block earned the mark.
+            narration = is_intermediate_narration(
                 stop_reason=getattr(message, "stop_reason", None),
                 has_tool_calls=bool(tool_calls),
             )
+            hidden = hide_narration and narration
             if assistant_row_text(text) and not hidden:
                 block = AssistantBlock()
                 block.completion_anchor_id = str(getattr(message, "id", ""))
@@ -1162,6 +1189,23 @@ def project_settled_rows(
                 # fold ladder on every update, and a hint set afterwards would
                 # only reach a rebuild that has already happened.
                 block.set_fold_hint(fold_width)
+                # And marked SETTLED before it too, for the same rate reason and
+                # a second one: every row this pass projects belongs to a message
+                # the engine has already committed to the transcript, so it has
+                # stopped arriving and there is no streaming frame to paint. Left
+                # to `finalize_text` alone, the first `update_text` would author
+                # the whole lane with no rail and the commit would then re-fold
+                # the same message two cells narrower — a discarded paint per
+                # row, at a width these rows are never seen at (review round 1, R2).
+                block.mark_settled()
+                # And marked narration before it too, for exactly that reason: the
+                # rail is read at paint rate, so a mark applied after
+                # `update_text` would leave the rows this call authors carrying a
+                # rail the next rebuild drops. Replay is a REPLAY of the live
+                # frame, and the live one is marked in the same order at
+                # `app.py::on_assistant_message_end`.
+                if narration:
+                    block.mark_narration()
                 block.update_text(text)
                 block.finalize_text()
                 self._append_block(block)

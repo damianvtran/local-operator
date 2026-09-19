@@ -660,9 +660,10 @@ def test_coerce_compaction_reads_legacy_max_threshold_tokens() -> None:
 def test_train_false_named_agent_uses_ephemeral_dir(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
     agent = cast("AgentData", SimpleNamespace(id="a1"))
-    directory, agent_id = _transcript_dir_and_agent_id(
+    directory, agent_id, is_new = _transcript_dir_and_agent_id(
         agent, _args(train=False), cast("AgentRegistry", registry)
     )
+    assert is_new is True  # an id nothing has ever used
     # Ephemeral session dir — NOT the agent dir: no replay, no append.
     assert directory.parent == tmp_path / "sessions"
     assert directory.name != "a1"
@@ -672,28 +673,31 @@ def test_train_false_named_agent_uses_ephemeral_dir(tmp_path: Path) -> None:
 def test_train_true_named_agent_uses_agent_dir(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
     agent = cast("AgentData", SimpleNamespace(id="a1"))
-    directory, agent_id = _transcript_dir_and_agent_id(
+    directory, agent_id, is_new = _transcript_dir_and_agent_id(
         agent, _args(train=True), cast("AgentRegistry", registry)
     )
     assert directory == tmp_path / "agents" / "a1"
     assert agent_id == "a1"
+    assert is_new is False  # an agent DIRECTORY, not a session
 
 
 def test_train_true_no_agent_uses_autosave(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
-    directory, agent_id = _transcript_dir_and_agent_id(
+    directory, agent_id, is_new = _transcript_dir_and_agent_id(
         None, _args(train=True), cast("AgentRegistry", registry)
     )
     assert registry.autosave_calls == 1
     assert directory == tmp_path / "agents" / "autosave-1"
+    assert is_new is False  # the autosave agent's directory, as above
     assert agent_id == "autosave-1"
 
 
 def test_no_train_no_agent_is_ephemeral(tmp_path: Path) -> None:
     registry = FakeRegistry(tmp_path)
-    directory, agent_id = _transcript_dir_and_agent_id(
+    directory, agent_id, is_new = _transcript_dir_and_agent_id(
         None, _args(train=False), cast("AgentRegistry", registry)
     )
+    assert is_new is True
     assert directory.parent == tmp_path / "sessions"
     assert agent_id == "main"
     assert registry.autosave_calls == 0
@@ -1054,16 +1058,20 @@ class FakeSessionShell(Session):
         self.mcp_manager = None
         self.mcp_startup = None
         self._dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
+        self._final_dispose_hooks: list[Callable[[], Awaitable[None] | None]] = []
 
     def refresh_tools(self, tools) -> None:
         self.tools = list(tools)
 
-    def add_dispose_hook(self, hook) -> None:
-        self._dispose_hooks.append(hook)
+    def add_dispose_hook(self, hook, *, last: bool = False) -> None:
+        # ``last`` mirrors ``Session.add_dispose_hook``, including the ordering it
+        # buys: a late hook is what may still WRITE to the resource the ordinary
+        # hooks need, so it runs after all of them however early it registered.
+        (self._final_dispose_hooks if last else self._dispose_hooks).append(hook)
 
     async def dispose(self) -> None:
         self.disposed += 1
-        for hook in self._dispose_hooks:
+        for hook in [*self._dispose_hooks, *self._final_dispose_hooks]:
             outcome = hook()
             if inspect.isawaitable(outcome):
                 await outcome
@@ -1875,11 +1883,14 @@ def test_resume_reuses_the_named_session_directory(tmp_path: Path) -> None:
     (sessions / "abc123" / "transcript.jsonl").write_text("{}\n", encoding="utf-8")
     registry = FakeRegistry(tmp_path)
 
-    directory, agent_id = session_factory._transcript_dir_and_agent_id(
+    directory, agent_id, is_new = session_factory._transcript_dir_and_agent_id(
         None, _args(resume="abc123"), cast("AgentRegistry", registry)
     )
     assert directory == sessions / "abc123"
     assert agent_id == "main"
+    # A strict resume only resolves a conversation that exists, so it is never
+    # "new" — which is what stops the escape stamp hiding the operator's own.
+    assert is_new is False
 
 
 def test_resume_latest_picks_the_newest_transcript(tmp_path: Path) -> None:
@@ -1896,10 +1907,11 @@ def test_resume_latest_picks_the_newest_transcript(tmp_path: Path) -> None:
         os.utime(transcript, (when, when))
     registry = FakeRegistry(tmp_path)
 
-    directory, _ = session_factory._transcript_dir_and_agent_id(
+    directory, _, is_new = session_factory._transcript_dir_and_agent_id(
         None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
     )
     assert directory == sessions / "newer"
+    assert is_new is False
 
 
 def test_resume_latest_skips_a_subagent_that_finished_last(tmp_path: Path) -> None:
@@ -1919,10 +1931,11 @@ def test_resume_latest_skips_a_subagent_that_finished_last(tmp_path: Path) -> No
     resume_mod.mark_session_origin(sessions / "child", resume_mod.ORIGIN_SUBAGENT, label="review")
     registry = FakeRegistry(tmp_path)
 
-    directory, _ = session_factory._transcript_dir_and_agent_id(
+    directory, _, is_new = session_factory._transcript_dir_and_agent_id(
         None, _args(resume=resume_mod.RESUME_LATEST), cast("AgentRegistry", registry)
     )
     assert directory == sessions / "mine"
+    assert is_new is False
 
 
 def test_a_subagent_session_still_resumes_by_explicit_id(tmp_path: Path) -> None:
@@ -4303,3 +4316,340 @@ async def test_preload_tools_cannot_surface_a_tool_the_allowlist_excludes(monkey
     await wire_mcp_into_session(session, [builtin], ".")
     assert allowed in session.tools
     assert excluded not in session.tools
+
+
+# Ownership: the seam's resources are the session's to release
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_classification_seam_is_closed_on_dispose(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session's keep-alive client and its memos are released with everything else.
+
+    The shipped service opens ONE ``httpx.AsyncClient`` per session and memoizes the
+    resolved credential and the roster lines for that session's life; its ``aclose``
+    is documented as "the session owner calls this on dispose". Nothing called it —
+    the composition root registered its siblings (``attach_auth_dispose``,
+    ``attach_stream_dispose``) and not this one, so the pool and the memos were pinned
+    once per SESSION on the planes that keep sessions alive for hours (review round
+    1, M2). The service's own ``aclose`` test proves the method works; only this test
+    proves anyone calls it, so it is built through ``create_session`` — the
+    composition root is the claim — with the package's service class swapped for a
+    recorder, so a failure points at the dispose path rather than at the cascade.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    built: list[Any] = []
+
+    class _RecordingService:
+        def __init__(self, *, manager: Any, settings: Any = None) -> None:
+            self.closed = False
+            self.timeout_s = 1.5
+            built.append(self)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("local_operator.classification.ClassificationService", _RecordingService)
+    config = ConfigManager(tmp_config_dir)
+    config.set_config_value("classification", {"auto": True})
+
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        assert built, "the layer was on, so the composition root built the seam"
+        assert built[0].closed is False, "dispose has not run yet"
+    finally:
+        await session.dispose()
+
+    assert built[0].closed is True, "dispose must close the seam it created"
+
+
+@pytest.mark.asyncio
+async def test_dispose_abandons_a_classification_call_still_in_flight(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Nothing outlives the session, and the client is not closed under a live call.
+
+    On a real vendor a session disposed right after a message ALWAYS has one call
+    running — the turn waits 50 ms and the answer takes ~250 ms — and the round-1
+    hook closed the keep-alive client out from under it, which turned that call into
+    a transport error with a traceback whose answer nobody could use any more
+    (review round 2, MINOR 2). Cancelling first is the honest order, so this test
+    asserts the three things that order buys: the wrapper is cancelled, the seam is
+    still closed, and nothing logged a failure on the way.
+
+    Built through ``create_session`` with the seam CAPTURED off the real composition
+    root rather than hand-assembled: the claim is about the session's own dispose
+    path, and a double would prove only that a coroutine I wrote does what I wrote.
+    ``hooks.classifier`` is then replaced by a hanging seam — the documented
+    injection point — so the call is in flight on demand instead of when a vendor
+    feels like answering.
+    """
+    import asyncio
+    import contextlib
+    import logging
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    captured: list[Any] = []
+    real_attach = session_factory.attach_classification_dispose
+
+    def _capture(session: Any, hooks: Any) -> None:
+        captured.append(hooks)
+        real_attach(session, hooks)
+
+    monkeypatch.setattr(session_factory, "attach_classification_dispose", _capture)
+    config = ConfigManager(tmp_config_dir)
+    config.set_config_value("classification", {"auto": True, "waitMs": 50})
+
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    assert captured, "the composition root registers the seam's dispose hook"
+
+    started = asyncio.Event()
+    closed: list[bool] = []
+
+    class _HangingSeam:
+        """The seam contract, with the vendor holding the line forever."""
+
+        async def recommend_resources(self, request: Any) -> Any:
+            started.set()
+            await asyncio.sleep(30)
+            return None
+
+        def notice(self, recommendation: Any) -> str | None:
+            return None
+
+        async def aclose(self) -> None:
+            closed.append(True)
+
+    captured[0].classifier = _HangingSeam()
+    try:
+        await session_factory._select_knowledge_block(
+            captured[0], "a question about the tunnel", task_id="t1"
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        outstanding = [
+            call for call in captured[0].classification_outstanding if not call.task.done()
+        ]
+        assert outstanding, "the call must still be running for this test to mean anything"
+
+        with caplog.at_level(logging.WARNING):
+            await session.dispose()
+    finally:
+        # ``getattr``: ``create_session`` is typed as returning the protocol, and
+        # ``_disposed`` is the facade's own flag rather than part of it.
+        if not getattr(session, "_disposed", False):
+            await session.dispose()
+
+    for task in outstanding:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+    assert all(call.task.done() for call in outstanding), "the call outlived the session"
+    assert closed == [True], "dispose still closes the seam it opened"
+    assert captured[0].classification_outstanding == []
+    # The failure this replaces: the client closed under a live call logged a
+    # warning with a traceback, from the vendor leg.
+    noisy = [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert not noisy, [record.getMessage() for record in noisy]
+
+
+@pytest.mark.asyncio
+async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_is_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``warm_up`` runs where the seam is built, and nowhere else.
+
+    WHY A TEST rather than reading the call site: the prewarm only ever SAVES time, so
+    nothing fails when it is dropped — the cost simply arrives on a session's first
+    message instead, which no test notices and only a measurement shows. The
+    enabled-only half is a real constraint, not a detail: a session with the layer OFF
+    must not import the package, build a service or open a client. That case is named
+    explicitly (``auto: false``) rather than left to the absent key, which is ON by
+    default since 2026-09-18 — the flip made the old "no section means off"
+    assumption here wrong, and CI, not this file, caught it.
+
+    Counted on the METHOD rather than with a recording subclass, because a subclass
+    would inherit this stub and then prove nothing about the shipped body — which is
+    exactly how the first version of this test passed its own mistake. The shipped body
+    gets the test below it.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.classification import ClassificationService
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    warmed: list[str] = []
+    monkeypatch.setattr(ClassificationService, "warm_up", lambda self: warmed.append("warm"))
+
+    on_dir = tmp_path / "on"
+    on_config = ConfigManager(on_dir)
+    on_config.set_config_value("classification", {"auto": True})
+    on_session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        on_config,
+        CredentialManager(on_dir),
+        AgentRegistry(on_dir),
+    )
+    try:
+        assert warmed == ["warm"], "the composition root must prewarm the seam it builds"
+    finally:
+        await on_session.dispose()
+
+    off_dir = tmp_path / "off"
+    off_config = ConfigManager(off_dir)
+    off_config.set_config_value("classification", {"auto": False})
+    off_session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        off_config,
+        CredentialManager(off_dir),
+        AgentRegistry(off_dir),
+    )
+    try:
+        assert warmed == ["warm"], "an install with the layer off must not prewarm"
+    finally:
+        await off_session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_prewarm_builds_the_client_and_starts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What ``warm_up`` actually does, on the body the session build calls.
+
+    Two claims, and the second is why this is not a network test: the keep-alive client
+    exists after session build (the object is the whole saving), and NO leg has been
+    built, so no request was made and no credential was read. Unstubbed, deliberately —
+    this is the shipped method, on the real service the composition root builds.
+    """
+    import httpx
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.classification import ClassificationService
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+
+    built: list[Any] = []
+
+    class _Recording(ClassificationService):
+        def __init__(self, *, manager: Any, settings: Any = None) -> None:
+            super().__init__(manager=manager, settings=settings)
+            built.append(self)
+
+    monkeypatch.setattr("local_operator.classification.ClassificationService", _Recording)
+    config = ConfigManager(tmp_path)
+    config.set_config_value("classification", {"auto": True})
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        config,
+        CredentialManager(tmp_path),
+        AgentRegistry(tmp_path),
+    )
+    try:
+        assert built, "the layer was on, so a service was built"
+        assert isinstance(
+            getattr(built[0], "_http", None), httpx.AsyncClient
+        ), "session build must build the keep-alive client, or the prewarm is a no-op"
+        assert built[0]._vendors == {}, "no leg may be built — that would be a credential read"
+    finally:
+        await session.dispose()
+
+
+# The credential store is the resource the OTHER teardowns write to
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_auth_store_is_closed_after_the_mcp_teardown(
+    tmp_config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dispose must close the credential store LAST, whatever order things registered in.
+
+    This is the ordering the whole "MCP grants survive a session exit" story
+    rests on, and it was wrong in a way a unit test could not see: dispose hooks
+    ran in REGISTRATION order, ``attach_auth_dispose`` registered the store's
+    close during ``create_session``, and the MCP teardown registered its own
+    ``disconnect_all`` much later — immediately, on the eager path, and from a
+    background task on the deferred one. So the store closed FIRST, and the MCP
+    teardown that follows it is exactly the code that needs the store: a refresh
+    exchange detached mid-POST persists the authorization server's rotation when
+    its answer lands, and a closed store made that write fail at DEBUG while the
+    caller was told it had succeeded. The row then kept the SPENT refresh token
+    plus a live ``grant_refresh_unconfirmed`` marker, so every later connect
+    refused to refresh for up to an hour and told the user to run ``/mcp reauth``
+    — which deletes the credential and demands a browser grant.
+
+    Built through ``create_session`` — the composition root is the claim — with
+    the MCP wiring swapped for the manager double this file already uses, since
+    the assertion is about the ORDER of the real dispose path and not about the
+    SDK. ``AuthStore.close`` is observed by wrapping the real method rather than
+    by standing a store in for it, so what is recorded is the real close on the
+    real store the session owns.
+    """
+    from local_operator.agents import AgentRegistry
+    from local_operator.config import ConfigManager
+    from local_operator.credentials import CredentialManager
+    from local_operator.providers.auth_store import AuthStore
+
+    order: list[str] = []
+    real_close = AuthStore.close
+
+    def _recording_close(self: Any) -> None:
+        order.append("auth_store.close")
+        real_close(self)
+
+    monkeypatch.setattr(AuthStore, "close", _recording_close)
+
+    class _RecordingManager(FakeMcpManager):
+        async def disconnect_all(self) -> None:
+            order.append("mcp.disconnect_all")
+            await super().disconnect_all()
+
+    manager = _RecordingManager()
+
+    async def _fake_wire(*args: Any, **kwargs: Any) -> Any:
+        return manager
+
+    monkeypatch.setattr(session_factory, "wire_mcp_into_session", _fake_wire)
+
+    session = await session_factory.create_session(
+        _args(hosting="test", model="test", yolo=True),
+        ConfigManager(tmp_config_dir),
+        CredentialManager(tmp_config_dir),
+        AgentRegistry(tmp_config_dir),
+    )
+    try:
+        # Recorded from here on: the session's own store closes only at dispose,
+        # and the earlier entries in ``order`` (an unrelated temporary store that
+        # construction closes while resolving the model catalogue) are filtered
+        # out by the tail assertion below rather than pretended away.
+        order.clear()
+    finally:
+        await session.dispose()
+
+    # The TAIL is the claim, not the whole list: construction closes an unrelated
+    # temporary store of its own while resolving the model catalogue
+    # (``model/configure.py``'s ``_oauth_listing_token``), so an equality assert
+    # over everything ever closed would pin that unrelated lifetime too. What
+    # matters here is that at dispose the MCP teardown runs and the session's
+    # store closes after it.
+    assert order[-2:] == ["mcp.disconnect_all", "auth_store.close"], (
+        "the credential store must be closed AFTER the MCP teardown — a rotation "
+        "still in flight at teardown is persisted through it, and closing first "
+        f"is what loses it (order was {order!r})"
+    )

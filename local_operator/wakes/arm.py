@@ -71,6 +71,7 @@ from local_operator.harness.wake import (
     build_wake_edit,
     build_wake_schedule,
 )
+from local_operator.session.transcript import read_latest_custom_entry
 from local_operator.wakes.lock import WakeLockBusy, WakeLockUnavailable, WakeWriteLock
 
 logger = logging.getLogger(__name__)
@@ -918,8 +919,16 @@ def _read_rows(session_dir: Path) -> list[WakeSchedule]:
     absent for a session that has never been opened, and the append below
     REPLACES the list — so a stale base is how a live reminder gets cancelled
     by an unrelated edit.
+
+    Read through :func:`read_latest_custom_entry`, NOT ``Transcript``. Both
+    answer the same one-row question, but ``Transcript.__init__`` parses the
+    WHOLE journal to do it: measured 8.84 s and 885 MB of traced peak on the
+    operator's 262 MB transcript, and this function runs twice per arm attempt
+    (plus once more on the rollback settle), i.e. 2-4 whole-journal parses to
+    answer one question about one row. The backward reader is 17 ms and is the
+    same reader the desktop's own checkpoint lookups use.
     """
-    entry = _transcript(session_dir).latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+    entry = read_latest_custom_entry(session_dir, WAKE_SCHEDULES_CUSTOM_TYPE)
     if entry is None:
         return []
     details = entry.payload.get("details")
@@ -947,7 +956,10 @@ def _read_rows(session_dir: Path) -> list[WakeSchedule]:
 
 
 def _latest_entry_id(session_dir: Path) -> str | None:
-    entry = _transcript(session_dir).latest_custom_entry(WAKE_SCHEDULES_CUSTOM_TYPE)
+    # The same bounded reader as ``_read_rows``, and for the same reason: this
+    # asks one row's id, and the whole-journal parse it used to pay for is the
+    # cost the arm path's rollback settle (``:720``) also pays.
+    entry = read_latest_custom_entry(session_dir, WAKE_SCHEDULES_CUSTOM_TYPE)
     return entry.id if entry is not None else None
 
 

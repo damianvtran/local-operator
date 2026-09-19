@@ -40,6 +40,7 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
 )
+from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.session.protocol import SessionProtocol
 
 #: One-line tool rows get truncated to this many columns (TUI minimalism).
@@ -67,10 +68,10 @@ def _stripped(value: Any) -> Any:
     return value
 
 
-def printable_event(event: AgentEvent) -> dict[str, Any]:
+def printable_event(event: AgentEvent, *, session_id: str | None = None) -> dict[str, Any]:
     """Shape an event for ``--json`` output.
 
-    Removes two classes of bloat so transcripts grow linearly with
+    Removes three classes of bloat so transcripts grow linearly with
     conversation size instead of quadratically (a single long turn used to
     re-serialize its whole in-progress message on every streamed delta,
     producing multi-GB logs — fixed by forwarding only deltas):
@@ -79,15 +80,36 @@ def printable_event(event: AgentEvent) -> dict[str, Any]:
       incremental ``delta`` is printed. The authoritative message follows in
       ``message_end``.
     - ``provider_payload`` is stripped everywhere it appears.
+    - an ``agent_end`` frame — which carries the turn's WHOLE conversation — is
+      bounded to ``harness.wire.AGENT_END_FRAME_BUDGET_BYTES``. Its tool rows
+      are already on this stream as ``tool_execution_end`` events, so shipping
+      them again in the aggregate doubles the turn's bytes, and on this path
+      the size is not a matter of taste: supervisors read this stream with a
+      4 MiB ``bufio.Scanner`` and fail the whole run on ``scanner.Err()``.
+      Elided tool rows say so and name the transcript entry holding the text.
+
+    ``session_id`` is stamped onto every emitted line — see the call site for
+    why the stamp is per line rather than per stream — and is also what lets an
+    elision marker name the session whose transcript holds what was cut.
     """
     if isinstance(event, MessageUpdateEvent):
-        return {
+        payload: dict[str, Any] = {
             "type": "message_update",
             "message_id": event.message.id,
             "delta": event.delta,
         }
-    data = event.model_dump(mode="json")
-    return strip_provider_payload(data)
+    else:
+        payload = strip_provider_payload(event.model_dump(mode="json"))
+    # THE STAMP GOES ON WHATEVER THIS FUNCTION RETURNS, on every branch. It used
+    # to live at the call site, after shaping; moving it in here without moving
+    # it past the early return above dropped the session id from exactly the
+    # most frequent line type on the stream — the one a supervisor's per-line
+    # filter sees most — which is unrecoverable for a stateless reader and is
+    # what `test_every_emitted_line_carries_the_session_id` now pins (it would
+    # have caught that).
+    if session_id:
+        payload.setdefault("session_id", session_id)
+    return bound_agent_end_for_wire(payload, session_id=session_id)
 
 
 class PrintRenderer:
@@ -147,15 +169,15 @@ class PrintRenderer:
         """Event handler for ``session.subscribe`` (sync; the harness accepts
         sync or async handlers)."""
         if self.json_mode:
-            payload = printable_event(event)
-            # Stamp the session on EVERY line rather than once in a header.
-            # External supervisors parse this stream line-by-line and
-            # statelessly (Minerva's sentinel runner is a per-line jq filter),
-            # so a header they happened to start after is unrecoverable — and
-            # the id is what lets them resume the session later.
-            session_id = self.session_id
-            if session_id:
-                payload.setdefault("session_id", session_id)
+            # The session id is stamped on EVERY line rather than once in a
+            # header, inside ``printable_event``. External supervisors parse
+            # this stream line-by-line and statelessly (Minerva's sentinel
+            # runner is a per-line jq filter), so a header they happened to
+            # start after is unrecoverable — and the id is what lets them
+            # resume the session later. It is also what makes an elided tool
+            # row's marker resolvable, which is why the shaping function is the
+            # one that stamps it.
+            payload = printable_event(event, session_id=self.session_id)
             sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
             sys.stdout.flush()
             self._track_outcome(event)

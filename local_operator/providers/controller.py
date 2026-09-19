@@ -48,6 +48,7 @@ from local_operator.providers.registry import (
     credential_file_names,
     credential_provider_id,
     get_provider_definition,
+    is_decision_only,
     list_login_providers,
     resolve_env_key,
 )
@@ -258,6 +259,24 @@ class ControllerAuthStore(Protocol):
     def list_oauth_identities(self, provider: str) -> list["OAuthAccess"]: ...  # pragma: no cover
 
     async def get_api_key(self, provider: str) -> str | None: ...  # pragma: no cover
+
+
+def _chat_providers() -> list[ProviderDefinition]:
+    """The registry rows that may contribute CHAT models to a catalogue.
+
+    Decision-only providers (``registry.is_decision_only`` — TypeSafe's Jev) are
+    dropped HERE, at the one place every catalogue is assembled, rather than
+    inside the three builders below or in each consumer of them. A provider whose
+    wire rejects ``chat/completions`` on every host must not appear as a model
+    the user can pick: selecting one produced a session that could not answer a
+    single turn, which is a dead end the picker cannot explain (see
+    ``ProviderDefinition.decision_only``).
+
+    It also keeps the LIVE fetch honest: :func:`available_models` would otherwise
+    be asked to list a decision endpoint's models and offer them as chat models,
+    spending a network round trip to build a list that must not be shown.
+    """
+    return [definition for definition in PROVIDER_REGISTRY if not is_decision_only(definition.id)]
 
 
 class ProviderController:
@@ -1821,7 +1840,7 @@ class ProviderController:
         # reported as connected — see :meth:`usable_providers` for why the
         # degradation runs that way and not toward an empty list.
         usable = self.usable_providers()
-        for definition in PROVIDER_REGISTRY:
+        for definition in _chat_providers():
             connected = usable is None or definition.id in usable
             for model_id, info in static_models(definition.id).items():
                 entries.append(
@@ -1858,7 +1877,7 @@ class ProviderController:
         """
         entries: list[CatalogueEntry] = []
         usable = self.usable_providers()
-        for definition in PROVIDER_REGISTRY:
+        for definition in _chat_providers():
             connected = usable is None or definition.id in usable
             if definition.id in AGGREGATOR_PROVIDERS or definition.id == "deepseek":
                 models, _status = cached_available_models(definition.id, cache_dir=cache_dir)
@@ -2024,11 +2043,16 @@ class ProviderController:
         entries: list[CatalogueEntry] = []
         statuses: dict[str, str] = {}
         usable = self.usable_providers()
-        registry = (
-            PROVIDER_REGISTRY
-            if providers is None
-            else [defn for defn in PROVIDER_REGISTRY if defn.id in providers]
-        )
+        # ``_chat_providers()`` filters FIRST, so an explicit ``providers`` set
+        # naming a decision-only provider is honoured as "this catalogue request
+        # mentions it" and still contributes no rows: the caller is asking for a
+        # CHAT catalogue, which is the one thing such a provider can never feed.
+        # An empty collection stays literally empty.
+        registry = [
+            definition
+            for definition in _chat_providers()
+            if providers is None or definition.id in providers
+        ]
         oauth_context: dict[str, dict[str, int]] = {}
 
         async def _fetch_provider(

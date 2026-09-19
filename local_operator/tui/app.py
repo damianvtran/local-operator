@@ -78,6 +78,15 @@ from textual.widgets import Static
 
 from local_operator import keymap as _keymap
 from local_operator.ansi import strip_control_sequences
+
+# The approval gate's authorization rule, shared with the runtime host so the two
+# cannot drift on which writes may loosen a live gate (issue #1282). Pure and
+# import-cheap: `harness.approval` pulls in `inspect` and nothing else.
+from local_operator.harness.approval import (
+    LOOSENING_KEPT_BY_ASK_NOTICE,
+    LOOSENING_REFUSED_NOTICE,
+    loosening_is_authorised,
+)
 from local_operator.harness.intent import (
     ACTIVITY_RESPONDING,
     batch_activity,
@@ -120,6 +129,12 @@ from local_operator.model.effort import (
     resolve_effort_in,
 )
 from local_operator.providers.catalogue import picker_rows
+
+# The `@path` resolver. Module scope here, unlike in `command_picker.py` where
+# it is reached through a lazy seam: this module already imports the session
+# layer directly (`session.naming`, `session.goal_loop`, …), so the layering
+# objection that applies to a Textual WIDGET does not apply to the app.
+from local_operator.references import expand_references, scan_directory_report
 from local_operator.session import naming
 from local_operator.session.errors import RuntimeRetiring
 from local_operator.session.frontend_state import (
@@ -145,7 +160,13 @@ from local_operator.session.goal_loop import (
     _parse_loop_verdict,
 )
 from local_operator.session.protocol import SessionProtocol, ViewerSessionProtocol
-from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
+from local_operator.session.runtime.types import (
+    BUILD_DRAIN_PROGRESS_S,
+    LEAVING_FOR_BUILD,
+    LEAVING_FOR_BUILD_OVERDUE,
+    LEAVING_ON_SIGNAL,
+    bound_text,
+)
 from local_operator.slash_commands import (
     PERSIST_HINT,
     SLASH_COMMANDS,
@@ -200,6 +221,7 @@ from local_operator.tui.events import (
     WakeDelivered,
 )
 from local_operator.tui.glyphs import display_name
+from local_operator.tui.link_targets import LinkTarget, build_link_targets, is_openable
 from local_operator.tui.markdown_theme import (
     brand_markdown_theme,
     install_markdown_theme,
@@ -258,6 +280,7 @@ from local_operator.tui.widgets.editor import (
     EditorPasteEmpty,
     EditorQuit,
     EditorSubmitted,
+    FileQueryOpened,
     InlineCommandRequested,
     InterruptRequested,
     Marked,
@@ -274,6 +297,7 @@ from local_operator.tui.widgets.editor import (
     substitute_credentials,
 )
 from local_operator.tui.widgets.image_block import ImageBlock
+from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
 from local_operator.tui.widgets.org_chart_view import (
@@ -367,6 +391,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
     from local_operator.notifications import ComposedNotification, NotificationKind
     from local_operator.providers.controller import CatalogueEntry
     from local_operator.providers.oauth.callback_server import LoginCallbacks
+    from local_operator.session.store_failures import StoreFailure
     from local_operator.skills.discovery import Skill
     from local_operator.tui.widgets.info_panel import InfoScreen
     from local_operator.tui.widgets.session_panel import (
@@ -374,6 +399,7 @@ if TYPE_CHECKING:  # keeps the provider graph off the TUI's runtime import path
         SessionScreen,
     )
     from local_operator.variables import CredentialStoreFailure
+    from local_operator.web_search.models import ProviderStatus
 
 
 #: Lead of the `/model` footer clause for a provider whose live refresh FAILED
@@ -687,6 +713,34 @@ SIGNAL_DRAIN_NOTICE = (
     "so a new message will not start a turn"
 )
 
+#: The notice for a runtime that gave up WAITING for the work in flight
+#: (``LEAVING_FOR_BUILD_OVERDUE``): a build handover that was forced rather than
+#: waited out, which is a different departure from :data:`DRAIN_NOTICE` in its
+#: second clause and the same one in its first.
+#:
+#: WHY IT MAY NOT REUSE THE ORDINARY BUILD SENTENCE. That sentence's promise —
+#: "it is finishing in-flight work first" — is exactly what this runtime has
+#: stopped doing: it denies the parked gates, hands the wakes over and cuts the
+#: turn. Painting it at that instant would reassure the operator about the one
+#: thing that is not true, in the sentence people act on when they decide the
+#: session is safe to leave alone (design round 1, D1; QA round 1, Q-1, which
+#: measured the frame rendering byte-identical to the unplaceable-phrase
+#: fallback).
+#:
+#: THE SENTENCE SAYS WHAT WAS OBSERVED, NOT WHY. "no movement has been reported"
+#: is the runtime's own evidence — the clock reads reports of movement and a
+#: foreground step reports nothing until it lands, so "stalled" would assert a
+#: cause the runtime cannot establish (agent review round 1, R1). The bound is
+#: rendered from the constant rather than typed, like the signal notice's.
+#: It stays a sentence about the HANDOVER, not about the cut turn's contents: the
+#: operator's question is whether their session is coming back, and the answer is
+#: the same one the ordinary build notice gives.
+OVERDUE_DRAIN_NOTICE = (
+    "this session is switching to a newer build without waiting any longer: no "
+    f"movement has been reported from the work in flight for {bound_text(BUILD_DRAIN_PROGRESS_S)}, "
+    "so a new message will not start a turn until the new build is up"
+)
+
 #: The notice for a draining frame whose trigger this build cannot name — a
 #: phrase written by a NEWER runtime than the app reading it. Kept separate from
 #: :data:`DRAIN_NOTICE` on purpose, and it is the whole point of the split: a
@@ -697,6 +751,37 @@ DRAIN_NOTICE_OTHER = (
     "this session is finishing in-flight work first, so a new message will not " "start a turn"
 )
 
+#: What the viewer says when the runtime answers a prompt with the SPOOL receipt
+#: (``inbox.SPOOL_RECEIPT_PROMPT``) rather than the durable admission — the
+#: message was accepted, just not by the runtime that is leaving: it is on the
+#: successor's spool and the successor runs it.
+#:
+#: THERE IS NO NOTICE FOR THIS OUTCOME, and that is the correction rather than an
+#: omission. A receipt row beneath the message could only accumulate — one
+#: byte-identical line per send, four rows of the same event on one narrow frame
+#: — and it could never END: the row said "queued" just as loudly after the
+#: successor had run the message, and it was the only evidence the message
+#: existed at all (design round 1, D2 and D4; UX round 1, U3). So the state is
+#: painted ON the message's own row (:data:`local_operator.tui.widgets.transcript.QUEUED_ROW_TEXT`)
+#: and comes down when the successor announces that message — one statement, with
+#: an end.
+#:
+#: The rows below are the RECALL's two outcomes. The recall exists for the reason
+#: the neighbouring steer recall does: Enter committed the user's words to a
+#: process that may run them hours later, so the cancel key has to be able to
+#: take them back — and it says which of the two happened rather than leaving the
+#: press unacknowledged.
+QUEUED_PROMPT_TAKEN_BACK_NOTICE = "taken back — the next runtime had not picked it up yet"
+QUEUED_PROMPT_MISSED_NOTICE = "too late — the next runtime already has that message"
+QUEUED_PROMPT_DECLINE_NOTICE = "queued message kept — clear the composer, esc again to take it back"
+#: Shown when a viewer BINDS to a session whose spool already holds the owner's
+#: messages (``_on_runtime_draining``). A queued message is in no transcript and
+#: in no record — `pending` on the record is `"approval"`/`"ask"`, a parked
+#: person — so a front end that joins mid-drain otherwise cannot learn that the
+#: session has a message waiting for the build on disk, and the two surfaces
+#: disagree about what has been said here (UX round 1, U2).
+QUEUED_ELSEWHERE_NOTICE = "a message is queued for the next runtime — it runs when the session does"
+
 #: Which sentence a draining frame earns, keyed by the TRIGGER'S OWN WORDS — the
 #: ``leaving`` phrase the runtime publishes on its record and now sends in the
 #: frame, so the app and the fleet surfaces quote one vocabulary instead of two
@@ -706,6 +791,7 @@ DRAIN_NOTICE_OTHER = (
 _DRAIN_NOTICES: dict[str, str] = {
     LEAVING_FOR_BUILD: DRAIN_NOTICE,
     LEAVING_ON_SIGNAL: SIGNAL_DRAIN_NOTICE,
+    LEAVING_FOR_BUILD_OVERDUE: OVERDUE_DRAIN_NOTICE,
 }
 
 
@@ -2552,6 +2638,19 @@ class NoticeFn(Protocol):
     """
 
     def __call__(self, body: str, kind: NoticeKind = "info") -> None: ...
+
+
+class _QueuedPrompt(NamedTuple):
+    """One message this surface sent into a draining runtime's spool.
+
+    ``command_id`` is the SAME id the row was painted under and the runtime will
+    announce the message under — one identity through the whole handover, which
+    is what lets the marker come down on the announcement and the recall address
+    the spool row (`inbox.withdraw_inbox`).
+    """
+
+    command_id: str
+    text: str
 
 
 class _PendingUserEcho(NamedTuple):
@@ -4483,6 +4582,16 @@ class OperatorApp(App[None]):
         # contract. Held here for the same reason the two above are: the Esc
         # chain and every approval/ask/clear yield close it the same way.
         self._settings_view: Any | None = None
+        #: The KEY of a ``/settings`` page write this pane could not loosen — the
+        #: gate belongs to an attached runtime. Read and cleared by the page right
+        #: after its save (`_take_page_kept_loosening`), because
+        #: `SettingsView._save` clears the page's own message slots on success and
+        #: anything recorded during the write would be wiped by the line that
+        #: reports it. The SENTENCE lives on the page
+        #: (`SettingsView`'s alert ladder) because it is that surface's copy: it
+        #: is read with no transcript on screen, and it is shed by that line's own
+        #: rules.
+        self._page_kept_loosening: str | None = None
         self._settings_focus_restore: Any | None = None
         #: True while a ``/settings`` hotkey row is LISTENING for a key to
         #: bind. :meth:`check_action` reads it and disarms every app binding,
@@ -5096,6 +5205,26 @@ class OperatorApp(App[None]):
             source.notices.append((text, kind))
             del source.notices[:-64]
 
+    def _notice_block_for(
+        self, source: SessionInteraction, text: str, kind: Any = "info"
+    ) -> NoticeBlock | None:
+        """Like :meth:`_notice_for`, but hands back the row it painted.
+
+        For the notices that need an END (design round 2, D7): a state row that
+        is only ever added outlives the state it describes, so the caller keeps
+        the block and takes it down when the state does. ``None`` when the row
+        went to the interaction's bounded off-screen store instead of the
+        transcript — there is nothing to remove there, and the store's own bound
+        is what keeps it from growing.
+        """
+        if not self._is_current(source):
+            source.notices.append((text, kind))
+            del source.notices[:-64]
+            return None
+        block = NoticeBlock(text, kind)
+        self._append_block(block)
+        return block
+
     def _notice_unsent_runtime(self, source: SessionInteraction) -> None:
         """Print `UNSENT_RUNTIME_NOTICE` once per standing failure, not per press.
 
@@ -5688,7 +5817,7 @@ class OperatorApp(App[None]):
         runtime's discovery record (it is running, so its recorded ``cwd`` is
         current), then the wake index, which keeps a ``cwd`` for a session no
         process has open. This is the ladder ``tui/resume_click.py``'s
-        ``_session_cwd`` already uses, deliberately minus its ``~`` fallback:
+        ``session_cwd`` already uses, deliberately minus its ``~`` fallback:
         a notification may put a user in a plausible default, but the band's
         ``cwd`` rung renders as the conversation's own identity field, where a
         guess cannot be told apart from a recorded fact.
@@ -5827,6 +5956,16 @@ class OperatorApp(App[None]):
             source.controller.set_parked(True)
             source.controller.subscribe()
             self._watch_source_frontend(source)
+            # A PREWARMED SOURCE IS NOT ON SCREEN AND NEVER HAS BEEN, so the
+            # owner has to be told here rather than on a switch edge it will
+            # never reach: the away edge fires in
+            # `_park_switched_away_source`, which only runs for a source that
+            # WAS displayed. Without this a gate parking in a session the
+            # sidebar merely prewarmed is suppressed exactly as #1244
+            # described -- the attach is live, nothing is showing it, and the
+            # row is not even flagged needs-you because `detached` stays False
+            # (independent review round 4, F1a).
+            self._note_viewer_watching(source, displaying=False)
             return source
         except BaseException:
             if remote is not self._session:
@@ -7226,6 +7365,58 @@ class OperatorApp(App[None]):
         # drops is per-token text already superseded by that seed.
         if outgoing.controller is not None:
             outgoing.controller.set_parked(True)
+        # Tell the OWNER too, not just this process. Its notification routing
+        # suppresses the out-of-band toast whenever a terminal is attached,
+        # and the connection this source holds stays open while it is parked --
+        # so without this a gate parked on the session the user just left waits
+        # in silence, its card painted into a viewer showing something else.
+        self._note_viewer_watching(outgoing, displaying=False)
+
+    def _note_viewer_watching(self, source: SessionInteraction, *, displaying: bool) -> None:
+        """Tell a source's owner whether this terminal still shows its session.
+
+        Best-effort by contract, like the viewer record: notification routing
+        is chrome and must never be able to break a switch. Fire-and-forget
+        because the answer is state the owner keeps, not a value this side
+        reads back -- awaiting it would put an owner round trip on the switch
+        path, which is the interaction the sidebar exists to keep instant.
+
+        THE FAILURE IS SWALLOWED INSIDE THE COROUTINE, not merely around the
+        spawn. ``run_worker`` defaults to ``exit_on_error=True``, so a raise
+        from the awaited body arrives as ``WorkerFailed`` at the app's
+        exception handler and takes the TUI down -- a ``try`` around the
+        synchronous call cannot see it, because the call only schedules. Both
+        triggers here are ordinary rather than exotic: an owner too old to know
+        the op answers with an error frame, and a connection dropped mid-switch
+        raises on the write. ``exit_on_error=False`` is belt-and-braces for the
+        same reason the surrounding method is best-effort at all.
+        """
+        session = getattr(source, "session", None)
+        # REMEMBERED ON THE FACADE FIRST, and deliberately before the reachability
+        # check below: the claim is per connection, so a redial re-asserts it from
+        # here (``AttachedSession._attach``). Recording it only when a client
+        # happens to exist would lose exactly the away claims raised while a
+        # socket was down -- the window the re-assert exists to cover.
+        if session is not None:
+            try:
+                session._viewer_displaying = displaying
+            except Exception:  # noqa: BLE001 -- a facade without the field is older, not broken
+                logger.debug("could not record the viewer display claim", exc_info=True)
+        client = getattr(session, "_client", None)
+        watch = getattr(client, "viewer_watch", None)
+        if watch is None:
+            return
+
+        async def _signal() -> None:
+            try:
+                await watch(displaying=displaying)
+            except Exception:  # noqa: BLE001 -- routing chrome never breaks a switch
+                logger.debug("viewer watch signal failed", exc_info=True)
+
+        try:
+            self.run_worker(_signal(), exclusive=False, exit_on_error=False)
+        except Exception:  # noqa: BLE001 -- nor does failing to schedule it
+            logger.debug("viewer watch signal could not be scheduled", exc_info=True)
 
     def _commit_sidebar_session(
         self,
@@ -9034,6 +9225,10 @@ class OperatorApp(App[None]):
         # path below replays the owner's live seed through the same controller.
         if source.controller is not None:
             source.controller.set_parked(False)
+        # The other edge of the owner-side watch signal parked in
+        # `_park_switched_away_source`: this source IS the screen now, so its
+        # owner must count it again and paint any parked card in band.
+        self._note_viewer_watching(source, displaying=True)
         self._watch_source_frontend(source)
         self._set_approve_all(self._approve_all)
         if getattr(session, "session_id", ""):
@@ -13770,7 +13965,20 @@ class OperatorApp(App[None]):
     #: ``_finish_session_transition`` re-checks ``requested_id``, so a navigation
     #: in flight resolves to the session the user asked for, and a command frame
     #: is ended by the transition instead of raced with it.
-    _SAVED_LOCAL_COMMANDS = frozenset({"/copy", "/sidebar", "/help", "/settings", "/resume"})
+    #:
+    #: ``/notifications`` is here because it never needs the owner at all: both
+    #: halves read and write THIS machine's own receipt store (``config_dir()``),
+    #: and the listing is computed from the same local catalogue the sidebar
+    #: paints (``load_catalog``). Asking a source for permission first would
+    #: refuse a command that cannot fail for the reason the gate exists — the
+    #: ``/copy`` class, one step further from the transcript. Measured rather
+    #: than assumed: without the entry, a ``display_only`` source (the state a
+    #: follower sits in while it binds) answers Enter with "until connected" and
+    #: the handler never runs, while the marks it lists are on disk in front of
+    #: the user the whole time.
+    _SAVED_LOCAL_COMMANDS = frozenset(
+        {"/copy", "/links", "/sidebar", "/help", "/settings", "/resume", "/notifications"}
+    )
 
     def _source_commands_ready(self, source: SessionInteraction | None = None) -> bool:
         """One authority boundary for Enter, shortcuts and async continuations.
@@ -14797,6 +15005,7 @@ class OperatorApp(App[None]):
             self._resume_session(fork_id, self._notice, preserve_outgoing=True)
             return
 
+        from local_operator.agent_shell import without_agent_shell_marker
         from local_operator.multiplexer.broadcast import resume_argv, resume_executable
         from local_operator.spawn.fallback import fallback_receipt
         from local_operator.spawn.registry import active_backend
@@ -14812,7 +15021,7 @@ class OperatorApp(App[None]):
             session_id=fork_id,
             executable=executable,
             argv=resume_argv(fork_id, executable),
-            cwd=self._session_cwd(),
+            cwd=self.session_cwd(),
             title=self._fork_window_title(),
         )
         try:
@@ -14824,7 +15033,14 @@ class OperatorApp(App[None]):
             # frozen TUI and, on the deferred path, a stalled parent turn. The
             # environment is copied rather than passed live: it crosses a thread
             # boundary, and `os.environ` is process-global mutable state.
-            opened = await asyncio.to_thread(backend.spawn, launch, dict(os.environ))
+            # The fork is a window for the USER, opened by this session's own
+            # front end — not a command an agent's tool call ran — so the child
+            # must not inherit the agent-shell marker: `cli.main` would refuse
+            # its `lop --resume` and the window would die on that line. See
+            # `agent_shell.without_agent_shell_marker`.
+            opened = await asyncio.to_thread(
+                backend.spawn, launch, without_agent_shell_marker(os.environ)
+            )
         except Exception:
             # A backend must not raise, but this path is the user's fork and not
             # the place to find out that one did.
@@ -14874,7 +15090,7 @@ class OperatorApp(App[None]):
         except Exception:
             return {}
 
-    def _session_cwd(self) -> str:
+    def session_cwd(self) -> str:
         """The session's working directory, falling back to the process's.
 
         The fork must open in the PARENT's directory: a window in ``$HOME``
@@ -14882,6 +15098,17 @@ class OperatorApp(App[None]):
         different cwd also changes the environment block and which ``createIf``
         tools resolve — altering the cached prompt prefix the fork exists to
         inherit warm.
+
+        PUBLIC, and not only because seven call sites inside this class want it:
+        it is the directory an ``@path`` is resolved against, so the widgets that
+        answer questions about a path have to ask it rather than guess. The file
+        list scans against it (``on_file_query_opened``), ``Session.prompt``
+        expands tokens against it, and the composer's ``@path`` ink asks for it
+        through ``Editor._reference_cwd`` — the same ``getattr``-looked-up hook
+        pattern the composer already uses for its other session facts, which is
+        also what keeps a bare widget host in a test working. One name for the
+        one directory, or the three answers can disagree about whether a path
+        exists.
         """
         session = self._session
         session_cwd = getattr(session, "_cwd", None) if session is not None else None
@@ -15332,6 +15559,23 @@ class OperatorApp(App[None]):
         never-raises contract all live inside it.
         """
         images = resolve_markers(request, attachments or {})
+        # `@path` REFERENCES are deliberately NOT expanded here, and the absence
+        # is the decision — not an omission somebody forgot.
+        #
+        # This method is synchronous and so is every path into it (`_cmd_team`,
+        # `_cmd_agent`, `_cmd_goal`, `_render_authoritative_slash`), while
+        # `expand_references` is a coroutine. Expansion happens instead in
+        # `Session.prompt`, which awaits it before taking the turn lock, so every
+        # request that leaves here IS expanded by the time the model sees it —
+        # including the programmatic call sites, which have no composer and so
+        # no operator waiting to read a notice.
+        #
+        # REJECTED: dispatching it as a detached task (`run_worker` /
+        # `create_task`) to bridge sync to async here. That sends the turn before
+        # the expansion resolves — the bare token reaches the model and the
+        # expansion lands after — and it puts a human approval gate in a task
+        # nothing awaits. If this ever needs TUI-side notices, the fix is making
+        # this method async as its own refactor, not a task launched from here.
         sent = self._expand_invocation(request, attachments)
         # `row` mirrors `on_editor_submitted`: an invocation keeps the TYPED
         # argument as its row (the body belongs in the payload, never the
@@ -16829,13 +17073,28 @@ class OperatorApp(App[None]):
         move that cannot work. "Couldn't attach an image from the clipboard" is
         true in every case because it describes what the app did.
 
-        Three variants, matching exactly what
+        The set of variants is exactly the closed set
         :class:`~local_operator.tui.widgets.editor.EditorPasteEmpty` can
         establish, and no more — a per-backend message would fight the
         deliberate collapse in :mod:`local_operator.clipboard` and would mean
-        guessing between an empty clipboard and a missing ``xclip``. The two
+        guessing between an empty clipboard and a missing ``xclip``. The ones
         that are knowable name the user's next move, since a failure the user
-        can act on is worth more words than one they cannot.
+        can act on is worth more words than one they cannot. Only ``nothing``
+        has no move to name, which is the whole reason it is the one variant
+        that does not take the failure duration.
+
+        **A named move has to work for EVERY cause the variant covers**, which
+        is why ``read-failed`` names the path route and not a retry (review
+        round 1, NIT-5 / QA Q2). That variant is the union of a transient
+        escape and a permanent refusal — QA staged a ``chmod 500`` scratch base
+        that refuses on every attempt — and a retry names an action the second
+        half rules out. Pasting a file path bypasses the clipboard read
+        entirely, so it survives both halves and survives a full volume; it is
+        also the move ``remote`` already spells, so the family teaches one
+        route rather than three. ``unattachable`` used to spell it too and does
+        not any more — round 2 removed the phrase from its copy (its own branch
+        comment below says why, D10) — so a reader looking for a second sibling
+        notice will not find one (design round 2, D3).
 
         Capitalised, noun-first: this is a state notice, the family
         ``No provider configured`` belongs to, not a gesture receipt like
@@ -16844,8 +17103,8 @@ class OperatorApp(App[None]):
         ``TOAST_FAILURE_MS`` and not the 5 s default, because
         ``toast.py`` splits duration by ACTIONABILITY rather than severity:
         a receipt the user can verify at a glance gets 5 s, something they must
-        read and act on gets 10 s. Two of these three now carry a remedy, so
-        they belong in the second family (design round 1, D6).
+        read and act on gets 10 s. Every variant but ``nothing`` now carries a
+        remedy, so the family is the second one (design round 1, D6).
 
         ``yield_to_actionable`` for the same reason the copy receipt uses it:
         the user just pressed a key, so this must not evict an MCP failure they
@@ -16864,6 +17123,38 @@ class OperatorApp(App[None]):
             # family is one line; this one now is too, and it keeps the remedy
             # that makes it actionable.
             text = "Clipboard isn't read over SSH. Paste a file path."
+        elif message.reason == "read-no-space":
+            # 55 cells. The card has to do two jobs the family's other branches
+            # do not: it is the ONLY place the user is told the clipboard was
+            # not consulted at all (so "copy again", the move every other
+            # notice implies, would be wrong advice), and it has to convert a
+            # disk condition into a paste-shaped sentence, because the failure
+            # the user experienced was a keystroke, not a filesystem. "Free up
+            # space" is therefore not decoration - it is the entire content of
+            # the notice, and it is why this variant cannot be merged into
+            # `read-failed` below (2026-09-17).
+            text = "Clipboard not read — no temp space left. Free up space."
+        elif message.reason == "read-failed":
+            # 46 cells. Says what happened and the one move that helps, and
+            # deliberately does NOT guess why: the cause this branch covers is
+            # the union of "a probe could not name it" and "an exception
+            # escaped a backend", which is a set this app cannot enumerate. Not
+            # collapsed into `nothing` for the reason the whole reason field
+            # exists: this user's clipboard was never read, and telling them it
+            # was empty sends them to re-copy something that may be perfectly
+            # fine.
+            #
+            # The move is the PATH route, not a retry (review round 1, NIT-5 /
+            # QA Q2). "Try ctrl+v again" was right for the transient half of
+            # this value (an escaped `EMFILE`) and provably wrong for the
+            # permanent half: QA staged a `chmod 500` scratch base, where every
+            # attempt is refused, so the notice named an action that could not
+            # work. The path route bypasses the clipboard READ altogether, so
+            # it survives both halves - and "Paste a file path" is already the
+            # family's own vocabulary (`remote` names it, and `unattachable`
+            # did until round 2 removed the phrase from its copy), so this is
+            # not a new move to teach.
+            text = "Clipboard not read. Paste a file path instead."
         elif message.reason == "unattachable":
             # No "paste its file path" here any more: the path route runs the
             # same bounding tail, so a refusal caused by the IMAGE cannot be
@@ -17107,6 +17398,81 @@ class OperatorApp(App[None]):
                 notice("copied — note that answer was cut off before it finished", "warning")
 
         self.push_screen(CopyPickerScreen(targets), _copy_choice)
+
+    def _cmd_links(self, notice: NoticeFn) -> None:
+        """``/links`` — pick a URL out of the conversation and open it.
+
+        The route the terminal cannot take. lop holds mouse reporting, and a
+        terminal that is reporting mouse events to an application does not run
+        its own click-to-open gesture — so the OSC-8 hyperlink the transcript
+        paints is correct on screen and unclickable, and the same is true of a
+        bare URL, which the terminal's link detection would otherwise catch.
+        Shift+click is the terminal's own bypass and never reaches the app
+        (Ghostty documents that the program cannot detect it), so the app has to
+        offer the URL itself. The picker is where it does, on every terminal,
+        for every scheme the app will open.
+
+        The list is the URLs of the MESSAGES — the user's prompts and the agent's
+        answers — newest first. Tool output is deliberately not scanned: a URL a
+        tool printed is not a link the user was reading, and listing it would
+        bury the two or three they were.
+
+        The two empty answers stay TWO, the rule ``/copy`` records: "the first
+        answer is still coming" and "nothing here is a link" are different
+        states with different fixes, and one string for both sends the user to
+        wait for something that will not arrive.
+        """
+        targets = build_link_targets(self._transcript_view().blocks())
+        if not targets:
+            if self._turn_is_live():
+                notice("no links yet — the first answer is still coming", "warning")
+            else:
+                notice("no links — nothing in this conversation is a web address", "warning")
+            return
+
+        def _open_choice(target: LinkTarget | None) -> None:
+            # Dismissed with Esc — nothing said, the silence a cancelled picker
+            # keeps everywhere else in this app.
+            if target is None:
+                return
+            # A worker rather than an await here: the launcher waits on a
+            # child process, and the modal's dismiss callback runs inside the
+            # screen stack's own teardown. `open_browser_quietly` is itself
+            # what keeps that child's output off the frame.
+            self.run_worker(self._open_link(target, notice), group="open-link")
+
+        self.push_screen(LinkPickerScreen(targets), _open_choice)
+
+    async def _open_link(self, target: LinkTarget, notice: NoticeFn) -> None:
+        """Hand ONE url to the browser, and say what happened.
+
+        The scheme is re-checked HERE, at the boundary, rather than trusted from
+        the extraction that built the list. This is the one place in the app that
+        gives a string to a browser, and the string can come from anything the
+        model or a tool wrote; a single guard at the point of use is what makes
+        the rule true of every route that ever reaches it, including one added
+        later that does not go through :func:`build_link_targets`.
+
+        ``open_browser_quietly`` rather than ``webbrowser.open`` for the reason
+        its own docstring records: the stdlib spawns the browser with fd 1 and
+        fd 2 INHERITED, so ``xdg-open: no method available`` or a browser's
+        chatter lands in the middle of the Textual frame. The same helper the
+        MCP login flow uses, so the two cannot drift in how they open a browser.
+        """
+        from local_operator.mcp.auth import open_browser_quietly
+
+        if not is_openable(target.url):
+            notice("only http and https links can be opened", "warning")
+            return
+        opened = await open_browser_quietly(target.url)
+        if opened:
+            notice(f"opening {target.url}")
+        else:
+            # The URL is repeated because this is the one failure the user can
+            # work around: select it from the row and paste it themselves. A
+            # receipt that only said "could not open" would send them back to
+            # the picker to read what it would not open.
+            notice(f"no browser available — the link is {target.url}", "warning")
 
     # -- resize (TUI-017 / D5) ----------------------------------------------
     def on_resize(self, event) -> None:  # type: ignore[no-untyped-def]
@@ -17801,6 +18167,42 @@ class OperatorApp(App[None]):
             return
         notice = _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
         self._notice_for(self._interaction, notice, "note")
+        self._announce_queued_elsewhere(self._interaction)
+
+    def _announce_queued_elsewhere(self, source: SessionInteraction) -> None:
+        """Name the messages this session has queued that THIS surface did not send.
+
+        A queued message is written to ``inbox.jsonl`` and nowhere else: not to
+        the transcript, and not to the session record (whose only "waiting" field
+        is ``pending``, documented as ``"approval"``/``"ask"`` — a parked person).
+        So a front end that joins a session mid-drain sees a session that is
+        leaving and, without this, has no way to learn that it has a message
+        waiting for the build on disk — while the sender's own screen shows one,
+        and two surfaces describing one session differently is the class of
+        disagreement this PR exists to remove (UX round 1, U2).
+
+        Only rows this surface is NOT already showing as queued rows are
+        announced, so the sender's own frame does not say it twice.
+
+        Stated with its own limits: the read is the lock-free ``peek_inbox``
+        (a torn last row is dropped rather than reported), and a message spooled
+        *after* this frame is announced only on the sender's own surface. Both
+        are named in the PR thread rather than papered over.
+        """
+        elsewhere = self._foreign_queued_rows(source)
+        if not elsewhere:
+            return
+        if len(elsewhere) == 1:
+            source.turn.queued_elsewhere_notice = self._notice_block_for(
+                source, QUEUED_ELSEWHERE_NOTICE, "note"
+            )
+            return
+        source.turn.queued_elsewhere_notice = self._notice_block_for(
+            source,
+            f"{len(elsewhere)} messages are queued for the next runtime — "
+            "they run when the session does",
+            "note",
+        )
 
     def _announce_refresh_completed(self) -> None:
         """One line naming the version change a self-refresh just made.
@@ -17984,6 +18386,17 @@ class OperatorApp(App[None]):
             # by the refresh path and is cleared on read, so an ordinary
             # engage finds nothing and says nothing.
             self._announce_refresh_completed()
+            # AND THE QUEUED STATE OF THIS SESSION SETTLES HERE. A bind is the
+            # first moment a surface can ask whether the successor has run the
+            # messages its own queue names: the announcement cannot answer it on
+            # the handover's normal arm, because the boot drain admits the spooled
+            # row before the socket that would carry the event exists (UX round 2,
+            # U2). Idempotent, and with an empty queue it reads NOTHING — no
+            # transcript replay, no spool read — which is what keeps a bind cheap
+            # on the join path (agent review round 3, MAJOR-3).
+            interaction = self._interaction
+            if interaction is not None:
+                self._settle_handed_over_queues(interaction)
 
         self.run_worker(run(), group="warm-engage", exclusive=False)
 
@@ -18540,6 +18953,18 @@ class OperatorApp(App[None]):
             # UNRECOVERABLE rather than merely absent (review round 2,
             # BLOCKER-1). The aside is also the surface a user is most likely to
             # paste a log into, since it exists for "what is this?".
+            # `@path` REFERENCES are expanded here too, and this exit is the one
+            # most likely to be missed because it does not go through
+            # `_expand_invocation` and so does not look like the others. Without
+            # it `/btw what does @foo.py do?` reaches the aside model with a bare
+            # token — the same shape of hole as the paste bug above, in the same
+            # branch, for the same reason: this path returns before the splice at
+            # the foot of the method.
+            #
+            # `@path` REFERENCES are expanded in `_aside_worker`, not here. This
+            # is only ONE of three routes into the card (`_cmd_aside` at the
+            # `/btw` command and the inline-command path are the others), and
+            # expanding per-route is how two of them would quietly miss it.
             self._ask_aside(expand_pastes(text, message.attachments))
             return
         if message.shell:
@@ -18667,6 +19092,37 @@ class OperatorApp(App[None]):
         # `typed=` carries the chip line on for NAMING only — the expanded
         # payload is what the row shows and what the model gets, but titling a
         # conversation after a pasted stack trace is not what the user asked.
+        # `@path` REFERENCES ARE DELIBERATELY NOT EXPANDED HERE. `Session.prompt`
+        # expands them, before it takes `_turn_lock` and with the approval gate
+        # passed (`session.py:5159`), which is what makes the deny-list and the
+        # outside-workspace escalation reachable at all.
+        #
+        # Expanding here instead — the design's §2.7 "preferred" mitigation —
+        # cannot carry that gate, and the reason is this method's own contract
+        # documented above: the pump awaits each handler to completion, and the
+        # approval card is MOUNTED and ANSWERED through that same pump. Awaiting
+        # an approval here therefore blocks the loop that would draw it. Probed
+        # on a real app: with the gate marshalled through `call_later` no card
+        # ever mounted and Enter never returned; mounting it inline instead got
+        # a card that a keypress could not reach. A frozen composer is worse
+        # than the slow turn R3 was written about.
+        #
+        # So exit 1 is exactly what it was before this feature, and the session
+        # is the single expansion site for it, exits 3 and 4 (ruling D). The
+        # ASIDE is the one exception and must be, because `_ask_aside` never
+        # reaches `Session.prompt` — it expands in `_aside_worker`, which is a
+        # `run_worker` and so is off the pump (an await there is legal), under a
+        # DECLINING gate — the interactive one is not answerable from inside the
+        # aside either, for the cancellation chain `_expand_references`
+        # documents: `request_tool_approval` → `_close_aside` → cancels the
+        # `aside` worker group, which is where `_aside_worker` awaits.
+        #
+        # The cost is that exit 1 paints no reference notice (an unresolved
+        # `@nope.py` is sent verbatim and silently). Exits 3 and 4 already
+        # behave that way, so this is consistent rather than newly broken. The
+        # fix, if it is ever wanted, is moving this expansion into a worker —
+        # which disturbs the submit ORDERING this docstring calls load-bearing
+        # and so deserves its own change, not a line in this one.
         sent = self._expand_invocation(text, message.attachments)
         # An INVOCATION keeps the typed line as its row; everything else shows
         # the expanded text (design §2.5).
@@ -19887,6 +20343,33 @@ class OperatorApp(App[None]):
         # stopping, and the press still means what Esc always means below
         # (abort the turn, deny the prompt), so the resend the user is
         # lining up goes now rather than queueing again.
+        # A SPOOLED PROMPT FIRST, AND OUTSIDE THE CHILDREN GATE. Two reasons,
+        # both measured. It is the stronger commitment of the two (a queued steer
+        # rides a turn already running; this message went to a runtime that does
+        # not exist yet), so it is not the press the subagent ladder should spend.
+        # And with children up the recall used to sit behind `if not children:` —
+        # so press 1 offered to stop them, press 2 STOPPED them and the queued
+        # message was never touched, while its own row said `esc takes it back`
+        # (UX round 2, U3, at the incident's own shape: `subagents_running=3`).
+        #
+        # A PRESS THE RECALL USED RETURNS, and "used" includes the MISS: falling
+        # through to the stop ladder made the same key that answered about the
+        # queued message also abort the turn in flight, which is what ENDS a
+        # drain (its liveness is in-flight work), boots the successor and puts
+        # every other queued message out of the recall's reach (UX round 2, U1).
+        #
+        # THE MISS IS NOT THE SAME AS THE DECLINE, and the difference is what the
+        # app has just said. ``"missed"`` means the successor's batch already has
+        # the row — the notice reads "the next runtime already has that message",
+        # i.e. it WILL run — so stopping the turn is the press acting against the
+        # sentence it just printed. Measured on the real flow: with the press,
+        # ``end_cause='user-stop'``, an extra ``interrupted`` row, and the
+        # message's answer never arrives; without it, ``end_cause='completed'``
+        # and the answer lands (UX round 4). ``"declined"`` and ``""`` still fall
+        # through: nothing was said about a run, the composer is the obstacle, and
+        # Esc keeps the meaning it has everywhere else in this method.
+        if self._withdraw_queued_prompt(self._interaction) in ("withdrawn", "missed"):
+            return
         if not children:
             self._recall_queued_steers()
 
@@ -21088,14 +21571,26 @@ class OperatorApp(App[None]):
                 kind,
             )
         elif wanted_auto:
+            # The save hint is offered only while it is NEW information (UX
+            # round 1, U5): with `config.yml` already saying auto, "saves it for
+            # new sessions" asks the user to do what is done — and that is
+            # exactly the state a `/approvals auto` follows a refusal notice in,
+            # which is now the command's main job. The live half keeps the
+            # runtime's wording word for word: one gesture, one sentence,
+            # whichever host answers it.
+            save_hint = (
+                ""
+                if self._configured_approvals_mode() == "auto"
+                else " — /approvals default auto saves it for new sessions"
+            )
             notice(
-                "tool approvals: auto — every tool runs without asking (this session) — "
-                "/approvals default auto saves it for new sessions",
+                "tool approvals: auto — every tool runs without asking (this session)" + save_hint,
                 "warning",
             )
         else:
             notice(
-                "tool approvals: ask — write and command tools will prompt again " "(this session)"
+                "tool approvals: ask — write and command tools prompt before running "
+                "(this session)"
             )
 
     def _report_approvals(self, notice: NoticeFn) -> None:
@@ -21143,7 +21638,7 @@ class OperatorApp(App[None]):
             return
         notice(
             f"tool approvals: {live} (this session) — {effect}; "
-            f"config.yml says {saved} — /approvals default {live} changes that",
+            f"config.yml says {saved} — /approvals {saved} adopts it in this session",
             "warning" if self._approve_all else "info",
         )
 
@@ -24315,11 +24810,28 @@ class OperatorApp(App[None]):
             error_text: str | None = None
             try:
                 async with source.turn.provider_lock:
-                    await session.prompt(text, images, **echo.prompt_kwargs())
+                    receipt = await session.prompt(text, images, **echo.prompt_kwargs())
                 # DELIVERED — so if the transport had to shrink an attachment to
                 # get it here, this is the moment the user can be told. See
                 # `_report_wire_refit_for`.
                 self._report_wire_refit_for(source)
+                # QUEUED FOR THE SUCCESSOR, which is a THIRD outcome beside
+                # "admitted" and "refused" and the one the two branches further
+                # down cannot express: the runtime that took the message is
+                # leaving and has spooled it for the build that replaces it
+                # (`inbox.SPOOL_RECEIPT_PROMPT`). Nothing failed, so nothing is
+                # reported as a failure — no withdrawal of the echo row, no
+                # draft restored to a composer that no longer holds the user's
+                # only copy — and the row states where the message went, which
+                # is the fact the operator cannot otherwise see (memo §4.4).
+                # Compared by IDENTITY against the one constant the runtime
+                # answers with, never by matching words: "queued" in the ack is
+                # the receipt's own, and a runtime older than it cannot send it.
+                from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
+
+                if receipt == SPOOL_RECEIPT_PROMPT:
+                    # The row is marked, not narrated: see the constants above.
+                    self._mark_prompt_queued(source, echo.message_id, text)
             except asyncio.CancelledError:
                 # NOT OPTIONAL, and not covered by the clause below:
                 # `CancelledError` is a `BaseException`, so it slides straight
@@ -25188,7 +25700,7 @@ class OperatorApp(App[None]):
             suggest_targets,
         )
 
-        cwd = self._session_cwd()
+        cwd = self.session_cwd()
         try:
             targets = suggest_targets(cwd, config_dir=config_dir())
         except Exception:  # noqa: BLE001 — a picker that cannot suggest still opens
@@ -25252,7 +25764,7 @@ class OperatorApp(App[None]):
             self._system_notice(body, kind)
             return
         try:
-            target = validate_target(expand_path(raw, cwd=self._session_cwd()))
+            target = validate_target(expand_path(raw, cwd=self.session_cwd()))
         except MoveError as error:
             notice(str(error), "warning")
             return
@@ -25263,7 +25775,7 @@ class OperatorApp(App[None]):
             return
 
         destination = str(target)
-        if destination == self._session_cwd():
+        if destination == self.session_cwd():
             notice(f"already in {format_label(destination)}")
             return
         # NARRATED BEFORE the transition, exactly as `/resume` does one method
@@ -26004,6 +26516,83 @@ class OperatorApp(App[None]):
         except Exception:
             return [], None
 
+    def _subagent_child_counts(self, jobs: Sequence[Any]) -> dict[str, int]:
+        """Direct-child count per roster row, for the panel's ``⊞N`` mark.
+
+        Read from the SAME graph :meth:`_subagent_roster` walks AND through the
+        SAME two resolvers, so a row's mark and the roster the reader gets by
+        drilling in cannot come from two different trees — the count is a
+        property of the graph, never of the job row (``RowFacts.child_count``).
+
+        THE WINDOW IS THE HALF THAT USED TO DISAGREE (review round 1, F1).
+        Resolving the node and stopping there counts every child the REGISTRY
+        still knows, while :meth:`_subagent_roster` additionally drops a row
+        whose job no longer resolves (``app.py``'s node loop) and one the
+        manager's ``retention_ms`` has released (:meth:`_within_roster_window`).
+        Counting verbatim therefore promised a level that opened EMPTY: with the
+        production default (5 min) and a settled child, the dock painted
+        ``Coordinate review ⊞1`` over a page whose roster resolved to ``[]``. A
+        mark is a promise about the PAGE, so the promise is computed with the
+        page's own filter — every child node resolved with
+        :meth:`_subagent_job`, skipped when it does not resolve, and put through
+        :meth:`_within_roster_window` before it is counted.
+
+        ONE pass over the graph, not one per row (review round 1, F2).
+        ``SubagentComms.children`` rebuilds every node per call
+        (``harness/comms.py``), so the per-row form was O(rows x nodes) and ran
+        from the 1 Hz poll and from every ``Subagent*`` handler — measured
+        **504 ms** for a single refresh at 500 rows / 6000 nodes on the real
+        follower facade, against **276 ms** for this one. ``nodes()`` is
+        grouped by ``parent_job_id`` ONCE here, and that predicate is what
+        ``children`` applies (both facades canonicalise a node's parent the same
+        way, and ``SubagentComms``'s alias table is already folded into
+        ``node.parent_job_id``). The grouping holds the NODE rather than a tally
+        so that F1's filter — which needs the resolved job — is applied per
+        roster row, and only to the children of rows actually listed: a page
+        deep in a large tree reads its own children, never the whole graph.
+
+        Total and silent by design, because this runs from the 1 Hz poll and
+        from every ``Subagent*`` handler: a host with no comms graph, or one
+        whose ``nodes`` is not callable, answers ``{}`` — i.e. no marks — and a
+        row that cannot be counted answers ``0``, which paints the same nothing
+        a leaf does. The alternative here is not a better mark but an exception
+        in a Textual message handler, for a decoration.
+        """
+        comms = getattr(self._session, "_subagent_comms", None)
+        nodes = getattr(comms, "nodes", None)
+        if not callable(nodes):
+            return {}
+        try:
+            buckets: dict[str, list[Any]] = {}
+            for node in cast(Sequence[Any], nodes()):
+                parent_id = str(getattr(node, "parent_job_id", "") or "")
+                if parent_id:
+                    buckets.setdefault(parent_id, []).append(node)
+        except Exception:  # noqa: BLE001 — a mark may not cost the band
+            return {}
+        manager = getattr(self._session, "jobs", None)
+        paused = paused_child_ids(comms)
+        counts: dict[str, int] = {}
+        for job in jobs:
+            job_id = str(getattr(job, "id", "") or "")
+            if not job_id:
+                continue
+            try:
+                # Resolved LAZILY, per roster row rather than per node in the
+                # graph: a page deep in a large tree reads its own children
+                # only, and `_subagent_job` is the roster's own resolver, whose
+                # follower form detaches a public job per call.
+                children = [
+                    child
+                    for node in buckets.get(job_id, ())
+                    if (child := self._subagent_job(str(getattr(node, "job_id", "") or "")))
+                    is not None
+                ]
+                counts[job_id] = len(self._within_roster_window(children, manager, paused))
+            except Exception:  # noqa: BLE001 — a mark may not cost the band
+                counts[job_id] = 0
+        return counts
+
     def _refresh_band(self) -> None:
         """Repaint the dock band (subagent + todo) from live session state.
 
@@ -26017,6 +26606,10 @@ class OperatorApp(App[None]):
         # ledger cannot change synchronously inside one refresh. Snapshot once
         # so 100-child sessions do not copy and sort the same roster per pass.
         jobs, selected_job = self._subagent_roster()
+        # Beside the roster and for the same reason: the counts are one more
+        # read of the tree the roster was resolved from, so they are snapshotted
+        # once per refresh rather than per settle pass below.
+        children_counts = self._subagent_child_counts(jobs)
         # Three steps, and the order is load-bearing rather than tidy.
         #
         # A panel's own `sync` is what decides whether it is displayed at all
@@ -26051,7 +26644,12 @@ class OperatorApp(App[None]):
         # first frame that does not move.
         for _ in range(_BAND_SETTLE_PASSES):
             if self._subagent_panel is not None:
-                self._subagent_panel.sync(session, jobs=jobs, selected_job=selected_job)
+                self._subagent_panel.sync(
+                    session,
+                    jobs=jobs,
+                    selected_job=selected_job,
+                    children_counts=children_counts,
+                )
             if self._wake_panel is not None:
                 self._wake_panel.sync(session)
             if self._todo_panel is not None:
@@ -26375,7 +26973,14 @@ class OperatorApp(App[None]):
         view.remove()
         if self._subagent_panel is not None:
             scoped_jobs, _ = self._subagent_roster()
-            self._subagent_panel.sync(self._session, jobs=scoped_jobs)
+            # With the counts, like `_refresh_band`: `sync` REPLACES them, so a
+            # re-scope that left them out would drop every `⊞N` from the rows
+            # the reader just returned to, until the next poll re-derived them.
+            self._subagent_panel.sync(
+                self._session,
+                jobs=scoped_jobs,
+                children_counts=self._subagent_child_counts(scoped_jobs),
+            )
         if self._subagent_panel is not None:
             self._subagent_panel.mark_current(None)
         self.screen.remove_class(SUBAGENT_LAYOUT_CLASS)
@@ -26926,7 +27531,12 @@ class OperatorApp(App[None]):
         self._point_band_at(job)
         if self._subagent_panel is not None:
             scoped_jobs, selected_job = self._subagent_roster()
-            self._subagent_panel.sync(session, jobs=scoped_jobs, selected_job=selected_job)
+            self._subagent_panel.sync(
+                session,
+                jobs=scoped_jobs,
+                selected_job=selected_job,
+                children_counts=self._subagent_child_counts(scoped_jobs),
+            )
         if self._todo_panel is not None and session is not None:
             self._todo_panel.sync(
                 session,
@@ -27333,8 +27943,14 @@ class OperatorApp(App[None]):
         own gate stayed where it was. Reproduced in review in the UNSAFE
         direction — page set to ``ask``, ``request_tool_approval`` still
         auto-approving a command tool with no prompt. A page write is also an
-        explicit user action in this pane, so it moves the gate in BOTH
-        directions.
+        explicit user action in this pane, so WHERE THIS PANE OWNS THE GATE it
+        moves the gate in BOTH directions.
+
+        Where an attached runtime owns the gate it moves nothing, and that is the
+        same #1282 rule rather than a second one: the engine consults the
+        runtime's flag, the runtime sees this process's file write as ``disk``
+        and refuses it, so painting ``auto`` on this band would report a mode the
+        session is not running under (see ``_follow_configured_approvals``).
 
         For a change from another process, ONE notice per change listing the
         registry keys compactly, with the keys whose section is not LIVE named
@@ -27562,7 +28178,7 @@ class OperatorApp(App[None]):
         add to its line (``""`` when this process has nothing to say — the mode
         did not parse, the gate did not move, or another process owns the gate
         and its own receipt is already on its way), plus ``kept``, which is True
-        only on the KEEP path below.
+        only on a KEEP path below (there are two of those since #1282).
 
         The caller needs ``kept`` separately from the clause because both a
         refusal and a silent success return no clause, and only the refusal must
@@ -27574,19 +28190,41 @@ class OperatorApp(App[None]):
         once there in full:
 
         * tightening (``auto`` → ``ask``) follows the file unconditionally;
+        * loosening (``ask`` → ``auto``) is refused unless it is ATTRIBUTED
+          (#1282): only a write this process made through the operator's own
+          settings facade (``source="local"``, which is exactly what
+          ``announce=False`` means here) AND in the process that holds the gate
+          may loosen it. A model tool's own file write, an editor, another pane,
+          the settings API in another process, and ``lop config edit`` are
+          unattributable from here, and unattributed writes may only tighten.
+          See :func:`local_operator.harness.approval.loosening_is_authorised`;
+          the runtime host applies the same predicate through
+          ``ServingSessionHandle._on_config_change`` so the two cannot drift;
         * loosening (``ask`` → ``auto``) does not move a pane whose human typed
           ``/approvals ask`` in it, and prints a keep notice instead — the
           CHOSEN MODE is what is consulted, so a pane whose human chose ``auto``
-          has no hardening to protect and still follows the file both ways;
-        * a pane that never chose follows the file in both directions, which is
-          the operator's "goes into effect for all my agents" case and is what
-          this change exists to deliver.
+          has no hardening to protect, but the unattributed refusal above still
+          holds it;
+        * a pane that never chose follows the file in every direction it is
+          allowed to, which is the operator's "goes into effect for all my
+          agents" case and is what this change exists to deliver.
+
+        There are therefore TWO keep branches, and BOTH must return ``kept=True``
+        and gate their notice on :meth:`_gate_is_owned_elsewhere` (design round
+        1 D1, extended to the second branch by round 2 D8): with a runtime
+        attached both carriers hold the same mode, both branches fire on one
+        poll, and one sentence printed twice in a viewport is one event told
+        twice.
 
         A write from THIS process (``announce=False``, the ``/settings`` page)
-        applies with no notice at all: the page is its own receipt, and it is
-        also an explicit action IN this pane, so it moves the gate in both
-        directions and re-bases the explicit-choice flag rather than being
-        blocked by it.
+        is attributed, so where it owns the gate it applies with no notice at
+        all: the page is its own receipt, and it is also an explicit action IN
+        this pane, so it moves the gate in both directions and re-bases the
+        explicit-choice flag rather than being blocked by it. In an ATTACHED
+        pane it is NOT authorised — the engine consults the runtime's flag, and
+        repainting ``auto`` on this band would report a mode the session is not
+        running under — so it takes the same refusal path, and the notice says
+        how to loosen the session that actually holds the gate.
 
         Written through :meth:`_set_approve_all`, the one writer of gate and
         band, so the band cannot say something the gate does not do; the cached
@@ -27634,12 +28272,55 @@ class OperatorApp(App[None]):
             # owns the gate, so the runtime's keep notice is the one that speaks;
             # this branch still returns `kept=True` because the local `applied:`
             # list is this process's to correct either way.
+            #
+            # `warning`, the rung the runtime's copy of the sibling refusal now
+            # carries (design round 1, D2): both sentences are one event — a
+            # policy change this session did not follow — and a rung apart, the
+            # one the operator must read first is whichever the palette happens
+            # to weight. See the refusal branch below for why `note` is not
+            # available to either.
             if not self._gate_is_owned_elsewhere():
-                self._system_notice(
-                    "keeping tool approvals: ask — set with /approvals in this session; "
-                    "config.yml now says auto, /approvals auto adopts it",
-                    "info",
-                )
+                self._system_notice(LOOSENING_KEPT_BY_ASK_NOTICE, "warning")
+            self._set_approve_all(self._approve_all)
+            return _ApprovalsFollow("", True)
+        if wanted_auto and not loosening_is_authorised(
+            # ``announce=False`` IS this process's write (``_on_config_change``
+            # derives it from ``change.source == "local"``), so it is passed as
+            # such rather than re-read off the change here: one place decides
+            # what the flag means, and this is not it.
+            source="disk" if announce else "local",
+            gate_is_here=not self._gate_is_owned_elsewhere(),
+        ):
+            # LOOSENING this process may not attribute to an operator (#1282):
+            # keep the gate where it is. Two shapes reach here and both refuse
+            # for the same reason — an unattributed write (another pane, a
+            # model-run shell command rewriting config.yml, an editor, the
+            # settings API elsewhere) and a page write in an ATTACHED pane,
+            # where the file write is the operator's but the flag the engine
+            # reads lives in the runtime. Neither is a mode this pane may paint
+            # on its band.
+            #
+            # Checked AFTER the explicit-`ask` branch so that branch keeps
+            # meaning "the human typed ask" and the more specific reason is the
+            # one printed. ``kept=True`` because this is a refusal: the caller
+            # must strike the key from its ``applied:`` list. The NOTICE is
+            # gated on ownership for the reason the branch above documents —
+            # with a runtime attached the runtime prints its own refusal and
+            # this one would be the same sentence twice.
+            if self._gate_is_owned_elsewhere():
+                # The engine's gate is a runtime's, and that runtime prints its
+                # own copy of this refusal into the transcript. Right carrier for
+                # a change that arrived from the WATCHER — but a write made from
+                # THIS page (`announce=False`) is the operator's own click, and
+                # `_open_settings_view` hides the transcript while the page is
+                # up, so the sentence would land in a region nobody can see (UX
+                # round 1, U1). Recorded for the page to paint instead; the two
+                # wordings never share a viewport, and the page's is written for
+                # a surface with no transcript on it.
+                if not announce:
+                    self._page_kept_loosening = "tool_approval_mode"
+            else:
+                self._system_notice(LOOSENING_REFUSED_NOTICE, "warning")
             self._set_approve_all(self._approve_all)
             return _ApprovalsFollow("", True)
         if not announce:
@@ -27667,6 +28348,25 @@ class OperatorApp(App[None]):
             if wanted_auto
             else _ApprovalsFollow("tool approvals now ask — tools prompt before running", False)
         )
+
+    def _take_page_kept_loosening(self, key: str) -> bool:
+        """Whether THIS page write was a loosening this pane could not make.
+
+        Read-and-clear: the write and the refusal happen on one call stack (the
+        page's ``settings_io.write_setting`` reaches the app's own config
+        listener synchronously), so the record set by
+        :meth:`_follow_configured_approvals` describes the write that just
+        returned — and clearing it here is what keeps a later, unrelated repaint
+        from re-printing it. Keyed by the setting so a record can never be
+        handed to a different row's write.
+
+        ``False`` when nothing was refused, which is every write in the embedded
+        app (it owns its gate, so its own facade writes are authorised) and
+        every write of another key.
+        """
+        held = self._page_kept_loosening
+        self._page_kept_loosening = None
+        return held == key
 
     def _gate_is_owned_elsewhere(self) -> bool:
         """Whether an attached RUNTIME, not this app, owns the approval gate.
@@ -28699,6 +29399,8 @@ class OperatorApp(App[None]):
             self._cmd_accounts(notice)
         elif command == "/failovers":
             self._cmd_failovers(notice)
+        elif command == "/notifications":
+            self._cmd_notifications(arg, notice)
         elif command == "/usage":
             self._cmd_usage(arg, notice)
         elif command == "/analytics":
@@ -28729,6 +29431,8 @@ class OperatorApp(App[None]):
             self._cmd_stop(arg, notice)
         elif command == "/copy":
             self._cmd_copy(notice)
+        elif command == "/links":
+            self._cmd_links(notice)
         elif command == "/approvals":
             self._cmd_approvals(arg, notice)
         elif command == "/skills":
@@ -29226,6 +29930,9 @@ class OperatorApp(App[None]):
             pid_hint="a pid",
             session_hint="a session id",
             include_wedged=True,  # a wedged agent is the one a user most needs to stop
+            # Same kill-switch carve-out as `_stop_target_worker`: the watched
+            # session may be a composer window, and stopping it is the point.
+            require_started=False,
         )
         if record is not None and record.pid != os.getpid():
             # The RESOLVED RECORD is handed straight to the ladder. Re-entering
@@ -29255,6 +29962,12 @@ class OperatorApp(App[None]):
             pid_hint="a pid",
             session_hint="a session id",
             include_wedged=True,  # a wedged agent is the one a user most needs to stop
+            # A session that has not run a turn yet is STILL stoppable, and this
+            # is the one caller that wants it resolved: the kill switch names a
+            # target in order to end it, not to message it. A composer window
+            # someone needs to stop is exactly the fresh `/new` that `send`
+            # otherwise holds out of reach; `send` keeps the default True.
+            require_started=False,
         )
         if candidates:
             # Each candidate in the form that RESOLVES when retyped — the
@@ -32864,7 +33577,12 @@ class OperatorApp(App[None]):
             SearchProviderId,
             SearchStrategy,
         )
-        from local_operator.web_search.providers import provider_statuses
+        from local_operator.web_search.providers import (
+            provider_landing_line,
+            provider_order_note,
+            provider_statuses,
+            state_legend,
+        )
         from local_operator.web_search.service import (
             load_search_settings,
             set_provider_enabled,
@@ -32883,17 +33601,38 @@ class OperatorApp(App[None]):
                 labels = {status.id: status.label for status in statuses}
                 strategy = settings.strategy.replace("_", " ").title()
                 order = " → ".join(labels[value] for value in settings.providers)
-                items: list[tuple[str, str]] = [
+                items: list[tuple[str, str | Text]] = [
                     (
                         "Web search",
+                        # Labelled, because the row below it carries the same arrow
+                        # notation for a different fact: unlabelled, a cold reader
+                        # takes this one for the order searches run in and reads the
+                        # `chain` row as contradicting it (round-2 U2-2/D2-4).
                         f"{'On' if settings.enabled else 'Off'} · {strategy} · "
-                        f"{order or 'No providers'}",
-                    )
+                        f"order: {order or 'No providers'}",
+                    ),
+                    # `order:` above is the stored prefix, which on an install that
+                    # LISTS a paid provider cannot show where that leg lands. This
+                    # row is the chain as it will be walked, every leg in try order,
+                    # the paid ones marked. It replaced a summary that named only
+                    # the auto-joined bands and therefore printed a paid band of
+                    # `(none)` while a model-turn leg sat in the chain (round-1 D1).
+                    ("chain", _search_chain_text(statuses)),
+                    # Same header fact as the CLI's, because the two surfaces
+                    # disagreed about the one thing an exclusion is FOR: the CLI
+                    # said `excluded: exa` and this listing said nothing at all
+                    # (round-1 U6).
+                    (
+                        "excluded",
+                        (
+                            ", ".join(settings.excluded_providers)
+                            if settings.excluded_providers
+                            else "none"
+                        ),
+                    ),
                 ]
                 for status in statuses:
-                    enabled = "enabled" if status.enabled else "disabled"
-                    available = "available" if status.available else "setup needed"
-                    items.append((status.label, f"{enabled} · {available} · {status.detail}"))
+                    items.append((status.label, _search_status_detail(status)))
                 items.extend(
                     [
                         ("toggle", "/search on|off · /search enable|disable <provider>"),
@@ -32913,6 +33652,13 @@ class OperatorApp(App[None]):
                             "SearXNG (shell)",
                             "local-operator search setup searxng --endpoint <url>",
                         ),
+                        # The legend: every state word this listing prints, in one
+                        # place, from the same table that explains them to `search
+                        # enable`. Printed here because the reader who has just
+                        # logged in reads this surface first and would otherwise
+                        # have to infer what `auto paid` means from the word
+                        # "auto" (round-1 U5, D5).
+                        ("states", state_legend(statuses).removeprefix("States: ")),
                     ]
                 )
                 self._append_block(RichBlock(_tree_listing(items, "web search")))
@@ -32931,12 +33677,42 @@ class OperatorApp(App[None]):
                 if provider not in PROVIDER_IDS:
                     notice(f"unknown search provider: {provider}", "warning")
                     return
-                set_provider_enabled(
+                settings = set_provider_enabled(
                     manager,
                     cast(SearchProviderId, provider),
                     command == "enable",
                 )
-                notice(f"{provider} {command}d; applies to the next search")
+                if command == "disable":
+                    notice(
+                        f"{provider} excluded; it will not be used by any search until "
+                        f"you run /search enable {provider}"
+                    )
+                else:
+                    # ONE sentence for both surfaces: `provider_landing_line` is
+                    # what the CLI prints too, so the same action cannot be
+                    # described two ways. It says where the provider will serve
+                    # from (a listed provider does not go to the front any more),
+                    # or -- when it cannot serve yet -- names the command that
+                    # fixes that instead of claiming it is both enabled and off.
+                    row = next(
+                        (
+                            status
+                            for status in provider_statuses(settings, credentials)
+                            if status.id == provider
+                        ),
+                        None,
+                    )
+                    landing = (
+                        provider_landing_line(provider, row)
+                        if row is not None
+                        else f"{provider} enabled"
+                    )
+                    # `; applies now` belongs to a sentence about a CHANGE. The
+                    # needs-setup arm is a sentence about a STATE that has not
+                    # become usable, so the tail was reading as "your search is
+                    # about to use this" (round-2 D2-5).
+                    tail = "" if row is not None and not row.available else "; applies now"
+                    notice(f"{landing}{tail}")
                 return
             if command == "balance" and len(words) == 2:
                 strategy = words[1].lower()
@@ -32955,8 +33731,18 @@ class OperatorApp(App[None]):
                 providers: list[SearchProviderId] = [
                     cast(SearchProviderId, word) for word in provider_words
                 ]
-                set_provider_order(manager, providers)
-                notice("search order: " + ", ".join(providers))
+                settings = set_provider_order(manager, providers)
+                # The tail is DERIVED from the resolver, word-for-word what the CLI
+                # prints: "tried first" is true of the ids that land in a free band
+                # and false of a paid one the resolver hoists behind them, so a
+                # hardcoded version promises something this very command breaks
+                # (round-2 U2-1; round-1 U6 wanted the two surfaces to match).
+                notice(
+                    "search order: "
+                    + ", ".join(providers)
+                    + " "
+                    + provider_order_note(providers, settings, credentials)
+                )
                 return
             if command == "setup" and len(words) == 2:
                 provider = words[1].lower()
@@ -32972,8 +33758,28 @@ class OperatorApp(App[None]):
                     notice(
                         "run in a shell: local-operator search setup searxng " "--endpoint <url>"
                     )
-                elif provider in ("brave", "exa", "serpapi", "perplexity"):
-                    notice(f"run in a shell: local-operator search setup {provider} " "--api-key")
+                elif provider == "deepseek":
+                    # DeepSeek joining the chain automatically is what this change
+                    # is FOR, so this branch cannot be the DuckDuckGo fallback: it
+                    # has to say that a login is the whole setup (round-1 N1).
+                    notice(
+                        "DeepSeek search reuses the DeepSeek model key (one model "
+                        "turn per search): run in a shell `local-operator login "
+                        "deepseek`; it joins the chain automatically in the paid "
+                        "band, after every free provider"
+                    )
+                elif provider in ("brave", "exa", "serpapi", "parallel", "perplexity"):
+                    if provider in ("exa", "parallel"):
+                        # Their keyless MCP tier is the default, so `--api-key` is an
+                        # upgrade rather than a requirement -- saying otherwise would
+                        # send a user hunting for a credential they do not need.
+                        notice(
+                            f"{provider} works keyless (free MCP tier); run in a shell: "
+                            f"local-operator search setup {provider} --api-key to raise "
+                            "the limits"
+                        )
+                    else:
+                        notice(f"run in a shell: local-operator search setup {provider} --api-key")
                 else:
                     notice("DuckDuckGo needs no setup; use /search enable duckduckgo")
                 return
@@ -33353,6 +34159,217 @@ class OperatorApp(App[None]):
             return
         if rows:
             self._append_block(RichBlock(_tree_listing(rows, "failover cascade")))
+
+    def _cmd_notifications(self, arg: str, notice: NoticeFn) -> None:
+        """``/notifications`` — the unread completions this app is painting.
+
+        Two forms, and the split is the answer to "what does the bare word do":
+        ``/notifications`` LISTS what this terminal's sidebar has marked, and
+        ``/notifications read`` clears exactly the set that listing is computed
+        from. One set, one command, so the receipt and the action can never
+        describe different piles.
+
+        THE SET IS THE CATALOGUE'S, deliberately not the receipt store's whole
+        unread population. On the operator's own machine that population is
+        6,392 conversations, 4,659 of which still have a directory and none of
+        which this app renders: the report this command answers is the pile the
+        sidebar SHOWS, and a gesture that quietly cleared thousands of marks
+        nobody was ever offered would be a watermark sweep in all but name. The
+        store-side rule lives in ``AttentionStore.acknowledge_many``; the rule
+        this command adds is that listing and clearing are one set.
+
+        BOTH HALVES ARE LOCAL, and the divergence is stated rather than implied.
+        The listing comes from THIS machine's catalogue and the clear writes THIS
+        machine's store, so on a follower attached to a runtime on another host
+        the two still agree: the marks being listed are the ones this frontend
+        paints. What does NOT happen is a forwarded acknowledgement — an owner
+        sharing this config root converges through its own poll (the sidebar's
+        2 s catalog poll, the desktop's 1 s attention poll), and an owner on a
+        different root has no row here at all, so those items answer ``unknown``
+        and keep their mark until the conversation is actually read. That is the
+        honest outcome: a receipt for a write this machine cannot perform would
+        claim a clear that did not happen.
+
+        A ``busy``/``wedged``/``pending`` row is listed when it is ``unseen``
+        even though the sidebar paints its LIVE state rather than the mark
+        (``CatalogEntry.shows_completion_mark``). This is a receipt of unread
+        completions, not a copy of the glyph column: the mark below it is the
+        one that comes back the moment the row stops being busy.
+
+        NO NEW KEY BINDING, and deliberately: acknowledging a receipt cannot be
+        undone (nothing in the product withdraws one), so clearing stays a typed
+        gesture or the desktop's own button, never a keystroke anyone reaches by
+        accident.
+        """
+        word = arg.strip().casefold()
+        if word not in ("", "read"):
+            self._system_notice(
+                f"/notifications takes no such argument — got {arg!r}. "
+                "Send /notifications to list them, or /notifications read to mark them read.",
+                "warning",
+            )
+            return
+        # The scan can take seconds on a large store, and the refusal leg is the
+        # slow one (it waits out a writer holding the store). One line up front,
+        # the way ``/update`` prints "checking for updates…": without it the
+        # transcript shows nothing between the keystroke and the answer, so a
+        # working command and a wedged one look the same (UX round 1, U3).
+        self._system_notice("reading receipts…")
+        # NOT exclusive, and that is a correctness choice rather than a
+        # preference. Cancelling a worker does not stop the thread it is
+        # awaiting, so an ``exclusive`` second press would abort the FIRST
+        # ``read``'s receipt while its ``acknowledge_many`` still committed — a
+        # clear that happened with nothing on screen to say so, the one outcome
+        # this receipt exists to rule out. Overlapping workers each report the
+        # truth instead (the store is idempotent, so the second says "Nothing
+        # unread." if it loses the race).
+        self.run_worker(
+            self._notifications_receipt(word == "read"),
+            group="notifications",
+            thread=False,
+            exclusive=False,
+            exit_on_error=False,
+        )
+
+    async def _notifications_receipt(self, clear: bool) -> None:
+        """Read the local catalogue off the loop, render it, then clear it if asked.
+
+        The scan is the blocking read the sidebar's own poll makes, so it runs in
+        a thread for the same reason: ``load_catalog`` walks the session store and
+        stats the transcripts in the window. The receipt is written AFTER
+        ``acknowledge_many`` returns, never before — a line naming a number this
+        call did not get back would be a receipt for a write nobody can verify.
+
+        ONE READ FOR BOTH FORMS, and the clearing form RENDERS the set it is
+        about to write (UX round 1, U1). The listing and the clear used to be two
+        independent catalogue scans, so ``read`` acknowledged whatever was unread
+        when IT ran: a completion published between the two typed commands was
+        cleared without ever having been painted, which is exactly the case R10
+        refuses ("a completion published after the render is not in the batch").
+        Acting on this read's own ``(conversation, token)`` pairs makes the
+        listing a render of the batch rather than a sibling of it, and it is why
+        ``read`` paints the rows before it writes — a user who typed the space and
+        two Enters has seen the pile they are clearing.
+
+        A store the catalogue could not READ is not an empty pile (UX round 1,
+        U2). ``load_catalog`` stamps ``DECORATION_ATTENTION`` on its rows when the
+        attention read fails, and this handler then refuses to answer for the
+        user's receipts at all: no listing, no write, and a sentence that names
+        the condition and says it is not a verdict about what is unread. The
+        empty-pile strings are reachable only when the store was consulted and
+        had nothing.
+
+        Never raises, because its worker is created with
+        ``exit_on_error=False``: an escaping exception would leave the user with a
+        command that silently did nothing, which is worse than the failure.
+        """
+        import sqlite3
+
+        from local_operator.paths import config_dir
+        from local_operator.session.attention import (
+            AttentionStore,
+            conversation_identity,
+        )
+        from local_operator.session.catalog import DECORATION_ATTENTION
+        from local_operator.session.store_failures import store_failure
+        from local_operator.tui.session_catalog import load_catalog
+
+        root = config_dir()
+        try:
+            entries = await asyncio.to_thread(load_catalog, root)
+        except Exception as error:  # noqa: BLE001 — report, never leave a silent no-op
+            # The store itself could not be walked, which the catalogue raises for
+            # rather than reporting as "you have no conversations". The exception's
+            # own text is never echoed — it can name file paths and this text lands
+            # in a transcript that gets screenshotted — so the SENTENCE comes from
+            # the shared classifier and the diagnostic goes to the log.
+            logger.exception("notifications: the session catalogue could not be read")
+            body, kind = _notifications_store_failure(
+                store_failure(error, root), root, clearing=clear
+            )
+            self._notice(body, kind)
+            return
+        if any(DECORATION_ATTENTION in entry.row.degraded for entry in entries):
+            failure = await asyncio.to_thread(_receipts_failure, root)
+            logger.warning("notifications: the receipt read was degraded (%s)", failure)
+            body, kind = _notifications_store_failure(failure, root, clearing=clear)
+            self._notice(body, kind)
+            return
+        # Ordered by the completion's own age, which is the column the receipt
+        # prints (design round 1, D5). The catalogue's rank is a conversation
+        # question — newest conversations first — so a months-old conversation
+        # that finished a minute ago used to be what "…N more" hid, and an age
+        # column that is not the sort key reads as if it were.
+        unread = sorted(
+            (entry for entry in entries if entry.unseen),
+            key=lambda entry: entry.row.mtime,
+            reverse=True,
+        )
+        # The budget the BLOCK paints at, not the view's — see ``_stop_all``'s
+        # note: a caller-side approximation misses by the transcript's padding
+        # cell and the glyph gutter, and a row that wraps spends a second row of
+        # the listing's bound. Computed once, because both forms paint through it.
+        budget = NoticeBlock.body_budget(max(0, self._transcript_view().size.width - 1))
+        if not clear:
+            self._append_block(NoticeBlock(_notifications_listing(unread, budget), "note"))
+            return
+        items = [
+            (
+                conversation_identity(root / "sessions" / entry.id),
+                entry.completion_token,
+            )
+            for entry in unread
+            if entry.completion_token
+        ]
+        if not items:
+            # No store call AT ALL when nothing is unread: the empty case is
+            # answered from the catalogue read above, so it cannot open a
+            # database (or create one) to acknowledge nothing. Same tier as the
+            # clearing receipt -- it is the answer to what the user just typed,
+            # not background chrome.
+            self._notice("Nothing unread.", "note")
+            return
+        # The pile goes up BEFORE the write, so a write that then fails leaves the
+        # user looking at what did not get cleared rather than at nothing. Painted
+        # in its CLEARING form: same rows and count, no instruction to run the
+        # command that is already running, and no pointer to rows that are about
+        # to stop being unread (UX round 2, U7 / agent review F4).
+        self._append_block(
+            NoticeBlock(_notifications_listing(unread, budget, clearing=True), "note")
+        )
+        try:
+            results = await asyncio.to_thread(
+                AttentionStore(root / "attention.db").acknowledge_many, items
+            )
+        except (sqlite3.Error, OSError) as error:
+            # Three conditions, three answers — this arm used to flatten all of
+            # them into the contention sentence, so a full volume or an
+            # unopenable store told the operator to send it again (agent review
+            # round 1, R1). The classification and the copy are the shared
+            # module's, so this surface and the desktop ladder cannot drift; the
+            # exception itself is logged, never echoed.
+            logger.exception("notifications: the receipt write failed")
+            body, kind = _notifications_store_failure(
+                store_failure(error, root), root, clearing=True
+            )
+            self._notice(body, kind)
+            return
+        except Exception:  # noqa: BLE001 — report, never leave a silent no-op
+            # Anything the classifier does not own still gets a vetted sentence:
+            # interpolating the exception would leak a path into a transcript.
+            logger.exception("notifications: the receipt write failed")
+            self._notice(
+                "/notifications could not clear the receipts, and nothing was cleared.",
+                "error",
+            )
+            return
+        read = sum(1 for result in results if result["status"] == "read")
+        superseded = sum(1 for result in results if result["status"] == "superseded")
+        unknown = sum(1 for result in results if result["status"] == "unknown")
+        self._notice(_notifications_cleared(read, superseded, unknown), "note")
+        # The sidebar repaints off its own 2 s poll; this only shortens the wait,
+        # through the same call that poll makes.
+        self._refresh_sidebar()
 
     def _clock_ms(self) -> float:
         import time
@@ -34346,7 +35363,23 @@ class OperatorApp(App[None]):
         for previous in prior_turns or []:
             if previous.forkable:
                 turns.extend((Message.user(previous.question), Message.assistant(previous.answer)))
-        turns.append(Message.user(ASIDE_PROMPT.format(question=question)))
+        # `@path` REFERENCES expand HERE, and this is the only place they can.
+        # The aside is a separate model call that never reaches
+        # `Session.prompt`, so the session-layer expansion every other exit
+        # relies on does not run for it — without this, `/btw what does
+        # @auth.py do?` asks the model about a token it cannot resolve.
+        #
+        # In the WORKER rather than at the three `_ask_aside` call sites
+        # (`on_editor_submitted`, `_cmd_aside`, the inline-command path) because
+        # this is where they converge and where an await is already legal. Per
+        # route, two of the three would have missed it — and `/btw` typed fresh
+        # goes through `_cmd_aside`, which is the commonest way in.
+        #
+        # The card still shows the TYPED question: only the text handed to the
+        # model is expanded, so the display/sent split holds on this surface
+        # exactly as it does in the transcript.
+        asked = await self._expand_references(question)
+        turns.append(Message.user(ASIDE_PROMPT.format(question=asked)))
         source.active_workers += 1
         try:
             try:
@@ -34559,6 +35592,50 @@ class OperatorApp(App[None]):
             ]
         )
 
+    def on_file_query_opened(self, message: FileQueryOpened) -> None:
+        """The buffer just entered an ``@`` token — offer that directory's entries.
+
+        The ``@`` twin of :meth:`on_skill_query_opened`, answering on the message
+        for the same reason: every route into the list arrives at one place with
+        one set of rows.
+
+        The message carries the DIRECTORY, not the whole query, because the
+        editor re-posts whenever that directory changes rather than once per
+        token — a file vocabulary is not fixed for the session the way the skill
+        vocabulary is. Resolution is against :meth:`session_cwd`, the same cwd
+        an ``@path`` is expanded against at submit, so the list can never offer
+        a row the expander would then fail to find.
+
+        SYNCHRONOUS, and deliberately so (design D6). ``scan_directory`` does one
+        ``os.scandir`` of one directory, measured at 0.04–0.07 ms against the
+        0.29 ms fingerprint probe this same keystroke path already accepts.
+        Do NOT move it to ``run_worker``, ``asyncio.to_thread`` or a debounce:
+        this codebase has no cancellation for a stale list beyond
+        ``_dismissed_query`` and ``_apply`` re-matching the current query, so a
+        worker would mean BUILDING cancellation to make a 0.04 ms call
+        affordable. The staleness it would introduce is a real bug; the latency
+        it would save is not measurable.
+
+        An empty directory sets a notice rather than leaving a bare list, exactly
+        as an empty skill vocabulary does: "this directory has nothing to offer"
+        is a real answer, and the row says so instead of showing an empty box.
+
+        It also passes on how many entries the scan's own cap kept OUT
+        (``unlisted``), because the picker's overflow row is where the user finds
+        out how much of the directory is not on screen and the picker has no way
+        to know it: it holds the rows it was given (design round 1, D6).
+        """
+        message.stop()
+        picker = self._editor().picker
+        choices, unlisted = scan_directory_report(message.directory, self.session_cwd())
+        if not choices:
+            picker.set_choices([])
+            where = message.directory or "this directory"
+            picker.set_notice(f"nothing to reference in {where}")
+            return
+        picker.set_notice("")
+        picker.set_choices(choices, unlisted=unlisted)
+
     def on_argument_query_opened(self, message: ArgumentQueryOpened) -> None:
         """The buffer just entered ``/<command> …`` — fill that command's list.
 
@@ -34651,6 +35728,31 @@ class OperatorApp(App[None]):
             )
             picker.set_notice("")
             return
+        if message.command == "notifications":
+            # ONE row, and it is the clearing form — the bare command (which
+            # lists) is what pressing Enter without a space already does, so
+            # offering it here would be a row that restates the submit key.
+            #
+            # `alert=True` for the `/goal --clear` reason, and it matters more
+            # here: the row is pre-selected and the only match, so without the
+            # flag `_picker_choice_is_unambiguous` RUNS it on one Enter — turning
+            # `/notifications ` + Enter, the keystroke a user reaches when they
+            # want to SEE the pile, into a clear. Acknowledging a receipt cannot
+            # be undone, so the first Enter fills `/notifications read` and the
+            # second runs it; a deliberate down-arrow onto the row keeps its one
+            # press, because the editor already treats a move as unambiguous.
+            #
+            # NOT gated on there being anything unread, unlike the `/goal` and
+            # `/loop` rows: that gate is a live-state read they already hold, and
+            # the equivalent here is a catalogue scan per keystroke after the
+            # space — a store walk to decide whether to draw one row. The
+            # ungated clear is not a dead end either: `Nothing unread.` is the
+            # command's own honest answer, the case `_cmd_notifications` names.
+            picker.set_choices(
+                [ArgumentChoice("read", "Mark every unread completion read", alert=True)]
+            )
+            picker.set_notice("")
+            return
         if message.command == "loop":
             # The same offer for the loop, gated on the loop THIS terminal is
             # running: `_loop_running` is app-local and unpublished, and the
@@ -34680,7 +35782,7 @@ class OperatorApp(App[None]):
             from local_operator.tui.move_targets import suggest_targets
 
             try:
-                targets = suggest_targets(self._session_cwd(), config_dir=config_dir())
+                targets = suggest_targets(self.session_cwd(), config_dir=config_dir())
             except Exception:  # noqa: BLE001 — an unreadable store is an empty list
                 logger.debug("could not assemble move argument rows", exc_info=True)
                 targets = []
@@ -36046,8 +37148,12 @@ class OperatorApp(App[None]):
         """Adopt a just-logged-in provider as hosting when none is set.
 
         Returns a one-line receipt naming what was written, or ``None`` when
-        hosting was already configured (nothing changed, nothing to say). The
-        provider id is the credential's storage id \u2014 an OAuth flavour like
+        hosting was already configured (nothing changed, nothing to say). One
+        case speaks WITHOUT writing: a decision-only provider (TypeSafe's Jev)
+        has a credential worth storing and no chat hosting worth adopting, so
+        the plan carries a receipt with ``hosting=None`` and it is returned
+        here for the caller to paint. The provider id is the credential's
+        storage id — an OAuth flavour like
         ``xai-oauth`` stores under ``xai``, and that is the hosting the app
         should point at. Config-write failure is reported but never fatal: the
         login itself already succeeded.
@@ -36074,7 +37180,12 @@ class OperatorApp(App[None]):
                 manager.get_config_value("model_name"),
             )
             if plan.hosting is None:
-                return None
+                # Nothing to write, but there can still be something to SAY: a
+                # decision-only provider (TypeSafe's Jev) leaves the routing
+                # exactly as it was and says so in ``receipt``. Returning None
+                # here — as this did — swallowed that line and made the login
+                # look like it had silently done nothing.
+                return plan.receipt
             manager.set_config_value("hosting", plan.hosting)
             # ``None`` = leave it; ``""`` = clear a model belonging to the
             # provider just replaced. The explicit None test is what keeps the
@@ -36146,7 +37257,13 @@ class OperatorApp(App[None]):
             # second provider, not changing their default).
             set_msg = self._apply_login_defaults(provider)
             if set_msg:
-                await notice(set_msg, "info")
+                # ``note``, not ``info`` (design round 1, D4): the taxonomy
+                # (``transcript.py``'s ``_KIND_TOKENS``) reserves ``note`` for "the
+                # answer to something the user just did", which is exactly what this
+                # line is — and ``info``'s dim ink is the quietest in the app, so the
+                # longest sentence in the block was also its least legible one while
+                # the two routine confirmations above it were bright.
+                await notice(set_msg, "note")
             # The credential set just changed, so the owner's offerable-model
             # publication is stale: a follower's picker must see the newly
             # usable provider without waiting for a session restart (D3).
@@ -36598,7 +37715,13 @@ class OperatorApp(App[None]):
         # the toast the one-shot edge), and the kill switch is exactly what a
         # user interrupted by a default-on feature goes looking for.
         notify_note = Text()
-        notify_note.append("notifications".ljust(name_width), style=muted)
+        # Labelled "desktop toasts" rather than "notifications" (UX round 1, U6):
+        # this block is printed BELOW the slash-command table, where
+        # ``/notifications`` is a row of its own, so the bare word used to be two
+        # unrelated hits on one screen with nothing saying they were different
+        # features. The setting's own name is still spelled out in the shell hint
+        # beside it, so nothing is lost by naming the feature instead of the key.
+        notify_note.append("desktop toasts".ljust(name_width), style=muted)
         notify_note.append(
             # Both halves of this used to be wrong for the detached path
             # (round 3, D13). "when a turn finishes" overstated it — the
@@ -36669,6 +37792,69 @@ class OperatorApp(App[None]):
             if self._skills_by_name is None:
                 self._skills_by_name = {}
         return self._skills_by_name
+
+    async def _expand_references(self, text: str) -> str:
+        """Expand every ``@path`` in ``text``, painting one notice per problem.
+
+        THE ASIDE'S expansion, and only the aside's. Every other exit is
+        expanded by :meth:`Session.prompt`; this one cannot be, because
+        ``complete_aside`` is a separate model call that never reaches it. See
+        ``on_editor_submitted`` for why the main submit path does NOT call this.
+
+        Never raises, by the resolver's contract: every failure degrades to the
+        original text plus a notice. That is the same bargain
+        :meth:`_expand_invocation` strikes for an unreadable skill body, and for
+        the same reason — swallowing the user's request is the worse half of the
+        trade, so an unresolved token is SAID and the raw text still goes.
+
+        Notices go through the app's ordinary :meth:`_notice` rather than any
+        new mechanism, so a reference problem reads like every other thing the
+        app has to tell the user.
+
+        THE GATE PASSED HERE DECLINES, and the interactive one MUST NOT be used
+        in its place — doing so cancels this very worker. The chain, because it
+        is three hops and invisible from this line:
+
+        1. :meth:`request_tool_approval` calls :meth:`_close_aside`
+           (``app.py:20181``), deliberately: its card floats over the transcript,
+           so a question raised behind an open aside would be drawn underneath
+           it while still taking focus.
+        2. :meth:`_close_aside` cancels the ``aside`` worker group
+           (``app.py:34024``) — it retires the in-flight request, not just the
+           surface.
+        3. :meth:`_aside_worker` RUNS in that group (``app.py:34124``).
+
+        So awaiting the interactive gate from here is self-cancelling. Probed on
+        a real app with ``/btw what is in @.env ?``: ``_close_aside CALLED`` →
+        ``EXPAND WAS CANCELLED mid-await`` → ``card never mounted`` →
+        ``asides=0``. The user's question is discarded in silence, which reads
+        as a flake rather than as a denial. A reader who cannot see this chain
+        will "fix" the decline by passing the real gate and reintroduce it.
+
+        This is NOT a second approval convention: same parameter, same shape,
+        same routing, and the decline degrades through the module's existing
+        path — verbatim token plus a notice, exactly as an unresolvable one
+        does. What differs is the POLICY for a surface with no interactive
+        approval channel available to it, expressed as the value passed.
+
+        The cost is bounded and it is the right half to lose. An ordinary
+        in-workspace file never consults the gate at all, so the common
+        ``/btw what does @auth.py do?`` expands exactly as before; only a
+        deny-listed or outside-workspace path is refused, and it is refused with
+        a notice rather than a hang. The real fix is resolving the approval
+        BEFORE the panel opens, which needs `_ask_aside` to stop being
+        synchronous — one of its three callers is a message handler, so that is
+        the pump question again and its own change.
+        """
+
+        async def _decline(tool_name: str, description: str) -> bool:
+            """Refuse without asking — see the chain above for why."""
+            return False
+
+        result = await expand_references(text, self.session_cwd(), request_approval=_decline)
+        for notice in result.notices:
+            self._notice(notice, "warning")
+        return result.sent
 
     def _expand_invocation(
         self, text: str, attachments: Mapping[int, Marked] | None = None
@@ -37839,7 +39025,7 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
-                f"config.yml says {saved} — /approvals default {live} changes that",
+                f"config.yml says {saved} — /approvals {saved} adopts it in this session",
                 style="warning" if self._approve_all else "info",
             )
         if wanted_auto:
@@ -37853,15 +39039,24 @@ class OperatorApp(App[None]):
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._set_approve_all(wanted_auto)
         if wanted_auto:
+            # Same rule as `_cmd_approvals`: the save hint is offered only while
+            # it is new information (UX round 1, U5), and the live half is the
+            # runtime's sentence word for word.
+            save_hint = (
+                ""
+                if self._configured_approvals_mode() == "auto"
+                else " — /approvals default auto saves it for new sessions"
+            )
             return SlashResult(
                 kind="notice",
-                text="tool approvals: auto — every tool runs without asking (this session) — "
-                "/approvals default auto saves it for new sessions",
+                text="tool approvals: auto — every tool runs without asking (this session)"
+                + save_hint,
                 style="warning",
             )
         return SlashResult(
             kind="notice",
-            text="tool approvals: ask — write and command tools will prompt again (this session)",
+            text="tool approvals: ask — write and command tools prompt before running "
+            "(this session)",
             style="info",
         )
 
@@ -39815,6 +41010,10 @@ class OperatorApp(App[None]):
             # true: the send that owns that composer draft has just been SERVED,
             # so the draft is gone and the text with it (UX round 3, U1).
             self._retire_unsent_runtime_notice(self._interaction)
+            # ...and the moment a QUEUED marker has to come off: this
+            # announcement is the successor running the message, which is the
+            # end of the state the marker asserted (design round 1, D2).
+            self._settle_queued_prompt(message.message_id)
             return  # our own echo — the row is already painted
         block = UserBlock(message.prompt, message.image_count)
         block.navigation_anchor_id = message.message_id
@@ -39952,14 +41151,50 @@ class OperatorApp(App[None]):
                 # second question, and conflating the two handed a user a half
                 # sentence indistinguishable from a whole answer.
                 block.mark_truncated()
+                # The same classification the mounted-prose branch below makes,
+                # read from this event's OWN two fields rather than inherited
+                # from it: a block survives this branch, so its rail is decided
+                # here too. A truncated PROGRESS message under a following tool
+                # call is still progress — the turn goes on and the answer is
+                # still coming — so it is un-railed like any other narration,
+                # while a truncated ANSWER (no calls follow it) keeps the rail
+                # that says this is all the turn produced.
+                if is_intermediate_narration(
+                    stop_reason=message.stop_reason,
+                    has_tool_calls=message.has_tool_calls,
+                ):
+                    block.mark_narration()
                 block.finalize_text()
             self._refresh_working_activity()
             return
         block = self._ensure_streaming_block()
+        # ONE classification for this event, made BEFORE anything renders and
+        # read by both consumers below: the rail mark, and `display.narration`'s
+        # removal further down. Two separate reads of the same two fields is how
+        # a frame comes to show a message whose rail and whose existence
+        # disagree — this repo has paid for one predicate in two places already
+        # (`narration.py`).
+        narration = is_intermediate_narration(
+            stop_reason=message.stop_reason,
+            has_tool_calls=message.has_tool_calls,
+        )
         # TUI-020: adopt the authoritative text carried by the event.
         block.update_text(message.text)
         block.completion_anchor_id = message.message_id
         block.navigation_anchor_id = message.message_id
+        # MARKED before `finalize_text()`, which is what commits the rows AND
+        # what raises the block's settled flag — and only a settled block can
+        # carry the rail at all (`AssistantBlock._rail_cols`). So a message that
+        # finalized into tool calls takes no rail, and this event is the first
+        # moment the outcome is known: mark it any later and the settling paint
+        # would already have railed a progress sentence.
+        #
+        # The streaming window above carries no rail either, and that is by
+        # design rather than by this mark: a block that has not settled paints no
+        # bar. The mark is still load-bearing — it decides the SETTLED frame — but
+        # it is not what keeps the rail off the streaming one.
+        if narration:
+            block.mark_narration()
         block.finalize_text()
         self._streaming_block = None
         # `display.narration` OFF: this call finalized into TOOL CALLS, so the
@@ -39981,10 +41216,7 @@ class OperatorApp(App[None]):
         # The WorkingBlock needs no guarding: it is SPACING_TRANSIENT, and
         # `remove_block` already skips transient blocks when it re-decides the
         # gap on whatever fell into the removed block's place.
-        if self._narration_hidden() and is_intermediate_narration(
-            stop_reason=message.stop_reason,
-            has_tool_calls=message.has_tool_calls,
-        ):
+        if self._narration_hidden() and narration:
             self._transcript_view().remove_block(block)
         # The prose is settled, so "responding…" is over: whatever the turn does
         # next — another model call, a tool batch — the line must stop claiming
@@ -40412,6 +41644,271 @@ class OperatorApp(App[None]):
         toast.show(
             _splash_toast_headline(text, headline), duration_ms=duration, owner=SPLASH_NOTICE
         )
+
+    def _mark_prompt_queued(self, source: SessionInteraction, message_id: str, text: str) -> None:
+        """Record a prompt the runtime QUEUED for its successor, and mark its row.
+
+        The third outcome beside "admitted" and "refused", and the one the
+        incident's copy is about: the runtime that took the message is leaving
+        and has spooled it for the build that replaces it, so nothing failed —
+        the echo row stands and the composer stays empty, because it is no longer
+        holding the user's only copy.
+
+        NO NOTICE IS APPENDED. The state is painted on the message's own row
+        (:data:`QUEUED_ROW_TEXT`) so that it has an END — the successor's
+        announcement takes it down (:meth:`_settle_queued_prompt`) — and so that
+        sending three messages during one drain costs three rows rather than
+        three identical receipts (design round 1, D2/D4; UX round 1, U3).
+
+        An id-less session (an implementation outside the ``message_id`` seam the
+        echo registry already documents) is left unmarked rather than marked
+        wrongly: without the id nothing can match the announcement, so a marker
+        could only be permanent.
+        """
+        if not message_id:
+            return
+        source.turn.queued_prompts[message_id] = _QueuedPrompt(command_id=message_id, text=text)
+        self._refresh_queued_offers(source)
+
+    def _settle_queued_prompt(self, message_id: str) -> None:
+        """The successor has run the message: take the queued marker off its row.
+
+        Keyed by the message id, which is the one identity that survives the
+        handover, and searched across every open interaction rather than only the
+        current one: the successor's announcement arrives on the session's own
+        event stream and the user may be looking at another conversation when it
+        lands — the marker is on the sender's row either way.
+        """
+        if not message_id:
+            return
+        for source in self._interactions.values():
+            if message_id not in source.turn.queued_prompts:
+                continue
+            self._settle_one_queued_prompt(source, message_id)
+            return
+
+    def _settle_one_queued_prompt(self, source: SessionInteraction, message_id: str) -> None:
+        """Drop one queued entry and take its marker down."""
+        source.turn.queued_prompts.pop(message_id, None)
+        block = self._user_block_for_message(message_id)
+        if block is not None:
+            block.set_queued(False)
+        self._refresh_queued_offers(source)
+
+    def _refresh_queued_offers(self, source: SessionInteraction) -> None:
+        """Only the NEWEST queued message advertises the recall key.
+
+        The recall lifts one message at a time (the sibling steer channel's rule,
+        and the reason its decline names the composer), so a second marked row
+        offering the same key promises a press that will decline — measured:
+        two rows offering, one honouring (UX round 2, U4). The order is
+        insertion order, which is queue order.
+        """
+        ids = list(source.turn.queued_prompts)
+        for index, message_id in enumerate(ids):
+            block = self._user_block_for_message(message_id)
+            if block is not None:
+                block.set_queued(True, offer=index == len(ids) - 1)
+
+    def _handover_admitted_ids(self, source: SessionInteraction) -> set[str]:
+        """Which of this surface's queued ids the DURABLE transcript already holds.
+
+        THE EVIDENCE A JOINED SURFACE CAN ACTUALLY SEE, and the reason the marker
+        needs it: the successor's boot drain admits the spooled row BEFORE its
+        control socket exists (``process._drain_inbox_into`` runs ahead of
+        ``RuntimeServer.start_in_process``), so no viewer that binds afterwards
+        can witness that message's ``MessageStartEvent`` — measured on the real
+        handover: the marker was still up 60 s after the successor had answered
+        (UX round 2, U2). The durable row carries the id this surface sent, and
+        it is the same index the runtime uses to avoid running the message twice,
+        so it is evidence rather than a heuristic.
+
+        Read from disk, best effort: an unreadable or absent transcript answers
+        "nothing admitted", which keeps the marker up rather than clearing a
+        state nobody has established has ended.
+
+        RETURNING BEFORE THE READ IS LOAD-BEARING, not an optimisation. This runs
+        after EVERY successful bind, and ``Transcript(directory)`` replays the
+        whole journal eagerly: measured on this store's own 252.7 MB / 22,334-row
+        journal that is 3,916 ms synchronously on the event loop — on the join
+        path the operator's requirement is about, paid for a queue that is
+        usually empty (agent review round 3, MAJOR-3).
+        """
+        if not source.turn.queued_prompts:
+            return set()
+        directory = self._session_directory(source)
+        if directory is None:
+            return set()
+        from local_operator.resume import TRANSCRIPT_NAME
+
+        if not (directory / TRANSCRIPT_NAME).is_file():
+            return set()
+        try:
+            from local_operator.session.transcript import Transcript
+
+            transcript = Transcript(directory)
+            return {
+                command_id
+                for command_id in source.turn.queued_prompts
+                if transcript.has_admitted_command(command_id)
+            }
+        except Exception:  # a settle must never take the app down
+            logger.debug("could not read the durable transcript", exc_info=True)
+            return set()
+
+    def _settle_handed_over_queues(self, source: SessionInteraction) -> None:
+        """Take down every queued state whose message has been HANDED OVER.
+
+        Called when a bind completes, which is the first moment a surface that
+        joined a drain can ask the two questions its own queue raises: has the
+        successor run this message (the durable row), and does the spool still
+        hold messages this surface is not showing (the foreign-queue row).
+
+        The announcement path stays (:meth:`_settle_queued_prompt`): on the
+        mid-turn arm the successor is already serving and does announce, and a
+        settlement that only ran on a bind would miss it.
+        """
+        for command_id in self._handover_admitted_ids(source):
+            self._settle_one_queued_prompt(source, command_id)
+        self._retire_queued_elsewhere_notice(source)
+
+    def _retire_queued_elsewhere_notice(self, source: SessionInteraction) -> None:
+        """Take the joiner's queued-messages row down once nothing is queued.
+
+        The D2 class on the surface round 1 added (design round 2, D7): the row
+        announced messages the spool held and could never stop announcing them,
+        so it sat above the very answer it described. It goes when the spool no
+        longer holds an owner row this surface is not already marking.
+        """
+        notice = source.turn.queued_elsewhere_notice
+        if notice is None:
+            return
+        if self._foreign_queued_rows(source):
+            return
+        source.turn.queued_elsewhere_notice = None
+        try:
+            self._transcript_view().remove_block(notice)
+        except Exception:  # a row already gone is the common race, not a failure
+            logger.debug("queued-elsewhere row was already gone", exc_info=True)
+
+    def _foreign_queued_rows(self, source: SessionInteraction) -> list[Any]:
+        """Spooled owner rows this surface is NOT already showing as queued."""
+        directory = self._session_directory(source)
+        if directory is None:
+            return []
+        from local_operator.session.runtime.inbox import SOURCE_USER, peek_inbox
+
+        try:
+            rows = [
+                line for line in peek_inbox(directory) if getattr(line, "source", "") == SOURCE_USER
+            ]
+        except Exception:  # a read on the paint path must never take the app down
+            logger.debug("could not read the spool", exc_info=True)
+            return []
+        mine = set(source.turn.queued_prompts)
+        return [row for row in rows if str(getattr(row, "command_id", "") or "") not in mine]
+
+    def _user_block_for_message(self, message_id: str) -> UserBlock | None:
+        """The user row this surface painted for ``message_id``, if it is up.
+
+        Found by ANCHOR rather than held by reference: the row is identified by
+        the same id the session announces, which is what ``_submit_prompt``
+        stores as ``navigation_anchor_id``, so a settlement that arrives after a
+        rebind, a switch or a ``/clear`` finds nothing rather than writing to a
+        block that is no longer in the transcript.
+        """
+        if not message_id:
+            return None
+        for block in self._transcript_view().blocks():
+            if isinstance(block, UserBlock) and block.navigation_anchor_id == message_id:
+                return block
+        return None
+
+    def _session_directory(self, source: SessionInteraction) -> Any:
+        """Where a session's own files live — the drain spool among them.
+
+        The same layout every other reader here composes (``resume``, the boot
+        prompt, the notification funnel), from the config root rather than from
+        anything the session object exposes: an attached viewer's session knows
+        its id, not the path its owner stores it at.
+        """
+        from local_operator.paths import config_dir
+
+        session = source.session
+        session_id = getattr(session, "session_id", "") if session is not None else ""
+        if not session_id:
+            return None
+        return config_dir() / "sessions" / session_id
+
+    def _withdraw_queued_prompt(self, source: SessionInteraction) -> str:
+        """Esc: take the newest spooled prompt back out of the successor's spool.
+
+        THE NEIGHBOUR OF :meth:`_recall_queued_steers`, making the same promise
+        about the stronger commitment: Enter handed the user's words to a process
+        that may run them hours later, so the cancel key has to be able to take
+        them back. What differs is where the message lives — ``inbox.jsonl``, a
+        FILE, rather than the engine's queue — and that is why the withdrawal
+        needs no op and cannot disturb the runtime: no runtime has read the row
+        yet, which is exactly what makes it recallable.
+
+        Returns ``"withdrawn"`` when the message was actually taken back — the
+        one outcome that ends the press, because the row promised an inert undo
+        and the caller must not go on to stop the turn (UX round 2, U1) — or
+        ``"missed"``/``"declined"``/``""`` when it was not: the successor already
+        has the row, the composer must not be disturbed, there is nothing of ours
+        queued, or there is no session directory. Those keep the rest of Esc's
+        meaning, because the press did not change anything. The three guards are
+        the ones the steer recall applies for the same reasons: the aside owns the
+        composer, a read-only composer cannot show the text, and a half-typed
+        draft is never displaced on the cancel key.
+
+        LOSING THE RACE IS AN ANSWER, not a gap: once the successor has drained
+        the spool the row is gone and the message WILL run, so the miss says
+        exactly that instead of leaving the user to believe the recall worked. The
+        marker stays up in that case, because the message is still queued — it is
+        only out of reach.
+        """
+        entries = list(source.turn.queued_prompts.items())
+        if not entries:
+            return ""
+        message_id, queued = entries[-1]
+        editor = self._editor()
+        if self._aside_is_open() or editor.read_only:
+            return ""
+        if editor.text.strip():
+            # Same reasoning as the steer recall's decline: a press that changes
+            # nothing reads as a dropped keystroke, and the buffer is the
+            # obstacle — so say what the obstacle is and how to clear it.
+            self._replace_stop_notice(QUEUED_PROMPT_DECLINE_NOTICE, "note")
+            return "declined"
+        directory = self._session_directory(source)
+        if directory is None:
+            return ""
+        from local_operator.session.runtime.inbox import withdraw_inbox
+
+        try:
+            withdrawn = withdraw_inbox(directory, queued.command_id)
+        except Exception:  # a recall must never take the app down
+            logger.debug("queued-prompt recall failed", exc_info=True)
+            return ""
+        if not withdrawn:
+            self._replace_stop_notice(QUEUED_PROMPT_MISSED_NOTICE, "warning")
+            return "missed"
+        del source.turn.queued_prompts[message_id]
+        self._refresh_queued_offers(source)
+        block = self._user_block_for_message(message_id)
+        transcript = self._transcript_view()
+        if block is not None:
+            transcript.remove_block(block)
+        # The echo entry goes with the row: left in place it would swallow the
+        # RESEND's announcement and the resent message would never paint — the
+        # same reasoning as the steer recall's `_consume_user_echo` call, by the
+        # same id.
+        self._consume_user_echo(queued.text, message_id=queued.command_id)
+        self._load_editor_draft(SessionDraft(text=queued.text))
+        self._replace_stop_notice(QUEUED_PROMPT_TAKEN_BACK_NOTICE, "note")
+        self._editor().focus()
+        return "withdrawn"
 
     def _recall_queued_steers(self) -> None:
         """Esc: lift the newest still-queued steer back into the composer.
@@ -41765,7 +43262,7 @@ class _TreeRow(Text):
         self,
         branch: str,
         name: str,
-        detail: str,
+        detail: str | Text,
         *,
         dim: Style,
         name_style: Style,
@@ -41774,13 +43271,36 @@ class _TreeRow(Text):
         super().__init__()
         self._branch = branch
         self._name = name
-        self._detail = detail
+        # A ``Text`` detail is accepted so a row can style PART of its detail --
+        # `/search` prints its state word in its own ink (round-1 D5) -- while
+        # every other call site keeps passing plain strings. ``_detail_plain``
+        # keeps the inherited ``.plain`` readers (copy path, transcript walkers,
+        # the test helpers) working either way.
+        self._detail: str | Text = detail
         self._dim = dim
         self._name_style = name_style
         self._detail_style = detail_style
         self.append_text(self._head())
-        if detail:
-            self.append("  " + detail, style=detail_style)
+        if self._detail_plain():
+            self.append("  ")
+            if isinstance(detail, Text):
+                self.append_text(detail)
+            else:
+                self.append(detail, style=detail_style)
+
+    def _detail_plain(self) -> str:
+        """The detail as plain text, whichever form the row was built with."""
+        return self._detail.plain if isinstance(self._detail, Text) else self._detail
+
+    def _detail_text(self) -> Text:
+        """The detail as a styled ``Text``: a ``Text`` passes through, a ``str``
+        takes the row's detail style."""
+        if isinstance(self._detail, Text):
+            text = self._detail.copy()
+            if text.style is None:
+                text.style = self._detail_style
+            return text
+        return Text(self._detail, style=self._detail_style)
 
     def _head(self) -> Text:
         """The row up to the detail column — the glyph branch and the name.
@@ -41796,7 +43316,7 @@ class _TreeRow(Text):
 
     def __rich_console__(self, console: Any, options: Any) -> Any:
         row = self._head()
-        if not self._detail:
+        if not self._detail_plain():
             yield row
             return
         # The detail's own column: the glyph branch, the name, and the two
@@ -41804,7 +43324,7 @@ class _TreeRow(Text):
         column = cell_len(self._branch) + cell_len(self._name)
         room = max(1, options.max_width - column - 2)
         # ``Text.wrap`` keeps the spans and folds on words.
-        wrapped = Text(self._detail, style=self._detail_style).wrap(console, room)
+        wrapped = self._detail_text().wrap(console, room)
         for index, line in enumerate(wrapped):
             if index:
                 row.append("\n")
@@ -41815,8 +43335,336 @@ class _TreeRow(Text):
         yield row
 
 
+#: Rows ``/notifications`` prints before it stops and counts the rest. Ten is a
+#: bound rather than a preference: the notice is one block in the transcript, and
+#: a machine with hundreds of unread completions would otherwise spend the whole
+#: viewport on a listing whose last line — the form that CLEARS them — the user
+#: cannot see.
+NOTIFICATIONS_LISTING_ROWS = 10
+
+
+def _notifications_listing(
+    entries: Sequence[CatalogEntry], budget: int, *, clearing: bool = False
+) -> str:
+    """The unread-completion receipt ``/notifications`` prints.
+
+    ONE COMPOSITION FOR BOTH FORMS, because ``/notifications read`` renders the
+    set it is about to write through this function: the user who typed the space
+    and two Enters has seen the pile (UX round 1, U1 and U4), and a second
+    composition would be free to describe a different set.
+
+    ``clearing`` is the ONE difference, and it is about the reader's moment rather
+    than the rows: the listing's closing line is an instruction ("run the other
+    form"), which on the clearing form instructs the user to run the command they
+    just ran, and its ``…N more — ctrl+b`` pointer sends them after rows that are
+    no longer unread (UX round 2, U7 and agent review F4). The rows, the header
+    and the plain bound are identical — the block still reconciles what it paints
+    with what it clears, which is the property U1 is about.
+
+    ``entries`` arrives ordered by completion age — the column the rows print —
+    and bounded by the caller's read; this function only composes. ``budget`` is
+    the text-column width the notice paints at (``NoticeBlock.body_budget``) and
+    it bounds the ROW, not just the name cell: the name is surrendered first (it
+    is the only variable-width cell), and a budget too small even for the fixed
+    lead and tail truncates the composed row rather than letting it wrap, so the
+    count of painted rows is the count of listed rows (agent review round 1 R4,
+    round 2 F3).
+
+    The mark comes from ``COMPLETION_MARKERS`` — the same table the sidebar and
+    the picker paint from — so one completion kind cannot gain a second glyph
+    here. Its INK is deliberately unused: a notice is tinted by its kind as one
+    statement, and a second colour ramp inside it would be a claim about urgency
+    the listing does not make.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.resume import format_age
+    from local_operator.tui.widgets.session_picker import COMPLETION_MARKERS
+    from local_operator.tui.widgets.tool_card import truncate_cells
+
+    if not entries:
+        return "No unread completions."
+    total = len(entries)
+    lines = [f"{total} unread completion{'' if total == 1 else 's'}:"]
+    for entry in entries[:NOTIFICATIONS_LISTING_ROWS]:
+        mark = COMPLETION_MARKERS.get(entry.completion_kind, COMPLETION_MARKERS["complete"])[0]
+        lead = f"  {mark} "
+        # The kind is dropped rather than left empty when the store's row predates
+        # the taxonomy: "✓ name —  · 2h" would read as a missing column.
+        kind = f" — {entry.completion_kind}" if entry.completion_kind else ""
+        tail = f"{kind} · {format_age(max(0, time.time() - entry.row.mtime))}"
+        label = entry.row.name or "Untitled conversation"
+        if budget <= 0:
+            # Zero is "no opinion" (the caller could not measure), which keeps
+            # the untruncated name exactly as ``/stop all``'s listing does.
+            row = f"{lead}{label}{tail}"
+        else:
+            room = budget - cell_len(lead) - cell_len(tail)
+            row = f"{lead}{truncate_cells(label, max(1, room))}{tail}"
+            if cell_len(row) > budget:
+                # The fixed cells alone can overrun a narrow split, where no
+                # amount of name truncation fits the row; the ROW is what the
+                # bound is about, so it is the row that gets truncated.
+                row = truncate_cells(row, budget)
+        lines.append(row)
+    if total > NOTIFICATIONS_LISTING_ROWS:
+        # The count of what is hidden, in BOTH forms: it is what lets the reader
+        # reconcile the rows above with the number the receipt will name.
+        bound = f"  …{total - NOTIFICATIONS_LISTING_ROWS} more"
+        lines.append(bound if clearing else f"{bound} — ctrl+b shows or hides the sidebar")
+    if not clearing:
+        # "all N" once the bound bites, "these" only when every row is on screen:
+        # at 38 unread the short form named the ten rows above it while the write
+        # covered all 38, one Enter away from a permanent clear of rows nobody
+        # had seen (design round 1, D2).
+        if total > NOTIFICATIONS_LISTING_ROWS:
+            lines.append(f"/notifications read marks all {total} read")
+        else:
+            lines.append("/notifications read marks these read")
+    return "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _notifications_cleared(read: int, superseded: int, unknown: int) -> str:
+    """What ``/notifications read`` says it did, quoting no clean sweep it missed.
+
+    The leftovers are NAMED, per bucket, because a count that silently dropped
+    them would be the "silent partial success" this design refuses: the row stays
+    unread, so the receipt has to say so. Truncation is not the alternative — a
+    receipt covering a bound the user then has to re-derive from a badge is the
+    same defect one layer out.
+
+    Number agreement is spelled per bucket rather than papered over with a
+    plural-only sentence: these lines are the operator-facing copy, and "Marked 1
+    completions read" is what a receipt that never fires with a count of one
+    looks like.
+    """
+    text = f"Marked {read} completion{'s' if read != 1 else ''} read."
+    if superseded:
+        text += (
+            f" {superseded} have newer results and stay unread."
+            if superseded != 1
+            else " 1 has a newer result and stays unread."
+        )
+    if unknown:
+        # "could not be found on this machine" rather than "is no longer in the
+        # receipt store": the second is internal vocabulary with no referent for
+        # the user, and "no longer" asserts a past this bucket does not establish
+        # -- the row may be a conversation whose receipts live on another root
+        # (design round 1, D3).
+        text += (
+            f" {unknown} could not be found on this machine and stay unread."
+            if unknown != 1
+            else " 1 could not be found on this machine and stays unread."
+        )
+    return text
+
+
+def _notifications_store_failure(
+    failure: StoreFailure | None, root: Path, *, clearing: bool
+) -> tuple[str, NoticeKind]:
+    """What ``/notifications`` says when the receipts could not be read or written.
+
+    THE THREE CONDITIONS KEEP THEIR THREE ANSWERS, which is why this takes a
+    classification rather than an exception (agent review round 1, R1): the TUI
+    answered every ``sqlite3.Error`` with the contention sentence, so a full
+    volume or an unopenable store told the operator to send it again -- the exact
+    misreport the desktop ladder was split to end, and both ``SQLITE_FULL`` and
+    ``SQLITE_CANTOPEN`` are reachable here because ``AttentionStore._connect``
+    creates its directory and file before any statement runs.
+
+    THE CLASSIFICATION IS SHARED; THE SENTENCE IS NOT (agent review round 2, F1;
+    UX round 2, U8). Round 1's fix shared the desktop's prose as well as its
+    codes, and two of those strings were written for the SEND path: they talk
+    about "the message" that could not be written and tell the reader to send it
+    again, in an op with no message in it -- false about the operation on the
+    listing form, which attempts no write at all. So the codes, the ink split and
+    the store-failure vocabulary are the shared module's, and the sentence is
+    composed here in the receipts' own nouns, per form:
+
+    * ``store_busy`` is the one RETRYABLE condition, and this surface has no
+      second channel to carry the hint the desktop's client gets from the code --
+      so the sentence has to state the remedy, which is to run the form again.
+      "It will catch up on its own" is deliberately NOT reused: true of the
+      store's read state, false of the act the user asked for, and the pile stays
+      until they ask again.
+    * ``store_out_of_space`` names the volume and the remedy that is theirs to
+      take (free space, then ask again).
+    * ``store_unavailable`` says retrying will not help and where to look, and it
+      says "read" rather than "read or written" on the listing form, which never
+      tried to write.
+
+    THE VERDICT CLAUSE IS THE OTHER HALF, and it is honesty rather than register:
+    a read that failed is not a finding that the pile is empty (UX round 1, U2).
+    An operator whose store is unreadable, told "No unread completions.", has
+    been told a falsehood by omission.
+
+    ``None`` means the classifier did not own the exception (a catalogue read
+    raising ``SessionStoreUnavailable`` carries no ``errno``, for instance), or
+    the store answers again by the time it is asked: a sentence that names no
+    cause it cannot establish. The INK follows the shared ``StoreFailure.level``
+    rather than a second table here, so a condition cannot be an error on one
+    surface and a warning on the other.
+    """
+    import logging
+
+    from local_operator.session.store_failures import (
+        STORE_BUSY,
+        STORE_OUT_OF_SPACE,
+        STORE_UNAVAILABLE,
+        display_root,
+    )
+
+    where = display_root(root)
+    action = "run /notifications read again" if clearing else "run /notifications again"
+    if failure is None:
+        # No cause invented: the classifier does not own this, or it did not
+        # reproduce when asked.
+        body = (
+            "The read receipts could not be read"
+            + (" or written" if clearing else "")
+            + ", so nothing was "
+            + ("cleared" if clearing else "listed")
+            + "."
+        )
+        kind: NoticeKind = "error"
+    else:
+        if failure.code == STORE_BUSY:
+            body = (
+                "Read state is busy right now, so nothing was "
+                + ("cleared" if clearing else "listed")
+                + f". Try again in a moment — {action}."
+            )
+        elif failure.code == STORE_OUT_OF_SPACE:
+            body = (
+                "This computer is out of disk space, so nothing was "
+                + ("cleared" if clearing else "listed")
+                + f". Free some space on the volume holding {where}, then {action}."
+            )
+        elif failure.code == STORE_UNAVAILABLE:
+            body = (
+                "The read receipts could not be read"
+                + (" or written" if clearing else "")
+                + f", so nothing was {'cleared' if clearing else 'listed'}. "
+                + f"Retrying will not help; check {where} and the disk it is on."
+            )
+        else:  # pragma: no cover — the classifier names every condition it returns
+            body = f"The read receipts could not be read, so nothing was {action}."
+        # The ink IS the shared classification's: contention is the shared
+        # module's WARNING, every other condition its ERROR.
+        kind = "warning" if failure.level < logging.ERROR else "error"
+    return f"{body} This is not a verdict about what is unread.", kind
+
+
+def _receipts_failure(root: Path) -> StoreFailure | None:
+    """Classify the condition behind a receipts read the catalogue already lost.
+
+    Called only when ``load_catalog`` reported its attention decoration degraded,
+    and READ-ONLY by construction: ``AttentionStore.revision`` opens the file
+    ``mode=ro`` and answers ``(0, 0, 0)`` for a path that is not there, so the
+    probe cannot create a store or write to one -- a command answering "the
+    receipts could not be read" must not be the thing that changed the store.
+
+    ``None`` is not "no failure": it means the store answers now, which is a
+    sentence of its own (the read failed a moment ago and this is not a verdict),
+    and inventing a cause from a probe that succeeded would be the same
+    misattribution in the other direction.
+    """
+    import sqlite3
+
+    from local_operator.session.attention import AttentionStore
+    from local_operator.session.store_failures import store_failure
+
+    try:
+        AttentionStore(root / "attention.db").revision()
+    except (sqlite3.Error, OSError) as error:
+        return store_failure(error, root)
+    return None
+
+
+#: The ink each `/search` state word carries (round-1 D5). Every word used to be
+#: painted with the same dim prose tint, so the one that says a leg spends money --
+#: the design's own mitigation for surprise spend -- was indistinguishable from the
+#: sentence describing the provider. Semantic tokens, not literal hex: the two
+#: spending words take `warning`, the two out-of-play words take the dimmest ramp
+#: step, and the free in-play words stay one step above the prose so a reader can
+#: see there IS a state word.
+#:
+#: Keys are the shared vocabulary in `providers.py`; the coverage test pins that
+#: every word in `STATE_MEANINGS` appears here, so a new state cannot render
+#: unstyled by omission.
+_SEARCH_STATE_TOKENS: dict[str, str] = {
+    "enabled": "muted",
+    "enabled (paid)": "warning",
+    "enabled (best-effort)": "muted",
+    "auto free": "muted",
+    "auto best-effort": "muted",
+    "auto paid": "warning",
+    # `muted`, not `faint`: these two words tell the reader something must be DONE,
+    # and round 2 measured `faint` at 3.89:1 -- below AA and quieter than the prose
+    # describing the provider beside them (round-2 D2-3).
+    "excluded": "muted",
+    "needs setup": "muted",
+}
+
+
+def _search_chain_text(statuses: "Sequence[ProviderStatus]") -> Text:
+    """The `chain` row: every leg in try order, each marker in its own ink.
+
+    The markers come from the provider module's single table
+    (``chain_leg_marker``), so the CLI prints exactly the ones this row paints, and
+    the ink comes from ``CHAIN_MARKER_TOKENS`` -- round 2 measured the same `(paid)`
+    fact at plain dim here and amber on the provider row two lines below, which
+    made the row that says a leg will spend the least emphatic one on screen
+    (round-2 D2-3).
+    """
+    from local_operator.web_search.providers import (
+        CHAIN_MARKER_TOKENS,
+        chain_leg_marker,
+    )
+
+    dim = Style(color=theme_mod.semantic_color("dim"))
+    row = Text()
+    legs = [status for status in statuses if status.enabled]
+    if not legs:
+        row.append("(none)", style=dim)
+        return row
+    for index, status in enumerate(legs):
+        if index:
+            row.append(" → ", style=dim)
+        row.append(status.label, style=dim)
+        marker = chain_leg_marker(status)
+        if marker:
+            row.append(
+                f" {marker}",
+                style=Style(color=theme_mod.semantic_color(CHAIN_MARKER_TOKENS[marker])),
+            )
+    return row
+
+
+def _search_status_detail(status: "ProviderStatus") -> Text:
+    """One `/search` provider row: the state word in its own ink, then the prose.
+
+    Composed here rather than inline so the ink table above and the row cannot
+    drift, and returned as a `Text` so the state word keeps a span that the row's
+    single dim detail style would otherwise flatten. No readiness column: with the
+    resolver auto-joining every usable provider, "cannot serve" is the only reason
+    a provider is out of the chain, and the state word says it (round-1 D6).
+    """
+    # Function-local like every other provider touch in this module: the app is the
+    # TUI's entry point and the provider graph stays off its import path.
+    from local_operator.web_search.providers import provider_state_label
+
+    state = provider_state_label(status)
+    detail = Text()
+    detail.append(state, style=Style(color=theme_mod.semantic_color(_SEARCH_STATE_TOKENS[state])))
+    detail.append(" · ", style=Style(color=theme_mod.semantic_color("dim")))
+    detail.append(status.detail, style=Style(color=theme_mod.semantic_color("dim")))
+    return detail
+
+
 def _tree_listing(
-    items: list[tuple[str, str]], caption: str, *, detail_token: str = "dim"
+    items: Sequence[tuple[str, str | Text]], caption: str, *, detail_token: str = "dim"
 ) -> Group:
     """Tree-glyph section: ├─ / └─, name in the string tint, detail dim (D4).
 

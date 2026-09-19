@@ -14,7 +14,9 @@ break:
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -452,6 +454,147 @@ def test_footer_names_a_call_that_actually_resolves(
     assert "Continue with" not in expanded.text, "a suggested page must not re-truncate"
 
 
+# ---------------------------------------------------------------------------
+# single-line payloads: JSON results, and no line space to elide in
+#
+# Every MCP tool result is ONE marshalled JSON string, so the line-based
+# elision above has no line to snap to and no line span to state. What it did
+# with that shape was splice `[-1 of 1 lines elided — they are lines 2-0 of the
+# saved output]` into the middle of the document: a span that cannot exist
+# (``splitlines()`` sees one line), inside a payload a caller parses with
+# ``json.loads``. Observed on Minerva risk-assessment readbacks on 2026-09-17.
+# ---------------------------------------------------------------------------
+
+
+def _json_payload(records: int = 40) -> str:
+    """One marshalled JSON line, the shape every MCP tool result arrives in."""
+    return json.dumps(
+        {
+            "assessment_id": "ra_1",
+            "status": "running",
+            "notes_markdown": "n" * 4000,
+            "tasks": [
+                {
+                    "task_id": f"task_{i:03d}",
+                    "status": "complete",
+                    "evidence_ids": [f"ev_{i:03d}"],
+                    "resolution_comment": "c" * 400,
+                }
+                for i in range(records)
+            ],
+            "evidence_id_index": [
+                {"evidence_id": f"ev_{i:03d}", "title": f"Evidence {i}"} for i in range(records)
+            ],
+        }
+    )
+
+
+def test_single_line_json_result_is_still_parseable(context: ToolContext) -> None:
+    text = _json_payload()
+    assert "\n" not in text, "this test is about the one-line shape"
+
+    body, details = builtin.spill_truncate(text, "get_assessment", context)
+    assert details is not None
+
+    # THE property: a caller can parse the result. raw_decode at the head — the
+    # footer is appended after the document and is the only trailing text.
+    parsed, end = json.JSONDecoder().raw_decode(body)
+    assert end < len(body), "the footer must follow the document, not be spliced into it"
+    assert parsed["assessment_id"] == "ra_1"
+    # Keys survive: which key gets dropped must not be decided by sort order,
+    # because that is how the field a reader wants is the one that goes.
+    assert {"status", "notes_markdown", "tasks", "evidence_id_index"} <= set(parsed)
+
+    # A trim says so in band, under this harness's own key. It is deliberately
+    # NOT `_truncated`: that key belongs to the Minerva toolproxy, whose shape is
+    # `{"_truncated": true, "reason": ...}` and whose signal must survive a
+    # harness trim rather than be overwritten by it (review round 1, F4).
+    assert '"_elided"' in json.dumps(parsed)
+    assert '"_truncated"' not in json.dumps(parsed)
+
+    # The lie is gone: no impossible span, and no call that cannot resolve.
+    assert "-1 of" not in body
+    assert "lines 2-0" not in body
+    assert 'range="' not in body, "a one-line payload has no line range to page to"
+    assert details["spill"]["handle"] in body
+    assert "?q=<regex>" in body, "the search form is the route that works here"
+
+
+def test_single_line_non_json_result_gets_no_line_span(context: ToolContext) -> None:
+    body, details = builtin.spill_truncate("x" * 40_000, "fetch_page", context)
+    assert details is not None
+    assert builtin.BASH_TRUNCATION_MARKER.strip() in body
+    assert "-1 of" not in body and "lines 2-0" not in body
+    assert 'range="' not in body
+    assert "?q=<regex>" in body
+
+
+def test_json_elision_shortens_prose_before_it_drops_structure() -> None:
+    value = {
+        "status": "complete",
+        "prose": "p" * 20_000,
+        "tasks": [{"task_id": f"task_{i}", "title": f"T{i}"} for i in range(50)],
+    }
+    out = builtin._elide_json(json.dumps(value), 2_000)
+    assert out is not None
+    parsed = json.loads(out)
+    assert set(parsed) >= {"status", "prose", "tasks"}
+    # A shortened string keeps BOTH ends around a marker that states the count:
+    # a head-only cut with a bare `...[truncated]` said nothing about the scale of
+    # the loss and destroyed whatever the field concluded with (review round 1,
+    # F3) — for a disposition or a finding summary that is the part that matters.
+    elided = re.search(r"\.\.\.\[(\d+) of (\d+) chars elided\]\.\.\.", parsed["prose"])
+    assert elided, parsed["prose"][:120]
+    assert int(elided.group(2)) == 20_000, "the marker states the ORIGINAL length"
+    kept_chars_expected = len(parsed["prose"]) - len(elided.group(0))
+    assert (
+        int(elided.group(1)) == 20_000 - kept_chars_expected
+    ), "the count is the chars actually dropped"
+    kept_chars = len(parsed["prose"]) - len(elided.group(0))
+    assert parsed["prose"].startswith("p" * (kept_chars // 3))
+    assert parsed["prose"].endswith("p" * (kept_chars // 3)), "the tail is where a conclusion lives"
+    # Every task that is still listed is listed whole; the drop is counted, and
+    # the count must reconcile with what was kept.
+    kept = parsed["tasks"][:-1]
+    assert all(set(task) == {"task_id", "title"} for task in kept)
+    marker = parsed["tasks"][-1]["_elided"]
+    assert marker["total_items"] == 50
+    assert marker["omitted_items"] == 50 - len(kept)
+
+
+def test_json_elision_never_declines_a_json_payload() -> None:
+    # JSON that no rung can fit — short leaves, so there is nothing to shorten,
+    # and object keys are never dropped — must still come back as JSON. Declining
+    # sent it down the head+tail path, whose marker lands inside the document and
+    # hands the caller a payload `json.loads` rejects: the defect this branch
+    # exists to remove (review round 1, F1b/F1c).
+    for payload in (list(range(5_000)), "a bare string", 12345):
+        out = builtin._elide_json(json.dumps(payload), 16)
+        assert out is not None
+        assert len(out) <= 16 or out == "{}"
+        assert json.loads(out)  # or :: it parses
+
+    # Only a payload that is NOT a document shape declines, so the line path
+    # keeps its job: prose, logs, and a truncated fragment are readable with a
+    # spliced marker, and a document is not.
+    assert builtin._elide_json("not json at all", 16) is None
+    assert builtin._elide_json("2026-09-17T01:23:45Z starting up\n" * 40, 16) is None
+
+
+def test_elision_span_declines_a_payload_with_no_interior_line() -> None:
+    text = "y" * 40_000
+    head, tail = builtin._clip_head_tail(text, 8_000)
+    assert builtin._elision_span(text, head, tail) is None
+    # ...and still reports a real span when there is one, so the footer's
+    # suggested range keeps meaning what it meant before.
+    lines = _lines(5_000)
+    lhead, ltail = builtin._clip_head_tail(lines, 8_000)
+    span = builtin._elision_span(lines, lhead, ltail)
+    assert span is not None
+    total, first, last = span
+    assert total == 5_000 and first <= last
+
+
 def test_stderr_survives_preferentially_when_the_command_failed() -> None:
     budget = 10_000
     stdout = "o" * 100_000
@@ -691,3 +834,306 @@ def test_store_directory_honours_the_config_override(tmp_path: Path) -> None:
     meta = spill.get_store().write("x\ny", tool_name="bash", session_id="s")
     assert meta is not None
     assert (expected / f"{meta.digest}.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# review round 1: the payload shapes where the "the body parses" invariant did
+# not hold yet. Each of these was reproduced on the pre-remediation revision as
+# a body with the truncation marker spliced into it, which is the exact harm the
+# structured branch exists to remove.
+# ---------------------------------------------------------------------------
+
+
+def test_bom_prefixed_json_result_is_still_parseable(context: ToolContext) -> None:
+    # `json.loads` rejects a BOM in `str` input, so a BOM'd payload was
+    # classified "not JSON" and spliced. Realistic: the BOM survives transport.
+    text = "\ufeff" + json.dumps({"assessment_id": "ra_1", "notes_markdown": "n" * 20_000})
+    body, details = builtin.spill_truncate(text, "get_assessment", context)
+    assert details is not None
+    parsed, end = json.JSONDecoder().raw_decode(body)
+    assert end < len(body), "the footer must follow the document"
+    assert parsed["assessment_id"] == "ra_1"
+
+
+def test_json_no_rung_can_fit_still_parses(context: ToolContext) -> None:
+    # Object KEYS are never shortened (which keys survive is a meaning decision),
+    # so enough key bytes exhaust every rung. The answer is an envelope, not a
+    # decline that sends the payload to the head+tail path.
+    # Five keys of 20,000 characters each: keys are dropped, never shortened, so
+    # the smallest rung still carries 60,000 characters of key bytes.
+    payload = {("key_%d_" % index) + "k" * 20_000: index for index in range(5)}
+    body, details = builtin.spill_truncate(json.dumps(payload), "get_assessment", context)
+    assert details is not None
+    parsed, end = json.JSONDecoder().raw_decode(body)
+    assert end < len(body)
+    assert parsed[builtin.ELISION_MARKER_KEY]["reason"] == "too_large"
+    assert parsed[builtin.ELISION_MARKER_KEY]["top_level"] == "object"
+    assert parsed[builtin.ELISION_MARKER_KEY]["keys"] == 5
+
+
+def test_top_level_scalar_json_still_parses(context: ToolContext) -> None:
+    # A top-level scalar is not a container to trim, so it is either shortened
+    # into a shorter scalar or answered with the envelope — both parse. What it
+    # must never be is a splice, which is what declining produced.
+    body, details = builtin.spill_truncate(json.dumps("s" * 40_000), "fetch_page", context)
+    assert details is not None
+    parsed, end = json.JSONDecoder().raw_decode(body)
+    assert end < len(body)
+    assert isinstance(parsed, (str, dict))
+
+    # The envelope is reachable for a scalar too, when even the shortest form of
+    # the value exceeds the budget.
+    out = builtin._elide_json(json.dumps("s" * 40_000), 20)
+    assert out is not None
+    marker = json.loads(out)[builtin.ELISION_MARKER_KEY]
+    assert marker is True or marker["top_level"] == "scalar", marker
+
+
+def test_every_read_call_the_chars_footer_prints_resolves(
+    tools: dict[str, AgentTool], context: ToolContext
+) -> None:
+    # The discipline `test_footer_names_a_call_that_actually_resolves` applies to
+    # the range branch, applied to EVERY route this branch prints: a footer that
+    # names a call which cannot resolve teaches the model the handle is useless.
+    import asyncio
+
+    payload = {
+        "assessment_id": "ra_1",
+        "evidence_id_index": [
+            {"evidence_id": f"ev_{index:04d}", "title": f"Evidence {index}"} for index in range(400)
+        ],
+    }
+    body, details = builtin.spill_truncate(json.dumps(payload), "get_assessment", context)
+    assert details is not None
+    calls = re.findall(
+        r'read\(path="(spill://[0-9a-f]{32})(\?q=<regex>)?"(, range="(\d+-\d+)")?\)', body
+    )
+    assert calls, f"the footer must print at least one route:\n{body[-400:]}"
+    for handle, search, _, span in calls:
+        args: dict[str, Any] = {"path": f"{handle}?q=ev_0001" if search else handle}
+        if span:
+            args["range"] = span
+        result = asyncio.run(_call(tools, "read", args, context))
+        assert result.is_error is False
+        assert "beyond the end" not in result.text, f"printed call cannot resolve: {args}"
+        assert "range " not in result.text.split("\n")[0], result.text[:200]
+
+
+def test_multi_line_stored_copy_keeps_the_paging_route(context: ToolContext) -> None:
+    # The second route is dropped only where it cannot work. A stored copy with
+    # line structure still gets it: an unranged read pages it 200 lines at a time.
+    text = json.dumps({"records": [{"n": index} for index in range(400)]}, indent=2)
+    body, details = builtin.spill_truncate(text, "bash", context)
+    assert details is not None
+    assert f'read(path="{details["spill"]["handle"]}")' in body
+
+
+def test_harness_trim_never_clobbers_the_toolproxy_marker() -> None:
+    # The proxy writes `{"_truncated": true, "reason": "max_depth"}`. A harness
+    # trim must not overwrite it, or a reader cannot tell which layer elided what
+    # or why — and this is the payload family the investigation is about.
+    payload: dict[str, Any] = {"_truncated": True, "reason": "max_depth"}
+    payload.update({f"field_{index:03d}": "x" * 40 for index in range(300)})
+    out = builtin._elide_json(json.dumps(payload), 2_000)
+    assert out is not None
+    parsed = json.loads(out)
+    assert parsed["_truncated"] is True, "the upstream marker survives"
+    assert parsed["reason"] == "max_depth", "and so does the reason beside it"
+    assert builtin.ELISION_MARKER_KEY in parsed, "and the harness trim is still visible"
+    assert '"_truncated": {"' not in out, "the harness never writes the proxy's shape"
+
+
+def test_over_cap_store_copy_is_not_advertised_as_full(context: ToolContext) -> None:
+    # The store caps an entry; when it did, the chars footer still said "SAVED in
+    # full" while its own note said the copy was head+tail. A footnote that
+    # contradicts itself is worse than no footnote.
+    text = json.dumps({"assessment_id": "ra_1", "blob": "x" * (5 * 1024 * 1024)})
+    body, details = builtin.spill_truncate(text, "get_assessment", context)
+    assert details is not None
+    assert details["spill"]["complete"] is False, "the entry must be over the store cap"
+    assert "SAVED in full" not in body
+    assert "SAVED" in body
+    assert "per-entry store cap" in body, "and the note still says so"
+
+
+def test_non_ascii_payload_keeps_its_characters() -> None:
+    # `ensure_ascii=True` turns each non-ASCII character into six, so a CJK
+    # payload spent its budget on escapes and served roughly half the content,
+    # as `\u65e5\u672c\u8a9e` rather than 日本語.
+    text = json.dumps(
+        {"records": [{"n": "日本語のデータ" * 30} for _ in range(20)]}, ensure_ascii=False
+    )
+    out = builtin._elide_json(text, 8_000)
+    assert out is not None
+    assert len(out) <= 8_000
+    assert "日本語" in out, "the reader gets the characters, not their escapes"
+
+
+# ---------------------------------------------------------------------------
+# review round 2: payloads that ARE JSON but that CPython's parser refuses, and
+# the small honesty gaps around them
+# ---------------------------------------------------------------------------
+
+
+def _parseable_head(body: str) -> Any:
+    """The document at the head of a served body, or a failure that names why."""
+    parsed, end = json.JSONDecoder().raw_decode(body.lstrip("\ufeff"))
+    assert end > 0
+    return parsed
+
+
+def test_json_the_stdlib_refuses_is_never_spliced(context: ToolContext) -> None:
+    # `json.loads` is stricter than JSON: it refuses a number past its
+    # int-conversion guard (4,301 digits, CVE-2020-10735), a document nested past
+    # the recursion limit, and a document followed by text. All three are JSON a
+    # model's own parser accepts, so declining to the head+tail path handed the
+    # model the exact signature this module removes (review round 2, F1).
+    # A 20,000-deep document cannot be BUILT by json.dumps either (the encoder hits
+    # the same recursion limit), so it is spelled out as text.
+    shapes = {
+        "4301-digit integer": '{\n  "notes": "'
+        + "n" * 4_000
+        + '",\n  "big": '
+        + "1" * 4_301
+        + "\n}",
+        "40000-digit integer": "1" * 40_000,
+        "nesting depth 20000": "[" * 20_000 + "1" + "]" * 20_000,
+        "JSON + trailing text": json.dumps({"assessment_id": "ra_1", "notes": "n" * 9_000})
+        + "\nnot-json trailing region",
+    }
+
+    for name, text in shapes.items():
+        body, details = builtin.spill_truncate(text, "get_assessment", context)
+        assert details is not None
+        parsed = _parseable_head(body)
+        assert parsed is not None, name
+        assert (
+            builtin.BASH_TRUNCATION_MARKER not in body
+        ), f"{name}: the marker must never be spliced into a payload that is JSON-shaped"
+        # The recovery route is still the footer's, so the model can get the rest.
+        assert details["spill"]["handle"] in body
+
+
+def test_lone_surrogate_escape_never_reaches_the_body_raw(context: ToolContext) -> None:
+    # `\ud800` decodes to a lone surrogate. With ensure_ascii=False it would reach
+    # the body raw, and every plain UTF-8 write of that body — including the one
+    # this agent does when it persists a result — raises UnicodeEncodeError
+    # (review round 2, F3).
+    text = json.dumps({"a": "\ud800", "blob": "b" * 20_000})
+    body, details = builtin.spill_truncate(text, "get_assessment", context)
+    assert details is not None
+    body.encode("utf-8")  # must not raise
+    parsed = _parseable_head(body)
+    assert parsed is not None
+    assert "blob" in parsed
+
+
+def test_partial_last_line_is_not_described_as_an_unbroken_copy(
+    tools: dict[str, AgentTool], context: ToolContext
+) -> None:
+    # Withholding the next range is right; calling the copy "one unbroken line"
+    # was not, because a multi-line entry reaches that branch whenever the page
+    # starts at its last line and that line is longer than the clip (round 2, F2).
+    import asyncio
+
+    text = "short first line\n" + "y" * 9_000
+    body, details = builtin.spill_truncate(text, "bash", context)
+    assert details is not None
+    handle = details["spill"]["handle"]
+    page = asyncio.run(_call(tools, "read", {"path": handle, "range": "2-2"}, context))
+    assert page.is_error is False
+    assert "one unbroken line" not in page.text, page.text[-400:]
+    assert "only partly shown" in page.text, page.text[-400:]
+
+
+def test_string_marker_count_is_the_chars_actually_dropped() -> None:
+    # The count identity, across the sizes where the marker is a large share of the
+    # budget. Review round 3's N1 correction: the marker-only branch (room == 0)
+    # always reported `total`, so the round-2 finding about it was wrong and is
+    # recorded as such in the code; this grid pins the property that IS load-bearing
+    # — dropped == total - kept — instead of the inert branch case.
+    for total, string_limit in [(5_000, 20), (1_000, 40), (200, 60), (100_000, 120), (12, 8)]:
+        value = "v" * total
+        out = builtin._elide_string_middle(value, string_limit)
+        elided = re.search(r"\.\.\.\[(\d+) of (\d+) chars elided\]\.\.\.", out)
+        assert elided, (total, string_limit, out)
+        kept_content = len(out) - len(elided.group(0))
+        assert int(elided.group(2)) == total, (total, string_limit)
+        assert int(elided.group(1)) == total - kept_content, (total, string_limit, out)
+
+
+def test_one_line_copy_search_route_says_what_it_returns(context: ToolContext) -> None:
+    # Review round 2, N2: for a one-line copy `?q=` is the ONLY route, and it
+    # returns that whole line — there is no "read around them" step to budget for.
+    payload = json.dumps({"assessment_id": "ra_1", "notes": "n" * 20_000})
+    body, details = builtin.spill_truncate(payload, "get_assessment", context)
+    assert details is not None
+    assert "?q=<regex>" in body
+    assert "read around them" not in body, "a one-line copy has no lines to read around"
+    assert "the whole line comes back" in body
+
+
+def test_python_repr_output_is_not_treated_as_a_json_document(context: ToolContext) -> None:
+    # `json.JSONDecodeError` is the "not a JSON document" signal; a bare `{`/`[` is
+    # not. `eval` hands its printed body straight to spill_truncate, so `print(rows)`
+    # on a list or dict of records — Python's repr, single quotes — is the busiest
+    # payload this function sees, and treating a leading bracket as evidence of a
+    # document collapsed 10-12 KB of readable output to a 167-byte stub with a
+    # `not_parseable` reason that was false (review round 3, F1).
+    shapes = {
+        "list of dicts": repr(
+            [{"id": index, "name": f"record {index}", "note": "n" * 200} for index in range(80)]
+        ),
+        "list of strings": repr([f"row {index} " + "x" * 300 for index in range(100)]),
+        "dict": repr({index: "v" * 200 for index in range(120)}),
+        "bracketed log": "[INFO] starting\n"
+        + "".join(f"[INFO] step {index} done\n" for index in range(700)),
+    }
+    for name, text in shapes.items():
+        assert len(text) > 8_192, name
+        body, details = builtin.spill_truncate(text, "eval", context)
+        assert details is not None
+        assert '"not_parseable"' not in body, f"{name}: readable output is not a refused document"
+        # The line path kept readable content from both ends, as it did before the
+        # F1 fix went in.
+        assert len(body) > 4_000, (name, len(body))
+        assert body.lstrip().startswith(text.lstrip()[:20]), (name, body[:80])
+        head, _ = builtin._clip_head_tail(text, 4_000 - len(builtin.BASH_TRUNCATION_MARKER))
+        assert head[:64] in body, name
+
+    # …and a genuine document still takes the structured branch.
+    payload = json.dumps({"assessment_id": "ra_1", "rows": [{"n": "n" * 40} for _ in range(200)]})
+    body, _ = builtin.spill_truncate(payload, "eval", context)
+    parsed_document, _ = json.JSONDecoder().raw_decode(body.lstrip("\ufeff"))
+    assert parsed_document["assessment_id"] == "ra_1"
+
+
+def test_numeric_scalar_variants_still_get_the_envelope(context: ToolContext) -> None:
+    # Review round 3, F2: the old shape test compared the whole head against a
+    # numeric charset, so one trailing space or newline defeated it and the payload
+    # was spliced into the number. The exception TYPE does not care about
+    # whitespace — both variants raise the plain ValueError — so both are closed.
+    for suffix in ("", "\n", " "):
+        text = "1" * 9_000 + suffix
+        body, details = builtin.spill_truncate(text, "eval", context)
+        assert details is not None
+        assert builtin.BASH_TRUNCATION_MARKER not in body, repr(suffix)
+        parsed = _parseable_head(body)  # the footer follows the document
+        assert parsed[builtin.ELISION_MARKER_KEY]["reason"] == "not_parseable", repr(suffix)
+
+
+def test_document_trailer_is_kept_not_dropped(context: ToolContext) -> None:
+    # Review round 3, F3: the text after a parsed document is outside it, so it can
+    # be kept losslessly rather than "elided out" — dropping it silently was the
+    # failure mode, because the only signal was an aggregate char count a reader
+    # attributes to the elided JSON fields.
+    document = json.dumps({"assessment_id": "ra_1", "notes": "n" * 9_000})
+    body, details = builtin.spill_truncate(
+        document + "\nTRAILER-TEXT-THAT-MATTERS", "eval", context
+    )
+    assert details is not None
+    assert "TRAILER-TEXT-THAT-MATTERS" in body
+    # …and the document before it is still a clean parseable prefix.
+    parsed, end = json.JSONDecoder().raw_decode(body.lstrip("\ufeff"))
+    assert end < len(body)
+    assert parsed["assessment_id"] == "ra_1"

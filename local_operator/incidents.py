@@ -362,10 +362,44 @@ DELIBERATE_CUT_OFF_CAUSE = "user-stop"
 #: (review round 1, NIT-1).
 DELIBERATE_CUT_OFF_CAUSES: frozenset[str] = frozenset({DELIBERATE_CUT_OFF_CAUSE})
 
+
+#: The sentence for :data:`CUT_OFF_CAUSES`' ``runtime-overdue`` rung, and the one
+#: place the bound's number is spelled for a reader — RENDERED from the constant
+#: that enforces it, never typed here: this sentence is repeated by every surface
+#: that repeats a cut-off (the live notice, the durable outcome, the sidebar), and a
+#: second copy of "15 min" is a copy that drifts.
+#:
+#: The import is FUNCTION-LOCAL, not module scope: this table is a leaf every
+#: runtime module may import, and the runtime's own vocabulary module is the wrong
+#: thing for a leaf to depend on at import time (``incidents`` is imported by
+#: ``session/runtime/journal.py``, which the child loads before it has a session).
+#: A dict entry may call a function; a dict entry may not defer an import.
+#: COORDINATE NOTE: PR #1297 also touches this module (its install-marker work);
+#: this is one new key and one new helper, no existing entry reworded.
+def _overdue_cause_sentence() -> str:
+    from local_operator.session.runtime.types import BUILD_DRAIN_PROGRESS_S, bound_text
+
+    return (
+        "the runtime left for the newer build after "
+        f"{bound_text(BUILD_DRAIN_PROGRESS_S)} of no movement reported from the work in flight"
+    )
+
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
+    # The BOUNDED handover: a build drain that stopped waiting for its own work
+    # (``process._leave_overdue``). It is deliberately its own token rather than
+    # ``runtime-retired``, which is what it used to be recorded as: the retirement
+    # sentence is true of it, but it is ALSO the sentence every ordinary build
+    # handover leaves, so a turn that had to be FORCED out was indistinguishable
+    # from one that waited its turn out in the only durable account of it — and by
+    # the time an operator looks, that account is all there is (``lop sessions``
+    # loses the record ~97 ms after the escalation). QA round 1 (Q-2) measured
+    # exactly that: a successor narrated the generic retirement sentence, never the
+    # bound.
+    "runtime-overdue": _overdue_cause_sentence(),
     "runtime-killed": (
         # The trailing clause is the POST-MARKER meaning of this token, and it
         # is decidable now in a way it was not before the durable marker
@@ -417,18 +451,55 @@ def is_deliberate_cause(cause: str) -> bool:
     return cause in DELIBERATE_CUT_OFF_CAUSES
 
 
+def _render_cut_off_detail(detail: str) -> str:
+    """The detail a cut-off sentence carries, punctuated into place.
+
+    NORMALISED rather than concatenated, because the callers do not agree on
+    the separator. Two of them (``attention._record_detail``,
+    ``update._install_mid_update_reason``) hand over a string that already
+    opens with a space and a bracket, while ``process._drain_detail`` composes
+    a phrase and its pair (``the runtime declined to hand over 3x (0.56.2 →
+    0.56.6)``) with neither. Appending the raw detail made every retirement
+    read ``…would run a newer builddeclined 3x (0.56.2 → 0.56.6)`` in the live
+    row, in the durable reason AND in the next turn's incident card (measured
+    on this host, 2026-09-17). The separator belongs to the one function that
+    knows the sentence precedes it, so a fourth caller cannot reintroduce the
+    run-together text.
+
+    ONE PARENTHETICAL, NEVER NESTED — the rule ``journal.row_detail`` states
+    and every other producer already honours, and the reason a bare detail does
+    NOT get wrapped in a second pair here. Wrapping the drain's phrase gave
+    ``…would run a newer build (the runtime declined to hand over 3x (0.56.2 →
+    0.56.6))``: two bracket levels, ``)).`` at the end of the clause, and a
+    reader matching two levels across a line break to read one aside (design
+    round 1, D1; QA round 1, Q2). The em dash is this vocabulary's own way of
+    appending a clause to a sentence — ``format_cut_off_notice`` and
+    ``catalog._stop_label`` both use it — so a bare detail is joined with it:
+    ``…would run a newer build — the runtime declined to hand over 3x (0.56.2 →
+    0.56.6)``. A detail that is ALREADY a parenthetical keeps its single pair,
+    which is what leaves those callers untouched.
+    """
+    text = (detail or "").strip()
+    if not text:
+        return ""
+    if text.startswith("(") and text.endswith(")"):
+        return f" {text}"
+    return f" — {text}"
+
+
 def render_cut_off_reason(cause: str, *, detail: str = "") -> str:
     """One operator-facing sentence naming why a turn was cut off.
 
     This is the string the durable outcome stores as ``reason`` and every
     surface prints after its own prefix (``Stopped with an error — …``), so it
-    is deliberately a sentence and not a paragraph: ``detail`` carries an
-    optional parenthetical (a build pair, a pid, a started-at) rather than
-    more prose, because the sidebar tooltip has one line and truncates the
-    rest rather than wrapping it.
+    is deliberately a sentence and not a paragraph: ``detail`` carries the
+    why-now clause (a build pair, a pid, a started-at) rather than more prose,
+    because the sidebar tooltip has one line and truncates the rest rather than
+    wrapping it. The caller supplies the text of that clause and nothing else —
+    its punctuation is added here (see :func:`_render_cut_off_detail`).
     """
     sentence = CUT_OFF_CAUSES.get(cause) or CUT_OFF_UNKNOWN
-    return f"{sentence}{detail}"
+    return f"{sentence}{_render_cut_off_detail(detail)}"
 
 
 #: How one rung of the stop ladder reads inside a deliberate stop's detail.
@@ -721,6 +792,47 @@ def format_credential_message(
         f"variable ${key} into every bash command — use it there (a child "
         "process reads it), never echo, print, or write it. It is not "
         "readable through read_variable."
+    )
+
+
+def format_shape_incident_message(tool: str, labels: "list[str]", summary: str = "") -> str:
+    """Render the credential-SHAPE notice injected into the model's context.
+
+    The counterpart to the shape pass in :mod:`local_operator.redaction_shapes`,
+    and the reason it is its own formatter rather than a
+    :func:`classify_incident` category: nothing FAILED. A tool returned a
+    credential in a shape the table recognises, the harness masked it before the
+    model could read it, and the only jobs this text has are to say so (so the
+    model does not reason about a value it cannot see, or re-run the command
+    hoping for a different result) and to make the event visible to the operator.
+
+    ``labels`` are shape NAMES, never values — a notice that carried the
+    credential would be the leak it exists to report. The summary is the one the
+    harness built, already scrubbed and bounded.
+
+    The last sentence is the point of the whole path: the operator has to rotate
+    the credential. Today a miss is discovered by accident, from a transcript,
+    weeks later; this row is what turns it into a ticket.
+    """
+    shapes = ", ".join(labels) if labels else "credential-shaped content"
+    tool_name = tool or "a tool"
+    where = f" The call was: {summary}." if summary else ""
+    # "was about to reach you ... and was masked" rather than "the result
+    # carried": the same notice serves a credential in a tool's OUTPUT and one
+    # TYPED INTO a call's arguments, and only the first of those is a result.
+    # A notice that misnamed the surface would send an operator looking in the
+    # wrong place.
+    # The FIRST row carries the action. The row is six lines in the card and the
+    # head is all most readers take: it used to open with the mechanism (``a
+    # credential in a shape the harness recognises (dsn-password)``), which put
+    # "rotate it" in the fourth line. The bracketed head stays — the harness's
+    # notice-row rules key on it, and a row that paints as the user's own words
+    # would be worse than a jargon-first one.
+    return (
+        f"[credential redaction] rotate it — a credential ({shapes}) reached "
+        f"{tool_name} and was masked before you saw it.{where} Treat it as "
+        "compromised: the operator has to rotate it. Do not re-run the command to "
+        "read the value; it is contained for the rest of this session."
     )
 
 

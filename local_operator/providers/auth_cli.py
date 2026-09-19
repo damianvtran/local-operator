@@ -542,16 +542,27 @@ def _apply_login_defaults(provider_id: str) -> None:
             manager.get_config_value("hosting"),
             manager.get_config_value("model_name"),
         )
-        if plan.hosting is None:
-            return
-        manager.set_config_value("hosting", plan.hosting)
-        # ``None`` means leave it alone; ``""`` means clear a model that
-        # belonged to the provider we just replaced. Compared against None
-        # explicitly so the clearing case is not swallowed by a falsy test.
-        if plan.model_name is not None:
-            manager.set_config_value("model_name", plan.model_name)
+        if plan.hosting is not None:
+            manager.set_config_value("hosting", plan.hosting)
+            # ``None`` means leave it alone; ``""`` means clear a model that
+            # belonged to the provider we just replaced. Compared against None
+            # explicitly so the clearing case is not swallowed by a falsy test.
+            if plan.model_name is not None:
+                manager.set_config_value("model_name", plan.model_name)
+        # Printed on the NO-WRITE path too, and that is not symmetry for its own
+        # sake: a decision-only provider (TypeSafe's Jev) stores its credential,
+        # deliberately leaves the routing alone, and explains itself in
+        # ``receipt``. Returning before this print — as this did — made that note
+        # unreachable, so the login read as having silently done nothing.
+        #
+        # The receipt is printed VERBATIM, and that is the fix rather than a
+        # simplification (design round 1, D6/D9): this line used to append a full stop
+        # and upper-case the first letter, while the TUI rendered the planner's string
+        # as written — so the same receipt reached two front ends with two openings and
+        # two endings. Capital, punctuation and wording all belong to the planner, which
+        # is the one place that knows what the sentence says.
         if plan.receipt:
-            print(f"{plan.receipt[:1].upper()}{plan.receipt[1:]}.")
+            print(plan.receipt)
     except Exception as exc:  # noqa: BLE001 — never fail a completed login
         print(f"Note: logged in, but could not set default hosting/model: {exc}")
 

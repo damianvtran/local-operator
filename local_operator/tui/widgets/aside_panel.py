@@ -1069,9 +1069,17 @@ class AsidePanel(Static):
         prose renders it (``AssistantBlock`` at
         :meth:`AssistantBlock._flat_rows`). Rendered here through the SAME
         :func:`flatten` rather than a second renderer, so a code span, a bullet
-        and a heading are the one shape everywhere — and so ``^f``, which hands
-        this exact string to an ``AssistantBlock``, cannot change how the words
-        look on their way into the chat.
+        and a heading are the one shape everywhere.
+
+        The FLATTEN is shared; the block's chrome is not. ``AssistantBlock``
+        prefixes a ``▌`` rail to every row it paints (``assistant.rail_rows``,
+        applied in ``_apply_rows`` — a seam this card does not go through), and
+        this panel deliberately has no rail: it is a card with its own frame and
+        indent, not a transcript block. So ``^f``, which hands this exact string
+        to an ``AssistantBlock``, does not change how the WORDS look on their
+        way into the chat, but the answer does pick up the transcript's rail
+        when it lands there. That is the same prose in two frames, which is the
+        intent.
 
         The QUESTION deliberately stays plain (see :meth:`_question_rows`).
 

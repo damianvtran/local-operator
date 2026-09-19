@@ -5,10 +5,15 @@ gate or bridge is mocked: this catches the seams a green adapter suite cannot.
 """
 
 import asyncio
+import base64
+import contextlib
+import hashlib
+import io
 import json
 import os
 import secrets
 import socket
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
@@ -100,6 +105,7 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     text_turn("The canonical runtime answered."),
                     text_turn("The team request arrived once."),
                     text_turn("The image arrived without invented text."),
+                    text_turn("The stored image arrived without invented text."),
                 ]
             )
             session = build_session(root / "sessions" / sid, stream, cwd=workspace)
@@ -337,6 +343,79 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
                     "one durable user row; retry did not duplicate image"
                 )
 
+                # The image above is 70 bytes of base64 -- BELOW the 1024-byte
+                # externalization floor -- so it never reaches the attachment
+                # store, and until now this file's single image body exercised
+                # admission with the store path untouched. That is the gap an
+                # image send walked through on 2026-09-17: the store write is the
+                # largest write in the flow, so it is the FIRST to fail on a
+                # nearly-full volume, while a few-KB text write still lands. That
+                # is the whole reason an image was refused and the same message
+                # without one was not.
+                #
+                # This second message carries a screenshot-sized image and pins
+                # the path end to end: admission, the bytes on disk, the
+                # REFERENCE the transcript keeps instead of the bytes, and the
+                # read route that serves them back.
+                from PIL import Image as PILImage
+
+                buffer = io.BytesIO()
+                PILImage.frombytes("RGB", (300, 300), os.urandom(300 * 300 * 3)).save(
+                    buffer, format="PNG"
+                )
+                raw = buffer.getvalue()
+                large_b64 = base64.b64encode(raw).decode()
+                assert len(large_b64) > 1024, "below the externalization floor"
+                large_body = {
+                    "request_id": "88888888-8888-4888-8888-888888888888",
+                    "text": "",
+                    "images": [{"mime_type": "image/png", "data_b64": large_b64}],
+                }
+                large_result = await client.post(target + "/messages", json=large_body)
+                assert large_result.status_code == 200, large_result.text
+                await next_frame(
+                    lines,
+                    lambda f: f["type"] == "event" and f["payload"].get("type") == "agent_end",
+                )
+
+                digest = hashlib.sha256(raw).hexdigest()[:32]
+                store_dir = root / "attachments"
+                stored = store_dir / f"{digest}.bin"
+                # A store that is absent is the failure mode this guards (the
+                # write never happened), so the diagnostic has to survive it.
+                present = (
+                    sorted(entry.name for entry in store_dir.iterdir())
+                    if store_dir.exists()
+                    else "no attachments directory at all"
+                )
+                assert stored.exists(), f"image never reached the store: {present}"
+                assert stored.read_bytes() == raw
+
+                rows = [
+                    json.loads(line)
+                    for line in (root / "sessions" / sid / "transcript.jsonl")
+                    .read_text()
+                    .splitlines()
+                ]
+                (row,) = [entry for entry in rows if entry.get("id") == large_body["request_id"]]
+                (block,) = [entry for entry in row["payload"]["content"] if entry.get("mime_type")]
+                # The reference, not the bytes: the row carries a digest and the
+                # store owns the payload, which is what keeps a screenshot out of
+                # the JSONL the model is replayed from.
+                assert block["attachment"] == digest
+                assert "data" not in block
+                assert len(json.dumps(row)) < len(large_b64)
+
+                served = await client.get(target + "/attachments/" + digest)
+                assert served.status_code == 200, served.text
+                assert served.content == raw
+                assert served.headers["content-type"].startswith("image/")
+                assert len(stream.requests) == 5
+                print(
+                    f"Image {len(raw)}B persisted to the attachment store and "
+                    "referenced from the transcript; served back over HTTP"
+                )
+
                 # Exercise the actual installed owner gate closures. Invalid
                 # answers must leave the same future pending; another window's
                 # successful answer makes the original popup stale.
@@ -499,6 +578,164 @@ async def test_canonical_desktop_over_http(headless_tui_env: Path, workspace: Pa
             await runtime.aclose()
         if handle is not None:
             await handle.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_bulk_read_receipt_clears_only_the_completions_it_was_given(
+    headless_tui_env: Path, workspace: Path, monkeypatch
+):
+    """The whole matrix over real loopback HTTP, against a real receipt store.
+
+    The feature is a bulk write, so the two things that can only be tested here
+    are (a) that the WIRE admits exactly the items it was handed and answers a
+    verdict for each, and (b) that the write is narrow: a completion published
+    after the client's render stays unread, an id this machine has no session for
+    earns `unknown` rather than a refusal of the call, and nothing about
+    DELIVERY moves -- notifying is not reading, so an already-bannered
+    conversation keeps its banner while its mark clears.
+
+    Deliberately no bridge, runtime or transcript is involved: a read receipt is
+    cold by construction, and the desktop pool has no owner here at all.
+    """
+    root = headless_tui_env
+    token = secrets.token_hex(32)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", token)
+    monkeypatch.delenv("LOCAL_OPERATOR_DESKTOP_ORIGINS", raising=False)
+    (root / "config.yml").write_text(
+        "version: 0.0.0\nvalues:\n  hosting: test\n  model_name: mock\n"
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    server, serving = await serve_app(listener, token)
+    store = AttentionStore(root / "attention.db")
+    try:
+        async with httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{listener.getsockname()[1]}", timeout=30
+        ) as client:
+            client.headers["Authorization"] = f"Bearer {token}"
+            path = "/v1/desktop/sessions"
+
+            async def new_session() -> str:
+                created = await client.post(
+                    path,
+                    json={"request_id": str(uuid.uuid4()), "cwd": str(workspace)},
+                )
+                assert created.status_code == 200, created.text
+                return created.json()["result"]["session_id"]
+
+            def publish(session_id: str, anchor: str) -> str:
+                completion = str(uuid.uuid4())
+                store.publish(f"session/{session_id}", completion, anchor, "complete")
+                return completion
+
+            settled, racing, delivered = (
+                await new_session(),
+                await new_session(),
+                await new_session(),
+            )
+            observed = {
+                settled: publish(settled, "anchor-settled"),
+                # Two completions for this conversation: the token the client was
+                # shown is no longer current by the time it clicks.
+                racing: publish(racing, "anchor-racing-1"),
+                delivered: publish(delivered, "anchor-delivered"),
+            }
+            publish(racing, "anchor-racing-2")
+            assert store.claim_delivery(f"session/{delivered}", observed[delivered], "desktop")
+
+            revision_before = store.revision()
+            with contextlib.closing(sqlite3.connect(root / "attention.db")) as conn:
+                supersedes_before = conn.execute("SELECT COUNT(*) FROM supersede_log").fetchone()[0]
+                deliveries_before = conn.execute("SELECT * FROM deliveries ORDER BY 1").fetchall()
+                completions_before = conn.execute("SELECT * FROM completions ORDER BY 1").fetchall()
+
+            absent = "0123456789ab"
+            response = await client.post(
+                "/v1/desktop/attention/seen",
+                json={
+                    "items": [
+                        {"session_id": settled, "completion_token": observed[settled]},
+                        {"session_id": racing, "completion_token": observed[racing]},
+                        {"session_id": delivered, "completion_token": observed[delivered]},
+                        {"session_id": absent, "completion_token": str(uuid.uuid4())},
+                    ]
+                },
+            )
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert body["message"] == "Completion receipts marked read."
+            assert body["result"]["superseded"] == [racing]
+            assert body["result"]["unknown"] == [absent]
+            assert sorted(entry["conversation_id"] for entry in body["result"]["read"]) == sorted(
+                [f"session/{settled}", f"session/{delivered}"]
+            )
+            for entry in body["result"]["read"]:
+                assert entry["unseen"] is False
+                # R8: the store's own state, so the wire omits `supported`
+                # entirely and the renderer's merge inherits what it knew.
+                assert "supported" not in entry, entry
+
+            # The store, read back through the same object every surface uses.
+            assert store.state(f"session/{settled}")["unseen"] is False
+            assert store.state(f"session/{delivered}")["unseen"] is False
+            superseded_state = store.state(f"session/{racing}")
+            assert superseded_state["unseen"] is True, "a superseded item was cleared"
+            assert superseded_state["anchor_id"] == "anchor-racing-2"
+            assert store.state(f"session/{absent}")["unseen"] is False
+
+            # R2: a read is not a notification. Delivery, the supersede log and
+            # the completion rows are untouched, and MAX(sequence) has not moved,
+            # so nothing read can be resurrected as unread.
+            with contextlib.closing(sqlite3.connect(root / "attention.db")) as conn:
+                assert conn.execute("SELECT COUNT(*) FROM supersede_log").fetchone()[0] == (
+                    supersedes_before
+                )
+                assert conn.execute("SELECT * FROM deliveries ORDER BY 1").fetchall() == (
+                    deliveries_before
+                )
+                assert conn.execute("SELECT * FROM completions ORDER BY 1").fetchall() == (
+                    completions_before
+                )
+            assert store.revision()[0] == revision_before[0]
+            assert store.revision()[2] == revision_before[2]
+            assert store.revision()[1] > revision_before[1], "the ack did not move the watermark"
+
+            # A batch that clears nothing is still 200 -- the three buckets are
+            # the answer -- and the malformed bodies are refused before the store
+            # is ever consulted.
+            nothing = await client.post(
+                "/v1/desktop/attention/seen",
+                json={"items": [{"session_id": absent, "completion_token": str(uuid.uuid4())}]},
+            )
+            assert nothing.status_code == 200, nothing.text
+            assert nothing.json()["result"] == {"read": [], "superseded": [], "unknown": [absent]}
+            for payload in (
+                {"items": []},
+                {"items": [{"session_id": "short", "completion_token": str(uuid.uuid4())}]},
+                {"items": [{"session_id": absent, "completion_token": "not-a-token"}]},
+                {
+                    "items": [
+                        {"session_id": absent, "completion_token": str(uuid.uuid4())}
+                        for _ in range(501)
+                    ]
+                },
+            ):
+                refused = await client.post("/v1/desktop/attention/seen", json=payload)
+                assert refused.status_code == 422, (payload, refused.text)
+
+            for headers in ({"Authorization": ""}, {"Authorization": "Bearer nope"}):
+                denied = await client.post(
+                    "/v1/desktop/attention/seen",
+                    json={
+                        "items": [{"session_id": settled, "completion_token": str(uuid.uuid4())}]
+                    },
+                    headers=headers,
+                )
+                assert denied.status_code == 401, headers
+    finally:
+        server.should_exit = True
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(serving, timeout=10)
 
 
 async def collect_frames(lines, until, *, timeout: float = 30.0) -> list[dict[str, Any]]:

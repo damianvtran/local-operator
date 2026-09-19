@@ -8,6 +8,7 @@ that same team; the prompt is never rewritten into a simulated slash command.
 
 ```sh
 lop exec 'Review the implementation' --team release --background
+lop exec --tools read,mcp__vendor_screen 'Screen these names'
 printf 'Summarize this report' | lop exec --profile reviewer
 lop exec --goal 'Finish the acceptance checklist' --loop 3 --name 'Night audit'
 lop exec --resume SESSION_ID --loop-goal 'All acceptance checks are verified'
@@ -29,6 +30,7 @@ lop --resume SESSION_ID
 | `--loop N` | Run 1–25 continuation iterations **after** an optional initial prompt. Requires a new or resumed standing goal. |
 | `--loop-goal TEXT` | Run continuation/judge iterations until achieved. No fixed iteration cap; repeated undecidable judge results fail safely. Mutually exclusive with `--loop`. |
 | `--name TEXT` | Set the persisted conversation title. |
+| `--tools NAMES` | Declare this run's whole reach: a comma-separated list of tools, and the only ones the session may reach — an excluded tool is unreachable by name, not merely unapproved, and delegated children inherit the bound. The declaration is **one-way** for the session's life (a second declaration may only tighten it; a host that needs a different set starts a session with it) and it is not persisted, so a later `--resume` without the flag is unrestricted. It also stands as the APPROVAL for the names it lists *where nobody can be asked* — a non-TTY run without `--control`; on a terminal, and under `--control`, every write/exec call is still put to the gate. Overrides an attached role's `tools:` allow-list, and inherits it when the flag is absent. A name this build does not have is unreachable, and reported at the end of the run. |
 | `--effort LEVEL` | Set reasoning effort using the selected model's existing validation. Unsupported levels fail before a turn. |
 | `--resume [ID]` | Reopen the same transcript; omit the ID to select the most recent session. A live headless runtime is refused rather than raced; `lop --resume ID` attaches the TUI to that runtime instead. |
 | `--background` | Detach a worker. The launcher prints a bounded readiness receipt, not a claim that the work completed. |
@@ -51,6 +53,76 @@ startup options override only their own slots. Team and profile can coexist;
 a profile does not remove the team's roster. Stored loop progress remains
 visible, but restarting or resuming never automatically replays iterations.
 Pass a new loop option explicitly to start another loop.
+
+## What may not start a session: an agent's shell
+
+A `lop` invocation that descends from an agent's `bash` tool call
+(`LOCAL_OPERATOR_AGENT_SHELL`, set by that tool on every command it runs) may
+not open a session. Both entry points refuse it — `exec`, and the interactive
+path (`lop`, `lop --resume ID`, `--tui`) — because what such a run starts is a
+TOP-LEVEL conversation: an ordinary session directory with no `origin.json`, so
+`is_user_session` reports that the operator opened it, and the session list, the
+desktop sidebar and the phone's history all offer it as their own work.
+
+```
+exec failed: a `lop` invocation from inside an agent session cannot open one — the session it would start is a top-level conversation the operator never opened, listed in their session list and desktop sidebar as if they had, and running outside the job manager that lets this session see, steer, cancel and account for delegated work.
+Delegated work is launched with the `task` tool. A session that does not hold `task` may not create subagents at all: do the work yourself, and say so with `hub` if the slice genuinely cannot be done alone — `hub` reaches the session that delegated to you and the brief travels in the message. Work that must happen later is not a child session's to arm — `wake` is pruned from every child — so a child routes it back to the session that delegated to it, while a session that holds `wake` arms it there itself.
+```
+
+The incident this answers (2026-09-18): a subagent owed a review round on a PR,
+held no `task` tool to run it with, and reached for `lop exec --profile reviewer
+--background`. Two sessions — `lo-1281-review` and `lo-1281-qa`, 7 ms apart —
+appeared in the operator's sidebar as chats they had opened. `lop exec --status`
+starts nothing and is unaffected.
+
+The other half of that incident is the role's allowance, and it is the half the
+guard does not fix: whether a subagent may delegate at all is its ROLE's answer
+(`delegate: yes`), and a subagent that holds `task` is expected to use it, at any
+depth. A role that does not delegate — a `coder`, a `reviewer`, a `scout` — never
+holds it, and is expected to do the work itself rather than route around the
+rule. So a team brief that owes a review round to a slice gives that slice a role
+that may delegate, or keeps the round with the session that delegates.
+
+**The escape, for tests and QA runs.** `LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1`
+waives the refusal for one invocation, on BOTH entry points. It exists because
+testing evidence here comes from exercising the REAL CLI — including the TUI in
+a pty — which a QA run of the front end itself cannot do through the guard. It is
+deliberately NOT named in the refusal text (that text is model-facing and its job
+is to route the reader to `task`/`hub`/`wake`; obscurity, not secrecy — this
+file and `AGENTS.md` both name it), and script harnesses declare themselves with
+`agent_shell.harness_child_env()` rather than copying the variable by hand. It is
+not a silent equivalent either: a session it OPENS is stamped
+`origin.json` = `agent-shell`, so it stays out of the `/resume` picker, the
+desktop sidebar and the phone's list (a conversation it merely RESUMES is the
+operator's own work and is left alone). The picker is a FILTERED VIEW, not the
+store: that session is still on disk at `<config>/sessions/<id>` and
+`lop --resume <id>` opens it, which is the route back for the run that forgot to
+isolate. The id is in the run's own output either way: `lop exec --background`
+prints its receipt line, a foreground `lop exec` that reaches its runtime prints
+`lop exec session: session_id=<id>`, and a pty-driven front end prints
+`lop --resume <id>` when it exits. That front end creates the session directory
+as it OPENS — the transcript lands on its first turn — so if the only thing to
+hand is the store, the entry to resume is the newest one under
+`<config>/sessions/` carrying a `transcript.jsonl`: an open-and-quit leaves a
+directory holding only `origin.json`, which `--resume` refuses, and
+`--resume @latest` reads the same user-filtered listing the picker does.
+Isolating the run (`LOCAL_OPERATOR_CONFIG_DIR=<scratch>`) remains what keeps a
+test off the operator's own store; the stamp is the seatbelt for the run that
+forgets.
+
+**What this does not cover**, stated so the rule is not read as a boundary:
+
+* The marker is set by the `bash` tool alone. A subprocess spawned by the
+  `eval` tool, or one started with `env -u LOCAL_OPERATOR_AGENT_SHELL`, does not
+  carry it, so it is not refused.
+* The guard lives at `cli.main`: a marked process that starts `lop serve`, or
+  engages a runtime, mints sessions through the server/runtime composition root
+  and is not refused there.
+* A session's own front end opening a conversation for its user is deliberately
+  exempt — the TUI restart, `/fork`'s new window and a notification click's
+  terminal all drop the marker before they re-exec
+  (`agent_shell.without_agent_shell_marker`), because those are the user's
+gestures, not an agent's command.
 
 ## Divergence from `/goal`
 
@@ -78,6 +150,14 @@ headless gate. Publishing a discovery record does not replace that gate with
 an interactive one. With `--control`, work may park for a supervisor. Choose
 `--yolo` only when you intend that override; it is not required for an
 unattended run. Viewer attach/detach does not end the worker's work.
+
+`--tools` is a reach bound and not an approval override, so it does not change
+that: the declaration stands as the approval for the names it lists only where
+nobody can answer — a non-TTY run without `--control`, which includes a
+`--background` worker. On a terminal the per-call prompt remains, for every
+declared write/exec call as much as any undeclared one: naming a tool says
+which tools this run may reach, never that each command it is about to run has
+been agreed to in advance.
 
 A parked run stays `running` for as long as nobody answers it, so the status
 names what it is waiting on: `--status` reports `"pending": "approval"`

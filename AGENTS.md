@@ -257,7 +257,11 @@ driver's input thread, raised by three raw coordinate bytes), and those pty
 members are what makes it observable. It uses no API key, so its CI job
 carries **no fork gate** — unlike `cli-sanity`/`server-sanity`, whose live-LLM
 secrets force one. That is deliberate: the resume-liveness assertion is the
-regression guard, so it has to run on every PR including forks.
+regression guard, so it has to run on every PR whose diff is not inert,
+**including forks**, and the macOS leg below is mandatory. Change-scope gating
+narrows it in exactly one direction — a diff confined to `docs/**` or to
+`local_operator/mobile/web/**` does not run it — because nothing the stage
+exercises reads either tree.
 
 **It runs on a `[ubuntu-latest, macos-latest]` matrix, and the macOS leg is the
 one that makes it a regression guard.** The deadlock is a macOS/BSD property —
@@ -272,19 +276,55 @@ green against the exact commit it exists to catch.
 The `tui-e2e` job must not `need` the unit `test` job or `pip-audit`. It exists
 because a green unit suite did not catch #401; gating it on `test` skipped the
 freeze guard on every red unit run (observed on PR #426, which *fixed* a
-deadlock while `tui-e2e` reported `skipping`). It needs only `lint` and
-`type-check` — cheap syntax gates. A flake or a newly-published CVE must not
-disarm the macOS resume-liveness assertion.
+deadlock while `tui-e2e` reported `skipping`). It needs only `changes` (the
+scope classifier, which always runs), `lint` and `type-check` — cheap syntax
+gates. A flake or a newly-published CVE must not disarm the macOS
+resume-liveness assertion.
 
-Gates, all of which must be clean before a PR. **Run them over the whole tree,
-exactly as CI does** — these are the commands from `.github/workflows/ci.yml`:
+Its `tui` scope flag is deliberately **equal** to the unit matrix's `unit` flag,
+and that equality is load-bearing: `tests/e2e/test_fork_e2e.py` and
+`test_mcp_failure_reaches_the_viewer_e2e.py` import `scripts.*`, so a `scripts/`
+change is an input to this stage, and a flag narrower than the unit matrix would
+re-create the #426 disarm in a new costume. `tests/unit/test_ci_hygiene.py`
+asserts the implication (`types(tui-e2e) => types(lint)`), not the comment.
+
+Gates, all of which must be clean before a PR. These are the four command-shaped
+jobs of `.github/workflows/ci.yml`, spelled as they are for a full-tree run:
 
 ```sh
 .venv/bin/python -m flake8 .
 uvx --from black==26.1.0 black --check .
 uvx isort==5.13.2 --check .
-.venv/bin/python -m pyright --pythonpath .venv/bin/python .
+.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
+
+The `pyright` line goes through a bounded, process-group-reaping wrapper: it is
+whole-tree, exactly as before, but it cannot leave an analyzer running. See
+"The local `pyright` gate is bounded and process-group-reaped" below.
+
+**CI no longer runs all four over the whole tree on every PR.** Each job is
+gated on a scope flag computed by `scripts/ci_scope.py`, which classifies the
+diff and skips work a change provably cannot affect — a one-line `docs/**` edit
+runs two cheap checks instead of sixteen. The local equivalent of the whole CI
+job set is:
+
+```sh
+make check-changed      # scripts/ci_scope.py --since <merge-base origin/main> --run
+```
+
+It selects its gates from the SAME module the workflow's `changes` job runs, so
+the local answer and CI's answer cannot drift into two opinions, and it runs
+only the jobs whose flags are true for your diff. **Four gated jobs are never
+part of a local run** — `filesystem-boundaries-windows` (native Windows
+junction semantics), `cli-sanity` and `server-sanity` (live-LLM: they need
+`OPENROUTER_API_KEY` and spend real tokens), and `pip-audit` (its CI shape is
+`pypa/gh-action-pip-audit`, which installs the project and then audits it inside
+a hermetic venv that cannot be reproduced here). `--run` prints each exclusion
+with its reason, so a local green is not evidence about those four — the audit in
+particular, since a dependency-touching PR is exactly where a local green and a
+red audit can coexist. Use the four commands above by hand when you want the
+whole-tree form regardless — a release PR, or a diff that touches `.github/**`,
+both of which set every flag true.
 
 Do **not** invoke `.venv/bin/black`, `.venv/bin/flake8`, `.venv/bin/isort`, or
 `.venv/bin/pyright` directly. Those console scripts carry a shebang baked in
@@ -315,6 +355,64 @@ edits are live. After a pull that changes dependencies:
 ```sh
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
+
+### The local `pyright` gate is bounded and process-group-reaped
+
+The local `type-check` command is spelled
+`.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright …`.
+The gate itself is **whole-tree**, exactly as `ci.yml` spells it: the wrapper
+bounds and reaps, it never narrows.
+
+**1800 s, deliberately NOT the 900 s that would mirror that job's
+`timeout-minutes: 15`.** A whole-tree `pyright` measures **508 s on a quiet host
+and 1170 s under load** on this fleet, and CI's 15 minutes also cover checkout,
+dependency install and that job's protocol-sync step — so a bound equal to CI's
+provision can fire on a merely loaded host and red a gate CI would pass. Timing
+out a legitimately slow host is the worse failure, so the local bound is twice
+CI's provision, and a bound that does fire says what it is **on either path**: the
+wrapper's own stderr prints *"that is the BOUND (1800s) firing, not the gate
+failing — re-run it, or raise it (`--timeout`, or `make type-check
+BOUND_TIMEOUT=<seconds>`)"* — which is the only line `make type-check` shows — and
+`make check-changed` adds *"rc=124 is the BOUND (--timeout 1800s) firing, not the
+gate failing … re-run it; if it fires again, raise the bound"* from
+`scripts/ci_scope.py`. `make type-check BOUND_TIMEOUT=<seconds>` raises it for one
+run; `BOUNDED_GATE_TIMEOUT` in `scripts/ci_scope.py` is the same number for
+`make check-changed`, and a test asserts the two agree.
+
+**Why a wrapper.** `pyright` is a Python wrapper around an npm/node analyzer, and
+node runs as a *separate* process. The fleet shows what goes wrong when the group
+is not reaped: orphans re-parented to `ppid 1` holding **2.28 GB and 1.50 GB**,
+one of them still alive **81 minutes** after its parent died, ten analyzers alive
+at once at ~5 GB while sessions queued more behind them.
+
+Be precise about what was measured and what was not: with `timeout 8|25` — and
+even with `timeout -s KILL` — over a whole-tree `pyright`, the analyzer died with
+its wrapper in every attempt here, and GNU `timeout(1)` signals the child's whole
+process group on this host, so the tidy causal story ("the bound fires, the
+wrapper dies, node survives") is **not** the mechanism, and the TRIGGER behind the
+fleet's own orphan cases was never captured. What IS measured, and what the unit
+tests drive with a real process tree, is the case `timeout(1)` cannot cover at
+all: a leader that exits while a descendant lives on. `run_bounded.py` runs the
+command in its own process group and signals the GROUP — on the bound, on a signal
+to the wrapper, and as a sweep once the leader exits — so all three paths end with
+nothing left running; the sweep is what removes a survivor the plain invocation
+leaves.
+
+It also escalates where a bare bound does not: over a SIGTERM-ignoring tree,
+`timeout 3` fires at 3 s and then **waits the tree out** (30 s for a 30 s tree,
+measured; 300 s in an earlier run for a 300 s one), where the wrapper SIGKILLs the
+group after `--grace` and clears the same tree in 5 s **with `--grace 2`** (the
+shipped `--grace` default of 10 takes ~13 s for it). It keeps
+`timeout(1)`'s statuses (124 on a fired bound, 125 when the command could not
+start), reports **128 + signum** when a signal ends the run — forwarded by this
+wrapper, or delivered to the child by someone else, where `sys.exit` used to
+render the raw `-9` as 247 — forwards **SIGHUP and SIGQUIT** as well as
+SIGINT/SIGTERM (SIGHUP used to kill the wrapper and leave the group alive), writes
+diagnostics to stderr only, and reports what it reaped.
+
+Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
+nothing runs a sweep in that case — what protects the group there is that the
+members were signalled as a group in the first place.
 
 ### Every feature worktree owns its own venv. Never symlink one.
 
@@ -602,6 +700,14 @@ admins hold a configured bypass (see "Who may merge: two tiers"), so an
 `version-bump-guard` as a stop signal rather than an obstacle to route around:
 the job is the reviewer's missing memory, not a lock.
 
+**A release PR's green is narrow.** Change-scope gating classifies a diff
+that is nothing but the `version =` line as a release bump, and a release
+bump runs *only* `changes` and `version-bump-guard` — two checks, not a
+matrix. That is the intended disposition (the classifier's `release_bump`
+rule is asserted in `tests/unit/test_ci_hygiene.py`), but it means "CI is
+green" on a release PR is evidence about the version line and nothing else.
+The code being released was gated on the PR that landed it, not on this one.
+
 Note that `gh api repos/<owner>/<repo>/branches/main/protection` answers
 `404 Branch not protected` here. That endpoint reports only **legacy** branch
 protection and 404s even while a modern ruleset is actively enforcing the
@@ -632,8 +738,12 @@ version that no longer existed. None of that work needed a distinct version;
 it needed to land.
 
 So: **the owner of a PR merges it the moment its review rounds are clean and
-fresh and CI is green** — no release queue, no waiting for a predecessor, no
-handing the "next number" to whoever is behind you. A merged PR that has not
+fresh and CI is green** — and "green" means reading the run's
+classification report: it names every flag, every changed path's category and
+which jobs ran. **A skipped job is not evidence.** A guard nothing ran is
+indistinguishable from no guard, which is why the `changes` job writes that
+report into the step summary. No release queue, no waiting for a predecessor,
+no handing the "next number" to whoever is behind you. A merged PR that has not
 been released yet is the normal state of `main`, not a problem to fix.
 
 ### One release owner per window
@@ -731,6 +841,14 @@ it landed.
    The owner replies with the remediation comment and merges. A bump commit
    that also carries code is a defect — the code belongs in a reviewed PR
    of its own.
+
+   **Expect two checks on this PR, not a matrix.** A version-only
+   `pyproject.toml` diff classifies as a release bump, so only `changes` and
+   `version-bump-guard` run — the whole job set would be gating code this PR
+   does not touch. Do not read that short check list as a truncated pipeline,
+   and do not "fix" it by adding an always-run job: the narrow green is the
+   design (`scripts/ci_scope.py`, `release_bump`), and the code being released
+   was gated on the PR that landed it.
 4. **Tag and publish** from the merge commit of that bump, then install and
    smoke (mechanics below). The release notes cover **every PR in the
    window**, grouped in the house style of the existing releases (a headline
@@ -1126,6 +1244,55 @@ the version is live on the public listing. Never claim a version is live from
 a merged PR or a workflow's success — only from the public listing or a
 successful publish call.
 
+## An agent may not start a session
+
+`lop exec` opens a TOP-LEVEL conversation — an ordinary session directory that
+`is_user_session` reports as the operator's own. From inside an agent session
+that is never what you want: the operator's session list and desktop sidebar
+show it as a chat they opened, and it runs outside the job manager that would
+let you see, steer, cancel or account for it. A subagent does it out of the
+wrong belief that it is the only way to get a review run going:
+
+```sh
+lop exec --profile reviewer --background --name lo-1281-review < brief.md
+```
+
+That happened on 2026-09-18: two sessions (`lo-1281-review`, `lo-1281-qa`)
+appeared in the operator's sidebar for a PR they had never asked about, because
+the coder that owed the review round held no `task` tool (a role that does not
+delegate is never handed `task`/`wait`/`wake` — see `harness.subagent`'s prune).
+So the guard is in the product now: a `lop`
+invocation that descends from an agent's bash tool call may not open a session,
+and the refusal states the rule — a session that HOLDS `task` delegates with it,
+and one that does not may not create subagents at all, does the work itself, and
+reports a genuine blocker with `hub` to the session that delegated to it. Work
+that belongs later is not the child's to arm either — `wake` is pruned from
+EVERY child session — so it goes back to the session that delegated.
+
+WHO may delegate is the role's answer, never the depth's (operator, 2026-09-18).
+A subagent whose role allows delegation is expected to use `task` at any depth —
+a `manager`'s child is a manager too — and the tree it grows is navigable: the
+TUI re-scopes its roster to the page you have open and climbs with `p`/`Esc`, and
+the desktop UI walks the same edges with its breadcrumbs and back control. A role
+that does not delegate gets no `task` at any depth and must do the work itself.
+
+Delegate with `task`, always. If you think you need a separate live session —
+something a human must steer, or work that must outlive this turn — say so in
+your report instead of starting one. `lop exec --status JOB_ID` still polls a
+job that is already running.
+
+**Scripts that drive the real CLI must declare themselves.** A bench, an eval
+driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
+it inherits the marker and every inner run would be refused, which reads as a
+broken product instead of a guard. Call
+`agent_shell.harness_child_env()` for the child's environment: it sets
+`LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1` (named here for a harness that needs it —
+obscurity, not secrecy, and `docs/EXEC.md` documents the limits of the whole
+rule). Use it against an isolated `LOCAL_OPERATOR_CONFIG_DIR`; the session the
+child opens is stamped `agent-shell`, so it cannot be mistaken for one the
+operator started. The same applies to a manual QA run: that escape is for
+driving the real front end, never for opening a peer to hand work to.
+
 ## Who may merge: two tiers
 
 `main` is governed by a ruleset that requires **one approving review**, plus the
@@ -1149,6 +1316,9 @@ running on the owner's machine and under their account, which is
 the normal case here — the standing agent review gate **is** the approval. A
 clean, fresh, independent agent review round plus green CI is sufficient to
 merge; the agent does not need to find a second human to click approve.
+Green here is the *classified* green: read the `changes` job's summary
+before treating the check list as evidence, because a job this diff skipped
+appears there as a skip rather than as a pass.
 
 **Tier 2 — the PR is anyone else's.** An outside contributor's PR needs **both**
 an approving review **and** a clean agent review round. The approval is the
@@ -1166,7 +1336,9 @@ here pushes as the owner's account, so an agent-authored PR the owner created
 can never be *clicked* approved by the account that opened it. The ruleset
 anticipates exactly this: the admin-role bypass is the **sanctioned** way the
 owner's reviewed PR completes, not a hole. So, concretely, for an agent acting
-for the owner with a clean independent round and green CI: try the
+for the owner with a clean independent round and green CI (the `changes`
+job's classification summary, not just the tick list — a skipped job is not
+evidence): try the
 normal merge first (a collaborator may already have approved); if the ruleset
 refuses because nobody else has approved, complete it with `--admin` **and
 disclose that on the PR** in the terms below. Do not sit on finished, reviewed
@@ -1729,11 +1901,15 @@ have the build you are testing.
 
 **Do not commit PR evidence artifacts** — before/after frames (SVG or PNG),
 screenshots, terminal byte captures, measurement logs, review-round
-transcripts, or a `docs/evidence/<change>/`, `docs/assets/pr-<n>/` or
+transcripts, or a `bench/`, `docs/evidence/<change>/`, `docs/assets/pr-<n>/` or
 `docs/pr-<n>/` directory of any kind. Those directories used to exist and
 were removed in one sweep: they had grown to ~60 MB of frames that nothing in
 the code or tests loaded, that every clone paid for forever, and that
-described a UI several releases out of date.
+described a UI several releases out of date. `bench/` was the same mistake in a
+second place — 13 JSON dumps and the two hand-built markdown tables beside them,
+written by the `scripts/bench_*.py` harnesses and read by nothing at runtime —
+and was swept on its own: a measurement store is regenerable, so it belongs with
+the PR that cites it, and it is ignored now (`.gitignore`).
 
 The evidence still has to exist; it just lives where the review does. Attach
 images to the PR description or the review comment (drag them into the GitHub
@@ -1750,12 +1926,13 @@ document whose only purpose is to hold a PR's proof is a PR comment, not a
 doc.
 
 Comments and docstrings still cite a few of the removed directories by path
-(`docs/evidence/cmd-chords/MEASURED.md`, the compaction-ruler measurements,
-and so on). Those citations are kept as-is — the measurements they name are
-real and the reasoning built on them still holds — and the files are one
-`git show` away. Last commit that carried each:
+(`docs/evidence/cmd-chords/MEASURED.md`, the compaction-ruler measurements, the
+`bench/*.json` pairs the analytics and info-snapshot code quote, and so on).
+Those citations are kept as-is — the measurements they name are real and the
+reasoning built on them still holds — and the files are one `git show` away.
+The commit to retrieve each from:
 
-| directory | `git show <sha>:docs/evidence/<dir>/…` |
+| directory | `git show <sha>:<path>` |
 |---|---|
 | `cmd-chords`, `aside-chord` | `f3ae0441`, `1634a53b` |
 | `compaction-ruler` | `9eb9bb33` |
@@ -1763,7 +1940,8 @@ real and the reasoning built on them still holds — and the files are one
 | `fork-ux`, `fork-cache` | `a70e3460` |
 | `browser-extension` | `39691ea0` |
 | `sibling-modes-boot-layout` | `2c4ebc77` |
-| everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `5cbea141` (the last `main` before the sweep) |
+| everything else under `docs/evidence`, `docs/assets/pr-*`, `docs/pr-280`, `docs/performance` | `fc80a967` (the last `main` before the sweep) |
+| `bench` | `ba225070` (the `main` this sweep branched from; the whole store is still present there — `git show ba225070:bench/README.md` retrieves the tables, `git show ba225070:bench/analytics-rollup-after.json` the numbers behind them) |
 
 ## Timing, flakes, and how to assert that something is fast
 
@@ -2067,8 +2245,9 @@ than widening the bound. Do not merge a red head on the assumption that it is
 ### Two things this section cannot do for you
 
 **There is no `pytest-timeout` in this suite.** A test that waits forever hangs
-its CI job until the workflow's `timeout-minutes` reclaims the runner (40 min
-for `test`, and that ceiling exists because a job once held a slot for 3h38m).
+its CI job until the workflow's `timeout-minutes` reclaims the runner
+(`timeout-minutes: 20` for `test` in `.github/workflows/ci.yml` — quoted from
+the file, and that ceiling exists because a job once held a slot for 3h38m).
 So an unbounded wait is not merely slow, it is expensive for everyone queued
 behind it — which is the other half of why `wait_for` carries
 `DEADLOCK_GUARD_S`.
@@ -2564,8 +2743,14 @@ Things that will bite you if you forget them:
   unchanged, naming the refusal in a `debug` log. Measured on the operator's
   342.8 MB ledger (1 155 845 calls), p50, both arms measured in one session at
   load ~215-280: the panel's 30-day window goes from 4 868 ms wall / 3 179 ms CPU
-  to 187 ms / 166 ms CPU — `scripts/bench_panel_latency.py`, `bench/analytics-rollup-*.json`, and THOSE
-  committed numbers are the canonical ones. Wall is not portable between hosts,
+  to 187 ms / 166 ms CPU — both arms produced by `scripts/bench_panel_latency.py`,
+  and THOSE numbers are the canonical ones. They were stored in
+  `bench/analytics-rollup-before.json` / `-after.json`, which left the tree with
+  the rest of `bench/` (see "Evidence goes on the PR, never into the
+  repository"), so quote them from `ba225070` — the `main` this sweep branched
+  from, where the whole store is still present:
+  `git show ba225070:bench/analytics-rollup-after.json` (`-before.json` is the arm
+  it is compared against). Wall is not portable between hosts,
   and neither is CPU to the same degree: the same fast path cost 121 ms of CPU at
   load 38 and 166 ms at load 237 on this box, so quote the pair with its load and
   never one arm alone. Three properties matter more than the mechanism:

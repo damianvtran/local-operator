@@ -31,11 +31,13 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.session.frontend_state import (
+    LIVE_EVENT_END_ROWS_MAX,
     CommandScope,
     CostKnowledge,
     FrontendModelSpec,
     FrontendSessionState,
     FrontendStateStore,
+    FrontendSync,
     FrontendUpdate,
     FrontendUsage,
     JobState,
@@ -1392,6 +1394,208 @@ def test_live_tool_start_epochs_hands_out_a_copy() -> None:
     handed_out = store.live_tool_start_epochs()
     handed_out["call-evil"] = 1.0
     assert store.live_tool_start_epochs() == {"call-1": 1_700_000_000.0}
+
+
+# ---------------------------------------------------------------------------
+# The retained END carries the clock its START announced.
+#
+# The seed keeps a settled ``tool_execution_end`` so a viewer joining mid-turn
+# can settle a card for work that finished while it was away — and that end is
+# the only frame of the pair that states NO time, because it replaced the start
+# that did. A client cannot date such a row itself (it refuses to place a frame
+# at its own arrival instant), so without the stamp the joining pane paints a
+# wall of rows that are in the wrong place and name nothing that ran, on a
+# runtime whose TUI has had them right since they ran.
+#
+# The stamp is therefore CARRIED, never invented: absent start, absent key.
+# ---------------------------------------------------------------------------
+
+
+def _fold_live(store: FrontendStateStore, *events) -> list[dict[str, Any]]:  # noqa: ANN002
+    """``_fold`` against a session MID-TURN, which the settled rows require.
+
+    ``observe_event`` refreshes from the session at every ``tool_execution_end``,
+    and a session with no turn in flight publishes NO seed at all — so a
+    non-streaming fake blanks ``live_events`` on the first end and would make
+    every assertion below vacuous.
+    """
+    session = _live_session()
+    for event in events:
+        store.observe_event(session, event)
+    return list(store.state.live_events)
+
+
+def test_a_settled_seed_end_carries_the_clock_its_start_announced() -> None:
+    """The joining viewer is handed the instant the call really began.
+
+    Taken from ``live_tool_started_at`` at the ONE point it is readable: the end
+    arm of the seed fold, which ``observe_event`` runs before the anchor fold
+    pops the entry on this same event. Read anywhere later and there is nothing
+    left to read, which is what makes this the only place the stamp can be made.
+    """
+    store = FrontendStateStore(_state())
+    started = time.time() - 27.0
+    live = _fold_live(
+        store,
+        AgentStartEvent(generation=1),
+        ToolExecutionStartEvent(
+            tool_call_id="call-bash", tool_name="bash", args={}, started_at_epoch=started
+        ),
+        ToolExecutionEndEvent(
+            tool_call_id="call-bash",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="call-bash", tool_name="bash", content=[]),
+        ),
+    )
+
+    assert [row["type"] for row in live] == ["tool_execution_end"]
+    assert live[0]["started_at_epoch"] == started
+    # The start is still DROPPED and its anchor still released: the clock is
+    # carried onto the retained row rather than the row being kept beside it.
+    assert store.live_tool_start_epochs() == {}
+
+
+def test_a_settled_seed_end_states_no_time_when_no_start_was_seen() -> None:
+    """Never fabricate: the shapes that must carry no stamp at all.
+
+    A missing instant is a real answer, not a value to default, and the three
+    ways to reach one are pinned here:
+
+    * a LEGACY start, recorded in the anchor map as a start with no instant;
+    * an end whose start this fold never saw at all;
+    * a call that will never run — ``not_run_reason`` deliberately gets no
+      ``tool_execution_start``/``_end``, so its row is the compose surface and
+      nothing may be stamped onto it.
+    """
+    store = FrontendStateStore(_state())
+    session = _live_session()
+    store.observe_event(session, AgentStartEvent(generation=1))
+    store.observe_event(
+        session, ToolExecutionStartEvent(tool_call_id="legacy", tool_name="bash", args={})
+    )
+    assert store.live_tool_start_epochs() == {"legacy": None}
+    store.observe_event(
+        session,
+        ToolExecutionEndEvent(
+            tool_call_id="legacy",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="legacy", tool_name="bash", content=[]),
+        ),
+    )
+    store.observe_event(
+        session,
+        ToolExecutionEndEvent(
+            tool_call_id="orphan",
+            tool_name="read",
+            result=ToolResult(tool_call_id="orphan", tool_name="read", content=[]),
+        ),
+    )
+    store.observe_event(
+        session,
+        ToolCallComposeEvent(
+            tool_call_id="parked",
+            tool_name="bash",
+            argument_bytes=5,
+            dictation_complete=True,
+            not_run_reason="Tool call not run: planning failure",
+        ),
+    )
+
+    rows = {row["tool_call_id"]: row for row in store.state.live_events}
+    assert rows["legacy"]["type"] == "tool_execution_end"
+    assert rows["orphan"]["type"] == "tool_execution_end"
+    assert rows["parked"]["type"] == "tool_call_compose"
+    for call_id in ("legacy", "orphan", "parked"):
+        assert (
+            "started_at_epoch" not in rows[call_id]
+        ), f"{call_id} carries a clock no producer ever announced"
+
+
+def test_the_stamp_is_one_key_on_the_retained_row_and_adds_no_row() -> None:
+    """The superseded/compose id space is untouched: one call, one row.
+
+    The stamp is a key on the dict the seed already ships, NOT a second
+    retained start. Re-keeping the start beside the end would re-open the two
+    id spaces the supersession hand-off exists to close and double the rows the
+    line budget pays for, for nothing the stamped end does not already state.
+    """
+    store = FrontendStateStore(_state())
+    started = time.time() - 3.0
+    live = _fold_live(
+        store,
+        AgentStartEvent(generation=1),
+        ToolCallComposeEvent(tool_call_id="compose:0", tool_name="bash", argument_bytes=5),
+        ToolCallComposeEvent(
+            tool_call_id="real_0",
+            tool_name="bash",
+            argument_bytes=20,
+            supersedes_tool_call_id="compose:0",
+        ),
+        ToolExecutionStartEvent(
+            tool_call_id="real_0", tool_name="bash", args={}, started_at_epoch=started
+        ),
+        ToolExecutionEndEvent(
+            tool_call_id="real_0",
+            tool_name="bash",
+            result=ToolResult(tool_call_id="real_0", tool_name="bash", content=[]),
+        ),
+    )
+
+    # The placeholder was retired by the promotion and the end replaced the
+    # start, so the seed holds one row and the stamp moves no count.
+    assert len(live) == 1
+    assert live[0]["type"] == "tool_execution_end"
+    assert live[0]["tool_call_id"] == "real_0"
+    assert live[0]["started_at_epoch"] == started
+
+
+def test_the_seed_row_cap_still_holds_when_every_row_is_stamped() -> None:
+    """The cap is a ROW count, so a key per row cannot move it.
+
+    Asserted through the wire boundary rather than on the fold: the fold is
+    unbounded by design and ``LIVE_EVENT_END_ROWS_MAX`` is what a mid-turn
+    joiner actually receives.
+    """
+    store = FrontendStateStore(_state())
+    events: list[AgentEvent[Any]] = [AgentStartEvent(generation=1)]
+    total = LIVE_EVENT_END_ROWS_MAX + 25
+    for index in range(total):
+        events.append(
+            ToolExecutionStartEvent(
+                tool_call_id=f"call-{index}",
+                tool_name="bash",
+                args={},
+                started_at_epoch=1_700_000_000.0 + index,
+            )
+        )
+        events.append(
+            ToolExecutionEndEvent(
+                tool_call_id=f"call-{index}",
+                tool_name="bash",
+                result=ToolResult(tool_call_id=f"call-{index}", tool_name="bash", content=[]),
+            )
+        )
+    _fold_live(store, *events)
+    assert store.live_tool_start_epochs() == {}
+
+    payload = sync_wire_payload(
+        FrontendSync(
+            epoch=store.state.epoch,
+            sequence=store.state.sequence,
+            snapshot=store.state,
+            live_cursor=None,
+        )
+    )
+    sent = payload["snapshot"]["live_events"]
+    ends = [row for row in sent if row["type"] == "tool_execution_end"]
+
+    assert len(ends) == LIVE_EVENT_END_ROWS_MAX
+    assert len({row["tool_call_id"] for row in ends}) == len(ends), "a call was sent twice"
+    # Oldest-first eviction, unchanged — and every survivor keeps its own clock.
+    assert ends[-1]["tool_call_id"] == f"call-{total - 1}"
+    assert all(
+        row["started_at_epoch"] == 1_700_000_000.0 + int(row["tool_call_id"][5:]) for row in ends
+    )
 
 
 def test_the_phase_fold_restarts_only_when_the_kind_of_work_changes() -> None:

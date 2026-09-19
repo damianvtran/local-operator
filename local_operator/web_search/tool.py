@@ -390,7 +390,15 @@ async def execute_web_search(
                         key: value.get_secret_value()
                         for key, value in {
                             key: credentials.get_credential(key)
-                            for provider in settings.providers
+                            # The RESOLVED, non-rotating chain, not
+                            # ``settings.providers``: an auto-joined provider's
+                            # credential (EXA_API_KEY, PARALLEL_API_KEY,
+                            # DEEPSEEK_API_KEY) sits outside the priority prefix,
+                            # and two calls with different credentials behind it
+                            # must not coalesce. ``resolve()`` rather than
+                            # ``candidates()`` because the rotation offset moves
+                            # per call and the key must be stable.
+                            for provider in service.resolve()
                             for key in PROVIDERS[provider].credential_keys
                         }.items()
                     },

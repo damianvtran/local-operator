@@ -4,7 +4,7 @@ export const PROTO_VERSION = 1 as const;
 // ADVISORY ONLY: nothing is refused for being older (`MIN_SUPPORTED_PROTO` is
 // the compatibility floor). Generated so the popup's update line and the
 // daemon's agree by construction.
-export const EXPECTED_EXTENSION_VERSION = '0.1.17' as const;
+export const EXPECTED_EXTENSION_VERSION = '0.1.18' as const;
 // The ONE spelling of the "a newer extension exists" advisory. `{have}` and
 // `{want}` are the reported and the expected extension versions; the
 // contingency is on the Chrome Web Store because nothing here can know what the
@@ -34,10 +34,21 @@ export enum ErrorCode {
   PROTO_MISMATCH = 'proto_mismatch',
   OWNER_REFUSED = 'owner_refused',
   EXTENSION_UNRESPONSIVE = 'extension_unresponsive',
+  CAPABILITY_UNSUPPORTED = 'capability_unsupported',
   INTERNAL = 'internal',
 }
 
-export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release';
+// Methods NO build of this extension can serve, and the reason each is in the
+// vocabulary anyway: `download` needs a destination the harness chooses, and
+// Chrome refuses a tab-scoped `chrome.debugger` session the only two CDP
+// primitives that could give it one (`Page.setDownloadBehavior` answers
+// -32000 "Cannot not access browser-level commands", `Browser.setDownloadBehavior`
+// -32601; no browser target is attachable). Measured on Chrome 153.0.8010.53 —
+// docs/design/browser-file-transfer.md §17.1. Generated, so a method added there
+// cannot silently become "the extension forgot a handler".
+export const EXTENSION_CANNOT_SERVE: string[] = ['download'];
+
+export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool
 // filters on; `source` distinguishes a page console call from an uncaught
@@ -50,6 +61,27 @@ export interface LogEntry {
 export interface ScrollResult {
   scrollX: number; scrollY: number; moreBelow: boolean; moreRight: boolean;
   url: string; title: string;
+}
+// One file's facts, in the ONE shape both hosts return for `download` and
+// `upload` (design §6.1). `sha256` is computed by PYTHON, never by a host: a
+// host that reports a hash it did not compute is a host whose word is being
+// trusted, which is the property the post-hoc verification exists to remove.
+// `sniffed` is what the reporting side observed about the CONTENT ('' when it
+// could observe nothing), and `mime` is what the SERVER declared ('' unknown).
+export interface FileFact {
+  name: string; path: string; bytes: number; mime: string; sniffed: string; sha256: string;
+}
+// `download` -> the files that landed, whether a capture was armed at all, and
+// why not. `armed: false` with a `reason` is a POLICY ANSWER, not a fault: a
+// refusal is a result because an already-released daemon drops a frame carrying
+// an ErrorCode it does not know (design §6.2).
+export interface DownloadResult {
+  files: FileFact[]; armed: boolean; reason: string;
+}
+// `upload` -> the selectors/inputs that accepted files, and the facts of what
+// the DOM actually holds after the attach (read back, never assumed).
+export interface UploadResult {
+  inputs: string[]; accepted: FileFact[];
 }
 export interface Request { id: string; method: Method; params: Record<string, unknown>; }
 export interface ErrorDetail { code: ErrorCode; message: string; data: Record<string, unknown>; }
@@ -78,6 +110,14 @@ export interface PairRequest { event: 'pair'; code: string; }
 export interface PairResult { event: 'pair_result'; ok: boolean; token: string; message: string; }
 export interface Ping { event: 'ping'; }
 export interface Pong { event: 'pong'; }
+// Which wire methods THIS build serves, sent right after hello. An old daemon
+// drops the unknown event harmlessly, which is why capability may travel here
+// and may not travel as a new field on Hello (extra="forbid" would close the
+// socket with 4001). `methods` is the extension's own dispatch table, so an
+// advertised capability cannot drift from a served one.
+export interface Capabilities {
+  event: 'capabilities'; methods: string[]; version: string;
+}
 export interface TabClosed { event: 'tab_closed'; tab: string; }
 export interface TabUpdate { event: 'tab_update'; tab: string; url: string; title: string; }
 export interface AwaitingOrigin { event: 'awaiting_origin'; id: string; origin: string; }
@@ -88,5 +128,5 @@ export interface OriginDecision {
 }
 export type ExtensionEvent =
   | Hello | PairRequest | Pong | TabClosed | TabUpdate | AwaitingOrigin | AwaitingOriginCleared
-  | Unpair | OriginDecision;
+  | Unpair | OriginDecision | Capabilities;
 export type DaemonMessage = HelloAck | PairResult | Ping | Request | Role;

@@ -327,6 +327,25 @@ class ServeRecord:
     #: record is not the attach protocol).
     retiring_from: str = ""
     retiring_to: str = ""
+    #: Can this daemon replace its own process image onto the current build
+    #: without leaving the port (``server/reload``)?
+    #:
+    #: A CAPABILITY STATEMENT, published by the daemon that has it and never by a
+    #: reader, and the reason it has to be in the record rather than deduced: the
+    #: request travels as ``SIGUSR1``, whose default disposition is to TERMINATE.
+    #: A caller that WAITS FOR THIS FIELD can only ever signal a process that
+    #: installed the handler; a caller that assumed it would kill any daemon built
+    #: before this field existed.
+    #:
+    #: ``False`` here is not a fault and not permanent: it is what every daemon
+    #: started before this build reports, and what this one reports while it runs
+    #: as a ``--reload`` child (whose port belongs to uvicorn's supervisor) or was
+    #: booted without a listener of its own. ``lop services restart`` reports those
+    #: by name rather than signalling them.
+    #:
+    #: Additive, like every field here: a reader built before it drops the key and
+    #: sees the daemon it always saw.
+    reloadable: bool = False
 
     def to_json(self) -> dict[str, Any]:
         # ``asdict`` like the session record: one serialization spelling for
@@ -348,7 +367,11 @@ class ServeRecord:
 
 
 def build_record(
-    *, instance_id: str, announced: tuple[str, int], desktop_governed: bool | None = None
+    *,
+    instance_id: str,
+    announced: tuple[str, int],
+    desktop_governed: bool | None = None,
+    reloadable: bool = False,
 ) -> ServeRecord:
     """Assemble the record for THIS process, reading identity fresh.
 
@@ -373,6 +396,16 @@ def build_record(
     a governed plane therefore publishes a record whose ``desktop`` and
     ``claim_key`` contradict each other — a state a test may construct, never
     one production can be in.
+
+    ``reloadable`` is the same kind of seam for the record's reload capability,
+    and it is a PARAMETER rather than a read of this process inside the
+    assembler because the capability is a fact the caller owns: it depends on
+    whether ``serve_command`` gave this boot a listener of its own
+    (``server/reload.listener_fd``), which lives on the app the lifespan holds
+    and this function is not given. Passing ``False`` for a daemon that CAN reload
+    understates the fleet — a caller reports it as "cannot move itself" and asks
+    the operator to restart it by hand — which is the safe direction and the one
+    the default takes.
 
     **The claim key is minted HERE, and only when the plane is nobody else's**
     (``desktop_posture().enabled`` false). Two reasons for the placement: the
@@ -407,6 +440,13 @@ def build_record(
         prefix=sys.prefix,
         install_kind=install_kind().value,
         desktop=governed,
+        # Published by the caller rather than derived here: the capability
+        # depends on the listener this boot was given, which lives on the app
+        # (see this function's docstring). The reload module owns the predicate
+        # so the field and the armed signal handler cannot disagree — a record
+        # claiming the capability for a daemon that installed no handler is a
+        # caller signalling a process whose default answer to SIGUSR1 is death.
+        reloadable=bool(reloadable),
         # ``""``, never a regenerated key: an env-governed daemon has no claim
         # to publish, and a reader must be able to tell that from a key.
         claim_key="" if governed else secrets.token_urlsafe(32),

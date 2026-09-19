@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-operator"
-version = "0.56.12"
+version = "0.59.10"
 description = "A team of proactive AI assistants that can work together behind the scenes to help you get mundane tasks done so you can focus on the fun stuff."
 readme = "README.md"
 authors = [{ name = "Radient Inc.", email = "contact@radienthq.com" }]
@@ -161,7 +161,7 @@ dev = [
     # Bump this pin, not an env override, and keep the exclude-superset
     # guard in tests/unit/test_ci_hygiene.py green against the new
     # analyzer.
-    "pyright==1.1.411",
+    "pyright==1.1.414",
     "pytest",
     "pytest-asyncio",
     "pytest-cov",
@@ -308,7 +308,14 @@ reportPrivateImportUsage = false
 # either mechanism — which is what keeps this from masking a packaging break.
 extraPaths = ["benchmarks/osworld_v2_adapter/src"]
 # `exclude` REPLACES pyright's built-in defaults, it does not extend them, so
-# the three defaults must be restated here alongside any addition of our own.
+# the four defaults must be restated here alongside any addition of our own.
+# THE COUNT IS VERSION-COUPLED. It became FOUR at 1.1.414, which added
+# `**/__editable__.*` to the three this list had carried. That is why the pin
+# and this list move together:
+# `tests/unit/test_ci_hygiene.py::test_configured_pyright_excludes_are_a_superset_of_the_running_defaults`
+# probes the RUNNING analyzer's own defaults and compares them to this list by
+# set membership, so the entry has to be the analyzer's string verbatim — a
+# spelling of our own that looks equivalent leaves the guard red.
 # Dropping `**/.*` is not cosmetic: every worktree (and the main checkout)
 # carries a `.venv` symlink into the shared uv environment, so pyright walks it
 # and enumerates the whole site-packages tree — 29466 source files instead of
@@ -336,7 +343,7 @@ extraPaths = ["benchmarks/osworld_v2_adapter/src"]
 # code, and CI cannot catch the omission — it never builds a wheel before
 # type-checking — so the cost lands entirely on local runs of the gate command,
 # where `rm -rf build/` is folklore the next person re-derives from scratch.
-exclude = ["**/node_modules", "**/__pycache__", "**/.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build"]
+exclude = ["**/node_modules", "**/__pycache__", "**/.*", "**/__editable__.*", "docs", "benchmarks/osworld_v2_adapter/**/evaluation_examples", "build"]
 # NOTE: venvPath/venv are deliberately NOT set here, even though a bare local
 # `pyright` run resolves whatever interpreter it finds and reports spurious
 # "import could not be resolved" errors that bury the real ones.

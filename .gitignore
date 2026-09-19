@@ -50,3 +50,14 @@ uv.lock
 # deliberately not type-clean) under the pyright/black gate and re-bill the
 # SVGs as repo weight. The shipped code is the promoted `org_layout.py`.
 scratch/
+
+# The local measurement store for the `scripts/bench_*.py` harnesses: the
+# before/after JSON dumps and the tables built from them. It is regenerable
+# output, not source, so the evidence belongs on the PR that cites it and never
+# in the tree (`AGENTS.md`, "Evidence goes on the PR, never into the repository")
+# — committing it made every clone pay forever for numbers one PR cared about.
+# Ignored here so a re-run still has somewhere to write (`bench_info_snapshot.py`
+# creates the directory itself, because git does not materialise an ignored one);
+# the numbers that were committed are one `git show` away at `ba225070`, the
+# `main` this sweep branched from, where the whole store is still present.
+bench/

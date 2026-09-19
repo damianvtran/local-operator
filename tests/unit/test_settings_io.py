@@ -66,6 +66,7 @@ def _consumer_defaults() -> dict[str, object]:
         DEFAULT_FORK_CMUX_PLACEMENT,
         DEFAULT_FORK_MODE,
     )
+    from local_operator.tools import shell_env
     from local_operator.tools.builtin import BASH_SHELL_DEFAULT
     from local_operator.tui.resume_click import DESKTOP_LAUNCH_COMMAND_DEFAULT
     from local_operator.tui.session_catalog import (
@@ -177,6 +178,14 @@ def _consumer_defaults() -> dict[str, object]:
         "fork.mode": DEFAULT_FORK_MODE,
         "fork.cmux_placement": DEFAULT_FORK_CMUX_PLACEMENT,
     }
+    # The three ``shell_environment`` rows answer to constants in their reader
+    # (``tools/shell_env.py``), for the same reason the fork keys do and with a
+    # security stake: a registry default that disagreed with ``MODE_DEFAULT``
+    # would have the page offer to reset the policy to a mode the harness does
+    # not implement.
+    consumers["shell_environment.mode"] = shell_env.MODE_DEFAULT
+    consumers["shell_environment.inherit"] = []
+    consumers["shell_environment.exclude"] = []
     # The hotkeys have a REAL single-value consumer for the same reason the
     # fork keys do, and a stricter one: `KeyAction.default` is what
     # `OperatorApp.BINDINGS` binds and what `resolved_keymap` falls back to
@@ -200,7 +209,54 @@ def _consumer_defaults() -> dict[str, object]:
     for provider, (_name, endpoint, _url) in LOCAL_PRESETS.items():
         consumers[f"providers.{provider}.base_url"] = endpoint
         consumers[f"providers.{provider}.models"] = DEFAULT_MODEL_OVERRIDES
+    consumers.update(_classification_consumer_defaults())
     return consumers
+
+
+def _classification_consumer_defaults() -> dict[str, object]:
+    """``values.classification.*`` defaults, asked of the layer that reads them.
+
+    For every key but one the consumer is the classification package —
+    ``service.py``, ``context.py``, ``recommend.py`` and ``cascade.py`` each own one
+    of the §8 constants — so this imports THEM rather than restating the numbers
+    beside the registry rows. That is the same rule the rest of
+    ``_consumer_defaults`` follows, and it is what catches a registry default that
+    drifted from the layer's own fallback (the painted-lie failure this test exists
+    for).
+
+    ``waitMs`` is the exception, and the reason is structural rather than a
+    choice: it is the WIRING's number (how long a turn waits before it stops
+    waiting and lets the call ride a later message), which the package never
+    reads. Its consumer is ``session_factory.DEFAULT_CLASSIFICATION_WAIT_MS``, so
+    that is what is imported here.
+
+    The wiring restates two of the package's values in ``session_factory``
+    (``DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS``,
+    ``DEFAULT_CLASSIFICATION_TIMEOUT_MS``) for a turn-path copy that must not
+    import the package; those two are pinned HERE to the same constants, so the
+    third and fourth spellings cannot drift either.
+    """
+    from local_operator.classification import (
+        DEFAULT_AUTO,
+        DEFAULT_MAX_CANDIDATES,
+        DEFAULT_MAX_RECOMMENDATIONS,
+        DEFAULT_MAX_STATE_CHARS,
+        DEFAULT_MODEL,
+        DEFAULT_TIMEOUT_MS,
+        DEFAULT_VENDOR,
+    )
+    from local_operator.session_factory import DEFAULT_CLASSIFICATION_WAIT_MS
+
+    return {
+        "classification.auto": DEFAULT_AUTO,
+        "classification.vendor": DEFAULT_VENDOR,
+        "classification.model": DEFAULT_MODEL,
+        "classification.timeoutMs": DEFAULT_TIMEOUT_MS,
+        "classification.waitMs": DEFAULT_CLASSIFICATION_WAIT_MS,
+        "classification.maxStateChars": DEFAULT_MAX_STATE_CHARS,
+        "classification.maxCandidates": DEFAULT_MAX_CANDIDATES,
+        "classification.maxRecommendations": DEFAULT_MAX_RECOMMENDATIONS,
+    }
 
 
 #: Settings with no independent consumer constant to compare against, and WHY
@@ -218,6 +274,7 @@ def _consumer_defaults() -> dict[str, object]:
 _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.shimmer": "tui/settings.py derives its defaults from this registry",
     "display.narration": "tui/settings.py derives its defaults from this registry",
+    "display.rail": "tui/settings.py derives its defaults from this registry",
     "display.comfortable_rows": "tui/settings.py derives its defaults from this registry",
     "display.nerd_icons": "derived; tri-state None means auto-detect, not a value",
     "display.heading_markers": "tui/settings.py derives its defaults from this registry",
@@ -231,7 +288,33 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
+    "classification.notice": (
+        "retired: the row gates a render path that was deleted outright, so it has no "
+        "reader to compare a default against"
+    ),
 }
+
+
+def test_the_harness_copy_of_the_classification_limits_matches_the_package() -> None:
+    """The wiring's two restated numbers are pinned to the package's §8 defaults.
+
+    ``session_factory`` carries ``DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS``
+    and ``DEFAULT_CLASSIFICATION_TIMEOUT_MS`` because the turn path must not
+    import the classification package (the off path is byte-identical down to
+    its import graph, and the unit tests inject a double that never sees the real
+    types). Those two copies are the only place a §8 default is spelled twice, so
+    they are the only place this file can miss a drift: the registry rows above
+    are compared against the package by ``test_every_default_matches_its_consumer``,
+    and this asserts the harness's copies against the same constants.
+    """
+    from local_operator import session_factory
+    from local_operator.classification import (
+        DEFAULT_MAX_RECOMMENDATIONS,
+        DEFAULT_TIMEOUT_MS,
+    )
+
+    assert session_factory.DEFAULT_CLASSIFICATION_MAX_RECOMMENDATIONS == DEFAULT_MAX_RECOMMENDATIONS
+    assert session_factory.DEFAULT_CLASSIFICATION_TIMEOUT_MS == DEFAULT_TIMEOUT_MS
 
 
 def test_the_drift_allow_list_is_not_stale() -> None:
@@ -494,6 +577,44 @@ def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _configured_bash_shell() == "/opt/x/bash"
+
+
+def test_shell_environment_rows_share_the_reader_paths(manager: ConfigManager) -> None:
+    """The three ``shell_environment`` rows write exactly where
+    ``tools/shell_env.py`` reads, and a stored mode round-trips through the real
+    reader.
+
+    Pinned by test rather than import for the reason the row above is: the
+    reader lives in the tool layer (which the CLI must not pay for) while the
+    rows live in the registry. This is the security-relevant half of that split
+    — a registry writing ``shell_environment: {mode: allowlist}`` while the
+    reader looked for something else would leave the strict mode silently
+    unset, which is the failure class this key exists to close.
+    """
+    from local_operator.tools import shell_env
+
+    assert settings_io.BY_KEY["shell_environment.mode"].path == shell_env.MODE_PATH
+    assert settings_io.BY_KEY["shell_environment.inherit"].path == shell_env.INHERIT_PATH
+    assert settings_io.BY_KEY["shell_environment.exclude"].path == shell_env.EXCLUDE_PATH
+    assert settings_io.BY_KEY["shell_environment.mode"].default == shell_env.MODE_DEFAULT
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["shell_environment.mode"], "allowlist")
+    settings_io.write_setting(manager, settings_io.BY_KEY["shell_environment.inherit"], ["LANG"])
+    settings_io.write_setting(
+        manager, settings_io.BY_KEY["shell_environment.exclude"], ["GH_TOKEN"]
+    )
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["shell_environment"] == {
+        "mode": "allowlist",
+        "inherit": ["LANG"],
+        "exclude": ["GH_TOKEN"],
+    }
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        policy = shell_env.load_policy()
+    assert policy.mode == shell_env.MODE_ALLOWLIST
+    assert policy.inherit == ("LANG",)
+    assert policy.exclude == frozenset({"GH_TOKEN"})
 
 
 def test_cleanup_settings_are_nested_under_session_cleanup(manager: ConfigManager) -> None:
@@ -1713,3 +1834,134 @@ def test_the_real_validator_is_what_marks_the_shape(tmp_path, monkeypatch) -> No
     assert value == quoted.split('"')[1], value
     assert " " in value
     assert advice == settings_io.ADVICE_NOT_FOUND, advice
+
+
+class TestTheApprovalsCopyIsTrueOnBothSurfaces:
+    """The one approvals string the TUI paints, and the one the desktop paints.
+
+    ``Section.description`` has exactly ONE consumer in this repository — the
+    desktop settings header (``server/routes/settings.py``) — while the TUI page
+    paints the section TITLE and its scope tag, then the row and the row HELP.
+    The caveat #1282 adds therefore cannot live in the description alone: in the
+    production topology (``lop`` always attaches, so the gate is a runtime
+    process) the row the operator edits would go on promising that a config write
+    reaches every running session, which the runtime refuses on the next poll
+    (design round 1, D1; agent review round 1, m1).
+    """
+
+    def test_the_help_fits_the_detail_ladder_beside_its_default_clause(self) -> None:
+        """74 cells is the detail line at 80x24, and the ladder sheds WHOLE rungs.
+
+        So the budget that decides whether this sentence is on the frame at all is
+        74 minus the ``· default: ask`` suffix — the off-default state is exactly
+        the one the user is in after writing this key. Measured on the head with
+        the real page: the first cut (72 cells) painted nothing off-default at
+        80x24, and the ladder fell through to ``default: ask  tool_approval_mode``.
+        """
+        setting = settings_io.resolve_key("tool_approval_mode")
+        assert setting is not None
+        assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help
+
+    def test_the_help_drops_the_promise_that_made_it_false(self) -> None:
+        """The old help promised ``every running session … from its next call``,
+        which no longer holds in the loosening direction, and it names the route
+        that does loosen one."""
+        setting = settings_io.resolve_key("tool_approval_mode")
+        assert setting is not None
+        assert "every running session" not in setting.help, setting.help
+        assert "/approvals auto" in setting.help, setting.help
+
+    def test_the_section_description_does_not_over_claim_the_command(self) -> None:
+        """It must not say a loosening ALWAYS needs the command.
+
+        In the embedded pane the page's own write IS the gate-holding process's
+        write, so it is authorised and does loosen the session — pinned by
+        ``tests/unit/tui/test_config_change_notice.py::
+        test_the_page_says_nothing_when_its_own_write_is_authorised``. The first
+        wording said "loosening a running one needs /approvals auto in it", which
+        that test falsifies (agent review round 1, m1).
+        """
+        section = next(entry for entry in settings_io.SECTIONS if entry.name == "approvals")
+        assert "tightens every running session" in section.description, section.description
+        assert "that session's own process" in section.description, section.description
+
+
+class TestConfigEditQualifiesALoosening:
+    """``lop config edit tool_approval_mode auto`` must not read as "ungated now".
+
+    Since #1282 a ``config.yml`` write can only TIGHTEN a session that is already
+    running, and this command's process holds no gate at all, so the unqualified
+    "Successfully updated …" line was the only account of a change that reaches
+    no live agent (UX round 1, U4).
+    """
+
+    def test_the_loosening_receipt_names_the_route(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="auto"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated tool_approval_mode to auto" in out, out
+        assert "Running sessions are unchanged" in out, out
+        assert "/approvals auto in each session" in out, out
+
+    def test_a_tightening_receipt_carries_no_such_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A tightening really does reach every running session — the safe
+        direction — so the same warning there would be a false alarm."""
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        ConfigManager(tmp_path).set_config_value("tool_approval_mode", "auto")
+        code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="ask"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated tool_approval_mode to ask" in out, out
+        assert "Running sessions are unchanged" not in out, out
+
+
+def test_the_exclusion_row_round_trips_and_treats_empty_as_none(manager: ConfigManager) -> None:
+    """`web_search.excluded_providers` is the opt-out list, and [] is its DEFAULT.
+
+    The opposite of `web_search.providers`, where an empty list is refused: there
+    an empty priority list would be an empty chain, here `[]` means "nothing
+    excluded" -- the resting state of every existing config, which is why this
+    key needs no migration.
+    """
+    excluded = settings_io.BY_KEY["web_search.excluded_providers"]
+
+    assert settings_io.validate(excluded, ["exa"]) is None
+    assert settings_io.validate(excluded, []) is None
+    assert settings_io.validate(excluded, ["parallel", "duckduckgo"]) is None
+    # An id the catalogue does not own is still a typo, not an opt-out.
+    assert settings_io.validate(excluded, ["bing"]) is not None
+
+    assert settings_io.coerce(excluded, "exa, parallel") == ["exa", "parallel"]
+    assert settings_io.coerce(excluded, "exa,exa") == ["exa"]
+
+    settings_io.write_setting(manager, excluded, ["exa", "parallel"])
+    assert settings_io.read_setting(manager, excluded) == ["exa", "parallel"]
+
+    # An ABSENT key and an empty list are the same thing to the consumer, which is
+    # why this key needs no migration. `empty_unsets` is what lets a user clear the
+    # row (the settings view and the server route both reset the key on an empty
+    # edit) instead of being refused for choosing "none excluded".
+    assert settings_io.read_setting(manager, excluded) == ["exa", "parallel"]
+    settings_io.reset_setting(manager, excluded)
+    assert manager.get_config_value("web_search").get("excluded_providers") is None
+    assert settings_io.read_setting(manager, excluded) == []
+
+
+def test_parallel_is_a_providers_member(manager: ConfigManager) -> None:
+    providers = settings_io.BY_KEY["web_search.providers"]
+
+    assert settings_io.validate(providers, ["parallel"]) is None
+    assert settings_io.coerce(providers, "exa, parallel") == ["exa", "parallel"]

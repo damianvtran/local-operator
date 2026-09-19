@@ -24,11 +24,14 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, Sequence
 
 from local_operator.info.model import format_duration
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
+from local_operator.session.runtime.engagement import (
+    session_has_durable_history as _session_has_durable_history,
+)
 
 #: How much of a stored session store the send-side fallback scans while
 #: hunting for a substring match. Discovery over the WHOLE store would pay one
@@ -48,6 +51,128 @@ STORED_DISCOVERY_LIMIT = 200
 PEER_MESSAGE_MAX_BYTES = 256 * 1024
 
 
+def unengaged_refusal(label: str, *, count: int = 1, cold: bool = False) -> str:
+    """The ONE sentence that refuses a peer message to a never-engaged session.
+
+    A session that has not run a real turn yet (``SessionRecord.started`` is
+    False — the ``/new`` window where the record is published but the owner is
+    still composing their first prompt) is not a recipient: a peer row landing
+    there becomes the OPENING row of a conversation its owner never started,
+    which is the operator-reported symptom this gate exists for.
+
+    Three layers can each stop a delivery — resolution
+    (:func:`resolve_peer_target`), delivery (:func:`deliver_peer_message`) and
+    the receive-side gate (``session.runtime.server._dispatch``, the one that
+    also holds against a sender on an older build) — and they use the SAME
+    sentence, because a sender refused at one layer and retried into another
+    must not have to learn a second rule. Only ``label`` varies, and it is
+    written in the caller's own grammar — ``pid 12345`` where a live record
+    gives us the pid the sender typed, ``session 'abc'`` for an id (see
+    :func:`delivery_label` and the resolver's own ``f"pid {pid}"`` /
+    ``f"session {session!r}"`` forms) — so the target the refusal names is the
+    one that was addressed.
+
+    The reason is stated as the FIX, not as a prohibition: the owner sends a
+    first message and the session becomes eligible at that moment (the first
+    turn publishes the flipped bit the resolver and the receive side both
+    read). ``/stop`` never reads this — the kill switch passes
+    ``require_started=False``, since a composer window is exactly a session a
+    person may need to stop.
+
+    ``count`` pluralises the sentence for a BATCHED refusal: a substring match
+    that reached several unengaged sessions refuses them in one line, and
+    "every … (4 of them)" with a singular tail disagrees with itself
+    (design round 1, D3). ``cold`` swaps the remedy for a target with NO live
+    runtime — a stored session: there, "its owner has to send a first message"
+    presumes a window the sender cannot open, so the cold tail says the
+    conversation has to be opened and used before it becomes a recipient
+    (design round 1, D5). Both default to the single live form, which is what
+    the exact-address sites want.
+    """
+    plural = count != 1
+    sent = (
+        "no user message has been sent in any of them"
+        if plural
+        else "no user message has been sent in it"
+    )
+    if cold:
+        remedy = (
+            "they become recipients once someone opens them and sends a first message"
+            if plural
+            else "it becomes a recipient once someone opens it and sends a first message"
+        )
+    else:
+        remedy = (
+            "their owners have to send a first message"
+            if plural
+            else "its owner has to send a first message"
+        )
+    return (
+        f"{label} {'have' if plural else 'has'} not been engaged yet ({sent}), "
+        f"so {'they' if plural else 'it'} cannot receive peer messages — {remedy}"
+    )
+
+
+def skipped_clause(skipped: "Sequence[Any]") -> str:
+    """The receipt's tail when a name/substring send left matches behind.
+
+    A substring match that found a recipient may still have HELD BACK other
+    matches for being unengaged, and the sender typed one command believing it
+    reached its needle — so the delivery line says so instead of reporting a
+    bare success (design round 1, D1). Returns ``""`` for nothing skipped, so a
+    caller appends it unconditionally.
+
+    The wording lives HERE, next to :func:`unengaged_refusal`, because both the
+    CLI's print and the ``send`` tool's result text append it: a sender reading
+    one surface and then the other must not meet two spellings of the same
+    fact, the argument that already keeps the refusal one sentence.
+    """
+    count = len(skipped)
+    if not count:
+        return ""
+    return f"; {count} match{'es' if count != 1 else ''} skipped (not engaged yet)"
+
+
+def session_has_durable_history(session_id: str, *, root: "Path | None" = None) -> bool:
+    """Whether a session's OWN transcript already holds a real turn.
+
+    The cold half of the unengaged gate: a target with no live record still has
+    a durable history to ask about, and that history is what distinguishes a
+    session someone has used from a composer window that was never typed in.
+    The discriminator (only a plain ``Message`` row counts, so a quiet-dialled
+    peer note is not history) is
+    :func:`local_operator.session.runtime.engagement.durable_conversation_path`,
+    read through that stdlib-only module — NOT through ``session.transcript``,
+    which would drag pydantic in and break this module's pinned import contract.
+
+    ``root`` defaults to :func:`config_dir` and exists for the tests, which
+    drive the store out of a tmp dir. NEVER raises: an absent, unreadable or
+    malformed directory answers False — the conservative unengaged direction,
+    which the owner's first real turn immediately corrects.
+    """
+    return _session_has_durable_history(session_id, root=config_dir() if root is None else root)
+
+
+def unengaged_label(*, session_id: str, pid: "int | None" = None) -> str:
+    """How a refusal NAMES its target: the address the caller actually used.
+
+    ``pid 12345`` when the address was a pid — a live record resolved from one,
+    or a dial that arrived at a receiver's control port, which is addressed by
+    pid — and ``session 'abc'`` when a session id was typed.
+
+    This is the grammar for the sites that name an ADDRESS: the resolver's
+    exact ``pid`` branch, its exact ``session`` branch, ``deliver_peer_message``
+    (both its live record and its cold raise) and the receive-side gate. The
+    two NEEDLE-shaped refusals — the live substring branch and the stored
+    withholding — compose their own label on purpose: neither answers an
+    address, they answer a name that reached one row (a pid) or one id, and
+    saying ``pid N`` there would hide the needle the sender typed.
+    """
+    if pid is not None:
+        return f"pid {pid}"
+    return f"session {session_id!r}"
+
+
 def resolve_peer_target(
     *,
     target: str | None = None,
@@ -56,6 +181,8 @@ def resolve_peer_target(
     pid_hint: str = "an exact pid",
     session_hint: str = "a session id",
     include_wedged: bool = False,
+    require_started: bool = True,
+    skipped: "list[Any] | None" = None,
 ) -> "tuple[Any | None, list[Any], str]":
     """Resolve a peer-send target to one live :class:`SessionRecord`.
 
@@ -77,7 +204,32 @@ def resolve_peer_target(
     for a runtime that will not answer. A send never wants that; a message to
     such a runtime is a message that may sit unread.
 
-    Note what that refusal is and is not. It is a rule about which target to
+    A record that has not run a real turn yet (``started`` False — the ``/new``
+    composer window) is not a recipient, and ``require_started`` (default True)
+    is where every send path enforces that: an EXACT ``pid``/``session``/all-digit
+    address is refused with :func:`unengaged_refusal` naming it, and a SUBSTRING
+    match skips it. Both halves matter and they fail differently: a broadcast
+    that reached an unengaged session would drive an interrupt into a
+    conversation nobody started, while an exact send that resolved to one would
+    let a caller who named it explicitly land the first row of that history.
+    The refusal for a substring match deliberately does NOT use the
+    ``no live session matches`` phrasing: that form is what opens the stored
+    fallback (``live_scan_found_nothing``), and a refusal about a session the
+    live scan DID reach must never fall through to a stored namesake — the same
+    wrong-recipient rule as the target+selector conflict below.
+
+    ``require_started=False`` resolves an unengaged record exactly as a started
+    one, and exists for the KILL SWITCH alone (``/stop``, ``lop stop`` in
+    ``tui/app.py`` and ``cli.py``): a composer window is a session a person may
+    need to stop, and a stop names its target rather than messaging it.
+    Delivery is not reachable through it — ``deliver_peer_message`` refuses an
+    unengaged target whatever the resolver allowed.
+
+    A session that stops being unengaged needs no re-scan: the first real turn
+    flips the record's ``started`` bit (``RuntimeServer.set_record_started``,
+    published by the owner process), and this reads the record.
+
+    Note what the wedged refusal is and is not. It is a rule about which target to
     DIAL, not a claim that the owner is broken: the beat is authored by the
     runtime's own event loop, so a busy session can read ``wedged`` too
     (``registry.classify``). The cost of being wrong that way is bounded and
@@ -98,6 +250,17 @@ def resolve_peer_target(
     ``error`` is meaningful; ``candidates`` is populated on an ambiguous substring
     so the caller can list them for disambiguation. The shape is identical for the
     CLI and the tool — only how each SURFACES the outcome differs.
+
+    ``skipped`` is an OUT-PARAMETER, not a fourth tuple element, and it is how a
+    substring match's HELD-BACK records reach the sender's receipt: a name that
+    reached one engaged recipient may have passed over others, and the caller
+    that delivered appends :func:`skipped_clause` so the success line says how
+    many were left behind (design round 1, D1). Passing a list is opt-in on
+    purpose — the three kill-switch callers pass ``require_started=False`` and
+    so never hold anything back, an exact address names one record and can hold
+    nothing back either, and a caller that ignores the list keeps exactly
+    today's behaviour. This is a courtesy to a sender, never a gate: every
+    refusal below fires whether or not anyone is listening.
 
     The conflict wording uses the caller's own ``pid_hint``/``session_hint``
     grammar for the same reason the "no target given" line does. The CLI never
@@ -131,6 +294,12 @@ def resolve_peer_target(
             if rec.pid == pid:
                 if state not in eligible:
                     return None, [], _not_dialable(f"target pid {pid}", rec, state)
+                if require_started and not getattr(rec, "started", True):
+                    return (
+                        None,
+                        [],
+                        unengaged_refusal(unengaged_label(pid=pid, session_id=rec.session_id)),
+                    )
                 return rec, [], ""
         return None, [], f"no session found with pid {pid}"
 
@@ -139,6 +308,11 @@ def resolve_peer_target(
             if rec.session_id == session:
                 if state not in eligible:
                     return None, [], _not_dialable(f"target session {session}", rec, state)
+                if require_started and not getattr(rec, "started", True):
+                    # The label is the SESSION ID here, because that is the
+                    # address this branch answers: an exact `--session` send
+                    # named an id, not a pid.
+                    return None, [], unengaged_refusal(unengaged_label(session_id=session))
                 return rec, [], ""
         return None, [], f"no session found with session id {session!r}"
 
@@ -163,33 +337,52 @@ def resolve_peer_target(
                 pid_hint=pid_hint,
                 session_hint=session_hint,
                 include_wedged=include_wedged,
+                require_started=require_started,
             )
 
     needle = needle_source.lower()
     matches: list[Any] = []
+    # Live matches held back ONLY because the session has not been engaged yet.
+    # Kept rather than dropped so the refusal below can name what it reached and
+    # keep the stored fallback closed (see the docstring), and so a DELIVERY can
+    # report the held-back count on its receipt through ``skipped``.
+    unengaged: list[Any] = []
     for rec, _state in live:
-        # A session that has never run a turn (``/new``, owner still composing
-        # the first prompt) is excluded from a BROADCAST/substring match: an
-        # interrupt there would drive a turn into a session whose owner has not
-        # started it. An EXACT ``--pid``/``--session`` send still resolves to it
-        # (the sender deliberately named that session); delivery then degrades
-        # to a quiet mailbox dial that drives no turn — see
-        # ``deliver_peer_message``. The default True keeps a record that simply
-        # lacks the attribute (a test double, a hand-built record) eligible; a
-        # pre-field binary's record round-trips through ``from_json``, which
-        # reads the ABSENT key as True (old peer behaviour preserved) — see the
-        # mixed-version note there.
-        if not getattr(rec, "started", True):
-            continue
+        # A session that has never run a turn is excluded from a
+        # BROADCAST/substring match: an interrupt there would drive a turn into
+        # a session whose owner has not started it, and a quiet note there would
+        # become the opening row of that history. The default True keeps a
+        # record that simply lacks the attribute (a test double, a hand-built
+        # record) eligible; a pre-field binary's record round-trips through
+        # ``from_json``, which reads the ABSENT key as True (old peer behaviour
+        # preserved) — see the mixed-version note there. That is exactly why the
+        # receive-side gate exists: an older SENDER resolves such a record and
+        # dials it, and only the receiver can refuse.
         haystacks = [
             rec.conversation_name or "",
             rec.session_id or "",
             os.path.basename(rec.cwd or ""),
         ]
-        if any(needle in field.lower() for field in haystacks):
-            matches.append(rec)
+        if not any(needle in field.lower() for field in haystacks):
+            continue
+        if require_started and not getattr(rec, "started", True):
+            unengaged.append(rec)
+            continue
+        matches.append(rec)
 
     if not matches:
+        if unengaged:
+            # A refusal ABOUT a live session the scan did reach. Deliberately
+            # NOT the no-match form: ``live_scan_found_nothing`` reads that
+            # phrasing as "try the stored store", and a stored namesake would
+            # then be spooled to — a recipient this call never named
+            # (BLOCKER-1). A batch states its own count in the label so the
+            # sentence's tail can agree with it (design round 1, D3).
+            if len(unengaged) == 1:
+                label = f"the only live match for {needle_source!r} (pid {unengaged[0].pid})"
+            else:
+                label = f"{len(unengaged)} live matches for {needle_source!r}"
+            return None, [], unengaged_refusal(label, count=len(unengaged))
         # Distinguish "matched but not live" from "no match at all" so the caller
         # knows whether to wait or to fix the name.
         wedged = [
@@ -215,6 +408,13 @@ def resolve_peer_target(
         return None, [], f"no live session matches {needle_source!r}"
     if len(matches) > 1:
         return None, matches, ""
+    if skipped is not None:
+        # The recipient resolved, so this call is a DELIVERY and the caller is
+        # about to print a receipt: hand it the matches the scan held back so
+        # that receipt can say a peer was left out (design round 1, D1). Only
+        # here — an ambiguous or refused call prints no receipt, so there is
+        # nothing for the clause to qualify.
+        skipped.extend(unengaged)
     return matches[0], [], ""
 
 
@@ -310,6 +510,43 @@ def live_scan_found_nothing(error: str) -> bool:
     return "no live session matches" in error
 
 
+def session_id_unowned(error: str) -> bool:
+    """True when the live resolver's answer about an exact session id means
+    NOTHING OWNS THAT SESSION — the state the stored-exact send exists for.
+
+    Two forms qualify, because they are the two states in which no process is
+    behind the conversation at all:
+
+    * the id is UNKNOWN to the scan (``no session found with session id …``):
+      nothing published a record, so the store is a NEW question;
+    * the record the scan found is STALE (``… is stale (its pid no longer
+      exists)``): the process is gone and the sweep is about to reap the
+      record, so the conversation is exactly as unowned as the first form, and
+      the note must still be spooled for the next runtime that opens it
+      (review round 4, MINOR-1 — refusing there turned a one-line cold send
+      into "refuse now, retry after the reap").
+
+    Every OTHER form keeps standing as a refusal, and the difference is what
+    each one says about the session:
+
+    * WEDGED (``has not reported for …``) — a live pid that did not answer, so
+      re-asking the store would spool a note behind the process that still owns
+      the conversation (MAJOR-1);
+    * the UNENGAGED refusal — a live session that is deliberately not a
+      recipient yet, so a cold delivery would route around the gate
+      (BLOCKER-1);
+    * a CONFLICTING ``target``+selector pair — the caller never named one
+      session unambiguously, so there is nothing to look up: the id in
+      ``session`` is half of an address that was refused, and spooling to it
+      would deliver to a recipient the call did not name (BLOCKER-1's class,
+      review round 4 NIT-4).
+    """
+    return (
+        "no session found with session id" in error
+        or "is stale (its pid no longer exists)" in error
+    )
+
+
 def resolve_stored_target(
     needle: str,
     *,
@@ -339,15 +576,27 @@ def resolve_stored_target(
     differs by name is a rename-timing edge, not a case worth a second
     registry scan on every stored send to catch.
 
+    A row whose session has NO durable history is skipped rather than returned:
+    such a session was never engaged, so it is not a recipient either — the
+    stored half of the same rule the live resolver applies with
+    ``require_started``. The read is one :func:`session_has_durable_history`
+    pass per MATCHING row only, and the no-match answer is unchanged.
+
     Returns ``(session_id, candidates, error)`` shaped like
     :func:`resolve_peer_target`'s triple for symmetry, with one deliberate
-    difference: ``error`` is ALWAYS empty. A plain no-match is not this
-    function's fact to report — the caller just watched the live scan miss,
-    so the refusal it owes the user names BOTH searches ("searched live and
-    stored sessions"), a sentence only the caller can say. The first or the
-    second element is meaningful, never both; the resolved id feeds the
-    EXISTING :func:`resolve_cold_session` / :func:`deliver_peer_message`
-    path — this function decides WHO, never HOW a message is delivered.
+    difference: a plain no-match still leaves ``error`` empty. A plain no-match
+    is not this function's fact to report — the caller just watched the live
+    scan miss, so the refusal it owes the user names BOTH searches ("searched
+    live and stored sessions"), a sentence only the caller can say. What is this
+    function's fact to report is the OTHER empty answer: rows that DID match and
+    were withheld for being unengaged (review round 1, F-4). The caller's
+    "no session matches '<needle>'" sentence would be false there — a session
+    does answer to that name, it is merely not a recipient yet — so the refusal
+    names the withheld row and says why, and the callers pass it through instead
+    of composing their own miss. The first or the second element is meaningful,
+    never both; the resolved id feeds the EXISTING :func:`resolve_cold_session`
+    / :func:`deliver_peer_message` path — this function decides WHO, never HOW a
+    message is delivered.
     """
     from local_operator.resume import recent_session_rows
 
@@ -361,14 +610,41 @@ def resolve_stored_target(
         return None, [], ""
     excluded = live_ids or set()
     matches: list[StoredCandidate] = []
+    # Rows that answered to the needle and were held back ONLY for being
+    # unengaged. Kept so the refusal below can name them: this is not a
+    # no-match, and reporting it as one would be a false statement about a
+    # session the user can see on the picker.
+    withheld: list[StoredCandidate] = []
     for row in rows:
         if row.id in excluded:
             continue
         candidate = StoredCandidate(session_id=row.id, conversation_name=row.name)
         haystacks = [candidate.conversation_name, candidate.session_id]
         if any(needle_folded in field.lower() for field in haystacks):
+            # Hold back the never-engaged row instead of resolving onto it: a
+            # broadcast must not be able to reach a conversation nobody started
+            # even through the stored fallback. The read happens ONLY here, on
+            # a row that already matched, so the scan stays one bounded name
+            # read per row for everything that does not match.
+            if not session_has_durable_history(row.id, root=directory):
+                withheld.append(candidate)
+                continue
             matches.append(candidate)
     if not matches:
+        if withheld:
+            # Named in the same grammar the live substring branch uses, with the
+            # session id the user would retype rather than a pid a stored
+            # session cannot satisfy.
+            if len(withheld) == 1:
+                label = (
+                    f"the only stored match for {needle!r} " f"(session {withheld[0].session_id!r})"
+                )
+            else:
+                label = f"{len(withheld)} stored matches for {needle!r}"
+            # ``cold=True``: a stored row has no runtime anyone can type into,
+            # so the remedy is the conversation being opened and used, not the
+            # owner sending into a window that is already there (D5).
+            return None, [], unengaged_refusal(label, count=len(withheld), cold=True)
         return None, [], ""
     if len(matches) > 1:
         return None, matches, ""
@@ -399,14 +675,14 @@ async def _spool_quiet_note(
 ) -> str:
     """Spool one message for a session with NO live runtime. Returns receipt.
 
-    The single spool writer for ``deliver_peer_message``'s cold branch (and
-    historically its unstarted branch): one ``O_APPEND`` row under the
-    session's directory, consumed by the runtime child's boot drain
-    (``process._drain_inbox_into``) the next time that session actually opens
-    a runtime. A spool is ONLY for a session nobody has open — the drain runs
-    once at child boot, so a session that is already live would never read
-    it, which is why a live-but-unstarted target is dialled quietly instead
-    (see ``deliver_peer_message``).
+    The single spool writer for ``deliver_peer_message``'s cold branch: one
+    ``O_APPEND`` row under the session's directory, consumed by the runtime
+    child's boot drain (``process._drain_inbox_into``) the next time that
+    session opens a runtime — or, for a session that has not been engaged yet,
+    by the first real turn (``Session._drain_spooled_peer_inbox``). Only a
+    session with durable history ever reaches this writer: a cold target with
+    NO history is refused by the caller, so nothing here can become the opening
+    row of a conversation nobody started.
     """
     from local_operator.session.runtime.inbox import InboxLine, append_inbox
 
@@ -438,17 +714,19 @@ async def deliver_peer_message(
 ) -> str:
     """Hand one message to a peer session, running or not. Returns the receipt.
 
-    Four cases, and the split between them is the whole point:
+    Three cases, and the split between them is the whole point:
 
+    - **A session that has not run a real turn yet** (``started`` False — the
+      ``/new`` composer window) — REFUSED, with
+      :func:`unengaged_refusal`, whether it is live or cold. Nothing is dialled
+      and nothing is spooled: a peer row written there would be the OPENING row
+      of a conversation its owner never started, which is the reported symptom
+      this gate exists for. The refusal is raised at THIS layer as well as in
+      resolution because a caller can bypass resolution (a hand-built record, a
+      future entry point), and because the cold half cannot be decided by
+      resolution at all — a target with no live record has no ``started`` bit to
+      read, only its durable history (see :func:`session_has_durable_history`).
     - **A live, started record** — dial it, exactly as before.
-    - **A live, UNSTARTED record** (``/new``, owner still composing) — dial it
-      in the quiet mailbox shape (``mailbox`` + no wake) so the receive side
-      paints the peer card and persists the row WITHOUT driving a turn. A
-      spool would be wrong here: a live record means the session is already
-      open, and the only inbox consumer is the runtime child's boot drain, so
-      a spooled note would sit unread for that session's whole life while the
-      receipt claimed otherwise. Degrading wake/steer to the quiet dial is
-      the deliverable form of "never drive a turn into an unstarted session".
     - **No runtime, quiet note** (``wake=False`` and mailbox mode) — SPOOL it.
       Starting a runtime here would contradict what the sender asked for:
       ``wake=False`` means "read this on your next turn", not "start one now",
@@ -465,24 +743,37 @@ async def deliver_peer_message(
 
     if record is not None:
         if not getattr(record, "started", True):
-            # Belt-and-braces with the resolver's broadcast exclusion: an
-            # exact-address send (or any caller that bypassed resolution) must
-            # NEVER drive a turn into a session whose owner is still composing
-            # their first prompt — so whatever mode/wake the sender asked for,
-            # the dial uses the record-only shape (``mailbox`` + no wake). The
-            # receive side's record-only branch persists the row and paints the
-            # peer card but spawns no turn, which makes the message visible to
-            # the already-open session NOW; a spool cannot (its only consumer
-            # is the runtime child's boot drain, and this session is past
-            # that). The default True is a defence against a NON-standard
-            # record that simply lacks the attribute (a test double, a
-            # hand-built record); a record a PRE-FIELD binary wrote round-trips
-            # through ``from_json``, which reads the absent key as ``True`` —
-            # old peer behaviour preserved — so an old working session is
-            # dialled normally, never degraded.
-            await _dial_or_explain(record, text=text, mode="mailbox", wake=False, sender=sender)
-            return "delivered to the mailbox (session not started yet; no turn driven)"
+            # The default True is a defence against a NON-standard record that
+            # simply lacks the attribute (a test double, a hand-built record); a
+            # record a PRE-FIELD binary wrote round-trips through ``from_json``,
+            # which reads the absent key as ``True`` — so an old working session
+            # is dialled normally. That mixed-version direction is why the
+            # RECEIVE side also gates: an older SENDER resolves such a record
+            # and dials it, and only the receiver can refuse (see
+            # ``session.runtime.server``'s ``peer_message`` op).
+            raise RuntimeError(
+                unengaged_refusal(unengaged_label(pid=record.pid, session_id=session_id))
+            )
         return await _dial_or_explain(record, text=text, mode=mode, wake=wake, sender=sender)
+
+    # Cold target: the ONLY signal of engagement is the session's own durable
+    # history — a live record would have carried ``started``. Without it this is
+    # a conversation nobody has started, so neither branch below is a delivery
+    # to make: a spool would land the peer row at the head of that history once
+    # the owner starts typing, and ``engage_runtime`` is worse still — a
+    # ``wake`` would OPEN A TURN in a session whose owner is not there. Both are
+    # refused before any file is touched.
+    if not session_has_durable_history(session_id):
+        # ``cold=True``: the caller reached this raise with no DIALABLE record
+        # for the id, and after the Q8 gate that means one thing from the send
+        # paths — either nothing published a record at all, or the live scan
+        # did not know the id (both accepted by ``session_id_unowned``). Every
+        # refusal the live resolver CAN make — wedged, unengaged, conflicting
+        # selector pair — returns before this call, so this raise is not how
+        # those surface (review round 4, NIT-1). There is no window to send
+        # into, so the remedy is stated for a session that has to be opened and
+        # used (D5).
+        raise RuntimeError(unengaged_refusal(unengaged_label(session_id=session_id), cold=True))
 
     if not wake and mode == "mailbox":
         return await _spool_quiet_note(session_id, text=text, mode=mode, sender=sender)

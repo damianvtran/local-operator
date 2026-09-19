@@ -118,6 +118,20 @@ class ConfigChange:
     (``"local"``: the page or CLI here already showed its own result, so the
     TUI stays quiet) or another one did (``"disk"``: name the keys so the user
     knows why behaviour just changed under them).
+
+    It is not only a notice-suppression hint: it is AUTHORIZATION-RELEVANT for
+    the approval gate. ``"local"`` is the mark of an operator write through
+    ``settings_io`` in this very process, and that is the one delivery the gate
+    may LOOSEN on (:func:`local_operator.harness.approval
+    .loosening_is_authorised`); every other value is unattributable from here
+    and may only tighten. So WIDENING what counts as ``"local"`` — a new
+    caller of ``notify_local``, a hand-delivered ``ConfigChange``, a raw write
+    that grew a facade — widens who may lower the gate, and a change to this
+    field is a change to that boundary rather than a cosmetic one. The
+    converse is equally load-bearing: a genuine operator write that arrives as
+    ``"disk"`` (see the kqueue race on :meth:`ConfigWatcher.notify_local`) is
+    then REFUSED a loosening, which is the fail-closed direction and is
+    accepted for that reason.
     """
 
     values: Mapping[str, Any]
@@ -325,12 +339,20 @@ class ConfigWatcher:
         with the kqueue accelerator the directory event can wake the loop and
         deliver the change as ``"disk"`` before that hop lands — the change
         still arrives exactly once and on the loop thread, only its ``source``
-        is then the conservative one (the TUI prints a line it could have
-        skipped). Accepted: no production writer runs off-loop today, and the
-        alternative is a pre-write handshake in ``settings_io`` for a cosmetic
-        difference. With no loop started (the CLI's ``config edit``) it just
-        re-reads so ``values`` stays current for anyone who asks, and delivers
-        to nobody — there is nobody.
+        is then the conservative one. That costs more than a spare TUI line
+        since the approval gate became source-sensitive (issue #1282): an
+        off-loop facade write that the kqueue event wins is delivered as
+        ``"disk"``, and a LOOSENING delivered that way is REFUSED by the gate
+        that would have honoured it as ``"local"``. Fail-closed, and accepted:
+        no production writer runs off-loop today, the gate keeps its previous
+        (the more restrictive) mode, and the user's route is the in-session
+        ``/approvals auto`` the refusal notice names. The alternative is a
+        pre-write handshake in ``settings_io`` so the source cannot be lost —
+        which is a real option if a loosening ever needs to be driven from off
+        the loop, and is deliberately not built for a path nothing takes. With
+        no loop started (the CLI's ``config edit``) it just re-reads so
+        ``values`` stays current for anyone who asks, and delivers to nobody —
+        there is nobody.
 
         ``values`` is accepted for API symmetry with the design and ignored for
         the reason above; the file is the source of truth.

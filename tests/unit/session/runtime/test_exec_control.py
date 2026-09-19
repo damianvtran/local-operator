@@ -175,6 +175,22 @@ async def _request(reader, writer, frame: dict[str, Any]) -> dict[str, Any]:  # 
             return got
 
 
+async def _refused(record, frame: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN001
+    """Dial, send one op, and return the reply frame.
+
+    One helper rather than four inline dials. Every op here is now a
+    CROSS-THREAD call (the exec runtime serves from its own thread since
+    ``RuntimeServer.start()``), so what each of these tests pins is both the
+    op's effect and the fact that the handle's ``@_on_session_loop`` seam is
+    what carried it to the session's loop instead of running it here.
+    """
+    reader, writer = await _dial(record)
+    try:
+        return await _request(reader, writer, frame)
+    finally:
+        writer.close()
+
+
 @pytest.mark.asyncio
 async def test_start_publishes_an_exec_record(isolated_config: Path) -> None:
     session = FakeSession()
@@ -206,8 +222,8 @@ async def test_the_printed_record_path_is_the_file_this_run_published(
     later — and the environment can move in either of two windows between the
     two:
 
-    * the pin is taken inside `start_in_process`, so a move BEFORE it lands the
-      record in a different directory than the one this function resolved; and
+    * the pin is taken inside `start`, so a move BEFORE it lands the record in a
+      different directory than the one this function resolved; and
     * `_serve` reaches its first yield (`await asyncio.start_server`) BEFORE it
       builds the publisher, so a move during that await is resolved by the
       publisher itself.
@@ -217,24 +233,30 @@ async def test_the_printed_record_path_is_the_file_this_run_published(
     both earlier spellings — `registry.record_path(record.pid, config_dir())`
     (a second read) and the run's own pre-resolved `config_directory` — which
     is the point: only asking the runtime cannot disagree with it.
+
+    ``start`` (sync since the serving plane moved to its own thread) is the
+    window-1 patch, and it is a BETTER forcing point than the in-process call
+    it replaces: the pin is taken on the caller's thread inside ``start`` while
+    ``_serve`` — window 2 — now runs on the runtime's, so the two windows are
+    on different threads as well as different moments.
     """
     moved_to = tmp_path / "moved-to"
     third = tmp_path / "third"
-    original_start_in_process = RuntimeServer.start_in_process
+    original_start = RuntimeServer.start
     original_serve = RuntimeServer._serve
 
-    async def start_after_the_config_dir_moved(server: RuntimeServer) -> None:
+    def start_after_the_config_dir_moved(server: RuntimeServer) -> None:
         # Window 1: after `start_exec_control` resolved its root, before the
         # pin the runtime actually publishes under.
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(moved_to))
-        await original_start_in_process(server)
+        original_start(server)
 
     async def serve_after_the_config_dir_moved(server: RuntimeServer) -> None:
         # Window 2: `_serve`'s first yield, after the pin was taken.
         monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(third))
         await original_serve(server)
 
-    monkeypatch.setattr(RuntimeServer, "start_in_process", start_after_the_config_dir_moved)
+    monkeypatch.setattr(RuntimeServer, "start", start_after_the_config_dir_moved)
     monkeypatch.setattr(RuntimeServer, "_serve", serve_after_the_config_dir_moved)
     control = await start_exec_control(FakeSession(), cwd="/tmp")
     try:
@@ -272,6 +294,10 @@ async def test_cancel_defaults_to_the_tool_boundary(isolated_config: Path) -> No
     so the assertion is on WHICH session method ran: ``request_graceful_cancel``
     sets a sticky flag the loop honours at the post-tool boundary, while
     ``abort`` fires the AbortSignal and cancels the tool task outright.
+
+    Over the SOCKET, deliberately: the exec runtime serves from its own thread
+    now, and the handle's ``@_on_session_loop`` seam is what carries this op
+    across to the session's loop — which is the half that used to be missing.
     """
     session = FakeSession()
     control = await start_exec_control(session, cwd="/tmp")
@@ -402,9 +428,43 @@ async def test_maybe_start_disposes_and_raises_when_it_cannot_start(
         raise OSError("no port")
 
     monkeypatch.setattr(
-        "local_operator.session.runtime.server.RuntimeServer.start_in_process",
+        "local_operator.session.runtime.server.RuntimeServer.start",
         boom,
     )
     with pytest.raises(OSError):
         await maybe_start_exec_control(session, enabled=True, cwd="/tmp")
     assert session.disposed is True
+
+
+@pytest.mark.asyncio
+async def test_the_unpublished_surface_is_closed_before_it_is_reported(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fatal path closes what it started, in that order (review round 2, MINOR-2).
+
+    ``start()`` has already put a thread and a loop behind the caller who is about
+    to fail this run, so raising alone abandons a runtime that may still be
+    serving — the D-5 fix. This is the ONLY test that reaches the
+    ``wait_until_published() == False`` branch: the sibling above fails inside
+    ``start()`` itself and never gets here. It pins both halves — the teardown is
+    awaited, and it runs before the raise.
+    """
+    session = FakeSession()
+    order: list[str] = []
+    real_aclose_remote = RuntimeServer.aclose_remote
+
+    async def never_published(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    async def teardown(self: Any) -> None:
+        # Records AND performs the real teardown, so nothing this test started is
+        # left behind — a stub that only recorded would leak the thread and the
+        # bound socket the fatal path exists to close.
+        order.append("closed")
+        await real_aclose_remote(self)
+
+    monkeypatch.setattr(RuntimeServer, "wait_until_published", never_published)
+    monkeypatch.setattr(RuntimeServer, "aclose_remote", teardown)
+    with pytest.raises(RuntimeError, match="never published its record"):
+        await start_exec_control(session, cwd="/tmp")
+    assert order == ["closed"], "the runtime this run started was left behind"

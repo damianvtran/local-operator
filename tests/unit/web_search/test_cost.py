@@ -203,3 +203,45 @@ def test_the_search_route_evaluates_the_shared_schedule_not_its_own_copy() -> No
             assert deepseek_is_peak_hour(moment) is tariff.is_peak(
                 tariff.DEEPSEEK_TOU, moment
             ), moment
+
+
+# -- the keyless MCP tiers: free where documented, never guessed -------------
+
+
+def test_the_keyless_mcp_tiers_are_free_and_the_keyed_paths_are_not() -> None:
+    """A keyless flag is a FREE TIER, not a missing price -- and not the reverse."""
+    for provider in ("exa", "parallel"):
+        keyless = estimate_search_cost(provider, SearchUsage(keyless=True))
+        assert keyless.usd == 0.0, provider
+        assert keyless.basis == "free (keyless tier)"
+
+    # Exa's REST API keeps its published rate; Parallel's keyed Search API has no
+    # rate we can verify, so it is UNPRICED -- which must never render as $0.00.
+    assert estimate_search_cost("exa", SearchUsage(keyless=False)).usd == pytest.approx(0.005)
+    unpriced = estimate_search_cost("parallel", SearchUsage(keyless=False))
+    assert unpriced.usd is None
+    assert unpriced.basis == "no published rate"
+
+    # No usage block and no tier flag. Exa has a published per-search rate, so
+    # the estimator prices ONE search at list (its long-standing rule for a
+    # rate-bearing provider); Parallel has no verifiable rate, so it stays
+    # unpriced. Neither case may be reported as free.
+    assert estimate_search_cost("exa", None).usd == pytest.approx(0.005)
+    assert estimate_search_cost("parallel", None).usd is None
+    assert "free" not in estimate_search_cost("parallel", None).basis
+
+
+def test_a_session_can_hold_one_free_and_one_paid_exa_leg_honestly() -> None:
+    """One provider id, two cost bases: the ledger must not blend them."""
+    ledger = SearchSpendLedger()
+    ledger.record("s1", "exa", estimate_search_cost("exa", SearchUsage(keyless=True)))
+    ledger.record("s1", "exa", estimate_search_cost("exa", SearchUsage(keyless=False)))
+
+    totals = ledger.session("s1")
+    row = totals.by_provider["exa"]
+
+    assert row.free_operations == 1 and row.paid_operations == 1
+    assert row.free_usd == 0.0
+    assert row.paid_usd == pytest.approx(0.005)
+    assert row.usd == pytest.approx(0.005)
+    assert len(row.bases) == 2

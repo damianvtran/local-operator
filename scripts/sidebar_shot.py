@@ -29,6 +29,10 @@ record would have published for a session holding background work.
 
 The frame is deterministic: the spinner is pinned to a known frame and the
 catalog is fixed, so before/after captures differ only where the change does.
+
+The seeded prose is a fixture, not a subject: it is mounted without
+``finalize_text()``, so it is a STREAMING block and deliberately paints no rail
+(``AssistantBlock._rail_cols``) — a missing bar beside it is that, not a defect.
 """
 
 from __future__ import annotations

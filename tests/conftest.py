@@ -62,6 +62,18 @@ _AMBIENT_VARS = (
     # trail. Inherited from the operator's own runtime it would write their
     # real session id into a sandboxed store's audit rows.
     "LOCAL_OPERATOR_SESSION_ID",
+    # The marker the harness's `bash` tool sets on every command it runs. It
+    # now decides whether a `lop` invocation may open a session at all
+    # (`local_operator/agent_shell.py`), so an inherited value would refuse the
+    # sessions a spawned CLI is meant to build — the whole suite would be
+    # testing the refusal on every real-CLI path instead of the feature under
+    # it. The worker-count hook in the ROOT `conftest.py` reads it at COLLECTION
+    # time and is unaffected by the fixture.
+    "LOCAL_OPERATOR_AGENT_SHELL",
+    # The escape hatch for that rule. Inherited, every guard test would assert
+    # the allow path while looking like it tested the refusal, and a QA test
+    # that meant to prove the refusal would prove nothing.
+    "LOCAL_OPERATOR_ALLOW_NESTED_SESSION",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",

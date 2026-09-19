@@ -123,10 +123,11 @@ def _median(values: list[float]) -> float:
 def _display_path(path: str | Path) -> str:
     """A path as it goes into the artifact: ``~/...`` under the home directory.
 
-    These artifacts are committed, and the repo's convention for anything that
-    travels is a home-relative path (``AGENTS.md``). What the artifact has to
-    record is WHICH CHECKOUT was measured — the caller's own layout is not part
-    of the measurement.
+    These artifacts travel — published on the PR that cites them, never committed
+    (``AGENTS.md``, "Evidence goes on the PR, never into the repository") — and the
+    repo's convention for anything that travels is a home-relative path. What the
+    artifact has to record is WHICH CHECKOUT was measured — the caller's own
+    layout is not part of the measurement.
     """
     resolved = Path(path).resolve()
     try:
@@ -471,13 +472,13 @@ def _ps_rss_by_pid(pids: list[int]) -> dict[int, int]:
 
 
 def _process_label(comm: str) -> str:
-    """A pid's process, in a form that is safe to commit.
+    """A pid's process, in a form that is safe to publish.
 
     ``ps`` returns either a path or, for a branded runtime, mac's ``Local
     Operator [session] id=<hex>``. The id half names one of the operator's own
-    sessions and these artifacts are committed, so it is dropped; the path half
-    is reduced to its basename for the same reason (the operator's home and
-    worktree layout is not part of the measurement). What is kept is what the
+    sessions and these artifacts are published on a PR, so it is dropped; the
+    path half is reduced to its basename for the same reason (the operator's home
+    and worktree layout is not part of the measurement). What is kept is what the
     row is for: whether the pid is a fixture interpreter or a real session
     process.
     """
@@ -1061,9 +1062,16 @@ def main() -> int:
 
     _print_report(report)
     if args.json:
-        Path(args.json).write_text(
-            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        # The store is gitignored, so a fresh clone or worktree has no ``bench/``
+        # at all — git materialises an ignored directory for nobody. Without this
+        # mkdir the write below, the LAST action a long run takes, dies with
+        # FileNotFoundError and the artifact is lost: ``_print_report`` above has
+        # already put the digest on stdout, so the numbers survive only if that
+        # stdout was captured. Same shape as ``bench_session_page.py`` and
+        # ``bench_session_switch.py``.
+        json_path = Path(args.json)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(f"\nwrote {args.json}")
     if _FAILURES:
         print(f"\n{len(_FAILURES)} check(s) failed:", file=sys.stderr)

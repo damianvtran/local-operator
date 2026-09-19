@@ -1415,7 +1415,12 @@ class AttachClient:
                 images=command.images,
             )
         except RuntimeError as exc:
-            if "already streaming" not in str(exc):
+            # Local import, matching this module's other `session.errors` use:
+            # the check is a TYPE when this build raised it and the old sentence
+            # when the producer is a build that has never heard of the class.
+            from local_operator.session.errors import TurnInFlight
+
+            if not isinstance(exc, TurnInFlight) and "already streaming" not in str(exc):
                 raise
             return await self.steer(
                 command.text, command_id=command.command_id, images=command.images
@@ -1438,6 +1443,20 @@ class AttachClient:
     async def desktop_watch(self, *, visible: bool, can_notify: bool) -> str:
         """Renew this attach connection's desktop lease, not the phone counter."""
         return await self._request("desktop_watch", visible=visible, can_notify=can_notify)
+
+    async def viewer_watch(self, *, displaying: bool) -> str:
+        """Tell the owner whether this terminal is still SHOWING its session.
+
+        A multiplexing TUI keeps a switched-away session's connection open, so
+        the owner cannot infer "on screen" from "connected" and a parked gate
+        behind a retained attach never notified anybody. Sent on the switch
+        edge, not on a timer: this is state, not a lease.
+
+        Best-effort by contract. An owner too old to know the op answers with
+        an error frame, which is the correct outcome -- that build counted
+        every attach anyway, so nothing regresses when the call fails.
+        """
+        return await self._request("viewer_watch", displaying=displaying)
 
     async def abort(self) -> str:
         return await self._request("abort")
@@ -1772,7 +1791,7 @@ async def continue_command(
     """
     from local_operator.session.runtime.launch import PromptErrand, engage_runtime
 
-    await engage_runtime(
+    outcome = await engage_runtime(
         command.session_id,
         str(Path.home()),
         PromptErrand(
@@ -1787,6 +1806,15 @@ async def continue_command(
     # turn it started. A record must exist now (engage_runtime only returns
     # once one answered), so a miss here is a runtime that died in the gap and
     # is reported as the same timeout the caller already handles.
+    #
+    # THE RECEIPT IS THE ENGAGE'S OWN DETAIL, never a hardcoded sentence. On a
+    # draining owner the runtime spools the message for the build that replaces
+    # it, and its answer is ``inbox.SPOOL_RECEIPT_PROMPT`` — a deferral. This
+    # used to return the literal "prompt admitted" over whatever the runtime
+    # said, so the phone was told the owner had the message and waited for a
+    # reply only another process would produce, after this one exited (agent
+    # review round 1, R2).
+    admitted_detail = outcome.detail or "prompt admitted"
     record, _ = await asyncio.to_thread(find_runtime_record, config_dir, command.session_id)
     if record is None:
         raise TimeoutError("Couldn’t continue this conversation. Try again.")
@@ -1799,4 +1827,4 @@ async def continue_command(
     except (ConnectionError, RuntimeError, TimeoutError) as exc:
         client.close()
         raise TimeoutError("Couldn’t continue this conversation. Try again.") from exc
-    return client, "prompt admitted"
+    return client, admitted_detail

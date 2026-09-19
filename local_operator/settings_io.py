@@ -136,11 +136,15 @@ class Scope(enum.Enum):
     #: Takes effect immediately in every running session on this machine —
     #: on the same call stack in the process that wrote it, and within
     #: ``ConfigWatcher.POLL_INTERVAL_S`` for sessions in other processes (see
-    #: :mod:`local_operator.config_watch`). Per-key caveats live on the
-    #: SECTION description (``model``: a session that chose with ``/model``
-    #: keeps its choice; ``web_tools``: the inventory catches up at the next
-    #: turn while execution refuses at once) — the scope says WHEN, the
-    #: description says what "applied" means for that key.
+    #: :mod:`local_operator.config_watch`) — SUBJECT to the per-key caveats on
+    #: the SECTION description, which is where "applied" is spelled out for a
+    #: key whose live half is conditional: ``model`` (a session that chose with
+    #: ``/model`` keeps its choice), ``web_tools`` (the inventory catches up at
+    #: the next turn while execution refuses at once), and ``approvals`` (a
+    #: LOOSENING reaches only the session whose own process wrote it, while a
+    #: tightening is unconditional — see the section description and
+    #: :func:`local_operator.harness.approval.loosening_is_authorised`). The
+    #: scope says WHEN, the description says what "applied" means for that key.
     LIVE = "live"
     #: Read when a session is built — a ``/new`` or ``/reload`` picks it up.
     #: Only ``local_providers`` carries it now: ``approvals``, ``model`` and
@@ -372,23 +376,42 @@ SECTIONS: tuple[Section, ...] = (
         "Keys for starting and resuming conversations. Press enter on a row, "
         "then press the key you want.",
     ),
-    # LIVE — a reversal of the original design, which kept the approval mode
-    # build-time on the theory that a gate flipping under a running turn is a
-    # security-relevant surprise. The operator's actual request ("if I change
-    # a setting I want it to go into effect for all my agents") is the
-    # opposite: a disk write IS the machine-wide intent, and it overrides any
-    # per-session ``/approvals`` toggle. Two rules keep it safe: the new mode
-    # applies at the next approval DECISION (``ServingSessionHandle`` reads its
-    # flag per gate call), so a prompt already parked on screen is left for
-    # the human — never auto-answered, never auto-denied; and every viewer
-    # prints the amber "tool approvals now auto" notice. ``--yolo`` is an
-    # explicit pin that outranks the key. Its own section because ``session``
-    # (autosave + cleanup) is launch-time and scope is uniform per section.
+    # LIVE — the SCOPE is right (a config write reaches every running session
+    # within a poll) and the description below carries the key's one caveat, so
+    # it is not a lie on a section header. Two rules keep the live half safe:
+    # the new mode applies at the next approval DECISION (``ServingSessionHandle``
+    # reads its flag per gate call), so a prompt already parked on screen is left
+    # for the human — never auto-answered, never auto-denied; and a LOOSENING is
+    # only honoured when the process holding the gate made the write itself
+    # through this facade (issue #1282, ``harness.approval
+    # .loosening_is_authorised``) — a model-run shell command rewriting
+    # ``config.yml``, an editor, another pane, the settings API elsewhere, and
+    # ``lop config edit`` may all TIGHTEN a running session and none may loosen
+    # one. ``--yolo`` is an explicit pin that outranks the key. Its own section
+    # because ``session`` (autosave + cleanup) is launch-time and scope is
+    # uniform per section.
+    #
+    # THE DESCRIPTION BELOW IS THE ONLY APPROVALS CAVEAT THIS REGISTRY CARRIES,
+    # and it has exactly ONE consumer: the desktop settings header
+    # (``server/routes/settings.py`` -> the section header component). The TUI
+    # ``/settings`` page paints the section TITLE and its scope tag, then the
+    # ROW and the row HELP (``Tool approval mode`` / ``tool_approval_mode``'s
+    # own ``help``) — never this sentence — so the row help has to stand on its
+    # own and say the same thing in its own cell budget (58 cells of the 74-cell
+    # detail line, which must still fit its ``· default: ask`` clause; the
+    # measurement is at that row. Design round 1, D1; agent review round 1,
+    # m1). Keep the two in step: both must be TRUE for the embedded
+    # pane (whose own page write IS the gate-holding process's write, and so
+    # does loosen) and for the attached one (where only ``/approvals auto`` in
+    # the session loosens).
     Section(
         "approvals",
         "Approvals",
         Scope.LIVE,
-        "Whether write and command tools prompt, in every running session.",
+        "Whether write and command tools prompt, in every running session. A config "
+        "write tightens every running session at once; loosening one needs a write "
+        "from that session's own process (/approvals auto in it, or a /settings page "
+        "in that process).",
     ),
     # NEW_LAUNCH, honestly: ``auto_save_conversation`` is read ONCE by the CLI
     # at process start (``cli.py`` sets ``args.train``) to pick the transcript
@@ -418,6 +441,32 @@ SECTIONS: tuple[Section, ...] = (
         "Subagents",
         Scope.LIVE,
         "Concurrency cap, who picks a child's model, and the model each tier runs on.",
+    ),
+    # NEW_SESSIONS, and the scope is a statement about the CONSUMER: the
+    # classification service is built per session (``ClassificationService`` is
+    # constructed by ``session_factory._attach_classification`` and caches the
+    # vendor it resolved, its circuit breaker and its LRU for that session's
+    # life), and it is handed a SNAPSHOT of this section rather than the live
+    # mapping the stream fn holds. An edit therefore lands on the next session,
+    # which is what this tag tells the user — claiming LIVE here would be a
+    # painted lie of the kind the ``effort.*`` note in
+    # ``Session._apply_config_change`` records.
+    Section(
+        "classification",
+        # THE NAME IS THE ONE THE TIPS USE, and it is the title rather than the
+        # description because the TUI paints the title on every settings frame
+        # while the description below reaches only the settings API. Round 1
+        # added the word to a row's help line and round 2 measured what that
+        # bought: the help paints on the SELECTED row's detail line, clipped
+        # from 78 columns down, so at rest the page said "Resource
+        # recommendations" twice and never the word a tip sent the user to look
+        # for (design round 2, D11). The runtime used to have its own message as
+        # well ("Suggestion added…"); that line is deleted — the layer is silent
+        # in the chat — so the title is now the only name on screen.
+        "Smart hints",
+        Scope.NEW_SESSIONS,
+        "Advisory skills, guides and MCP servers a decision model may suggest "
+        "per message. Off keeps the prompt unchanged.",
     ),
     # Its own section rather than a row under "Session", and the reason is the
     # SCOPE: scope is uniform within a section by construction, "Session" is
@@ -490,6 +539,19 @@ SECTIONS: tuple[Section, ...] = (
         "Tools",
         Scope.LIVE,
         "How the built-in tools execute.",
+    ),
+    # Split out of ``tools`` (review round 1, M2), for the reason the module's
+    # own history gives for ``providers`` and ``web_tools``: scope is uniform
+    # within a section by construction, and these three keys are the one part of
+    # how a tool executes that must NOT re-read per call — a live policy is a
+    # policy the agent's own shell can weaken between two commands.
+    Section(
+        "shell_environment",
+        "Agent shell",
+        Scope.NEW_LAUNCH,
+        "What a command the agent runs can see. Resolved once per session, so an "
+        "edit here applies at the next launch and cannot weaken a session that is "
+        "already running.",
     ),
     Section(
         "local_providers",
@@ -1415,6 +1477,19 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("keep narration", "hide narration once tools run"),
     ),
     Setting(
+        key="display.rail",
+        path=("display.rail",),
+        section="appearance",
+        label="Assistant gutter rail",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "A rule marks the ANSWER: the message that ends the turn. "
+            "Mid-turn narration takes no rail."
+        ),
+        choices=_bool_choices("rail the answer only", "no rail"),
+    ),
+    Setting(
         # Default changed to False by maintainer
         key="display.comfortable_rows",
         path=("display.comfortable_rows",),
@@ -1645,8 +1720,26 @@ SETTINGS: tuple[Setting, ...] = (
         label="Tool approval mode",
         kind=Kind.ENUM,
         default="ask",
-        # 74 cells — see the note on `hosting`.
-        help="How every running session treats write and exec tools, from its next call.",
+        # 58 cells, and the number is the LADDER's, not a taste call. The detail
+        # line composes ``<help> · default: <default>`` when the row is off its
+        # default and sheds whole rungs to fit — so the budget that decides
+        # whether this sentence is on the frame at all is 74 cells MINUS the
+        # 15-cell ``· default: ask`` suffix, i.e. 59. Measured on the head with
+        # the real page: the 72-cell sentence I first wrote (design round 1,
+        # D1's recommendation, which was measured against the width with no
+        # clause) painted NOTHING off-default at 80x24 — the ladder fell through
+        # to ``default: ask   tool_approval_mode``, which is exactly the state the
+        # operator is in after the write this change is about. Verified again
+        # after this edit: 80x24 off-default shows the help and the clause, and
+        # only 60 cols ellipsizes (today's string already did).
+        #
+        # The sentence is the SECTION description's rule in the TUI's own words —
+        # one clause, no head — because that description is painted by the desktop
+        # header alone and this is the only approvals copy the TUI page shows
+        # (design round 1, D1; agent review round 1, m1). Both must stay true for
+        # the embedded pane (whose own page write IS the gate-holding process's
+        # write) and for the attached one.
+        help="Loosening needs a write in this session — /approvals auto.",
         choices=(
             Choice("ask", "ask", "prompt before write/exec tools"),
             Choice("auto", "auto", "run them without asking"),
@@ -1945,6 +2038,145 @@ SETTINGS: tuple[Setting, ...] = (
         help="Bills at that model's rates; empty inherits. See subagents.model_choice",
         empty_unsets=True,
     ),
+    # -- resource classification --------------------------------------------
+    #
+    # docs/design/classification-layer.md §8. Ordered master-switch first, then
+    # what it controls, matching the `session.cleanup.*` block above: the page
+    # reads as "a switch, then its knobs", every sub-row leads with the gate
+    # (`↳` label, "Needs recommendations on." help), and the numbers here are the
+    # §8 defaults the classification package's own readers fall back to —
+    # `_consumer_defaults()` in tests/unit/test_settings_io.py binds the two so
+    # neither can drift.
+    #
+    # Scope is NEW_SESSIONS on the SECTION above; the reason is recorded there
+    # rather than repeated per row.
+    Setting(
+        key="classification.auto",
+        path=("classification", "auto"),
+        section="classification",
+        label="Smart hints",
+        kind=Kind.BOOL,
+        # Default ON since 2026-09-18, matching the package's own `DEFAULT_AUTO`
+        # (`classification/service.py`, which records why the flip is worth its
+        # spend). The OFF case stays a real path and stays free: with
+        # `auto: false` the wiring returns before it imports the package, so the
+        # prompt is byte-identical to a harness without the layer.
+        #
+        # The flip was a deliberate change of behaviour, so it is stated once
+        # here in the comment that owns the default, and nowhere else in this
+        # file. The help says what ON does rather than what the feature is: the
+        # label already names the feature, and it now names it in the one term
+        # the tips and `guide://classification` use (design round 2, D11).
+        default=True,
+        help="On: a decision model may add advisory resources. Off: the prompt is unchanged.",
+        choices=_bool_choices(
+            "a decision model may add advisory resources",
+            "the prompt stays exactly as it is",
+        ),
+    ),
+    Setting(
+        key="classification.vendor",
+        path=("classification", "vendor"),
+        section="classification",
+        label="↳ vendor",
+        kind=Kind.ENUM,
+        default="auto",
+        # `auto` is a real member here rather than the unset spelling
+        # `model_effort` uses: the cascade's own default IS "first leg with a
+        # usable credential", and storing that as an empty string would leave
+        # the page unable to show which of the two the operator chose.
+        help="Needs recommendations on. Pin one leg; auto prefers Radient.",
+        choices=(
+            Choice("auto", "auto", "first leg with a usable credential"),
+            Choice("radient", "radient", "Radient's decision route"),
+            Choice("typesafe", "typesafe", "TypeSafe's Jev endpoint"),
+            Choice("openrouter", "openrouter", "OpenRouter's alpha decisions route"),
+        ),
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.model",
+        path=("classification", "model"),
+        section="classification",
+        label="↳ model",
+        kind=Kind.TEXT,
+        default="",
+        help="Needs recommendations on. Vendor model id; empty uses its default.",
+        empty_unsets=True,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.timeoutMs",
+        path=("classification", "timeoutMs"),
+        section="classification",
+        label="↳ deadline (ms)",
+        kind=Kind.INT,
+        default=1500,
+        # 0 is "use the default", not "no deadline": the reader refuses a
+        # non-positive value rather than treating it as unlimited, so a hand-edit
+        # cannot leave a turn parked on a vendor. The help says so.
+        help="Needs recommendations on. Per-call deadline; 0 uses 1500 ms.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.waitMs",
+        path=("classification", "waitMs"),
+        section="classification",
+        label="↳ wait budget (ms)",
+        kind=Kind.INT,
+        default=50,
+        # The operator's latency budget, in the one number that enforces it: how
+        # long a turn will WAIT for an answer. Deliberately NOT the call's
+        # deadline — a call that misses this window is left running and its
+        # answer is delivered by a later message (contract §5a, and
+        # ``session_factory._harvest_classification``), so raising this buys a
+        # fresher prompt at the price of turn latency and lowering it pushes more
+        # answers onto the following turn. The vendor's own model time is excluded
+        # from the budget by its terms, which is exactly what makes 50 ms
+        # achievable while ``timeoutMs`` stays at 1500. 0 is "use the default",
+        # like every other number in this section, never "wait forever".
+        help="Needs recommendations on. How long a turn waits; 0 uses 50 ms.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.maxStateChars",
+        path=("classification", "maxStateChars"),
+        section="classification",
+        label="↳ max state chars",
+        kind=Kind.INT,
+        default=6000,
+        help="Needs recommendations on. State cap; 0 uses 6000 chars.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.maxCandidates",
+        path=("classification", "maxCandidates"),
+        section="classification",
+        label="↳ max candidates",
+        kind=Kind.INT,
+        default=12,
+        help="Needs recommendations on. Candidates per kind; 0 uses 12.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    Setting(
+        key="classification.maxRecommendations",
+        path=("classification", "maxRecommendations"),
+        section="classification",
+        label="↳ max recommendations",
+        kind=Kind.INT,
+        default=3,
+        help="Needs recommendations on. Per-message resources; 0 uses 3.",
+        minimum=0,
+        gated_by="classification.auto",
+    ),
+    # ``classification.notice`` used to sit here. The layer no longer renders a line
+    # into the transcript at all (the operator asked for it gone: it is an internal
+    # resource-selection step, and it was landing under the reply), so the switch has
+    # nothing left to gate — see the retired row below.
     # -- fork ---------------------------------------------------------------
     #
     # Both paths are genuinely NESTED two-element tuples, not flat dotted keys.
@@ -2132,7 +2364,12 @@ SETTINGS: tuple[Setting, ...] = (
         label="Providers",
         kind=Kind.LIST,
         default=["duckduckgo", "tavily"],
-        help="Comma-separated, in priority order.",
+        # A PRIORITY PREFIX, not an allowlist: naming a provider here means "try
+        # this first", and every other usable provider still follows in its
+        # automatic band. The help says so, because a user who reads the list as
+        # "exactly these" would be surprised by the chain -- and that surprise is
+        # the documented cost of not writing a freezing migration.
+        help="Comma-separated, in priority order; tried before the automatic free providers.",
         members=(
             "duckduckgo",
             "tavily",
@@ -2140,6 +2377,32 @@ SETTINGS: tuple[Setting, ...] = (
             "perplexity",
             "brave",
             "exa",
+            "parallel",
+            "serpapi",
+            "searxng",
+        ),
+    ),
+    Setting(
+        key="web_search.excluded_providers",
+        path=("web_search", "excluded_providers"),
+        section="web_search",
+        label="Excluded providers",
+        kind=Kind.LIST,
+        default=[],
+        # `empty_unsets` is required HERE and is exactly what is wrong for
+        # web_search.providers: [] is this key's DEFAULT (nothing excluded), so an
+        # empty field clears the key rather than failing validation the way an
+        # empty priority list does.
+        empty_unsets=True,
+        help="Never used, even in the automatic chain. Comma-separated; empty = none excluded.",
+        members=(
+            "duckduckgo",
+            "tavily",
+            "deepseek",
+            "perplexity",
+            "brave",
+            "exa",
+            "parallel",
             "serpapi",
             "searxng",
         ),
@@ -2314,6 +2577,81 @@ SETTINGS: tuple[Setting, ...] = (
         help="Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
         empty_unsets=True,
     ),
+    # -- shell_environment ----------------------------------------------
+    # ``path`` mirrors ``tools.shell_env.MODE_PATH`` and friends, pinned the same
+    # way as the row above. The three rows are one policy and are read together
+    # by one reader, but they are three settings rather than a JSON blob because
+    # each answers a different question and each has a shape the editor already
+    # knows: a mode to pick, and two name lists to type.
+    #
+    # IN THEIR OWN SECTION, and specifically NOT in ``tools`` (review round 1,
+    # M2): scope is uniform within a section by construction, ``tools`` is LIVE,
+    # and these keys must NOT be live. ``tools.shell_env.load_policy`` resolves
+    # the policy once per process and memoises it, because ``config.yml`` is
+    # writable by the agent's own shell as the same uid — a policy re-read per
+    # command is a policy the constrained party can LOWER mid-run, which is how
+    # a strict run gets its provider key back in the next command. NEW_LAUNCH is
+    # that decision said in the vocabulary this module already has, and it is
+    # also what the config-change notice tells the user.
+    Setting(
+        key="shell_environment.mode",
+        path=("shell_environment", "mode"),
+        section="shell_environment",
+        label="Agent shell environment",
+        kind=Kind.ENUM,
+        # Pinned to ``shell_env.MODE_DEFAULT`` by
+        # ``test_shell_environment_rows_share_the_reader_paths`` rather than
+        # imported: the default must stay the permissive one, and the pin is
+        # what makes flipping it a decision rather than an edit.
+        default="inherit",
+        help=(
+            "'inherit' lets a command the agent runs see your environment "
+            "(gh, aws, npm keep their tokens). 'allowlist' passes only "
+            "PATH/HOME/SHELL/TERM/USER/LOGNAME plus the two lists beside this, "
+            "so the provider key this session launched with is not handed to a "
+            "command the model writes. Read once per session: changing it takes "
+            "effect at the next launch."
+        ),
+        choices=(
+            Choice("inherit", "inherit", "your environment, as today (default)"),
+            Choice("allowlist", "allowlist", "the safe set plus the lists below, nothing else"),
+        ),
+    ),
+    Setting(
+        key="shell_environment.inherit",
+        path=("shell_environment", "inherit"),
+        section="shell_environment",
+        label="…kept in allowlist mode",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Empty = the safe set alone. Names the allowlist mode keeps ON TOP "
+            "of the safe set — e.g. LOCAL_OPERATOR_CONFIG_DIR for a shell that "
+            "must still resolve $(lop secret get NAME), or LANG. Inert in "
+            "inherit mode."
+        ),
+        # OPEN namespace: these are the operator's own variable names, so there
+        # is no vocabulary for this repo to bound.
+        placeholder="LOCAL_OPERATOR_CONFIG_DIR, LANG, …",
+        empty_unsets=True,
+    ),
+    Setting(
+        key="shell_environment.exclude",
+        path=("shell_environment", "exclude"),
+        section="shell_environment",
+        label="…removed in both modes",
+        kind=Kind.LIST,
+        default=[],
+        help=(
+            "Empty = nothing removed. Names never handed to a command the agent "
+            "runs, in either mode — including the session credential store's "
+            "own injections, so this is how a variable is denied outright. "
+            "Covers the bash and eval children only; MCP servers and the "
+            "harness's own processes are not governed by it."
+        ),
+        placeholder="OPENROUTER_API_KEY, …",
+        empty_unsets=True,
+    ),
     *[
         setting
         for provider, (name, endpoint, _url) in LOCAL_PRESETS.items()
@@ -2371,6 +2709,28 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.READONLY,
         default=50,
         help="Deprecated. Superseded by the compaction engine.",
+    ),
+    Setting(
+        key="classification.notice",
+        path=("classification", "notice"),
+        section="retired",
+        label="Smart hints notice",
+        kind=Kind.READONLY,
+        default=True,
+        # RETIRED RATHER THAN DELETED, by this section's own rule above: a user who
+        # set it deserves to see that it is inert rather than to find the row gone
+        # and guess whether the layer stopped using it or stopped existing. The
+        # surface it gated was removed outright instead of being left behind a false
+        # switch — the per-call cost line the guide points at is at INFO in the
+        # session log, so the diagnostic is not lost, and nothing draws into the
+        # transcript any more.
+        #
+        # The copy names the feature the way EVERY other name on that screen does
+        # ("Smart hints" — the section title, the live row's label, the tips, and the
+        # guide, which says in as many words that all three use that name). "the layer"
+        # is this codebase's word, not the user's; design round 1 (D1) measured that a
+        # user who once saw a suggestion line has no anchor for it.
+        help="Deprecated. Smart hints is silent in the chat; the call is in the log.",
     ),
     Setting(
         key="desktop.launch_command",

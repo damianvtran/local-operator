@@ -577,3 +577,105 @@ async def test_a_resumed_journal_outranks_the_configured_birth_effort(tmp_path):
         assert owner.model.reasoning_effort == "low"
     finally:
         await owner.dispose()
+
+
+# ---------------------------------------------------------------------------
+# A decision-only provider is not a chat identity (§9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_stored_decision_only_selection_is_refused_by_name(tmp_path):
+    """The journal's own identity, when it names a decision model, is named back.
+
+    A ``selected_model`` row of ``typesafe/jev-1.13`` is producible — the desktop
+    pick boundary accepted the pair before this build refused it — and honouring it
+    resumed the conversation onto a provider that rejects ``chat/completions`` on
+    every host we reach it through: a session that 400s on every turn, reported as an
+    ordinary provider error. TWO halves, both load-bearing:
+
+    - the READER refuses the row, which is the one validator both owner-side readers
+      share (``resolve_hosting_model_with_source`` and
+      ``Session._restore_selected_model``), so no path can turn it into a session
+      model;
+    - the resolver then says WHY rather than falling back to the configured hosting.
+      Falling back would resume the conversation on a model its own journal never
+      named and hide the fact — and the refusal is the family the guided setup state
+      is built on, so ``/model`` is one reachable answer away (review round 1, M1).
+    """
+    from local_operator.providers.registry import is_decision_only
+    from local_operator.session.model_selection import refused_decision_only_selection
+    from local_operator.session_factory import HostingNotChatError
+
+    assert is_decision_only("typesafe"), "this test is about the decision-only provider"
+    directory = tmp_path / "sessions" / "decision-only"
+    transcript = Transcript(directory)
+    await transcript.append_custom(
+        "selected_model", {"version": 2, "selector": "typesafe/jev-1.13"}
+    )
+
+    assert read_model_selection(directory) is None, "the reader must not hand it out"
+    assert refused_decision_only_selection(directory) == "typesafe"
+
+    # A perfectly good chat hosting in the config does not change the answer: the
+    # conversation's own stored identity is the thing that cannot chat.
+    config = ConfigManager(tmp_path)
+    config.update_config({"hosting": "test", "model_name": A.model_id})
+    args = argparse.Namespace(resume="decision-only", hosting=None, model=None)
+
+    with pytest.raises(HostingNotChatError) as refused:
+        resolve_hosting_model_with_source(None, args, config)
+
+    assert "decision-model calls, not chat completions" in str(refused.value)
+    assert "typesafe" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_a_decision_only_pair_named_by_a_flag_is_refused_by_name(tmp_path):
+    """``--hosting typesafe`` on a resume: the decision-only message, not "no model".
+
+    This pair has no default model, so the default-model lookup answered "no model
+    configured" — a symptom, about a pair that can never run any model it names
+    (review round 1, M1's third probe). The refusal has to precede that lookup.
+    """
+    from local_operator.session_factory import (
+        HostingNotChatError,
+        ModelNotConfiguredError,
+    )
+
+    config = ConfigManager(tmp_path)
+    config.update_config({"hosting": "test", "model_name": A.model_id})
+    directory = tmp_path / "sessions" / "flagged"
+    owner, _ = session(directory)
+    await owner.prompt("seed")
+    await owner.dispose()
+
+    args = argparse.Namespace(resume="flagged", hosting="typesafe", model=None)
+
+    with pytest.raises(HostingNotChatError) as refused:
+        resolve_hosting_model_with_source(None, args, config)
+
+    assert not isinstance(refused.value, ModelNotConfiguredError)
+    assert "decision-model calls" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_a_deliberate_flag_still_rescues_a_poisoned_journal(tmp_path):
+    """The refusal must never block the exit its own message prescribes.
+
+    ``/model`` (or ``--hosting``) is what the message tells the user to do, so a
+    journal whose stored identity is a decision model has to GET OUT OF THE WAY when
+    the caller names a chat pair deliberately: a flag is a statement about this run,
+    not a request to be re-judged by the journal it is replacing.
+    """
+    directory = tmp_path / "sessions" / "poisoned"
+    transcript = Transcript(directory)
+    await transcript.append_custom(
+        "selected_model", {"version": 2, "selector": "typesafe/jev-1.13"}
+    )
+    config = ConfigManager(tmp_path)
+    config.update_config({"hosting": "test", "model_name": A.model_id})
+
+    args = argparse.Namespace(resume="poisoned", hosting="test", model=A.model_id)
+
+    assert resolve_hosting_model_with_source(None, args, config) == ("test", A.model_id, "flag")

@@ -216,7 +216,7 @@ JOB_ERROR_WIRE_CHARS = 2_000
 #: distinction the 13-byte precedent above did not make. Measure the guard, not
 #: this paragraph, for what the LINE then does: ``_bound_model_catalogue_in_place``
 #: is a RESIDUAL budget, so it spends most of that back on real catalogue rows
-#: (the fixture's frame lands at 1,048,400 of 1,048,576, i.e. 176 B under, with
+#: (the fixture's frame lands at 1,048,408 of 1,048,576, i.e. 168 B under, with
 #: the catalogue grown from its 50-row floor to 54). The number that matters is
 #: the one the overshoot was about — whether the FLOOR fits: with the catalogue
 #: held at its floor the frame now has 1,384 B of line where it had 416 B too
@@ -387,7 +387,40 @@ _SHAREABLE_STATE_FIELDS = frozenset(
 #: calls measured 2,619,443 B). Both sailed through a bound that was looking at
 #: a different key. Measuring the row is what makes the NEXT payload-bearing
 #: field bounded on the day it is added rather than on the day it overflows.
-LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 60_000
+#:
+#: The value is 60,000 less the clock a retained end now carries. The fold
+#: stamps every settled end with its call's own ``started_at_epoch`` (see
+#: ``_fold_live_event``), which is 40 B on the row's ENVELOPE — outside the
+#: ``result`` this budget clips — so the only thing in this field that can give
+#: those bytes back is the text share itself: 60,000 - 40 x
+#: :data:`LIVE_EVENT_END_ROWS_MAX` (100) = 56,000. The per-row figure is the
+#: stamp's cost at the WIDEST epoch the producer emits, not at a typical
+#: sample: the only producer is ``time.time()`` (``harness/loop.py``), whose
+#: 10-integer-digit values at this magnitude carry six or seven fractional
+#: digits, so ``json.dumps`` writes an 18-character number —
+#: ``1789696914.5158982`` — for a large share of a run and never more than 18.
+#: Charging anything short of that maximum instead would leave the guard — the
+#: mechanism whose whole job is to catch the NEXT field's growth — reporting
+#: headroom the real frame does not have.
+#:
+#: Without the pay-down the field's own worst case grows past the frame it has
+#: to coexist with, and the class guard is where that lands: with every other
+#: field at its own maximum the all-year fixture measures 1,051,200 B against
+#: the 1,048,576-byte line — 2,624 B over. That is not the full 4,000 B because
+#: ``model_catalogue``, the frame's slack absorber, reclaims 1,208 B of what the
+#: text cut releases: it sits on its 50-row floor at the larger text share
+#: (15,080 B) and grows to 54 rows at the smaller one (16,288 B). Paid here
+#: instead the same fixture measures 1,048,408 B, 168 B under the line — and 8 of
+#: those bytes are not the stamp's: the fixture's own 8-entry
+#: ``live_tool_started_at`` map now carries the real epoch's width too, and that
+#: map exists on the released build. Measured, the frame is 1,048,400 B — the
+#: figure the released fixture signed off — when that one literal keeps its old
+#: width, and 1,048,408 B when it does not. Either way the stamp costs the frame
+#: nothing, the seed keeps its row cap, its fixture and its ~99 KB worst case,
+#: and the give-back is 40 characters off a preview the field already truncates —
+#: spent in the order the retention rule already ranks (identity and outcome
+#: first, then preview text, then ``details``).
+LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS = 56_000
 LIVE_EVENT_TEXT_FLOOR_CHARS = 200
 
 #: Placeholder for a result block too big to ride the reconnect seed.
@@ -443,6 +476,12 @@ LIVE_EVENT_BLOCK_ELIDED_SEPARATOR = "\n"
 #: Dropping OLDEST-first is what makes the cap safe: the newest calls are the
 #: ones most likely to still be on screen unsettled, and a dropped row costs
 #: nothing durable — the transcript replay repaints those cards regardless.
+#:
+#: Raising this cap is not a change to this constant alone. Each added row
+#: carries the settled end's own clock, and that clock's bytes come out of
+#: :data:`LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS` — 40 B a row at the widest epoch
+#: ``time.time()`` emits — so a new cap obliges the text budget to give back
+#: ``40 x (new cap - 100)`` characters, or the frame guard above fails.
 LIVE_EVENT_END_ROWS_MAX = 100
 
 #: Smallest catalogue the wire will clip to, however little the frame has left.
@@ -801,6 +840,12 @@ _FRONTEND_LOCAL_SLASHES = {
     # on a screen nobody is looking at and copy onto a host nobody is at, which
     # is the same argument `/theme` and `/settings` make about config.yml.
     "copy",
+    # The same three facts as `/copy` above, one step further out: the transcript
+    # it reads is painted by this frontend, the picker is painted by this
+    # frontend, and the BROWSER is on the machine the user is sitting at. Routed
+    # to an authoritative runtime it would open a page on the runtime's host,
+    # where nobody is looking, for a transcript this frontend owns.
+    "links",
     "new",
     "reload",
     "update",
@@ -850,6 +895,18 @@ _FRONTEND_LOCAL_SLASHES = {
     # Remote access is enrolled using this frontend computer's OAuth store and
     # service manager; routing to the runtime would expose another host.
     "mobile",
+    # FRONTEND-LOCAL because BOTH halves are facts about this machine: the
+    # unread completions it lists come from the store this frontend's own
+    # sidebar paints from (`config_dir()/attention.db`), and the receipt it
+    # writes clears the marks on the screen the user is looking at. Routed to
+    # the runtime it would list and clear the RUNTIME host's marks while the
+    # sidebar beside it kept showing this one's -- the same wrong-machine split
+    # `/info` and `/settings` refuse. This is also what keeps it out of
+    # `session/runtime/serving.py::_slash_result`: every registry entry NOT in
+    # this set is advertised `authoritative_session`, and that advertisement
+    # FAILS `tests/unit/session/runtime/test_capability_surface.py` unless the
+    # runtime dispatches it.
+    "notifications",
     # FRONTEND-LOCAL because the command hosts a MASKED PASTE, and the user is
     # sitting at this terminal — routing the whole command would raise the
     # paste prompt on the runtime host's screen, which nobody is looking at. This is
@@ -2662,8 +2719,20 @@ def _live_row_cost(value: Any) -> int:
         return LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1
 
 
-def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
+def _bound_live_result_in_place(
+    result: dict[str, Any],
+    *,
+    share: int,
+    placeholder: str = LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER,
+) -> None:
     """Spend one retained end's share across everything it actually carries.
+
+    ``placeholder`` is the stand-in for a block this bound cannot clip (an
+    image's base64, or any future payload under a key this module has never
+    heard of). It is a parameter because this bound is now spent on a second
+    frame with a different reader — an ``agent_end`` conversation frame bounded
+    for the wire (``harness/wire.py``) — and a row elided from THAT frame must
+    not tell the reader it was dropped from a reconnect snapshot it never rode.
 
     Driven by MEASURED cost rather than by key names, so a payload-bearing
     field cannot escape by not being a string (see
@@ -2743,9 +2812,7 @@ def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
             block.clear()
             block["type"] = "text"
             block["text"] = (
-                LIVE_EVENT_BLOCK_ELIDED_SEPARATOR + LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
-                if emitted_text
-                else LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+                LIVE_EVENT_BLOCK_ELIDED_SEPARATOR + placeholder if emitted_text else placeholder
             )
         emitted_text = emitted_text or bool(block.get("text"))
         remaining = max(0, remaining - _live_row_cost(block))
@@ -5352,6 +5419,45 @@ class FrontendStateStore:
             # at turn end — on a call that had SUCCEEDED (QA round 1, Q2).
             # A joiner that never saw the start still renders correctly: the
             # app buffers an unmatched end in ``_pending_tool_ends``.
+            #
+            # The end is also the only frame of the PAIR that states no time,
+            # and the line below is what drops the one that did: the start
+            # carried ``started_at_epoch`` and the end REPLACES it, so a viewer
+            # joining mid-turn is handed a settled row with no clock on the
+            # wire at all. A client cannot invent one — the renderer refuses to
+            # date a frame at its own arrival instant — so that row would paint
+            # unplaced, and naming nothing that ran, until a durable page
+            # reached it, on a runtime whose TUI has had the row in its true
+            # position since the call ran. Carry the call's own start instant
+            # onto the retained end instead.
+            #
+            # The value is readable ONLY at this statement, and that is the
+            # constraint the line rests on: the anchor lives in
+            # ``live_tool_started_at``, and ``_fold_live_tool_starts`` — which
+            # pops the entry on this very event — runs AFTER this method, so
+            # ``observe_event`` folds the seed first and no later point in the
+            # turn can read the start back.
+            #
+            # A call whose start was never seen contributes NO KEY rather than a
+            # placeholder: ``live_tool_started_at`` is empty for it, and the
+            # tempting substitutes — this fold's own ``now``, or a zero — are
+            # precisely the arrival-instant-dressed-as-a-start that
+            # ``_fold_live_tool_starts`` refuses for the same reason. The ABSENT
+            # key is the wire's "states no time", which leaves the client's own
+            # rule in charge of withholding the row; a fabricated instant would
+            # print a plausible wrong age where the client's blank column is the
+            # truth.
+            #
+            # COMPATIBILITY, both directions, with no ``PROTOCOL_VERSION`` move
+            # — the same story ``AgentEndEvent.cut_off`` records: the seed entry
+            # is an untyped dict on the wire, and this key name is one clients
+            # ALREADY read on the sibling ``tool_execution_start`` (it is the
+            # value their clock helper keys on). An older client ignores an
+            # unknown key on a seed entry; an older runtime simply never stamps,
+            # and the client refuses the row exactly as it does today.
+            started_at = self._state.live_tool_started_at.get(call_id)
+            if started_at is not None:
+                data["started_at_epoch"] = started_at
             live = [item for item in live if str(item.get("tool_call_id") or "") != call_id]
             live.append(data)
         # Shallow copy on purpose: this runs per streaming delta on the session

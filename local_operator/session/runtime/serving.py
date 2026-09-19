@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import inspect
 import logging
 import secrets
@@ -32,14 +33,33 @@ from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Iterable, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    TypeVar,
+    cast,
+)
 
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
 )
+from local_operator.harness.approval import (
+    LOOSENING_KEPT_BY_ASK_NOTICE as _LOOSENING_KEPT_BY_ASK_NOTICE,
+)
+from local_operator.harness.approval import (
+    LOOSENING_REFUSED_NOTICE as _LOOSENING_REFUSED_NOTICE,
+)
+from local_operator.harness.approval import (
+    loosening_is_authorised as _loosening_is_authorised,
+)
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
+from local_operator.harness.wire import bound_agent_end_for_wire
 
 if TYPE_CHECKING:
     from local_operator.harness.types import ImageContent
@@ -60,6 +80,7 @@ from local_operator.mobile.types import (
 # handlers, and a second copy of the words is how `--stop` would cancel a loop in
 # one window and start one toward the literal goal `--stop` in another.
 from local_operator.session.goal_loop import LOOP_CLEAR_ARGS, LOOP_STOP_ARGS
+from local_operator.session.runtime.inbox import SOURCE_PEER, SOURCE_USER
 from local_operator.session.runtime.server import SessionHandle
 from local_operator.session.runtime.server import (
     image_blocks_in_thread as _image_blocks_async,
@@ -317,14 +338,166 @@ def _read_child_todo_snapshot(directory: Any) -> list[dict[str, Any]] | None:
         return None
 
 
-class ServingSessionHandle(SessionHandle):
-    """SessionHandle over an in-process Session living on ``loop``.
+#: What a ROUTED approvals change must disclose about the pane's persistent
+#: marker (UX round 2, U6). The marker is fed by the pane's own `_approve_all`
+#: (`tui/app.py`), a routed command cannot move it, and after #1282 a routed
+#: `/approvals auto` is the only route that loosens a running session — so the
+#: one indicator built to survive a scrolling receipt is dark for exactly the
+#: state that route creates. Fixing the MECHANISM is a change of its own
+#: (deferred, with the measurements, on the PR); telling the operator is one
+#: clause, on the surface where the state changes, and that is what this is.
+_GATE_MARKER_CLAUSE = "; the band's ! will not follow this — /approvals re-reports the gate"
 
-    The registrant drives handle methods on the OWNING loop here — the child
-    process runs the registrant's socket server as a task on its one asyncio
-    loop, so no cross-thread hop is needed and ``run_coroutine_threadsafe``
-    never appears. The registrant's ``start_in_process`` classmethod is the
-    entry point that wiring uses.
+
+#: The decorated method's own type, returned unchanged. A decorator that instead
+#: declared ``Coroutine[Any, Any, _R]`` would widen every decorated method's
+#: signature: ``async def`` methods are ``CoroutineType``, which is a SUBCLASS of
+#: ``Coroutine``, so the override stops matching the ``SessionHandle`` protocol it
+#: implements (pyright: ``reportIncompatibleMethodOverride``) — the invariant is
+#: "this runs the same method somewhere else", so the type is the same type.
+_F = TypeVar("_F", bound=Callable[..., Coroutine[Any, Any, Any]])
+
+
+def _on_session_loop(method: _F) -> _F:
+    """Run a handle method's WHOLE BODY on the loop that owns the session.
+
+    WHY A WRAPPER AND NOT A SYNCHRONOUS CALL. The failure this replaces was not a
+    slowdown, it was a turn run on the wrong thread. Measured on a naive
+    thread-hosted runtime (``probe_daemon_threaded.py``, before this seam): a
+    ``prompt`` reached the handle from the runtime's thread, created its
+    ``admitted`` future with ``self._loop.create_future()`` — the SESSION's loop
+    — and then scheduled the drain task with ``asyncio.ensure_future``, which
+    binds to the CALLER's. So the client got an asyncio cross-loop error while
+    the turn ran on ``lop-mobile-registrant``, and the session was left
+    un-disposable. Every ``self._loop``-bound object the body creates has to be
+    created where it belongs, and the only way to guarantee that for the whole
+    body — including the sync prefix before the first await — is to run the body
+    there.
+
+    WHAT IT GUARANTEES. Nothing of the body executes on the caller's thread: the
+    coroutine is handed to the owner loop with
+    ``asyncio.run_coroutine_threadsafe`` and awaited back through
+    ``asyncio.wrap_future``, never ``.result()``. The result is unchanged, and
+    every synchronous read the body makes — session state, the transcript, the
+    reservation map — is made where that state lives.
+
+    CALLING IT FROM THE SESSION'S LOOP IS A NO-OP, deliberately: a hop from the
+    loop you are hopping TO would be a round trip to the thread already
+    executing, which is the shape this class's original docstring was right
+    about for an in-process host. That also covers a nested call — a decorated
+    method calling another one — and every in-process runtime, so no caller has
+    to know which plane it is on.
+
+    WHAT HAPPENS WHEN THE CALLER IS CANCELLED is measured, not assumed, because
+    a sibling change depends on it: the cancellation DOES reach the remote body.
+    ``asyncio.wrap_future`` propagates it to the concurrent future
+    ``run_coroutine_threadsafe`` returned, and that future cancels the task it
+    scheduled — verified directly, a remote ``await asyncio.sleep(5)`` raising
+    ``CancelledError`` 0.3 s after the awaiting task was cancelled. So a
+    ``prompt`` whose caller is dropped does not leave a turn running detached
+    from the client that asked for it, which is what
+    ``RuntimeServer._drop_client``'s teardown reasoning relies on.
+
+    And it hops only when there is a loop to hop to: a handle whose loop is gone
+    runs the body inline so that teardown paths (``dispose``) still work, and
+    ``_check_loop_thread`` refuses the mutating ones that would then be executed
+    off-loop rather than silently running them on the wrong thread.
+    """
+
+    @functools.wraps(method)
+    async def marshalled(self: "ServingSessionHandle", *args: Any, **kwargs: Any) -> Any:
+        # ``getattr``, not ``self._loop``: a reduced host may BORROW a bound
+        # method without the attribute (``test_serving_drain``'s ``DrainHost``
+        # takes ``begin_drain``/``begin_retire`` off the class to test the latch
+        # they write). A host with no loop has no other plane to hop to, so it
+        # runs inline — which is exactly the behaviour it had before the seam.
+        loop = getattr(self, "_loop", None)
+        if loop is None or loop.is_closed() or loop is asyncio.get_running_loop():
+            return await method(self, *args, **kwargs)
+        return await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(method(self, *args, **kwargs), loop)
+        )
+
+    return cast(_F, marshalled)
+
+
+class ServingSessionHandle(SessionHandle):
+    """SessionHandle over a Session that the process hosting ``loop`` owns.
+
+    THE SEAM LIVES IN :func:`_on_session_loop`, which decorates every mutating
+    method below, and the premise it repairs is worth keeping visible because it
+    is how this handle came to be the one implementation that did not marshal:
+    *"the child process runs the registrant's socket server as a task on its one
+    asyncio loop, so no cross-thread hop is needed and ``run_coroutine_threadsafe``
+    never appears."* That was true while ``daemon`` and ``exec`` served in
+    process.
+
+    It is not true now. ``process.amain`` and ``exec_control.start_exec_control``
+    both reach the runtime through ``RuntimeServer.start()``, which puts the
+    registrant on its OWN thread, so every handle call from the registrant crosses
+    threads. The contract this class now implements is the one the
+    ``SessionHandle`` protocol always stated — *"every method is awaited on the
+    RUNTIME'S loop … the implementor guarantees any hop the session needs"* — and
+    the invariant it holds, stated once so no method has to restate it:
+
+        No coroutine on the runtime's loop performs a synchronous cross-thread
+        wait, and no code on the session's loop is called from the runtime's
+        thread except through a hop whose result is awaited.
+
+        THE EXEMPTIONS ARE NAMED, NOT COUNTED — a number here is what drifted
+        twice already, in this class, for exactly this reason (review round 2,
+        NIT-1; the "six" this branch removed). They are one MUTATION and a
+        CATEGORY of reads, which is why "one exception" was never the right
+        shape:
+
+        * the mutation: ``redate_from_phase`` writes the fold's phase clock from
+          ``RuntimeServer._projection_payload``. Deliberate and bounded — it sits
+          on the WELCOME path, so hopping it would re-couple the welcome to the
+          turn, which is the coupling this change exists to remove and the reason
+          a fresh dial is served while the loop is busy.
+        * the reads: ``session_projection_seed`` hands out the LIVE projection
+          object, and ``is_busy``/``is_conversationally_active``/``subagent_counts``
+          are plain field reads — the class the heartbeat has always made from
+          this side, and they are named in the status bullet below rather than
+          hopped. A read of a field the session's loop owns is not the hazard the
+          hop exists for; a write is, and there is one.
+
+        The pair is exactly what the TUI kind already does (audit §2.2: a data
+        race in principle, shipped since the pair was written), the values are an
+        int and an object reference, and the alternative was measured worse.
+
+    Which is enforced where:
+
+    * every ``async def`` that touches session state carries
+      ``@_on_session_loop``, so its WHOLE BODY runs on the session's loop and the
+      caller awaits the result — futures, tasks and the prompt queue included;
+    * the ``def``s that mutate or read session state cannot hop themselves (a
+      synchronous method has nowhere to await), so the REGISTRANT hops them
+      through ``server.RuntimeServer._handle_call_on_session_loop``: that is
+      ``subscribe``/``subscribe_events`` (boot registrations),
+      ``is_pristine``/``may_refresh``/``begin_retire``/``request_stop`` (the
+      retire and kill-switch probes), ``has_admitted_command`` (the dedupe
+      probe) and ``register_secret_redaction``/``cancel_subagents_count`` (the
+      two ``_dispatch`` arms that mutate session state) — the last two added in
+      review, because a cancel that runs on the runtime's thread executes on the
+      wrong loop and has its cross-loop ``RuntimeError`` swallowed while the op
+      still reports success;
+    * ``reannounce_pending`` is the one named method that is deliberately NOT
+      hopped: one of its in-tree callers (the registrant's ``_drop_client``) is
+      synchronous and cannot await a hop, and it is a read-then-NOTIFY whose
+      notify path is the registrant's own thread-safe-by-design callback
+      surface — the same shape the TUI kind has always used, and the reason its
+      own docstring says the registrant calls it;
+    * plain reads of session state (``is_busy``, ``is_conversationally_active``,
+      ``subagent_counts``, ``session_projection_seed``) are read directly, which
+      is what the TUI handle documents as safe and what the heartbeat has always
+      done;
+    * ``_check_loop_thread`` is the enforcement on the other side of the seam:
+      it raises if a body reaches it from a thread that does not own the session,
+      which can now only mean the hop was impossible (no loop, or a closed one).
+
+    ``spawn_owned_session`` is the only constructor, and it binds ``loop`` to the
+    loop the session lives on.
     """
 
     #: The latch ``RuntimeServer._serve`` opens once this runtime's record is
@@ -514,6 +687,14 @@ class ServingSessionHandle(SessionHandle):
         #: Deliberately never cleared: a retirement is a one-way door for the
         #: process.
         self._retiring_cause: str = ""
+        #: The parenthetical that belongs to ``_retiring_cause``, held here so
+        #: the exit can compose its own reading of it (``process._drain_detail_at_exit``
+        #: RE-READS the build pair rather than replaying the latch's). It is the
+        #: LOG's why-now and nothing else: a retirement cannot have cut a turn
+        #: (``begin_retire`` refuses while anything is in flight), so there is no
+        #: turn outcome for it to ride — see
+        #: :meth:`_note_retirement_cut_off`.
+        self._retiring_detail: str = ""
         #: Set by :meth:`begin_drain`, the latch that does NOT require an idle
         #: runtime. It says the leaving is a HANDOVER with time left in it: the
         #: runtime still has work to finish, so a message that arrives in the
@@ -755,31 +936,42 @@ class ServingSessionHandle(SessionHandle):
         A ``config.yml`` write is the operator's machine-wide intent ("if I
         change a setting I want it to go into effect for all my agents"), so a
         session that never made a choice of its own follows the file in BOTH
-        directions. ``source`` is ignored on purpose: the runtime is never the
-        process that wrote, so every delivery is another process's edit.
+        directions — with ONE exception, the loosening rule below, which is what
+        makes the SOURCE of a policy change part of the authorization decision
+        and not merely its value.
 
-        **The rule is asymmetric, and only for a session that chose** (review
-        round 1 R1, UX round 1 U1):
+        **The rule is asymmetric, and its loosening half has two refusal
+        reasons** (review round 1 R1, UX round 1 U1; issue #1282):
 
         * **Tightening (``auto`` → ``ask``) always follows the file**,
           unconditionally, in every session. Safety propagates without
           exception; a user ends up safer than they asked, which is never the
           wrong surprise.
-        * **Loosening (``ask`` → ``auto``) does not move a session whose human
-          typed ``/approvals ask`` in it.** That session keeps its gate and
-          reads a keep notice naming the way to adopt the file instead. It is
-          the CHOSEN MODE that is consulted, not merely the fact of a choice:
-          a session whose human chose ``auto`` has no hardening to protect and
-          follows the file in both directions like any other.
+        * **Loosening (``ask`` → ``auto``) is refused unless it is attributed**
+          (#1282). Only a write THIS process made through the operator's own
+          settings facade (``source="local"``) is an operator action; a model
+          tool's own file write, an editor, another pane, the settings API in
+          another process, and ``lop config edit`` are all unattributable from
+          here, and unattributed writes may only tighten. See
+          :func:`local_operator.harness.approval.loosening_is_authorised` for
+          the rule itself and why it is `source == "local"` rather than "not
+          disk".
+        * **Loosening does not move a session whose human typed ``/approvals
+          ask`` in it** either, and that branch is checked FIRST so the more
+          specific reason is the one printed. It is the CHOSEN MODE that is
+          consulted, not merely the fact of a choice: a session whose human
+          chose ``auto`` has no hardening to protect, but this process still
+          refused the unattributed write that would have moved it.
 
         The asymmetry is the whole point. The operator asked for settings to
         REACH running sessions, which was broken and is what this change fixes;
         they did not ask for a file write to revoke a hardening a human typed
-        into a specific pane thirty seconds earlier. The parked-prompt rule
-        below already encodes that principle — a card on screen is not
-        auto-answered *because the human's presence outranks the file* — and it
-        applies one step earlier to a human who typed the mode. This mirrors
-        the model half of the same change exactly (``Session.
+        into a specific pane thirty seconds earlier, and they did not ask for a
+        model-run shell command to remove the gate from its own later calls.
+        The parked-prompt rule below already encodes the same principle — a card
+        on screen is not auto-answered *because the human's presence outranks
+        the file* — and it applies one step earlier to a human who typed the
+        mode. This mirrors the model half of the same change exactly (``Session.
         _on_configured_model_changed``, ``_explicit_model_choice``, and its
         ``keeping …`` notice), and approvals is the more dangerous of the two
         keys: an explicit ``/model`` pick was already protected while an
@@ -829,9 +1021,53 @@ class ServingSessionHandle(SessionHandle):
             # opinion about the same key, but refusing a loosening on its
             # behalf would pin a session to a mode its human never asked for.
             self._emit_notice(
-                "keeping tool approvals: ask — set with /approvals in this session; "
-                "config.yml now says auto, /approvals auto adopts it",
-                "info",
+                _LOOSENING_KEPT_BY_ASK_NOTICE,
+                # `warning`, one rung above the routine `config.yml changed:`
+                # receipt's `info`: this sentence is the whole user-visible trace
+                # of a refused policy change, and `info` renders `dim` — the same
+                # ink as the routine receipt it must be told apart from (design
+                # round 1, D2). `note` would be the designer's preferred rung and
+                # is NOT available to a runtime notice: `NoticeEvent.kind` is
+                # ``Literal["info", "warning", "error"]``, so a `note` refusal
+                # would be representable only in the embedded topology — and in
+                # production (`lop` always attaches) the sentence below is the
+                # one the user actually reads. Both keep notices carry the same
+                # rung so the two refusal reasons cannot look like two events.
+                "warning",
+                headline="Approvals unchanged",
+            )
+            return
+        if wanted_auto and not _loosening_is_authorised(
+            source=getattr(change, "source", "disk"), gate_is_here=True
+        ):
+            # LOOSENING that this process cannot attribute to an operator (see
+            # ``loosening_is_authorised``): keep the gate and say so. This is
+            # the branch that makes "the party being gated is not the authority
+            # that may lower its own gate" true in the runtime, and it is why
+            # the keep sentence above is deliberately NOT reused — there, a
+            # human's own typed ``ask`` is what refused the file; here nobody
+            # in this session asked for anything.
+            #
+            # The sentence names the RULE and not the author (design round 1,
+            # D3): this process cannot know who wrote the file, and in the
+            # attached-pane case the person reading it is the one who just
+            # clicked the row — an earlier revision said "without an operator
+            # write in this session", which was simply false to them. "From
+            # outside this session" is true of an editor, of ``lop config
+            # edit``, of a model-run shell command and of that same operator's
+            # click a process away.
+            #
+            # Checked AFTER the explicit-`ask` branch so that branch keeps
+            # meaning "the human typed ask" and so the more specific reason is
+            # the one printed. Refusing means exactly one thing: ``_auto_approve``
+            # does not move and no ``tool approvals: auto`` receipt is emitted.
+            # Nothing in this process writes this key through the settings
+            # facade today (`/approvals auto` here sets the flag directly), so
+            # in practice every file-originated loosening is refused here.
+            self._emit_notice(
+                _LOOSENING_REFUSED_NOTICE,
+                # `warning` for the reason the sibling keep notice documents.
+                "warning",
                 headline="Approvals unchanged",
             )
             return
@@ -942,7 +1178,18 @@ class ServingSessionHandle(SessionHandle):
         or an event. It RAISES when there is no store, so the viewer's sink
         declines to acknowledge and the broker denies the child rather than
         serving a value nothing can scrub — the fail-closed direction §6 requires.
+
+        THE LOOP GUARD IS WHAT MAKES THE SEAM'S CLOSED-LOOP BRANCH TRUE FOR A
+        ``def``. A synchronous method cannot carry ``@_on_session_loop``, so when
+        the session's loop is gone the registrant's helper runs this body INLINE
+        on the runtime's thread — the plane round 1's MAJOR-1 took it off. Without
+        this line that branch would execute the write and ack success (review
+        round 2, MINOR-1 / QA Q4); with it the caller gets the ordinary refusal.
+        Not a no-op for this method's other callers: the running loop IS the
+        session's loop when the session's own side calls it, which is the
+        condition this accepts.
         """
+        self._check_loop_thread()
         variables = getattr(self._session, "variables", None)
         if variables is None:
             raise RuntimeError("this runtime has no variable store to redact through")
@@ -964,6 +1211,7 @@ class ServingSessionHandle(SessionHandle):
             except Exception:  # noqa: BLE001 — teardown must not fail on a deregistration
                 logger.debug("secret session deregistration failed", exc_info=True)
 
+    @_on_session_loop
     async def dispose(self) -> None:
         """Dispose the underlying session (release the claim, flush, abort).
 
@@ -984,10 +1232,16 @@ class ServingSessionHandle(SessionHandle):
         # event), and suppressed when a deliberate stop was already noted for
         # this turn — the graceful ``stop`` op reaches here too, and relabelling
         # a user's own cancel as an error is the worse mistake.
-        session = getattr(self, "_session", None)
-        note = getattr(session, "note_cut_off", None)
-        if callable(note):
-            note(self._retiring_cause or "runtime-shutdown")
+        #
+        # THIS IS THE RUNG THAT WRITES IT, for every exit, and that placement is
+        # the fix (2026-09-17): the latches above run when the departure is
+        # DECIDED, which for the build rungs can be hours before the exit — and
+        # the note belongs to a TURN, so one armed at a latch could only ever
+        # brand whatever run ended next. Arming it here means it can only ever
+        # brand the turn the disposal is about to abort, and
+        # :meth:`_note_retirement_cut_off` gates even that on the session's own
+        # evidence of a live turn, so an exit that caught nothing notes nothing.
+        self._note_retirement_cut_off()
         # Revoke the broker registration along with the session: descendants of
         # a session that is going away must not stay authorized behind it
         # (§2.1). Bounded and non-raising, so it cannot delay or break teardown.
@@ -1252,10 +1506,27 @@ class ServingSessionHandle(SessionHandle):
         aborted (design §5.1). The latch makes the claim true by construction
         rather than by timing.
 
-        ``cause`` names the retirement for the refusal and the log; the session
-        is told as well, so a turn aborted while retiring is labelled with the
-        retirement rather than a generic shutdown.
+        ``cause`` names the retirement for the refusal and the log, and
+        ``detail`` is the why-now parenthetical that belongs to it — the build
+        pair the exit RE-READS, or the latch's reasons when the pair cannot be
+        asserted (``process._drain_detail_at_exit``). BOTH ARE RECORDED AND
+        LOGGED, AND NEITHER CAN BRAND A TURN: the cut-off note is written by
+        :meth:`_note_retirement_cut_off` at the disposal, and only for a turn
+        the disposal is actually aborting. Arming one here — which is what this
+        method did until 2026-09-17 — could only ever brand a run the exit did
+        not cut, because the idle gate above means no turn is in flight when
+        this succeeds (agent review round 1, MAJOR-1).
+
+        Refuses while this handle is already disposing, mirroring
+        :meth:`begin_drain`: the disposal owns the ordering from ``_disposing``
+        on, and a second rung committing to an exit would race it into
+        ``_clean_exit``. Hardening rather than a fix — the incident that
+        motivated the move (2026-09-17) has the arming, not the disposal, before
+        it — but the asymmetry with ``begin_drain`` is one rung away from being
+        read as an invitation.
         """
+        if getattr(self, "_disposing", False):
+            return False
         try:
             reason = str(self.may_refresh() or "")
         except Exception:  # noqa: BLE001 — uncertainty keeps the runtime
@@ -1263,12 +1534,55 @@ class ServingSessionHandle(SessionHandle):
         if reason:
             return False
         self._retiring_cause = cause or "retiring"
+        self._retiring_detail = detail
         self._exit_committed = True
+        # The exit's own LOG line, and the only reader this detail has. It is
+        # logged HERE rather than at the departure site so every rung's reading
+        # lands in one shape: the two build rungs log the pair they composed at
+        # the exit (never the latch's), the signal rung its phrase, and the
+        # viewer-driven retirement (``server._retire``) its build label.
+        logger.info(
+            "session runtime: retiring (%s)%s",
+            self._retiring_cause,
+            f" {detail.strip()}" if detail.strip() else "",
+        )
+        return True
+
+    def _note_retirement_cut_off(self) -> None:
+        """Record the cause of the turn THIS disposal is about to cut.
+
+        Called by :meth:`dispose` before the handle hands over to the session's
+        own disposal, which is the moment the cut becomes a fact rather than a
+        forecast.
+
+        THE GATE IS THE SESSION'S OWN EVIDENCE, not this handle's latch, and
+        that is the fix (agent review round 1, MAJOR-1). Written whenever the
+        latch existed, the note branded whichever run end came next — and for
+        every rung that names a build there can only ever be a run this exit did
+        NOT cut, because ``begin_retire`` refuses while anything is in flight:
+        the note then landed on a run left unsettled by a turn that had stopped
+        somewhere else, and rendered the operator a "Stopped with an error" card
+        for an update that caught nothing. What the session can attest to is a
+        turn it is ABORTING (``Session.disposal_cuts_a_turn``), so that is what
+        is asked.
+
+        THE CAUSE STILL RIDES, because one latch that CAN reach a live turn is
+        the bounded signal drain: ``begin_drain(SIGNAL_DRAIN_CAUSE)`` does not
+        require idle, ``_drain_for`` retries the exit latch until the boundary,
+        and the disposal is what aborts the turn the bound expired under —
+        labelled ``runtime-shutdown``, the token that drain carries, so a turn
+        is classified identically whether the drain expired or never ran
+        (``process._drain_for_signal``). ``runtime-shutdown`` when nothing
+        latched at all: a fatal-on-arrival SIGTERM and a host that disposes in
+        place name no retirement, and both can catch a live turn.
+        """
         session = getattr(self, "_session", None)
+        cuts = getattr(session, "disposal_cuts_a_turn", None)
+        if not callable(cuts) or not cuts():
+            return
         note = getattr(session, "note_cut_off", None)
         if callable(note):
-            note(self._retiring_cause, detail)
-        return True
+            note(self._retiring_cause or "runtime-shutdown", self._retiring_detail)
 
     def begin_drain(self, cause: str, detail: str = "") -> bool:
         """Commit this runtime to leaving WITHOUT requiring it to be idle.
@@ -1310,9 +1624,9 @@ class ServingSessionHandle(SessionHandle):
 
         Deliberately NOT ``note_cut_off``: no turn is being cut off. The turn
         running when this latches is expected to FINISH, and arming a cut-off
-        for it would relabel a completed turn as an error — that note belongs
-        to the rung that actually takes the exit, which is still
-        :meth:`begin_retire`.
+        for it would relabel a completed turn as an error — the note belongs to
+        the DISPOSAL, and only for a turn the disposal is actually aborting
+        (:meth:`_note_retirement_cut_off`).
 
         ``cause`` is the vocabulary token the refusal and the eventual cut-off
         note carry; ``detail`` is free text for the log. Returns whether the
@@ -1396,16 +1710,36 @@ class ServingSessionHandle(SessionHandle):
         # ``SIGNAL_DRAIN_CAUSE`` is the token ``process._drain_for_signal``
         # commits its drain with — imported from the drain vocabulary rather
         # than spelled here, because a rename that missed this file would
-        # silently restore the build sentence for a signalled runtime. It is the
-        # ONLY departure this side names: the build arm is left unnamed on
-        # purpose, because its cause token is shared with ``/move`` (see above),
-        # and the far side reads the trigger off the phrase the frame published
-        # instead — which a build drain carries and a move does not.
-        trigger = RuntimeRetiring.SIGNAL if self._retiring_cause == SIGNAL_DRAIN_CAUSE else ""
+        # silently restore the build sentence for a signalled runtime.
+        #
+        # THE BUILD ARM IS NAMED TOO, from the one fact that separates it from
+        # the idle retirement sharing its cause: ``_draining`` without a
+        # committed exit is the DRAIN, and every drain is raised by
+        # ``process._begin_drain`` (the stale build / the vanished tree) or by
+        # the signal handler, while ``begin_retire`` — the viewer-driven rotate,
+        # the ``/move`` — commits its exit in the same synchronous step it sets
+        # the cause. That term is what the old comment above said was missing
+        # ("the cause is shared with ``/move``, so the phrase tells them apart"),
+        # and it matters here for one reason: a build drain OWES a successor, and
+        # the refusal's tail says so instead of telling the operator to do the
+        # thing this very refusal just refused (memo §4.2 piece 3).
+        if self._retiring_cause == SIGNAL_DRAIN_CAUSE:
+            trigger = RuntimeRetiring.SIGNAL
+        elif self._draining and not self._exit_committed:
+            trigger = RuntimeRetiring.BUILD
+        else:
+            trigger = ""
         return RuntimeRetiring(trigger=trigger)
 
     async def _spool_for_successor(
-        self, text: str, *, mode: str, wake: bool, sender: dict[str, Any]
+        self,
+        text: str,
+        *,
+        mode: str,
+        wake: bool,
+        sender: dict[str, Any],
+        source: str = SOURCE_PEER,
+        command_id: str = "",
     ) -> str:
         """Spool one message for the successor runtime, and receipt it.
 
@@ -1439,9 +1773,21 @@ class ServingSessionHandle(SessionHandle):
         directory, an unwritable inbox): the caller then gets the sentence that
         tells it to send again, which is the same contract every other admission
         gets once a runtime is leaving.
+
+        ``source`` and ``command_id`` are the OWNER's-prompt halves and default
+        to the peer shape, so the peer callers above are unchanged and a row a
+        build older than these fields wrote still reads as a peer row. See
+        ``inbox.SOURCE_USER`` for why the successor cannot guess: the two
+        deliveries differ in provenance, not just in wording. The receipt
+        follows the source, because the two senders are buying different things
+        from the same vehicle — a peer's message is held for the next runtime, a
+        user's own prompt is queued onto it, and only the second one is the same
+        admission their composer was refused a moment ago.
         """
         from local_operator.session.runtime.inbox import (
+            SOURCE_USER,
             SPOOL_RECEIPT_NOTE,
+            SPOOL_RECEIPT_PROMPT,
             SPOOL_RECEIPT_WAKE,
             InboxLine,
             append_inbox,
@@ -1462,14 +1808,21 @@ class ServingSessionHandle(SessionHandle):
                     mode=mode,
                     written_at=time.time(),
                     wake=wake,
+                    source=source,
+                    command_id=command_id,
                 ),
             )
         except Exception:  # noqa: BLE001 — a broken spool is a refusal, not a crash
-            logger.warning("could not spool a peer message for the successor", exc_info=True)
+            logger.warning("could not spool a message for the successor", exc_info=True)
             written = False
         if not written:
             raise self._retiring_refusal()
-        logger.info("session runtime: spooled a peer message for the successor")
+        logger.info(
+            "session runtime: spooled a %s for the successor",
+            "prompt" if source == SOURCE_USER else "peer message",
+        )
+        if source == SOURCE_USER:
+            return SPOOL_RECEIPT_PROMPT
         return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE
 
     def may_refresh(self) -> str:
@@ -1658,6 +2011,13 @@ class ServingSessionHandle(SessionHandle):
 
     async def _resolve_pending(self, request_id: str, value: Any) -> None:
         """Atomically reserve and settle one gate on its owning event loop."""
+        # THE GATE PATH NEEDS THE REFUSAL TOO (review round 2, UX U8). This is the
+        # one body on the decorator half of the seam that touches the loop
+        # directly — ``call_soon_threadsafe`` below — so on a closed session loop
+        # it raised ``RuntimeError: Event loop is closed`` and the client was handed
+        # the asyncio internal, in the middle of a person tapping Approve. The
+        # guard turns that into the named refusal the dispatcher already renders.
+        self._check_loop_thread()
         import concurrent.futures
 
         receipt: concurrent.futures.Future[None] = concurrent.futures.Future()
@@ -1680,8 +2040,48 @@ class ServingSessionHandle(SessionHandle):
     # -- SessionHandle -----------------------------------------------------------
 
     @property
+    def session_loop(self) -> asyncio.AbstractEventLoop:
+        """The loop this handle's session lives on: what a registrant must hop to.
+
+        Published because the runtime cannot infer it. ``RuntimeServer`` hosts
+        itself on its own thread (``start()``), and the handle is constructed on
+        the SESSION's loop, so from the runtime's side "the session's loop" is
+        otherwise unknowable — and the ``SessionHandle`` protocol has always said
+        the implementor must make the hop possible rather than require the
+        registrant to guess.
+
+        Two callers, both in ``server.py`` and both registrations that MOVE
+        rather than merely hop: ``RuntimeServer._handle_call_on_session_loop``
+        (the two boot registrations in ``_serve`` plus the per-connection frontend
+        bind in ``_on_connection``) and the loop comparison in that helper, which
+        turns an in-process host into a no-op.
+
+        A handle that does NOT publish this keeps the behaviour it shipped with,
+        and that is load-bearing rather than lenient: the TUI handle owns its own
+        hopping (Textual's ``call_from_thread``, ``tui_handle.py``) and must not
+        be handed the runtime's ``run_coroutine_threadsafe`` instead. Its absence
+        is therefore the signal "this handle marshals for itself".
+        """
+        return self._loop
+
+    @property
     def session_projection_seed(self) -> SessionProjection:
+        """The projection skeleton: identity fields the runtime folds onto.
+
+        A pure read; see :meth:`redate_from_phase` for the hand-off that dates
+        the band's age, and the TUI handle's same pair for why they are separate
+        (review round 4, NIT 2).
+        """
         return self._projection
+
+    def redate_from_phase(self) -> None:
+        """Re-date the band's age through the fold the EVENTS ARE FED into.
+
+        The runtime calls this on every frame it serializes: the age is written
+        when the phase moves, so a viewer or a push arriving mid-phase is
+        otherwise served the number from the last edge (review round 3, MAJOR 1).
+        """
+        self._fold.redate_from_phase()
 
     # -- v4 full-TUI capability --------------------------------------------------
     # These three are what makes ``RuntimeServer`` advertise
@@ -1697,17 +2097,35 @@ class ServingSessionHandle(SessionHandle):
     # no message could be sent in any session. Round 1 QA (Q2) and UX (U1)
     # both found it independently against the real binary.
     #
-    # The delegation is DIRECT where the mobile bridge hops threads. That
-    # bridge adapts a session living on Textual's loop from a foreign thread,
-    # so it must marshal; this handle IS constructed on the runtime's own loop
-    # and owns its session outright (see ``spawn_owned_session``), so the hop
-    # would be a round trip to the thread already executing.
+    # The delegation is DIRECT where the mobile bridge hops threads. That bridge
+    # adapts a session living on Textual's loop from a foreign thread, so it must
+    # marshal; this handle was written against the opposite premise — *"this
+    # handle IS constructed on the runtime's own loop … so the hop would be a
+    # round trip to the thread already executing"* — which held only while
+    # ``daemon``/``exec`` served in process.
+    #
+    # IT NO LONGER HOLDS, and the premise stays visible because it is how this
+    # handle came to be the one implementation that does not marshal.
+    # ``RuntimeServer.start()`` puts the runtime on its own thread, so every
+    # method below is called ACROSS threads by the daemon and exec kinds, and
+    # every ``async def`` out of the reachable surface now carries
+    # ``@_on_session_loop`` — that decorator, and the synchronous methods the
+    # registrant hops through ``server._handle_call_on_session_loop``, ARE the
+    # marshalling. The class docstring's enumeration is the one place the hop
+    # list lives, and that list is deliberately not counted here: this comment
+    # said "six" while the list already held four more, which is the drift a
+    # number in a second location always produces (review round 1, MAJOR-1).
+    # The class docstring states the contract and which method is served by
+    # which mechanism; :meth:`_check_loop_thread` states what happens when a hop
+    # is impossible.
 
+    @_on_session_loop
     async def refresh_attention(self) -> dict[str, Any]:
         state = await self._session.refresh_attention()
         self._projection.attention = state
         return state
 
+    @_on_session_loop
     async def acknowledge_attention(self, token: str) -> dict[str, Any]:
         state = await self._session.acknowledge_attention(token)
         self._projection.attention = state
@@ -1718,6 +2136,7 @@ class ServingSessionHandle(SessionHandle):
         """Canonical state seed for full-TUI attach clients."""
         return self._session.frontend_state
 
+    @_on_session_loop
     async def subscribe_frontend(
         self, on_update: Callable[[Any], None], *, display_window: bool = False
     ) -> Any:
@@ -1730,9 +2149,11 @@ class ServingSessionHandle(SessionHandle):
         """
         return self._session.subscribe_frontend(on_update, display_window=display_window)
 
+    @_on_session_loop
     async def record_shell(self, command: str, result: Any) -> None:
         await self._session.record_shell(command, result)
 
+    @_on_session_loop
     async def history_page(self, before: str, anchor: str = "") -> dict[str, Any]:
         return self._session.history_page(before, anchor)
 
@@ -1751,7 +2172,18 @@ class ServingSessionHandle(SessionHandle):
 
         def handler(event: AgentEvent) -> None:
             try:
-                on_event(event.model_dump(mode="json"))
+                # Bounded here rather than in the relay: this is where the
+                # event becomes bytes, so it is the last place a conversation
+                # frame can be elided while the loop's own message objects stay
+                # untouched (``harness/wire.py``). The socket's own 1 MiB fitter
+                # would not have caught it — the 104-message / 50-tool-row
+                # fixture measures a 531,082-byte payload, and
+                # ``fit_frame_for_wire`` returns it byte-identical.
+                payload = bound_agent_end_for_wire(
+                    event.model_dump(mode="json"),
+                    session_id=getattr(self._session, "session_id", None),
+                )
+                on_event(payload)
             except Exception:  # noqa: BLE001 — the relay is additive, never a gate
                 logger.debug("runtime event serialization failed", exc_info=True)
 
@@ -1780,6 +2212,15 @@ class ServingSessionHandle(SessionHandle):
         # saw the AgentStartEvent). After this the fold's own lifecycle events
         # own ``streaming`` — see ``_reconcile_streaming``.
         self._reconcile_streaming()
+        # Seed the CLOCKS from the same attach, and for the same reason: this
+        # fold was built for the attachment, so it witnessed neither the
+        # ``tool_execution_start`` of a call already in flight nor the phase
+        # edge of a model call already streaming, and its first event would
+        # date both from this process's arrival — the reported band reading
+        # ``0s`` and counting up. The producer's own folded instants date them
+        # instead; a session that cannot answer seeds nothing
+        # (``ProjectionFold.reconcile_clocks``).
+        self._fold.reconcile_clocks(self._session)
         # Seed the state (and with it the child roster) ONCE at attach. Until
         # the next event arrives this push is all a freshly attached phone
         # renders, and a settled turn never sends another: without this an
@@ -1795,6 +2236,7 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         return unsubscribe
 
+    @_on_session_loop
     async def prompt(
         self,
         text: str,
@@ -1879,6 +2321,50 @@ class ServingSessionHandle(SessionHandle):
             # Refused, not queued: a turn admitted here is aborted one await
             # later by the dispose that is already on its way, after the
             # provider has been paid for whatever it managed to stream.
+            #
+            # UNLESS THE SUCCESSOR CAN HAVE IT, which is the sibling of the peer
+            # path one method over: the message is SPOOLED into the same inbox
+            # the successor drains before its socket listens, so the user's own
+            # message runs on the build that is taking over instead of being
+            # handed back to them to send again. The refusal that remains is the
+            # fallback for the case where there is nowhere to put it, and that is
+            # deliberate rather than incidental: telling a user "send it again
+            # later" is worse than carrying the message, but it beats both a
+            # silent drop and a receipt for a deferral no runtime will ever read.
+            #
+            # THREE TERMS, and each excludes a case where the spool would lie.
+            # ``_draining`` is the committed-but-not-yet-exiting drain whose
+            # successor is owed; ``begin_retire`` (a viewer-driven rotate, a
+            # ``/move``) sets the cause WITHOUT it and commits its exit in the
+            # same step, so there is no handover for a message to ride.
+            # ``_exit_committed`` is the drain's own terminal rung — once the
+            # process is taking the exit nothing will ever read the spool.
+            #
+            # ATTACHMENTS ARE THE ONE THING THE VEHICLE CANNOT CARRY: an inbox
+            # row is text (``inbox.InboxLine``), so spooling an image-carrying
+            # prompt would return a receipt for a message that arrives without
+            # its attachment — losing the user's file while telling them it was
+            # queued. It takes the refusal, which returns both to the composer.
+            if self._draining and not self._exit_committed and not blocks:
+                try:
+                    receipt = await self._spool_for_successor(
+                        text,
+                        mode="mailbox",
+                        wake=True,
+                        sender={},
+                        source=SOURCE_USER,
+                        command_id=command_id,
+                    )
+                finally:
+                    # Rejected on BOTH outcomes, and for the same reason the
+                    # refusal below rejects: this command is not in the
+                    # transcript, so the identity must not be spent. A retry
+                    # that re-spools is deduplicated by the successor instead
+                    # (``process._drain_inbox_into`` consults the durable index
+                    # with this same id), which is the only place the answer is
+                    # authoritative — this process is leaving.
+                    self._command_reservations.reject(command_id)
+                return receipt
             self._command_reservations.reject(command_id)
             raise self._retiring_refusal()
         if len(self._prompt_queue) >= MAX_QUEUED_PROMPTS:
@@ -1949,6 +2435,7 @@ class ServingSessionHandle(SessionHandle):
                 self._goal_loop.state = dict(store.state.loop)
         return self._goal_loop
 
+    @_on_session_loop
     async def run_headless_prompt(self, text: str) -> bool:
         """Submit through the owner queue so live viewers cannot race exec.
 
@@ -1973,6 +2460,7 @@ class ServingSessionHandle(SessionHandle):
         """Why the last admitted turn failed, or "" — see the drain's handler."""
         return self._last_prompt_failure
 
+    @_on_session_loop
     async def run_headless_loop(self, *, count: int | None, goal: str | None) -> bool:
         """Await the same owner-local driver used by /loop, not another runner."""
         driver = self._loop_driver()
@@ -1989,6 +2477,7 @@ class ServingSessionHandle(SessionHandle):
             raise asyncio.CancelledError
         return driver.state.get("status") in {"completed", "achieved"}
 
+    @_on_session_loop
     async def cancel_headless_loop(self) -> None:
         if self._goal_loop is not None:
             await self._goal_loop.cancel()
@@ -2186,9 +2675,13 @@ class ServingSessionHandle(SessionHandle):
                 raise
             except Exception as exc:  # noqa: BLE001 — admitted turns need terminal handling
                 if not command.admitted.done():
+                    from local_operator.session.errors import TurnInFlight
+
                     self._command_reservations.reject(
                         command.command_id,
-                        transfer_to_steer="already streaming" in str(exc),
+                        transfer_to_steer=(
+                            isinstance(exc, TurnInFlight) or "already streaming" in str(exc)
+                        ),
                     )
                     command.admitted.set_exception(exc)
                 # Provider, transcript, and tool failures are all terminal for
@@ -2215,6 +2708,7 @@ class ServingSessionHandle(SessionHandle):
                 self._prompt_queue.popleft()
                 self._prompt_commands.pop(command.command_id, None)
 
+    @_on_session_loop
     async def steer(
         self,
         text: str,
@@ -2274,6 +2768,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return "steering queued"
 
+    @_on_session_loop
     async def receive_peer_message(
         self,
         text: str,
@@ -2311,6 +2806,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return detail
 
+    @_on_session_loop
     async def abort(self) -> str:
         """Stop this session's turn AND its children, and say what was stopped.
 
@@ -2527,6 +3023,7 @@ class ServingSessionHandle(SessionHandle):
             if getattr(job, "type", "") == "bash" and getattr(job, "status", "") == "running"
         )
 
+    @_on_session_loop
     async def cancel_gracefully(self, reason: str = "cancelled by supervisor") -> str:
         """Stop at the next post-tool boundary, leaving in-flight work intact.
 
@@ -2560,6 +3057,7 @@ class ServingSessionHandle(SessionHandle):
         request(reason)
         return "cancelling at the next tool boundary"
 
+    @_on_session_loop
     async def set_model(self, provider: str, model_id: str) -> str:
         """Switch the owner onto ``provider``/``model_id`` at the model's own level.
 
@@ -2569,6 +3067,7 @@ class ServingSessionHandle(SessionHandle):
         """
         return await self.set_model_effort(provider, model_id, None)
 
+    @_on_session_loop
     async def set_model_effort(self, provider: str, model_id: str, effort: str | None) -> str:
         """Switch the owner onto ``provider``/``model_id`` AT ``effort``.
 
@@ -2607,6 +3106,7 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         return f"model: {self._projection.model_label}"
 
+    @_on_session_loop
     async def set_effort(self, effort: str) -> str:
         self._check_loop_thread()
         spec = self._session.model
@@ -2623,6 +3123,7 @@ class ServingSessionHandle(SessionHandle):
         self._refresh_state()
         return f"effort: {effort}"
 
+    @_on_session_loop
     async def slash(self, command: str, args: str) -> str:
         """Session-level slash commands — the ones with meaning off-terminal.
         TUI chrome (/help tables, /usage panels) is the phone UI's own job."""
@@ -2634,16 +3135,20 @@ class ServingSessionHandle(SessionHandle):
             return "compacting context"
         raise ValueError(f"/{command} is terminal-only here")
 
+    @_on_session_loop
     async def new_conversation(self) -> str:
         raise ValueError("start a new session from the session list")
 
+    @_on_session_loop
     async def resume_session(self, session_id: str) -> str:
         raise ValueError("pick the session from the session list instead")
 
+    @_on_session_loop
     async def approval_answer(self, request_id: str, approved: bool, remember: bool) -> str:
         await self._resolve_pending(request_id, approved)
         return "approved" if approved else "denied"
 
+    @_on_session_loop
     async def ask_answer(
         self, request_id: str, value: str, question_index: int | None = None
     ) -> str:
@@ -3140,6 +3645,15 @@ class ServingSessionHandle(SessionHandle):
             return
         try:
             loop = asyncio.get_running_loop()
+            # CONTRACT, read from outside: the successor is stored in
+            # `_completion_task` BEFORE this rung returns, and there is exactly ONE
+            # chain per slot. A reader can then tell "exhausted" from "still
+            # running" by a slot that still holds the task that just finished —
+            # `tests/unit/session/test_runtime_completion_announce.py`'s
+            # `_ladder_exhausted` waits on exactly that, because the alternative
+            # (counting banner calls) reads the claim before this attempt releases
+            # it. Build a successor without storing it, or keep a second chain
+            # alive, and that reader sees a ladder which ended after one rung.
             self._completion_task = loop.create_task(
                 self._run_completion_announce(attempt + 1, _COMPLETION_RETRY_DELAYS_S[attempt])
             )
@@ -3358,6 +3872,7 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("could not resolve the gate's session name", exc_info=True)
             return ""
 
+    @_on_session_loop
     async def fork_snapshot(self, message: str) -> dict[str, Any]:
         """Snapshot THIS authenticated owner, never a client-supplied path/id."""
         busy = self.is_busy()
@@ -3366,6 +3881,7 @@ class ServingSessionHandle(SessionHandle):
         result["busy"] = busy
         return result
 
+    @_on_session_loop
     async def complete_aside(self, turns: list[dict[str, Any]]) -> str:
         """Run an off-record provider request against this session.
 
@@ -3392,6 +3908,7 @@ class ServingSessionHandle(SessionHandle):
             )
         return await complete(messages)
 
+    @_on_session_loop
     async def adopt_aside(self, messages: list[dict[str, Any]]) -> str:
         """Fork a viewer's aside exchange into the durable conversation."""
         from local_operator.harness.types import Message
@@ -3401,6 +3918,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return f"forked {len(parsed) // 2} aside exchange(s) into the chat"
 
+    @_on_session_loop
     async def recall_steer(self, command_id: str) -> str:
         """Recall one queued steer by the Message id its producer supplied.
 
@@ -3419,6 +3937,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return "steering recalled"
 
+    @_on_session_loop
     async def slash_images(
         self,
         command: str,
@@ -3441,6 +3960,7 @@ class ServingSessionHandle(SessionHandle):
         result = await self.run_slash_authoritative(command, args, images)
         return str(result.get("text") or f"ran /{command}")
 
+    @_on_session_loop
     async def credential_op(self, action: str, key: str, value: str) -> dict[str, Any]:
         """Run one ``/credential`` verb against the session's variable store.
 
@@ -3486,11 +4006,13 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the credential is already stored
             logger.warning("could not announce credential change", exc_info=True)
 
+    @_on_session_loop
     async def mcp_credentials_op(self, body: dict[str, Any]) -> dict[str, Any]:
         from local_operator.mcp.credentials import MCPCredentials, store_credentials
 
         return await store_credentials(self._session, MCPCredentials.model_validate(body))
 
+    @_on_session_loop
     async def variables_op(
         self, action: str, key: str = "", value: str = "", value_type: str = ""
     ) -> dict[str, Any]:
@@ -3534,11 +4056,25 @@ class ServingSessionHandle(SessionHandle):
         do less than it says on a detached session (round 3, U9) — the turn
         ends but the children keep burning tokens.
 
-        Re-homed from ``TuiSessionHandle``: that version hopped to the app
-        loop because the session lived there. Here the session is on THIS
-        loop, so the call is direct — the same reason the rest of this class
-        does not need ``run_coroutine_threadsafe``.
+        THE CALL IS MARSHALLED, not direct, and the premise it replaced is
+        quoted because it is the exact sentence that shipped the bug: *"Re-homed
+        from ``TuiSessionHandle``: that version hopped to the app loop because
+        the session lived there. Here the session is on THIS loop, so the call
+        is direct."* The session is NOT on this loop any more —
+        ``RuntimeServer.start()`` puts the registrant on its own thread — so the
+        registrant hops this through
+        ``RuntimeServer._handle_call_on_session_loop`` (review round 1, BLOCKER
+        D-1), which is also where the reasoning for why a bare call was worse
+        than slow is written down.
+
+        THE LOOP GUARD, for the same reason as ``register_secret_redaction``'s:
+        this is the other ``def`` the registrant hops, so it is the other one a
+        dead session loop would run INLINE on the runtime's thread while still
+        returning a count (review round 2, MINOR-1 / QA Q4). The bodies that
+        carry ``@_on_session_loop`` get the refusal from the decorator's path;
+        these two need it written down.
         """
+        self._check_loop_thread()
         cancel = getattr(self._session, "cancel_subagents", None)
         if not callable(cancel):
             return 0
@@ -3547,6 +4083,7 @@ class ServingSessionHandle(SessionHandle):
         self._notify()
         return stopped
 
+    @_on_session_loop
     async def run_slash_authoritative(
         self,
         command: str,
@@ -4928,17 +5465,46 @@ class ServingSessionHandle(SessionHandle):
             # asks reports a matched pair while the two genuinely disagree.
             on_disk = self._configured_approval_mode()
             if on_disk is not None and on_disk != live:
+                # The remedy is named (UX round 1, U3): this is the surface whose
+                # job is "what is in effect and why", and a divergence it
+                # discloses without naming the command that resolves it leaves
+                # the user to work out the direction themselves. `/approvals
+                # {on_disk}` is the one that MATCHES the file, so it is right in
+                # both directions — `/approvals auto` for the divergence this
+                # change makes common (a live `ask` over a file that says
+                # `auto`), and `/approvals ask` for the mirror case.
                 return SlashResult(
                     kind="notice",
                     text=(
                         f"tool approvals: {live} (this session) — {effect}; "
-                        f"config.yml says {on_disk}"
+                        f"config.yml says {on_disk} — /approvals {on_disk} adopts it in "
+                        "this session"
                     ),
                     style="warning" if self._auto_approve else "info",
                 )
+            # The matched pair, worded as the app words it (UX round 2, U10):
+            # the app-local report has always ended "new sessions open the same
+            # way" here and the runtime's stopped one clause short, which is the
+            # divergence U5 closed for the receipts. The clause is only added
+            # when the FILE was actually read and agrees — with no watcher
+            # snapshot (`None`) the runtime has nothing to say about new
+            # sessions, and inventing it would be the class of claim this whole
+            # change is about.
+            matched = f"tool approvals: {live} — {effect}"
+            if on_disk == live:
+                matched += "; new sessions open the same way"
+            # A DISARMED gate the pane's marker cannot show (UX round 2, U6):
+            # with this change a routed `/approvals auto` is the only route that
+            # loosens a running session, and the routed command cannot move the
+            # pane's `_approve_all`, which is the marker's only input — so the
+            # operator's persistent indicator stays dark and only this sentence
+            # says so. Only for `auto`: a routed tightening leaves the marker
+            # correctly dark, and the clause would be noise there.
+            if live == "auto":
+                matched += _GATE_MARKER_CLAUSE
             return SlashResult(
                 kind="notice",
-                text=f"tool approvals: {live} — {effect}",
+                text=matched,
                 style="warning" if self._auto_approve else "info",
             )
         if argument in ("ask", "on", "prompt"):
@@ -4959,12 +5525,23 @@ class ServingSessionHandle(SessionHandle):
         # hardening a file loosening must not revoke.
         self._explicit_approvals_mode = "auto" if wanted_auto else "ask"
         self._notify()
+        # "(this session)" on the LIVE half, matching the app's own receipt word
+        # for word (UX round 1, U5): the two hosts answer the same gesture, and
+        # two sentences for it read as two different facts, one of which is
+        # always the wrong half — this half governs THIS session, whatever
+        # config.yml says about the next one. The app's ASK receipt said "will
+        # prompt again" until round 2 and this one said "prompt before running"
+        # — one noun apart, which made the "word for word" above untrue for that
+        # direction (agent review round 2, nit); the app now uses this phrase,
+        # the one the reports use for the same state.
         return SlashResult(
             kind="notice",
             text=(
-                "tool approvals: auto — every tool runs without asking"
+                "tool approvals: auto — every tool runs without asking (this session)"
+                + _GATE_MARKER_CLAUSE
                 if wanted_auto
-                else "tool approvals: ask — write and command tools prompt before running"
+                else "tool approvals: ask — write and command tools prompt before running "
+                "(this session)"
             ),
             style="warning" if wanted_auto else "info",
         )
@@ -5074,6 +5651,7 @@ class ServingSessionHandle(SessionHandle):
         except Exception:  # noqa: BLE001 — the refusal still stands
             logger.debug("could not record the compaction refusal", exc_info=True)
 
+    @_on_session_loop
     async def job_trajectory(self, job_id: str, offset: int, limit: int) -> dict[str, Any]:
         """One page of a child job's retained event window.
 
@@ -5157,6 +5735,7 @@ class ServingSessionHandle(SessionHandle):
             **details,
         }
 
+    @_on_session_loop
     async def refresh(self) -> None:
         self._refresh_state()
         self._refresh_todos()
@@ -5299,11 +5878,47 @@ class ServingSessionHandle(SessionHandle):
             logger.debug("could not publish the subagent counts", exc_info=True)
 
     def _check_loop_thread(self) -> None:
-        """The registrant calls handle methods on its own loop; owned sessions
-        live on the daemon loop. The registrant hops via ``run_coroutine_threadsafe``
-        in the daemon's spawn path, so reaching here means we ARE on the right
-        loop — assert it in dev, and let the call proceed (asyncio detects real
-        cross-loop misuse loudly)."""
+        """Enforce that a body below this line is on the loop owning the session.
+
+        THIS IS NOW A REAL INVARIANT, and it was a lie for as long as
+        ``daemon``/``exec`` served in process: a docstring over an empty body
+        asserting a hop that did not exist (the only ``run_coroutine_threadsafe``
+        in ``server.py`` was ``close()``'s bounded join). An invariant that
+        nothing enforces is worse than an absent one — the caller reads the
+        claim, believes it, and the mistake ships as a wrong-thread TURN rather
+        than as an error.
+
+        Measured, which is why the enforcement matters (``probe_daemon_threaded.py``,
+        the naive thread-hosted runtime): a ``prompt`` reached here from the
+        runtime's thread and did two things at once — replied with an asyncio
+        cross-loop error (``prompt`` created its ``admitted`` future on the
+        session's loop and then ``asyncio.ensure_future``d the drain on the
+        CALLER's, so the turn ran on the wrong thread) AND mutated the session
+        anyway, leaving it un-disposable (the probe had to be killed at 150 s
+        with the session's loop parked in ``select()``).
+
+        WHO KEEPS IT TRUE: :func:`_on_session_loop`, which puts every public
+        async body on the session's loop before this line runs, and
+        ``RuntimeServer._handle_call_on_session_loop`` for the synchronous
+        methods the registrant drives — the class docstring enumerates them, and
+        that list is the single place they are named. So reaching here off-loop is now the
+        EXCEPTION rather than the rule, and it means exactly one thing: the hop
+        could not be made — no loop, or a loop already closed. That is not a
+        state to run a session-mutating op in, so it is refused.
+
+        A plain ``RuntimeError`` is the refusal, which is what the dispatcher's
+        existing error-frame path already renders for a handle refusal — no new
+        category, no ``error_code``, no wire change — and the sentence names the
+        SITUATION rather than the machinery, because a person reads it. Nothing
+        below this line runs.
+        """
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            return
+        raise RuntimeError("this session cannot accept that op right now")
 
     def _refresh_state(self) -> None:
         self._fold.set_state(
@@ -5542,7 +6157,7 @@ async def spawn_owned_session(
         # MCP WIRING RIDES THE RECORD, NOT THE BOOT PATH. Everything this
         # session does before ``RecordPublisher`` runs (``process.amain``:
         # spawn_owned_session -> _drain_inbox_into -> async_init ->
-        # start_in_process) is invisible to the viewer, which is sitting on
+        # ``RuntimeServer.start``) is invisible to the viewer, which is sitting on
         # the status band's `starting…` with nothing to bind to. Eager wiring
         # put MCP discovery, every configured server's connect and the 250 ms
         # startup gate — plus whatever a hanging or 401-answering server costs

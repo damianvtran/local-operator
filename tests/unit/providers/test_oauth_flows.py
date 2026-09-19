@@ -1420,6 +1420,11 @@ def test_paste_key_providers_declare_that_they_require_a_prompt() -> None:
         "alibaba-token-plan",
         "alibaba-token-plan-oauth",
         "zai",
+        # TypeSafe's Jev joined this set with the classification layer: its key
+        # is pasted from the console, and the provider is decision-only, which
+        # changes WHERE the credential is used (never chat) rather than how it
+        # is obtained.
+        "typesafe",
     }, required
 
     # And the union a host actually gates on: required plus the browser
