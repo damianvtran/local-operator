@@ -1560,6 +1560,87 @@ def test_local_commands_are_safe_and_track_the_ci_steps_they_mirror() -> None:
             )
 
 
+def test_a_narrowed_local_command_still_runs_the_tool_ci_runs() -> None:
+    """A16. File-level scoping must not change WHICH tool a local gate runs.
+
+    The scoped commands are cut out of `JOB_COMMANDS` by replacing one scripted
+    input with a file list. That is a second spelling of a gate, in the one place
+    the drift assertion above does not look, so it is asserted here: for every
+    scoped job, narrowing its commands must keep both the tool that assertion
+    compares AND the #423-safe invocation shape (`python -m …`/`uvx`, never a
+    bare console script).
+
+    Mutations that must fail this: point `SCOPE_MARKERS` at a token the command
+    does not contain (then the marker assertion below fires first); or narrow by
+    rewriting the tool token instead of the scripted input.
+    """
+    scope = _scope()
+    assert set(scope.SCOPE_MARKERS) == set(scope.SCOPED_JOBS), (
+        "every scoped job needs a marker to narrow, and every marker needs a job: "
+        f"{sorted(set(scope.SCOPE_MARKERS) ^ set(scope.SCOPED_JOBS))}"
+    )
+
+    for job in scope.SCOPED_JOBS:
+        marker = scope.SCOPE_MARKERS[job]
+        targets = ["probe.py"] if marker == "." else [f"{marker}/probe.py"]
+        narrowed_commands, notes = scope._narrow_where_possible(
+            scope.JOB_COMMANDS[job], marker, targets
+        )
+        assert len(narrowed_commands) == len(
+            scope.JOB_COMMANDS[job]
+        ), f"{job}: narrowing must not add or drop a step"
+        for original, narrowed in zip(scope.JOB_COMMANDS[job], narrowed_commands):
+            assert scope._invoked_tool(narrowed) == scope._invoked_tool(original), (
+                f"{job}: narrowing changed the tool from "
+                f"{scope._invoked_tool(original)!r} to {scope._invoked_tool(narrowed)!r} "
+                f"({narrowed!r})"
+            )
+            program = Path(_executed_program(narrowed)).name
+            assert program == "uvx" or program == "env" or program.startswith("python"), (
+                f"{job}: the narrowed command execs `{program}` — only the "
+                "interpreter and `uvx` are safe spellings (#423)"
+            )
+        narrowed_count = sum(1 for c in narrowed_commands if targets[0] in c)
+        assert narrowed_count == len(narrowed_commands) - len(
+            notes
+        ), f"{job}: a step that did not narrow must be REPORTED as kept ({notes!r})"
+        assert narrowed_count, f"{job}: nothing in the job was narrowed at all"
+
+
+def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
+    """A17. A local bound a timeout can escape is the leak this repo measured.
+
+    `pyright` is a Python wrapper around an npm analyzer. `timeout 900 …` kills
+    the wrapper, the node child survives as an orphan holding its heap, and the
+    queue behind it is what makes the next run slower still. So the local
+    command must go through `scripts/run_bounded.py`, the bound must MATCH the
+    job's own `timeout-minutes` in ci.yml (a local bound looser than CI's would
+    hide the difference), and the wrapper must exist — a typo in the path would
+    otherwise surface only on a real run.
+
+    Mutations that must fail this: drop the wrapper from the command; change
+    `timeout-minutes: 15`; or point the command at a wrapper path that is not
+    there.
+    """
+    scope = _scope()
+    command = scope.JOB_COMMANDS["type-check"][0]
+    assert f"scripts/{scope.BOUNDED_WRAPPER_NAME}" in command, command
+    wrapper = REPO / "scripts" / scope.BOUNDED_WRAPPER_NAME
+    assert wrapper.is_file(), "the local gate names a wrapper script that does not exist"
+
+    minutes = _ci_jobs()["type-check"].get("timeout-minutes")
+    assert isinstance(minutes, int), "type-check has no timeout-minutes to mirror"
+    tokens = shlex.split(command)
+    assert "--timeout" in tokens, tokens
+    assert float(tokens[tokens.index("--timeout") + 1]) == minutes * 60, (
+        f"the local bound {tokens[tokens.index('--timeout') + 1]!r} does not mirror "
+        f"ci.yml's timeout-minutes: {minutes}"
+    )
+    tool = scope._invoked_tool(command)
+    assert tool == "pyright", "the drift assertion must see the wrapped tool, not the wrapper"
+    assert "pyright" in tokens, "the wrapper must still wrap pyright itself"
+
+
 def test_ci_and_make_share_one_classifier_module() -> None:
     """A12. Two hand-written mappings are how CI and the local gate drift apart.
 

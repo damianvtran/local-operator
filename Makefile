@@ -117,6 +117,14 @@ lint: ## Run linting with flake8
 # whose flags gate its jobs — so the local answer and CI's answer cannot drift
 # into two opinions about which gates a diff needs.
 #
+# File-level narrowing happens inside that module (its fourth section): lint and
+# the two pytest jobs run over the files this diff can reach, and fall back to
+# the whole-tree command — printing which trigger fired — for a structural
+# change, an unbuildable import graph, or a selection above the fraction arms.
+# CI is untouched and stays the authoritative full-matrix gate; `--no-scope`
+# runs the whole-tree commands if you want them anyway. AGENTS.md, "Scoping the
+# inner loop", has the trigger list and the measured costs.
+#
 # `--since` is the merge base with `origin/main`, not `origin/main` itself: a
 # plain two-dot diff against a moved `origin/main` sweeps in every commit main
 # landed since this branch was cut and would run gates for work this branch
@@ -132,8 +140,19 @@ check-changed: ## Run the CI gates this branch's diff can affect
 	.venv/bin/python scripts/ci_scope.py --since "$$base" --run
 
 # Run type checking with pyright
+#
+# Through `scripts/run_bounded.py`, not `timeout`, and never unbounded. pyright
+# is a Python wrapper around an npm/node analyzer, and the fleet has shown
+# analyzers re-parented to launchd holding 1-2 GB each, one alive 81 minutes
+# after its parent died. The wrapper puts the command in its own process group
+# and signals the whole group on every exit path — including the two cases a
+# `timeout` cannot cover: a descendant alive when the leader exits by itself, and
+# a group that ignores SIGTERM (measured: a bare `timeout` wedged for 300 s where
+# the wrapper's SIGKILL escalation cleared the same tree in ~8 s). 900 s mirrors
+# this job's `timeout-minutes: 15` in ci.yml.
 type-check: ## Run type checking with pyright
-	.venv/bin/python -m pyright --pythonpath .venv/bin/python .
+	.venv/bin/python scripts/run_bounded.py --timeout 900 -- \
+		.venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 # Build the OSWorld V2 evaluation adapter: lock, wheel, and the workspace
 # materialisation command. Deliberately NOT wired into CI's default job — the
