@@ -17,7 +17,16 @@ carried forward:
 | repo | ref | notes |
 |---|---|---|
 | `local-operator` | `a8fe0c1d66896ff4843092a708adef9464eafed2` (`origin/main`, the merge of PR #1326) | read in the worktree `~/local-operator-worktrees/console-tab-design`, branch `design/console-tab` |
-| `local-operator-ui` | `db615bd46d55f9375911d2359af5b4feff27a1cd` (`origin/main`) | read through `git show origin/main:<path>` from `~/local-operator-ui`, whose **checked-out HEAD is `0f76af9e1` — three days and 656 files behind `origin/main`** |
+| `local-operator-ui` | `db615bd46d55f9375911d2359af5b4feff27a1cd` (`origin/main`) | read through `git show origin/main:<path>` from `~/local-operator-ui`, which is checked out on `chore/release-0.25.11` at `0f76af9e1` and is **1,355 commits behind** `origin/main` (656 files differ) |
+
+**Both checkouts on this machine are behind `origin/main`, and no implementation
+branch may be cut from either.** Measured at the time of writing:
+`~/local-operator`'s working tree is HEAD `0e287be0` with **295 staged changes**
+that are not on `origin/main` (`a8fe0c1d`), including deleted modules; and
+`~/local-operator-ui` sits on a *release branch*, 1,355 commits behind its
+`origin/main`. Every PR in §17.1 must branch from `origin/main` in a fresh
+worktree — the same rule `AGENTS.md:482-520` states, and the reason this
+document's citations are all resolved at a ref rather than from the disk.
 
 **The recon line numbers in the design brief are stale, and not by a little.**
 The brief cites `builtin.py:10775` for `build_browser_tool`; at `lop@a8fe0c1d`
@@ -78,16 +87,34 @@ satisfied and what it produces.
 | **R20** | Password entry by agents AND by users; security is part of the design; nothing in the model context or a trace | **§11.2-11.5** | the exact-value path, the secure-input span, the redaction seam, the stated limits |
 | **R21** | Keep the window-focus rule: every agent-driven launch names a window mode; headless for captures | **§16.1** | the mode table per rig, the assertion that a capture raises nothing |
 
-### 0.4 Fixed interface decisions, and this revision's verdict on each
+### 0.4 Revision-2 changes, in one table
+
+Revision 1 was written before the compatibility spike finished, so its D1
+(emulator) decision was made from published packages rather than from runs. The
+spike has since run on this machine (macOS 26.6.2 / Darwin 25.6.0, arm64, Electron
+44.3.0 → node 24.20.0, ABI 149, N-API 10), and revision 2 folds it in. **Only D1
+moved; every other decision, section and citation stands unless the table says
+otherwise.**
+
+| area | revision 1 | revision 2 |
+|---|---|---|
+| D1 emulator | xterm.js, ghostty assessed from licences and packaging | **unchanged decision, now evidence-backed** — and the ghostty path is recorded as *measured-viable*, with its sha256, its minisign verification and a named switch trigger (§5.5) |
+| the capture path | `capturePage()` offscreen; no renderer chosen | **the capture view pins the DOM renderer**, `canvas.toDataURL()` is forbidden on the WebGL canvas, and every capture asserts a non-blank frame and retries once (§13.2) — three measured traps |
+| the pty | N-API prebuilds "expected" to work | **measured**: the same `pty.node` loads under ABI 147 and 149, with spawn/echo/24-bit round-trip/resize/exit verified (§5.3) |
+| packaging | `asarUnpack` "sufficient" | **two measured traps**: the shipped `spawn-helper` is mode 0644 and nothing chmods it, and a packed asar fails to spawn until the prebuilds are actually unpacked (§5.3, §18.1) |
+| fonts (R5) | the app bundles a Nerd-patched face, so glyphs are available | **the pane is fine; the machine is not** — no Nerd Font is installed here at all, the app ships the face with **no font licence notice**, and the box-drawing join was measured as broken at that size (§6.6) |
+| probes | P1-P12, all unrun | **P1 and the capture half of P4 are measured**; P3 stays open; two new probes (P13 packaging, P14 VT conformance against ghostty's own VT) (§19.1) |
+
+### 0.5 Fixed interface decisions, and this revision's verdict on each
 
 | fixed decision | verdict | where argued |
 |---|---|---|
-| exactly one emulator **of record**, in main; the pane is a mirror | **new, and the load-bearing one** | §3, §4 |
+| exactly one emulator **of record**, in main; the pane is a mirror | **new, and the load-bearing one** — kept in revision 2, re-decided against the spike's measurements | §3, §4, §5.5 |
 | the pty lives in the app's main process (`node-pty`) | **new** | §3 |
 | one loopback host, one 0600 record, a `console_*` method namespace — not a second endpoint | **new** | §10.1 |
 | the console tool is `createIf`-gated on the app, and is **not** hidden | **new** | §14.2 |
 | the right slot gains a **fourth** pane | **new, following the third's own precedent** | §6.1 |
-| capture is text from the record and pixels from a view fed by the record | **new** | §13.2 |
+| capture is text from the record and pixels from a view fed by the record | **new**; revised in revision 2 for three measured traps (DOM renderer pinned, no canvas readback, assert-and-retry) | §13.2 |
 | no detached (surviving-logout) surfaces in v1 | **new, with the cost stated** | §7.4 |
 | cmux's *model* is adopted; its **code is not** (GPL-3.0-or-later) | **new** | §2.12, §4 |
 | a new native dependency is a packaging decision, not an install | **new** | §5.3, §17 |
@@ -584,6 +611,10 @@ closed**.
 - **Cost:** one pure-JS `Terminal` per surface in main (measured size on npm:
   `@xterm/headless@6.0.0` unpacked 1,957,834 B, no dependencies) — plus at most
   one live pane renderer at a time, because the right slot shows one pane.
+- **Status:** this topology was chosen before the compatibility spike ran and is
+  **unchanged by it**; §5.5 re-opens the emulator half on the spike's
+  measurements and closes it again, and the two things the spike changed inside
+  this topology are named there (the capture path, §13.2) and in §0.4.
 
 ### (b) The emulator lives in the app's renderer, one view per surface — rejected
 
@@ -628,7 +659,7 @@ the move.
 
 | | cost per surface | R7 with no view | R13 while closed | one authority | packaging |
 |---|---|---|---|---|---|
-| **(a) main: node-pty + headless core, pane mirror** | one JS `Terminal` (~2 MB installed once) | **satisfied** | satisfied (the log + the core keep running) | **yes** (main) | one native dep (§17.1) |
+| **(a) main: node-pty + headless core, pane mirror** | one JS `Terminal` (~2 MB installed once) | **satisfied** | satisfied (the log + the core keep running) | **yes** (main) | one native dep (§5.3) — its pty half is now measured (§19.1 P1), its packing traps are §18.1 |
 | (b) emulator in the renderer, view per surface | one renderer process + GL context | **not satisfiable** | satisfied only if the view stays alive | no — the copy and the view can differ | none |
 | (c) Python pty | n/a | no (app may be closed) | no | no — two owners | none in the app |
 | (d) `utilityProcess` | one JS core + one helper process | satisfied | satisfied | yes | one native dep |
@@ -699,8 +730,8 @@ than a fantasy, and the minisign signatures are what make pinning one honest.
 
 | | what it is | licence | packaging cost | what it cannot do |
 |---|---|---|---|---|
-| **A** | `@xterm/xterm@6.0.0` + `@xterm/headless@6.0.0` + addons (`serialize` 0.14, `webgl` 0.19, `unicode11` 0.9, `fit` 0.11, `search` 0.16, `image` 0.9 — all **MIT**, all zero-dependency) with `node-pty@1.1.0` (**MIT**) for the pty | MIT | one native dep (§5.3) | not ghostty's renderer; no Sixel without addon-image |
-| **B** | Ghostty's own VT compiled to WASM (`ghostty-vt.wasm`), wrapped by `ghostty-web@0.4.0` (**MIT**, `coder/ghostty-web`) or driven directly | MIT | a 1 MB WASM blob, a **pinned single-vendor** wrapper, and its own renderer to audit | no shell integration with the app's CSS variables; the wrapper is one vendor's, at 0.x |
+| **A** | `@xterm/xterm@6.0.0` + `@xterm/headless@6.0.0` + addons (`serialize` 0.14, `webgl` 0.19, `unicode11` 0.9, `fit` 0.11, `search` 0.16, `image` 0.9 — all **MIT**, all zero-dependency) with `node-pty@1.1.0` (**MIT**) for the pty | MIT | one native dep (§5.3) | not ghostty's renderer; no Sixel without addon-image. **Measured (spike):** the browser bundle loads in a hidden `BrowserWindow`; WebGL gets a real ANGLE-Metal context; `serialize`/`search`/`unicode11` all work (unicode 11 proven discriminatingly: `cursorX` after an emoji is 1 under v6 and 2 under v11); cells readable with fg/bg colour **modes**. **Its capture is the weak half** (§13.2) |
+| **B** | Ghostty's own VT compiled to WASM (`ghostty-vt.wasm`), wrapped by `ghostty-web@0.4.0` (**MIT**, `coder/ghostty-web`) or driven **directly, with no shim at all** | MIT | a 1,007,826 B WASM blob (or `ghostty-web`'s bundled 423,045 B one), a **pinned single-vendor** wrapper if the wrapper is taken, and its own renderer to audit | no shell integration with the app's CSS variables. **Measured (spike):** the raw blob is `wasm32-freestanding`, **0 imports / 189 exports**, sha256 `139c9617c9dfea4a51dfab7a87a72017163c472ad248c61cdea8d7e942c1f424`, minisign **VALID** against the key in Ghostty's own `PACKAGING.md`; it created a terminal, took bytes, resized to 100×30 and returned **plain text, re-emitted VT, HTML and styled cells** (wide/`SPACER_TAIL` flags on CJK and emoji tails, palette red → `[204,102,102]`) with **no C or Rust shim**; `ghostty_type_json()` hands over a 43,531-byte machine-readable ABI (159 types, struct sizes/offsets, enum values). `ghostty-web` renders its canvas **while unattached to the document** and `toDataURL()`s it correctly first attempt |
 | **C** | `@coder/libghostty-vt-node@0.1.0-beta.0` (**MIT**, N-API, `engines.node >= 20.19`, "ABI-stable… terminal semantics") | MIT | a native dep **and** a beta ABI the project itself calls explicitly unstable | **no renderer at all** — it gives state and structured snapshots, so the pane still needs xterm or a hand-written renderer |
 
 **And the option the brief invites a verdict on: vendoring ghostty's Zig
@@ -724,15 +755,17 @@ than a fantasy, and the minisign signatures are what make pinning one honest.
    (option B) is *reviewable* — one blob, one signature, one wrapper — where a
    vendored Zig build is a compiler version, a build graph and a patch stack.
 
-**Recommended: A.** What R4's "copy the relevant terminal functionality" is
-therefore held to is **VT correctness and coverage**, not a shared codebase, and
-§19 makes that testable: a corpus of escape sequences, a TUI run of the
-project's own `lop` interface inside the surface, and frame-for-frame agreement
-between the record's text and the pane's grid. Where A is genuinely weaker than
-ghostty — GPU renderer polish, Kitty graphics, and a smaller glyph/emoji pipeline
-— this document says so rather than claiming parity; §20.4 states what would
-change the verdict (a measured VT-correctness failure on a TUI the product
-itself uses).
+**Recommended: A**, on the spike's evidence and not merely on availability. The
+reasoning is in §5.5, which is the section the spike re-opened; the short version
+is that A's weak half turned out to be **pixels** (three measured capture traps,
+§13.2) and B's weak half is still **the pane's renderer** (2-D canvas only, one
+vendor, 0.x) — and A's weak half is a font/renderer choice we control, while B's
+would be a renderer we would have to write. What R4's "copy the relevant terminal
+functionality" is therefore held to is **VT correctness and coverage**, not a
+shared codebase: a corpus of escape sequences, the project's own `lop` interface
+run inside a surface, and — new in revision 2 — a **differential conformance
+probe against ghostty's own VT** (P14), which is only possible *because* the wasm
+drives with no shim.
 
 ### 5.3 `node-pty` is the one native dependency, and it is a packaging decision
 
@@ -751,11 +784,29 @@ Measured from the published tarball (`node-pty@1.1.0`):
   from source at install time** and needs a toolchain. The UI repo builds
   `deb`/`AppImage`/`rpm` for Linux x64 (`package.json` `build.linux.target`), so
   this is a CI-toolchain question, not a hypothetical.
-- **`asar` is already handled by the library.** `lib/unixTerminal.js` computes
+- **`asar` is already handled by the library — and the rewrite is necessary but
+  NOT sufficient.** `lib/unixTerminal.js` computes
   `helperPath = path.resolve(__dirname, native.dir + '/spawn-helper')` and then
   rewrites `app.asar` → `app.asar.unpacked` (and `node_modules.asar` likewise)
-  before `pty.fork`. So the requirement is that the package **is** unpacked, not
-  that the path is patched.
+  before `pty.fork`. **Measured (spike):** in a fully-packed `app.asar`,
+  `pty.node` resolves and the spawn still fails, because the rewritten path does
+  not exist until the prebuilds are *actually* unpacked; with
+  `--unpack-dir node_modules/node-pty/prebuilds` it works. So the requirement is
+  that the tree **is** unpacked, not that the path is patched.
+- **The shipped helper is not executable, and nothing in the install fixes it.**
+  **Measured (spike):** the published tarball carries
+  `prebuilds/darwin-arm64/spawn-helper` with mode **0644**, so the first spawn
+  dies `FATAL Error: posix_spawnp failed. at new UnixTerminal (lib/unixTerminal.js:92)`.
+  npm 11.17's install-script gate means `scripts/prebuild.js` does not run, and
+  the UI repo's own gate is pnpm 10's `onlyBuiltDependencies` (§2.11) — the same
+  class. **PR A therefore chmods the helper to 0755 in its packaging step and
+  asserts the mode in the packaged tree**, because "the install script will do
+  it" is measurably false in this fleet.
+- **The prebuilds carry 58 MB the app does not need.** **Measured (spike):** the
+  64 MB unpacked package is mostly `win32` prebuilds and their `.pdb` files; the
+  `darwin-arm64` prebuilds are **135,976 B across 2 files**. PR A prunes the
+  foreign-platform prebuilds for a platform-specific artifact and says so in the
+  packaged-closure evidence.
 - **pnpm 10 will not run its install script** unless `node-pty` joins
   `onlyBuiltDependencies` in `pnpm-workspace.yaml` (§2.11).
 - **The closure gates must be edited deliberately**: `check-runtime-deps.mjs`'s
@@ -806,6 +857,79 @@ reason it does not: *replay* replaces *serialize*.
 
 ---
 
+### 5.5 D1 re-opened: the emulator decision, on the spike's measurements
+
+The spike ran after revision 1 was written, so D1 was the one decision taken on
+published facts rather than on runs. It is re-opened here, decided, and closed.
+The measurements are in §5.2's table and §0.4; what follows is the argument.
+
+**What changed in the evidence, in three lines.** (i) `node-pty`'s N-API prebuild
+loads under this Electron with no rebuild, and a real pty was driven end to end —
+so the *pty* half of option A is no longer a risk at all. (ii) xterm's half is
+confirmed working in a hidden window **except for capture**: the WebGL canvas
+cannot be read (`toDataURL()` returns blank white) and `capturePage()` on a hidden
+window returns a stale/blank first frame, where the **DOM renderer captures
+correctly first attempt**. (iii) The ghostty path is **real rather than
+theoretical**: the raw `ghostty-vt.wasm` drives with no C or Rust shim, its
+provenance verifies (sha256 + minisign against Ghostty's own published key), and
+`ghostty-web` renders and captures offscreen first attempt — exactly where xterm's
+WebGL path failed.
+
+**The three options, against that evidence:**
+
+| | what it means concretely | cost | does it satisfy R7 (capture with no pane)? |
+|---|---|---|---|
+| **(1) xterm.js only** — one emulator (`headless` in main + `xterm` in the pane), ghostty as a *behavioural* reference | keep revision 1's architecture; fix the capture path (§13.2: DOM renderer for the capture view, `capturePage` only, non-blank assert + one retry) | the capture-path work, which is now *known* work rather than presumed | **yes** |
+| **(2) ghostty's VT wasm in MAIN as the authority** | main holds a `ghostty-vt.wasm` terminal; text/VT/HTML/styled cells come from its formatters. **The renderer is the item**: `ghostty-web` owns its own wasm instance and renders 2-D canvas only, so it cannot straightforwardly be used as a renderer *for someone else's* terminal — the choices are to take `ghostty-web` wholesale (which moves the authority into the renderer, i.e. it becomes option 3), or to write our own renderer over `GhosttyCell` rows | **a renderer, written by us** — the single largest item in this feature, and the one thing revision 1 refused on principle ("write no renderer") | **yes** (the authority is still in main) |
+| **(3) `ghostty-web` in the renderer, authority there** | the pane owns the terminal state | cheapest of the three to reach a *screenshot*, and it makes the capture trap disappear | **no** — a surface whose pane was never opened has no state to read, which is R7's whole case, and it re-introduces the mirror problem in the worse direction (the authority would be the view) |
+
+**Decision: (1) xterm.js only — revision 1's architecture stands, with the
+capture path corrected.** The deciding asymmetry is that A's weak half is
+*pixels* and B's two weak halves are a *renderer we would have to write* and, for
+option 3, R7 itself. Three measured facts make (1) cheap to hold: the DOM
+renderer captures correctly first attempt, so the offscreen path has a known-good
+renderer; `capturePage()` (the compositor) is not the same mechanism as
+`toDataURL()` (the canvas' own bitmap), so a WebGL pane can still be photographed
+as part of the window — measured in the same harness with the WebGL addon loaded,
+where `capturePage()` returned a correct 27,869 B frame on its second attempt;
+and the failure mode when a first frame is stale is a *retry*, not a redesign.
+*(The compositor-vs-canvas distinction is the mechanism I read into those two
+numbers rather than something the spike isolated; §13.2's assert-and-retry does
+not depend on that reading being right.)*
+
+**R4, R7 and R10 under this decision, in one paragraph.** R4 is satisfied in
+**behaviour, not in code**: the surface is a VT-correct terminal measured against
+ghostty's own VT (P14) rather than a build of it, and the document says so plainly
+instead of implying a shared codebase. R7 is satisfied *because* the authority is
+in main — capture works for a surface nobody has opened, which is the requirement
+that eliminated options (2)-without-a-renderer and (3). R10 is satisfied by the
+record being the single source both actors read: the human sees the mirror, the
+agent reads the record, and the frame the agent gets is either the live pane or a
+DOM-rendered reconstruction from that same record, labelled `rendered`.
+
+**The seam that keeps (1)↔(2) a swap rather than a rewrite** is §5.4's
+`ConsoleEmulator` interface — `write`, `resize`, `text`, `modes`, `cursor`,
+`dispose` — plus two rules that make a swap honest: the pane never reads the pty
+and never answers a read (so the authority can move without touching the pane's
+role), and the conformance tests (P5, P14) are written against the interface, not
+against xterm's API.
+
+**The upgrade path, recorded with its provenance.** If (1) ever fails a
+correctness probe on a TUI the product ships, the replacement is
+`ghostty-vt.wasm` — **1,007,826 B, sha256
+`139c9617c9dfea4a51dfab7a87a72017163c472ad248c61cdea8d7e942c1f424`**, MIT
+(Ghostty is first-party MIT, §5.1), GPG/minisign signature **verified in this
+environment** against the key published in Ghostty's own `PACKAGING.md`, 0 imports
+/ 189 exports, `wasm32-freestanding`, instantiating in both Node and the Electron
+renderer. Two ABI gotchas a future implementer must not re-learn:
+`CELLS_RAW` writes a **pointer** into `out` (not a copy, so the buffer must stay
+alive and the read must be immediate), and a row iterator is **single-use**. Its
+formatters return text, re-emitted VT, HTML and styled cells, and `ghostty_type_json()`
+publishes the full ABI (43,531 bytes, 159 types) — so the type layer is
+machine-checkable rather than guessed at, and `scripts/check-vendored.mjs`'s
+byte-pinning discipline (§2.4) applies to the blob exactly as it does to the
+browser driver modules.
+
 ## 6. R1/R2/R3/R13/R18 — the surface, the pane, and what owns what
 
 ### 6.1 R1 — the pane: the fourth occupant of the right slot
@@ -825,14 +949,19 @@ Specifics this document fixes, so the implementation is reviewable against them:
   browser's scope switch — `consoleActiveSurface: string | null`, the surface
   the pane is showing when a session has more than one.
 - **Pane width vs grid.** The browser's `640` is justified as "a page at 420px is
-  not a page"; the console's justification is a character cell. At the app's mono
-  step (~13px, `0.6875rem` for code surfaces and the `--font-mono` stack) a
-  monospace advance is ≈0.6em, i.e. ≈7.8px, so **100 columns ≈ 780px plus the
-  pane's horizontal padding**. Recommendation: default `consolePanelWidth` chosen
-  so the pane's default grid is the default grid below, with the divider clamped
-  at `minWidth={480}` and the *surface's* grid floor (40 columns) enforced by
-  main, not by the divider. The PR must state the measured px-per-column of the
-  shipped font at the chosen size rather than inheriting this arithmetic.
+  not a page"; the console's justification is a character cell, and the cell is
+  now **measured**: in the spike's harness the xterm DOM renderer reported
+  **8.425 × 16 px per cell at `fontSize: 14`** (100 columns → 800×384 px), so a
+  100-column pane needs **≈843px** plus the pane's horizontal padding at that
+  step, and the same grid at a smaller step is proportionally narrower. (The
+  spike's `ghostty-web` measured 9×15 with a 12px baseline at DPR 2 — the two
+  stacks do not agree, which is one more reason the *grid* is main's and the
+  *mirror* is replaceable.) Recommendation: pick the pane's font step, then set
+  `consolePanelWidth`'s default from the measured advance of **the shipped
+  Geist Mono** (not Menlo, which is what the spike's harness resolved to — see
+  §6.6) so the default lands on the default grid below; clamp the divider at
+  `minWidth={480}`; and leave the *surface's* 40-column floor to main, not to
+  the divider. The PR must print the measured px-per-column it used.
 - **Default grid: 100×30.** Rationale, all citable: the project's own visual
   evidence is produced at 100×30 and 150×40 (`AGENTS.md:1332-1340` names
   `scripts/ask_shot.py out.svg 100x30` etc.); the TUI's own regressions are
@@ -968,6 +1097,52 @@ An agent told "I ran it in the console" must be able to (a) find the surface and
   module already accepts one), and it leaves every existing decision intact.
   `console_status` reports the marker it set and the glyph decision, so the
   behaviour is observable rather than inferred.
+- **And the machine itself has no Nerd Font at all — measured.** `~/Library/Fonts`
+  is empty, `/Library/Fonts` holds only `Arial Unicode.ttf`, and the system
+  fonts are Menlo/Monaco/Courier and friends; a
+  `"JetBrainsMono Nerd Font Mono", Menlo, monospace` stack resolved to **Menlo**
+  and every PUA codepoint tried (U+E0B0-E0B3, U+F015, U+F07B) rendered **tofu**.
+  Three consequences, and they are the whole of R5's font story:
+  1. **Inside the app this is already solved, and it is the app's job.** The pane
+     renders `--font-mono` = the bundled `GeistMonoNerdFontMono` faces (§2.7), and
+     CSP is `font-src 'self' data:` (`styles/index.css:100-110`) so no remote face
+     can rescue a missing glyph — the bundled file is the only mechanism. The
+     spike's tofu is what happens *outside* the app and in any harness that does
+     not load the app's CSS.
+  2. **The bundled face has no licence notice in the repository.** Read at
+     `ui@db615bd46`: `LICENSE` is the project's MIT licence (Radient Inc.),
+     `build/license_*.txt` is the installer EULA in ten languages and mentions no
+     font, and there is no `THIRD_PARTY`/`OFL` file anywhere in the tree. The face
+     is **Geist Mono, SIL OFL 1.1** — verified from `vercel/geist-font`'s own
+     `OFL.txt`: "Copyright 2024 The Geist Project Authors
+     (https://github.com/vercel/geist-font) … This Font Software is licensed under
+     the SIL Open Font License, Version 1.1", with no Reserved Font Name declared
+     — redistributed as a Nerd-patched derivative, and Nerd Fonts' own `LICENSE`
+     states that "Nerd Fonts source fonts, patched fonts, and folders with
+     explicit OFL SIL files are licensed under SIL OPEN FONT LICENSE Version 1.1".
+     OFL's condition is that the copyright notice and the licence text travel with
+     the font. **Action, owned by PR B and stated as a checklist item rather than
+     a nicety:** ship the OFL notice and text for the face (and Nerd Fonts' MIT
+     notice for the patch), or record in the PR why the existing distribution
+     already satisfies it. This is pre-existing rather than caused by the console,
+     but the console is the feature that *depends* on the font, so it is the
+     feature that should not leave it undocumented. *(The licence is
+     web-verified, not legal advice; if in doubt the OFL text and copyright line
+     above are the two things to attach.)*
+  3. **A design-round item, measured, not a stack defect:** Menlo's box-drawing
+     glyphs **do not join** at the pane's size — a visible gap in `─` in both
+     stacks the spike tried. The bundled Geist Mono must be checked for
+     continuity at the chosen font size in the torture stream (§9.3), because a
+     terminal whose box frames have gaps reads as broken even when it is
+     rendering correctly. If the bundled face does not join either, the answer is
+     the font step (and, if that fails, a different bundled face), not the
+     emulator.
+- **Tofu is not detectable in a canvas, and does not need to be here.** A missing
+  glyph in a canvas renderer produces a blank cell with no signal to read, which
+  is why the Python side has an env-marker gate rather than a runtime probe
+  (`glyphs.py:168`). The pane does not need detection because the app owns the
+  font and ships the face; what it *does* need is the design round's glyph sweep
+  (§19.1's P9) and the licence notice above.
 
 ### 6.7 Surface identity and lifetime, stated as a table
 
@@ -1647,8 +1822,27 @@ Three cases, and the result always names which one it was:
 | case | mechanism | `rendered` |
 |---|---|---|
 | the pane is displayed on this surface | `webContents.capturePage()` of the app's own window, cropped to the pane's reported rect | `"displayed"` |
-| the pane is closed / this is an agent-only surface | a **capture view**: a hidden renderer fed the surface's record (replay), at the surface's grid, photographed with `capturePage()` | `"offscreen"` |
+| the pane is closed / this is an agent-only surface | a **capture view**: a hidden renderer fed the surface's record (replay), at the surface's grid, with the **DOM renderer** pinned, photographed with `capturePage()` | `"offscreen"` |
 | the record is `live: false` (post-relaunch) | the same capture view over the replayed history | `"offscreen"` |
+
+**Three measured traps shape this path, and revision 1 did not know about any of
+them** (all from the compatibility spike, §0.4):
+
+1. **A WebGL canvas cannot be read back.** `canvas.toDataURL()` on the xterm
+   WebGL canvas returned **blank white**, byte-identical at 26,791 B with
+   `preserveDrawingBuffer` both `true` and `false` — so nothing in this feature
+   may take pixels from a canvas' own bitmap. `capturePage()` is a **compositor**
+   capture and is not the same mechanism, which is why the displayed-pane row
+   above still works with a WebGL pane.
+2. **`capturePage()` on a hidden window can return a stale first frame.** Measured
+   on a hidden `BrowserWindow`: the first capture came back blank/stale at
+   9,866 B, the next was correct at 27,869 B. **Every capture therefore asserts a
+   non-blank frame and retries exactly once**, and the retry is part of the
+   contract rather than a hopeful `setTimeout`.
+3. **The DOM renderer captures correctly on the first attempt** — which is why the
+   capture view pins it. It is the slower renderer, and for an offscreen
+   single-shot reconstruction that is the right trade: the pane (interactive,
+   watched) may use WebGL; the capture view (one frame, unattended) may not.
 
 - `rendered` is what keeps this honest: an offscreen frame is a faithful
   *reconstruction from the record* and not a photograph of a live screen, and a
@@ -1672,10 +1866,17 @@ Three cases, and the result always names which one it was:
   at most **one** capture view at a time app-wide (`console_capture_full` is a
   typed refusal, mirroring cmux's `input_queue_full` honesty), sized to the
   surface's grid, and torn down by pid-exact teardown (§16.2).
-- **The frame is a function of `(record bytes, grid, theme, font)`**, all of which
-  are pinned, so a frame is reproducible — which is what makes it evidence
-  (§19.1's P10 requires the determinism check, because a frame that changes run
-  to run cannot be a before/after).
+- **The renderer is pinned to the DOM renderer, and the pin is asserted** — a
+  renderer choice that could silently become WebGL would turn every offscreen
+  frame blank, and a blank frame is exactly what an unbounded capture retry would
+  hide. The capture view therefore reports which renderer it is using in the
+  capture result's log line, and a test asserts the DOM one.
+- **The frame is a function of `(record bytes, grid, theme, font, renderer)`**, all
+  of which are pinned, so a frame is reproducible — which is what makes it
+  evidence (§19.1's P10 requires the determinism check, because a frame that
+  changes run to run cannot be a before/after). The retry above is compatible
+  with that only because a retry re-captures the *same* settled state: the frame
+  must be re-fed from the record, not re-read from a live surface.
 
 ### 13.4 R10/R18 — the co-pilot cell, and reading a surface the user opened
 
@@ -1956,8 +2157,8 @@ control run in `normal` — the discipline and the numbers are already recorded
 | PR | repo | content | what it freezes |
 |---|---|---|---|
 | **0** | `local-operator` | `docs(design): the console tab` — **this document**, alone | nothing in code; it is the citation target for A/B/C |
-| **A** | `local-operator-ui` | `feat(console-host)`: `src/main/console/` (surface registry, `ConsoleHost`, the emulator seam, the byte log, retention/persistence, the OSC-133 scanner), the pty dependency + its packaging changes (`asarUnpack`, `pnpm-workspace.yaml`, `check-runtime-deps` allowlist), the `console_*` methods on the existing RPC host, the record's console fields, the `console_*` renderer IPC namespace, the push channel, main-process tests, and a host proof rig | the emulator seam, the record fields, the method vocabulary and its params, the failure taxonomy, the grid-ownership rule |
-| **B** | `local-operator-ui` | `feat(console-pane)`: the fourth pane (component, header, divider, empty/ended/secure states), the mirror (`@xterm/xterm` + addons, replay-then-stream), `terminal-theme.ts` + the contrast block, the blip, the notification entry + click payload field, the capture view, stories, designer + UX rounds | the pane's chrome and states, the theme mapping, the blip/notification UX, the capture path |
+| **A** | `local-operator-ui` | `feat(console-host)`: `src/main/console/` (surface registry, `ConsoleHost`, the emulator seam, the byte log, retention/persistence, the OSC-133 scanner), the pty dependency + its packaging changes (`asarUnpack`/unpack-dir, the **chmod 0755 of `spawn-helper`** and its assertion in the packed tree, the foreign-platform prebuild prune, `pnpm-workspace.yaml`, `check-runtime-deps` allowlist), the `console_*` methods on the existing RPC host, the record's console fields, the `console_*` renderer IPC namespace, the push channel, main-process tests, and a host proof rig | the emulator seam, the record fields, the method vocabulary and its params, the failure taxonomy, the grid-ownership rule |
+| **B** | `local-operator-ui` | `feat(console-pane)`: the fourth pane (component, header, divider, empty/ended/secure states), the mirror (`@xterm/xterm` + addons, replay-then-stream), `terminal-theme.ts` + the contrast block, **the DOM-renderer capture view with its non-blank assert and one retry**, **the bundled face's OFL notice and licence text (§6.6)**, the blip, the notification entry + click payload field, stories, designer + UX rounds (including the box-drawing join check) | the pane's chrome and states, the theme mapping, the blip/notification UX, the capture path |
 | **C** | `local-operator` | `feat(console-tool)`: `local_operator/ui_console/` (state + client), `build_console_tool`, `registry.py` + `DEFAULT_TOOL_NAMES`, the description and its parameter descriptions (§14.3), the prompt notes and their flag completer, `secret_ref`, the redaction registration, the glyph tables **plus the console's own `terminals.py` predicate and its `glyphs.py` clause (§6.6)**, `scripts/bench_context_budget.py`'s measurement in the PR body, `docs/CONSOLE.md` **and the `guide://console` playbook**, the e2e cells | the tool's schema and description, the gate, the prompt notes, the harness contract |
 
 **Merge order: 0 → A → B ∥ C.** The doc first because A/B/C cite it and because a
@@ -2022,18 +2223,28 @@ window-mode rules (§16.1).
 
 Ordered by expected cost.
 
-1. **The native dependency breaks packaging, on a platform the CI does not build
-   in the same way.** `node-pty` ships no Linux prebuild (§5.3), the UI repo
-   builds Linux x64 artifacts, pnpm 10 will not run its install script unless
-   allowlisted, the asar must be unpacked for both `pty.node` and the exec-bit
-   `spawn-helper`, and the app is signed, hardened and notarized. Symptom if this
-   is got wrong: the app launches in development and ships broken — or the
-   Linux artifact fails to build weeks later, at release time.
-   *Mitigation:* all five changes are in PR A and reviewed as a set; §19.1 makes
-   `pnpm exec electron-builder --dir --arm64` + `check-packaged-closure` + the
-   signed smoke a gate; the Linux toolchain question is answered in A's CI rather
-   than at release. *Accepted residual:* a Linux prebuild regression upstream is
-   a future surprise; the mitigation is that the build fails loudly rather than
+1. **The native dependency breaks packaging — and the failure modes are now
+   measured rather than imagined.** Three traps, all from the spike:
+   (a) the published tarball ships `prebuilds/darwin-arm64/spawn-helper` with mode
+   **0644** and nothing chmods it, so the first spawn dies
+   `FATAL Error: posix_spawnp failed. at new UnixTerminal (lib/unixTerminal.js:92)`;
+   (b) a **fully-packed `app.asar`** resolves `pty.node` and still fails to spawn,
+   because `helperPath` is rewritten to `app.asar.unpacked` which does not exist
+   until the prebuilds are actually unpacked (`--unpack-dir
+   node_modules/node-pty/prebuilds` works); and (c) **no install script will save
+   us** — npm 11.17's install-script gate skips `scripts/prebuild.js`, and this
+   repo's own gate is pnpm 10's `onlyBuiltDependencies` (§2.11), the same class.
+   On top of those: `node-pty` ships **no Linux prebuild** while the repo builds
+   Linux x64 artifacts, the tree carries **58 MB of unused win32 prebuilds and
+   `.pdb` files**, and the app is signed, hardened and notarized — so the unpacked
+   helper must be signed with the same identity.
+   *Symptom if this is got wrong:* the app works in development and ships broken,
+   or the Linux artifact fails weeks later at release time.
+   *Mitigation:* all of it is PR A, reviewed as one set — chmod 0755 the helper and
+   **assert the mode in the packed tree**, unpack the prebuilds, prune the foreign
+   platforms, and prove it with §19.1's P11 (packed, signed, spawning) rather than
+   with a dev run. *Accepted residual:* a Linux prebuild regression upstream is a
+   future surprise; the mitigation is that the build fails loudly rather than
    silently.
 2. **Two terminal instances diverge, so an agent's read and the human's screen
    disagree.** This is the risk the "exactly one emulator" requirement exists for,
@@ -2073,12 +2284,26 @@ Ordered by expected cost.
    survive it.
 8. **Disk growth from retained history.** *Mitigation:* §7.2's caps, the 30-day
    default, and a GC pass that reports what it removed.
-9. **The tool's schema cost.** Every core tool ships its schema on every request
+9. **The font is tofu, or the box frames do not join.** Measured: this machine has
+   **no Nerd Font installed at all**, and PUA glyphs rendered as replacement boxes
+   in every stack the spike tried; Menlo's box-drawing glyphs also visibly fail to
+   join at terminal size. The pane is the one place this is solvable, because the
+   app bundles a Nerd-patched face and CSP (`font-src 'self' data:`) forbids any
+   other — so the mitigation is that the face is bundled, the design round checks
+   the glyph table and box continuity in the torture stream (§9.3), and the PR
+   ships the face's **OFL notice and licence text, which the repository currently
+   does not carry** (§6.6). *Accepted residual:* outside the app, in the user's own
+   terminal, this remains their environment and the TUI's tri-state gate is the
+   only lever — nothing in this feature can repair a terminal's fonts.
+10. **The tool's schema cost.** Every core tool ships its schema on every request
    (`AGENTS.md`'s ladder). *Mitigation:* the tool is `createIf`-gated, so a host
    without the app pays nothing; §19.1's probe P8 runs `/context` with and without
    it and puts the measured delta in the PR. **The honest expectation is that the
    gate does not save the operator anything on their own machine** — their app is
    usually running — so the number belongs in the PR rather than in an assumption.
+   **Spike context, not a substitute measurement:** the whole xterm + addons
+   *renderer* bundle is 523.31 kB JS (138.72 kB gzip) + 3.52 kB CSS, which says
+   nothing about schema tokens — P8 measures those.
 
 ---
 
@@ -2091,18 +2316,20 @@ its actual output. **None of these has been run**; they are the plan.
 
 | probe | question | exact experiment | settles |
 |---|---|---|---|
-| **P1** | Does `node-pty`'s prebuilt binary load under the pinned Electron (44.3.0) on this arm64 host, with no `electron-rebuild`? | in a scratch profile, `require("node-pty")` from the built main process, fork `/bin/sh -c 'echo hi; stty size'`, assert the bytes and the grid | §5.3's N-API claim; risk 1 |
+| **P1** | Does `node-pty`'s prebuilt binary load under the pinned Electron (44.3.0) on this arm64 host, with no `electron-rebuild`? | **MEASURED — PASS** by the compatibility spike: the same 85,496 B `pty.node` loads under node 26.5.0 (ABI 147) and Electron 44.3.0 (ABI 149); `/bin/zsh -f -i` spawned, prompt read back, echo round-tripped, 24-bit/UTF-8 byte-exact, `resize(100,30)` reflected in `stty size`, `exit 42` → `exitCode 42` | §5.3's N-API claim; risk 1 |
 | **P2** | Does `@xterm/headless` work in the main process of the packaged app (no DOM)? | feed a recorded ANSI stream, assert `translateToString("scrollback")` and `modes.bracketedPasteMode` | §3(a)'s core |
 | **P3** | Does a byte flood starve the main thread? | `yes` into a surface for 30 s; sample main-thread responsiveness (an IPC echo's round trip) and the surface's dropped-byte count | risk 3; the `utilityProcess` trigger |
-| **P4** | Does `capturePage()` on a **hidden, unattached** `WebContentsView` return a complete frame of a terminal grid? | create the capture view offscreen at 100×30, feed a known frame, capture, compare against the pane's own capture of the same record | §13.2's offscreen path |
+| **P4** | Does `capturePage()` on a **hidden, unattached** `WebContentsView` return a complete frame of a terminal grid? | **PARTLY MEASURED**: on a hidden `BrowserWindow` the first capture was stale/blank (9,866 B) and the second correct (27,869 B) — hence §13.2's assert-and-retry-once — and the **DOM renderer captured correctly first attempt** while the WebGL canvas could not be read at all (`toDataURL()` blank white, identical 26,791 B either way). **Still open:** the *unattached `WebContentsView`* variant, and whether an unattached view paints at all under Chromium's visibility rules. Run the grid capture against the capture view itself and compare with the pane's capture of the same record | §13.2 and §13.3 |
 | **P5** | Do the mirror and the record agree? | replay a 2 MB recorded stream into both, compare scrollback text, cursor, and grid cells per row/column | risk 2 |
 | **P6** | Does the pane's first frame after a replay equal the record's viewport text? | the conformance harness of P5, extended to the paint path | §7.3's replay claim |
 | **P7** | Does the operator's shell emit OSC 133 marks (and with which integration)? | run their shell in a surface, print the surface's raw byte log, grep for `\x1b]133;` | §12.1's rung 2 |
-| **P8** | What does the console tool's schema cost? | `scripts/bench_context_budget.py` (the guard CI already runs for the `context-budget` scope, `scripts/ci_scope.py:178-182`) plus `/context` in the live session, with the tool present and absent | risk 9; the §14.3 description budget |
-| **P9** | Does the shipped GeistMono Nerd Font cover the recommended glyphs (`\uf108`, and every glyph in `NERD_TOOL_ICONS`)? | render the table in the pane and in the app's own trace, screenshot both, and check for tofu | §6.1's icon choice |
+| **P8** | What does the console tool's schema cost? | `scripts/bench_context_budget.py` (the guard CI already runs for the `context-budget` scope, `scripts/ci_scope.py:178-182`) plus `/context` in the live session, with the tool present and absent | risk 10; the §14.3 description budget |
+| **P9** | Does the shipped GeistMono Nerd Font cover the recommended glyphs (`\uf108`, and every glyph in `NERD_TOOL_ICONS`), and do its box-drawing glyphs join at the pane's size? | **PARTLY MEASURED**: this machine has **no Nerd Font installed at all** (`~/Library/Fonts` empty, `/Library/Fonts` = `Arial Unicode.ttf`), so a `"…Nerd Font Mono", Menlo, monospace` stack resolved to Menlo and every PUA codepoint tried was **tofu**; Menlo's `─` also showed visible gaps at size. **Still open:** the same sweep *inside the pane*, where the bundled face is what renders — the glyph table, the UI trace icon, and the box-drawing continuity at the chosen font step, in a rendered frame | §6.1's icon choice; §6.6; risk 9 |
 | **P10** | Is the frame reproducible? | capture the same surface twice, 30 s apart, with no output in between; assert byte equality | §13.3's evidence claim |
-| **P11** | Does a signed, notarized, packaged build fork a pty and capture a frame? | `pnpm exec electron-builder --dir --arm64` → `check-packaged-closure` → the signed smoke with a console scene | risk 1, release gate |
+| **P11** | Does a signed, notarized, packaged build fork a pty and capture a frame — with the helper executable and the prebuilds unpacked? | `pnpm exec electron-builder --dir --arm64` → **assert `stat` mode 0755 on `app.asar.unpacked/**/spawn-helper`** → assert the packaged tree is inside `check-packaged-closure` → the signed smoke with a console scene, forking a real pty and capturing one frame | risk 1, release gate |
 | **P12** | Does an agent-driven capture leave the app non-frontmost? | dense external sampling of the frontmost process by pid during a full console capture sequence, in `headless`, with a `normal` control | R21 |
+| **P13** | Do the two measured packing traps stay fixed? | in `dist/mac-arm64/Local Operator.app`: `stat -f '%Sp %N' "Contents/Resources/app.asar.unpacked/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper"` (**expect `-rwxr-xr-x`**), `lsof`-free spawn of a real pty from the packaged app, and a size check that the foreign-platform prebuilds are absent | risk 1 |
+| **P14** | Is xterm's VT behaviour the *same* as ghostty's, on the streams the product actually uses? | the differential probe the raw wasm makes possible: replay one recorded corpus (the torture stream, a `lop` TUI session, a vim/less session, a CJK+emoji frame) through `@xterm/headless` and through `ghostty-vt.wasm`'s formatters, and diff the plain-text snapshots row by row | R4's "similar to ghostty" claim and §5.5's switch trigger |
 
 ### 19.2 `local-operator-ui` — the gates, and what each can prove
 
@@ -2313,38 +2540,102 @@ node-gyp rebuild`; `node-addon-api ^7.1.0`; the `app.asar` → `app.asar.unpacke
 helper-path rewrite in `lib/unixTerminal.js`), `ghostty-web` 0.4.0 (MIT),
 `@coder/libghostty-vt-node` 0.1.0-beta.0 (MIT, `engines.node >= 20.19`).
 
-**Measured on this machine:** the two refs and their divergence (§0.1 — the UI
-checkout is 656 files behind `origin/main`; the `local-operator` working tree
-carries 273 staged changes including deleted modules); `node-pty`'s tarball
-contents (286 files, no Linux prebuild, `prebuilds/darwin-arm64/spawn-helper`);
-`@xterm/headless`'s tarball size (477,641 B compressed / 1,957,834 B unpacked,
-7 files) and its declared API surface (modes, buffer, `translateToString`,
-`getWidth`/`getChars`, the event list); `df` on the working volume (78 GiB free).
+**Measured on this machine, by me:** the two refs and their divergence (§0.1 —
+`~/local-operator`'s working tree is HEAD `0e287be0` with **295 staged changes**
+not on `origin/main`, and `~/local-operator-ui` is checked out on
+`chore/release-0.25.11` at `0f76af9e1`, **1,355 commits behind** its `origin/main`,
+656 files differing); `node-pty`'s tarball contents (286 files, no Linux prebuild,
+`prebuilds/darwin-arm64/spawn-helper`); `@xterm/headless`'s tarball size
+(477,641 B compressed / 1,957,834 B unpacked, 7 files) and its declared API
+surface (modes, buffer, `translateToString`, `getWidth`/`getChars`, the event
+list); the UI repo's shipped font faces and the **absence** of any font licence
+notice in it (`LICENSE`, `build/license_*.txt`, no `THIRD_PARTY`/`OFL`); `df` on
+the working volume (78 GiB free).
+
+**Measured by the compatibility spike, and relayed to me rather than re-run here
+(it ran on the same machine: macOS 26.6.2 / Darwin 25.6.0, arm64, Electron 44.3.0
+→ node 24.20.0, ABI 149, N-API 10).** Quoted because §5.5's decision rests on it:
+
+- **`node-pty@1.1.0`** — the same `pty.node` (**85,496 B**) loads under node 26.5.0
+  (ABI **147**) and Electron 44.3.0 (ABI **149**), so **no `electron-rebuild`**;
+  `/bin/zsh -f -i` spawned, prompt read back, echo round-trip, 24-bit and UTF-8
+  **byte-exact**, `resize(100,30)` visible in `stty size`, `exit 42` → 42. Two
+  packing traps: `prebuilds/darwin-arm64/spawn-helper` ships **mode 0644** and
+  nothing chmods it → `FATAL Error: posix_spawnp failed. at new UnixTerminal
+  (lib/unixTerminal.js:92)`; and a fully-packed `app.asar` resolves `pty.node` yet
+  still fails to spawn until the prebuilds are unpacked
+  (`--unpack-dir node_modules/node-pty/prebuilds` works). npm 11.17's
+  install-script gate means `scripts/prebuild.js` does not run. `darwin-arm64`
+  prebuilds are **135,976 B / 2 files**; win32 prebuilds are **58 MB of the 64 MB**
+  unpacked (mostly `.pdb`).
+- **xterm 6.0.0 + addons** — Vite bundle **523.31 kB JS** (138.72 kB gzip) +
+  3.52 kB CSS; loads in a hidden `BrowserWindow` (`show:false`, `isVisible()`
+  false, `getFocusedWindow()` null); 100×24; WebGL got a real GPU context (ANGLE
+  Metal); `serialize()` returned the text; `search.findNext()` true; `unicode.versions`
+  `["6","11"]` with a discriminating proof (`cursorX` after an emoji = 1 under v6,
+  2 under v11); cells read via `buffer.active.getLine(y).getCell(x)` with fg/bg
+  **colour modes**. Capture: WebGL `toDataURL()` **blank white** (identical
+  26,791 B with `preserveDrawingBuffer` both ways); `capturePage()` on a hidden
+  window **stale first frame** (9,866 B) then correct (27,869 B); **DOM renderer
+  correct first attempt**.
+- **`ghostty-vt.wasm`** — **1,007,826 B**, sha256
+  `139c9617c9dfea4a51dfab7a87a72017163c472ad248c61cdea8d7e942c1f424`; minisign
+  **VALID** (file signature and trusted comment) against the key in Ghostty's own
+  `PACKAGING.md`, verified with `node:crypto`; 0 imports, 189 exports,
+  `wasm32-freestanding`; `ghostty_type_json()` = 43,531 B (159 types, struct
+  sizes/offsets, enum values). With **no shim written**: a terminal was created,
+  fed bytes, resized to 100×30, and read back as plain text, re-emitted VT and
+  HTML; styled cells came back via the row-cells container and via the packed u64
+  `GhosttyCell` (wide=1, `SPACER_TAIL`=2 on CJK/emoji tails, palette red →
+  `[204,102,102]`). The same wasm instantiates in the Electron renderer. ABI
+  gotchas: `CELLS_RAW` writes a **pointer** into `out`; a row iterator is
+  **single-use**.
+- **`ghostty-web@0.4.0`** — bundles a **423,045 B** wasm; API largely
+  xterm-compatible (`open`/`write`/`resize`/`paste`/`input`/`buffer`/`getCell`/
+  `onData`/`onResize`); **2-D canvas renderer only**; styles arrive as a `flags`
+  bitfield; its canvas renders **and** `toDataURL()`s while **not attached to the
+  document** (36,886 B, pixels verified: truecolor, CJK, emoji, box-drawing).
+- **Fonts** — **no Nerd Font is installed on this machine** (`~/Library/Fonts`
+  empty; `/Library/Fonts` = `Arial Unicode.ttf`); a `"JetBrainsMono Nerd Font
+  Mono", Menlo, monospace` stack resolved to Menlo and every PUA codepoint tried
+  (U+E0B0-E0B3, U+F015, U+F07B) was **tofu**. Cell metrics: xterm DOM
+  **8.425 × 16 px at `fontSize: 14`** (100 columns → 800×384); `ghostty-web`
+  9 × 15 with a 12px baseline at DPR 2. Menlo's box-drawing glyphs **do not join**
+  at that size in either stack.
 
 **NOT verified — every one of these needs running, and each names what would
 settle it:**
 
-1. **That `node-pty`'s prebuilt binary loads under Electron 44.3.0 on this host,
-   with no rebuild.** The N-API claim is read from the manifest, not measured
-   (P1).
-2. **Everything about the WASM options.** I did not instantiate
-   `ghostty-vt.wasm`, did not load `ghostty-web`, and did not try
-   `@coder/libghostty-vt-node`. §5's verdict on those is a judgement from
-   their packaging and licences, and it should be re-opened only if option A
-   fails a correctness probe.
+1. ~~That `node-pty`'s prebuilt binary loads under Electron 44.3.0 with no
+   rebuild.~~ **Settled by the spike — PASS** (P1), including spawn, echo, 24-bit
+   round-trip, resize and exit code. What it did **not** settle is the packaged
+   case, which is now P11/P13.
+2. **`@coder/libghostty-vt-node`** — never loaded (option C is not chosen), and
+   its beta ABI caveat is upstream's own statement rather than a measurement.
+   The **other** two WASM options are now measured rather than judged (§5.2's B
+   row, the appendix above), and `ghostty-vt.wasm`'s provenance was verified in
+   this environment; what remains unmeasured is **the differential VT comparison**
+   itself (P14), i.e. whether xterm and ghostty agree on the streams this product
+   uses.
 3. **`@xterm/headless`'s behaviour under Electron's main process** (P2), and its
    exact memory per surface at 100×30 with a 5,000-line scrollback — §6.3's cost
    figures are order-of-magnitude, not measured.
-4. **`capturePage()` on a hidden, unattached `WebContentsView`** returning a
-   complete frame of a terminal grid (P4). §13.2 depends on it.
+4. **`capturePage()` on a hidden, *unattached* `WebContentsView`** returning a
+   complete frame of a terminal grid (P4) — the hidden-`BrowserWindow` case is
+   measured (stale first frame, then correct), the unattached-view case is not.
+   §13.2's assert-and-retry is designed for exactly the measured half.
 5. **The mirror/record conformance test existing at all** (P5) — the design
    asserts the invariant and names the test; nothing was run.
 6. **Whether the operator's shell emits OSC 133** (P7).
-7. **The exact px-per-column of Geist Mono at the pane's text step**, and
-   therefore whether 100×30 fits the default pane width (§6.1's arithmetic is a
-   0.6em estimate and is labelled as one).
+7. **The exact px-per-column of *the shipped Geist Mono* at the pane's text
+   step**, and therefore whether 100×30 fits the default pane width. The spike
+   measured **xterm's DOM renderer at 8.425 px/column with `fontSize: 14`** — but
+   that run's stack resolved to **Menlo**, not to the bundled face, so the number
+   the pane will actually get is still unmeasured (§6.1).
 8. **That the shipped Nerd Font covers `\uf108`** and every glyph the tables use
-   (P9).
+   **inside the pane**, and that its box-drawing glyphs join at the chosen size
+   (P9). What the spike measured is the *negative*: with no Nerd Font installed, a
+   PUA sweep is tofu, and Menlo's `─` has gaps.
 9. **A signed, notarized, packaged build** (P11), and the Linux build at all.
 10. **The tool's schema cost** in tokens (P8), and its effect on the prompt cache.
 11. **The `renderer-driver.mjs` scene for a pane whose content is a live pty** —
