@@ -126,21 +126,26 @@ AGENT_SHELL_ENV = "LOCAL_OPERATOR_AGENT_SHELL"
 #: CLI. Named in ``docs/EXEC.md``, never in the refusal the model reads.
 ALLOW_NESTED_SESSION_ENV = "LOCAL_OPERATOR_ALLOW_NESTED_SESSION"
 
-#: Set by the ``bash`` tool on every command it runs, to "1" or to the empty
-#: string, from :attr:`local_operator.harness.types.ToolContext.may_delegate`.
+#: Signed by the ``bash`` tool on every command it runs, from
+#: :attr:`local_operator.harness.types.ToolContext.may_delegate`, in THREE arms:
+#: "1" when the session may delegate, the empty string when the name is
+#: inherited from the launcher and must be cleared, and NOT WRITTEN AT ALL
+#: otherwise — the name is the mechanism (a shell that knows the spelling can
+#: self-grant), and a session that never had the allowance is not handed it.
 #: Names the second fact this module acts on: this shell's session may delegate,
 #: so ``exec`` is a delegation route for it rather than a way around one.
 #: Deliberately NOT named in :func:`refusal_message` — a reader told how the
 #: allowance is spelled learns how to look for it — but documented for the human
 #: in ``docs/EXEC.md``.
 #:
-#: WHY THE CLEAR MATTERS AS MUCH AS THE SET: a ``bash`` child's environment
-#: starts as a copy of the harness process's own (``shell_env``'s default
-#: ``inherit`` mode), so a session that inherited the marker from an ancestor
-#: would otherwise carry it for life however its own role is configured — and
-#: the allowed route is what puts it there, since an allowed `lop exec` runs
-#: `lop` as a child of the delegating shell. ``_on("")`` is False, so the empty
-#: string is the "no", and an absent one still reads as "no".
+#: WHY THE CLEAR MATTERS AS MUCH AS THE SET, and why the OMIT is not a gap: a
+#: ``bash`` child's environment starts as a copy of the harness process's own
+#: (``shell_env``'s default ``inherit`` mode), so a session that inherited the
+#: marker from an ancestor would otherwise carry it for life however its own role
+#: is configured — and the allowed route is what puts it there, since an allowed
+#: `lop exec` runs `lop` as a child of the delegating shell. ``_on("")`` is False,
+#: so the empty string is the "no"; an absent name reads the same way, which is
+#: why a session that never had the allowance is not told how it is spelled.
 MAY_DELEGATE_ENV = "LOCAL_OPERATOR_AGENT_MAY_DELEGATE"
 
 #: Values that read as "on". Matches the convention the rest of the package

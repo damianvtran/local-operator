@@ -69,10 +69,17 @@ The two entry points differ, and the asymmetry is deliberate:
   shape a `task` child cannot be — a child is one prompt and ends. A session that
   does NOT hold `task` is refused exactly as before, because for that session
   `lop exec` is a way around a missing tool rather than a way to delegate.
-  `task` in the inventory is the whole test: the role's own `task` is pruned when
-  it does not delegate, and a declared inventory narrows the same list, so
-  "holds `task`" and "may delegate" cannot disagree. An absent marker reads as
-  NO.
+  `task` in the inventory the session ACTUALLY has is the whole test — not the
+  role's `delegate:` flag. What builds that inventory differs by path and the two
+  can disagree: `--tools` narrows the list on both, and the SUBAGENT path
+  additionally prunes `task` from a child whose role does not delegate
+  (`harness.subagent._build_child_session`), while `exec --profile` derives its
+  inventory from the role's `tools:` allow-list ALONE — the prune lives on the
+  subagent path only. A `delegate: false` role that declares no `tools:` list
+  (the packaged `coder` seed, for one) therefore keeps `task` in an `exec`-opened
+  session, and that session IS admitted, correctly: it genuinely holds the tool,
+  so the rule is satisfied. The asymmetry between the two paths predates this
+  allowance. An absent marker reads as NO.
 * **the interactive path stays refused for EVERY agent shell**, delegating or not
   (`lop`, `lop --resume ID`, `--tui`). An agent has no terminal, so what that
   path opens is a front end on the OPERATOR's screen — not the separate session

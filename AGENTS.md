@@ -169,8 +169,14 @@ regression above. If you are adding a new non-interactive variable to
 `NON_INTERACTIVE_ENV`, check nothing else reads it as "dedicated machine".
 
 The sibling marker `LOCAL_OPERATOR_AGENT_MAY_DELEGATE` is deliberately NOT in
-that dict: it is conditional (set only when `ToolContext.may_delegate`, i.e. the
-session holds `task`), so `NON_INTERACTIVE_ENV` is the wrong home for it, and
+that dict: it is written in three arms rather than on every command — `1` when
+`ToolContext.may_delegate` (the session holds `task`); the empty string only when
+the name really is inherited from the launcher and has to be cleared, so the
+allowance cannot outlive the session it described; and NOT WRITTEN AT ALL
+otherwise, so a session
+that never had the allowance is not handed the spelling — the name is the
+mechanism (`LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop exec` is a one-token
+self-grant). So `NON_INTERACTIVE_ENV` is the wrong home for it, and
 nothing reads it as a CI or "dedicated machine" signal — the guard in
 `agent_shell.py` is its only consumer. See the section on what an agent may
 start below.
@@ -1224,10 +1230,15 @@ live inventory — it holds `task`, or it does not:
   predicate and not the other is the defect this paragraph exists to prevent.
 
 The allowance travels as `LOCAL_OPERATOR_AGENT_MAY_DELEGATE`, which the `bash`
-tool exports from the session's live tool inventory (`ToolContext.may_delegate`,
-set by `Session._build_tool_context` from `self._tools`). An absent marker reads
-as "may not delegate", so a forgotten export is a refusal the model reads rather
-than a chat in the operator's sidebar.
+tool signs from the session's live tool inventory (`ToolContext.may_delegate`,
+set by `Session._build_tool_context` from `self._tools`) in three arms: `1` when
+the session holds `task`; the EMPTY string only where the name is inherited from
+the launcher and the session does NOT hold it, which is the clear that stops the
+allowance outliving the session it described; and NOTHING AT ALL otherwise, so a
+session that never had it is not handed the spelling — the name IS the mechanism
+(`LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop exec` is a one-token self-grant). Both
+an absent marker and an empty one read as "may not delegate", so a forgotten
+export is a refusal the model reads rather than a chat in the operator's sidebar.
 
 **Delegate with `task`, and reach for `exec` only when the user asked for
 sessions.** "Spin up parallel sessions to fully delegate this" is that ask: open
