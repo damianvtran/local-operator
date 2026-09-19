@@ -146,20 +146,16 @@ class Recommendation:
     output_tokens: int | None = None
     latency_s: float = 0.0
     skipped: SkipReason | None = None
-    #: Which of ``resources`` were asked for by an EARLIER message than the prompt
-    #: that is carrying them, as ``resource_url`` values. Set by a CALLER whose turn
-    #: stopped waiting before the answer arrived — nothing in this package produces it,
-    #: because the service answers inside its own deadline and does not know what the
-    #: turn did with the wait — and the notice renderer needs it: saying "for this
-    #: message" about advice the model was asked for one message ago is a claim the
-    #: line cannot support (design round 1, D2).
-    #:
-    #: A SET rather than a flag because one prompt can gain BOTH: a late answer and the
-    #: current message's own, announced on one line (§7). With a flag, the line had to
-    #: pick one half's attribution and print it for the union — which told the user a
-    #: resource chosen for THIS message came from their previous one (QA round 4, Q1).
-    #: Empty means every resource is this message's.
-    late_urls: tuple[str, ...] = ()
+
+    # NO ``late_urls`` FIELD any more. It carried "which of these resources were asked
+    # for by an earlier message", set by the caller for one consumer: the one-line
+    # notice's attribution ("Suggestion added for your previous message: …"). That
+    # render path is deleted — the layer no longer speaks in the transcript — so the
+    # field had no reader left, and a field kept for a renderer that does not exist is
+    # the second way of doing the same thing this package's conventions reject. The
+    # DELIVERY distinction it was derived from is untouched and still tested: an answer
+    # that misses the wait reaches that turn's next model step, and one whose turn has
+    # ended rides the next user message (``session_factory``'s pending list).
 
 
 @dataclass(frozen=True)
