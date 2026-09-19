@@ -1587,18 +1587,30 @@ async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
         remote = await _follower(tmp_path, live.record)
         asked = asyncio.Event()
         surfaced: list[BaseException] = []
+        answers: list[bool] = []
 
-        async def approve(tool_name: str, description: str, job_id: str | None = None) -> bool:
-            # ANSWERS ONCE, then waits — which is what a pane does: the operator
-            # presses Allow, and if the card comes back they are looking at it
-            # again rather than having pressed anything. A handler that answered
-            # immediately forever would spin the re-armed gate (UX round 3, U12).
-            if asked.is_set():
+        async def answer_as_the_card_does(
+            tool_name: str, description: str, job_id: str | None = None
+        ) -> bool:
+            """The card's two keystrokes, then it waits for a third.
+
+            Call 1 is the operator pressing ALLOW — refused by the owner. Call 2
+            is the same operator pressing DENY on the card that came back, and it
+            has to reach the owner with NO repaint in between (agent review round
+            4, R4-1 = QA Q8 = design D17 = UX U12: the re-armed card looked
+            answerable and swallowed every answer). Anything after that waits,
+            which is what a card does between keystrokes — a handler that
+            answered immediately forever would spin the re-armed gate.
+            """
+            call = len(answers)
+            answers.append(call != 1)
+            if call == 0:
+                asked.set()
+            if call >= 2:
                 await asyncio.Event().wait()
-            asked.set()
-            return True
+            return answers[-1]
 
-        remote.set_approval_handler(approve)
+        remote.set_approval_handler(answer_as_the_card_does)
         remote.set_gate_refusal_handler(surfaced.append)
         card = await _park_a_card(live.handle)
         parked = live.handle._fold.projection.pending
@@ -1636,8 +1648,33 @@ async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
         assert remote._gate_task is not None, "the refused pane never got its card back"
         assert not remote._gate_task.done(), "the re-armed gate settled without an answer"
         assert remote._gate_task is not asyncio.current_task()
-        await asyncio.sleep(0.05)
-        assert not remote._gate_task.done(), "the re-armed gate did not wait for the operator"
+        assert remote._gate_key == remote._gate_identity(
+            pending
+        ), "the re-armed card's key was not restored, so an answer it posts is dropped"
+        for _ in range(100):
+            if len(answers) == 2:
+                break
+            await asyncio.sleep(0.02)
+        assert len(answers) == 2, answers
+
+        # AND THE DENY IT NAMES ACTUALLY LANDS — with NO push in between. The
+        # key has to come back WITH the arm: an answer posted by the re-armed
+        # task is discarded before it reaches the owner if ``_gate_key`` is left
+        # unset, and no repaint is owed after a refusal (agent review round 4,
+        # R4-1 = QA Q8 = design D17 = UX U12). The handler above answered DENY on
+        # its second call, which is that keystroke; nothing here pushes a
+        # projection, so the only way the owner's card can clear is the reply
+        # this gate posts.
+        for _ in range(200):
+            if live.handle._fold.projection.pending is None:
+                break
+            await asyncio.sleep(0.02)
+        assert (
+            live.handle._fold.projection.pending is None
+        ), "the deny from the re-armed card never reached the owner"
+        # A deny is ordinary: it surfaced no refusal, and the card is settled.
+        assert len(surfaced) == 1, surfaced
+        assert card.done()
 
         # THE POSITIVE CONTROL (agent review round 2, R2-4; #1291's lesson that
         # a refusal nobody can turn into an acceptance proves nothing). Same
@@ -1653,15 +1690,29 @@ async def test_a_refused_card_reply_reaches_the_pane(tmp_path: Path) -> None:
         remote = await _follower(tmp_path, live.record)
         assert remote._client._authority_bearing, "the console did not present its capability"
         surfaced.clear()
-        asked.clear()
-        remote.set_approval_handler(approve)
+
+        async def allow_again(tool_name: str, description: str, job_id: str | None = None) -> bool:
+            return True
+
+        # A SECOND card, because the deny above settled the first: the control is
+        # about the arm and the capability, not about that card.
+        second = await _park_a_card(live.handle)
+        remote.set_approval_handler(allow_again)
         remote.set_gate_refusal_handler(surfaced.append)
+        parked_second = live.handle._fold.projection.pending
+        assert parked_second is not None
+        pending = PendingRequest(
+            request_id=parked_second.request_id,
+            kind="approval",
+            title=parked_second.title,
+            detail=parked_second.detail,
+        )
         remote._gate_key = remote._gate_identity(pending)
         remote._gate_task = asyncio.current_task()
         await asyncio.wait_for(remote._run_approval(pending), 10)
-        assert not surfaced, surfaced
+        assert not surfaced[1:], surfaced
         assert live.handle._fold.projection.pending is None, "the card was not answered"
-        assert card.done()
+        assert second.done()
     finally:
         if remote is not None:
             await remote.dispose()

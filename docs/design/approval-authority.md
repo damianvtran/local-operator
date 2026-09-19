@@ -208,15 +208,17 @@ The copy is 345 characters (the card's is 162) and both are under the runtime's
 fails a test rather than a phone.
 
 Rows are a property of the RENDERER, not of the characters: the notice block
-wraps at its own content width — measured 40 cells at a 44-column terminal, not
-44 — so the command's copy renders as **12 rows** against a **11-row** content
-area at 44x20, and the card's as 6. In a conversation the first row of the
-command's block can therefore scroll off, and what stays on screen is the reason
-and the primary remedy, which is exactly why the copy leads with them. The
-rendered numbers are pinned in
+wraps at its own content width — measured **40 cells** at a 44-column terminal,
+not 44 — where the command's copy renders as **12 rows** and the card's as **6**.
+The transcript's own content area at 44x20 is **11 rows** in a freshly booted app
+and **13** once the transcript fills, so the block fits at every height measured
+and nothing is clipped; the reason and the primary remedy lead the copy because
+those are the rows that survive at the narrowest of them. Both block heights are
+pinned as exact numbers in
 `tests/unit/tui/test_approvals_ux.py::test_the_refused_card_notice_reaches_the_screen`
-(design round 3, D14; agent review round 3, R3-5 — a wrap-based pin said "9 rows"
-and measured a wrapping the frame does not do).
+(design round 3 D14 and agent R3-5 corrected a wrap-based pin that said "9 rows"
+and measured a wrapping the frame does not do; agent round 4 R4-2 corrected the
+area figure this text used to claim).
 
 ## 4. The residual
 

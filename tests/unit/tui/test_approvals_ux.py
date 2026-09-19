@@ -506,8 +506,12 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         block = [
             item for item in app.query_one(TranscriptView).blocks() if isinstance(item, NoticeBlock)
         ][-1]
-        # The card's own sentence is 6 rows here, and the block shows all of it.
-        assert block.size.height <= 8, block.size.height
+        # The card's own sentence is EXACTLY 6 rows at 44 columns measured on this
+        # widget (162 characters + the receipt correction, at a 40-cell content
+        # width). An exact bound rather than a comfortable one: a one-row growth
+        # is the regression this pin exists for (agent review round 4, R4-2/R4-3
+        # — the previous `<= 8` and `<= 13` let a row slip through).
+        assert block.size.height == 6, block.size.height
 
         # The command's copy is NOT what a card reader is told.
         from local_operator.harness.approval import OPERATOR_CAP_REQUIRED_NOTICE
@@ -529,7 +533,14 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         tall = [
             item for item in app.query_one(TranscriptView).blocks() if isinstance(item, NoticeBlock)
         ][-1]
-        assert tall.size.height <= 13, tall.size.height
+        # 12, measured: the command's 345 characters at the same 40-cell content
+        # width. The block is pinned; the AREA is not, because it is a property of
+        # what else is in the transcript — 11 rows in a freshly booted app, 13
+        # once the transcript fills (both measured at 44x20 with this notice on
+        # screen). Nothing is clipped at either height, which is why the copy
+        # leads with the reason and the primary remedy: those are the rows that
+        # survive at every height measured (agent review round 4, R4-2).
+        assert tall.size.height == 12, tall.size.height
         assert OPERATOR_CAP_REQUIRED_NOTICE in tall._text
 
 

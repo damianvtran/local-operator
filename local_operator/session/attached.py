@@ -5673,13 +5673,30 @@ class AttachedSession:
             # refusal and the same notice, which is the honest outcome on a pane
             # that cannot allow.
             if not answered_without_a_person:
-                self._gate_key = None
+                # THE KEY GOES BACK WITH THE ARM. ``_gate_reply_is_current``
+                # requires ``_gate_key`` to equal this pending's identity, so an
+                # arm that CLEARED it delivered a card whose every answer was
+                # discarded: the operator pressed DENY on the card that had just
+                # come back and nothing happened — no notice, the runtime's card
+                # still parked, the tool still blocked (agent review round 4,
+                # R4-1 = QA Q8 = design D17 = UX U12).
+                #
+                # Restored HERE rather than left to the next projection push,
+                # because no repaint is owed after a refusal and none arrives on
+                # its own: the fix only lands on the push after the one that
+                # happens to carry the same card. It is the same identity
+                # ``_apply_pending_gate`` compares, so a later update carrying
+                # this card returns early instead of replacing the task the
+                # operator is looking at.
+                #
+                # The card is the one that was REFUSED, not whatever the
+                # projection holds: the refusal is about this request, and a
+                # store that has not caught up (or a client whose pending gate
+                # never arrived) must not decide whether the operator can answer
+                # it.
+                self._gate_key = self._gate_identity(pending)
                 self._gate_task = None
                 self._keep_gate_reply = False
-                # The card that was REFUSED, not whatever the projection holds:
-                # the refusal is about this request, and a store that has not
-                # caught up (or a client whose pending gate never arrived) must
-                # not decide whether the operator can answer it.
                 self._maybe_start_gate(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is

@@ -383,7 +383,10 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     texts = [getattr(e, "text", "") for e in emitted]
     assert any("set with /approvals in this session" in t for t in texts), texts
 
-    reported = handle._approvals_slash(session, "", SlashResult)
+    # ``may_loosen=True`` explicitly: the DEFAULT is now "not said", which the
+    # sentence builders read conservatively (agent review round 4, R4-3), and
+    # every production caller passes the connection's own answer.
+    reported = handle._approvals_slash(session, "", SlashResult, may_loosen=True)
     text = getattr(reported, "text", "")
     assert "tool approvals: ask (this session)" in text, text
     assert "config.yml says auto" in text, text
@@ -419,7 +422,9 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     # it (design round 2, D10 = UX round 2, U7).
     from local_operator.session.frontend_state import SlashResult as _SlashResult
 
-    capable = getattr(handle._approvals_slash(session, "default auto", _SlashResult), "text", "")
+    capable = getattr(
+        handle._approvals_slash(session, "default auto", _SlashResult, may_loosen=True), "text", ""
+    )
     assert "/approvals ask|auto switches this session now" in capable, capable
     refused = getattr(
         handle._approvals_slash(session, "default auto", _SlashResult, may_loosen=False), "text", ""
