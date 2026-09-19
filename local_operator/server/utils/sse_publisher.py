@@ -8,11 +8,12 @@ dispatcher and the wire contract stays reviewable in one file.
 TWO CHANNELS PER EVENT, ON PURPOSE
 ----------------------------------
 Everything is published to both the job-keyed channel and (where a record id
-exists) the record-keyed channel. The record channel exists for parity with the
-legacy WebSocket key; the job channel exists because a client can open it the
-moment it submits a turn, before any record id has been minted. Each channel
-owns its own sequence space, so a client resuming on one is unaffected by
-traffic on the other.
+exists) the record-keyed channel. The record channel exists because an
+installed client already holds a record id - it is the key the removed
+WebSocket channel was addressed by; the job channel exists because a client can
+open it the moment it submits a turn, before any record id has been minted.
+Each channel owns its own sequence space, so a client resuming on one is
+unaffected by traffic on the other.
 
 FAILURE POSTURE
 ---------------
@@ -66,13 +67,14 @@ _AGENT_EVENT_NAMES: Dict[str, str] = {
 
 
 def legacy_record_frame(record: CodeExecutionResult, message_id: str) -> Dict[str, Any]:
-    """The exact dict the WebSocket transport puts on the wire.
+    """The exact dict the removed WebSocket transport put on the wire.
 
-    ``WebSocketManager.broadcast()`` dumps the record and then injects
+    ``WebSocketManager.broadcast()`` dumped the record and then injected
     ``message_id`` and ``connection_type``. Reproducing both injections here is
-    what makes SSE a transport swap for an existing client: its reducer sees the
-    same keys it always has. Do not "clean this up" - the two extra keys are
-    part of the compatibility surface.
+    what keeps SSE a transport swap for an already-installed client: its reducer
+    sees the same keys it always has. The transport is gone; the reducer is not.
+    Do not "clean this up" - the two extra keys are part of the compatibility
+    surface.
     """
     data = record.model_dump()
     data["message_id"] = message_id
@@ -112,7 +114,7 @@ def publish_record(
         name = EventName.RECORD_COMPLETE if record.is_complete else EventName.RECORD_UPDATE
         if job_id:
             payload["job_id"] = job_id
-        # The record channel keeps parity with the legacy WebSocket key; the job
+        # The record channel keeps the key an installed client holds; the job
         # channel is what a client can attach to before any record id exists.
         record_ch = message_channel(message_id)
         _publish(broker, record_ch, name, payload)
@@ -155,10 +157,10 @@ def publish_agent_event(
 ) -> None:
     """Publish a raw engine event (deltas, tool traces, turn boundaries).
 
-    These are the events the legacy WebSocket bridge discards. They are additive:
-    a client that only understands ``record.*`` keeps working, while one that
-    wants true incremental text reads ``message.delta`` and stops re-rendering a
-    whole message per frame.
+    These are the events the removed WebSocket bridge discarded. They are
+    additive: a client that only understands ``record.*`` keeps working, while
+    one that wants true incremental text reads ``message.delta`` and stops
+    re-rendering a whole message per frame.
     """
     if broker is None:
         return

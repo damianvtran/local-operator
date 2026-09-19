@@ -31,8 +31,9 @@ hole forever. Retention is also time-bounded so a channel nobody ever reads
 cannot pin memory.
 
 The broker is deliberately transport-neutral: it knows nothing about SSE,
-WebSockets, or FastAPI. The legacy WebSocket fan-out remains a separate,
-untouched publish path so the fallback transport stays byte-identical.
+WebSockets, or FastAPI. ``sse_publisher`` is its only publisher - the legacy
+WebSocket fan-out that used to publish here in parallel was removed with the
+``/v1/ws`` transport.
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ JOB_CHANNEL = "job"
 
 
 def message_channel(message_id: str) -> str:
-    """The record-keyed channel, parity with the legacy WebSocket key."""
+    """The record-keyed channel - the key an installed client already holds."""
     return f"{MESSAGE_CHANNEL}:{message_id}"
 
 
@@ -234,9 +235,10 @@ class EventBroker:
     ) -> List[BrokerEvent]:
         """Publish one event to several channels.
 
-        The record-keyed channel (parity with the legacy WebSocket key) and the
-        job-keyed channel (which a client can subscribe to *before* the first
-        record id exists) carry the same events with independent sequences.
+        The record-keyed channel (the legacy WebSocket key, kept because an
+        installed client holds that id) and the job-keyed channel (which a
+        client can subscribe to *before* the first record id exists) carry the
+        same events with independent sequences.
         """
         return [self.publish(c, name, data, terminal=terminal) for c in channels if c]
 

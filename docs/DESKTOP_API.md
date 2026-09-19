@@ -125,7 +125,7 @@ Sensitive responses are `Cache-Control: no-store`; rejected input is not echoed
 by validation responses.
 
 Two surfaces are deliberately **outside both gate families**, so no bearer and no
-claim gates them: `/v1/chat`, `/v1/sse`, `/v1/ws`, `/v1/static`, and the
+claim gates them: `/v1/chat`, `/v1/sse`, `/v1/static`, and the
 `/v1/models/...` sub-paths (the gate matches the exact `/v1/models` template).
 This predates the claim handshake and is unchanged by it; on a daemon whose
 allowlist admits an origin, a claim still removes their CORS grant from every
@@ -134,6 +134,15 @@ allowlist-less daemon keeps the echo (see the `null`-origin residual above) and
 an unauthenticated local caller can still reach them either way. Widening the
 gate to cover them is a separate, larger decision and is recorded rather than
 made here.
+
+The deprecated `/v1/ws` socket surface was also in that ungated set and is now
+**gone** — route, mount and fan-out — so it is no longer listed. This is a
+wire-protocol change, not a widening of the gate: an installed desktop build
+that probes `/v1/sse/capabilities` and falls back to the socket when SSE is
+unavailable or goes silent now has no second transport against this backend and
+must be updated. The capabilities payload names `"sse"` alone; a client that
+reads `transports` still finds it, and a client that reads the removed
+`websocket` key finds no such key rather than a malformed one.
 
 ## Providers and accounts
 

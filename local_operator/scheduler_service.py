@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import inspect
 import logging
 import os
 from collections.abc import Callable
@@ -80,7 +79,6 @@ from local_operator.types import ConversationRole, OperatorType, Schedule, Sched
 
 if TYPE_CHECKING:
     from local_operator.server.utils.event_broker import EventBroker
-    from local_operator.server.utils.websocket_manager import WebSocketManager
 
 from local_operator.server.utils.sse_publisher import publish_job_status
 
@@ -126,7 +124,6 @@ class SchedulerService:
         operator_type: "OperatorType",
         verbosity_level: VerbosityLevel,
         job_manager: JobManager,
-        websocket_manager: "WebSocketManager",
         event_broker: "EventBroker | None" = None,
     ) -> None:
         self.agent_registry = agent_registry
@@ -136,11 +133,11 @@ class SchedulerService:
         self.operator_type = operator_type
         self.verbosity_level = verbosity_level
         self.job_manager = job_manager
-        self.websocket_manager = websocket_manager
-        # Optional SSE fan-out. Scheduled runs execute inline in the parent (no
-        # pump), so without this their job streams would open and keepalive
-        # forever; publishing here gives them the same terminal contract as
-        # async chat jobs (review B-2).
+        # SSE fan-out: the only one left, since the websocket fan-out this used
+        # to broadcast onto went away with the /v1/ws transport. Scheduled runs
+        # execute inline in the parent (no pump), so without this their job
+        # streams would open and keepalive forever; publishing here gives them
+        # the same terminal contract as async chat jobs (review B-2).
         self.event_broker = event_broker
 
         self.scheduler = AsyncIOScheduler(timezone="UTC")
@@ -885,42 +882,14 @@ class SchedulerService:
         status: JobStatus,
         result: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Record the status in the job ledger and best-effort websocket broadcast."""
+        """Record the status in the job ledger and publish it to the SSE broker."""
         try:
             await self.job_manager.update_job_status(job_id, status, result)
         except KeyError:
             logger.debug(f"Job {job_id} not found when recording status {status}.")
         except Exception:
             logger.exception(f"Failed to record job status {status} for job {job_id}.")
-        await self._broadcast_status(job_id, status, result)
         # Mirror the status onto the SSE broker so scheduled job streams get the
         # same job.status / stream.terminal contract as async chat jobs (B-2).
         if self.event_broker is not None:
             publish_job_status(self.event_broker, job_id, status, result)
-
-    async def _broadcast_status(
-        self,
-        job_id: str,
-        status: JobStatus,
-        result: Optional[dict[str, Any]] = None,
-    ) -> None:
-        """Best-effort broadcast; degrades gracefully if the manager shape differs."""
-        manager = self.websocket_manager
-        broadcast = getattr(manager, "broadcast", None)
-        if not callable(broadcast):
-            return
-        payload: dict[str, Any] = {
-            "type": "scheduled_job_status",
-            "job_id": job_id,
-            "status": status.value,
-        }
-        if isinstance(result, dict):
-            for key in ("error", "schedule_id", "agent_id"):
-                if result.get(key):
-                    payload[key] = result[key]
-        try:
-            outcome = broadcast(job_id, payload)
-            if inspect.isawaitable(outcome):
-                await outcome
-        except Exception:
-            logger.debug(f"WebSocket broadcast for job {job_id} failed (degraded).", exc_info=True)

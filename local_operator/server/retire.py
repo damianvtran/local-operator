@@ -93,27 +93,6 @@ def retiring(app: "FastAPI") -> bool:
     return bool(getattr(state, RETIRING_STATE_ATTR, False))
 
 
-def _subscribers(value: Any) -> int | None:
-    """``value``'s live subscriber count; ``None`` when the probe could not be read.
-
-    ABSENT and BROKEN are different answers and must never be folded together: a
-    reduced app that never built a ``WebSocketManager`` has no connections to
-    lose, while an accessor that RAISES is a probe that could not be asked. An
-    unreadable probe means "stay" — see :func:`in_flight`, whose rule is that a
-    probe this process cannot read may never be the reason it leaves.
-    """
-    count: Callable[[], Any] | None = getattr(value, "live_connection_count", None)
-    if not callable(count):
-        return 0
-    try:
-        return int(count())
-    except Exception:  # noqa: BLE001 — unreadable, which is not the same as zero
-        logger.warning(
-            "serve daemon: the websocket connection count could not be read", exc_info=True
-        )
-        return None
-
-
 def _unreadable(probe: str) -> str:
     """The in-flight reason an UNREADABLE probe produces: stay, and say which one."""
     return f"an in-flight probe that could not be read ({probe})"
@@ -134,24 +113,26 @@ def in_flight(app: "FastAPI") -> str | None:
        turn is streaming live frames to a client and this process is the only
        source of them — the broker's replay buffer dies with the process, so
        those frames cannot be recovered from the successor.
-    2. **An open legacy WebSocket stream.** ``WebSocketManager``
-       (``server/utils/websocket_manager.py``) carries the same frames on the
-       transport that predates SSE and is still served.
-    3. **The desktop plane.** ``DesktopSessions.in_flight_reason()``
+    2. **The desktop plane.** ``DesktopSessions.in_flight_reason()``
        (``server/utils/desktop_sessions.py``) owns the bridge terms — an in-flight
        HTTP operation, a live watch lease and a runtime mid-spawn — because the
        pool is what knows its bridges.
 
+    (A third term used to sit between them — the deprecated WebSocket manager's
+    live-connection count — and was removed with that transport. It is not
+    "missing": no WebSocket stream can exist in this process any more, so the
+    term had no possible non-zero reading.)
+
     WHICH OF THOSE IS A STANDING ATTACHMENT, and why it decides the SHAPE of the
-    retirement rather than only its timing: term 3's first two entries come from
+    retirement rather than only its timing: term 2's first two entries come from
     the desktop app's own relay. ``GET /v1/desktop/sessions/{id}/events``
     acquires the bridge BEFORE it returns response headers and releases it only
     when the stream tears down, so ``users > 0`` for as long as a conversation is
     on screen — there is no turn boundary and no TTL on that stream; the app
     holds it until the view unmounts or the app quits. The watch lease beside it
     is renewed every 15 s within a 45 s TTL, and counts whether or not the window
-    is visible. Term 1 and 2 are bounded (a turn's stream ends with the turn, a
-    WebSocket likewise) and do not pin an app-attached daemon on their own.
+    is visible. Term 1 is bounded (a turn's stream ends with the turn) and does
+    not pin an app-attached daemon on its own.
 
     Therefore the announcement is written BEFORE this predicate is consulted, and
     the drain is only what decides when the LATCH happens (module docstring).
@@ -159,8 +140,8 @@ def in_flight(app: "FastAPI") -> str | None:
     the standing terms; the terms themselves are never cut.
 
     A PROBE THAT CANNOT BE READ MEANS STAY, and the direction is the point. A
-    broken or unreadable probe (a raising ``stats()``, a raising accessor, a
-    raising desktop probe) must not be read as "nothing in flight": the cost of
+    broken or unreadable probe (a raising ``stats()``, a raising desktop probe)
+    must not be read as "nothing in flight": the cost of
     staying is a daemon that keeps serving its old build for one more check
     (bounded, observable — it logs), while the cost of leaving is an exit under
     a live stream, which is an interruption nobody undoes. Missing probes are
@@ -185,12 +166,6 @@ def in_flight(app: "FastAPI") -> str | None:
             return _unreadable("the event broker's subscriber count")
         if streams:
             return f"{streams} SSE subscription(s)"
-
-    sockets = _subscribers(getattr(state, "websocket_manager", None))
-    if sockets is None:
-        return _unreadable("the websocket connection count")
-    if sockets:
-        return f"{sockets} websocket connection(s)"
 
     pool: Any = getattr(state, "desktop_sessions", None)
     desktop: Callable[[], Any] | None = getattr(pool, "in_flight_reason", None)
