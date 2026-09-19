@@ -42,6 +42,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_operator.paths import O_BINARY
+
 logger = logging.getLogger(__name__)
 
 #: The spool file inside ``sessions/<id>/``.
@@ -286,7 +288,7 @@ def append_inbox(session_dir: Path, line: InboxLine) -> bool:
     path = inbox_path(session_dir)
     payload = json.dumps(line.to_json(), separators=(",", ":")).encode() + b"\n"
     try:
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | O_BINARY, 0o600)
     except OSError:
         logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
         return False

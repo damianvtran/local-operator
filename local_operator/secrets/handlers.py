@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from local_operator.paths import O_BINARY
 from local_operator.secrets.access import open_store, retrieve_secret, session_id
 from local_operator.secrets.errors import BrokerIncompatible, SecretStoreError
 from local_operator.secrets.keys import DIR_MODE, FILE_MODE, key_mode, secrets_dir
@@ -782,7 +783,7 @@ def _file(args: argparse.Namespace) -> int:
     target = directory / args.name.replace(os.sep, "_")
     previous_sigterm = _install_sigterm_cleanup()
     try:
-        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, FILE_MODE)
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | O_BINARY, FILE_MODE)
         try:
             os.write(descriptor, value)
         finally:

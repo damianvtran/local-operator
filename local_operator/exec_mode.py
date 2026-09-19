@@ -33,6 +33,7 @@ from uuid import uuid4
 
 from local_operator import procstate
 from local_operator.interpreter import python_argv
+from local_operator.paths import O_BINARY
 
 
 def logs_dir() -> Path:
@@ -215,7 +216,8 @@ def _ensure_logs_dir() -> Path:
 
 def _open_log_file(log_path: Path) -> Any:
     """Open a job log for append, forcing 0600 regardless of umask (CL-10)."""
-    return os.fdopen(os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
+    descriptor = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
+    return os.fdopen(descriptor, "ab")
 
 
 def _append_job_record(
@@ -251,7 +253,7 @@ def _append_job_record(
     }
     line = json.dumps(record, ensure_ascii=False) + "\n"
     try:
-        fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
         try:
             os.write(fd, line.encode("utf-8"))
         finally:
@@ -304,7 +306,7 @@ def update_job_exit(job_id: str, exit_code: int) -> None:
         ),
     }
     try:
-        fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
         try:
             os.write(fd, (json.dumps(update, ensure_ascii=False) + "\n").encode("utf-8"))
         finally:
@@ -339,7 +341,7 @@ def update_job_running(job_id: str, session: Any) -> None:
 
 def _append_job_update(update: dict[str, Any]) -> None:
     path = _ensure_logs_dir() / JOBS_FILE
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
     try:
         os.write(fd, (json.dumps(update, ensure_ascii=False) + "\n").encode())
     finally:

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal
 
+from local_operator.paths import O_BINARY
 from local_operator.procstate import is_zombie, pid_liveness
 
 LEASE_NAME = ".execution-lease"
@@ -112,7 +113,7 @@ def _stale_recovery_right(session_dir: Path) -> Iterator[bool]:
     live contender are intentionally indistinguishable here.
     """
     path = session_dir / RECOVERY_LOCK_NAME
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | O_BINARY, 0o600)
     token = secrets.token_hex(16)
     acquired = False
     try:
@@ -250,7 +251,7 @@ def acquire_session_lease(session_dir: Path, pid: int | None = None) -> SessionL
 
     while True:
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | O_BINARY, 0o600)
         except FileExistsError:
             inspected_generation, inspected_pid = _read_claim(path)
             if inspected_pid is None or _pid_state(inspected_pid) != "dead":
@@ -274,7 +275,7 @@ def acquire_session_lease(session_dir: Path, pid: int | None = None) -> SessionL
                 tombstone = session_dir / f"{LEASE_NAME}.stale.{secrets.token_hex(8)}"
                 try:
                     os.replace(path, tombstone)
-                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | O_BINARY, 0o600)
                 except OSError:
                     # Windows rename denial and any unexpected successor both
                     # stay closed; neither permits speculative ownership.

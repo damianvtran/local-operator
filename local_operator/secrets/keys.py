@@ -27,7 +27,7 @@ import os
 import stat
 from pathlib import Path
 
-from local_operator.paths import config_dir
+from local_operator.paths import O_BINARY, config_dir
 from local_operator.secrets.crypto import KEY_BYTES, generate_master_key
 from local_operator.secrets.errors import InsecurePermissions, SecretStoreError
 
@@ -324,7 +324,7 @@ def write_private_file(path: Path, data: bytes) -> None:
     site was checked against the docstring and read as guarded. For a shared
     final path use :func:`create_private_file`, which really is exclusive.
     """
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, FILE_MODE)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | O_BINARY, FILE_MODE)
     try:
         os.write(descriptor, data)
         os.fsync(descriptor)
