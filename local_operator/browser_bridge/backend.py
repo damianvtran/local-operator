@@ -773,6 +773,24 @@ class HostClient:
         """
         return client_timeout(method, params.get("timeout_s"))
 
+    def unreadable_response(self, http_response: httpx.Response) -> str:
+        """The sentence for a body this version cannot read as a ``Response``.
+
+        A hook rather than a direct ``copy.invalid_response`` call, for the same
+        reason as :meth:`copy_for` and :meth:`timeout_for`: two different events
+        land here and their remedies are opposite. A torn or non-JSON body is a
+        fault; a WELL-FORMED refusal whose ``ErrorDetail.code`` this version does
+        not model is version skew, and it fails validation at exactly the same
+        line because ``code`` is typed on the shared enum. Only a client that knows
+        its own vocabulary can tell them apart, so the client is what decides.
+
+        The default is byte-identical to what every host reported before this hook
+        existed; a subclass that can name the case overrides it (see
+        ``ui_console.backend.ConsoleHostClient``, which reads the raw body for the
+        one field that separates a newer app from a broken one).
+        """
+        return self.copy_for().invalid_response.format(status=http_response.status_code)
+
     def _read(self) -> Any:
         return self.store.read(self.root)
 
@@ -846,9 +864,7 @@ class HostClient:
         try:
             response = Response.model_validate(http_response.json())
         except (ValueError, json.JSONDecodeError) as exc:
-            raise BridgeUnreachable(
-                copy.invalid_response.format(status=http_response.status_code)
-            ) from exc
+            raise BridgeUnreachable(self.unreadable_response(http_response)) from exc
         if not response.ok:
             detail = response.error or ErrorDetail(
                 code=ErrorCode.INTERNAL, message="unknown failure"

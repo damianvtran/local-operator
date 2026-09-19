@@ -2,7 +2,7 @@
 
 The transport is NOT re-implemented here: :class:`ConsoleHostClient` is
 :class:`~local_operator.browser_bridge.backend.HostClient` pointed at the app
-host's discovery record, with two things overridden and nothing else:
+host's discovery record, with three things overridden and nothing else:
 
 * **The failure copy.** The app host's own table entry names its *browser*
   ("open a browser tab in it, then retry"), which is the wrong remedy for a
@@ -16,6 +16,12 @@ host's discovery record, with two things overridden and nothing else:
   call that hangs for three minutes. That is precisely the outcome the console's
   absence copy exists to replace with an honest answer (design §15), so the
   console sizes its own calls.
+* **The unreadable-answer diagnosis.** An unknown `ErrorCode` fails
+  `Response.model_validate` like a malformed body does, and "returned an invalid
+  response" points the reader at a BROKEN app for what is usually a NEWER one
+  (design §15's forward-compat rule: a peer that does not know a code never emits
+  it, so every code this side cannot parse is one it has not learned yet). This
+  module names the code it could not read and the version-skew remedy instead.
 
 What is deliberately NOT here: the console's method names are absent from
 :data:`local_operator.browser_bridge.protocol.METHODS`. That tuple is the
@@ -42,7 +48,7 @@ from local_operator.browser_bridge.backend import (
     HostClient,
     HostCopy,
 )
-from local_operator.browser_bridge.protocol import ErrorCode
+from local_operator.browser_bridge.protocol import PROTO_VERSION, ErrorCode
 from local_operator.ui_console import state as state_store
 
 #: The ten console methods (design §10.2), in the app's own order. A tuple so the
@@ -139,6 +145,21 @@ CONSOLE_FEATURE_OFF_COPY = (
 )
 
 
+#: What the model reads when the app refused with a code THIS version of `lop`
+#: does not model. The shared `ErrorCode` is validated on the way in, so such a
+#: refusal is indistinguishable — to the transport — from a body that is not a
+#: `Response` at all: both fail `Response.model_validate`. They are not the same
+#: event, and the remedies are opposite, so the console reads the raw body for the
+#: one field that tells them apart (`unreadable_response` below) rather than
+#: reporting a healthy newer app as a broken one.
+CONSOLE_UNKNOWN_CODE_COPY = (
+    "the Local Operator desktop app's console refused the call with a code this version "
+    "of Local Operator does not model ('{code}', HTTP {status}), so the app is newer than "
+    "this session. Update Local Operator, then retry; do not read the app as broken, and "
+    "do not retry this call unchanged."
+)
+
+
 class ConsoleHostClient(HostClient):
     """One authenticated console call against the app's loopback host."""
 
@@ -156,6 +177,51 @@ class ConsoleHostClient(HostClient):
         del params
         base = CONSOLE_TIMEOUTS.get(method, max(CONSOLE_TIMEOUTS.values()))
         return base + CONSOLE_TIMEOUT_MARGIN_S
+
+    def unreadable_response(self, http_response: httpx.Response) -> str:
+        """Answer a well-formed refusal whose CODE this version does not model.
+
+        `ErrorDetail.code` is typed on the shared enum, so a code added by a newer
+        app fails `Response.model_validate` exactly where a torn body does — and
+        design §15 says that direction is the ORDINARY one (a peer that does not
+        know a code never emits it, so a code this side cannot parse is one it has
+        not learned yet). Answering it with `invalid_response` sends the reader to
+        look at a broken app. The raw body is read for the one field that separates
+        the two cases; anything else falls through to the shared sentence.
+        """
+        code = _unmodelled_error_code(http_response)
+        if code:
+            return CONSOLE_UNKNOWN_CODE_COPY.format(code=code, status=http_response.status_code)
+        return super().unreadable_response(http_response)
+
+
+def _unmodelled_error_code(http_response: httpx.Response) -> str:
+    """The `error.code` of a refusal this version's `ErrorCode` does not know.
+
+    Returns `""` for every other case — a non-JSON body, a body that is not a
+    `Response`, an `ok: true` answer, an `error` without a string code, and (the
+    one that matters) a code that IS in the enum, where the validation failure has
+    some other cause and the shared sentence is the honest one. Every failure of
+    this probe means "not the case the hook exists for", never an exception of its
+    own: it runs on a path that is already reporting a fault.
+    """
+    try:
+        body = http_response.json()
+    except Exception:  # noqa: BLE001 - an unparseable body is the caller's default path
+        return ""
+    if not isinstance(body, dict) or body.get("ok") is not False:
+        return ""
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return ""
+    code = error.get("code")
+    if not isinstance(code, str) or not code.strip():
+        return ""
+    try:
+        ErrorCode(code)
+    except ValueError:
+        return code.strip()
+    return ""
 
 
 def console_timeout(method: str) -> float:
@@ -268,10 +334,21 @@ def console_error_text(error: BridgeError) -> str:
     remedy differs by value (an exited program needs a `create`, a full input queue
     needs a `read` first).
 
-    An unrecognised code falls through to the host's own message with the code
-    named, which is the honest answer for a refusal this version of `lop` has
-    never heard of: a NEW app can refuse a method with a code an older session
-    does not model, and inventing a sentence for it would be guessing.
+    An unrecognised code is answered BEFORE this function: `ErrorDetail.code` is
+    typed on the shared `ErrorCode`, so a value this version does not model fails
+    `Response.model_validate` at the transport boundary rather than arriving here,
+    and `ConsoleHostClient.unreadable_response` names it and the version-skew
+    remedy (design §15's forward-compat rule: a peer that does not know a code
+    never emits it, so an unparseable code is a NEWER app, not a broken one).
+
+    The branch below that DOES fall through is a code this version models but has
+    no sentence for — the shared vocabulary this capability reuses (`internal`,
+    `busy`, `tab_limit`) rather than a code from the future. There the host's own
+    message is carried through with the code named first, and that is deliberate:
+    those refusals are argument-shape mistakes whose only diagnosis IS the host's
+    sentence, and unlike the codes above there is no harness copy to prefer. Every
+    code with a sentence below names its specifics from `data` and never from
+    `message`.
     """
     code = error.code
     data = error.data or {}
@@ -311,7 +388,15 @@ def console_error_text(error: BridgeError) -> str:
         )
         return f"The program in that surface has exited{where}: {tail}."
     if code == ErrorCode.INPUT_QUEUE_FULL:
-        accepted = data.get("bytes")
+        # `accepted` is the published key: the bytes the app DID take before it
+        # stopped. It is NOT `data["bytes"]`, which is what the app's own payload
+        # calls the size of the REFUSED payload — reading that one would print the
+        # rejected size as an accepted count, a false statement in a model-facing
+        # result. A host that sends neither gets the honest sentence rather than a
+        # number this side guessed.
+        accepted = data.get("accepted")
+        if isinstance(accepted, bool) or not isinstance(accepted, int):
+            accepted = None
         count = (
             f"{accepted} bytes were accepted before" if accepted is not None else "the queue filled"
         )
@@ -350,10 +435,29 @@ def console_error_text(error: BridgeError) -> str:
             "or the terminal component failing to load; tell the user rather than retrying."
         )
     if code == ErrorCode.INVALID_GRID:
-        clamp = data.get("cols"), data.get("rows")
+        # Two conditions share this code (one §10.6 row: "the grid is outside what
+        # the app will honour") and they must not render alike. A surface created
+        # with a FIXED grid cannot be resized at all, and the cols/rows in that
+        # payload are the surface's own grid rather than a clamp — printing them as
+        # "it applied NxM instead" would be the same class of false statement the
+        # `{row, col}` cursor produced.
+        if str(data.get("reason") or "").strip().lower() == "fixed":
+            return (
+                "That grid is outside what the app will honour: this surface was created "
+                "with a fixed grid, so it cannot be resized. Create a new surface at the "
+                "size you want."
+            )
+        # The clamp is NESTED (`clamp: {cols, rows}`) under the published key table;
+        # the flat pair is those same two numbers for a host that spells it flat, and
+        # is accepted defensively rather than read as `None`. Both the probe and the
+        # fallback are bound to names: a conditional that re-reads `data.get("clamp")`
+        # on each branch is one the type checker cannot follow.
+        nested = data.get("clamp")
+        clamp: dict[str, Any] = nested if isinstance(nested, dict) else data
+        cols, rows = clamp.get("cols"), clamp.get("rows")
         applied = (
-            f" It applied {clamp[0]}x{clamp[1]} instead."
-            if all(isinstance(value, int) for value in clamp)
+            f" It applied {cols}x{rows} instead."
+            if isinstance(cols, int) and isinstance(rows, int)
             else ""
         )
         return f"That grid is outside what the app will honour.{applied}"
@@ -364,9 +468,22 @@ def console_error_text(error: BridgeError) -> str:
             "the surface as text."
         )
     if code == ErrorCode.PROTO_MISMATCH:
+        # Both numbers come from `data`, and the host's free-text message is NOT
+        # interpolated: §15 asks for "the existing copy, UI variant", and the
+        # browser's variant reads `data["proto"]` for the same reason — "update the
+        # app or Local Operator" is not actionable without knowing which side is
+        # behind. A peer that reported no revision still gets the number this side
+        # speaks, so the sentence never reads as a shrug.
+        peer = data.get("proto")
+        if isinstance(peer, bool) or not isinstance(peer, int):
+            return (
+                "The app and this session speak different console protocol versions, and the "
+                f"app did not report which (this Local Operator speaks {PROTO_VERSION}). "
+                "Update the desktop app or Local Operator, then retry."
+            )
         return (
-            f"The app and this session speak different protocol versions ({message}). "
-            "Update Local Operator, then retry."
+            f"The app's console host speaks protocol {peer}; this Local Operator speaks "
+            f"{PROTO_VERSION}. Update the desktop app or Local Operator, then retry."
         )
     return (
         f"The app refused '{code.value}': {message or 'no detail given'}"

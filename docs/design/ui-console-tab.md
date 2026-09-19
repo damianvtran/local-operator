@@ -130,6 +130,19 @@ table's `last_activity`, and the idle interval is the agent's own derivation
 rather than a returned field. §0.5 and §17.1 are unchanged between revision 3
 and this one.
 
+**Revision 5 — this commit — shapes two things the table left to the reader,
+and no decision moved.** §10.2's `console_status` and `console_read` rows name
+`cursor` without saying what it is, while the only cursor type the document
+defines is §5.4's emulator cursor; the rows now carry that spelling and §10.2
+states it in one paragraph, because a wire field the frozen table does not shape
+is a field two implementations can disagree about while both stay conformant.
+§10.6 gains the `data` keys per code for the same reason one level down: its copy
+rules promise the specifics (“the clamp it applied”, “the accepted byte count”)
+without saying which key carries them, and a privately chosen spelling degrades
+exactly the diagnosis §15 promises while every gate stays green. Both amendments
+come from the agent-review round 1 on the tool half (`local-operator` #1338) and
+are the contract its app half implements.
+
 | area | revision 1 | revision 2 |
 |---|---|---|
 | D1 emulator | xterm.js, ghostty assessed from licences and packaging | **unchanged decision, now evidence-backed** — and the ghostty path is recorded as *measured-viable*, with its sha256, its minisign verification and a named switch trigger (§5.5) |
@@ -1497,14 +1510,25 @@ vocabulary; ids are opaque strings.
 |---|---|---|
 | `console_list` | `{session_id?: str}` | `[{surface, session_id, origin, command, argv_tail, cwd, cols, rows, running, exit_code, last_activity, live, agent_owned}]` |
 | `console_create` | `{session_id, cwd?, command?, args?, input?, env?, cols?, rows?, reveal?, retain?}` | `{surface, cols, rows, pid, live, revealed}` |
-| `console_status` | `{surface}` | `{running, exit_code, exit_epoch, cols, rows, live, truncated, modes, cursor, last_activity, retain, secure}` |
-| `console_read` | `{surface, mode: "viewport"\|"scrollback", start?, count?}` | `{text, cols, rows, cursor, truncated, live, mode}` |
+| `console_status` | `{surface}` | `{running, exit_code, exit_epoch, cols, rows, live, truncated, modes, cursor ({x, y} — §5.4's emulator cursor), last_activity, retain, secure}` |
+| `console_read` | `{surface, mode: "viewport"\|"scrollback", start?, count?}` | `{text, cols, rows, cursor ({x, y} — §5.4's emulator cursor), truncated, live, mode}` |
 | `console_screenshot` | `{surface, format?: "png"}` | `{image_base64, cols, rows, rendered: "displayed"\|"offscreen", theme, live}` |
 | `console_input` | `{surface, text?, bytes?, secret_ref?, paste?}` | `{accepted: true, bytes: <count>}` |
 | `console_keys` | `{surface, keys: [str, …]}` | `{accepted: true, encoded: [str, …]}` |
 | `console_resize` | `{surface, cols, rows}` | `{cols, rows}` |
 | `console_secure` | `{surface, on}` | `{secure}` |
 | `console_close` | `{surface, kill?: bool, retain?: bool}` | `{closed, exit_code?}` |
+
+**`cursor` is the emulator's own shape, and that is the only one.** §5.4 fixes it
+(`readonly cursor: Readonly<{ x: number; y: number }>`, i.e. `@xterm/headless`'s
+`cursorX`/`cursorY`, where `x` is the COLUMN and `y` the ROW) and both rows above
+carry that value unchanged, so a host emits `{x, y}` and nothing else. It is
+`null` in `console_status` when the app has no grid for the surface — a restored,
+never-runtime surface (§7.3) — which is a value rather than an omission, and the
+session-side renderer prints a field it does not recognise as it arrived rather
+than as `None`. The renderer also ACCEPTS `{row, col}` defensively for a host
+written against an earlier draft; that tolerance is not a second wire spelling
+and no app may emit it.
 
 And the renderer-facing ops on the browser's IPC namespace shape (not RPC —
 `ipc.ts:20-35`'s rule 2 forbids routing them through `desktop-request`):
@@ -1602,6 +1626,30 @@ with the reason the existing value would be a lie:
 | capability off / pty unavailable | `console_unavailable` (**new**) | names which of the three conditions failed (§10.1) |
 | grid out of range | `invalid_grid` (**new**) | carries the clamp it applied |
 | a second capture requested while the capture view is busy | `console_capture_full` (**new**) | names the surface whose capture holds the view; the caller's own surface is never the one named, because §13.3's one-at-a-time rule is what makes this reachable at all |
+
+**The `data` keys, per code.** `ErrorDetail.data` is `dict[str, Any]`, so a copy
+rule that names a specific — the handle, the accepted byte count, the clamp — is
+unimplementable until the key carrying it is written down, and a spelling chosen
+privately on one side fails *silently*: every gate stays green while the sentence
+degrades to its generic form. These are the keys, one spelling each:
+
+| code | `data` keys |
+|---|---|
+| `surface_unavailable` | `surface` (the handle asked for), `count` (how many surfaces exist) |
+| `surface_not_owned` | `surface` (the handle that belongs to another session) |
+| `process_exited` | `exit_code`, `retain` (absent means the log is retained) |
+| `input_queue_full` | `accepted` — the bytes the host TOOK; the size of the refused payload is the host's own `message`, and a copy that read it as an accepted count would state the opposite of what happened |
+| `unknown_key` | `accepted` (the names the encoder has), `key` (the one that was not found) |
+| `invalid_grid` | `clamp: {cols, rows}` — the grid applied instead; `reason: "fixed"` for the surface that cannot be resized at all, where there is no clamp to carry |
+| `console_capture_full` | none in this half: §13.3's busy-view copy names no holder yet, and the key is recorded here as one to add when a host emits this code (§10.6's rule that the caller's own surface is never the one named) |
+| `console_unavailable` | `reason` (which of §10.1's conditions failed) |
+| `proto_mismatch` | `proto` — the peer's revision, so the sentence can name both numbers |
+
+No other code carries keys: `unsupported_method` and `secure_input_active` are
+answered by the copy alone. The session side reads exactly these, with two
+legacy spellings accepted defensively and never read as `None` — `handle` for
+`surface`, and a flat `cols`/`rows` for `invalid_grid` — recorded here so the
+renderer's tolerance is not mistaken for the contract.
 
 **Proto rule this design follows:** every addition above is *additive* — new
 methods, new `ErrorCode` values that an old peer never emits (and that a peer

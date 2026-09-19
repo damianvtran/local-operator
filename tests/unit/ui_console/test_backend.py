@@ -323,6 +323,192 @@ async def test_an_absent_record_is_not_a_probe_candidate(tmp_path: Path) -> None
     assert await backend.ui_console_reachable(tmp_path) is False
 
 
+@pytest.mark.asyncio
+async def test_a_code_this_version_does_not_model_is_a_newer_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q2: an unknown-but-VALID refusal is version skew, not a broken app.
+
+    `ErrorDetail.code` is typed on the shared enum, so a code a newer app added
+    fails `Response.model_validate` exactly where a torn body does — and the
+    generic sentence ("returned an invalid response (HTTP 200)") sends the reader
+    to look at a broken app. Design §15 makes this direction the ORDINARY one: a
+    peer that does not know a code never emits it, so a code this side cannot
+    parse is one it has not learned yet. The raw body is read for the one field
+    that tells the two cases apart.
+    """
+    publish(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "id": body["id"],
+                "ok": False,
+                "error": {
+                    "code": "some_future_code",
+                    "message": "a host sentence the model must not be shown",
+                    "data": {"anything": 1},
+                },
+            },
+        )
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    with pytest.raises(BridgeUnreachable) as caught:
+        await client.call("console_status", {"surface": "con:1:a"})
+    message = str(caught.value)
+    assert "some_future_code" in message, message
+    assert "does not model" in message, message
+    assert "invalid response" not in message, message
+    assert "newer" in message, message
+    assert "a host sentence the model must not be shown" not in message, message
+
+
+@pytest.mark.asyncio
+async def test_a_known_code_that_fails_validation_keeps_the_generic_sentence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook names a code only when the code is genuinely unmodelled.
+
+    A body that is broken in ANY other way (here: an `error` with no `message`)
+    fails validation too, and calling that "a code this version does not model"
+    would be a false statement of its own — `surface_unavailable` is very much
+    modelled.
+    """
+    publish(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"id": body["id"], "ok": False, "error": {"code": "surface_unavailable"}},
+        )
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    with pytest.raises(BridgeUnreachable) as caught:
+        await client.call("console_status", {"surface": "con:1:a"})
+    message = str(caught.value)
+    assert "invalid response" in message, message
+    assert "does not model" not in message, message
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_code_from_a_peer_that_is_not_ours_is_still_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a well-formed `ok: false` envelope is read for its code.
+
+    An `ok: true` body that fails validation has no refusal to name, and reading a
+    code out of one would invent a refusal that never happened.
+    """
+    publish(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        # Fails validation on an UNEXPECTED TOP-LEVEL FIELD, with a `code`-looking
+        # value sitting outside `error` where the hook must not look for one.
+        return httpx.Response(
+            200,
+            json={
+                "id": body["id"],
+                "ok": True,
+                "result": {"surfaces": []},
+                "code": "some_future_code",
+            },
+        )
+
+    client = _client_with_transport(tmp_path, monkeypatch, handler)
+    with pytest.raises(BridgeUnreachable) as caught:
+        await client.call("console_list", {})
+    assert "does not model" not in str(caught.value)
+
+
+def test_the_proto_skew_copy_names_both_numbers_and_never_the_host() -> None:
+    """Q1: §15 asks for the UI variant, which reads `data["proto"]`.
+
+    `proto_mismatch` was the one code interpolating the host's free-text message,
+    and losing the two revision numbers is losing the only actionable part —
+    "update the app or Local Operator" without knowing which side is behind is a
+    shrug. The host's prose must not reach the transcript either (the module's own
+    contract, and what every other code in the table honours).
+    """
+    error = BridgeError(
+        ErrorCode.PROTO_MISMATCH,
+        "a host sentence the model must not be shown",
+        {"proto": 7},
+    )
+    text = backend.console_error_text(error)
+    assert "protocol 7" in text, text
+    assert f"speaks {PROTO_VERSION}" in text, text
+    assert "a host sentence the model must not be shown" not in text, text
+
+    # No revision reported: one number rather than none, and still no host prose.
+    bare = backend.console_error_text(BridgeError(ErrorCode.PROTO_MISMATCH, "host prose", {}))
+    assert "did not report" in bare, bare
+    assert str(PROTO_VERSION) in bare, bare
+    assert "host prose" not in bare, bare
+
+
+def test_the_grid_refusal_reads_the_nested_clamp_and_the_fixed_reason() -> None:
+    """C-2: the clamp is nested, and a fixed grid is not a clamp at all.
+
+    Two conditions share `invalid_grid`. Reading only a flat `cols`/`rows` pair
+    printed nothing for the nested clamp (the app's spelling) and printed the
+    surface's OWN grid as "it applied NxM instead" for a fixed surface — a false
+    statement about what the app did.
+    """
+    nested = backend.console_error_text(
+        BridgeError(
+            ErrorCode.INVALID_GRID,
+            "9000x9000 is outside the supported grid; the clamp would be 400x200",
+            {"requested": {"cols": 9000, "rows": 9000}, "clamp": {"cols": 400, "rows": 200}},
+        )
+    )
+    assert "It applied 400x200 instead." in nested, nested
+
+    fixed = backend.console_error_text(
+        BridgeError(
+            ErrorCode.INVALID_GRID,
+            "this surface was created with a fixed grid",
+            {"reason": "fixed", "cols": 100, "rows": 30},
+        )
+    )
+    assert "fixed grid" in fixed, fixed
+    assert "applied" not in fixed, fixed
+
+    # A flat pair is the same two numbers for a host that spells it flat: accepted
+    # defensively, never read as `None`.
+    flat = backend.console_error_text(
+        BridgeError(ErrorCode.INVALID_GRID, "out of range", {"cols": 40, "rows": 10})
+    )
+    assert "It applied 40x10 instead." in flat, flat
+
+
+def test_the_queue_refusal_reads_the_accepted_count_not_the_payload_size() -> None:
+    """C-2: `accepted` is the bytes the host TOOK; `bytes` is the refused size.
+
+    Reading `bytes` as an accepted count states the opposite of what happened, and
+    it is the reason the key table is published rather than left to either half.
+    """
+    text = backend.console_error_text(
+        BridgeError(
+            ErrorCode.INPUT_QUEUE_FULL,
+            "that payload is 9000 bytes and this surface accepts 4096 at a time",
+            {"accepted": 0, "limit": 4096, "bytes": 9000},
+        )
+    )
+    assert "0 bytes were accepted" in text, text
+    assert "9000" not in text, text
+
+    # A host that reports no count gets the honest sentence rather than a guess.
+    bare = backend.console_error_text(
+        BridgeError(ErrorCode.INPUT_QUEUE_FULL, "queue full", {"bytes": 9000})
+    )
+    assert "the queue filled" in bare, bare
+    assert "9000" not in bare, bare
+
+
 def test_the_record_is_read_through_the_console_model(tmp_path: Path) -> None:
     """`ConsoleHostClient` must read THIS namespace's model, or the capability bit
     is dropped on the floor and every call looks like a console-less host."""

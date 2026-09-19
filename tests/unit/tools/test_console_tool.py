@@ -290,6 +290,10 @@ async def test_list_passes_the_sessions_own_id_and_renders_provenance(
     assert "con:1:aaaa" in result.text
     assert "user" in result.text
     assert "zsh" in result.text
+    # N-4: §6.5 and §13.4 put the owning session in the listing, and it is what
+    # answers "is this one mine to read" — the app filters by session, and the
+    # agent can only check the answer if the row carries it.
+    assert "session s-1" in result.text
 
 
 @pytest.mark.asyncio
@@ -378,6 +382,71 @@ async def test_status_does_not_invent_a_waiting_for_input_verdict(
     assert "running: True" in result.text
     # ...and never as a field the app did not send.
     assert "waiting_for_input" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_the_cursor_is_rendered_in_every_shape_and_never_as_none(
+    monkeypatch: pytest.MonkeyPatch, live_app: None
+) -> None:
+    """§10.2's `cursor` is the emulator's `{x, y}`; anything else is still described.
+
+    The frozen shape is the emulator's own (§5.4): `x` is the COLUMN and `y` the
+    ROW, because that is what `@xterm/headless`'s `cursorX`/`cursorY` mean. The
+    legacy `{row, col}` spelling is accepted DEFENSIVELY, and a shape with no axis
+    names is printed as it arrived — the defect this pins was the literal `None`:
+    `cursor: row None, column None` for a healthy surface, which is a false
+    statement in a model-facing result and invisible to the e2e cells, whose peer
+    sends no cursor at all.
+    """
+    cases = (
+        ({"x": 3, "y": 7}, "cursor: row 7, column 3"),
+        ({"row": 1, "col": 4}, "cursor: row 1, column 4"),
+        ({"column": 4, "row": 1}, "cursor: row 1, column 4"),
+        ([3, 7], "cursor: row 7, column 3"),
+        ([7], "cursor: [7]"),
+        ({"depth": 2}, "cursor: {'depth': 2}"),
+        ("3,7", "cursor: 3,7"),
+    )
+    for cursor, expected in cases:
+        _install(monkeypatch, _FakeClient({"running": True, "cursor": cursor}))
+        result = await _call({"method": "status", "surface": "con:1:a"})
+        assert expected in result.text, (cursor, result.text)
+        assert "None" not in result.text, (cursor, result.text)
+
+
+@pytest.mark.asyncio
+async def test_the_read_footer_carries_the_same_cursor_shape(
+    monkeypatch: pytest.MonkeyPatch, live_app: None
+) -> None:
+    _install(
+        monkeypatch,
+        _FakeClient({"text": "hi", "cols": 100, "rows": 30, "cursor": {"x": 3, "y": 7}}),
+    )
+    result = await _call({"method": "read", "surface": "con:1:a"})
+    assert "cursor row 7, column 3" in result.text, result.text
+    assert "None" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_secure_reports_the_answer_not_the_request(
+    monkeypatch: pytest.MonkeyPatch, live_app: None
+) -> None:
+    """N-3: §10.2 returns `{secure}`, and the app is the authority on the new state.
+
+    A host that refused the toggle, or applied a different one, is invisible to a
+    renderer that echoes `params.on` back — and an agent that believes a lock is on
+    when it is off is the failure §12's ladder exists to prevent.
+    """
+    _install(monkeypatch, _FakeClient({"secure": False}))
+    result = await _call({"method": "secure", "surface": "con:1:a", "on": True})
+    assert "is off" in result.text, result.text
+    assert result.details == {"surface": "con:1:a", "secure": False}
+
+    # No boolean in the result: what was ASKED for is the only thing left to report.
+    _install(monkeypatch, _FakeClient({}))
+    result = await _call({"method": "secure", "surface": "con:1:a", "on": True})
+    assert "is on" in result.text, result.text
+    assert result.details == {"surface": "con:1:a", "secure": True}
 
 
 @pytest.mark.asyncio

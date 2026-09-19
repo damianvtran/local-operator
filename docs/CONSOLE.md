@@ -144,10 +144,13 @@ rather than being left to hang.
 
 ## Where this half departs from the design document, and why
 
-The design (`docs/design/ui-console-tab.md`, PR 0) is the contract; these are the
-places the Python half could not follow it literally, each stated with its reason
-rather than silently diverged from. The PR that lands this tool carries the same
-list.
+The design (`docs/design/ui-console-tab.md`) is the contract, and it is **landed
+on `origin/main`** (`122c64c8`, "docs(design): the console tab …" #1336) as of the
+round-1 review of this PR — so the few places this half needed the document to say
+more are amended IN the document by this same PR rather than recorded here. What
+follows are the places the Python half could not follow it literally, each stated
+with its reason rather than silently diverged from. The PR that lands this tool
+carries the same list.
 
 1. **§19.3's `secret_ref` cell contradicts §11.3, and §11.3 wins.** §19.3 asks for
    an assertion that the value never appears "in the peer's received params as
@@ -173,13 +176,53 @@ list.
    (`unsupported_method`, `surface_unavailable`, `surface_not_owned`,
    `process_exited`, `input_queue_full`, `unknown_key`, `secure_input_active`,
    `console_unavailable`, `invalid_grid`, `console_capture_full`).
+
+   **The `data` key table, published so neither half has to guess one.** §10.6
+   freezes the CODE names and §15 the sentences, but neither said which key inside
+   `ErrorDetail.data` carries the specific — and a key chosen privately on one side
+   degrades the sentence SILENTLY: the copy stays correct and generic while the
+   handle, the clamp or the accepted byte count never appears, with nothing red in
+   any gate. §10.6 now carries this table; it is the spelling both halves test
+   against, and the session side reads exactly these:
+
+   | code | `data` keys |
+   |---|---|
+   | `surface_unavailable` | `surface` (the handle asked for), `count` (how many exist) |
+   | `surface_not_owned` | `surface` |
+   | `process_exited` | `exit_code`, `retain` (absent means retained) |
+   | `input_queue_full` | `accepted` — the bytes the host TOOK, never the size of the refused payload |
+   | `unknown_key` | `accepted` (the names the encoder has), `key` (the one not found) |
+   | `invalid_grid` | `clamp: {cols, rows}`; `reason: "fixed"` for a surface that cannot be resized at all |
+   | `console_unavailable` | `reason` (which of design §10.1's conditions failed) |
+   | `proto_mismatch` | `proto` — the peer's revision, so both numbers can be named |
+   | `console_capture_full` | none yet: the copy names no holder, and design §10.6's "names the surface whose capture holds the view" is implemented when a host emits this code |
+
+   `unsupported_method` and `secure_input_active` carry no keys: the copy alone
+   answers them. Two legacy spellings are accepted DEFENSIVELY and never read as
+   `None` — `handle` for `surface`, and a flat `cols`/`rows` for `invalid_grid`'s
+   nested `clamp` — so a host written against an earlier draft renders instead of
+   reporting "the app did not say"; neither is a wire spelling any app may emit.
+
+   **The frozen `cursor` shape, stated once.** §10.2's `console_status` and
+   `console_read` results carry `cursor`, and the type is the emulator's own
+   (§5.4): `{x, y}`, `x` the COLUMN and `y` the ROW, exactly as
+   `@xterm/headless`'s `cursorX`/`cursorY` mean it. It is `null` in `status` when
+   the app holds no grid for the surface (a restored one, §7.3). The renderer
+   accepts `{row, col}` defensively — a renderer that required one spelling printed
+   "row None, column None" for a healthy host that used the other — and prints an
+   unrecognised shape as it arrived rather than as `None`.
 4. **`console_list`'s result must be WRAPPED.** §10.2 shows an array; the shared
    `Response` envelope types `result` as a dict, so the app has to answer
    `{"surfaces": [...]}` (which the tool reads, and which the e2e peer sends).
-5. **`console_status`'s field spelling is unsettled.** §10.2 says `last_activity`;
-   §11.1 says `last_output_at` plus `idle_ms`. The renderer accepts either and
-   prints what it is given, rather than requiring one spelling and reading a
-   healthy host as console-less. The app half should pick one.
+5. **`console_status`'s idle field has ONE spelling, and this renderer's
+   tolerance is defensive.** §0.4's revision-4 paragraph settles it: §10.2's table
+   is the vocabulary the app implements and the only one any prose may use, so
+   §11.1's `last_output_at` IS that row's `last_activity`, and the idle interval is
+   the agent's own derivation rather than a returned field. Nothing is unsettled
+   and there is nothing for the app half to choose. The renderer still accepts the
+   legacy pair and prints what it is given — a host written before the settlement
+   renders instead of reading as console-less — which is defensively accepting a
+   legacy spelling, NOT a contract gap, and it invites no second wire spelling.
 6. **`secret_ref` is resolved in the session and sent as `text`**, per §11.3 —
    `secret_ref` is not forwarded to the app. Two further wire params are not
    exposed as tool parameters because they earn no schema slot: `console_input`'s
@@ -192,12 +235,16 @@ list.
 8. **The context-budget ceiling was raised** 28,000 → 29,950 for this tool, with
    the measured arithmetic in `scripts/bench_context_budget.py` (base 27,912 →
    head 29,904 billed: schema +1,697, `system.md` +292, inventory +4).
-9. **Two seams were added to the shared `HostClient`**: `copy_for()` (so the
+9. **Three seams were added to the shared `HostClient`**: `copy_for()` (so the
    console's transport-failure sentences live in the console's module rather than
-   in a host-keyed table about a different capability on the same process) and
+   in a host-keyed table about a different capability on the same process),
    `timeout_for()` (so a console call cannot inherit the browser's 190-second
-   human-prompt budget). Both default to the existing behaviour, so every current
-   host is byte-identical.
+   human-prompt budget), and `unreadable_response()` (so a well-formed refusal
+   whose `ErrorCode` this version does not model is answered as a NEWER app rather
+   than as a broken one — the two are the same `Response.model_validate` failure,
+   because `code` is typed on the shared enum, and only a client that knows its own
+   vocabulary can tell them apart). All three default to the existing behaviour, so
+   every current host is byte-identical.
 
 ## Not shipped by this half
 

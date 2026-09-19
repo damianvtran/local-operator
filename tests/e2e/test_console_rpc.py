@@ -292,7 +292,13 @@ async def test_create_read_and_close_over_the_real_wire(peer: Peer, tmp_path: Pa
                 "text": "$ echo hi\nhi\n$ ",
                 "cols": 100,
                 "rows": 30,
-                "cursor": {"row": 2, "col": 2},
+                # The FROZEN shape, and the only one a host may emit: §5.4's
+                # emulator cursor, `x` the column and `y` the row (§10.2). This cell
+                # sent the legacy `{row, col}` spelling, which the renderer accepts
+                # defensively — so the shape the contract actually freezes was never
+                # exercised on the wire, and the literal `row None, column None` that
+                # spelling used to produce for the frozen one was invisible here.
+                "cursor": {"x": 2, "y": 2},
                 "truncated": False,
                 "live": True,
                 "mode": "viewport",
@@ -314,6 +320,8 @@ async def test_create_read_and_close_over_the_real_wire(peer: Peer, tmp_path: Pa
         )
         assert read.is_error is False, read.text
         assert "echo hi" in read.text
+        assert "cursor row 2, column 2" in read.text, read.text
+        assert "None" not in read.text, read.text
 
         closed = await execute_console(
             "c-close", {"method": "close", "surface": "con:1:9f2a"}, None, None, context
@@ -370,6 +378,12 @@ async def test_a_request_without_the_key_is_refused(peer: Peer, tmp_path: Path) 
         ("invalid_grid", "outside what the app will honour"),
         ("console_capture_full", "one at a time"),
         ("console_unavailable", "console feature as unavailable"),
+        # The one code the first round left out of this list, which is how the copy
+        # that interpolated the host's own sentence survived a green suite: a test
+        # that covers ten of eleven codes cannot see the eleventh's defect. It is
+        # asserted like its siblings now — harness copy, both numbers from `data`,
+        # and the host's message nowhere in the result.
+        ("proto_mismatch", "speaks protocol 7"),
     ],
 )
 @pytest.mark.asyncio
@@ -394,6 +408,9 @@ async def test_every_typed_refusal_of_the_vocabulary_reaches_the_model(
             "exit_code": 3,
             "count": 2,
             "key": "ctrl-pageup",
+            # The peer's own revision, deliberately not this session's: the copy
+            # must name BOTH numbers, which it can only do from `data`.
+            "proto": 7,
         },
     )
     session = _session(tmp_path)
@@ -511,6 +528,11 @@ async def test_a_surface_the_user_opened_is_readable_and_named_as_theirs(
     assert "con:4:beef" in result.text
     assert "user" in result.text
     assert "pytest -x tests/e2e" in result.text
+    # N-4: §6.5/§13.4 put the owning session IN the listing, and this id is
+    # deliberately not this session's — the field is what lets an agent check the
+    # app's session filtering instead of taking it on trust, so the row that
+    # demonstrates "a surface the user opened" is the row that has to carry it.
+    assert "session the-users-session" in result.text
     assert "/Users/someone/project" in result.text
 
 

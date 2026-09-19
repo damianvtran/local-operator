@@ -194,6 +194,12 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:   + its one inventory line                +10 chars = +4
 #:   = measured on this head                  83,134 chars = ~29,904 billed
 #:
+#: (components rounded; the total is taken from the char counts, so the three
+#: component figures are floors — 4,717/2.78, 811/2.78 and 10/2.78 are 1,696.8,
+#: 291.7 and 3.6, and a reader who adds the printed integers gets 1,993 rather
+#: than the 1,992 the endpoints give. The total is the measured one; the parts
+#: are reported to the nearest token so a reader can see where it went.)
+#:
 #: The schema is 85% of it, and the schema is the capability: ten methods with
 #: one method parameter is ONE tool, where ten tools would be ten schemas of
 #: permanent tax (the ladder's rung 1). It was measured and then CUT once — the
@@ -210,6 +216,16 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: console-capable record, so a session on a machine without the app carries no
 #: console schema at all — this benchmark forces the gate ON precisely so the
 #: figure reported is the worst case rather than the common one.
+#:
+#: The OTHER path is outside this arithmetic and is stated rather than hidden: with
+#: no record at all, the tool is absent but the inventory carries its one-line
+#: prohibition (``_NO_CONSOLE_NOTE``), so the inventory block goes 211 -> 727 chars
+#: (+516 chars, ~+186 billed at 2.78 chars/token) for every session on a machine
+#: without the desktop app. It is not in the figure above because the gate is forced
+#: ON here; it is smaller than the tool-present case it trades against, and §14.5
+#: chose the prohibition deliberately — an agent that does not know the capability
+#: exists cannot ask for it — but a reader comparing this number to a session's real
+#: start context should know which side of the gate they are reading.
 #:
 #: The ceiling is set 46 above the measured head, the same order of headroom as
 #: the ``secret`` (49), ``web_read`` (71) and ``scratchpad://`` (51) raises, so

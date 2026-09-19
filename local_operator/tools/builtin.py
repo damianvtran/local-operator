@@ -13385,6 +13385,7 @@ def _console_list_text(result: dict[str, Any]) -> str:
             continue
         surface = str(entry.get("surface") or "?")
         origin = str(entry.get("origin") or ("agent" if entry.get("agent_owned") else "user"))
+        session = str(entry.get("session_id") or "").strip()
         command = " ".join(
             str(part).strip()
             for part in [entry.get("command") or "zsh", *(entry.get("argv_tail") or [])]
@@ -13393,6 +13394,12 @@ def _console_list_text(result: dict[str, Any]) -> str:
         bits = [
             surface,
             origin,
+            # §6.5 and §13.4 put the owning session IN THE LISTING, and it is not
+            # decorative: a surface the user opened is the ordinary case an agent is
+            # asked to read, and "is this one mine to read" is a question the listing
+            # is what answers — the app filters by session, and the agent can only
+            # verify the answer if the row carries it.
+            f"session {session}" if session else "",
             command or "?",
             str(entry.get("cwd") or ""),
             f"{entry.get('cols')}x{entry.get('rows')}",
@@ -13414,14 +13421,58 @@ def _console_list_text(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _console_cursor_text(cursor: Any) -> str:
+    """Describe the app's cursor without asserting a shape the contract does not fix.
+
+    The FROZEN wire shape is the emulator's own, `{x, y}` — `x` is the COLUMN and
+    `y` the ROW, because that is what `@xterm/headless`'s `cursorX`/`cursorY` mean
+    and §10.2's rows carry the emulator's grid state unchanged (§5.4, and the
+    spelling published in `docs/CONSOLE.md` and the PR body for the app half).
+
+    The legacy `{row, col}` spelling is still ACCEPTED, defensively: a renderer
+    that required one spelling printed "row None, column None" for a healthy host
+    that used the other, and that is a FALSE statement about the surface in a
+    model-facing result, on the field §13.1 uses to decide where a TUI is.
+
+    Nothing is ever printed as `None`, for the same reason. A shape with no axis
+    names to read is printed AS IT ARRIVED — "the app sent this and this renderer
+    does not know its shape" is true where `None` is not — and a bare two-element
+    pair is read positionally in the frozen shape's own field order (`x`, then
+    `y`), which is the only order this namespace declares.
+    """
+    if isinstance(cursor, dict):
+        column = next(
+            (cursor[key] for key in ("x", "col", "column") if cursor.get(key) is not None),
+            None,
+        )
+        row = next(
+            (cursor[key] for key in ("y", "row") if cursor.get(key) is not None),
+            None,
+        )
+        parts = [
+            f"{name} {value}"
+            for name, value in (("row", row), ("column", column))
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        return ", ".join(parts) if parts else str(cursor)
+    if isinstance(cursor, (list, tuple)) and len(cursor) == 2:
+        first, second = cursor
+        if all(isinstance(value, int) and not isinstance(value, bool) for value in (first, second)):
+            return f"row {second}, column {first}"
+    return str(cursor)
+
+
 def _console_status_text(result: dict[str, Any]) -> str:
     """Render `console_status` without asserting anything the app did not say.
 
     Every field is read with `.get`, and a field the app did not send is simply not
-    printed. That is not defensiveness for its own sake: §11.1 and §10.2 disagree
-    about whether the idle signal is spelled `last_output_at` (plus `idle_ms`) or
-    `last_activity`, and a renderer that required one spelling would answer "no
-    console" for a healthy host that used the other. What is NOT here is any
+    printed. The `last_activity`/`last_output_at` tolerance is DEFENSIVE, not a
+    contract gap: §0.4's revision-4 paragraph settles the spelling (§10.2's table
+    is the vocabulary the app implements and the only one any prose may use, so
+    §11.1's `last_output_at` is that row's `last_activity`, and the idle interval is
+    the agent's own derivation rather than a returned field), and this renderer
+    accepts the legacy pair anyway so a host written before the settlement still
+    renders instead of reading as console-less. What is NOT here is any
     "waiting for input" verdict — there is no reliable in-band signal for it, the
     heuristic was explicitly rejected (§11.1), and inventing one would give the
     model a confident wrong answer about whether a prompt is waiting.
@@ -13442,11 +13493,7 @@ def _console_status_text(result: dict[str, Any]) -> str:
     elif result.get("last_output_at") or result.get("last_activity"):
         lines.append(f"last output: {result.get('last_output_at') or result.get('last_activity')}")
     if result.get("cursor") is not None:
-        cursor = result.get("cursor")
-        if isinstance(cursor, dict):
-            lines.append(f"cursor: row {cursor.get('row')}, column {cursor.get('col')}")
-        else:
-            lines.append(f"cursor: {cursor}")
+        lines.append(f"cursor: {_console_cursor_text(result.get('cursor'))}")
     modes = result.get("modes")
     if isinstance(modes, dict):
         active = sorted(name for name, on in modes.items() if on)
@@ -13471,8 +13518,8 @@ def _console_read_text(result: dict[str, Any]) -> str:
     if result.get("mode"):
         footer.append(f"mode {result.get('mode')}")
     cursor = result.get("cursor")
-    if isinstance(cursor, dict):
-        footer.append(f"cursor row {cursor.get('row')}, column {cursor.get('col')}")
+    if cursor is not None:
+        footer.append(f"cursor {_console_cursor_text(cursor)}")
     if result.get("truncated"):
         footer.append("truncated by the app")
     if result.get("live") is False:
@@ -13567,6 +13614,17 @@ def _console_input_params(
     when it is not. The error path names the secret and the failure, never a byte of
     the value — there is no value to name when resolution fails, and there is a
     registered value to protect when it succeeds.
+
+    **What containment of a READ is, stated because it is easy to claim more:** this
+    function returns nothing, and :func:`execute_console` hands the app's output
+    back VERBATIM. A value that a program echoes (or that the shell prints with
+    `set -x`) therefore reaches the transcript only as far as the session loop lets
+    it: the masking is `redact_tool_result`, at the loop's model-visible choke
+    point, which is where §19.3's "never appears in the tool result" is actually
+    enforced for a read-after-echo. What this function guarantees is the other half
+    — the sink is registered BEFORE the bytes leave, and a session with no sink
+    refuses to type the value at all — so the value is contained at both ends of the
+    round trip rather than by the tool alone.
 
     **A store that cannot register is a REFUSAL, not a downgrade.** The registration
     is what contains the value after this call, and a program that echoes its input
@@ -13769,12 +13827,19 @@ async def execute_console(
             details={"surface": surface},
         )
     if method == "secure":
-        state = "on — reads and screenshots of this surface will be refused" if params.on else "off"
+        # The ANSWER, not the request. §10.2 makes `console_secure` return
+        # `{secure}`, and the app is the authority on whether the lock is now on: a
+        # host that declined the toggle, or applied a different state, is invisible
+        # if this echoes `params.on` back. An app that sent no boolean falls back to
+        # what was asked for, which is all a caller can claim in that case.
+        reported = result.get("secure")
+        secure = reported if isinstance(reported, bool) else bool(params.on)
+        state = "on — reads and screenshots of this surface will be refused" if secure else "off"
         return _text(
             tool_call_id,
             "console",
             f"Secure input for {surface} is {state}.",
-            details={"surface": surface, "secure": bool(params.on)},
+            details={"surface": surface, "secure": secure},
         )
     # close
     if result.get("closed") is False:
