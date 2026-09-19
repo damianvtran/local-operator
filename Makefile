@@ -132,8 +132,20 @@ check-changed: ## Run the CI gates this branch's diff can affect
 	.venv/bin/python scripts/ci_scope.py --since "$$base" --run
 
 # Run type checking with pyright
+#
+# Through `scripts/run_bounded.py`, not a bare `timeout`, and never unbounded.
+# pyright is a Python wrapper around an npm/node analyzer that runs as a
+# SEPARATE process, and the fleet has shown analyzers re-parented to launchd
+# holding 1-2 GB each, one alive 81 minutes after its parent died. The wrapper
+# puts the command in its own process group and signals the whole group on every
+# exit path — including the two a bare `timeout` cannot cover: a descendant alive
+# when the leader exits by itself, and a group that ignores SIGTERM (measured: a
+# bare `timeout` wedged for 300 s where the wrapper's SIGKILL escalation cleared
+# the same tree in ~8 s). 900 s mirrors this job's `timeout-minutes: 15` in
+# ci.yml, so the local bound is CI's bound.
 type-check: ## Run type checking with pyright
-	.venv/bin/python -m pyright --pythonpath .venv/bin/python .
+	.venv/bin/python scripts/run_bounded.py --timeout 900 -- \
+		.venv/bin/python -m pyright --pythonpath .venv/bin/python .
 
 # Build the OSWorld V2 evaluation adapter: lock, wheel, and the workspace
 # materialisation command. Deliberately NOT wired into CI's default job — the

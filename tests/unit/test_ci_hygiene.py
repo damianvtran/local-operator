@@ -1560,6 +1560,54 @@ def test_local_commands_are_safe_and_track_the_ci_steps_they_mirror() -> None:
             )
 
 
+def test_the_local_typed_gate_is_bounded_and_reaped_by_the_wrapper() -> None:
+    """A17. The typed gate is bounded and reaped, and never narrowed.
+
+    `pyright` is a Python wrapper around an npm/node analyzer that runs as a
+    SEPARATE process, and the fleet measured what a group nobody reaps leaves
+    behind: node children re-parented to `ppid 1` holding 2.28 GB and 1.50 GB,
+    one alive 81 minutes after its parent died. The tidy "`timeout` kills only the
+    wrapper" story is NOT what was measured — GNU `timeout(1)` signals the group
+    here, and no `timeout` spelling left an orphan on demand; what IS measured,
+    and what the wrapper's own tests drive, is a leader that exits while a
+    descendant lives on. So the local command must go through
+    `scripts/run_bounded.py`, the bound must MATCH the job's own
+    `timeout-minutes` in ci.yml (a local bound looser than CI's would hide the
+    difference), the wrapped command must still be the WHOLE-TREE one, and the
+    wrapper must exist — a typo in the path would otherwise surface only on a real
+    run.
+
+    Mutations that must fail this: drop the wrapper from the command; change
+    `timeout-minutes: 15`; narrow the wrapped command; or point the command at a
+    wrapper path that is not there.
+    """
+    scope = _scope()
+    command = scope.JOB_COMMANDS["type-check"][0]
+    assert f"scripts/{scope.BOUNDED_WRAPPER_NAME}" in command, command
+    wrapper = REPO / "scripts" / scope.BOUNDED_WRAPPER_NAME
+    assert wrapper.is_file(), "the local gate names a wrapper script that does not exist"
+
+    minutes = _ci_jobs()["type-check"].get("timeout-minutes")
+    assert isinstance(minutes, int), "type-check has no timeout-minutes to mirror"
+    tokens = shlex.split(command)
+    assert "--timeout" in tokens, tokens
+    assert float(tokens[tokens.index("--timeout") + 1]) == minutes * 60, (
+        f"the local bound {tokens[tokens.index('--timeout') + 1]!r} does not mirror "
+        f"ci.yml's timeout-minutes: {minutes}"
+    )
+    tool = scope._invoked_tool(command)
+    assert tool == "pyright", "the drift assertion must see the wrapped tool, not the wrapper"
+    assert "pyright" in tokens, "the wrapper must still wrap pyright itself"
+    wrapper_at = next(
+        index
+        for index, token in enumerate(tokens)
+        if Path(token).name == scope.BOUNDED_WRAPPER_NAME
+    )
+    inner = ci_scope._unwrap_bounded(tokens[wrapper_at + 1 :])
+    assert inner[-1] == ".", f"the bound wraps a whole-tree pyright, not a file list: {inner!r}"
+    assert not any(token.endswith(".py") and "/" in token for token in inner), inner
+
+
 def test_ci_and_make_share_one_classifier_module() -> None:
     """A12. Two hand-written mappings are how CI and the local gate drift apart.
 

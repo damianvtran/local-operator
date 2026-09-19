@@ -295,8 +295,12 @@ jobs of `.github/workflows/ci.yml`, spelled as they are for a full-tree run:
 .venv/bin/python -m flake8 .
 uvx --from black==26.1.0 black --check .
 uvx isort==5.13.2 --check .
-.venv/bin/python -m pyright --pythonpath .venv/bin/python .
+.venv/bin/python scripts/run_bounded.py --timeout 900 -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
+
+The `pyright` line goes through a bounded, process-group-reaping wrapper: it is
+whole-tree, exactly as before, but it cannot leave an analyzer running. See
+"The local `pyright` gate is bounded and process-group-reaped" below.
 
 **CI no longer runs all four over the whole tree on every PR.** Each job is
 gated on a scope flag computed by `scripts/ci_scope.py`, which classifies the
@@ -351,6 +355,42 @@ edits are live. After a pull that changes dependencies:
 ```sh
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
+
+### The local `pyright` gate is bounded and process-group-reaped
+
+The local `type-check` command is spelled
+`.venv/bin/python scripts/run_bounded.py --timeout 900 -- .venv/bin/python -m pyright …`
+— 900 s, mirroring that job's own `timeout-minutes: 15` in `ci.yml`. The gate
+itself is **whole-tree**, exactly as `ci.yml` spells it: the wrapper bounds and
+reaps, it never narrows.
+
+**Why a wrapper.** `pyright` is a Python wrapper around an npm/node analyzer, and
+node runs as a *separate* process. The fleet shows what goes wrong when the group
+is not reaped: orphans re-parented to `ppid 1` holding **2.28 GB and 1.50 GB**,
+one of them still alive **81 minutes** after its parent died, ten analyzers alive
+at once at ~5 GB while sessions queued more behind them.
+
+Be precise about what was measured and what was not: with `timeout 8|25` — and
+even with `timeout -s KILL` — over a whole-tree `pyright`, the analyzer died with
+its wrapper in every attempt here, and GNU `timeout(1)` signals the child's whole
+process group on this host, so the tidy causal story ("the bound fires, the
+wrapper dies, node survives") is **not** the mechanism and could not be
+reproduced on demand. The orphans above are real; their trigger was not captured.
+What IS measured, and what the unit tests drive with a real process tree, is the
+case `timeout(1)` cannot cover at all: a leader that exits while a descendant
+lives on. `run_bounded.py` runs the command in its own process group and signals
+the GROUP — on the bound, on a signal to the wrapper, and as a sweep once the
+leader exits — so all three paths end with nothing left running. It keeps
+`timeout(1)`'s statuses (124 on a fired bound, 125 when the command could not
+start), reports **128 + signum** when a signal ends the run — forwarded by this
+wrapper, or delivered to the child by someone else, where `sys.exit` used to
+render the raw `-9` as 247 — forwards **SIGHUP and SIGQUIT** as well as
+SIGINT/SIGTERM (SIGHUP used to kill the wrapper and leave the group alive), writes
+diagnostics to stderr only, and reports what it reaped.
+
+Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
+nothing runs a sweep in that case — what protects the group there is that the
+members were signalled as a group in the first place.
 
 ### Every feature worktree owns its own venv. Never symlink one.
 

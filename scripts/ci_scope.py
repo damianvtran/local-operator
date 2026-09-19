@@ -354,6 +354,12 @@ PERMISSIVE_DEPS: dict[tuple[str, str], str] = {}
 #: deliberately does not carry (black, isort). `_invoked_tool` maps each back
 #: to the tool the job actually runs, which is what the drift assertion
 #: compares against ci.yml.
+#: The wrapper that bounds a gate and reaps its process group (see
+#: scripts/run_bounded.py). It is invoked through the interpreter, so the #423
+#: shebang rule holds for it too; `_invoked_tool` sees through it so the drift
+#: assertion still compares the TOOL the job runs against ci.yml.
+BOUNDED_WRAPPER_NAME = "run_bounded.py"
+
 JOB_COMMANDS: dict[str, tuple[str, ...]] = {
     "lint": (
         ".venv/bin/python -m flake8 .",
@@ -361,6 +367,16 @@ JOB_COMMANDS: dict[str, tuple[str, ...]] = {
         "uvx isort==5.13.2 --check .",
     ),
     "type-check": (
+        # Bounded and group-reaped. `pyright` is a Python wrapper around an
+        # npm/node analyzer that runs as a SEPARATE process, so a bound that ends
+        # only the leader can leave the analyzer behind — measured on the fleet as
+        # node children re-parented to `ppid 1` holding 2.28 GB and 1.50 GB, one
+        # alive 81 minutes after its parent died. `timeout(1)` is not the villain
+        # here (on this host it signals the group); what it cannot cover is a
+        # leader that exits while a descendant lives on, which the wrapper sweeps.
+        # `900` mirrors this job's `timeout-minutes: 15` in ci.yml, so the local
+        # bound IS CI's bound.
+        f".venv/bin/python scripts/{BOUNDED_WRAPPER_NAME} --timeout 900 -- "
         ".venv/bin/python -m pyright --pythonpath .venv/bin/python .",
         # The protocol-sync check is a *step of this job* in ci.yml, not a job
         # of its own: a Python-only protocol edit must fail even when the
@@ -822,6 +838,13 @@ def _invoked_tool(command: str) -> str:
     if Path(head).name.startswith("python"):
         if tail[:1] == ["-m"] and len(tail) > 1:
             return tail[1]
+        if tail and Path(tail[0]).name == BOUNDED_WRAPPER_NAME:
+            # `.venv/bin/python scripts/run_bounded.py --timeout 900 -- <gate>`
+            # bounds and reaps a gate; the tool it reports is the WRAPPED one.
+            # Reporting the wrapper would compare its name against ci.yml and
+            # fail the drift assertion whenever a gate is correctly bounded.
+            inner = _unwrap_bounded(tail[1:])
+            return _invoked_tool(shlex.join(inner)) if inner else ""
         return Path(tail[0]).name if tail else "python"
     if head == "uvx":
         if tail[:1] == ["--from"]:
@@ -830,6 +853,19 @@ def _invoked_tool(command: str) -> str:
             return "uvx"
         return tail[0].split("==")[0]
     return Path(head).name
+
+
+def _unwrap_bounded(tokens: Sequence[str]) -> list[str]:
+    """The command inside `run_bounded.py --timeout N -- <command>`.
+
+    Shared by `_invoked_tool` (which the drift assertion reads) and the tests,
+    so the wrapper's argument shape has one reader rather than two.
+    """
+    rest = list(tokens)
+    for flag in ("--timeout", "--grace"):
+        if flag in rest:
+            rest = rest[rest.index(flag) + 2 :]
+    return rest[1:] if rest[:1] == ["--"] else rest
 
 
 def run_jobs(jobs: Sequence[str], root: Path) -> int:
