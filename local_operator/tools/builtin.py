@@ -1293,6 +1293,43 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         except (OSError, ValueError):
             return f"screenshot: {_display_target(raw_path)}"
         return _approval_description(path, inside, "screenshot", resolvable)
+    if action == "download":
+        # The consent question is "may this page write files to your disk", and the
+        # DIRECTORY is the answer — the file names are the page's to choose, and a
+        # prompt that showed one of them would describe the wrong thing. Folded to
+        # `~` like every other row: the path is on every row of a session, so the
+        # home prefix is noise in a 40-cell budget.
+        from local_operator import browser_files as _files
+
+        root = str(_files.downloads_root())
+        home = str(Path.home())
+        shown = root.replace(home, "~", 1) if root.startswith(home) else root
+        return f"download \u2192 {_display_target(shown)}/"
+    if action == "upload":
+        # Both halves are mandatory (design §7.3): the FILE, because that is what
+        # leaves the machine, and the ORIGIN, because that is where it goes. The
+        # file goes through the same resolver and marker as `screenshot`, so an
+        # outside-workspace path is named as one and the row shows the resolved
+        # target rather than the string the model typed. A multi-file call shows
+        # the first and the count, because a prompt that truncates a list of
+        # secrets is worse than one that admits the count.
+        raw_paths = args.get("paths")
+        named = [str(entry) for entry in raw_paths] if isinstance(raw_paths, list) else []
+        if not named:
+            return "upload: no files named"
+        first = named[0]
+        if _SCHEME_SHAPED_RE.match(first.strip()):
+            row = f"upload: {_display_target(first.strip())}"
+        else:
+            try:
+                path, inside, resolvable = _resolve_workspace_path(first, cwd or ".")
+            except (OSError, ValueError):
+                row = f"upload: {_display_target(first)}"
+            else:
+                row = _approval_description(path, inside, "upload", resolvable)
+        if len(named) > 1:
+            row = f"{row} +{len(named) - 1} more"
+        return f"{row} \u2192 the page in the tab this session is driving"
     if url and action in NAVIGATING_BROWSER_ACTIONS:
         if url_unparsed:
             return f"{UNRESOLVABLE_MARKER} {UNPARSED_URL_PREFIX} {url}"
@@ -8426,6 +8463,16 @@ BROWSER_ACTIONS = (
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
     # multi-surface registry, so it degrades with the same typed error.
     "tabs",
+    # File transfer. `upload` is served by BOTH non-cmux hosts (it needs only the
+    # tab-scoped CDP session they already hold); `download` is served by the
+    # desktop app's host only, because Chrome refuses an extension the
+    # browser-level commands that would let it choose a destination — see
+    # EXTENSION_CANNOT_SERVE, and the extension host answers with a typed
+    # capability refusal that names where to go instead of failing obscurely.
+    # Both are ACTIONS so they ride the same schema, approval tier and dispatch as
+    # everything else, and both are in CMUX_UNSUPPORTED_BROWSER_ACTIONS below.
+    "download",
+    "upload",
     # The async site-approval flow, non-cmux only like scroll/logs. open/goto
     # to a not-yet-allowed origin fails EARLY with a typed error naming these
     # two actions, because the old behaviour — blocking the navigation RPC on
@@ -8455,7 +8502,16 @@ BROWSER_ACTIONS = (
 #: BROWSER_ACTIONS so the degrade check and the advertised action list can never
 #: drift apart.
 CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
-    {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
+    {
+        "scroll",
+        "logs",
+        "tabs",
+        "request_access",
+        "await_access",
+        "cancel_access",
+        "download",
+        "upload",
+    }
 )
 
 #: The actions whose whole handler lives in the ownership lane (see
@@ -8574,14 +8630,31 @@ class BrowserParams(BaseModel):
             "new tab; a redacted handle is not yours to drive."
         ),
     )
-    path: str = Field(default="", description="Destination file for 'screenshot'.")
+    path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
         description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
         "scopes the text for 'read' (default: body); for 'scroll', the element "
-        "to bring into view.",
+        "to bring into view; for 'download', the control to click to start the "
+        "download (omit it when the page starts one on its own); for 'upload', "
+        "the file input to fill.",
     )
     text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
+    # One new field for the whole feature (the tool-surface ladder's rung 1):
+    # `download` needs no destination (the harness chooses it), so a comma-split
+    # of the existing `path` was the alternative — rejected because a filename may
+    # legally contain a comma, which would make the failure a silently wrong
+    # attachment.
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "'upload' only: the local files to attach, one or more. Each must be a "
+            "real file the user can read; secrets and credential files are refused, "
+            "and so is a path inside the harness's own config directory. Absolute "
+            "paths work as written; relative ones resolve against the session's "
+            "working directory."
+        ),
+    )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
     # down. Precedence is selector > x/y > direction > default (mirrors
     # extension/src/commands/scroll.ts).
@@ -8612,7 +8685,8 @@ class BrowserParams(BaseModel):
     timeout_s: float | None = Field(
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
-        "(default 120, max 240). Still pending after that? Tell the user, then "
+        "(default 120, max 240); 'download' max seconds to wait for one to start "
+        "(default 120, max 600). Still pending after that? Tell the user, then "
         "call await_access again.",
     )
 
@@ -9010,6 +9084,26 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"unknown scroll direction: {params.direction!r} "
                 f"(expected one of {', '.join(sorted(_SCROLL_DIRECTIONS))})"
             )
+        return ""
+    if action == "download":
+        # Only the selector is optional: a page that starts its own download needs
+        # none, and one that needs a click names the control. The wait is bounded
+        # by `timeout_s` and by the host, so there is nothing else to validate —
+        # the DESTINATION is composed by the harness and is not a parameter at all
+        # (design §6.1).
+        return _validate_selector(params.selector, "download") if params.selector.strip() else ""
+    if action == "upload":
+        problem = _validate_selector(params.selector, "upload")
+        if problem:
+            return problem
+        if not params.paths:
+            return "'upload' needs paths: name at least one local file to attach"
+        # Entries that are not strings are refused by the model's own validator
+        # (`list[str]`), which reports the offending value; only emptiness has to
+        # be caught here, because "" is a well-formed string.
+        for entry in params.paths:
+            if not entry.strip():
+                return "every entry in 'paths' must be a non-empty path"
         return ""
     if action == "logs":
         level = params.level.strip().lower()
@@ -10757,6 +10851,435 @@ async def _bridge_tabs(
     )
 
 
+def _capability_problem(
+    tool_call_id: str, method: str, client: Any, *, surface: str = ""
+) -> ToolResult | None:
+    """Refuse a capability-gated method from the host's own record, no socket call.
+
+    The FIRST line of the capability check (design §6.3): the daemon refuses to
+    send an unadvertised method too, but by then a socket round trip has been paid
+    and the refusal arrives as a wire error rather than as the local, immediate
+    answer the model can act on. `None` means the host advertises the method and
+    the call may proceed.
+
+    The decision reads the discovery FILE, which is what makes it work between
+    dials and costs nothing; a record written by a pre-feature daemon or app has no
+    `capabilities` key at all, and that reads as "told us nothing" — the refusal.
+    """
+    from local_operator.browser_bridge.backend import capability_refusal, format_error
+
+    host = _host_of_client(client)
+    capabilities = client.capabilities()
+    if capabilities.serves(method):
+        return None
+    error = capability_refusal(method, host=host, capabilities=capabilities)
+    problem = _error(
+        tool_call_id,
+        "browser",
+        format_error(error, action=method, surface=surface, host=host),
+    )
+    problem.details = {**(problem.details or {}), "error_code": error.code.value}
+    return problem
+
+
+def _download_audit(
+    *,
+    call_id: str,
+    session_id: str,
+    host: str,
+    action: str,
+    origin: str,
+    name: str,
+    path: str = "",
+    size: int = 0,
+    verdict: str = "",
+    reason: str = "",
+    declared_mime: str = "",
+    sniffed: str = "",
+    sha256: str = "",
+    redact: bool = False,
+) -> None:
+    """One audit row (design §10.5), best-effort and never raising.
+
+    A REFUSED file's name field is redacted to its first character: the log is
+    not allowed to become a map of where the secrets are, and the model (whose
+    context is the user's own transcript) is told the real name elsewhere.
+    """
+    from local_operator import browser_files as files
+
+    files.audit(
+        {
+            "session_id": session_id,
+            "call_id": call_id,
+            "tool": "browser",
+            "action": action,
+            "origin": origin,
+            "host": host,
+            "name": files.redact_name(name) if redact else name,
+            "path": path,
+            "bytes": size,
+            "sha256": sha256,
+            "declared_mime": declared_mime,
+            "sniffed": sniffed,
+            "verdict": verdict,
+            "reason": reason,
+        }
+    )
+
+
+async def _browser_download(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+) -> ToolResult:
+    """`download`: arm the host, then judge what LANDED, from disk.
+
+    The whole shape follows the screenshot precedent: the host's exit code is not
+    evidence, so the answer is assembled from Python's own inspection of the
+    quarantine directory it composed itself (§5.3). A host that reports a file
+    which is not there — or a PDF that is an ELF — is CAUGHT rather than believed.
+    """
+    from local_operator import browser_files as files
+
+    host = _host_of_client(client)
+    problem = _capability_problem(tool_call_id, "download", client, surface=state.surface_id)
+    if problem is not None:
+        return problem
+
+    session_id = str(getattr(context, "session_id", "") or "")
+    # Over-quota sessions are refused BEFORE anything is armed: the ceiling exists
+    # so a page cannot fill the disk through an agent loop, and a check that runs
+    # after the bytes land is a check that already lost.
+    if files.session_bytes(session_id) > files.DOWNLOAD_MAX_TOTAL_BYTES_PER_SESSION:
+        return _error(
+            tool_call_id,
+            "browser",
+            "refused: this session has already downloaded more than "
+            f"{files.DOWNLOAD_MAX_TOTAL_BYTES_PER_SESSION} bytes. Move or delete some of "
+            "what is in the browser download directory, then retry.",
+        )
+    directory = files.session_dir(session_id)
+    before = files.snapshot(directory)
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        # Composed by the harness from the config root and never from page input:
+        # this parameter is the one whose value the Project Zero report used to
+        # write into ~/.ssh, so it is the last thing a page is allowed to reach.
+        "dir": str(directory),
+        **_browser_identity_params(context, tool_call_id),
+    }
+    if params.selector.strip():
+        wire["selector"] = params.selector.strip()
+    if params.timeout_s is not None and params.timeout_s > 0:
+        wire["timeout_s"] = min(float(params.timeout_s), files.DOWNLOAD_TIMEOUT_MAX_S)
+    result, problem = await _bridge_call(
+        tool_call_id, "download", wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    assert result is not None
+    call_id = files.new_call_id()
+    origin = str(result.get("url", ""))
+    if not bool(result.get("armed", True)):
+        # The host refused to arm. That is a policy answer carried as a result
+        # (§6.2 — an extension may not emit an ErrorCode an old daemon would
+        # drop), and it is rendered here as the model-facing refusal.
+        reason = str(result.get("reason") or "the host refused to arm a download")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_false",
+            reason=reason,
+        )
+        return _error(tool_call_id, "browser", f"refused: {reason}")
+
+    reported = {
+        str(item.get("name")): item
+        for item in (result.get("files") or [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    landed = files.snapshot(directory)
+    candidates = sorted(name for name in landed if name not in before)
+    if not candidates:
+        wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="no_download",
+            reason="nothing started",
+        )
+        return _error(
+            tool_call_id,
+            "browser",
+            f"no download started within {wait:g} s. If the page needs a click first, "
+            "call 'click' on its Download control and retry with selector=..., or the "
+            "file may be behind a login — ask the user to sign in, then retry.",
+        )
+
+    kept: list[dict[str, Any]] = []
+    refused: list[str] = []
+    for name in candidates:
+        path = directory / name
+        declared = str((reported.get(name) or {}).get("mime") or "")
+        try:
+            # `resolve()` first: the destination is ours, but a hostile host could
+            # still have written a symlink, so what is judged and reported is the
+            # real file. Anything outside the quarantine root is deleted, not
+            # described (§5.3 step 4).
+            resolved = path.resolve()
+        except OSError:
+            refused.append(f"{name}: could not be read")
+            continue
+        if not files._is_within(resolved, directory.resolve()):
+            refused.append(
+                f"{name}: refused and deleted — it resolved outside the download directory"
+            )
+            _unlink_quietly(resolved)
+            _download_audit(
+                call_id=call_id,
+                session_id=session_id,
+                host=host,
+                action="download",
+                origin=origin,
+                name=name,
+                path=str(resolved),
+                verdict="deny",
+                reason="outside the quarantine root",
+                redact=True,
+            )
+            continue
+        verdict = files.classify_download(resolved, declared_mime=declared)
+        if verdict.kind == "deny":
+            _unlink_quietly(resolved)
+            refused.append(f"{name}: {verdict.reason}")
+            _download_audit(
+                call_id=call_id,
+                session_id=session_id,
+                host=host,
+                action="download",
+                origin=origin,
+                name=name,
+                path="",
+                size=landed.get(name, 0),
+                verdict="deny",
+                reason=verdict.reason,
+                declared_mime=declared,
+                sniffed=verdict.sniffed,
+                redact=True,
+            )
+            continue
+        final = resolved
+        if verdict.safe_name and verdict.safe_name != resolved.name:
+            # ALLOW-WITH-RENAME: the content disagreed with the name, so the file
+            # takes the name the content earns and the change is reported.
+            final = resolved.with_name(_unique_name(directory, verdict.safe_name))
+            try:
+                resolved.rename(final)
+            except OSError:
+                final = resolved
+        fact = files.stat_fact(final.name, final, declared_mime=declared)
+        fact["sniffed"] = verdict.sniffed
+        kept.append(fact)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=final.name,
+            path=str(final),
+            size=int(fact["bytes"]),
+            verdict=verdict.kind,
+            reason=verdict.reason,
+            declared_mime=declared,
+            sniffed=verdict.sniffed,
+            sha256=str(fact["sha256"]),
+        )
+        if verdict.reason:
+            kept[-1]["note"] = verdict.reason
+
+    # Per-CALL ceiling, enforced after the fact for a host that cannot abort
+    # mid-flight (the extension cannot; the app host can, design §10.3): what is
+    # kept is the FIRST n files, and the rest are deleted with the reason.
+    if len(kept) > files.DOWNLOAD_MAX_FILES_PER_CALL:
+        extra = kept[files.DOWNLOAD_MAX_FILES_PER_CALL :]
+        for fact in extra:
+            _unlink_quietly(Path(str(fact["path"])))
+            refused.append(
+                f"{fact['name']}: refused and deleted — over the "
+                f"{files.DOWNLOAD_MAX_FILES_PER_CALL} files per call limit"
+            )
+        kept = kept[: files.DOWNLOAD_MAX_FILES_PER_CALL]
+
+    if not kept:
+        return _error(
+            tool_call_id,
+            "browser",
+            "nothing was saved. " + " ".join(refused),
+        )
+    lines = [f"downloaded {len(kept)} file(s) into {directory}:"]
+    for fact in kept:
+        kind = str(fact.get("sniffed") or fact.get("mime") or "unknown type")
+        line = f"- {fact['path']} — {fact['bytes']} bytes, {kind}"
+        if fact.get("sniffed") == "":
+            line += " (unverified: not opened)"
+        if fact.get("note"):
+            line += f" [{fact['note']}]"
+        lines.append(line)
+    if refused:
+        lines.append("refused:")
+        lines.extend(f"- {item}" for item in refused)
+    text = "\n".join(lines)
+    return _text(
+        tool_call_id, "browser", text, details={"files": kept, "directory": str(directory)}
+    )
+
+
+async def _browser_upload(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+) -> ToolResult:
+    """`upload`: the unconditional gate, then the attach, then the read-back.
+
+    The gate runs BEFORE anything reaches a browser (§9.2) and it consults no
+    approval policy, because the adversary it exists for is a confused-deputy
+    agent whose call may be auto-approved. All-or-nothing on a multi-file call: a
+    partial attach would send the page a set of files the model never asked for.
+    """
+    from local_operator import browser_files as files
+
+    host = _host_of_client(client)
+    problem = _capability_problem(tool_call_id, "upload", client, surface=state.surface_id)
+    if problem is not None:
+        return problem
+    if len(params.paths) > files.UPLOAD_MAX_FILES:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"refused: {len(params.paths)} files named, over the {files.UPLOAD_MAX_FILES} "
+            "files per call limit. Attach them in batches.",
+        )
+    session_id = str(getattr(context, "session_id", "") or "")
+    resolved: list[Path] = []
+    for raw in params.paths:
+        path, reason = files.check_upload(raw, cwd=_safe_cwd(context))
+        if path is None:
+            # Refused as a whole call: attaching the rest would send a set the
+            # caller did not name, and the refusal names the one rule that fired.
+            return _error(tool_call_id, "browser", f"refused: nothing was attached — {reason}")
+        resolved.append(path)
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        "selector": params.selector.strip(),
+        # The RESOLVED paths, so the host is handed targets that were checked,
+        # never the strings the model typed (design §9.2's step 2).
+        "paths": [str(path) for path in resolved],
+        **_browser_identity_params(context, tool_call_id),
+    }
+    result, problem = await _bridge_call(
+        tool_call_id, "upload", wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    assert result is not None
+    call_id = files.new_call_id()
+    origin = str(result.get("url", ""))
+    host_refused = result.get("refused") or []
+    if host_refused:
+        reasons = "; ".join(
+            str(item.get("reason") or item) if isinstance(item, dict) else str(item)
+            for item in host_refused
+        )
+        return _error(tool_call_id, "browser", f"refused: nothing was attached — {reasons}")
+    accepted = [item for item in (result.get("accepted") or []) if isinstance(item, dict)]
+    by_path = {str(item.get("path") or ""): item for item in accepted}
+    facts: list[dict[str, Any]] = []
+    for path in resolved:
+        fact = files.stat_fact(files.safe_name(path.name), path)
+        seen = by_path.get(str(path))
+        if seen is None or int(seen.get("bytes", -1)) != int(fact["bytes"]):
+            # The DOM holds something else. Reported as an error naming both
+            # sides rather than as a success: a file input that ignored the
+            # attach is exactly the failure a page would like us to call filled.
+            return _error(
+                tool_call_id,
+                "browser",
+                f"the file input did not take the attach: it holds "
+                f"{seen.get('bytes') if seen else 'nothing'} bytes for {path}, and the file "
+                f"on disk is {fact['bytes']} bytes. Nothing was sent.",
+            )
+        facts.append(fact)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="upload",
+            origin=origin,
+            name=str(fact["name"]),
+            path=str(path),
+            size=int(fact["bytes"]),
+            verdict="allow",
+            sha256=str(fact["sha256"]),
+        )
+    accept = str(result.get("accept") or "")
+    where = f" to {origin}" if origin else " to the page in this tab"
+    lines = [f"attached {len(facts)} file(s){where}:"]
+    lines.extend(
+        f"- {fact['path']} — {fact['bytes']} bytes, sha256 {str(fact['sha256'])[:12]}"
+        for fact in facts
+    )
+    if accept:
+        # REPORTED, never obeyed: a site's `accept` filter protects nothing and
+        # honouring it would let the page steer which local files we try.
+        lines.append(f"the input declares accept='{accept}'; it was not applied to the attach")
+    return _text(tool_call_id, "browser", "\n".join(lines), details={"files": facts})
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Delete a refused artifact, absorbing the failure.
+
+    Best-effort on purpose: the verdict is the deliverable here, and a file we
+    could not delete must not turn a policy refusal into a traceback in the
+    model's context. The audit row already records what was refused.
+    """
+    try:
+        path.unlink()
+    except OSError:
+        logger.warning("could not delete the refused browser download %s", path)
+
+
+def _unique_name(directory: Path, name: str) -> str:
+    """``name``, or ``name-2``, ``name-3``... when something already holds it.
+
+    The rename a content-corrected file needs must never overwrite: two receipts
+    downloaded from one page can both be called `invoice.pdf` after correction.
+    """
+    candidate = name
+    stem, dot, ext = name.rpartition(".")
+    stem = stem if dot else name
+    ext = ext if dot else ""
+    index = 2
+    while (directory / candidate).exists():
+        candidate = f"{stem}-{index}.{ext}" if ext else f"{stem}-{index}"
+        index += 1
+    return candidate
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -10775,6 +11298,10 @@ async def _bridge_action(
     """
     host = _host_of_client(client)
     surface = state.surface_id
+    if action == "download":
+        return await _browser_download(tool_call_id, state, params, context, client=client)
+    if action == "upload":
+        return await _browser_upload(tool_call_id, state, params, context, client=client)
     wire: dict[str, Any] = {
         "tab": surface,
         # Identity and display label are trusted host metadata. Keeping both on
@@ -11475,8 +12002,10 @@ async def _execute_browser(
             tool_call_id,
             "browser",
             f"'{action}' is not supported on the cmux backend — cmux has no console-log tap, "
-            "background-tab scroll primitive, multi-surface registry or site-permission "
-            "model. " + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available) + demotion,
+            "background-tab scroll primitive, multi-surface registry, site-permission "
+            "model, or file-transfer primitive. "
+            + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
+            + demotion,
         )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
@@ -11716,6 +12245,10 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
             "your turn with 'retain' and end that hold with 'release'. "
             "'scroll', 'logs' and "
             "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
+            "'download' saves what the page offers into this session's browser download "
+            "directory (private, 0700, owned by the harness, reported as an absolute path; "
+            "nothing executable is ever kept), and 'upload' attaches local files to a "
+            "page's file input. "
             "'open'/'goto' to a site the user has not approved fails with "
             "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
             "user (ask tool or message) to approve the prompt in the extension popup "
@@ -11727,8 +12260,20 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write
-        # approval gate rather than auto-approved read.
+        # approval gate rather than auto-approved read. `upload` escalates PER
+        # CALL to `exec`, because it transmits local bytes to a remote origin — a
+        # side effect whose consequence is not visible from the arguments.
+        #
+        # The honest caveat, which must not be lost: today the gate is ONE callback
+        # for both tiers and `tool_approval_mode: auto` / `--yolo` installs no gate
+        # at all, so the tier records intent and future-proofs a tier-sensitive
+        # host — it is NOT the protection. The protection is the policy in
+        # `local_operator/browser_files.py`, which runs unconditionally, plus this
+        # describer naming what the call will do.
         approval_tier="write",
+        call_approval_tier=lambda args: (
+            "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
+        ),
         concurrency="shared",
         interruptible=False,
         execute=execute_browser,

@@ -6,6 +6,7 @@ import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
+import { upload } from "./commands/upload";
 import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSiteGrant } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
@@ -48,6 +49,13 @@ const HANDLERS: Record<
   tabs,
   scroll,
   logs,
+  // Attach local files to a page's file input. `download` is deliberately ABSENT:
+  // no extension build can serve it (Chrome refuses the browser-level download
+  // commands to a tab-scoped debugger session — measured, see
+  // `EXTENSION_CANNOT_SERVE` in local_operator/browser_bridge/protocol.py), and
+  // this table is what the capabilities event advertises, so leaving it out is
+  // how the daemon knows not to send it.
+  upload,
   // Async site-approval flow: request returns immediately after raising the
   // prompt; await polls the stored decision in bounded slices (access.ts
   // explains why slices, not a daemon long-poll).
@@ -501,6 +509,19 @@ async function connect(): Promise<void> {
     attempt = 0;
     const hello: ExtensionEvent = { event: "hello", proto: PROTO_VERSION, token: token ?? "", extension_version: chrome.runtime.getManifest().version, browser: navigator.userAgent };
     wire.send(JSON.stringify(hello));
+    // Which methods THIS build serves, right after the handshake, and read off
+    // the dispatch table so an advertised capability cannot drift from a served
+    // one. It is an EVENT rather than a field on `hello` because `Hello` is
+    // validated with `extra="forbid"`: a new field there is closed 4001 by every
+    // already-released daemon (an unfixable "update needed" card in the popup),
+    // while an unknown event is dropped harmlessly — which is what lets this
+    // travel with PROTO_VERSION still at 1.
+    const capabilities: ExtensionEvent = {
+      event: "capabilities",
+      methods: Object.keys(HANDLERS),
+      version: chrome.runtime.getManifest().version,
+    };
+    wire.send(JSON.stringify(capabilities));
   };
   wire.onmessage = (message) => {
     if (socket !== wire) return; // a superseded socket's frames are not ours

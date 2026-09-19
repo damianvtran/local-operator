@@ -93,6 +93,19 @@ class BridgeState(HeartbeatState):
     #: socket can never drive that decision.
     extension_version: str = ""
     extension_proto: int = 0
+    #: The wire methods the attached extension ADVERTISED, sorted (design §6.3).
+    #:
+    #: Published for the same reason `extension_version` is: the session-side
+    #: decision it drives — whether `download`/`upload` may be sent at all — must
+    #: not cost a socket round-trip, and the file is the only surface a session
+    #: between dials can read. Empty when no link is proven, so a stamp outliving
+    #: its socket can never authorise a method nobody serves.
+    #:
+    #: `extra="ignore"` on this model is what makes the field safe in BOTH
+    #: directions: an old harness ignores a key it does not know, and a new
+    #: harness reads a record written by an older daemon as the empty default —
+    #: "the host told us nothing", which is exactly the refusal case.
+    capabilities: list[str] = []
     #: Whether a KNOWN extension version is strictly below the one this runtime
     #: ships with (`protocol.EXPECTED_EXTENSION_VERSION`). The predicate lives
     #: in the daemon (see `BridgeService.publish`) and is published rather than
