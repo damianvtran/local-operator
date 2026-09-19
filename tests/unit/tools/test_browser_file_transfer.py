@@ -478,7 +478,55 @@ def test_the_per_call_cap_is_applied_before_anything_is_audited(tmp_path: Path) 
     # named by a row that says why.
     assert all(Path(str(row["path"])).exists() for row in kept)
     assert all("per call limit" in str(row["reason"]) for row in dropped)
+    # N7/R8: the row answers "is it still on disk?", the same way for every rule.
+    assert all("the entry was removed" in str(row["reason"]) for row in dropped)
     assert "files per call limit" in result.text
+
+
+def test_the_cap_row_says_what_happened_when_the_delete_failed(tmp_path: Path) -> None:
+    """R8: the over-cap row carries the delete outcome, not only the cap.
+
+    The remediation reply claimed the over-cap path got the same treatment as the
+    containment rule; the sentence did and the audit row did not. The row is what
+    a later reader answers "what did this session keep?" from, so the claim is
+    made true in the row — and it is exercised in the state where it matters: an
+    unwritable session directory, where the unlink really fails and the dropped
+    files really are still there.
+    """
+    directory: dict[str, Path] = {}
+
+    def write_it(method: str, params: dict[str, Any]) -> None:
+        directory["path"] = Path(params["dir"])
+        for index in range(5):
+            Path(params["dir"], f"f{index}.pdf").write_bytes(b"%PDF-1.4\n1 0 obj\n%%EOF\n")
+        # Readable, not writable: every unlink below fails on a real disk.
+        os.chmod(directory["path"], 0o500)
+
+    host = FakeHost(methods=("download",), result={"armed": True}, on_call=write_it)
+    try:
+        result = _flow(
+            "download",
+            host,
+            tool_call_id="t1",
+            state=_surface(),
+            params=_params(action="download"),
+            context=_ctx(),
+            policy=bf.Policy(download_max_files=3),
+        )
+    finally:
+        os.chmod(directory["path"], 0o700)
+    assert not result.is_error, result.text
+    assert "refused, NOT deleted" in result.text
+    rows = [
+        json.loads(line)
+        for line in (bf.downloads_root() / bf.AUDIT_FILENAME).read_text().splitlines()
+    ]
+    dropped = [row for row in rows if row["verdict"] == "deny"]
+    assert len(dropped) == 2
+    assert all("per call limit" in str(row["reason"]) for row in dropped)
+    assert all("could NOT be removed" in str(row["reason"]) for row in dropped)
+    # The rows are true: the two dropped files are still in the session directory.
+    assert len(bf.snapshot(directory["path"])) == 5
 
 
 def test_the_session_ceiling_refuses_before_anything_is_armed(tmp_path: Path) -> None:
@@ -521,6 +569,40 @@ def test_a_kept_artifact_is_tightened_to_0600(tmp_path: Path) -> None:
     assert not result.is_error, result.text
     landed = Path(host.calls[0][1]["dir"]) / "receipt.pdf"
     assert stat.S_IMODE(landed.stat().st_mode) == 0o600
+
+
+def test_the_mode_change_lands_on_the_entry_not_on_a_symlink_target(tmp_path: Path) -> None:
+    """N8: `os.chmod` follows a link, so the entry it names must be lchmod'ed.
+
+    An in-root symlink is a legitimate candidate (containment passes, because its
+    target is inside the root), and the old `os.chmod` tightened the TARGET — a
+    file this call did not land, does not report as an artifact, and did not
+    choose: the page wrote the link. The mode change belongs to the entry under
+    the name the sentence carries. The target here sits in a subdirectory so it is
+    not itself a candidate, which keeps the two modes independently observable.
+    """
+
+    def write_it(method: str, params: dict[str, Any]) -> None:
+        directory = Path(params["dir"])
+        (directory / "sub").mkdir()
+        target = directory / "sub" / "target.pdf"
+        target.write_bytes(b"%PDF-1.4\n1 0 obj\n%%EOF\n")
+        target.chmod(0o644)
+        os.symlink(target, directory / "receipt.pdf")
+
+    host = FakeHost(methods=("download",), result={"armed": True}, on_call=write_it)
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+    assert not result.is_error, result.text
+    directory = Path(host.calls[0][1]["dir"])
+    assert stat.S_IMODE((directory / "sub" / "target.pdf").stat().st_mode) == 0o644
+    assert stat.S_IMODE(os.lstat(directory / "receipt.pdf").st_mode) == 0o600
 
 
 # --- upload: the gate runs before anything reaches a browser -----------------
@@ -812,6 +894,173 @@ def test_the_unverified_marker_is_not_a_free_bypass(tmp_path: Path) -> None:
     )
     assert result.is_error
     assert "did not take the attach" in result.text
+
+
+def test_the_marker_does_not_suppress_a_reported_mismatch(tmp_path: Path) -> None:
+    """R6: the comparison is gated on the -1 sentinel, never on the marker.
+
+    The marker means "I could not read it back"; it must never mean "do not
+    check". A host that reports BOTH a real count and a marker used to skip the
+    one comparison a page that ignored the attach is caught by — proven here with
+    the same 8-byte file and the same host result as the failing case above,
+    differing only in the marker.
+    """
+    deck = _uploadable(tmp_path)
+    marker = (
+        "unavailable — the page navigated out of the change event before the input "
+        "could be read back"
+    )
+    host = FakeHost(
+        methods=("upload",),
+        result={
+            "inputs": ["#f"],
+            "accepted": [{"name": "deck.pptx", "path": str(deck.resolve()), "bytes": 999999}],
+            "refused": [],
+            "accept": "",
+            "readback": marker,
+        },
+    )
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(deck)]),
+        context=_ctx(),
+    )
+    assert result.is_error, result.text
+    assert "did not take the attach" in result.text
+    assert "999999" in result.text
+    # No facts and no audit row for a call nothing was sent by — the same answer
+    # the marker-less mismatch gives.
+    assert not (result.details or {}).get("files")
+    # A refused call writes no row at all: nothing was sent, and the trail says so
+    # by being empty rather than by carrying an `allow` row for a call that failed.
+    audit_path = bf.downloads_root() / bf.AUDIT_FILENAME
+    assert not audit_path.exists() or audit_path.read_text().strip() == ""
+
+
+def test_the_host_marker_is_sanitised_and_capped_before_the_transcript(
+    tmp_path: Path,
+) -> None:
+    """R7: the marker is a string from OUTSIDE, so it gets the same door as the type.
+
+    A marker carrying `\r\n` used to grow the tool result by a line the HOST
+    chose, and a bidi override DISPLAYS one string while the bytes say another.
+    Both are stripped, and what survives is capped, before it reaches the note or
+    the audit row.
+    """
+    deck = _uploadable(tmp_path)
+    injected = "\u202e" + "fake note" + "x" * 400
+    marker = f"unavailable — the read-back was lost\r\n[injected line] {injected}"
+    host = FakeHost(
+        methods=("upload",),
+        result={
+            "inputs": ["#f"],
+            "accepted": [{"name": "deck.pptx", "path": str(deck.resolve()), "bytes": -1}],
+            "refused": [],
+            "accept": "",
+            "readback": marker,
+        },
+    )
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(deck)]),
+        context=_ctx(),
+    )
+    assert not result.is_error, result.text
+    assert "could not be read back" in result.text
+    # The host's newline cannot start a line, and the override cannot travel.
+    assert "\n[injected line]" not in result.text
+    assert "\r" not in result.text
+    assert "\u202e" not in result.text
+    rows = [
+        json.loads(line)
+        for line in (bf.downloads_root() / bf.AUDIT_FILENAME).read_text().splitlines()
+    ]
+    reason = str(rows[0]["reason"])
+    assert "\r" not in reason and "\n" not in reason
+    assert "\u202e" not in reason
+    assert len(reason.encode("utf-8")) <= bf.MAX_READBACK_BYTES
+    # And the fact itself is marked unverified, so a consumer of `details` sees
+    # the same caveat the prose carries (N6).
+    facts = (result.details or {}).get("files") or []
+    assert facts and facts[0]["verified"] is False
+
+
+def test_a_marker_that_sanitises_away_still_marks_the_attach_unverified(
+    tmp_path: Path,
+) -> None:
+    """R7's edge: the marker's PRESENCE is a fact, its TEXT is untrusted.
+
+    A host that sends a marker made only of control characters is still saying
+    its read failed. Sanitising cannot be allowed to turn that into a VERIFIED
+    attach — the note is what a model re-checks from, and "no detail" is also the
+    extension's own fallback for an empty error detail.
+    """
+    deck = _uploadable(tmp_path)
+    host = FakeHost(
+        methods=("upload",),
+        result={
+            "inputs": ["#f"],
+            "accepted": [{"name": "deck.pptx", "path": str(deck.resolve()), "bytes": -1}],
+            "refused": [],
+            "accept": "",
+            "readback": "\r\n\u202e",
+        },
+    )
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(deck)]),
+        context=_ctx(),
+    )
+    assert not result.is_error, result.text
+    assert "could not be read back (no detail)" in result.text
+    facts = (result.details or {}).get("files") or []
+    assert facts and facts[0]["verified"] is False
+    rows = [
+        json.loads(line)
+        for line in (bf.downloads_root() / bf.AUDIT_FILENAME).read_text().splitlines()
+    ]
+    assert str(rows[0]["reason"]) == "no detail"
+
+
+def test_an_ordinary_attach_is_marked_verified_in_details(tmp_path: Path) -> None:
+    """N6: the structured result distinguishes a verified attach from an unverified one."""
+    deck = _uploadable(tmp_path)
+    host = FakeHost(
+        methods=("upload",),
+        result={
+            "inputs": ["#f"],
+            "accepted": [
+                {
+                    "name": "deck.pptx",
+                    "path": str(deck.resolve()),
+                    "bytes": deck.stat().st_size,
+                }
+            ],
+            "refused": [],
+            "accept": "",
+        },
+    )
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=[str(deck)]),
+        context=_ctx(),
+    )
+    assert not result.is_error, result.text
+    facts = (result.details or {}).get("files") or []
+    assert facts and facts[0]["verified"] is True
+    assert "could not be read back" not in result.text
 
 
 def test_a_bridge_that_predates_the_advertisement_sends_the_reader_to_a_restart() -> None:

@@ -591,10 +591,10 @@ told to use the browser and was not told why reached for playwright anyway
 | host predates the feature | typed `capability_unsupported` + version + "update the extension / the app" |
 | host is current but wedged | the existing wedge copy, naming the extension toggle (`guide://browser`) |
 | no download started | "no download started within N s; if the page needs a click first, `click` it and retry, or the file may be behind a login" |
-| cancelled by the name policy | "refused: `<name>` is an executable/script type (`<why>`); nothing was saved" |
+| cancelled by the name policy | "refused and deleted — `<name>` is an executable/script type (`<why>`); nothing was saved" |
 | sniff disagrees with the name | kept, renamed, and said so: "saved as `x.pdf` (the name said `zip`; the server said `application/zip`; the content is a PDF document)" — the declared type is quoted only when there is one to quote, and it never changes the verdict |
-| executable content | "refused and deleted: the file at `<path>` is a `<type>`. Nothing executable is ever kept." |
-| over cap | "refused: `<name>` is `<n>` bytes, over the `<cap>` limit" |
+| executable content | "refused and deleted — the file at `<path>` is a `<type>`; nothing executable is ever kept" |
+| over cap | "refused and deleted — `<name>` is `<n>` bytes, over the `<cap>` byte limit" |
 | upload refused | the specific reason: "that file is inside Local Operator's own config directory", "`<basename>` matches the credential deny-list (`<pattern>`)", "`<basename>` is inside a `<component>` directory, which holds credentials", "not a regular file", "`<n>` bytes over the `<cap>` limit", "`<path>` does not exist", "the file is empty" |
 | upload from outside the workspace | **NOT refused** — the approval row is MARKED `[outside workspace]` (§7.3) and the call proceeds. Corrected here in §17.7 #8: refusing it would refuse the file the user just downloaded into this session's own quarantine root, which is the feature's main use, and the containment rule this table implied has no counterpart in §9.2's check list. The controls are the config-root refusal, the credential deny-list on the RESOLVED path, and the cap — informed consent for the rest is the describer's job |
 
@@ -730,7 +730,13 @@ because a file is **read and transmitted**. Two adversaries meet here.
   holds. This is `type`'s rule (`docs/BROWSER.md:303-308`: the read-back is
   compared, not interpolated) applied to attachments: a file input that silently
   ignored the call must not be reported as filled. A mismatch is an error naming
-  both sides.
+  both sides — and the comparison is gated on the host REPORTING a count
+  (`bytes >= 0`), never on its marker: the marker is the host's word about its own
+  read ("I could not read it back"), so it makes an *unreported* count
+  unverifiable and can never suppress the check of a count that came back
+  (review round 2, R6). The marker is a string from OUTSIDE and is sanitised and
+  capped like the declared type is before it reaches the transcript or the audit
+  row (review round 2, R7).
 - `accept=` on the input is **reported, never obeyed as policy**: a site's
   `accept` does not protect the user's files, and honouring it would let a page
   steer which files the agent tries.
@@ -1073,6 +1079,19 @@ takes seriously:
 - **R5** An agent can still exfiltrate via `bash` + `curl`; this design does not
   defend that, and pretending otherwise would be worse than saying it. The upload
   policy makes the *browser* path safe, not the machine.
+- **R6** A NON-REGULAR entry in the session directory — a dangling symlink, or a
+  symlink to a directory — is invisible to `snapshot` (§5.3), because the
+  candidate set is built from entries that `is_file()` follows to a real file. So
+  the containment rule can never reach such an entry: it is neither refused nor
+  deleted, and it stays in the session directory. Nothing escapes the root and no
+  quota is inflated (`dir_size`/`session_bytes` count regular files only), so the
+  impact is a stray entry where a refusal was meant, against the same premise the
+  containment rule is written for (a hostile or buggy WRITER — the page cannot
+  create entries in the quarantine directory itself; only the host can).
+  Pre-existing selection code, recorded rather than fixed (review round 2's R9)
+  and deferred as a PR-thread `deferred — ` line; the widening, if it is wanted,
+  is "candidate set = `lexists`, delete the entry, then judge", which is a
+  change to the download half at a moment the feature does not need it.
 - **R6** The DeepSeek end-to-end scenario needs a logged-in session in the
   operator's browser. If QA cannot get one, that scenario is BLOCKED and reported
   as such rather than substituted with a fixture (§12.1, E1).
@@ -1622,3 +1641,30 @@ remediation comments on the PR carry the evidence.
 | **N5** | the extension reads the input's `files` through `HTMLInputElement.prototype`'s own getter (an own-property shadow was a real bypass for the read-back), and the size-only limit of the comparison is stated in the code and in `BROWSER.md` rather than implied |
 | **Q-1 (major)** — an auto-submitting form returned a bare CDP internal error while the bytes had really gone, with no facts and no audit row | the read-back failure is classified BY ITS PROOF VALUE rather than by a list of error strings: the attach has already resolved by the time the read runs, so a read that failed is evidence of nothing and the call is reported as an **unverified attach** — `accepted` facts from the harness's own stat + digest, the audit row written with the marker in `reason`, and the marker in the model-facing text. What the read-back exists to catch (a page that ignored the attach) is a MISMATCH, found by a read that succeeded, and every mismatch still fails the call; the control test asserts the marker is not a bypass |
 | **Q-2** — §4.1's "files 0600" was enforced nowhere | the harness tightens each artifact it keeps to 0600 (`browser_files.chmod_private`), best-effort, after the content-corrected rename has settled the final name |
+
+### 17.10 The round-2 review round, and what each finding changed
+
+Round 2 (`### Agent review — round 2` on the PR, scope `f4a27d0d..d697c8e0`)
+came back **terminal-clean on head `d697c8e0`**: no blocker, no major. It left four
+minors and three nits, all of them things this feature cannot ship with while its
+premise is "the host may lie; Python judges" — three of the four touch a string or
+a decision a HOST controls. `### Agent review remediation — round 2` on the PR
+carries the per-finding answer; this table is the record of what the CODE now
+does, so a later reader does not have to reconstruct it from the diff.
+
+| finding | what changed |
+|---|---|
+| **R6** — the upload read-back comparison was gated on the host's MARKER, so a host that reported a real byte count AND a marker lost the only check a page that ignored the attach is caught by | the gate is the `-1` SENTINEL (`if count >= 0: compare`), never the marker. "I could not read it back" now only makes the UNREPORTED count unverifiable: with a count present the comparison runs whether or not a marker came with it, and with no count and no marker the call is still refused (the marker is what makes the unreported shape legitimate, not the absence of a comparison). The fact is also marked `verified: false` in `details` |
+| **R7** — `readback` was the one host-supplied string in the new code reaching the transcript uncapped and unsanitised (`\r\n` inside it grew the tool result by a line the host chose) | it goes through `browser_files.readback_label`, the same door as the declared type: one `_outside_text` strip (C0/C1 controls and the bidi/zero-width overrides removed) then a byte cap (`MAX_READBACK_BYTES = 120`, above the extension's own 120-character cap so an honest marker is never clipped — a cap that cut our own 93-byte marker would cost the diagnosis the marker exists to give). Its PRESENCE is kept apart from its TEXT: a marker made only of control characters sanitises to nothing but still marks the attach unverified (`no detail`, the extension's own fallback wording), because sanitising must not be able to turn a failed read into a verified attach |
+| **R8** — the over-cap deny row omitted the delete outcome the sentence carries, while the round-1 remediation reply claimed it "got the same treatment" | the row carries it, in the same words as the containment row: `over the N files per call limit; the entry was removed` / `… could NOT be removed — it is still on disk`. The claim and the code now agree, and this is the branch where the claim was false: a 0500 session directory makes the unlink fail, and the row is what a later reader answers "what did this session keep?" from |
+| **R9** — non-regular entries (dangling symlinks, symlinks to a directory) are invisible to `snapshot`, so the containment rule can never reach them | **recorded, not coded**: §11.5's residual R6. No escape, no quota effect, pre-existing selection code — and deferred as a `deferred — ` line on the PR rather than widened in this commit |
+| **N6** — an unverified attach was indistinguishable from a verified one in the structured result | every fact in `details["files"]` carries `verified`, true only when the host's own read completed and agreed with Python's stat |
+| **N7** — the delete outcome was stated only when it FAILED, and several deny reasons deleted the artifact silently | one vocabulary for the fact, in one function (`_delete_outcome`), used by the containment rule, the per-call cap and the content refusals alike. The deny REASONS in `browser_files` are therefore rule text only — they no longer open with `refused and deleted:`/`refused:`, because only the caller knows what happened to the entry; §7.4's rows are updated to the shipped sentences |
+| **N8** — `chmod_private` used `os.chmod`, which follows a symlink, so an in-root symlink artifact tightened its TARGET | a symlink entry takes `lchmod`, and is skipped where the platform has none (Linux), rather than firing the mode change at whatever it points at. The containment check already bounded the target to the root, so this was never an escape — it is R1's "the artifact it is about to report" rule applied to the mode change |
+
+**One consequence for a reader of the trail.** A fact is `verified` only when the
+read completed; a marker present alongside a matching count is reported as
+UNVERIFIED (`verified: false`, with the note in the text). That is deliberate:
+the marker is the host's word that its read failed, and the cheap failure is a
+caveat the operator can dismiss, where the expensive one is a model that reads
+"attached" over an attach nobody checked.
