@@ -479,6 +479,7 @@ _BOUNDED_JOB_FIELDS = {
     "trajectory_length": "int",
     "output_seq": "int",
     "restored": "bool",
+    "roster_released": "bool",
     "parent_job_id": "one job id",
     "session_id": "one session id",
     "session_dir": "one filesystem path",
