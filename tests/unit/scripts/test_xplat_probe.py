@@ -432,12 +432,16 @@ def test_the_mobile_install_failure_detail_is_the_end_of_the_output(
     The Linux artifact's `mobile.install` FAIL detail was "generated a new portal
     password (a 0600 file ...)" -- a step that worked -- while the actual failure
     was four lines further down (reviewer B, A6).
+
+    The transcript here deliberately does NOT contain "did not come up
+    healthy": that case has its own, better evidence now (the daemon's own log)
+    and is covered below, so what stays pinned here is the generic failure.
     """
     transcript = (
         "generated a new portal password (a 0600 file (/tmp/x/password))\n"
         "  built the web bundle\n"
         "  wrote the unit\n"
-        "daemon did not come up healthy; see /tmp/x/logs/mobile.log\n"
+        "could not register the daemon: schtasks exited 1: ERROR: Access is denied.\n"
     )
 
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -450,10 +454,80 @@ def test_the_mobile_install_failure_detail_is_the_end_of_the_output(
     assert result.status == "FAIL"
     # The detail ENDS at the failure rather than starting at the progress: the
     # old `_first_line` opened the reader's evidence with a step that worked.
-    # `_tail` keeps the last few lines, so the failure is in the detail and the
-    # reader's LAST line is what actually failed; `_first_line` gave the progress
-    # line alone and the real cause never reached the artifact.
-    assert result.detail.splitlines()[-1].startswith("daemon did not come up healthy")
+    assert result.detail.splitlines()[-1].startswith("could not register the daemon")
+
+
+def test_a_daemon_that_never_came_up_reports_the_daemons_own_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The installer answers with a POINTER, and the artifact outlives the runner.
+
+    The Windows run of 35457478927 read exactly this: `daemon did not come up
+    healthy; see C:\\Users\\RUNNER~1\\...\\logs\\mobile.log`. The log is on a
+    runner that is already destroyed by the time anybody reads the artifact, so
+    the one fact that would have explained the failure -- the daemon's own last
+    words -- was the one fact not carried. Reported as PASS=20/FAIL=1 with no way
+    to tell a crash from a slow start.
+
+    The registry PATH dump is dropped rather than truncated: it is a single line
+    of several hundred characters on Windows, and keeping it pushed the actual
+    failure out of the tail and into the bit-bucket.
+    """
+    config = tmp_path / "config"
+    (config / "logs").mkdir(parents=True)
+    (config / "logs" / "mobile.log").write_text(
+        "2026-09-19 12:50:04,816 - INFO - Retrieved System PATH from registry: "
+        + "C:\\Program Files\\x;" * 60
+        + "\n2026-09-19 12:50:05,000 - INFO - starting server at http://127.0.0.1:4098\n"
+        "RuntimeError: no mobile password set. Run `lop mobile install`\n",
+        encoding="utf-8",
+    )
+    transcript = (
+        "  built the web bundle\n"
+        "  registered the scheduled task (Local Operator Mobile)\n"
+        "  started the task\n"
+        "daemon did not come up healthy; see /tmp/x/logs/mobile.log\n"
+    )
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout=transcript, stderr="")
+
+    monkeypatch.setattr(xplat_probe, "run", fake_run)
+    result = xplat_probe.probe_mobile_install(
+        {"LOP_XPLAT_ALLOW_KEYCHAIN": "1", "LOCAL_OPERATOR_CONFIG_DIR": str(config)}
+    )
+
+    assert result.status == "FAIL"
+    assert "no mobile password set" in result.detail, result.detail
+    assert "Retrieved System PATH" not in result.detail, "the PATH dump is not evidence"
+    assert "no mobile password set" in str(result.extra["daemon_log"])
+
+
+def test_a_daemon_that_never_came_up_without_a_log_still_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The absent-log case is a sentence, not a crash and not an empty detail.
+
+    A probe that dies while explaining a failure is worse than one that reports
+    it plainly, and the isolated stores the battery uses legitimately have no
+    daemon log to read until the installer writes one.
+    """
+    transcript = "  started the task\ndaemon did not come up healthy; see /tmp/x/logs/mobile.log\n"
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=1, stdout=transcript, stderr="")
+
+    monkeypatch.setattr(xplat_probe, "run", fake_run)
+    result = xplat_probe.probe_mobile_install(
+        {
+            "LOP_XPLAT_ALLOW_KEYCHAIN": "1",
+            "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path / "absent"),
+        }
+    )
+
+    assert result.status == "FAIL"
+    assert "never became healthy" in result.detail
+    assert "no daemon log" in result.detail
 
 
 def test_import_package_separates_a_refusal_from_a_breakage(
