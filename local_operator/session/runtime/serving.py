@@ -1547,10 +1547,10 @@ class ServingSessionHandle(SessionHandle):
         admission their composer was refused a moment ago.
         """
         from local_operator.session.runtime.inbox import (
+            SOURCE_USER,
             SPOOL_RECEIPT_NOTE,
             SPOOL_RECEIPT_PROMPT,
             SPOOL_RECEIPT_WAKE,
-            SOURCE_USER,
             InboxLine,
             append_inbox,
         )
@@ -2053,11 +2053,7 @@ class ServingSessionHandle(SessionHandle):
             # prompt would return a receipt for a message that arrives without
             # its attachment — losing the user's file while telling them it was
             # queued. It takes the refusal, which returns both to the composer.
-            if (
-                self._draining
-                and not self._exit_committed
-                and not blocks
-            ):
+            if self._draining and not self._exit_committed and not blocks:
                 try:
                     receipt = await self._spool_for_successor(
                         text,

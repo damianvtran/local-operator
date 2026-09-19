@@ -1656,7 +1656,7 @@ async def _drain_inbox_into(handle: object) -> int:
     return delivered
 
 
-async def _run_owner_prompt(handle: object, line: object) -> None:
+async def _run_owner_prompt(handle: object, line: Any) -> None:
     """Run one spooled OWNER prompt on this runtime, at most once.
 
     The continuation of the drain's own promise: a runtime that latched a
@@ -1680,17 +1680,19 @@ async def _run_owner_prompt(handle: object, line: object) -> None:
     prompt = getattr(handle, "prompt", None)
     if not callable(prompt):
         raise RuntimeError("this handle cannot run a spooled prompt")
+    run = cast(Callable[..., Awaitable[Any]], prompt)
     command_id = str(getattr(line, "command_id", "") or "")
     admitted = getattr(handle, "has_admitted_command", None)
     if command_id and callable(admitted) and admitted(command_id):
         logger.info("spooled prompt already in the transcript; not running it twice")
         return
-    if not command_id:
-        # No identity to deduplicate on, which only an old writer can produce.
-        # It still runs: the message is the user's and dropping it is worse.
-        await cast(Callable[..., Awaitable[str]], prompt)(line.text)  # type: ignore[attr-defined]
+    if command_id:
+        await run(line.text, command_id=command_id)
         return
-    await cast(Callable[..., Awaitable[str]], prompt)(line.text, command_id=command_id)  # type: ignore[attr-defined]
+    # No identity to deduplicate on, which only a writer older than the field
+    # can produce. It still runs: the message is the user's, and dropping it is
+    # worse than a duplicate it cannot be compared against.
+    await run(line.text)
 
 
 def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
