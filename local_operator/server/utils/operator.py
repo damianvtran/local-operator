@@ -295,10 +295,21 @@ class AgentEventBridge:
         # Bound BEFORE the per-string cap below, and deliberately before it: an
         # ``agent_end`` carries the whole turn, and this transport caps STRINGS
         # at 16 KiB, so a turn of ordinary rows (no single string over the
-        # limit) passes through it untouched — measured at 377,831 bytes for a
-        # frame that is 531,082 unbounded. The bound spends tool-row content
+        # limit) passes through it untouched — measured at 373,215 bytes for a
+        # frame that is 523,280 unbounded. The bound spends tool-row content
         # through an honest marker instead of clipping five rows' worth of
         # strings, so a reader sees ONE truncation story rather than two.
+        #
+        # The ordering is a preference, not a guarantee, and what actually
+        # happens at the seam is worth stating: a row's share can leave ONE
+        # string above ``STREAM_VALUE_LIMIT`` (a single 300,000-char tool result
+        # bounds to 258,128 chars against a 262,144-byte budget), and then
+        # ``_cap_stream_payload`` DOES clip it, with its own marker and no
+        # reference — measured: that frame reaches this reader as 16,450 chars
+        # / 17,645 bytes, while the socket relay and the NDJSON supervisor get
+        # the bound frame intact. Two stories are therefore still possible for
+        # that shape; the bound's ``elided_bytes`` counts only its own
+        # reduction and does not claim to cover this one.
         payload = bound_agent_end_for_wire(payload, session_id=self._session_id)
         # Restore the running snapshot on delta frames.
         #

@@ -1845,8 +1845,9 @@ class ServingSessionHandle(SessionHandle):
                 # event becomes bytes, so it is the last place a conversation
                 # frame can be elided while the loop's own message objects stay
                 # untouched (``harness/wire.py``). The socket's own 1 MiB fitter
-                # would not have caught it — an ``agent_end`` for a 104-message
-                # turn is 531 KB and passes that cap byte-identical.
+                # would not have caught it — the 104-message / 50-tool-row
+                # fixture measures a 531,082-byte payload, and
+                # ``fit_frame_for_wire`` returns it byte-identical.
                 payload = bound_agent_end_for_wire(
                     event.model_dump(mode="json"),
                     session_id=getattr(self._session, "session_id", None),
