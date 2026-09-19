@@ -767,6 +767,22 @@ _PAYLOAD_OPS = {
 #: precisely when its loop is stuck — the situation this set exists for.
 _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 
+#: Ops exempt from their connection's op CHAIN. A different question from
+#: :data:`_SYNC_PRIORITY_OPS`: that set decides what may run before the sync
+#: lands (ADMISSION), this one decides what may run without waiting for an
+#: earlier op to finish (ORDERING).
+#:
+#: ``ping`` alone, and the argument is that its answer cannot depend on session
+#: state: it reports that the runtime's loop is alive and serving. Chaining it
+#: made it report something else entirely — measured over a real socket (review
+#: round 1, UX U3), a ``ping`` sent after a parked ``steer`` on the SAME
+#: connection went unanswered for 8-15 s, so the one request a surface speaks to
+#: ask "are you there" was queued behind a mutation. Everything else keeps its
+#: place in the chain, because ordering is what stops two mutations interleaving
+#: and only a liveness probe has no state to be ordered against.
+_UNCHAINED_OPS = frozenset({"ping"})
+
+
 #: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
 #: of it: each mutates only this connection's own relay state and never touches
 #: the session, so none can act on a connection that has not yet been made
@@ -1014,6 +1030,16 @@ class _ClientConn:
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
     frontend_unsubscribe: Callable[[], None] | None = None
+    #: The chain of ops this connection has ADMITTED: each waits for the one
+    #: before it, so ordering is preserved, and none of them parks the reader —
+    #: which is what lets a ``ping`` be answered while a mutation is still in
+    #: flight. See ``RuntimeServer._dispatch_frame`` for the measured failure
+    #: the shape fixes (a parked ``steer`` made the whole connection mute).
+    op_chain: asyncio.Task[None] | None = None
+    #: Strong references to those tasks. A bare ``create_task`` can be collected
+    #: mid-await, which would leave an op half-run and its reply never written —
+    #: the same reason ``RuntimeServer._event_sends`` exists.
+    op_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     # Job ids whose trajectory deltas this connection wants (``watch_job``).
     # Empty by default and per-connection by necessity: the snapshot ships no
     # trajectories at all (they overflow ``_MAX_LINE_BYTES``), so a viewer
@@ -1400,6 +1426,10 @@ class RuntimeServer:
         #: admission rather than on an older one's completion.
         self._in_flight_requests = 0
         self._in_flight_idle: asyncio.Event | None = None
+        #: Frontend binds abandoned by a connection that died mid-bind, held
+        #: until they land so their release callback can still fire (nothing
+        #: awaits them any more — see ``_release_when_landed``).
+        self._abandoned_binds: set[asyncio.Task[Any]] = set()
         # N authenticated connections keyed by id(writer): one daemon (a new
         # daemon dial evicts the old — that IS its reconnect story) plus up to
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
@@ -3027,20 +3057,114 @@ class RuntimeServer:
                 except ValueError:
                     continue
                 conn.last_seen = time.monotonic()
-                # ADMITTED BEFORE IT RUNS, and released when it settles however
-                # it settles: this span is what ``_shutdown_impl`` waits on so
-                # the reply to an admitted request is written before the socket
-                # it belongs to is closed.
-                self._admit_request()
-                try:
-                    await self._on_request(frame, conn)
-                finally:
-                    self._release_request()
+                self._dispatch_frame(conn, frame)
         except (ConnectionResetError, BrokenPipeError):
             self._drop_client(conn, reason="reader reset")
             return
         finally:
             self._drop_client(conn, reason="reader eof")
+
+    def _dispatch_frame(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
+        """Run one admitted request OFF this connection's reader loop.
+
+        WHY THE READER NO LONGER AWAITS IT. The reader used to
+        ``await self._on_request(...)``, which made a connection strictly serial
+        — right for ORDERING (two mutations must not interleave) but wrong for
+        LIVENESS: while one op is parked inside a hop into the session's loop,
+        the reader cannot read the next frame, so everything else that client
+        sent waits behind it. Measured over a real socket (review round 1, UX
+        U3): a parked ``steer`` left ``ping`` on that same connection unanswered
+        for 8-15 s — the one request a surface speaks to ask "are you there",
+        queued behind a mutation. New connections were never affected (a fresh
+        dial, its ping and its refusals all answered in 0.00 s), so "always
+        connectable" held while "prioritize the health check" did not.
+
+        ORDERING IS PRESERVED BY CHAINING, not by concurrency: each op waits for
+        the one admitted before it, so a connection's frames still run one at a
+        time and in arrival order. What changes is only that the READER stays
+        free while it waits, and therefore keeps answering whatever else that
+        client sends.
+
+        The chain link is waited on with :func:`asyncio.wait`, which REPORTS a
+        task's outcome rather than raising it: the earlier op's failure is its
+        own business (``_on_request`` answers its own errors with an error
+        frame), and an ordering link must never be an error channel that takes
+        the next request down with it.
+
+        ``ping`` is exempt from the chain (see :data:`_UNCHAINED_OPS`): a health
+        check queued behind a mutation answers the wrong question, and measured
+        (review round 1, UX U3) it did exactly that — 8-15 s of silence on a
+        connection whose only sin was a parked ``steer``. An exempt op also does
+        NOT become the chain head, and that is load-bearing rather than tidiness:
+        the head is what the next mutation waits on, so letting a ping (which
+        finishes at once) take it would let the mutation admitted after the ping
+        overtake the one still in flight — reproduced before this line existed,
+        where a parked ``steer`` was overtaken by the next ``steer`` because a
+        ``ping`` had been admitted in between. The head therefore stays with the
+        last CHAINED op, and the chain is transitive: waiting on the head is
+        waiting on everything admitted before it.
+
+        Cancellation is deliberately NOT propagated to these tasks. An op parked
+        on a dead connection is left to unwind on its own, exactly as before
+        this change (``_drop_client``'s ``phone_watchers`` note depends on that:
+        an evicted daemon parked inside ``_on_request`` returns on its own), and
+        ``conn.op_tasks`` holds the strong references meanwhile.
+        """
+        # ``isinstance`` FIRST, and it is load-bearing rather than defensive: a
+        # frame that parses as a bare JSON scalar (``12345``, ``null``,
+        # ``"str"`` — reachable when an oversized line is discarded and its
+        # surviving TAIL happens to parse) reaches here as an int/None/str, and
+        # ``.get`` on one raises. That exception would escape the reader loop's
+        # ``ConnectionResetError``/``BrokenPipeError`` handler and take the
+        # connection down — the exact session death
+        # ``test_a_junk_scalar_frame_does_not_kill_the_connection`` exists to
+        # prevent, which the reader loop already guards against INSIDE
+        # ``_on_request``. This check must therefore never become a second,
+        # crashing gate in front of it: a non-dict frame is chained like any
+        # other and left to the dispatch to reject.
+        chained = not (isinstance(frame, dict) and frame.get("op") in _UNCHAINED_OPS)
+        previous = conn.op_chain if chained else None
+
+        async def run() -> None:
+            if previous is not None:
+                await asyncio.wait({previous})
+            # ADMITTED BEFORE IT RUNS, and released when it settles however it
+            # settles: this span is what ``_shutdown_impl`` waits on so the
+            # reply to an admitted request is written before the socket it
+            # belongs to is closed.
+            self._admit_request()
+            try:
+                await self._on_request(frame, conn)
+            finally:
+                self._release_request()
+
+        task = asyncio.create_task(run())
+        if chained:
+            conn.op_chain = task
+        conn.op_tasks.add(task)
+        task.add_done_callback(lambda completed: self._op_settled(conn, completed))
+
+    def _op_settled(self, conn: _ClientConn, completed: asyncio.Task[None]) -> None:
+        """Retire a dispatched op and consume its outcome.
+
+        The strong reference goes away here, and an exception is LOGGED rather
+        than left for the garbage collector: ``_on_request`` answers its own
+        failures with an error frame, so anything that escapes it is a bug in
+        the dispatch path, and an unretrieved task exception would surface much
+        later as an asyncio "never retrieved" warning naming no connection.
+        """
+        conn.op_tasks.discard(completed)
+        if completed.cancelled():
+            return
+        error = completed.exception()
+        if error is not None:
+            logger.warning(
+                "session runtime: an admitted request failed outside its own "
+                "error frame for %s client %s",
+                conn.kind,
+                conn.writer.get_extra_info("peername"),
+                exc_info=error,
+            )
 
     def _drop_client(self, conn: _ClientConn, *, reason: str = "unspecified") -> None:
         """Remove one connection from the registry and close its socket.

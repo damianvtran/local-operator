@@ -549,3 +549,152 @@ async def test_tui_hop_never_parks_the_runtime_loop() -> None:
     release.set()
     assert await asyncio.wait_for(hop, timeout=5) == {"unseen": 0}
     ticker.cancel()
+
+
+@pytest.mark.asyncio
+async def test_tui_hop_awaits_an_awaitable_result() -> None:
+    """An async callback's coroutine is awaited, never returned as its result.
+
+    THE DEFECT THIS PINS (review round 1, U1). Several callbacks handed to
+    ``_on_app`` are async on the session — ``Session.refresh_attention``,
+    ``acknowledge_attention`` and ``record_shell`` all are — so ``fn()`` returns
+    a coroutine OBJECT. The first version of the hop returned that object as the
+    answer, and the cost was not a cosmetic one: ``refresh_attention`` stores its
+    answer in ``Projection.attention``, so the projection carried a coroutine
+    and every push then failed to serialize — reproduced 2026-09-19 with the
+    product's own attach clients, where the FIRST viewer was dropped the moment
+    a SECOND dialled ("owner closed the connection"), and no artificial hold was
+    involved. ``record_shell``'s write silently never ran at all.
+
+    Asserted as the TYPE that reaches the projection rather than as an internal
+    call count, because the projection is what the wire serializes.
+    """
+
+    class Session(FakeSession):
+        async def refresh_attention(self) -> dict[str, Any]:
+            # The real signature: a coroutine, not a value.
+            return {"unseen": 3}
+
+    class App:
+        def __init__(self, session: Any, loop: Any) -> None:
+            self._session = session
+            self.owner_loop = loop
+
+        def call_from_thread(self, callback: Any) -> None:
+            # Runs the callback the way Textual does — on the app's own loop —
+            # and hands back whatever it returned.
+            asyncio.run_coroutine_threadsafe(_call(callback), self.owner_loop).result()
+
+    app = App(Session(), asyncio.get_running_loop())
+    handle = TuiSessionHandle(app)  # type: ignore[arg-type]
+
+    state = await asyncio.wait_for(handle.refresh_attention(), timeout=5)
+    assert state == {"unseen": 3}
+    assert handle._projection.attention == {"unseen": 3}, (
+        "the projection holds something other than the callback's RESULT — a "
+        "coroutine object here fails every projection push"
+    )
+
+
+async def _call(callback: Any) -> Any:
+    """Run ``callback`` and await it if it handed back a coroutine."""
+    outcome = callback()
+    if asyncio.iscoroutine(outcome):
+        return await outcome
+    return outcome
+
+
+@pytest.mark.asyncio
+async def test_tui_hop_is_bounded_by_one_budget(monkeypatch) -> None:
+    """The budget covers the ENQUEUE as well as the callback's result.
+
+    Review round 1, MAJOR 1: ``call_from_thread`` returns only once Textual has
+    RUN the callback, so a ``wait_for`` around the future alone bounded the
+    scheduling tail and nothing else — the await that actually parks was the
+    enqueue. This pins the corrected shape: with the app loop unavailable, the
+    caller is told within the budget instead of waiting out the client's own
+    15 s timeout (``attach_client.ACK_TIMEOUT_S``) in silence.
+    """
+    from local_operator.mobile import tui_handle as mod
+
+    monkeypatch.setattr(mod, "_APP_HOP_TIMEOUT_S", 0.3)
+    entered = threading.Event()
+
+    class Session(FakeSession):
+        def refresh_attention(self) -> dict[str, Any]:
+            return {"unseen": 0}
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            entered.set()
+            # The app is busy: the callback is queued and not run. The fake
+            # waits long enough that the budget must expire first, then runs it
+            # anyway — which is exactly what Textual does, and why the
+            # docstring says the bound does not RECALL an enqueue.
+            time.sleep(1.0)
+            callback()
+
+    handle = TuiSessionHandle(App(Session()))  # type: ignore[arg-type]
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as caught:
+        await handle.refresh_attention()
+    elapsed = time.monotonic() - started
+    assert entered.is_set(), "the hop never reached the app"
+    assert elapsed < 0.9, f"the caller waited {elapsed:.2f}s past its budget"
+    assert "did not answer within" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_tui_stop_receipt_does_not_wait_for_the_app_loop() -> None:
+    """``request_stop`` answers from identity reads, not from the app loop.
+
+    Review round 1, UX U2: the receipt used to be built INSIDE the hop, so a
+    busy app meant the ladder's rung 1 timed out at 15 s
+    (``OwnerAckTimeout``) and ``lop stop`` escalated to the signal rung —
+    killing a host whose hook would have ended the session politely (exit 143).
+    A receipt is a statement about what is about to happen, so it must not need
+    the work it announces to have started.
+    """
+    ran = threading.Event()
+
+    class Session(FakeSession):
+        def __init__(self) -> None:
+            super().__init__()
+            # Instance attributes, not class ones: ``FakeSession`` declares both
+            # as read-only properties, so assigning here must go through the
+            # object rather than shadowing them on the class.
+            self.owner_identity = "sess"
+
+        @property
+        def session_id(self) -> str:
+            return "sess"
+
+        @property
+        def conversation_name(self) -> str:
+            return "the conversation"
+
+    class App:
+        def __init__(self, session: Any) -> None:
+            self._session = session
+
+        def call_from_thread(self, callback: Any) -> None:
+            # The app is busy: the scheduling step is queued, not run yet.
+            time.sleep(0.4)
+            callback()
+            ran.set()
+
+        def run_worker(self, coro: Any, **kwargs: Any) -> None:
+            # ``_stop_local_session`` is a coroutine the real app owns; the
+            # receipt must not depend on it running.
+            coro.close()
+
+    handle = TuiSessionHandle(App(Session()))  # type: ignore[arg-type]
+    started = time.monotonic()
+    receipt = await asyncio.wait_for(handle.request_stop(), timeout=5)
+    elapsed = time.monotonic() - started
+    assert receipt == 'stopping "the conversation" — /resume sess reopens it'
+    assert elapsed < 0.3, f"the receipt waited {elapsed:.2f}s for the app loop"
+    assert await asyncio.to_thread(ran.wait, 5), "the stop hop never reached the app"
