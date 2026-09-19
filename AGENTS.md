@@ -168,6 +168,13 @@ halve parallelism on every provider nobody remembered to add, which is the
 regression above. If you are adding a new non-interactive variable to
 `NON_INTERACTIVE_ENV`, check nothing else reads it as "dedicated machine".
 
+The sibling marker `LOCAL_OPERATOR_AGENT_MAY_DELEGATE` is deliberately NOT in
+that dict: it is conditional (set only when `ToolContext.may_delegate`, i.e. the
+session holds `task`), so `NON_INTERACTIVE_ENV` is the wrong home for it, and
+nothing reads it as a CI or "dedicated machine" signal — the guard in
+`agent_shell.py` is its only consumer. See the section on what an agent may
+start below.
+
 **A memory reserve is also held back**, scaled per host (`min(2048, total / 8)`
 MB), because the budget otherwise claims a fraction of what *remains* and
 sibling suites converge toward zero free memory instead of toward a floor. Know
@@ -1182,14 +1189,14 @@ the version is live on the public listing. Never claim a version is live from
 a merged PR or a workflow's success — only from the public listing or a
 successful publish call.
 
-## An agent may not start a session
+## What an agent may start: `exec` with the allowance, never a terminal
 
 `lop exec` opens a TOP-LEVEL conversation — an ordinary session directory that
 `is_user_session` reports as the operator's own. From inside an agent session
-that is never what you want: the operator's session list and desktop sidebar
-show it as a chat they opened, and it runs outside the job manager that would
-let you see, steer, cancel or account for it. A subagent does it out of the
-wrong belief that it is the only way to get a review run going:
+that is never what you want *by default*: the operator's session list and
+desktop sidebar show it as a chat they opened, and it runs outside the job
+manager that would let you see, steer, cancel or account for it. A subagent did
+it out of the wrong belief that it was the only way to get a review run going:
 
 ```sh
 lop exec --profile reviewer --background --name lo-1281-review < brief.md
@@ -1199,13 +1206,37 @@ That happened on 2026-09-18: two sessions (`lo-1281-review`, `lo-1281-qa`)
 appeared in the operator's sidebar for a PR they had never asked about, because
 the coder that owed the review round held no `task` tool (a role that does not
 delegate is never handed `task`/`wait`/`wake` — see `harness.subagent`'s prune).
-So the guard is in the product now: a `lop`
-invocation that descends from an agent's bash tool call may not open a session,
-and the refusal states the rule — a session that HOLDS `task` delegates with it,
-and one that does not may not create subagents at all, does the work itself, and
-reports a genuine blocker with `hub` to the session that delegated to it. Work
-that belongs later is not the child's to arm either — `wake` is pruned from
-EVERY child session — so it goes back to the session that delegated.
+
+**The rule after the 2026-09-19 relaxation, and it has two answers on purpose.**
+The guard in `local_operator/agent_shell.py` decides by the calling session's OWN
+live inventory — it holds `task`, or it does not:
+
+* `lop exec` **is allowed** to an agent session that holds `task`, because that
+  is the case an operator asks for when they ask for it: "spin up parallel
+  sessions and fully delegate this work", or a fan-out of independent long-lived
+  workstreams, is a shape a `task` child cannot be (one prompt, then gone). A
+  session that does NOT hold `task` is refused exactly as before — for it the CLI
+  is a way around a missing tool, not a way to delegate.
+* the **interactive** path (`lop`, `lop --resume ID`, `--tui`) stays refused for
+  EVERY agent shell, delegating or not. An agent has no terminal, so that path
+  opens a front end on the operator's SCREEN — not the delegation shape above.
+  When you touch this guard, check both halves: a change that relaxes one
+  predicate and not the other is the defect this paragraph exists to prevent.
+
+The allowance travels as `LOCAL_OPERATOR_AGENT_MAY_DELEGATE`, which the `bash`
+tool exports from the session's live tool inventory (`ToolContext.may_delegate`,
+set by `Session._build_tool_context` from `self._tools`). An absent marker reads
+as "may not delegate", so a forgotten export is a refusal the model reads rather
+than a chat in the operator's sidebar.
+
+**Delegate with `task`, and reach for `exec` only when the user asked for
+sessions.** "Spin up parallel sessions to fully delegate this" is that ask: open
+them, and say what you opened. If you think you need a separate live session and
+were NOT asked, say so in your report instead of starting one. A session that
+holds no `task` does the work itself and reports a genuine blocker with `hub`;
+work that belongs later is not a child's to arm either — `wake` is pruned from
+EVERY child session — so it goes back to the session that delegated. `lop exec
+--status JOB_ID` still polls a job that is already running.
 
 WHO may delegate is the role's answer, never the depth's (operator, 2026-09-18).
 A subagent whose role allows delegation is expected to use `task` at any depth —
@@ -1214,10 +1245,13 @@ TUI re-scopes its roster to the page you have open and climbs with `p`/`Esc`, an
 the desktop UI walks the same edges with its breadcrumbs and back control. A role
 that does not delegate gets no `task` at any depth and must do the work itself.
 
-Delegate with `task`, always. If you think you need a separate live session —
-something a human must steer, or work that must outlive this turn — say so in
-your report instead of starting one. `lop exec --status JOB_ID` still polls a
-job that is already running.
+**A session either route opens is stamped `agent-shell`.** The QA escape hatch
+and an allowed delegating `exec` both write `origin.json` =
+`resume.ORIGIN_AGENT_SHELL` in `session_factory._prepare`, so the run stays out
+of the `/resume` picker, the desktop sidebar and the phone's list. It is not
+hidden and not a lock: `lop sessions` lists it, the id is in the run's own
+output, and `lop --resume <id>` opens it. A conversation a run merely RESUMES is
+never re-marked — that is the operator's own work.
 
 **Scripts that drive the real CLI must declare themselves.** A bench, an eval
 driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
