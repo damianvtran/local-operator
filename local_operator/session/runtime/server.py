@@ -635,6 +635,10 @@ def relay_frame_or_degraded(frame: dict[str, Any], cap_bytes: int) -> dict[str, 
 # healthy viewer and synthesising a false "interrupted".
 _SEND_TIMEOUT_S = 1.0
 _TUI_SEND_TIMEOUT_S = 5.0
+#: How long shutdown waits for a shielded frontend bind to land before the
+#: runtime's loop can disappear — see ``RuntimeServer._drain_abandoned_binds``.
+#: The same order as ``RuntimeServer.close``'s own bounded join (2.0s).
+_ABANDONED_BIND_DRAIN_S = 2.0
 # Raw events are lossless only while a follower keeps pace. One bounded FIFO per
 # event client prevents a non-reader from retaining an unbounded stream before
 # its active drain reaches the timeout; overflow drops that client so it can
@@ -758,9 +762,14 @@ _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
 #: ``desktop_watch`` re-asserts), each with its own bound; refusing them would
 #: turn every reconnect of a parked viewer into three error frames.
 #:
-#: The same eight are already treated as connection-local by the push exemption in
-#: ``_dispatch``, which is what makes this a mirror of an existing decision rather
-#: than a second one.
+#: SIX of the eight are already treated as connection-local by ``_dispatch``'s
+#: push exemption — ``watch``, ``unwatch``, ``watch_job``, ``unwatch_job``,
+#: ``event_mute``, ``event_unmute`` — which is what makes those a mirror of an
+#: existing decision rather than a second one. ``desktop_watch`` and
+#: ``viewer_watch`` are NOT in that tuple (it exempts an op from the post-ack
+#: repaint, and those two answer with a receipt instead), so they are admitted
+#: on their own reason: their ``_dispatch`` arms touch only this connection's own
+#: watch/presence state and notify this connection, never the session.
 _SYNC_LOCAL_OPS = frozenset(
     {
         "watch",
@@ -2272,9 +2281,45 @@ class RuntimeServer:
             await asyncio.gather(
                 *(conn.writer.wait_closed() for conn in clients), return_exceptions=True
             )
+        # A SHIELDED BIND OUTLIVES ITS CONNECTION, deliberately: the shield is what
+        # stops a cancel from aborting a registration halfway, so the bind is left
+        # to land and its done-callback releases what it registered
+        # (``_release_when_landed``). Give those a bounded chance to land BEFORE
+        # the loop goes away — a task still pending at loop close is destroyed
+        # with a warning, and its release never runs.
+        #
+        # THE RESIDUAL IS DISCLOSED RATHER THAN ARGUED AWAY: a bind parked on a
+        # session loop that is itself stuck cannot be made to land, and it must
+        # NOT be cancelled — cancelling it is the half-registered leak the shield
+        # exists to prevent (#1327 round 1, F3), since a cancelled bind's
+        # done-callback cannot tell whether a subscription got registered. So a
+        # shutdown that races a STUCK session loop can still destroy one bind
+        # pending and leave that one subscriber to the process's end. Bounded
+        # here so the ordinary case — a bind in flight, the session's loop
+        # healthy — always drains.
+        await self._drain_abandoned_binds()
         if self._publisher is not None:
             self._publisher.close()
             self._publisher = None
+
+    async def _drain_abandoned_binds(self, timeout: float = _ABANDONED_BIND_DRAIN_S) -> None:
+        """Let shielded binds land before the runtime's loop can disappear.
+
+        WAITERS, NOT CANCELLERS, and that is the whole design: see the call site
+        (and ``_release_when_landed``) for why a cancelled bind can leak the
+        subscription it registered. Bounded, because this runs during shutdown
+        and the loop a bind is waiting on may never answer.
+        """
+        pending = [task for task in self._abandoned_binds if not task.done()]
+        if not pending:
+            return
+        _done, still = await asyncio.wait(pending, timeout=timeout)
+        if still:
+            logger.debug(
+                "session runtime: %d frontend bind(s) still in flight at shutdown; each "
+                "releases its subscription when it lands, or is dropped with the process",
+                len(still),
+            )
 
     async def _await_push_shutdown(self) -> None:
         """Join the coalesced repaint before its owning loop can disappear."""
