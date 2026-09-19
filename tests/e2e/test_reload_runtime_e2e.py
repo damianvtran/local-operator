@@ -32,7 +32,12 @@ from tests.e2e.watchdog import bounded
 @pytest.mark.parametrize("command", ["/reload", "/update"])
 @pytest.mark.parametrize("approval", [False, True, "answered"])
 async def test_relaunch_preserves_owner_turn_and_gate(
-    headless_tui_env: Path, workspace: Path, monkeypatch, command: str, approval: bool | str
+    headless_tui_env: Path,
+    workspace: Path,
+    monkeypatch,
+    command: str,
+    approval: bool | str,
+    operator_cap: bytes,
 ) -> None:
     config = headless_tui_env
     monkeypatch.setattr(ServingSessionHandle, "_maybe_name_conversation", lambda *_: None)
@@ -79,8 +84,12 @@ async def test_relaunch_preserves_owner_turn_and_gate(
     )
     owner = build_session(directory, stream, tools=[tool], cwd=workspace)
     owner._yolo = not approval
+    # ``operator_cap`` (issue #1310): this test builds the registrant IN THIS
+    # PROCESS, so it is that runtime's console. The assembled TUI below is a
+    # follower, and answering a card is an authority-increasing request — wire the
+    # capability the way a real console would, or the card can never be settled.
     handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
-    server = RuntimeServer(handle, kind="daemon")
+    server = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
     await server.start_in_process()
     viewers = []
 
