@@ -30,7 +30,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -952,52 +955,101 @@ async def test_both_poles_of_the_allowance_through_the_real_prune(
         await parent.dispose()
 
 
-def _child_env_names(result: ToolResult) -> set[str]:
-    """The child's variable NAMES, from a command that prints names only.
-
-    ``cut -d= -f1`` for the reason ``tests/unit/tools/test_shell_env.py`` gives:
-    names are the property under test, and a value can never reach the assertion
-    whatever the policy did.
-    """
+def _stdout_block(result: ToolResult) -> str:
+    """The stdout section of a tool result, without the wrapper or the exit line."""
     assert not result.is_error, result.text
     text = result.text
     start = text.find("--- stdout ---")
     end = text.find("--- stderr ---")
-    body = text[start + len("--- stdout ---") : end if end > start else None]
-    return {line.strip() for line in body.splitlines() if line.strip()}
+    return text[start + len("--- stdout ---") : end if end > start else None]
+
+
+#: A command that asks the GUARD what it thinks, in the child itself. Reading the
+#: variable's raw value would answer a weaker question now that the writer signs
+#: it in both directions — an empty `= ` and an absent name are the same verdict,
+#: and only the reader can say so.
+_READER_PROBE = f"{shlex.quote(sys.executable)} -c " + shlex.quote(
+    "from local_operator.agent_shell import may_delegate_from_shell as m; print(m())"
+)
 
 
 @pytest.mark.asyncio
-async def test_the_bash_tool_exports_the_allowance_only_when_the_context_says_so(
-    tmp_path: Path,
+async def test_the_bash_tool_signs_the_allowance_where_the_guard_reads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`execute_bash` is the ONE writer of the second marker, in all three shapes.
+    """`execute_bash` is the ONE writer of the second marker, in every shape.
 
-    Each shape is a different bug. A writer that always exported it passes the
-    permissive case alone, so the refusing case is asserted beside it; and the
-    FAIL-CLOSED case — no context at all, which is what a test double or an
-    embedder with no session looks like — is the one that decides whether a
-    forgotten export produces a refusal the model reads or a chat in the
-    operator's sidebar.
+    Each shape is a different bug, and the two that matter are the ones a naive
+    test cannot see:
 
-    Driven over the real handler and the real interpreter, so the marker is
-    observed in the CHILD's environment rather than in the injection dict on the
-    way there — the shell-environment policy sits between the two, and it is the
+    * an inherited marker (R1-1). The ``bash`` child's environment starts as a
+      copy of this process's own in the default ``inherit`` mode, so a writer
+      that only SET the variable would leave a session reading ``True`` on an
+      allowance nobody granted it. That is not a hypothetical state: an allowed
+      `lop exec` runs `lop` — and, for `--background`, a detached worker spawned
+      with no ``env=`` — as a child of the shell that exported the marker, so
+      the session it opens starts life carrying it. `monkeypatch.setenv` is what
+      puts the process in exactly that state here, which is why the assertion
+      has to be "the reader says False", not "the name is absent".
+    * a duck-typed context (Q1). `context is None` and "a ToolContext-shaped
+      object without the field" are different inputs, and a bare attribute read
+      turns the second into an ``AttributeError`` out of ``execute_bash`` — every
+      `bash` call through it, not just the export.
+
+    Driven over the real handler and the real interpreter, and the answer is
+    taken from the GUARD in the child rather than from the injection dict on the
+    way there: the shell-environment policy sits between the two, and it is the
     half a test of the dict would miss.
     """
-    command = "env | cut -d= -f1"
 
-    async def names(may_delegate: bool) -> set[str]:
-        context = ToolContext(cwd=str(tmp_path), may_delegate=may_delegate)
+    async def reader_says(context: ToolContext | None) -> str:
         result = await builtin.execute_bash(
-            "bash-allow", {"command": command}, AbortSignal(), None, context
+            "bash-allow", {"command": _READER_PROBE}, AbortSignal(), None, context
         )
-        return _child_env_names(result)
+        return _stdout_block(result).strip()
 
-    assert MAY_DELEGATE_ENV in await names(True)
-    assert MAY_DELEGATE_ENV not in await names(False)
-    bare = await builtin.execute_bash("bash-bare", {"command": command}, AbortSignal(), None, None)
-    assert MAY_DELEGATE_ENV not in _child_env_names(bare)
+    assert await reader_says(ToolContext(cwd=str(tmp_path), may_delegate=True)) == "True"
+    assert await reader_says(ToolContext(cwd=str(tmp_path), may_delegate=False)) == "False"
+
+    # R1-1: the marker is INHERITED from this process's environment.
+    monkeypatch.setenv(MAY_DELEGATE_ENV, "1")
+    assert (
+        await reader_says(ToolContext(cwd=str(tmp_path), may_delegate=False)) == "False"
+    ), "an inherited allowance must be CLEARED, not merely not re-set"
+    # …and the same inherited value is still honoured when the context says so,
+    # which is what keeps the clear a clear rather than a blanket deny.
+    assert await reader_says(ToolContext(cwd=str(tmp_path), may_delegate=True)) == "True"
+
+    # No context at all: the same call the loop makes when a host has no session.
+    assert await reader_says(None) == "False"
+
+
+@pytest.mark.asyncio
+async def test_a_context_without_the_field_does_not_raise(tmp_path: Path) -> None:
+    """Q1's shape, pinned: a duck-typed context is not `None`.
+
+    ``tests/e2e/test_inline_credential_e2e.py`` builds exactly this — an object
+    with the two attributes ``execute_bash`` needs and nothing else — and a bare
+    ``context.may_delegate`` made every `bash` call through it fail with an
+    ``AttributeError``, which broke two e2e tests on both CI platforms. The field
+    is read with ``getattr`` for that reason, and the FAIL-CLOSED contract covers
+    this shape as well as ``None``: no field means "may not delegate", and the
+    command still RUNS.
+    """
+
+    class _Ctx:
+        variables = None
+        cwd = str(tmp_path)
+
+    # `cast`, not a `# type: ignore`: the point of the double is that it is NOT a
+    # ToolContext, and the argument type is what the real caller passes. Casting
+    # says that out loud instead of suppressing the check that would otherwise
+    # have caught the bare attribute read for us.
+    double = cast(ToolContext, _Ctx())
+    result = await builtin.execute_bash(
+        "bash-duck", {"command": _READER_PROBE}, AbortSignal(), None, double
+    )
+    assert _stdout_block(result).strip() == "False"
 
 
 # --- a session restarting its own front end ----------------------------------

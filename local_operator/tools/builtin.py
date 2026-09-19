@@ -2255,12 +2255,29 @@ async def execute_bash(
     # ``agent_shell`` and this is the one writer — one name, two consumers, the
     # same rule the marker above follows.
     #
-    # FAIL CLOSED: no context (a test double, an embedder with no session) leaves
-    # the variable unset, which the guard reads as "may not delegate" and
-    # refuses. The refusal is the cheap failure; the expensive one is a session
-    # in the operator's list that they never opened.
-    if context is not None and context.may_delegate:
-        injections[MAY_DELEGATE_ENV] = "1"
+    # WRITTEN IN BOTH DIRECTIONS, including the empty value, and that is not
+    # tidiness: `shell_env.child_environment` starts from a copy of THIS
+    # process's environment in the default `inherit` mode, so a marker the child
+    # inherited from its own ancestors would survive a `may_delegate=False`
+    # context untouched and the session would be admitted on an allowance nobody
+    # granted it. That is not hypothetical — the allowed route creates exactly
+    # that state: an allowed `lop exec` runs `lop` (and, for `--background`, a
+    # detached worker spawned with no `env=`) as a child of the delegating shell,
+    # so the session it opens starts life with the marker set whatever its own
+    # role says. Injections are applied LAST, so this beats the inherited copy,
+    # and the guard reads the empty string as "no" (`_on("")` is False) — the
+    # same absent-or-off contract the name is documented with.
+    #
+    # FAIL CLOSED on both shapes of "no answer": `context is None` (the loop with
+    # no host) and a duck-typed context that simply lacks the field (the
+    # `tests/e2e` doubles — reading it with `getattr` rather than a bare access
+    # is what keeps a double working here at all, matching the
+    # `getattr(store, "credential_env", None)` two lines above). The refusal a
+    # missing answer produces is the cheap failure; the expensive one is a
+    # session in the operator's list that they never opened.
+    injections[MAY_DELEGATE_ENV] = (
+        "1" if (context is not None and getattr(context, "may_delegate", False)) else ""
+    )
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
 

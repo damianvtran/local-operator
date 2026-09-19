@@ -68,8 +68,11 @@ INVENTORY rather than from a role name or a declared field: a role that may not
 delegate has ``task`` pruned from its inventory (``harness.subagent``), and a
 declared inventory narrows the same list (``Session._filter_declared``), so
 "holds ``task``" and "may delegate" are one fact wherever the inventory is
-trusted. Its writer is the ``bash`` tool and it FAILS CLOSED — an absent marker
-means the session may not delegate.
+trusted. Its writer is the ``bash`` tool, and that writer SIGNS IT IN BOTH
+DIRECTIONS: an absent marker and an empty one both mean "may not delegate",
+and the empty write is what stops a value INHERITED from the parent's
+environment — the allowed route's own `lop` child is exactly that — from
+outliving the session it described.
 
 WHAT THE MARKER IS, AND WHAT IT IS NOT. ``LOCAL_OPERATOR_AGENT_SHELL`` is set by
 the ``bash`` tool on every command it runs (see
@@ -123,13 +126,21 @@ AGENT_SHELL_ENV = "LOCAL_OPERATOR_AGENT_SHELL"
 #: CLI. Named in ``docs/EXEC.md``, never in the refusal the model reads.
 ALLOW_NESTED_SESSION_ENV = "LOCAL_OPERATOR_ALLOW_NESTED_SESSION"
 
-#: Set by the ``bash`` tool on every command run by a session that HOLDS
-#: ``task``, from :attr:`local_operator.harness.types.ToolContext.may_delegate`.
+#: Set by the ``bash`` tool on every command it runs, to "1" or to the empty
+#: string, from :attr:`local_operator.harness.types.ToolContext.may_delegate`.
 #: Names the second fact this module acts on: this shell's session may delegate,
 #: so ``exec`` is a delegation route for it rather than a way around one.
 #: Deliberately NOT named in :func:`refusal_message` — a reader told how the
 #: allowance is spelled learns how to look for it — but documented for the human
 #: in ``docs/EXEC.md``.
+#:
+#: WHY THE CLEAR MATTERS AS MUCH AS THE SET: a ``bash`` child's environment
+#: starts as a copy of the harness process's own (``shell_env``'s default
+#: ``inherit`` mode), so a session that inherited the marker from an ancestor
+#: would otherwise carry it for life however its own role is configured — and
+#: the allowed route is what puts it there, since an allowed `lop exec` runs
+#: `lop` as a child of the delegating shell. ``_on("")`` is False, so the empty
+#: string is the "no", and an absent one still reads as "no".
 MAY_DELEGATE_ENV = "LOCAL_OPERATOR_AGENT_MAY_DELEGATE"
 
 #: Values that read as "on". Matches the convention the rest of the package
@@ -156,14 +167,16 @@ def nested_session_allowed() -> bool:
 def may_delegate_from_shell() -> bool:
     """True when the session that ran this command holds ``task``.
 
-    Read from :data:`MAY_DELEGATE_ENV`, which the ``bash`` tool sets from
+    Read from :data:`MAY_DELEGATE_ENV`, which the ``bash`` tool signs from
     :attr:`local_operator.harness.types.ToolContext.may_delegate` — itself
-    derived by the session from its live tool inventory. ABSENT MEANS NO, and
-    that direction is load-bearing: a shell that did not export the marker (a
-    child built by an older runtime, a command that scrubbed its own
-    environment, a tool double with no context) is treated as a session that may
-    not delegate and is refused, so the failure a forgotten export produces is a
-    refusal the model reads rather than a chat in the operator's sidebar.
+    derived by the session from its live tool inventory. ABSENT MEANS NO, and so
+    does EMPTY, and both directions are load-bearing: a shell that did not export
+    the marker (a child built by an older runtime, a command that scrubbed its
+    own environment, a tool double with no context) is treated as a session that
+    may not delegate and is refused, while the empty value is how the writer
+    CLEARS a marker the child inherited from an ancestor — without it the
+    allowance would outlive the session it described and the block the operator
+    asked to keep would not hold one hop down.
     """
     return _on(os.environ.get(MAY_DELEGATE_ENV, ""))
 

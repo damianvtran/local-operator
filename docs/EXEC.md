@@ -117,7 +117,9 @@ routes (the escape hatch below, and an allowed delegating run), and only for a
 session the run CREATES: a conversation it merely RESUMES is the operator's own
 work and is left alone. It is not a lock — the session is on disk at
 `<config>/sessions/<id>` and `lop sessions` lists the live run; the id is in the
-run's own output, and `lop --resume <id>` opens it.
+run's own output, the OPERATOR reopens it with `lop --resume <id>`, and an AGENT
+reaches it again with `lop exec --resume <id>`, because the bare `--resume` form
+is the interactive path and that stays refused for every agent shell.
 
 **The escape, for tests and QA runs.** `LOCAL_OPERATOR_ALLOW_NESTED_SESSION=1`
 waives the refusal for one invocation, on BOTH entry points. It exists because
@@ -133,7 +135,9 @@ desktop sidebar and the phone's list (a conversation it merely RESUMES is the
 operator's own work and is left alone). The picker is a FILTERED VIEW, not the
 store: that session is still on disk at `<config>/sessions/<id>` and
 `lop --resume <id>` opens it, which is the route back for the run that forgot to
-isolate. The id is in the run's own output either way: `lop exec --background`
+isolate (typed at the operator's own terminal — from inside an agent shell that
+same form is refused, and the agent's route to a session it opened is
+`lop exec --resume <id>`). The id is in the run's own output either way: `lop exec --background`
 prints its receipt line, a foreground `lop exec` that reaches its runtime prints
 `lop exec session: session_id=<id>`, and a pty-driven front end prints
 `lop --resume <id>` when it exits. That front end creates the session directory

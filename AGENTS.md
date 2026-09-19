@@ -1250,8 +1250,11 @@ and an allowed delegating `exec` both write `origin.json` =
 `resume.ORIGIN_AGENT_SHELL` in `session_factory._prepare`, so the run stays out
 of the `/resume` picker, the desktop sidebar and the phone's list. It is not
 hidden and not a lock: `lop sessions` lists it, the id is in the run's own
-output, and `lop --resume <id>` opens it. A conversation a run merely RESUMES is
-never re-marked — that is the operator's own work.
+output, and YOUR route back to it is `lop exec --resume <id>` — the bare
+`lop --resume <id>` is the operator's, and the interactive path stays refused for
+every agent shell (which is why this paragraph names the `exec` form). A
+conversation a run merely RESUMES is never re-marked — that
+is the operator's own work.
 
 **Scripts that drive the real CLI must declare themselves.** A bench, an eval
 driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so

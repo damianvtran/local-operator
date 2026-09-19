@@ -71,7 +71,9 @@ different cost, and `lop exec` is how one is opened from inside a session:
 A session either route opens is stamped `origin.json` = `agent-shell`: it will
 not appear in the operator's `/resume` picker, desktop sidebar or phone list as a
 chat they started. It is not hidden — `lop sessions` lists the live run, `exec`
-prints its id, and `lop --resume <id>` reopens it.
+prints its id, and YOUR route back to it is `lop exec --resume <id>`. The bare
+`lop --resume <id>` form belongs to the operator: it is the interactive path,
+which stays refused for every agent shell (see above).
 
 ## Roles: `task(agent=...)`
 
