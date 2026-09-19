@@ -2587,6 +2587,20 @@ def browser_command(args: argparse.Namespace) -> int:
             print("                     run 'lop browser status --repair' to reconcile.")
         print(f"port:                {result['port']}")
         print(f"log:                 {result['log']}")
+        # Where `download` puts files, and how much is already there. Computed
+        # HERE rather than read from /health: the user asking "where did my
+        # download go" needs the real path and the real size, and both cost a
+        # local stat/walk that a polled HTTP endpoint should not pay for.
+        from local_operator import browser_files
+
+        downloads = browser_files.downloads_root()
+        print(f"downloads:           {downloads}")
+        if downloads.is_dir():
+            size = browser_files.dir_size(downloads)
+            print(
+                f"                     {size} bytes, one audit row per decision in "
+                f"{browser_files.AUDIT_FILENAME}"
+            )
         # Only when this is NOT the default install: the common case should not
         # grow a line, but an isolated run (a redirected HOME or
         # LOCAL_OPERATOR_CONFIG_DIR) is otherwise indistinguishable from the
