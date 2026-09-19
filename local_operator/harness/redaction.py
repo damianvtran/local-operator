@@ -88,8 +88,14 @@ def _hold(report: Any) -> Any:
                 "test_launch_subagent.py)"
             ) from exc
     if callable(report):
-        # A plain function or closure owns no session, so there is nothing to
-        # release: held directly, and that is the documented fallback.
+        # A plain function or closure is held DIRECTLY, and that is the documented
+        # fallback: nothing here can tell what a closure captured, so a caller that
+        # hands this a lambda closing over a session re-introduces the retention
+        # this file exists to avoid (N4-1). The only in-tree caller passes a bound
+        # method (`Session.__init__` → `set_shape_hit_reporter`), and the tests
+        # assert it, so the risk is documented rather than guarded: a guard would
+        # have to introspect closure cells, which is not a thing to do on the
+        # result path.
         return report
     raise TypeError(
         "the shape-hit sink must be a bound method of a weak-referenceable object, "

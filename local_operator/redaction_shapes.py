@@ -1038,10 +1038,23 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             r"(?i)(\"?private[_-]?key\"?\s*:\s*\"?)"
             r"(-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY"
             r"-{1,4}[\x27\x22]?-{1,4}"
-            r"(?:(?:\\r\\n|\\n|\n)"
-            r"(?:[A-Za-z0-9+/=]{2,}"
-            r"|-{1,4}[\x27\x22]?-{1,4}END [A-Z0-9 ]*PRIVATE KEY-{1,4}[\x27\x22]?-{1,4}))*"
-            r"(?:\\r\\n|\\n|\n)?)"
+            r"(?:"
+            # A body LINE, and it must reach its own line end: the run is required
+            # to be followed by a separator (escaped or real, CRLF included), a
+            # closing quote or the end of the text. Without that the loop consumed
+            # the leading run of the NEXT line and stopped mid-line, eating the
+            # anchor a following rule needed — `password = hunter2hunter2` after a
+            # block kept 6 of 7 surfaces readable, `ghp_…` on the next line lost its
+            # prefix, and unrelated text came back truncated (`deployment` →
+            # `-finished`). The match is bounded by the BLOCK's own extent rather
+            # than by a fixed line count — a real key body is ~100 lines, and a
+            # cap would release key material beyond it, which is the one thing this
+            # rule exists to prevent. The pass is linear in the input: 7.9 s for a
+            # 4.44 MB unterminated body, with the whole block masked.
+            r"(?:\\r\\n|\\n|\r\n|\n|\r)"
+            r"(?:[A-Za-z0-9+/=]{2,}(?=\\r\\n|\\n|\r\n|\n|\r|[\x27\x22]|$)"
+            r"|-{1,4}[\x27\x22]?-{1,4}END [A-Z0-9 ]*PRIVATE KEY-{1,4}[\x27\x22]?-{1,4})"
+            r")*)"
         ),
         r"\1" + REDACTION_MARKER,
         2,
@@ -1546,10 +1559,15 @@ def _is_truncated_pem(hit: ShapeHit) -> bool:
     the reviewer recovered a live key from — has no END, so the region's extent is
     unknown and no masking claim may be made about it.
     """
-    value = hit.value
-    if "BEGIN" not in value.upper():
+    marker = "PRIVATE KEY"
+    upper = hit.value.upper()
+    if "BEGIN" not in upper or marker not in upper:
         return False
-    return "END" not in value.upper()
+    # The MARKER PHRASE, not the substring ``END``: a body line can contain those
+    # three letters (base64 spells them often), and the substring test then reported
+    # a completed mask over readable key material — the same false-claim class as
+    # B3-1, reproduced at ~0.6% of a body.
+    return f"END {marker}" not in upper.replace("\r", "").replace("\n", "")
 
 
 def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:

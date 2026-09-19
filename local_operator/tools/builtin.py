@@ -2176,11 +2176,14 @@ class _PipeRedactor:
         # Keep the rest of this chunk: it is the block's first lines, and they go
         # through the same line loop as everything else. Replacing it with a
         # marker here DROPPED whatever followed the header in the same read.
-        return (
-            ready[: begin.end()]
-            + "\n"
-            + self._mask_open_key_block(ready[begin.end() :].lstrip("\n"))
-        )
+        # NO INJECTED SEPARATOR. This used to splice a real newline in after the
+        # header, which rewrote the ESCAPED spelling a JSON service-account value
+        # uses (`\\n`) and left the table unable to match the body — the marker was
+        # masked and the key published, silently, because a withheld claim means no
+        # notice either (QA's Q4-F1). The text after the header is passed through
+        # unchanged; a real newline there is stripped by ``lstrip`` only when it is
+        # really a newline.
+        return ready[: begin.end()] + self._mask_open_key_block(ready[begin.end() :].lstrip("\n"))
 
     def _release_point(self, text: str, *, final: bool) -> int:
         """Where the decidable prefix ends: after the last newline, capped."""
