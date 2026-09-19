@@ -1532,6 +1532,19 @@ class RuntimeServer:
             try:
                 await asyncio.wait_for(gate.wait(), timeout=timeout)
             except TimeoutError:
+                # A TIMED-OUT WAITER TAKES ITS GATE BACK OUT. The settle path
+                # clears the list wholesale, so a gate left behind here is not a
+                # leak in the ordinary case — but it IS one on the timeout path
+                # this branch exists for: a runtime whose prologue never settles
+                # keeps the list it was never cleared from, and a host that
+                # starts many runtimes that never publish walks a list of dead
+                # gates on every one of them. Under the same lock, and only
+                # while the latch is still closed, so a concurrent settle cannot
+                # race the removal.
+                with self._publication_lock:
+                    if not self._publication_settled:
+                        with contextlib.suppress(ValueError):
+                            self._publication_gates.remove(gate)
                 return False
         # ``_publisher`` is written on the runtime's own thread BEFORE the latch
         # settles, so a settled latch is a read of it that has already happened
@@ -1941,7 +1954,15 @@ class RuntimeServer:
           synchronous step that checks, so it is hopped as ONE call rather than
           sampled and then committed;
         * ``has_admitted_command`` — the dedupe probe, which reads the
-          transcript.
+          transcript;
+        * ``register_secret_redaction`` / ``cancel_subagents_count`` — the two
+          ``_dispatch`` arms that write session state. Added in review: the
+          first writes the redaction set the bash and eval redactors read, and
+          the second runs ``Session.cancel_subagents``, whose task creation and
+          loop-bound ``AsyncJobManager`` abort belong to the session's loop — on
+          the runtime's thread the manager swallowed its own cross-loop
+          ``RuntimeError`` and the op still acked success, so a cancel that
+          cancelled nothing reported ``1``.
 
         ``reannounce_pending`` is the one named method that does NOT come
         through here, deliberately: one of its four in-tree callers
@@ -1966,7 +1987,15 @@ class RuntimeServer:
         driven inline exactly as before.
         """
         loop = getattr(self._handle, "session_loop", None)
-        if loop is None or loop is _running_loop():
+        if loop is None or loop.is_closed() or loop is _running_loop():
+            # THE CLOSED-LOOP CASE RUNS INLINE, deliberately, and it is what
+            # makes this helper and ``ServingSessionHandle._on_session_loop``
+            # agree: ``run_coroutine_threadsafe`` raises ``Event loop is closed``
+            # from the caller's side, which is a bare crash where the handle's
+            # own ``_check_loop_thread`` would have produced the refusal the
+            # dispatcher knows how to render. So a dead loop takes the same path
+            # a handle without a loop takes — run it here and let the handle
+            # refuse it.
             return await _maybe_await(call(*args, **kwargs))
 
         async def _invoke() -> Any:
@@ -4203,17 +4232,28 @@ class RuntimeServer:
             register = getattr(h, "register_secret_redaction", None)
             if not callable(register):
                 raise ValueError("this owner cannot register a redaction")
-            outcome = register(str(frame.get("value", "")))
-            if inspect.isawaitable(outcome):
-                await outcome
+            # HOPPED. This body WRITES the session's redaction set — the one the
+            # bash and eval redactors read — so it belongs on the loop that owns
+            # it, like every other mutating handle call. The helper resolves an
+            # awaitable result too, so a handle whose registration is an
+            # ``async def`` still works.
+            await self._handle_call_on_session_loop(register, str(frame.get("value", "")))
             return True
         if op == "cancel_subagents":
             cancel = getattr(h, "cancel_subagents_count", None)
             if not callable(cancel):
                 raise ValueError("this owner cannot cancel subagents")
-            result = cancel()
-            if inspect.isawaitable(result):
-                result = await result
+            # HOPPED, and this one is not a tidiness call: the body runs
+            # ``Session.cancel_subagents``, which creates the cancellation task
+            # with ``asyncio.ensure_future`` and aborts a loop-bound
+            # ``AsyncJobManager`` signal. On the runtime's thread that is a task
+            # created on the wrong loop and a foreign-thread ``Event.set()``,
+            # and the manager's ``RuntimeError: got Future … attached to a
+            # different loop`` is SWALLOWED by its own
+            # ``logger.warning("job %s task raised on cancel")`` while this op
+            # still acks success — a cancel that reports ``1`` and cancels
+            # nothing. This is the operator's second-Esc path.
+            result = await self._handle_call_on_session_loop(cancel)
             return result if isinstance(result, int) else 0
         if op == "record_shell":
             from local_operator.harness.types import ToolResult

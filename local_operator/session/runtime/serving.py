@@ -387,11 +387,16 @@ def _on_session_loop(method: _F) -> _F:
     method calling another one — and every in-process runtime, so no caller has
     to know which plane it is on.
 
-    WHAT IT DOES NOT DO. A caller that is cancelled while waiting leaves the
-    remote body running: ``run_coroutine_threadsafe``'s future cannot tear down a
-    coroutine already executing on another loop, and pretending otherwise for a
-    ``prompt`` would mean cancelling a turn the session has begun (the same
-    choice ``TuiSessionHandle`` makes through Textual's ``call_from_thread``).
+    WHAT HAPPENS WHEN THE CALLER IS CANCELLED is measured, not assumed, because
+    a sibling change depends on it: the cancellation DOES reach the remote body.
+    ``asyncio.wrap_future`` propagates it to the concurrent future
+    ``run_coroutine_threadsafe`` returned, and that future cancels the task it
+    scheduled — verified directly, a remote ``await asyncio.sleep(5)`` raising
+    ``CancelledError`` 0.3 s after the awaiting task was cancelled. So a
+    ``prompt`` whose caller is dropped does not leave a turn running detached
+    from the client that asked for it, which is what
+    ``RuntimeServer._drop_client``'s teardown reasoning relies on.
+
     And it hops only when there is a loop to hop to: a handle whose loop is gone
     runs the body inline so that teardown paths (``dispose``) still work, and
     ``_check_loop_thread`` refuses the mutating ones that would then be executed
@@ -436,7 +441,17 @@ class ServingSessionHandle(SessionHandle):
 
         No coroutine on the runtime's loop performs a synchronous cross-thread
         wait, and no code on the session's loop is called from the runtime's
-        thread except through a hop whose result is awaited.
+        thread except through a hop whose result is awaited — with ONE exception,
+        named rather than implied because the sentence above would otherwise
+        overstate: ``redate_from_phase``'s mutation of the fold's phase clock and
+        ``session_projection_seed``'s read of the live projection object DO run on
+        the runtime's loop. That is deliberate and bounded: both sit on the
+        WELCOME path (``RuntimeServer._projection_payload``), so hopping them
+        would re-couple the welcome to the turn — the coupling this change exists
+        to remove, and the reason a fresh dial is served while the loop is busy.
+        The pair is exactly what the TUI kind already does (audit §2.2: a data
+        race in principle, shipped since the pair was written), the values are an
+        int and an object reference, and the alternative was measured worse.
 
     Which is enforced where:
 
@@ -446,9 +461,13 @@ class ServingSessionHandle(SessionHandle):
     * the ``def``s that mutate or read session state cannot hop themselves (a
       synchronous method has nowhere to await), so the REGISTRANT hops them
       through ``server.RuntimeServer._handle_call_on_session_loop``: that is
-      ``subscribe``/``subscribe_events`` (boot registrations) and
-      ``is_pristine``/``may_refresh``/``begin_retire``/``request_stop``/
-      ``has_admitted_command``;
+      ``subscribe``/``subscribe_events`` (boot registrations),
+      ``is_pristine``/``may_refresh``/``begin_retire``/``request_stop`` (the
+      retire and kill-switch probes), ``has_admitted_command`` (the dedupe
+      probe) and ``register_secret_redaction``/``cancel_subagents_count`` (the
+      two ``_dispatch`` arms that mutate session state) — the last two added in
+      review, because a cancel that runs on the runtime's thread reports success
+      while the manager swallows a cross-loop ``RuntimeError``;
     * ``reannounce_pending`` is the one named method that is deliberately NOT
       hopped: one of its in-tree callers (the registrant's ``_drop_client``) is
       synchronous and cannot await a hop, and it is a read-then-NOTIFY whose
@@ -3914,10 +3933,16 @@ class ServingSessionHandle(SessionHandle):
         do less than it says on a detached session (round 3, U9) — the turn
         ends but the children keep burning tokens.
 
-        Re-homed from ``TuiSessionHandle``: that version hopped to the app
-        loop because the session lived there. Here the session is on THIS
-        loop, so the call is direct — the same reason the rest of this class
-        does not need ``run_coroutine_threadsafe``.
+        THE CALL IS MARSHALLED, not direct, and the premise it replaced is
+        quoted because it is the exact sentence that shipped the bug: *"Re-homed
+        from ``TuiSessionHandle``: that version hopped to the app loop because
+        the session lived there. Here the session is on THIS loop, so the call
+        is direct."* The session is NOT on this loop any more —
+        ``RuntimeServer.start()`` puts the registrant on its own thread — so the
+        registrant hops this through
+        ``RuntimeServer._handle_call_on_session_loop`` (review round 1, BLOCKER
+        D-1), which is also where the reasoning for why a bare call was worse
+        than slow is written down.
         """
         cancel = getattr(self._session, "cancel_subagents", None)
         if not callable(cancel):

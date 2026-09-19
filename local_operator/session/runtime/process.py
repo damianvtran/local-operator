@@ -1816,9 +1816,14 @@ async def amain() -> int:
     # what binds it, on the runtime's own thread, so the ordering this comment
     # describes is now a happens-before across two threads rather than two
     # statements in one coroutine: the drain completes before ``start()`` is
-    # called, and ``start()`` cannot return before the listener is bound.
-    # Draining after it would race the engaging caller's own prompt and
-    # deliver a note written minutes ago after one written just now.
+    # called, and the binding happens on the thread ``start()`` creates — so
+    # listening strictly follows this point. Note that ``start()`` does NOT
+    # WAIT for that bind: it returns while ``_serve`` is still binding (which is
+    # why ``wait_until_published`` is awaited below, and why that wait and this
+    # guarantee are independent — this one is about ORDER, that one about being
+    # able to READ what the boot wrote). Draining after it would race the
+    # engaging caller's own prompt and deliver a note written minutes ago after
+    # one written just now.
     await _drain_inbox_into(handle)
 
     # The wake scheduler is armed HERE, after the inbox drain and before the
@@ -1917,19 +1922,25 @@ async def amain() -> int:
     def _on_socket_stop() -> None:
         """The graceful ``stop`` op (``ServingSessionHandle.request_stop``).
 
-        THIS HOOK NOW ARRIVES FROM ANOTHER THREAD, and the set is hopped rather
-        than written here. ``request_stop`` runs on the runtime's control-socket
-        thread, while ``stop`` belongs to the session's loop — and
-        ``asyncio.Event.set()`` from a foreign thread sets the flag WITHOUT
-        waking the waiter: its callback is scheduled with plain ``call_soon``
-        and no self-pipe write happens, so a loop parked in ``select()`` (which
-        is what ``await stop.wait()`` below looks like at the syscall level) is
-        not woken until some other timer fires. With nothing else armed, that is
-        never, and the graceful rung's stop never lands — the exact failure
-        ``publication.PublicationGate`` was written to prevent, and the reason
-        ``RuntimeServer._wake_close_wait`` goes through ``call_soon_threadsafe``
-        too. ``trigger`` is written here and read by the loop below; the hop is
-        what orders the two, the same way it orders ``stop``.
+        MEASURED ON THIS HEAD, this hook runs on the SESSION's loop: the
+        registrant HOPS ``request_stop`` there
+        (``RuntimeServer._handle_call_on_session_loop``), so the "arrives from
+        another thread" premise this docstring used to state is not what makes
+        the set below correct — and it is not stated as the repair any more.
+        What makes it correct is ``call_soon_threadsafe``, which is right on
+        BOTH loops: ``asyncio.Event.set()`` from a foreign thread sets the flag
+        WITHOUT waking the waiter (its callback is scheduled with plain
+        ``call_soon`` and no self-pipe write happens), so a loop parked in
+        ``select()`` — which is what ``await stop.wait()`` below looks like at
+        the syscall level — is not woken until some other timer fires; with
+        nothing else armed, never. That failure is what
+        ``publication.PublicationGate`` exists for, and why
+        ``RuntimeServer._wake_close_wait`` goes through the threadsafe form too.
+        Keeping the defensive shape costs one self-pipe write and removes the
+        question of which thread a registrant's hop machinery delivers this on —
+        a reduced handle, or a future caller that reaches the hook directly,
+        included. ``trigger`` is written here and read by the loop below; the
+        same hop orders the two, the same way it orders ``stop``.
         """
         trigger.setdefault("why", "socket-stop")
         loop.call_soon_threadsafe(stop.set)
