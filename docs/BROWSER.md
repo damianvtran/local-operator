@@ -22,7 +22,10 @@ Implementation: the `browser` section of `local_operator/tools/builtin.py`;
 the per-host clients in `local_operator/browser_bridge/backend.py` and
 `local_operator/ui_browser/backend.py`.
 Tests: `tests/unit/tools/test_browser_tool.py`,
-`tests/unit/browser_bridge/test_tool_selection.py`.
+`tests/unit/browser_bridge/test_tool_selection.py`,
+`tests/unit/tools/test_browser_file_transfer.py`,
+`tests/unit/test_browser_files.py`, and the capability gate in
+`tests/unit/browser_bridge/test_capability_gate.py`.
 
 ## Site approval scopes
 
@@ -45,10 +48,10 @@ off by default.
 
 ## Actions
 
-The non-cmux hosts answer the same 20 wire methods; cmux can serve a subset, and
-the rest (`scroll`, `logs`, `tabs`, the site-approval trio) degrade with a typed
-error naming the hosts that can. The table below is the CMUX mapping (the full
-list is the docstring of `BROWSER_ACTIONS`).
+The non-cmux hosts answer the same 22 wire methods; cmux can serve a subset, and
+the rest (`scroll`, `logs`, `tabs`, `download`, `upload`, the site-approval trio)
+degrade with a typed error naming the hosts that can. The table below is the CMUX
+mapping (the full list is the docstring of `BROWSER_ACTIONS`).
 
 | action | what it does | cmux command underneath |
 |---|---|---|
@@ -60,6 +63,8 @@ list is the docstring of `BROWSER_ACTIONS`).
 | `click` | Click a CSS selector or a snapshot ref | `browser --surface <s> click --selector <sel>` |
 | `type` | Replace the value of a field | `browser --surface <s> fill --selector <sel> --text <t>` |
 | `close` | Close the surface and drop the handle | `close-surface --surface <s>` |
+| `download` | Save what the page offers into the session's download directory | not available (typed refusal) |
+| `upload` | Attach local files to a `<input type=file>` | not available (typed refusal) |
 
 One surface per session, owned by the `Session` and injected into every rebuilt
 `ToolContext` as `ToolContext.browser`. `open` called a second time navigates
@@ -69,6 +74,63 @@ whatever is still open. The holder has to be host-owned because
 handle the tool stored on the context it was handed survived exactly one turn,
 which broke `open X` → next message → `click Y` outright and stranded a cmux
 tab per turn that nothing could close.
+
+## Downloads and uploads
+
+Two actions, one wire contract, and — deliberately — **one policy module**
+(`local_operator/browser_files.py`), because the rule that must not drift between
+the harness and the desktop app is data.
+
+**Where a download goes.** `<config_dir>/browser/downloads/<stamp>-<session>/`,
+0700/0600, composed by the harness from the config root and never from anything a
+page or the model supplies. `download` takes no destination parameter at all:
+a `Page.setDownloadBehavior`-style path is the one argument whose misuse writes
+into `~/.ssh` (that is what the original Project Zero report demonstrated), so it
+is not the caller's to name. `lop browser status` prints the root.
+
+**What the answer is built from.** The host's word is a hint and the filesystem
+is the truth, exactly as `screenshot` re-reads its PNG: the tool snapshots the
+download directory, asks the host to capture, diffs, then classifies each landed
+file from its BYTES. A host that reports a file which is not there fails the
+call. Content wins over the name in one direction only — an executable under
+`holiday.jpg` is deleted and its class named, while a PDF under `invoice.zip` is
+kept, renamed `.pdf`, and the rename is reported. Files that match no known
+signature are kept, flagged `unverified`, and never opened; SVG is deliberately
+one of them. Caps: 256 MB per file, 20 files per call, 2 GB per session, and
+nothing over the cap is kept.
+
+**Uploads are the more dangerous verb**, because a file is read and transmitted
+rather than written. The gate runs unconditionally — before any approval tier is
+consulted, because `--yolo` installs no gate at all and the adversary is a
+confused-deputy agent reading a hostile page. It refuses: anything under the
+harness's own config root (the secret store lives there), anything that is not a
+regular file, the credential deny-list (`id_rsa*`, `*.pem`, `*.key`, `.env`,
+`.ssh/`, `secrets/`, `service-account*.json`, …) matched on the resolved basename
+AND on every path component, and anything over 256 MB. The path is RESOLVED
+first, so a symlink named `handout.pdf` pointing at `~/.ssh/id_rsa` is judged by
+its target. A refusal is all-or-nothing: nothing is attached.
+
+**Which host can do what, and why they differ.** `upload` is served by both
+non-cmux hosts: the extension attaches files with `DOM.setFileInputFiles` over the
+tab-scoped debugger session it already holds, so no new extension permission is
+involved. `download` is served by the desktop app's host only. **No extension
+build can serve it**: Chrome refuses an extension the two CDP primitives that
+could choose a destination (`Page.setDownloadBehavior` answers `-32000 "Cannot
+not access browser-level commands"`, `Browser.setDownloadBehavior` `-32601`, no
+browser target is attachable, and no `downloadWillBegin`/`downloadProgress` event
+is delivered) — measured on Chrome 153.0.8010.53, and the `chrome.debugger`
+docs' restricted-domain list omits the `Browser` domain outright. Asking for a
+download on the extension host therefore returns a typed refusal that says so and
+points at the desktop app's browser tab or at `bash` + `curl`, rather than telling
+the user to update an extension whose update could not help.
+
+**A host that is too old says so immediately.** Both hosts advertise the methods
+they serve (the extension in a `capabilities` event after its handshake, the app
+in its `host.json` and `/health`), and the tool reads the discovery record before
+dispatching — so a pre-feature host produces a typed `capability_unsupported`
+with a remedy instead of a 120-second wait on a bare `internal`. The three
+remedies are kept apart on purpose: *no build can serve this*, *your build
+predates it*, and *your build is current but stopped advertising* (a wedge).
 
 ## Detection
 

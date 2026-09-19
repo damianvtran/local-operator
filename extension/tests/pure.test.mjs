@@ -959,7 +959,18 @@ test("every wire method has a worker handler", async () => {
   );
 
   const missing = methods.filter((method) => !handlers.has(method));
-  assert.deepEqual(missing, [], `wire methods with no handler: ${missing}`);
+  // The documented exception, and it is READ from the generated protocol rather
+  // than listed here: `download` cannot be served by ANY build of this extension
+  // (Chrome refuses a tab-scoped `chrome.debugger` session the browser-level
+  // commands that would let it choose a destination — see the constant's own
+  // comment and docs/design/browser-file-transfer.md §17.1). Anything else
+  // missing is still a real gap, so the assertion keeps its teeth.
+  const impossible = [...generated.matchAll(/EXTENSION_CANNOT_SERVE: string\[\] = \[([^\]]*)\]/g)].flatMap(
+    (m) => [...m[1].matchAll(/'([^']+)'/g)].map((item) => item[1]),
+  );
+  assert.ok(impossible.length > 0, "the generated cannot-serve list must be parsed");
+  const gaps = missing.filter((method) => !impossible.includes(method));
+  assert.deepEqual(gaps, [], `wire methods with no handler: ${gaps}`);
 });
 
 // The daemon accepts a WINDOW of protocol versions (MIN_SUPPORTED_PROTO..

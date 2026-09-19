@@ -38,6 +38,16 @@ export enum ErrorCode {
   INTERNAL = 'internal',
 }
 
+// Methods NO build of this extension can serve, and the reason each is in the
+// vocabulary anyway: `download` needs a destination the harness chooses, and
+// Chrome refuses a tab-scoped `chrome.debugger` session the only two CDP
+// primitives that could give it one (`Page.setDownloadBehavior` answers
+// -32000 "Cannot not access browser-level commands", `Browser.setDownloadBehavior`
+// -32601; no browser target is attachable). Measured on Chrome 153.0.8010.53 —
+// docs/design/browser-file-transfer.md §17.1. Generated, so a method added there
+// cannot silently become "the extension forgot a handler".
+export const EXTENSION_CANNOT_SERVE: string[] = ['download'];
+
 export type Method = 'open' | 'goto' | 'read' | 'snapshot' | 'screenshot' | 'click' | 'type' | 'close' | 'status' | 'tabs' | 'scroll' | 'logs' | 'request_access' | 'await_access' | 'cancel_access' | 'retitle' | 'owner_recover' | 'owner_finish' | 'owner_retain' | 'owner_release' | 'download' | 'upload';
 // One buffered console/runtime log line, as `logs` returns it (newest last).
 // `level` is normalized to the error/warning/info/log vocabulary the tool

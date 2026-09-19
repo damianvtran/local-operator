@@ -1,7 +1,10 @@
 # Design: safe download and upload for the `browser` tool, on both hosts
 
-Status: proposal (architect). Two PRs, both named at §13. Do not implement from
-this without the manager's go-ahead on the flagged decisions at §16.
+Status: proposal (architect), **AMENDED BY PR #1318** — see §17, which carries
+the experiments §12.4 asked for and the three places they proved this document
+wrong. Read §17 before implementing from anything below it. Two PRs, both named
+at §13; §17.5 records what the operator's decision on the extension's download
+half was.
 
 Base: `origin/main` @ `0c00d73d`. Every file:line reference below is against that
 tree and was read, not recalled.
@@ -1366,3 +1369,207 @@ applies the macOS quarantine attribute on that path; whether Electron's
 `downloads` permission would re-prompt existing users. **E1x is the one that can
 change the design's shape**, and it must be run before the extension work starts
 rather than after.
+
+---
+
+## 17. Amendment: what PR #1318 measured, and what it changed
+
+Written by the implementing agent, on branch `feat/browser-file-transfer`, after
+running the experiments §12.4 demanded. Three claims in this document proved
+false, one decision moved to the operator, and one is still open. Everything
+below is a COMMAND with its real output or an explicit "not verified".
+
+### 17.1 E1x: the extension cannot serve downloads at all
+
+Rig: `/tmp/lo-e1/{cdp.mjs,e1x.mjs,e1x2.mjs,e1x3.mjs}` (a Node CDP driver and a
+probe extension; headless, throwaway profile, `--use-mock-keychain
+--password-store=basic`, port chosen by Chrome, every process reaped by exact pid
+with the leftover count asserted 0). Chrome **153.0.8010.53** (stable).
+
+```text
+chrome.debugger.sendCommand({tabId}, 'Page.setDownloadBehavior',
+                            {behavior:'allow', downloadPath:<abs tmp dir>})
+  -> {"code":-32000,"message":"Cannot not access browser-level commands"}
+     (same for {behavior:'deny'}, and with eventsEnabled)
+chrome.debugger.sendCommand({tabId}, 'Browser.setDownloadBehavior', ...)
+  -> {"code":-32601,"message":"'Browser.setDownloadBehavior' wasn't found"}
+     (same on every attachable target; Browser.getVersion also "wasn't found",
+      so the Browser domain is absent from a tab-scoped session entirely)
+```
+
+No browser target is reachable: `chrome.debugger.getTargets()` offers only
+`page`/`worker`/`other`, and the `other`/`background_page` ones refuse attach
+("Cannot access a chrome:// URL", "Cannot access a chrome-extension:// URL of a
+different extension"). The indirections are refused too: `Target.getTargets` and
+`Target.attachToTarget` → `-32000 "Not allowed"`; `Target.setAutoAttach` is
+accepted but produces no child and no event.
+
+**And no download event is delivered.** With the tab attached, a real
+page-initiated download produced **zero** `Page.downloadWillBegin` /
+`Page.downloadProgress` frames. That kills §5.2's host-side name check on the
+extension as written ("it sees the suggested filename in
+`Page.downloadWillBegin`") — the extension cannot even observe a download, let
+alone cancel one.
+
+Public confirmation that this is deliberate rather than a version accident: the
+`chrome.debugger` documentation's "Restricted domains" list is
+{Accessibility, Audits, CacheStorage, Console, CSS, Database, Debugger, DOM,
+DOMDebugger, DOMSnapshot, Emulation, Fetch, IO, Input, Inspector, Log, Network,
+Overlay, Page, Performance, Profiler, Runtime, Storage, Target, Tracing,
+WebAudio, WebAuthn} — the **Browser** domain is not in it — and the extensions
+security FAQ added in chromium commit `394b807a84` says the permission "does not
+allow automating parts of the Chromium browser unrelated to websites …
+downloading and executing a native binary". (The Project Zero report this design
+cites as the motivation, issue 42450683, is from **2018**, not 2024: the guard
+above is its mitigation, not the vulnerability.)
+
+### 17.2 E3x and E4x
+
+**E3x cannot be answered as posed** — "per-tab or browser-wide, and is the
+default restorable?" presupposes that the arm succeeds, and it never does. What
+IS observed is the alternative the design rejected: with no extension
+involvement, a page-initiated download lands in the browser's default download
+directory under the page's own name, the extension cannot influence the
+destination, and `{behavior:'default'}` is refused with the same `-32000`.
+
+**E4x: yes, Chrome quarantines its own downloads.** A file Chrome wrote through
+`Browser.setDownloadBehavior` carries:
+
+```text
+$ xattr -p com.apple.quarantine /tmp/lo-e1-default.i0dwIefVVnDz/receipt.pdf
+0081;6aadf791;Chrome;
+```
+
+So on the Chrome/extension path the quarantine attribute is Chrome's, not
+something the app host must add — which is worth knowing for PR B, where the
+`will-download` handler decides the path.
+
+### 17.3 What PR A ships instead (and §17.5's decision)
+
+Per the manager's decision, PR A ships the harness half (tool surface, describer
+and tier, the policy module, post-hoc verification, the two wire methods, the
+capability advertisement) plus **`upload` on both hosts**, and **no extension
+download**:
+
+* the extension does not advertise `download` (it advertises its own dispatch
+  table, so this cannot drift), and
+* the harness refuses `download` on an extension host with a typed
+  `capability_unsupported` whose copy says Chrome does not let an extension
+  choose a download destination, sends the caller to the desktop app's browser
+  tab, and offers `bash` + `curl` for a URL the agent already has. **It does not
+  tell the user to update the extension**, because no update can help.
+
+§11.3's `Page.setDownloadBehavior` paragraph and §6.1's `download` row for the
+extension are superseded by §17.1; §13.2's PR B pin stays valid, because the
+shared artifacts (the policy module, the generated tables, the protocol
+constants) are exactly the ones PR B consumes.
+
+### 17.4 The extension's half that DOES ship: `upload`
+
+Measured on the same rig, in the same session type: `DOM.setFileInputFiles`
+over the tab-scoped session attaches real files to `<input type="file" multiple>`
+and to a single input, with the DOM read-back matching what was set:
+
+```text
+upload #file  [deck.pptx, notes file with spaces.pdf]
+  -> read back: {"count":2,"names":["deck.pptx","notes file with spaces.pdf"],
+                 "sizes":[13,69]}
+```
+
+No new permission is involved: the extension already holds `debugger`.
+
+### 17.5 The open decision: `chrome.downloads` (evidence for the operator)
+
+Recorded, **not implemented**. A throwaway probe extension
+(`/tmp/lo-dl/ext`, manifest declaring `downloads`) measured what the permission
+would actually give this host on Chrome 153.0.8010.53:
+
+* `chrome.downloads.download({url, filename, conflictAction})` works, and the
+  extension CAN learn the absolute landed path afterwards
+  (`DownloadItem.filename` = `/tmp/lo-dl-target/receipt.pdf` in the probe), plus
+  `state`, `bytesReceived`, `totalBytes`, `mime`, `danger`, `exists`.
+* `filename` is **relative to the user's default download directory** and cannot
+  escape it: `"lop-probe/receipt.pdf"` (a subfolder) works, while
+  `"../../escape-attempt.pdf"` and `"/tmp/lo-dl-escape.pdf"` are both refused
+  with **`Invalid filename`**. So the permission writes into the user's real
+  `~/Downloads` first and can never target the quarantine root directly. The
+  design's §4(a) rejection of the permission for exactly that reason survives
+  the measurement.
+* `chrome.downloads.onDeterminingFilename` exists (an unchanged no-arg call; the
+  probe reports it as a live API surface).
+* **Not measured here:** whether adding the permission would re-prompt or disable
+  an already-installed extension. That needs a published item and a reviewer, so
+  it stays a documented Chrome behaviour claim rather than a reading, and it is
+  the number the operator's decision should be sized against (the 0.1.8 store
+  review took ~4.5 days).
+
+One rig lesson worth keeping: the first probe run **wrote into the operator's
+real `~/Downloads`** (`lop-probe/receipt.pdf`; removed immediately) because a
+profile preference file written before launch did not take effect. The working
+setup is to set the download path over CDP
+(`Browser.setDownloadBehavior` with a temp `downloadPath`) **before** anything
+downloads. Any future probe of this permission must do that first.
+
+### 17.6 The evidence PR A carries
+
+Rig: `/tmp/lo-e2e/rig.py` — the real `BridgeService` on its own port and config
+root, the real BUILT extension loaded into headless Chrome over CDP, the tool's
+own `execute_browser` path, and a local fixture server. Two rig-only edits to the
+extension copy are reported in the run output and are there for isolation, not
+convenience: a **throwaway identity key** (the repo's dev manifest pins a shared
+identity, and a same-identity dial from a rig can displace the operator's own
+unpacked build) and **`DEFAULT_PORT` rewritten to the rig's daemon** (the worker
+reads its port from `chrome.storage.local`, and a worker paused at start has no
+execution context to seed storage in, so its first act is otherwise a dial to
+port 4099).
+
+```text
+upload 3 files -> tool: "attached 3 file(s) …" with per-file sha256
+  local  quarterly deck.pptx   83e763479072e35238c7226a64210f35ee677b9eecf6e62e80ded01d0553bfc4
+  server quarterly deck.pptx   83e763479072e35238c7226a64210f35ee677b9eecf6e62e80ded01d0553bfc4
+  local  receipt-2026-09.pdf   cfa3181c1ee36e8bce5e39f84959f4558ea7ba32c0e4539a8ab3c8ce8c716ec6
+  server receipt-2026-09.pdf   cfa3181c1ee36e8bce5e39f84959f4558ea7ba32c0e4539a8ab3c8ce8c716ec6
+  local  handout.zip           dcbc4bc4fc04dab17c7f9bfe024ebe2d3dd1c0b8b07125d2cc378f34622e336a
+  server handout.zip           dcbc4bc4fc04dab17c7f9bfe024ebe2d3dd1c0b8b07125d2cc378f34622e336a
+  -> digests_match: true (the page POSTed all three; the server hashed the bytes it received)
+
+upload refusals (server request count during them: 0)
+  ~/.ssh/id_rsa        refused: 'id_rsa' matches the credential deny-list (id_rsa*)
+  symlink -> id_rsa    refused: 'id_rsa' matches the credential deny-list (id_rsa*)
+  <config>/config.yml  refused: that file is inside Local Operator's own config directory
+  a missing path       refused: 'does-not-exist.pdf' does not exist
+
+download on the extension host (advertised list from the live record:
+  21 methods incl. upload, NOT download; version 0.1.18)
+  -> capability_unsupported: "the browser extension cannot serve 'download': Chrome does
+     not let an extension choose where a download goes, so no extension build can offer
+     it. Use the Local Operator desktop app's browser tab instead (open a browser tab
+     there and retry), or fetch the file directly with bash + curl. Nothing else about
+     this tab is affected."
+  -> download directory after the call: audit.jsonl only (nothing landed)
+leftover Chrome processes: 0
+```
+
+**What this does NOT prove:** the app host's download half (PR B — Electron
+`will-download` + `setSavePath`), and the DeepSeek live driver case in §12.1,
+which needs the operator's own logged-in profile.
+
+### 17.7 Deviations from this document, stated one by one
+
+| # | this document says | PR A does | why |
+|---|---|---|---|
+| 1 | §10.2 recommends PyPI `filetype` (MIT, dependency-free) | a hand-rolled signature table | PR A is under a no-new-default-dependency constraint. The cost is named where it bites: without reading the archive's first entries a hand table cannot tell a `.docx` from a plain `.zip`, so both are one "ZIP container" class and the NAME decides which of the two names for the same bytes is right. Nothing is looser — the class is allow-listed either way |
+| 2 | §10.2's fallback name is `download-<8 hex of sha256(url+stamp)>` | `download-<8 hex of FNV-1a(raw name)>` | `safe_name` is the single door and has no url; and the digest is a NAME, not an integrity claim, so it must be computable synchronously in the extension (`crypto.subtle` is async, and a hand-rolled SHA-256 in a vendored policy module is a second implementation of a security primitive for no gain). The shared fixture pins the value in both languages |
+| 3 | §10.5: host AND Python write an audit row per call, sharing a `call_id` | Python writes the row; the host column names the host | the extension cannot write into the config root (no filesystem access at all), so its half of that trail is unbuildable rather than skipped — the same limitation that puts the policy in Python |
+| 4 | §7.3: the approval row names the file AND the origin of the current tab | names the file and says "the page in the tab this session is driving" | `describe_approval(args, cwd)` receives no session state, and the driven tab's URL lives in the daemon's per-link record, not in the discovery file the tool can read. Adding a third state read inside an approval describer is a new failure mode on the card path; the origin is in the RESULT text and the audit row |
+| 5 | §9.4 leaves partial multi-file outcomes open | all-or-nothing: one refused path attaches nothing | a partial attach sends the page a set of files the caller never named, and the refusal sentence ("nothing was attached") is only true this way |
+| 6 | §4.1's stamped session directory | …with a `-2`, `-3`… suffix when the stamp collides | the stamp has one-second resolution, and two calls in the same second would share a directory — so the second call's before/after diff would be compared against the first call's files |
+| 7 | §6.1's `timeout_s` "extended by timeout_s to a hard ceiling of 600 s" | the wire key extends BOTH the daemon's budget and the client's timeout, clamped to the shared ceiling | the client would otherwise time out first and report an unreachable daemon while the daemon was healthy and about to deliver (§A3's class of mismatch) |
+
+### 17.8 Still unverified
+
+* Promotion/copy for §16.4's consent-and-reveal UI (PR B's, and not started).
+* `chrome://downloads` visibility and the user's own Downloads-folder semantics
+  on the app host, which §16.2/§16.4 raise for PR B.
+* Whether the extension could serve downloads through some future Chrome API
+  (nothing in the current API surface does; §17.1 is the state at Chrome 153).

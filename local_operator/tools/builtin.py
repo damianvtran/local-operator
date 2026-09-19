@@ -10851,6 +10851,17 @@ async def _bridge_tabs(
     )
 
 
+def _audit_host(client: Any) -> str:
+    """The audit row's host column: ``extension`` | ``app`` | ``cmux``.
+
+    The design's vocabulary (design §10.5), which is NOT the handle spelling
+    `_host_of_client` returns ("bridge"/"ui") and not the copy spelling
+    ("extension"/"ui"): a log read months later should name the product surface,
+    not the handle grammar.
+    """
+    return "app" if _host_of_client(client) == HOST_UI_PREFIX else "extension"
+
+
 def _capability_problem(
     tool_call_id: str, method: str, client: Any, *, surface: str = ""
 ) -> ToolResult | None:
@@ -10866,9 +10877,17 @@ def _capability_problem(
     dials and costs nothing; a record written by a pre-feature daemon or app has no
     `capabilities` key at all, and that reads as "told us nothing" — the refusal.
     """
-    from local_operator.browser_bridge.backend import capability_refusal, format_error
+    from local_operator.browser_bridge.backend import (
+        HOST_EXTENSION,
+        capability_refusal,
+        format_error,
+    )
 
-    host = _host_of_client(client)
+    # The COPY's host (``extension``/``ui``), read off the client exactly as
+    # `_bridge_call` reads it, so the reference and the refusal cannot name
+    # different processes. `_host_of_client` is the HANDLE spelling and is used
+    # below, not here.
+    host = str(getattr(client, "host", HOST_EXTENSION) or HOST_EXTENSION)
     capabilities = client.capabilities()
     if capabilities.serves(method):
         return None
@@ -10934,6 +10953,7 @@ async def _browser_download(
     context: ToolContext | None,
     *,
     client: Any = None,
+    policy: Any = None,
 ) -> ToolResult:
     """`download`: arm the host, then judge what LANDED, from disk.
 
@@ -10944,7 +10964,10 @@ async def _browser_download(
     """
     from local_operator import browser_files as files
 
-    host = _host_of_client(client)
+    # `policy` is the caps as data, injectable so a test can shrink a ceiling
+    # instead of writing a 256 MB file. The tool always leaves it at the default.
+    limits = policy or files.DEFAULT
+    host = _audit_host(client)
     problem = _capability_problem(tool_call_id, "download", client, surface=state.surface_id)
     if problem is not None:
         return problem
@@ -10953,12 +10976,12 @@ async def _browser_download(
     # Over-quota sessions are refused BEFORE anything is armed: the ceiling exists
     # so a page cannot fill the disk through an agent loop, and a check that runs
     # after the bytes land is a check that already lost.
-    if files.session_bytes(session_id) > files.DOWNLOAD_MAX_TOTAL_BYTES_PER_SESSION:
+    if files.session_bytes(session_id) > limits.download_max_session_bytes:
         return _error(
             tool_call_id,
             "browser",
             "refused: this session has already downloaded more than "
-            f"{files.DOWNLOAD_MAX_TOTAL_BYTES_PER_SESSION} bytes. Move or delete some of "
+            f"{limits.download_max_session_bytes} bytes. Move or delete some of "
             "what is in the browser download directory, then retry.",
         )
     directory = files.session_dir(session_id)
@@ -11059,7 +11082,7 @@ async def _browser_download(
                 redact=True,
             )
             continue
-        verdict = files.classify_download(resolved, declared_mime=declared)
+        verdict = files.classify_download(resolved, declared_mime=declared, policy=limits)
         if verdict.kind == "deny":
             _unlink_quietly(resolved)
             refused.append(f"{name}: {verdict.reason}")
@@ -11112,15 +11135,15 @@ async def _browser_download(
     # Per-CALL ceiling, enforced after the fact for a host that cannot abort
     # mid-flight (the extension cannot; the app host can, design §10.3): what is
     # kept is the FIRST n files, and the rest are deleted with the reason.
-    if len(kept) > files.DOWNLOAD_MAX_FILES_PER_CALL:
-        extra = kept[files.DOWNLOAD_MAX_FILES_PER_CALL :]
+    if len(kept) > limits.download_max_files:
+        extra = kept[limits.download_max_files :]
         for fact in extra:
             _unlink_quietly(Path(str(fact["path"])))
             refused.append(
                 f"{fact['name']}: refused and deleted — over the "
-                f"{files.DOWNLOAD_MAX_FILES_PER_CALL} files per call limit"
+                f"{limits.download_max_files} files per call limit"
             )
-        kept = kept[: files.DOWNLOAD_MAX_FILES_PER_CALL]
+        kept = kept[: limits.download_max_files]
 
     if not kept:
         return _error(
@@ -11153,6 +11176,7 @@ async def _browser_upload(
     context: ToolContext | None,
     *,
     client: Any = None,
+    policy: Any = None,
 ) -> ToolResult:
     """`upload`: the unconditional gate, then the attach, then the read-back.
 
@@ -11163,21 +11187,22 @@ async def _browser_upload(
     """
     from local_operator import browser_files as files
 
-    host = _host_of_client(client)
+    limits = policy or files.DEFAULT
+    host = _audit_host(client)
     problem = _capability_problem(tool_call_id, "upload", client, surface=state.surface_id)
     if problem is not None:
         return problem
-    if len(params.paths) > files.UPLOAD_MAX_FILES:
+    if len(params.paths) > limits.upload_max_files:
         return _error(
             tool_call_id,
             "browser",
-            f"refused: {len(params.paths)} files named, over the {files.UPLOAD_MAX_FILES} "
+            f"refused: {len(params.paths)} files named, over the {limits.upload_max_files} "
             "files per call limit. Attach them in batches.",
         )
     session_id = str(getattr(context, "session_id", "") or "")
     resolved: list[Path] = []
     for raw in params.paths:
-        path, reason = files.check_upload(raw, cwd=_safe_cwd(context))
+        path, reason = files.check_upload(raw, cwd=_safe_cwd(context), policy=limits)
         if path is None:
             # Refused as a whole call: attaching the rest would send a set the
             # caller did not name, and the refusal names the one rule that fired.

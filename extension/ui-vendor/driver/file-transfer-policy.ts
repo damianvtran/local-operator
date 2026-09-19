@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: driver/file-transfer-policy.ts (host-free shared policy (chrome.*-free by construction)).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (10 modules: access-flow.ts, access-queue.ts, ax-compact.ts, deadline.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: 03f0a2f546999b86ad680155e683e6d6bc6264e43e48cecd55961d4248f27ca0
+// Inputs sha256: 6b00b1ff859346581c7bcb9a0deb5090c6a2af9df53d87c87696680ad2eb1110
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -128,7 +128,10 @@ export function fallbackName(raw: string, sniffedExt = ""): string {
  */
 export function safeName(raw: string, sniffedExt = ""): string {
   const parts = raw.replace(/\\/g, "/").split("/");
-  let name = parts[parts.length - 1].replace(CONTROL, "").replace(BIDI_ZERO_WIDTH, "");
+  /* `?? ""` rather than a non-null assertion: this module is vendored into a
+   * host compiled with `noUncheckedIndexedAccess`, and an empty basename simply
+   * falls through to the generated-name branch below. */
+  let name = (parts[parts.length - 1] ?? "").replace(CONTROL, "").replace(BIDI_ZERO_WIDTH, "");
   name = name.normalize("NFC").trim().replace(/[. ]+$/, "");
   if (name === "" || name === "." || name === "..") return fallbackName(raw, sniffedExt);
   const dot = name.lastIndexOf(".");
@@ -175,7 +178,10 @@ function globToRegExp(pattern: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-const CREDENTIAL_GLOBS = CREDENTIAL_NAME_PATTERNS.map(globToRegExp);
+const CREDENTIAL_GLOBS = CREDENTIAL_NAME_PATTERNS.map((pattern) => ({
+  pattern,
+  regex: globToRegExp(pattern),
+}));
 
 /**
  * Why this path may not be uploaded, or "" when it may — the same rule as
@@ -190,14 +196,14 @@ const CREDENTIAL_GLOBS = CREDENTIAL_NAME_PATTERNS.map(globToRegExp);
 export function credentialRefusal(pathish: string): string {
   const parts = pathish.split("/").filter((part) => part !== "");
   const base = (parts[parts.length - 1] ?? "").toLowerCase();
-  for (let index = 0; index < CREDENTIAL_GLOBS.length; index += 1) {
-    if (CREDENTIAL_GLOBS[index].test(base)) {
-      return `refused: '${parts[parts.length - 1]}' matches the credential deny-list (${CREDENTIAL_NAME_PATTERNS[index]})`;
+  for (const { pattern, regex } of CREDENTIAL_GLOBS) {
+    if (regex.test(base)) {
+      return `refused: '${base}' matches the credential deny-list (${pattern})`;
     }
   }
   for (const part of parts) {
     if (CREDENTIAL_COMPONENTS.includes(part.toLowerCase())) {
-      return `refused: '${parts[parts.length - 1]}' is inside a '${part}' directory, which holds credentials`;
+      return `refused: '${base}' is inside a '${part}' directory, which holds credentials`;
     }
   }
   return "";
