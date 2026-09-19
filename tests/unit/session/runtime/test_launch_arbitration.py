@@ -69,6 +69,7 @@ def _draining_record() -> SessionRecord:
         leaving=LEAVING_FOR_BUILD,
     )
 
+
 #: Distinguishes "no ``cwd=`` was passed" from "``cwd=None`` was passed"; the
 #: spawn contract under test is the ABSENCE of the kwarg, not a null value.
 _MISSING = object()
