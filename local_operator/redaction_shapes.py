@@ -1081,10 +1081,16 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # `", "other": "value"}` and prose are not credential-shaped and survive
         # byte-identical.
         #
-        # KNOWN EDGE, recorded rather than patched (R8-2): a line that is a single bare
-        # word — `done`, `INFO` — still reads as credential-shaped, so it is masked. Any
-        # length floor that excludes it also excludes a SHORT TRUNCATED FINAL LINE, which
-        # is the leak direction, and a leak is the worse of the two. Measured: `done` and
+        # KNOWN EDGE, recorded rather than patched: a line whose content is a single
+        # bare word, or shorter than eight characters, is NOT masked — measured on
+        # `done`, `INFO` (both stay readable) and `NORMAL,` (readable; the comma is
+        # stripped by the class and the six remaining characters are under the floor).
+        # A length floor is what keeps numbered PROSE alive (`12| done`, `12| 42`), and
+        # the price is that a body line under eight characters ends the run — the
+        # over-mask direction, which is the safer of the two.
+        #
+        # The prefix spelling above is general on purpose (see the block comment); the
+        # trailing `[ \t]*` before it is part of that spelling.
         # `INFO` are consumed, `NORMAL,` is not.
         #
         # Not "stop at the first newline": that would publish the rest of a key whose
@@ -1094,15 +1100,27 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             r"(-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}[\x27\x22]?-{1,4}"
             r"(?:"
             r"(?:\\r\\n|\\n|\r\n|\n|\r)"
-            # A body line as TOOLS PRINT IT, not only as a file stores it: leading
-            # whitespace (an indented dump), a `N| ` LINE-NUMBER prefix — how this
-            # product's own `read` tool renders a file — a trailing comma and trailing
-            # whitespace all count as credential-shaped, because with them a run stopped
-            # early and published every remaining line silently (R8-1, and QA's N7-1 on
-            # the same shape).
-            r"[ \t]*(?:\d+\| )?[ \t]*(?:[A-Za-z0-9+/=]+,?"
+            # A body line as TOOLS PRINT IT, in the general form rather than an
+            # enumeration — enumeration cost four rounds. The line-number prefix is
+            # OPTIONAL and REPEATED (so `3| 4| <body>` falls out of the repetition), it
+            # accepts every separator these tools emit — `|`, `:`, `>`, `-` (for `->`) —
+            # separated by spaces or a TAB, and the separatorless `number<TAB>` that
+            # `cat -n` writes is covered by making the separator optional too. Miss it in
+            # any one of those spellings and the run ends there while the WHOLE body is
+            # published silently (Q9-F1: `grep -n` and `cat -n` output, 6/6 surfaces).
+            #
+            # The content floor is eight characters, and it is what keeps numbered PROSE
+            # alive: `12| done`, `12| 42`, `5| NORMAL, more text`, `1|` and `|` must
+            # survive byte-identical. The cost is the same one R8-2 records — a body line
+            # shorter than eight characters ends the run — and it is the over-mask
+            # direction, which is the safer of the two.
+            r"[ \t]*(?:(?:\d+[ \t]*(?:->|[|:>-])?[ \t]*)+"
+            r"(?:[A-Za-z0-9+/=]{8,},?"
             r"|-{1,4}[\x27\x22]?-{1,4}(?:BEGIN|END)[ A-Z0-9]*PRIVATE KEY"
-            r"-{1,4}[\x27\x22]?-{1,4})?[ \t]*"
+            r"-{1,4}[\x27\x22]?-{1,4})"
+            r"|(?:[A-Za-z0-9+/=]{8,},?"
+            r"|-{1,4}[\x27\x22]?-{1,4}(?:BEGIN|END)[ A-Z0-9]*PRIVATE KEY"
+            r"-{1,4}[\x27\x22]?-{1,4})?)?[ \t]*"
             r"(?=\\r\\n|\\n|\r\n|\n|\r|[\x27\x22]|$)"
             r")*)"
         ),
