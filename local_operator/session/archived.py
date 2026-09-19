@@ -93,10 +93,23 @@ def read_archived(config_dir: Path) -> list[str]:
     path is what keeps this module free of any coordination with
     ``session/cleanup.py`` — deletion needs to know nothing about archives, and
     the ``/v1/desktop`` delete route inherits that for free.
+
+    A STAT BEFORE THE READ, and it is not an optimisation for its own sake. The
+    common store has no archive file at all, and every listing pays this once
+    per scan on the picker's UI thread; an absent file must therefore cost a
+    stat rather than an open that raises. That is also what keeps the store's
+    read budget honest: an unarchived store contributes no READ to a scan, which
+    is the property ``test_fork``'s per-row read accounting pins for the same
+    class of store-wide index (the origin-verdict cache).
     """
     directory = Path(config_dir)
     try:
-        raw = json.loads((directory / ARCHIVED_FILE).read_text())
+        path = directory / ARCHIVED_FILE
+        # ``is_file`` answers False rather than raising for an unreadable path,
+        # which is the same "nothing is archived" this function's contract wants.
+        if not path.is_file():
+            return []
+        raw = json.loads(path.read_text())
     except FileNotFoundError:
         return []
     except (OSError, ValueError):
