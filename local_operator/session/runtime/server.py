@@ -729,6 +729,51 @@ _PAYLOAD_OPS = {
     "record_shell",
 }
 
+#: Ops a connection may run while its canonical ``frontend_sync`` is still being
+#: built and is not on the wire yet.
+#:
+#: The bind is a cross-thread hop onto the session's loop, so a session inside a
+#: synchronous step of a turn parks it for the length of that step. Running the
+#: bind inline therefore made a follower's socket DEAF rather than slow: the
+#: reader loop had not started, so nothing the client sent was read at all — not
+#: even a ``ping`` — while a daemon or phone dial to the same runtime kept
+#: answering (measured: review round 2, UX U6). ``_on_connection`` now starts the
+#: bind as a task and enters the reader loop first, which is what makes this set
+#: necessary: a connection that is reachable but not yet AUTHORITATIVE must not be
+#: allowed to act on state it has not been told about.
+#:
+#: So: health, and the three ways to regain control of a turn. ``stop``/``abort``/
+#: ``cancel`` are the kill switch in its three rungs, and withholding them until a
+#: sync lands would deny a supervisor the ability to stop a runaway session
+#: precisely when its loop is stuck — the situation this set exists for.
+_SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
+
+#: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
+#: of it: each mutates only this connection's own relay state and never touches
+#: the session, so none can act on a connection that has not yet been made
+#: authoritative — which is the whole reason the priority set is closed. They must
+#: be admitted, because the dial path itself sends three of them immediately after
+#: reading the welcome and BEFORE it awaits the sync frame
+#: (``session/attached.py``: the event-mute, ``viewer_watch`` and
+#: ``desktop_watch`` re-asserts), each with its own bound; refusing them would
+#: turn every reconnect of a parked viewer into three error frames.
+#:
+#: The same eight are already treated as connection-local by the push exemption in
+#: ``_dispatch``, which is what makes this a mirror of an existing decision rather
+#: than a second one.
+_SYNC_LOCAL_OPS = frozenset(
+    {
+        "watch",
+        "unwatch",
+        "watch_job",
+        "unwatch_job",
+        "desktop_watch",
+        "viewer_watch",
+        "event_mute",
+        "event_unmute",
+    }
+)
+
 
 def _running_loop() -> asyncio.AbstractEventLoop | None:
     """The loop this thread is running, or ``None`` on a plain thread.
@@ -924,6 +969,20 @@ class _ClientConn:
     # events begin behind that boundary on the same FIFO, so a joining client
     # cannot see transcript animation ahead of the snapshot that seeded it.
     events_ready: bool = False
+    #: The canonical frontend sync for this connection is still being built and is
+    #: not on the wire yet. Distinct from ``frontend_ready``, which is the
+    #: RECIPIENT set's gate ("frontend frames may be enqueued now"): this one is the
+    #: ADMISSION gate, and it is what ``_on_request`` consults to decide whether a
+    #: connection may run a session-facing op at all. Set before the sync task is
+    #: created and cleared when that task settles, so the two can never disagree
+    #: about a LIVE connection (a failed sync drops the client).
+    frontend_sync_pending: bool = False
+    #: The task that binds this viewer and queues its sync frame — see
+    #: ``RuntimeServer._serve_frontend_sync``. Held so ``_drop_client`` can cancel
+    #: it, the same contract ``event_writer_task`` keeps, because a connection that
+    #: goes away mid-bind owes the session an unsubscribe and must not queue a
+    #: frame onto a socket nobody owns.
+    frontend_sync_task: asyncio.Task[None] | None = None
     event_queue: asyncio.Queue[dict[str, Any]] = field(
         default_factory=lambda: asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
     )
@@ -1355,6 +1414,13 @@ class RuntimeServer:
         # frame: a busy session repaints ~30x/s and a per-frame warning is the
         # log flood the cap exists to prevent. Reset when a frame fits again.
         self._frame_cap_warned = False
+        #: Frontend binds whose connection went away MID-BIND, held until they
+        #: land so their registration can be released — see
+        #: ``_release_when_landed``. Nothing else awaits these tasks, and an
+        #: unreferenced task can be collected mid-flight, in which case its
+        #: release never fires and the session keeps a subscriber for the life of
+        #: the process.
+        self._abandoned_binds: set[asyncio.Task[Any]] = set()
         # The delayed repaint must be owned like the heartbeat. A bare task can
         # still be sleeping when close tears down the runtime loop, producing
         # an orphan warning and proving teardown returned before its work ended.
@@ -1960,9 +2026,12 @@ class RuntimeServer:
           first writes the redaction set the bash and eval redactors read, and
           the second runs ``Session.cancel_subagents``, whose task creation and
           loop-bound ``AsyncJobManager`` abort belong to the session's loop — on
-          the runtime's thread the manager swallowed its own cross-loop
-          ``RuntimeError`` and the op still acked success, so a cancel that
-          cancelled nothing reported ``1``.
+          the runtime's thread the cancel's execution ran on the wrong loop and
+          the manager swallowed its own cross-loop ``RuntimeError`` at WARNING
+          while the op still acked success. The completion the ``await task``
+          tracks is the manager's own, so what is lost is the caller's — the
+          count the user reads is not evidence the cancel ran where the job
+          lives.
 
         ``reannounce_pending`` is the one named method that does NOT come
         through here, deliberately: one of its four in-tree callers
@@ -1992,10 +2061,20 @@ class RuntimeServer:
             # makes this helper and ``ServingSessionHandle._on_session_loop``
             # agree: ``run_coroutine_threadsafe`` raises ``Event loop is closed``
             # from the caller's side, which is a bare crash where the handle's
-            # own ``_check_loop_thread`` would have produced the refusal the
-            # dispatcher knows how to render. So a dead loop takes the same path
-            # a handle without a loop takes — run it here and let the handle
-            # refuse it.
+            # own refusal is what the dispatcher knows how to render. So a dead
+            # loop takes the same path a handle without a loop takes — run it
+            # here and let the handle refuse it.
+            #
+            # WHICH MEANS EVERY BODY REACHABLE THROUGH HERE MUST REFUSE, and that
+            # is why the two ``def``s this helper hops for the ``_dispatch`` arms
+            # call ``_check_loop_thread`` in their own bodies (review round 2,
+            # MINOR-1 / QA Q4): a synchronous method cannot carry the decorator,
+            # so without that call the closed-loop case executed the write on the
+            # runtime's thread and acked success — the plane round 1 took these
+            # two off. ``_resolve_pending`` carries one for the same reason (UX
+            # U8): it is the body on the decorator half that touches the loop
+            # itself, and its ``call_soon_threadsafe`` was raising the asyncio
+            # internal in the middle of a gate tap.
             return await _maybe_await(call(*args, **kwargs))
 
         async def _invoke() -> Any:
@@ -2293,6 +2372,248 @@ class RuntimeServer:
 
     # -- connections -----------------------------------------------------------
 
+    async def _serve_frontend_sync(
+        self,
+        conn: _ClientConn,
+        frame: dict[str, Any],
+        subscribe_frontend: Callable[..., Any],
+    ) -> None:
+        """Bind one viewer and queue its canonical ``frontend_sync`` frame.
+
+        A per-connection task rather than inline work in ``_on_connection``; the
+        reason it is deferred at all is at its creation site. It owns two
+        invariants:
+
+        * **The frame order is the frame order it always was.** Registration and
+          snapshot capture still happen atomically inside the handle call, the
+          sync frame is queued *before* ``frontend_ready`` opens, and every
+          update that lands while this task is in flight waits in
+          ``conn.frontend_pending`` — so a repaint cannot overtake the state it is
+          a delta against. The task changes WHEN the bind runs, never the
+          sequence of frames it produces.
+        * **A failed bind does not leave a half-open connection.** Inline, a raise
+          here escaped ``_on_connection`` — there is no caller to catch it, this is
+          a ``client_connected_cb`` — so asyncio logged it as an unhandled
+          exception in the callback while the connection stayed registered, never
+          read and never dropped. As a task it has an owner: the failure drops the
+          connection and releases its subscription.
+
+        ``subscribe_frontend`` arrives as a PARAMETER, resolved and
+        capability-checked at the creation site: dropping a connection whose
+        handle cannot bind belongs on the connection path, where the socket still
+        exists to be closed, not inside a task.
+        """
+        try:
+
+            def on_update(update: Any) -> None:
+                payload = (
+                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
+                )
+                self._relay_frontend_to(conn, payload)
+
+            from local_operator.session.frontend_state import (
+                FrontendSubscription,
+                oversized_frame_report,
+                sync_wire_payload,
+            )
+            from local_operator.session.history_window import (
+                strip_audit_fields,
+                wire_payload,
+            )
+
+            window_requested = bool(frame.get("display_window")) and (
+                "display-history-window-v1" in self._record.capabilities
+            )
+            # Negotiated exactly like ``display_window``: the viewer opts in by
+            # declaring the flag, and an older viewer that cannot name it never
+            # receives the fields it would reject.
+            conn.audit_history = bool(frame.get("display_history_audit")) and (
+                "display-history-audit-v1" in self._record.capabilities
+            )
+
+            # THE FRONTEND BIND IS A SESSION-LOOP CALL, for a stronger reason
+            # than the two boot registrations: ``subscribe_frontend``'s first
+            # act is ``refresh_from_session``, a PUBLISH that moves canonical
+            # state and its sequence numbers, so running it on the runtime's
+            # thread is a write to the publishing store from the wrong plane.
+            # The handle's own seam takes care of it
+            # (``@_on_session_loop``), so this call needs no hop of its own —
+            # and deliberately has none, because two mechanisms for one hop is
+            # how a later reader concludes that one of them is redundant and
+            # removes the wrong one.
+            #
+            # It is also the one hop that can be SLOW, and that is the admitted
+            # cost of this change rather than an oversight: a guest joining
+            # mid-turn still waits for the turn's current synchronous step,
+            # exactly as the TUI kind does today. What this change buys is that
+            # the wait is a hop whose result is awaited, not the runtime's own
+            # loop parked — so the welcome, the `ping` and the heartbeat keep
+            # flowing while it happens (see ``_serve``'s registrations).
+            async def bind() -> Any:
+                outcome = (
+                    subscribe_frontend(on_update, display_window=True)
+                    if window_requested
+                    else subscribe_frontend(on_update)
+                )
+                if inspect.isawaitable(outcome):
+                    outcome = await outcome
+                return outcome
+
+            # THE BIND IS NOT CANCELLABLE ONCE IT IS RUNNING. The subscription is
+            # created INSIDE the awaited handle call — on the session's loop, one
+            # message before the reply that carries it back here — so cancelling
+            # this task mid-bind can land on either side of that registration.
+            # Shielding lets it land, and the handler below releases what it
+            # registered; with only one of the two halves a cancelled bind leaks a
+            # subscriber the session keeps for the life of the process. That is
+            # also what makes ``_drop_client``'s ordering — cancel this task, then
+            # release the recorded subscription — safe rather than lucky.
+            bind_task = asyncio.ensure_future(bind())
+            try:
+                subscription = cast(FrontendSubscription, await asyncio.shield(bind_task))
+            except asyncio.CancelledError:
+                self._release_when_landed(bind_task)
+                raise
+            sync = subscription.sync
+            # Trajectories are stripped here and re-fetched per job through
+            # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
+            # cannot carry them.
+            sync_payload = sync_wire_payload(sync)
+            # The sync frame carries the FIRST display page, so it is one of
+            # the THREE places the audit fields reach the wire (the others are
+            # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
+            # through the same helper; stripping in only some would produce a
+            # viewer that attaches cleanly and then fails on its first scroll
+            # or on its first post-append refresh.
+            if isinstance(sync_payload.get("display_history"), dict):
+                strip_audit_fields(
+                    sync_payload["display_history"], audit_capable=conn.audit_history
+                )
+            conn.frontend_unsubscribe = subscription.unsubscribe
+            # Registration and snapshot capture happened synchronously on the
+            # authoritative loop. Mark ready only after queuing that snapshot;
+            # later updates therefore cannot overtake it.
+            sync_frame = {"op": "frontend_sync", "data": sync_payload}
+            # An oversized sync is unreadable, not merely large: the client's
+            # readline raises and its pump dies, so the viewer waits out its
+            # full sync timeout and then degrades to a cold session with no
+            # roster and no todos. That looked exactly like a slow owner for
+            # one release. Say so loudly and name the field responsible, so
+            # the next unbounded list is one log line to find rather than a
+            # profiling session.
+            oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
+            if oversize is not None and sync.display_history is not None:
+                # The budget covers the WHOLE frame, not just history. A busy
+                # canonical state may leave too little room even for our page.
+                # Request the existing exact local replay, never truncate prose.
+                fallback = sync.display_history.model_copy(
+                    update={
+                        "status": "full_required",
+                        "messages": [],
+                        "durable_seed_ids": [],
+                        "before_token": None,
+                        "snapshot_token": None,
+                    }
+                )
+                sync_payload["display_history"] = wire_payload(
+                    fallback, audit_capable=conn.audit_history
+                )
+                oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
+            if oversize is not None:
+                # Still over the line limit even with the display window
+                # reduced. Nothing more can be shed HERE, and the guarantee the
+                # socket needs lives in ``_send_to``'s ceiling: it substitutes an
+                # ``error`` frame naming the size instead of writing a line this
+                # client cannot read (which used to kill its pump and cost the
+                # user the whole session). Reported here as well because this is
+                # where the field responsible is known — the next unbounded list
+                # should cost one log line to find, not a profiling session.
+                #
+                # What follows is deliberately unchanged and deliberately not
+                # prettier: the deltas queued below are applied against a base
+                # that never arrived, so the client refuses the first one by its
+                # own sequence rule (``attach_client`` raises "frontend state
+                # gap") and goes cold at once. That is the honest end for
+                # canonical state too large to send — fast, named, and no
+                # different in effect from the dead socket it replaces.
+                logger.error(
+                    "session runtime: frontend_sync does not fit — %s — and will be "
+                    "replaced by an error frame at the write",
+                    oversize,
+                )
+            await self._send_to(conn, sync_frame)
+            conn.frontend_ready = True
+            for pending in conn.frontend_pending:
+                self._enqueue_client_frame(conn, {"op": "frontend_update", "data": pending})
+            conn.frontend_pending.clear()
+            if conn.wants_events:
+                # Raw events ride the same FIFO as the canonical deltas and are
+                # seeded by the sync frame just queued, so the gate opens only
+                # now — a joiner must not receive transcript animation ahead of
+                # the snapshot it animates.
+                conn.events_ready = True
+        except asyncio.CancelledError:
+            # Cancellation is the connection going away (``_drop_client``), not a
+            # bind failure: re-raise so the task settles as cancelled and the
+            # subscription teardown stays in ``_drop_client``'s hands.
+            raise
+        except Exception:  # noqa: BLE001 — one client's bind must not take the runtime down
+            logger.warning(
+                "session runtime: frontend bind failed for %s — dropping the connection",
+                conn.surface,
+                exc_info=True,
+            )
+            self._drop_client(conn, reason="frontend bind failed")
+        finally:
+            # Opened by ``_on_connection`` before this task was created, and
+            # cleared on every exit — including the drop above, where the
+            # connection is gone and the gate no longer matters, and the
+            # cancellation case, where ``_drop_client`` has already removed it.
+            conn.frontend_sync_pending = False
+
+    def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
+        """Release a viewer subscription whose connection died MID-BIND.
+
+        ``_drop_client`` cancels this connection's bind task, and the reason a
+        cancelled bind cannot leave a live subscriber is STRUCTURAL rather than
+        argued: the bind is shielded, so the cancel cannot abort it
+        half-registered (``_serve_frontend_sync``), and this runs on the
+        cancellation path to release whatever did register. ``_drop_client``'s
+        ordering follows from it — cancel first, then release the recorded
+        subscription, so nothing is released twice.
+
+        A DONE-CALLBACK rather than an await, and the difference matters twice
+        over. ``_drop_client`` runs from the reader loop and from shutdown, so
+        awaiting the bind there would park the teardown — and the loop with it —
+        for as long as the abandoned hop takes, up to a whole hop budget, which is
+        exactly the coupling this change exists to remove. And a callback cannot be
+        skipped: a second cancellation racing the first would interrupt an await at
+        the moment the release has to happen, while a callback registered on the
+        task survives it.
+
+        The task is held in ``self._abandoned_binds`` until it lands, because
+        nothing else awaits it now: an unreferenced task can be collected
+        mid-flight, and then its release never fires.
+        """
+        self._abandoned_binds.add(bind_task)
+
+        def release(completed: asyncio.Task[Any]) -> None:
+            self._abandoned_binds.discard(completed)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                logger.debug("frontend bind failed after its connection went away", exc_info=error)
+                return
+            unsubscribe = getattr(completed.result(), "unsubscribe", None)
+            if callable(unsubscribe):
+                try:
+                    unsubscribe()
+                except Exception:  # noqa: BLE001 — connection cleanup must finish
+                    logger.debug("late frontend unsubscribe failed", exc_info=True)
+
+        bind_task.add_done_callback(release)
+
     async def _on_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -2412,133 +2733,39 @@ class RuntimeServer:
             if not callable(subscribe_frontend):
                 self._drop_client(conn, reason="frontend requested but unsupported")
                 return
-
-            def on_update(update: Any) -> None:
-                payload = (
-                    update.model_dump(mode="json") if hasattr(update, "model_dump") else update
-                )
-                self._relay_frontend_to(conn, payload)
-
-            from local_operator.session.frontend_state import (
-                FrontendSubscription,
-                oversized_frame_report,
-                sync_wire_payload,
-            )
-            from local_operator.session.history_window import (
-                strip_audit_fields,
-                wire_payload,
-            )
-
-            window_requested = bool(frame.get("display_window")) and (
-                "display-history-window-v1" in self._record.capabilities
-            )
-            # Negotiated exactly like ``display_window``: the viewer opts in by
-            # declaring the flag, and an older viewer that cannot name it never
-            # receives the fields it would reject.
-            conn.audit_history = bool(frame.get("display_history_audit")) and (
-                "display-history-audit-v1" in self._record.capabilities
-            )
-            # THE FRONTEND BIND IS A SESSION-LOOP CALL, for a stronger reason
-            # than the two boot registrations: ``subscribe_frontend``'s first
-            # act is ``refresh_from_session``, a PUBLISH that moves canonical
-            # state and its sequence numbers, so running it on the runtime's
-            # thread is a write to the publishing store from the wrong plane.
-            # The handle's own seam takes care of it
-            # (``@_on_session_loop``), so this call needs no hop of its own —
-            # and deliberately has none, because two mechanisms for one hop is
-            # how a later reader concludes that one of them is redundant and
-            # removes the wrong one.
+            # THE BIND RUNS IN ITS OWN TASK, so this connection's reader loop is
+            # already serving by the time the heavyweight part starts.
             #
-            # It is also the one hop that can be SLOW, and that is the admitted
-            # cost of this change rather than an oversight: a guest joining
-            # mid-turn still waits for the turn's current synchronous step,
-            # exactly as the TUI kind does today. What this change buys is that
-            # the wait is a hop whose result is awaited, not the runtime's own
-            # loop parked — so the welcome, the `ping` and the heartbeat keep
-            # flowing while it happens (see ``_serve``'s registrations).
-            outcome = (
-                subscribe_frontend(on_update, display_window=True)
-                if window_requested
-                else subscribe_frontend(on_update)
+            # It used to run inline, which made a follower's socket DEAF rather
+            # than slow: the bind is a cross-thread hop onto the session's loop,
+            # so a session inside a synchronous step of a turn held the connection
+            # before it could read anything at all — no ``ping``, no ``stop``, no
+            # ``steer`` — while a daemon dial and a phone dial to the same runtime
+            # both answered in 0.00 s (measured; review round 2, UX U6). The reader
+            # loop must therefore start FIRST.
+            #
+            # The welcome above stays synchronous and hop-free deliberately: it is
+            # an identity frame read from the cached seed, so it costs no
+            # session-loop access and there is nothing to defer.
+            #
+            # ``_on_request`` admits :data:`_SYNC_PRIORITY_OPS` while this task is
+            # pending and refuses everything else, so the connection is reachable
+            # without yet being authoritative.
+            conn.frontend_sync_pending = True
+            conn.frontend_sync_task = asyncio.create_task(
+                self._serve_frontend_sync(conn, frame, subscribe_frontend)
             )
-            if inspect.isawaitable(outcome):
-                outcome = await outcome
-            subscription = cast(FrontendSubscription, outcome)
-            sync = subscription.sync
-            # Trajectories are stripped here and re-fetched per job through
-            # ``job_trajectory``; see ``sync_wire_payload`` for why the frame
-            # cannot carry them.
-            sync_payload = sync_wire_payload(sync)
-            # The sync frame carries the FIRST display page, so it is one of
-            # the THREE places the audit fields reach the wire (the others are
-            # the ``history_page`` and ``frontend_sync`` RPCs). All three strip
-            # through the same helper; stripping in only some would produce a
-            # viewer that attaches cleanly and then fails on its first scroll
-            # or on its first post-append refresh.
-            if isinstance(sync_payload.get("display_history"), dict):
-                strip_audit_fields(
-                    sync_payload["display_history"], audit_capable=conn.audit_history
-                )
-            conn.frontend_unsubscribe = subscription.unsubscribe
-            # Registration and snapshot capture happened synchronously on the
-            # authoritative loop. Mark ready only after queuing that snapshot;
-            # later updates therefore cannot overtake it.
-            sync_frame = {"op": "frontend_sync", "data": sync_payload}
-            # An oversized sync is unreadable, not merely large: the client's
-            # readline raises and its pump dies, so the viewer waits out its
-            # full sync timeout and then degrades to a cold session with no
-            # roster and no todos. That looked exactly like a slow owner for
-            # one release. Say so loudly and name the field responsible, so
-            # the next unbounded list is one log line to find rather than a
-            # profiling session.
-            oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
-            if oversize is not None and sync.display_history is not None:
-                # The budget covers the WHOLE frame, not just history. A busy
-                # canonical state may leave too little room even for our page.
-                # Request the existing exact local replay, never truncate prose.
-                fallback = sync.display_history.model_copy(
-                    update={
-                        "status": "full_required",
-                        "messages": [],
-                        "durable_seed_ids": [],
-                        "before_token": None,
-                        "snapshot_token": None,
-                    }
-                )
-                sync_payload["display_history"] = wire_payload(
-                    fallback, audit_capable=conn.audit_history
-                )
-                oversize = oversized_frame_report(sync_frame, _MAX_LINE_BYTES)
-            if oversize is not None:
-                # Still over the line limit even with the display window
-                # reduced. Nothing more can be shed HERE, and the guarantee the
-                # socket needs lives in ``_send_to``'s ceiling: it substitutes an
-                # ``error`` frame naming the size instead of writing a line this
-                # client cannot read (which used to kill its pump and cost the
-                # user the whole session). Reported here as well because this is
-                # where the field responsible is known — the next unbounded list
-                # should cost one log line to find, not a profiling session.
-                #
-                # What follows is deliberately unchanged and deliberately not
-                # prettier: the deltas queued below are applied against a base
-                # that never arrived, so the client refuses the first one by its
-                # own sequence rule (``attach_client`` raises "frontend state
-                # gap") and goes cold at once. That is the honest end for
-                # canonical state too large to send — fast, named, and no
-                # different in effect from the dead socket it replaces.
-                logger.error(
-                    "session runtime: frontend_sync does not fit — %s — and will be "
-                    "replaced by an error frame at the write",
-                    oversize,
-                )
-            await self._send_to(conn, sync_frame)
-            conn.frontend_ready = True
-            for pending in conn.frontend_pending:
-                self._enqueue_client_frame(conn, {"op": "frontend_update", "data": pending})
-            conn.frontend_pending.clear()
-        if conn.wants_events:
-            # In-flight transcript state rides the same canonical sync as every
-            # other full-TUI field. Raw events begin only after that frame.
+        elif conn.wants_events:
+            # A client that asked for BOTH the frontend and events waits for the
+            # sync task to open this gate (``_serve_frontend_sync``); one that
+            # asked only for events has no snapshot to be seeded behind and starts
+            # now.
+            #
+            # THE STREAM ITSELF STAYS INLINE — the relay, its writer task and the
+            # ``epoch``/``sequence`` check a client closes a gapped connection over
+            # are untouched. What moved is only the moment this gate opens, because
+            # that is the part that has to be ordered after the sync frame: a
+            # joiner receiving events first would fail its own gap check.
             conn.events_ready = True
         # A FLOOR on the bytes discarded by the CURRENT oversized line, not the
         # exact figure — see where it is incremented. Doubles as the "already
@@ -2748,6 +2975,17 @@ class RuntimeServer:
         # the `attach` half above computes `detached`.
         if conn.kind == "daemon" and was_registered:
             self.phone_watchers = 0
+        # The frontend bind's own task goes first, and for the same reason as the
+        # writer above: it is a connection-owned task that must not outlive the
+        # connection. Ordering matters here — cancel it BEFORE releasing the
+        # recorded subscription, so the shielded bind cannot register an
+        # unsubscribe nobody will ever call. ``_release_when_landed`` is the other
+        # half of that guarantee, and ``is not current_task`` covers the bind
+        # dropping its own connection when it fails.
+        sync_task = conn.frontend_sync_task
+        conn.frontend_sync_task = None
+        if sync_task is not None and sync_task is not asyncio.current_task():
+            sync_task.cancel()
         task = conn.event_writer_task
         conn.event_writer_task = None
         if task is not None:
@@ -3134,6 +3372,33 @@ class RuntimeServer:
         op = str(frame.get("op") or "")
         req = frame.get("req")
         try:
+            # A CONNECTION THAT IS STILL BINDING IS REACHABLE BUT NOT YET
+            # AUTHORITATIVE. ``_on_connection`` starts this connection's reader
+            # loop before the canonical ``frontend_sync`` is on the wire (the why
+            # is there: the bind is a cross-thread hop onto the session's loop,
+            # and running it inline used to leave a follower's socket deaf, so a
+            # guest could neither steer nor stop the session it was looking at).
+            # The price of that reachability is this gate: while the sync is
+            # pending, the connection may run :data:`_SYNC_PRIORITY_OPS` — health,
+            # and the three ways to regain control of a turn — plus the
+            # connection-local bookkeeping in :data:`_SYNC_LOCAL_OPS` that the dial
+            # path itself sends before it awaits the sync.
+            #
+            # Everything else is REFUSED, through the ordinary error-frame path
+            # below rather than by running it or silently dropping it: a
+            # ``prompt`` or a ``slash`` admitted here would let a client act on a
+            # connection that has not yet been told what state it is acting on.
+            # Refusing is also not a dead end — the flag clears the moment the
+            # sync settles, so the client's retry succeeds.
+            if (
+                conn.frontend_sync_pending
+                and op not in _SYNC_PRIORITY_OPS
+                and op not in _SYNC_LOCAL_OPS
+            ):
+                raise ValueError(
+                    "this viewer is still connecting to the session; the request was not "
+                    "run — retry once the interface has connected"
+                )
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
             # owner. The error frame is the reply — the attach screen surfaces
@@ -4251,8 +4516,15 @@ class RuntimeServer:
             # and the manager's ``RuntimeError: got Future … attached to a
             # different loop`` is SWALLOWED by its own
             # ``logger.warning("job %s task raised on cancel")`` while this op
-            # still acks success — a cancel that reports ``1`` and cancels
-            # nothing. This is the operator's second-Esc path.
+            # still acks success — the cancel's execution left parked on the
+            # wrong loop with its failure swallowed, and the caller shown a
+            # count. NOT "cancels nothing": the instrument that found this
+            # watched the child's ``CancelledError`` land and the job row settle
+            # in BOTH arms, so the claim that survives is the plane and the
+            # swallowed failure (review round 2, QA Q3 / design D-8). The
+            # stronger reading needs a child parked on the manager's abort
+            # signal rather than on a sleep, which no rig here built. This is
+            # the operator's second-Esc path.
             result = await self._handle_call_on_session_loop(cancel)
             return result if isinstance(result, int) else 0
         if op == "record_shell":

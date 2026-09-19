@@ -20,8 +20,9 @@ product: without a seam, a `prompt` reaching the handle from the runtime's
 thread answers with an asyncio cross-loop error while STILL running the turn on
 the runtime's thread. So three of the tests below pin the seam itself — the turn
 on the session's loop, the registrations on `session.py`'s own methods, and the
-two mutating `_dispatch` arms whose omission from the seam let a cancel report
-success while cancelling nothing — because those are the readings that made the
+two mutating `_dispatch` arms whose omission from the seam left a cancel's
+execution on the wrong loop with its failure swallowed — because those are the
+readings that made the
 un-marshalled version visible.
 
 WHAT IT DOES NOT CLAIM. Mounting a guest mid-turn still waits for the turn's
@@ -400,8 +401,11 @@ async def test_the_mutating_ops_run_on_the_sessions_loop(
     ``Session.cancel_subagents`` created its task and aborted a loop-bound
     ``AsyncJobManager`` signal there, and the manager's
     ``RuntimeError: got Future … attached to a different loop`` was SWALLOWED at
-    WARNING while the op still acked success. A cancel that cancels nothing,
-    reporting success: the operator's second-Esc path.
+    WARNING while the op still acked success — the plane and the swallowed
+    failure, not a count of zero. The rig that found this watched the child's
+    ``CancelledError`` land and the job row settle in BOTH arms, so the narrower
+    claim is the one that reproduces (review round 2, QA Q3 / design D-8). This
+    is the operator's second-Esc path.
 
     The instrument is the SESSION's own method, for the reason the registration
     test gives — a handle-side wrapper runs wherever it was awaited, which is the
@@ -463,6 +467,143 @@ async def test_the_mutating_ops_run_on_the_sessions_loop(
         await session.dispose()
 
 
+class _GuestWire:
+    """One guest connection kept open for several ops — the shape a viewer dials.
+
+    ``_request`` opens a connection per call, which cannot express "the bind
+    landed between op A and op B"; the gate test needs one socket across the
+    whole arc. Blocking by construction, like the other helpers in this module,
+    so it runs under ``asyncio.to_thread``.
+    """
+
+    def __init__(self, record: Any, *, timeout: float = ACK_TIMEOUT_S) -> None:
+        self.timeout = timeout
+        self.buf = b""
+        self.sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=timeout)
+        self.sock.settimeout(timeout)
+        self.sock.sendall(
+            json.dumps(
+                {
+                    "key": record.control_key,
+                    "client": "attach",
+                    "locality": "remote",
+                    "events": True,
+                    "frontend_state": True,
+                    "display_window": True,
+                }
+            ).encode()
+            + b"\n"
+        )
+
+    def read(self, timeout: float | None = None) -> dict[str, Any]:
+        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+        while time.monotonic() < deadline:
+            while b"\n" not in self.buf:
+                self.sock.settimeout(max(0.05, deadline - time.monotonic()))
+                chunk = self.sock.recv(1 << 20)
+                if not chunk:
+                    return {}
+                self.buf += chunk
+            line, _, self.buf = self.buf.partition(b"\n")
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+        return {}
+
+    def read_until(self, op: str, *, timeout: float | None = None) -> dict[str, Any]:
+        """The next frame carrying ``op`` — deltas may arrive before it."""
+        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
+        while time.monotonic() < deadline:
+            frame = self.read(max(0.05, deadline - time.monotonic()))
+            if not frame or frame.get("op") == op:
+                return frame
+        return {}
+
+    def call(self, frame: dict[str, Any]) -> dict[str, Any]:
+        self.sock.sendall(json.dumps(frame).encode() + b"\n")
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            reply = self.read(max(0.05, deadline - time.monotonic()))
+            if not reply or reply.get("req") == frame.get("req"):
+                return reply
+        return {}
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_a_binding_guest_is_live_but_not_yet_authoritative(
+    isolated_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """U6\'s remedy, and the price of it, in one walk of the guest wire.
+
+    A follower used to be admitted and then DEAF: the connect handler awaited
+    ``subscribe_frontend`` — a cross-thread hop onto the session's loop — before
+    entering the reader loop, so a guest got its welcome and then nothing at all
+    (review round 2, UX U6). The reader loop now starts first, which is what makes
+    the connection reachable before it is AUTHORITATIVE; the admission gate is
+    what keeps "reachable" from meaning "able to act on state it has not been told
+    about".
+
+    The BIND is what is stalled here, not the session's loop, so this is the
+    gate's own window with everything else healthy: liveness is admitted, a
+    session op is refused with a sentence rather than executed or dropped, and the
+    same op is admitted once the sync has landed.
+    """
+    real_subscribe_frontend = ServingSessionHandle.subscribe_frontend
+
+    def slow_frontend(self: Any, *args: Any, **kwargs: Any) -> Any:
+        async def later() -> Any:
+            await asyncio.sleep(0.6)
+            # AWAITED, and it matters: ``subscribe_frontend`` is an ``async def``
+            # on this handle, so returning its coroutine un-awaited would leave the
+            # test stalling the bind and then handing ``None``-with-a-warning up the
+            # seam instead of the subscription.
+            return await real_subscribe_frontend(self, *args, **kwargs)
+
+        return later()
+
+    monkeypatch.setattr(ServingSessionHandle, "subscribe_frontend", slow_frontend)
+    session, _handle, runtime = await _boot(tmp_path, _recording_stream([]))
+
+    def walk() -> dict[str, Any]:
+        wire = _GuestWire(runtime.record)
+        try:
+            return {
+                "welcome": wire.read(),
+                "ping": wire.call({"op": "ping", "req": 1}),
+                "refused": wire.call({"op": "prompt", "req": 2, "text": "act now"}),
+                "sync": wire.read_until("frontend_sync"),
+                "after": wire.call({"op": "snapshot", "req": 3}),
+            }
+        finally:
+            wire.close()
+
+    try:
+        seen = await asyncio.to_thread(walk)
+    finally:
+        runtime.close()
+        await asyncio.wait_for(session.dispose(), timeout=20)
+
+    assert seen["welcome"].get("op") == "projection", seen
+    # LIVENESS IS ADMITTED while the bind is still in flight.
+    assert seen["ping"].get("detail") == "pong", seen
+    # A SESSION OP IS REFUSED, through the ordinary error frame, with the sentence
+    # a person can act on — not silence, and not execution.
+    assert seen["refused"].get("op") == "error", seen
+    assert "still connecting" in str(seen["refused"].get("message")), seen
+    # The sync is not skipped, only deferred: it is the frame the refusal's
+    # "retry" waits for.
+    assert seen["sync"].get("op") == "frontend_sync", seen
+    # AND THE GATE OPENS once it lands — the same op is no longer refused.
+    assert "still connecting" not in str(seen["after"].get("message")), seen
+
+
 @pytest.mark.asyncio
 async def test_wait_until_published_answers_no_when_the_bind_fails(
     isolated_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -489,6 +630,47 @@ async def test_wait_until_published_answers_no_when_the_bind_fails(
         assert time.monotonic() - started < 5, "a failed bind must release the latch, not the bound"
         assert runtime.record.control_port == 0
     finally:
+        runtime.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_publish_wait_takes_its_gate_back(
+    isolated_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The TIMEOUT path leaves nothing behind (review round 2, NIT-3).
+
+    ``_settle_publication`` empties ``_publication_gates`` wholesale, so the
+    ordinary path cannot leak one — the test above drives the bind failure, which
+    settles. The path that can leak is a prologue that never settles INSIDE the
+    bound, and this is the only shape that reaches it: the registration hop is
+    held longer than the wait, so the latch is still shut when the waiter's
+    ``wait_for`` expires.
+    """
+    real_subscribe = ServingSessionHandle.subscribe
+
+    def slow_subscribe(self: Any, *args: Any, **kwargs: Any) -> Any:
+        async def wait_then_subscribe() -> Any:
+            await asyncio.sleep(1.0)
+            return real_subscribe(self, *args, **kwargs)
+
+        return wait_then_subscribe()
+
+    monkeypatch.setattr(ServingSessionHandle, "subscribe", slow_subscribe)
+    loop = asyncio.get_running_loop()
+    session = make_session(tmp_path, _recording_stream([]))
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    try:
+        assert await runtime.wait_until_published(timeout=0.1) is False
+        assert (
+            runtime._publication_gates == []
+        ), "the timed-out waiter left its gate in the list for the life of the runtime"
+    finally:
+        # Let the held registration land before teardown, so this test is not
+        # racing the very hop it held open.
+        await asyncio.sleep(1.2)
         runtime.close()
         await session.dispose()
 
