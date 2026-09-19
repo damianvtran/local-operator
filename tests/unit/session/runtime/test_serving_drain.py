@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from local_operator.buildwatch import UpdateLock
 from local_operator.harness.types import ImageContent
 from local_operator.harness.wake import WakeSchedule
 from local_operator.mobile.command_reservation import CommandReservations
@@ -106,6 +107,16 @@ class DrainHost:
         self._draining = False
         self._exit_committed = False
         self._disposing = False
+        # The UPDATE WINDOW's state, which the production ``__init__`` owns and the
+        # admission paths read beside the drain latch above (``serving`` docstring,
+        # ``types.UPDATING``). Empty here: every cell in this file is about a drain,
+        # and the window's own cells live in ``test_update_window.py`` — but the
+        # attributes have to exist, because ``prompt``/``steer``/``receive_peer_message``
+        # are the REAL methods and a host that omits them is a host that raises.
+        self._updating = ""
+        self._update_failed = ""
+        self._update_lock = UpdateLock()
+        self._applied_update = ""
         self._fold = SimpleNamespace(note_peer_message=lambda *_a, **_k: None)
 
     def may_refresh(self) -> str:

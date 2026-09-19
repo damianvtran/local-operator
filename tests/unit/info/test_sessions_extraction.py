@@ -20,9 +20,18 @@ from typing import Any
 
 import pytest
 
+from local_operator import buildwatch
 from local_operator.info.collect import session_rows
 from local_operator.info.model import SessionLine
 from local_operator.session.runtime.types import LEAVING_ON_SIGNAL
+from local_operator.update import BuildStamp
+
+#: The window pair the fixture publishes, built the way a runtime builds one
+#: (``BuildStamp.label()``), so the cell below pins the string a real record carries.
+UPDATE_PAIR = buildwatch.update_pair_text(
+    BuildStamp(version="0.59.9", source_ref=""),
+    BuildStamp(version="0.59.11", source_ref="ead71b673a9a"),
+)
 
 #: Frozen clock, so every derived duration is a constant rather than a function
 #: of when the suite ran.
@@ -50,6 +59,9 @@ class _Record:
     #: below on purpose: an older runtime's record has no such field, and the
     #: listing must render it as "not leaving" rather than raising.
     leaving: str = ""
+    #: The update window's pair (``SessionRecord.updating``), same additive contract
+    #: as the field above.
+    updating: str = ""
 
 
 @dataclass
@@ -168,6 +180,7 @@ EXPECTED = [
         # BYTE of every row for every other cell in this file — the drain has
         # its own cells below.
         "leaving": "",
+        "updating": "",
     },
     {
         "state": "live",
@@ -198,6 +211,7 @@ EXPECTED = [
         "completion_reason": "",
         # NOT LEAVING — present on every row so the published shape is stable.
         "leaving": "",
+        "updating": "",
     },
     {
         "state": "stale",
@@ -233,6 +247,7 @@ EXPECTED = [
         # default: a record written by an older runtime lists as "not leaving"
         # rather than raising.
         "leaving": "",
+        "updating": "",
     },
 ]
 
@@ -248,6 +263,20 @@ DRAINING = [
         replace(record, leaving=LEAVING_ON_SIGNAL) if index == 0 else record,
         state,
     )
+    for index, (record, state) in enumerate(FIXTURE)
+]
+
+
+#: ``FIXTURE`` with one session MID-UPDATE — the idle handover's window, the state
+#: the 2026-09-19 incident is about (``types.UPDATING``).
+#:
+#: A separate set for the reason ``DRAINING`` above is one: a non-empty value
+#: re-flows that row's tail and so every cell that reads the end of the row. And
+#: the two windows must not be confusable — a window is a runtime that HAS the
+#: message and is coming back, a drain is one that refuses it — so this fixture
+#: deliberately carries no ``leaving``, and the cell below asserts both halves.
+UPDATING_WINDOW = [
+    (replace(record, updating=UPDATE_PAIR) if index == 0 else record, state)
     for index, (record, state) in enumerate(FIXTURE)
 ]
 
@@ -457,7 +486,13 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     rows = session_rows()
     assert rows[0]["leaving"] == LEAVING_ON_SIGNAL
     assert [row["leaving"] for row in rows[1:]] == ["", ""]
-    assert "leaving" in rows[0] and list(rows[0])[-1] == "leaving"
+    # THE TRAILING KEY IS THE CONTRACT, so this asserts the rule rather than one
+    # column: a field is APPENDED to the published row and never inserted, so the
+    # key order every existing consumer reads is unchanged by it. ``updating`` is the
+    # newest extension (the update window, ``types.UPDATING``) and therefore the last
+    # one; ``leaving`` must still be present and before it.
+    assert "leaving" in rows[0] and list(rows[0]).index("leaving") < list(rows[0]).index("updating")
+    assert list(rows[0])[-1] == "updating"
 
     assert (
         cli.sessions_command(
@@ -483,6 +518,41 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     # change that has nothing to do with the LEAVING column.
     row = next(line for line in out.splitlines() if line.startswith("live"))
     assert re.match(r"live\s+4243\b", row), row
+
+
+def test_an_update_window_is_published_in_the_rows_and_named_in_the_table(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """The window reaches the same two surfaces the drain does, on its own terms.
+
+    The operator's requirement is that a session mid-update is VISIBLE ("/info"
+    and ``lop sessions`` are where a fleet is inspected), and the separation from
+    ``leaving`` is the part that has to hold: the two fields say opposite things
+    about the operator's message, so a row that carried the window in the drain's
+    column would send them to re-send a message that is already queued.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch, UPDATING_WINDOW)
+    rows = session_rows()
+    assert rows[0]["updating"] == UPDATE_PAIR
+    assert [row["updating"] for row in rows[1:]] == ["", ""]
+    assert rows[0]["leaving"] == "", "a window is not a drain: nothing is being refused"
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "UPDATING" in out
+    # The CELL, rendered from the pair through the one vocabulary: the new build is
+    # what a rotation script reads, so a raw pair or a bare phase would both be wrong.
+    assert "updating → 0.59.11@ead71b6" in out, out
+    assert "LEAVING" not in out, "the column appears only when a row carries one"
 
 
 def test_the_leaving_column_fits_the_shipped_phrase() -> None:
