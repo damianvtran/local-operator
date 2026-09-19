@@ -319,7 +319,7 @@ async def test_the_response_does_not_wait_out_the_probe_queue(
     # the ones that never started were cancelled rather than waited out — and the
     # pool's own width is the ceiling, or a worker would have had to free itself
     # inside a budget shorter than one probe.
-    assert len(dialled) < len(pids), (
-        f"dialled {len(dialled)} of {len(pids)} ports: the probe queue was waited out"
-    )
+    assert len(dialled) < len(
+        pids
+    ), f"dialled {len(dialled)} of {len(pids)} ports: the probe queue was waited out"
     assert len(dialled) <= roster.PROBE_WORKERS, len(dialled)
