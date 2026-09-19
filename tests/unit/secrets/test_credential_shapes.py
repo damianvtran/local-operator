@@ -1304,3 +1304,53 @@ def test_a_body_line_is_masked_as_tools_print_it(prefix: str, suffix: str) -> No
     assert _PEM_BODY not in scrubbed, f"body published for prefix={prefix!r} suffix={suffix!r}"
     assert scrubbed.endswith("NORMAL, more text\n"), scrubbed
     assert not any(hit.complete for hit in hits)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "1| ",  # this product's own `read`
+        "1\t",  # `cat -n`
+        "1:",  # `grep -n`
+        "1>",
+        "1->",
+        "1 -> ",
+        "3| 4| ",  # a doubled prefix
+        "12:\t",
+    ],
+)
+def test_a_line_number_prefix_never_ends_the_run(prefix: str) -> None:
+    """Q9-F1: every way a tool numbers a line, not just `N| `.
+
+    The prefix was one numeric spelling plus one space, so `cat -n`'s `number<TAB>`,
+    `grep -n`'s `number:`, an arrow prefix and a doubled prefix each ended the run and
+    published the WHOLE body on six of seven surfaces. Enumerating spellings is what cost
+    four rounds; the pattern now takes an optional, REPEATED prefix with any of the
+    separators these tools emit, spaces or a TAB around them.
+    """
+    import local_operator.redaction_shapes as rs
+
+    header = "-----BEGIN RSA PRIVATE KEY-----"
+    text = '{"private_key": "' + header + "\n" + prefix + _PEM_BODY + "\nNORMAL, more text\n"
+    scrubbed, hits = rs.scrub_shapes_with_hits(text)
+    assert _PEM_BODY not in scrubbed, f"body published for prefix {prefix!r}"
+    assert scrubbed.endswith("NORMAL, more text\n"), scrubbed
+    assert not any(hit.complete for hit in hits)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    ["12| done", "12| 42", "5| NORMAL, more text", "1|", "|"],
+)
+def test_a_numbered_prose_line_survives(prose: str) -> None:
+    """The other half of the generalisation: a numbered line of ORDINARY text stays.
+
+    A prefix must not turn prose into a credential-shaped line — `12| done` is a log
+    line, not key material.
+    """
+    import local_operator.redaction_shapes as rs
+
+    header = "-----BEGIN RSA PRIVATE KEY-----"
+    text = '{"private_key": "' + header + "\n" + _PEM_BODY + "\n" + prose + "\n"
+    scrubbed = rs.scrub_shapes(text)
+    assert prose in scrubbed, scrubbed
