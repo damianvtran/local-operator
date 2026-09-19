@@ -1146,7 +1146,12 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # The prefix spelling above is general on purpose (see the block comment); the
         # trailing `[ \t]*` before it is part of that spelling.
         #
-        # RECORDED, with the measurement, rather than implemented: a SHORT FINAL line
+        # RECORDED, with the SCOPE QA measured — wider than "the final line": a
+        # sub-floor line publishes on the plain bash pipe path whether it is LAST or in
+        # the MIDDLE, up to seven base64 characters per event (<=5 bytes of a ~1.7 KB
+        # key: real key bytes, not usable material), a `head -c` cut publishes a
+        # 5-character residue, and the total is unbounded across lines (60 characters
+        # over ten lines measured). A SHORT FINAL line
         # (`…<BODY>\nMIIEo`, and the second of two consecutive short lines) still
         # publishes. It cannot be distinguished from numbered PROSE — `…<BODY>\n12| done`
         # is the same shape, and the prose case is a requirement (a log line must survive),

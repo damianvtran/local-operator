@@ -301,6 +301,15 @@ class VariableStore:
         self._env = env
         self._config_values = dict(config_values or {})
         self._cwd = cwd or os.getcwd()
+        # PER STORE, never class-level: a mutable default in the class body is shared by
+        # every VariableStore in the process (`.add()` cannot create an instance
+        # attribute), so one session's registered credentials were scanned in another's
+        # results and the 64-value cap ran out process-wide — containment silently
+        # stopping for every session, with the warning logged once on nobody's behalf.
+        # Two consequences surfaced it: a red CI shard where an earlier test had filled
+        # the shared set, and the cross-session coupling the design note forbids.
+        self._shape_registrations: set[str] = set()
+        self._shape_registration_cap_logged = False
         # Insertion-ordered so the prompt block and ``/credential`` listing
         # agree. Values live only here: never serialized, never listed, never
         # returned by ``get``/``read``.
@@ -544,11 +553,6 @@ class VariableStore:
     #: counted and noticed — the ticket still fires — and only the CONTAINMENT
     #: stops. Counted in registered values, not matches: a URI contributes two.
     MAX_DETECTED_REGISTRATIONS = 64
-
-    #: The values this session has registered from SHAPE detections, and whether
-    #: the cap has already been logged (once per session, not once per result).
-    _shape_registrations: set[str] = set()
-    _shape_registration_cap_logged = False
 
     def _register_shape_hits(self, hits: Sequence[ShapeHit]) -> None:
         """Register each matched credential as a value to scrub, for this session.
