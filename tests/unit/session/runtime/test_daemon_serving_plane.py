@@ -18,9 +18,10 @@ which is exactly the claim the surfaces already make.
 AND THE HANDLE MARSHALS, because decoupling alone was measured to break the
 product: without a seam, a `prompt` reaching the handle from the runtime's
 thread answers with an asyncio cross-loop error while STILL running the turn on
-the runtime's thread, then leaves the session un-disposable. So two of the tests
-below pin the seam itself — the turn on the session's loop, the registrations on
-`session.py`'s own methods — because those are the readings that made the
+the runtime's thread. So three of the tests below pin the seam itself — the turn
+on the session's loop, the registrations on `session.py`'s own methods, and the
+two mutating `_dispatch` arms whose omission from the seam let a cancel report
+success while cancelling nothing — because those are the readings that made the
 un-marshalled version visible.
 
 WHAT IT DOES NOT CLAIM. Mounting a guest mid-turn still waits for the turn's
@@ -167,6 +168,21 @@ def _sample_states(samples: list[tuple[str, float]], stop: threading.Event) -> N
         time.sleep(2.0)
 
 
+async def _let_the_server_settle() -> None:
+    """Yield until the SERVER's side of a dial has finished with its loop.
+
+    A reply frame is written BEFORE the connection task moves on to the rest of
+    the op's epilogue — ``refresh()`` and ``_push()`` — and both of those are
+    hops ONTO this loop. A client that closes as soon as it has its ack
+    therefore leaves the connection task legitimately parked here, and a
+    teardown that follows immediately reports it as "Task was destroyed but it
+    is pending". The block these tests run through is what parks it; this is the
+    yield that lets it land, and it is why the settle exists rather than an
+    assertion being relaxed.
+    """
+    await asyncio.sleep(0.5)
+
+
 async def _boot(tmp_path: Path, stream: Any, *, kind: str = "daemon") -> tuple[Any, Any, Any]:
     """A real session + real handle + thread-hosted runtime, published."""
     loop = asyncio.get_running_loop()
@@ -230,6 +246,7 @@ async def test_a_busy_session_never_reads_wedged_and_still_answers(
         assert welcome is not None and welcome.get("op") == "projection"
         assert welcome_s < 1.0, f"a fresh dial waited {welcome_s:.2f}s for its welcome"
         assert results["ping"].get("detail") == "pong"
+        await _let_the_server_settle()
     finally:
         runtime.close()
         await session.dispose()
@@ -284,6 +301,7 @@ async def test_a_prompt_over_the_control_socket_runs_on_the_sessions_loop(
 
         # And the session still disposes: bounded, so a mis-execution that wedged
         # teardown fails here instead of hanging the suite.
+        await _let_the_server_settle()
         await asyncio.wait_for(session.dispose(), timeout=20)
     finally:
         runtime.close()
@@ -355,6 +373,91 @@ async def test_the_boot_registrations_run_on_the_sessions_loop(
         assert "session.subscribe_frontend" in names, names
         for name, ran in ran_on:
             assert ran is loop, f"{name} ran on {ran!r}, not the session's loop"
+        # Same settle, same reason as the two dialling tests above: this test's
+        # `ping` is acked before the connection task moves on to the epilogue
+        # (`refresh()`, `_push()`), both hops onto this loop, so without it the
+        # teardown below reports "Task was destroyed but it is pending". The
+        # leak is a property of DIALING at all, not of the block those two run
+        # through, which is why this third dialling test needs it too
+        # (review round 1, MINOR-4).
+        await _let_the_server_settle()
+    finally:
+        runtime.close()
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_mutating_ops_run_on_the_sessions_loop(
+    isolated_config: Path, tmp_path: Path
+) -> None:
+    """The two `_dispatch` arms that WRITE session state are hopped too.
+
+    Review round 1's BLOCKER (D-1), found independently by the code reviewer and
+    the design round: ``cancel_subagents_count`` and ``register_secret_redaction``
+    are session-mutating ``def``s that ``_dispatch`` reached on the RUNTIME's
+    loop, and neither was routed through ``_handle_call_on_session_loop``. The
+    consequence was measured, not argued — on the runtime's thread
+    ``Session.cancel_subagents`` created its task and aborted a loop-bound
+    ``AsyncJobManager`` signal there, and the manager's
+    ``RuntimeError: got Future … attached to a different loop`` was SWALLOWED at
+    WARNING while the op still acked success. A cancel that cancels nothing,
+    reporting success: the operator's second-Esc path.
+
+    The instrument is the SESSION's own method, for the reason the registration
+    test gives — a handle-side wrapper runs wherever it was awaited, which is the
+    frame whose loop is not in question.
+    """
+    ran_on: list[tuple[str, Any]] = []
+
+    loop = asyncio.get_running_loop()
+    session = make_session(tmp_path, _recording_stream([]))
+
+    # ``register_secret_redaction`` raises when there is no store (fail-closed),
+    # so the store is attached or that op never reaches the instrument.
+    from local_operator.variables import VariableStore
+
+    # noqa: SLF001 — ``_variables`` is the property's backing field.
+    session._variables = VariableStore(cwd=str(tmp_path))
+
+    real_cancel = session.cancel_subagents
+    real_register = session.variables.register_redaction
+
+    def cancel_subagents(*args: Any, **kwargs: Any) -> Any:
+        ran_on.append(("session.cancel_subagents", asyncio.get_running_loop()))
+        return real_cancel(*args, **kwargs)
+
+    def register_redaction(*args: Any, **kwargs: Any) -> Any:
+        ran_on.append(("session.variables.register_redaction", asyncio.get_running_loop()))
+        return real_register(*args, **kwargs)
+
+    session.cancel_subagents = cancel_subagents  # type: ignore[method-assign]
+    session.variables.register_redaction = register_redaction  # type: ignore[method-assign]
+
+    handle = ServingSessionHandle(session, loop, cwd=str(tmp_path))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    try:
+        assert await runtime.wait_until_published()
+        # On a WORKER thread: both ops are hopped onto the session's loop, which
+        # is THIS loop, so a synchronous dial would park the loop the runtime's
+        # thread is waiting on.
+        cancel = await asyncio.to_thread(
+            _request, runtime.record, {"op": "cancel_subagents", "req": 1}
+        )
+        assert cancel.get("op") == "result", cancel
+        register = await asyncio.to_thread(
+            _request,
+            runtime.record,
+            {"op": "register_secret_redaction", "req": 2, "value": "probe-value"},
+        )
+        assert register.get("op") == "result", register
+
+        names = [name for name, _ in ran_on]
+        assert "session.cancel_subagents" in names, names
+        assert "session.variables.register_redaction" in names, names
+        for name, ran in ran_on:
+            assert ran is loop, f"{name} ran on {ran!r}, not the session's loop"
+        await _let_the_server_settle()
     finally:
         runtime.close()
         await session.dispose()

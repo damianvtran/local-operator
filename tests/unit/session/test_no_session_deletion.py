@@ -655,6 +655,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "wakes/deliveries/<id>.json FILE",
     ),
+    # The serving plane's publication latch. `wait_until_published` takes its own
+    # waiter back OUT of `_publication_gates` when its bound expires, so a
+    # runtime whose boot prologue never settles cannot leave a dead
+    # `PublicationGate` behind in a list that every later waiter walks (review
+    # round 1, NIT-2). The call is a `list.remove` on an in-memory list of
+    # objects authored in this class: no receiver on that line is a path, and
+    # nothing in the method is derived from a session id or a transcript.
+    (
+        "local_operator/session/runtime/server.py::RuntimeServer.wait_until_published",
+        "<path>.remove",
+        "`_publication_gates.remove(gate)` — a LIST of in-memory PublicationGate "
+        "objects, never a path",
+    ),
     # The registry's staged write is now ONE helper shared by the discovery
     # record and the durable stop marker, and the reaper MOVES a dead record
     # into the run namespace's `reaped/` sidecar instead of unlinking it (a
