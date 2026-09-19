@@ -71,6 +71,29 @@ def _make_session(root: Path, session_id: str, name: str) -> Path:
     return directory
 
 
+def _journal_selection(directory: Path, selector: str) -> None:
+    """Append the selection row ``Session._persist_selected_model`` writes.
+
+    Written here rather than driven through a real ``Session`` because the
+    subject is the OBSERVER's read of a stored journal: what matters is the row
+    shape the reader keys on (``version == 2``, newest wins), not the live path
+    that produced it. Keep it in step with that method if the payload changes —
+    ``tests/unit/test_notification_isolation.py`` covers the reader itself
+    against the same shape.
+    """
+    row = {
+        "id": "selection-1",
+        "ts": 1.0,
+        "type": "custom",
+        "payload": {
+            "custom_type": "selected_model",
+            "details": {"version": 2, "selector": selector, "effort": None, "boot": None},
+        },
+    }
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
 @pytest.fixture
 def store_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """An isolated config root, with cmux scrubbed from the environment.
@@ -228,6 +251,62 @@ async def test_a_background_session_completing_is_announced(
         # Carries the session id, which is what makes the banner clickable
         # back into the session (`lop resume-click`).
         assert "bg0000000001" in argv
+
+
+@pytest.mark.asyncio
+async def test_a_test_hosted_session_is_never_announced(
+    store_root: Path, spawned: list[list[str]]
+) -> None:
+    """The mock hosting is not news on THIS surface either (review round 1, R1-1).
+
+    Reproduced as the reviewer found it — a real ``OperatorApp`` over a real
+    ``AttentionStore`` — where a ``test/test-model`` session produced the same
+    mock-bodied banner as an ``openai/gpt-5`` control, and a ``detached``
+    delivery row spent the mock completion's watermark on the way. The process
+    switch alone could never cover this surface: it silences the process that
+    ADOPTED the mock, and the observer here is the operator's own TUI reading a
+    store some rig filled.
+
+    BOTH ARMS IN ONE CELL, so the control is the same run and the same scan:
+    the real session is announced, the mock one is not.
+    """
+    _make_session(store_root, "current", "Current conversation")
+    mock_dir = _make_session(store_root, "m00000000001", "Mock provider smoke")
+    _journal_selection(mock_dir, "test/test-model")
+    real_dir = _make_session(store_root, "r00000000001", "Article-search-svc schema review")
+    _journal_selection(real_dir, "openai/gpt-5")
+
+    store = AttentionStore(store_root / "attention.db")
+    mock_identity = conversation_identity(mock_dir)
+    real_identity = conversation_identity(real_dir)
+    # An ESTABLISHED store: both sessions carry a prior, read completion, so the
+    # baseline is installed and the next publish is news.
+    for identity in (mock_identity, real_identity):
+        seed = str(uuid.uuid4())
+        store.publish(identity, seed, "old", "complete")
+        store.acknowledge(identity, seed)
+
+    app = OperatorApp(lambda: _factory(AttachedSession()))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await _booted(app, pilot)
+        await _settle(app, pilot)
+        spawned.clear()
+
+        mock_token = str(uuid.uuid4())
+        store.publish(mock_identity, mock_token, "mock-completion", "complete")
+        store.publish(real_identity, str(uuid.uuid4()), "real-completion", "complete")
+        await _settle(app, pilot, rounds=10)
+
+        assert len(spawned) == 1, spawned
+        assert "r00000000001" in " ".join(spawned[0]), spawned
+        assert "m00000000001" not in " ".join(spawned[0]), spawned
+
+    # The skip is a FILTER ABOVE THE CLAIM, and this is the assertion that
+    # distinguishes the two: the mock row is still claimable, so a surface that
+    # may legitimately announce it (a desktop app on a host where notifications
+    # are on) still can. Had the observer claimed and then suppressed it, this
+    # would be False and the completion would be announced by nobody.
+    assert store.claim_delivery(mock_identity, mock_token, "probe") is True
 
 
 @pytest.mark.asyncio

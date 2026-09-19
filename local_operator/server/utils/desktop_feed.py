@@ -1057,12 +1057,22 @@ class DesktopFeed:
             policy = self._focus_policy_for(self._session_id(identity), presence)
             if policy is None:
                 continue
-            if session_uses_test_hosting(self.sessions_dir / self._session_id(identity)):
+            if await asyncio.to_thread(
+                session_uses_test_hosting, self.sessions_dir / self._session_id(identity)
+            ):
                 # A mock conversation in this store, whoever ran it. Asked LAST
                 # of the candidate filters, because it is the only one that
                 # reads a file: a store with a hundred finished real sessions
                 # pays nothing for them (they stop at the cheap checks above),
                 # and one banner's worth of work for the row this saves.
+                #
+                # OFF THE LOOP, because that read is not cheap: it is a backward
+                # walk to the newest v2 row, measured at 57-745 ms on this
+                # operator's three largest journals, and this line runs for every
+                # candidate row. `session_uses_test_hosting` memoises its verdict
+                # on the journal's `(mtime_ns, size)`, so the steady tick is a
+                # `stat`; the thread hop is for the misses, which is the whole
+                # reason a serve backend must not do this inline.
                 continue
             candidates.append(
                 (identity, str(row["token"]), str(row["kind"]), policy, int(row["sequence"]))

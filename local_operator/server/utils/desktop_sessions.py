@@ -1389,7 +1389,14 @@ class DesktopSessionBridge:
             or state.get("kind") not in BRIDGE_NOTIFIABLE_KINDS
         ):
             return
-        if session_uses_test_hosting(self.root / "sessions" / self.session_id):
+        # OFF THE LOOP, like every neighbouring store read in this method's poll
+        # loop: the journal walk is 57-745 ms on this operator's largest
+        # sessions (`session_uses_test_hosting`'s docstring carries the
+        # measurements), and it is memoised on `(mtime_ns, size)` so only a miss
+        # pays it.
+        if await asyncio.to_thread(
+            session_uses_test_hosting, self.root / "sessions" / self.session_id
+        ):
             return
         try:
             # The payload builder calls the PUBLIC composer

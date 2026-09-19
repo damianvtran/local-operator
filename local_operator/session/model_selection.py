@@ -28,6 +28,19 @@ from local_operator.session.transcript import _iter_complete_lines_backward
 SELECTED_MODEL_CUSTOM_TYPE = "selected_model"
 SELECTION_VERSION = 2
 
+#: Memoised test-hosting verdicts for :func:`session_uses_test_hosting`, keyed on
+#: the journal's own ``(st_mtime_ns, st_size)`` (see that function's docstring for
+#: the measurements and for why the key is sound). Per-process rather than on
+#: disk: both callers are long-lived (the serve backend, a TUI's worker), and a
+#: durable copy would be derived state to invalidate for a scan that costs a
+#: ``stat`` once warm.
+_HOSTING_VERDICT_CACHE: dict[Path, tuple[tuple[int, int], bool]] = {}
+
+#: Bound on :data:`_HOSTING_VERDICT_CACHE`, in entries: a store has hundreds of
+#: sessions and the readers are long-lived, so the cache needs a ceiling even
+#: though a real tick touches the same handful of rows.
+_HOSTING_VERDICT_CACHE_MAX = 256
+
 
 @dataclass(frozen=True)
 class StoredModelSelection:
@@ -367,11 +380,33 @@ def session_uses_test_hosting(directory: Path) -> bool:
     switched off it is a real session again — for the store's benefit, since
     the process that ran the mock has already silenced itself.
 
-    CHEAP, by construction: only the newest ``version == 2`` row is read, via
-    the same bounded backward scan :func:`_settled_selection` uses (16.9 ms on
-    the operator's 262 MB journal, and the callers only ask about sessions they
-    are about to banner anyway — the composer reads the same transcript's tail
-    on the very next line).
+    IT IS NOT CHEAP, which this docstring used to claim. The backward scan is
+    bounded by the NEWEST ``version == 2`` row, so a journal whose row is near
+    the tail answers in **0.6 ms** — but a journal with no valid v2 row, or one
+    written near the boot end, walks the whole file. Measured here (2026-09-19):
+    a 63.5 MB synthetic journal answers in 0.6 ms with the row at the tail and
+    **121-135 ms** with it at the boot end or absent, and the operator's real
+    store costs 57 ms / **745 ms** / 94 ms for its three largest journals
+    (265 / 108 / 80 MB). The callers ask once per CANDIDATE ROW PER TICK, so
+    the old "cheap, by construction" claim was wrong in exactly the shape that
+    matters: a serve backend doing this inline stalls its own event loop, and
+    a TUI doing it on the loop drops frames.
+
+    SO IT IS MEMOISED, on the journal's own ``(st_mtime_ns, st_size)`` — the
+    same key and the same argument ``resume.py`` makes for its ``origin.json``
+    verdict cache: a verdict read out of a file whose bytes and timestamp are
+    unchanged cannot differ from the next read of it, and any write to the
+    journal moves the key. A steady poll therefore pays a ``stat`` per row
+    (~0 ms) and re-scans only when something was appended. The cache is
+    per-process and bounded (:data:`_HOSTING_VERDICT_CACHE_MAX`), because both
+    readers are long-lived and nothing here is a source of truth.
+
+    TWO THINGS ARE NEVER CACHED, for the reason ``resume.py`` gives for not
+    caching an unreadable marker: a missing journal and an unreadable one
+    describe the MOMENT — a store mid-write, EMFILE under descriptor pressure,
+    a network volume blip — and caching that as "not a test session" would
+    serve a transient outage for the life of the file. They answer ``False``
+    (the tolerant direction below) and are re-derived next time.
 
     TOLERANT, AND FAILS TOWARD NOTIFYING. ``False`` for a missing, unreadable
     or selection-free journal, and for an unusable row. Two reasons that is the
@@ -383,7 +418,46 @@ def session_uses_test_hosting(directory: Path) -> bool:
     :func:`Session._persist_selected_model`), so the version gate loses nothing
     in practice; a version-less legacy row is deliberately not enough to
     silence a session.
+
+    ASYNC CALLERS MUST RUN IT OFF THE LOOP (``asyncio.to_thread``) on a cache
+    miss, which is why :data:`_HOSTING_VERDICT_CACHE` exists to make the miss
+    rare rather than to excuse it.
+
+    THE OTHER GATE MAY STILL DISAGREE, and cannot be made to here: a process
+    that ran the mock stays silenced for life (``tui.notify.
+    suppress_notifications_for_process``), so a session that switched OFF the
+    mock answers ``False`` from this reader while that process's switch still
+    says no. Every leg asks the switch first, so the safe answer wins; the
+    asymmetry and why it is not reconciled are spelled out on that helper.
     """
+    path = directory / "transcript.jsonl"
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    key = (info.st_mtime_ns, info.st_size)
+    cached = _HOSTING_VERDICT_CACHE.get(directory)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    # A journal that exists but cannot be opened is a MOMENT, not a verdict —
+    # answered without caching, exactly as the docstring says.
+    try:
+        with path.open("rb"):
+            pass
+    except OSError:
+        return False
+    verdict = _read_test_hosting(directory)
+    if len(_HOSTING_VERDICT_CACHE) >= _HOSTING_VERDICT_CACHE_MAX:
+        # Insertion-ordered, so the oldest insert is the first key: a plain FIFO
+        # bound is enough here (the callers touch the same handful of rows every
+        # tick, and a re-read costs one stat when an entry is evicted).
+        _HOSTING_VERDICT_CACHE.pop(next(iter(_HOSTING_VERDICT_CACHE)))
+    _HOSTING_VERDICT_CACHE[directory] = (key, verdict)
+    return verdict
+
+
+def _read_test_hosting(directory: Path) -> bool:
+    """The uncached read behind :func:`session_uses_test_hosting`."""
     try:
         from local_operator.providers.registry import is_mock_provider
 

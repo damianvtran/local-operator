@@ -456,6 +456,23 @@ def suppress_notifications_for_process(reason: str = "") -> None:
     what it is doing at the moment. Idempotent, so the several call sites on
     one boot path log once rather than four times.
 
+    THE PRICE OF THAT, stated here because this is where a reader looks for it.
+    A session that switches OFF the test hosting mid-run (``/model
+    openai/gpt-5``) stays silenced in THIS process, while the store-side reader
+    the machine-wide legs carry
+    (``session.model_selection.session_uses_test_hosting``) reads the session's
+    LATEST spec and would let them announce. The two can disagree, and the
+    direction is the safe one — every leg asks this switch FIRST, so a silenced
+    process stays silent — but the honest statement is that the banner for such
+    a completion comes from ANOTHER surface on the machine (the operator's own
+    TUI, the desktop app), not from the process that opened the mock.
+    Making the two agree was considered and rejected: it would mean re-reading a
+    session's spec in the process that decides and clearing the switch when the
+    spec left the mock — and a spawned child inherits the switch, so clearing it
+    re-arms banners for children started after the switch, which is the very
+    failure this rule exists to stop. A process that just ran a mock is the last
+    one that should un-silence itself.
+
     WHO MAY CALL IT. The two choke points where a process adopts a mock model —
     ``providers/clients.py::client_for_spec`` (every mock stream passes it,
     including a mid-session switch to the mock) and
