@@ -94,14 +94,16 @@ Worth reading before adding a shard or a new term to the weight, because the
 are in ``scripts/gen_test_durations.py``):
 
 - **The partition is exact on the weights it is given.** LPT equalised the
-  measured per-file cost of the pre-regeneration split from 1.086x to 1.000x
-  once the manifest was current -- five shards at 42.2 test-min each.
-- **That is a weaker claim than it sounds, and the walls show why.** Measured
-  out of sample, the same partitions scored 1.196x and 1.205x, because a few
-  dominant files swing 0.6-1.6x between runs; and two runs of ONE manifest gave
+  measured per-file cost to 1.000x once the manifest was current -- five shards
+  at 42.2 test-min each -- against 1.189x-1.310x for the same weights scored on
+  a run they were not fitted to.
+- **That is a weaker claim than it sounds, and the walls show why.** A few
+  dominant files swing 0.6-1.6x between runs, so two runs of ONE manifest gave
   shard walls 634-785 s (1.24x) and 461-846 s (1.84x), with the slowest shard of
   the first the fastest of the second. More RUNS of junit timings are what
-  shrink that; more shards only divide it.
+  shrink that; more shards only divide it -- and score every comparison on the
+  same tree, because a pre-rebase and a post-rebase table are not comparable
+  (that error is recorded in ``scripts/gen_test_durations.py``).
 - **A tree that outgrows its job's ceiling fails a test, not a runner.**
   ``tests/unit/test_ci_hygiene.py`` asserts the ceiling against the projection
   printed below, in minutes, at the worker count the job really gets.
