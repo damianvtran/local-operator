@@ -463,7 +463,9 @@ def unpublish(pid: int, root: Path | None = None) -> None:
     session_registry.unpublish(pid, root, SERVE_RUN_DIRNAME)
 
 
-def scan(root: Path | None = None, *, reap: bool = True) -> list[tuple[ServeRecord, str]]:
+def scan(
+    root: Path | None = None, *, reap: bool = True, unreadable_ttl_s: float = 0.0
+) -> list[tuple[ServeRecord, str]]:
     """Every serve record, classified ``live`` / ``wedged`` / ``stale``.
 
     The classification is the shared one, asked for this namespace and this
@@ -478,8 +480,19 @@ def scan(root: Path | None = None, *, reap: bool = True) -> list[tuple[ServeReco
     turning it into a clean namespace and an unprotected tree. Every other caller
     wants the default, and until :func:`prune_serve_records` existed this
     namespace had none in production at all (review round 2, MAJOR 1).
+
+    ``unreadable_ttl_s`` falls through for the same reason and to the same place:
+    the retention window this namespace's reaper applies to a record that will not
+    parse (see :func:`prune_serve_records`). Defaulted here rather than only on the
+    shared scan so that a future caller of THIS function has to choose.
     """
-    return session_registry.scan(root, SERVE_RUN_DIRNAME, ServeRecord.from_json, reap=reap)
+    return session_registry.scan(
+        root,
+        SERVE_RUN_DIRNAME,
+        ServeRecord.from_json,
+        reap=reap,
+        unreadable_ttl_s=unreadable_ttl_s,
+    )
 
 
 def prune_serve_records(root: Path | None = None) -> int:
@@ -497,30 +510,51 @@ def prune_serve_records(root: Path | None = None) -> int:
     daemon's own boot, which is the one time a new writer joins this namespace.
 
     THE REAPING SCAN IS THE WHOLE IMPLEMENTATION, deliberately: :func:`scan`
-    already deletes a record it cannot parse, moves a proven-dead one into the
-    sidecar (bounded by ``registry._prune_reaped``'s 24 h / 200-file policy), and
-    leaves a live daemon's record alone, so a second reaper written here would be
-    the one place where "is this daemon alive" could come to disagree with every
-    other reader of this file.
+    already deletes a record it cannot parse (past the window below), moves a
+    proven-dead one into the sidecar (bounded by ``registry._prune_reaped``'s 24 h /
+    200-file policy), and leaves a live daemon's record alone, so a second reaper
+    written here would be the one place where "is this daemon alive" could come to
+    disagree with every other reader of this file.
 
-    The count is MEASURED rather than tracked — one listing before and one after —
+    A FRESH UNREADABLE RECORD SURVIVES THIS CALL, and that is the direction chosen
+    for the two halves of review round 3's MINOR 2 (report it as such):
+    ``unreadable_ttl_s`` makes this namespace age an unparseable entry out on
+    ``REAPED_MAX_AGE_S`` instead of deleting it at the first boot after it lands,
+    because that is exactly what ``journal.prune_boot_records`` does for the same
+    shape in ``run/host`` ("evidence is worth one look soon after it lands"). The
+    cost is stated rather than hidden: for up to a day this namespace reads
+    INCOMPLETE, which keeps every generation a prune would reclaim — and the same
+    reaper clears it once the window is out, on the next daemon boot, so the wedge
+    is bounded rather than permanent. The alternative (delete on sight) threw away
+    the only artifact an explanation of a torn serve record would start from, for a
+    protection that is usually redundant because the tree an unreadable record might
+    name is normally named by a live record too.
+
+    The names are MEASURED rather than tracked — one listing before and one after —
     because :func:`scan` reports records, not removals, and a number the caller can
-    only get by subtraction is worth less than the log line. A concurrent daemon
-    publishing between the two listings can only shrink it, which is why it is a
-    report and never a reconciliation.
+    only get by subtraction says nothing about WHAT went; the removed files are the
+    evidence (review round 3, MINOR 2). A concurrent daemon publishing between the
+    two listings can only shrink the difference, which is why this is a report and
+    never a reconciliation.
     """
     directory = session_registry.run_dir(root, SERVE_RUN_DIRNAME)
     try:
-        before = len(list(directory.glob("*.json")))
+        before = {entry.name for entry in directory.glob("*.json")}
     except OSError:  # pragma: no cover — unlistable: there is nothing to reap
         return 0
     if not before:
         return 0
-    scan(root)
+    scan(root, unreadable_ttl_s=session_registry.REAPED_MAX_AGE_S)
     try:
-        removed = max(0, before - len(list(directory.glob("*.json"))))
+        after = {entry.name for entry in directory.glob("*.json")}
     except OSError:  # pragma: no cover — the listing itself went away under us
         return 0
-    if removed:
-        logger.info("reaped %d dead or unreadable serve record(s) from %s", removed, directory)
-    return removed
+    gone = sorted(before - after)
+    if gone:
+        logger.info(
+            "reaped %d dead or unreadable serve record(s) from %s: %s",
+            len(gone),
+            directory,
+            ", ".join(gone),
+        )
+    return len(gone)

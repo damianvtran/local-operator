@@ -1652,8 +1652,19 @@ class TestPruning:
         ``lop update`` and nothing could ever clear it. The fix is ownership rather
         than a new policy: the daemon's own boot reaps the namespace it is joining,
         exactly as the runtime's boot path reaps ``run/host``.
+
+        AND IT REAPS IT ON THE SAME TERMS AS ``run/host`` (review round 3, MINOR 2):
+        a record that landed seconds ago SURVIVES the first boot, because it is the
+        only artifact that would name what was in it, and the same reaper clears it
+        once it has outlived ``REAPED_MAX_AGE_S``. The direction was chosen over
+        delete-on-sight because the two halves of one finding applied opposite
+        policies to the same shape; the cost, stated rather than hidden, is that this
+        namespace reads INCOMPLETE — and so the prune keeps every generation — for up
+        to a day. Both halves are asserted, because either alone passes for a reaper
+        that always deletes or one that never does.
         """
         from local_operator.server import registry as serve_registry
+        from local_operator.session.runtime import registry
         from local_operator.session.runtime.types import SERVE_RUN_DIRNAME
 
         for index in range(3):
@@ -1666,6 +1677,14 @@ class TestPruning:
 
         assert update_mod.referenced_install_roots().complete is False
 
+        # FRESH: evidence for one look, so the boot leaves it where it is.
+        assert serve_registry.prune_serve_records(root) == 0
+        assert torn.exists(), "a torn serve record younger than the window is evidence"
+        assert update_mod.referenced_install_roots().complete is False
+
+        # AGED: the same reaper takes it, and the KEEP goes with it.
+        old = time.time() - registry.REAPED_MAX_AGE_S - 60.0
+        os.utime(torn, (old, old))
         assert serve_registry.prune_serve_records(root) == 1
         assert not torn.exists(), "the daemon's own boot is what clears this namespace"
         assert update_mod.referenced_install_roots().complete is True
@@ -1735,6 +1754,9 @@ class TestPruning:
         assert plan.references_complete is False
         notice = "\n".join(update_mod.prune_notice_lines(plan))
         assert "no generations reclaimed" in notice, notice
+        # AND THE LINE NAMES THE NAMESPACE (review round 3, NIT 2): "a session or
+        # serve record could not be read" sent the operator looking for which one.
+        assert HOST_RUN_DIRNAME in notice, notice
 
         (directory / "corrupt.json").unlink()
         clean = update_mod.prune_generations(
@@ -1746,7 +1768,7 @@ class TestPruning:
     def test_reading_the_namespaces_creates_nothing(self, home: Path) -> None:
         """MINOR 1: the traversal claimed not to leave a directory, and did.
 
-        ``_entries_listed`` spells ``run/mobile`` itself rather than calling
+        ``_entry_names`` spells ``run/mobile`` itself rather than calling
         ``registry.run_dir`` — which CREATES the directory — with the rule stated in
         its own docstring. The registry-backed readers then called ``registry.scan``
         a few lines above, and ``scan`` resolves its directory through ``run_dir``,
@@ -1756,21 +1778,177 @@ class TestPruning:
         problem is that something died must not write — so the readers now answer
         an absent namespace without calling ``scan`` at all, and this pins that as
         a fact about the traversal rather than a sentence about one function.
+
+        THE SERVE ARM AND THE PARENT ARE ASSERTED HERE TOO (review round 3, MINOR 4),
+        because this docstring named three directories while the body asserted two:
+        reverting ONLY ``_serve_records_under``'s early return left all twelve related
+        tests green, so a regression in that half would have shipped silently. The
+        parent covers both arms at once, since ``registry.scan`` creates ``run/`` as
+        well as the namespace it is asked about.
         """
-        from local_operator.session.runtime.types import HOST_RUN_DIRNAME, RUN_DIRNAME
+        from local_operator.session.runtime.types import (
+            HOST_RUN_DIRNAME,
+            RUN_DIRNAME,
+            SERVE_RUN_DIRNAME,
+        )
 
         _install("0.59.0")
         root = home / ".local-operator"
-        assert not (root / RUN_DIRNAME).exists()
-        assert not (root / HOST_RUN_DIRNAME).exists()
+        namespaces = (root / RUN_DIRNAME, root / SERVE_RUN_DIRNAME, root / HOST_RUN_DIRNAME)
+        for directory in namespaces:
+            assert not directory.exists()
 
         referenced = update_mod.referenced_install_roots()
 
         assert referenced.complete is True
-        assert not (root / RUN_DIRNAME).exists(), "a read must not leave a directory behind"
-        assert not (root / HOST_RUN_DIRNAME).exists()
+        for directory in namespaces:
+            assert not directory.exists(), f"a read must not leave {directory} behind"
         update_mod.prune_generations(keep=0, referenced=referenced)
-        assert not (root / RUN_DIRNAME).exists(), "neither may the prune that follows it"
+        for directory in namespaces:
+            assert not directory.exists(), f"neither may the prune that follows it: {directory}"
+
+    @pytest.mark.parametrize("obstructed", ["run/mobile", "run/serve", "run"])
+    def test_an_obstructed_namespace_keeps_every_generation(
+        self, home: Path, obstructed: str
+    ) -> None:
+        """MAJOR 1 (review round 3): a path that is not a directory is UNREADABLE, not empty.
+
+        The round-2 MINOR 1 fix answered "this namespace names nothing" for anything
+        that failed ``is_dir()``, and two different states were filed under it: never
+        created (nothing to protect) and EXISTS AND IS NOT A DIRECTORY — a stray file,
+        an unpacked archive, a partial restore, a clobbered ``run/``. The second one
+        is the dangerous reading, because the records that were there are gone and
+        every runtime still importing from a generation has no record left to name it;
+        answering it ``complete`` removed three generations where the build before it
+        removed none (A/B on one store, both directions measured). The old code reached
+        the safe answer by accident — ``scan``'s ``mkdir`` raised ``FileExistsError``
+        on the obstruction and the outer handler called the read unreadable — so the
+        fix restores it deliberately rather than by accident, and this pins it.
+
+        THE CONTROL IS THE OTHER HALF: without it, a prune that simply never deletes
+        anything passes this test, so the obstruction is removed and the SAME prune is
+        required to reclaim.
+        """
+        generations = [_install(f"0.60.{index}") for index in range(4)]
+        root = home / ".local-operator"
+        blocked = root / obstructed
+        blocked.parent.mkdir(parents=True, exist_ok=True)
+        blocked.write_text("not a directory", encoding="utf-8")
+
+        referenced = update_mod.referenced_install_roots()
+        assert referenced.complete is False, f"a non-directory at {obstructed} is not an empty read"
+        assert any(obstructed in gap for gap in referenced.gaps), referenced.gaps
+
+        plan = update_mod.prune_generations(keep=0, referenced=referenced)
+        assert plan.removed == (), plan.decisions
+        assert all(generation.is_dir() for generation in generations)
+        notice = "\n".join(update_mod.prune_notice_lines(plan))
+        assert obstructed in notice, notice
+
+        blocked.unlink()
+        after = update_mod.prune_generations(
+            keep=0, referenced=update_mod.referenced_install_roots()
+        )
+        assert len(after.removed) == 3, after.decisions
+
+    def test_ordinary_churn_is_churn_and_a_torn_record_is_not(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """MINOR 3 (review round 3): the count mismatch is churn as often as corruption.
+
+        The registry-backed readers key on a COUNT mismatch, and ordinary churn
+        produces exactly the same counts as a torn file — measured on a healthy
+        machine: 2 listed/1 parsed when a session started between the scan and the
+        listing, 0 listed/1 parsed when one exited. Both were reported at ``warning``
+        with wording asserting a record that could not be read, and the plan then told
+        the operator their records were unreadable on a machine where nothing was. The
+        listing now brackets the read, so the shapes are told apart: a namespace that
+        changed mid-read is ``info`` and says so, a record that was there the whole
+        time and did not parse is the ``warning`` an operator can clear.
+
+        BOTH DIRECTIONS ARE ASSERTED, because the direction is what must NOT move: the
+        churn read is still INCOMPLETE (the record that appeared may name a tree), so
+        the prune still keeps every candidate.
+        """
+        from local_operator.session.runtime import registry
+        from local_operator.session.runtime.types import RUN_DIRNAME
+
+        generations = [_install(f"0.61.{index}") for index in range(3)]
+        root = home / ".local-operator"
+        self._publish_session(root, os.getpid(), "here", "/live/tree")
+
+        real_scan = registry.scan
+
+        def scan_with_a_session_starting_after_it(*args: object, **kwargs: object):
+            parsed = real_scan(*args, **kwargs)
+            # THE MEASURED SHAPE: a session that starts between the read and the
+            # listing, with no corrupt file anywhere on the machine.
+            self._publish_session(root, 2**22 - 5, "arrived", "/other/tree")
+            return parsed
+
+        with monkeypatch.context() as patch:
+            patch.setattr(registry, "scan", scan_with_a_session_starting_after_it)
+            with caplog.at_level(logging.INFO):
+                churned = update_mod.referenced_install_roots()
+
+        assert churned.complete is False, "the record that appeared may name a tree"
+        assert "changed while it was read" in caplog.text, caplog.text
+        assert "could not read" not in caplog.text, caplog.text
+        plan = update_mod.prune_generations(keep=0, referenced=churned)
+        assert plan.removed == (), plan.decisions
+        notice = "\n".join(update_mod.prune_notice_lines(plan))
+        assert "changed while it was read" in notice, notice
+        assert "could not be read" not in notice, notice
+        assert all(generation.is_dir() for generation in generations)
+
+        # THE OTHER SHAPE, on the same store: a record that was there for the whole
+        # read and did not parse is the one that earns the warning.
+        caplog.clear()
+        (root / RUN_DIRNAME / "corrupt.json").write_text("{ not json", encoding="utf-8")
+        with caplog.at_level(logging.INFO):
+            torn = update_mod.referenced_install_roots()
+
+        assert torn.complete is False
+        assert "could not read" in caplog.text, caplog.text
+        assert "changed while it was read" not in caplog.text, caplog.text
+        assert any(r.levelno == logging.WARNING for r in caplog.records), caplog.records
+
+    def test_a_record_stamped_in_the_future_cannot_be_immortal(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """MINOR 1 (review round 3): one mtime shape was aged out by NEITHER bound.
+
+        ``age > REAPED_MAX_AGE_S`` is NEGATIVE for a stamp in the future, so the age
+        rule never fires; the count rule keeps the NEWEST ``REAPED_MAX_FILES``, which
+        is exactly where a future-dated file sorts. Measured on the previous head: 250
+        dead records pruned, the future-dated one surviving both — a record that could
+        pin the namespace to ``incomplete`` forever, by mtime alone. Restore,
+        ``os.utime`` and clock skew are the plausible producers. A negative age is
+        stale now, and the line says why instead of promising a retention window that
+        cannot apply.
+        """
+        from local_operator.session.runtime import journal, registry
+        from local_operator.session.runtime.types import HOST_RUN_DIRNAME
+
+        monkeypatch.setattr(registry, "REAPED_MAX_FILES", 1)
+        _install("0.62.0")
+        root = home / ".local-operator"
+        directory = root / HOST_RUN_DIRNAME
+        directory.mkdir(parents=True, exist_ok=True)
+        for index in range(3):
+            (directory / f"{index}.json").write_text("{}", encoding="utf-8")
+        ahead = directory / "ahead.json"
+        ahead.write_text("{}", encoding="utf-8")
+        future = time.time() + 10 * 365 * 24 * 3600.0
+        os.utime(ahead, (future, future))
+
+        with caplog.at_level(logging.WARNING):
+            removed = journal.prune_boot_records(root)
+
+        assert removed == 4, removed
+        assert not ahead.exists(), "no mtime may make a record immortal"
+        assert "stamped in the future" in caplog.text, caplog.text
+        assert update_mod.referenced_install_roots().complete is True
 
     def test_a_keyerror_shaped_record_costs_only_itself(self, home: Path) -> None:
         """MINOR 3: the shared scan rescued a narrower list than its contract says.
