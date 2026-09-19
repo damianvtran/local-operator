@@ -10,6 +10,7 @@ from local_operator.harness.types import AbortSignal, TextContent, ToolContext
 from local_operator.web_search import read_tool
 from local_operator.web_search.cost import SEARCH_SPEND
 from local_operator.web_search.models import (
+    PROVIDER_IDS,
     SearchResponse,
     SearchSource,
     SearchUsage,
@@ -217,6 +218,32 @@ async def test_read_refuses_actionably_when_no_pages_were_captured(monkeypatch) 
     text = _text(result)
     assert "web_fetch" in text
     assert "DeepSeek" in text
+    # No DeepSeek credential in this environment, so the refusal names the command
+    # that fixes THAT: "if you excluded it, run search enable" was wrong for the
+    # common case and could not restore service (round-1 U3).
+    assert "local-operator login deepseek" in text
+    assert "search enable deepseek" not in text
+
+
+@pytest.mark.asyncio
+async def test_read_refusal_names_the_way_back_when_deepseek_is_excluded(monkeypatch) -> None:
+    """The excluded case keeps its own sentence: it is the one `enable` fixes."""
+    monkeypatch.setattr(
+        read_tool,
+        "load_read_settings",
+        lambda _manager: WebSearchSettings(
+            providers=["duckduckgo"],
+            excluded_providers=[value for value in PROVIDER_IDS if value != "duckduckgo"],
+        ),
+    )
+    result = await read_tool.execute_web_read(
+        "call-2", {"question": "What is the pricing?"}, None, None, _context()
+    )
+
+    assert result.is_error is True
+    text = _text(result)
+    assert "local-operator search enable deepseek" in text
+    assert "local-operator login deepseek" not in text
 
 
 @pytest.mark.asyncio
@@ -347,13 +374,15 @@ async def test_read_reports_an_expired_context_as_a_refusal(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_read_runs_a_search_first_when_asked(monkeypatch) -> None:
-    """The one-call form pins DeepSeek ONLY when the session has it configured.
+    """The one-call form pins DeepSeek whenever it can serve and is not excluded.
 
-    Forcing a provider that is not in the session's chain raises before any
-    search happens -- and that is the default install, where a DeepSeek model
-    login makes ``provider_available`` true while ``web_search.providers`` holds
-    duckduckgo/tavily/perplexity. Pinning on credential availability alone made
-    every ``search=`` read fail with "provider 'deepseek' is disabled".
+    DeepSeek is the only provider whose payload captures readable pages, so the
+    pin is what makes `search=` useful -- but the resolver now puts EVERY
+    available, non-excluded provider in the chain (a logged-in DeepSeek lands in
+    the metered band), so "available and not excluded" implies "in the chain" and
+    forcing it cannot fail the way the old "deepseek in settings.providers" gate
+    guarded against. An EXCLUDED DeepSeek is still never forced: the pin is the
+    user's own read path, and it must not override an explicit "never".
     """
     seen: dict[str, Any] = {}
 
@@ -384,11 +413,11 @@ async def test_read_runs_a_search_first_when_asked(monkeypatch) -> None:
 
     monkeypatch.setattr(read_tool, "resolve_deepseek_key", fake_key)
 
-    # Configured + available: pin it, because only it captures readable pages.
+    # Available and not excluded -- even though the stored prefix does not name it.
     monkeypatch.setattr(
         read_tool,
         "load_read_settings",
-        lambda _manager: WebSearchSettings(providers=["deepseek"]),
+        lambda _manager: WebSearchSettings(providers=["duckduckgo", "tavily"]),
     )
     result = await read_tool.execute_web_read(
         "call-7", {"question": "q", "search": "minerva adverse media"}, None, None, _context()
@@ -396,13 +425,15 @@ async def test_read_runs_a_search_first_when_asked(monkeypatch) -> None:
     assert seen == {"query": "minerva adverse media", "forced": "deepseek"}
     assert result.is_error is False
 
-    # NOT configured: fall back to the session's own chain rather than forcing a
-    # provider the chain does not contain.
+    # EXCLUDED: not forced, and the chain runs without it -- the refusal below
+    # then names the way back rather than pretending nothing is configured.
     PAGE_CONTEXTS.reset()
     monkeypatch.setattr(
         read_tool,
         "load_read_settings",
-        lambda _manager: WebSearchSettings(providers=["duckduckgo", "tavily"]),
+        lambda _manager: WebSearchSettings(
+            providers=["duckduckgo", "tavily"], excluded_providers=["deepseek"]
+        ),
     )
     seen.clear()
     result = await read_tool.execute_web_read(
