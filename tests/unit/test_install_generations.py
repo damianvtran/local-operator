@@ -30,6 +30,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1887,7 +1888,10 @@ class TestPruning:
 
         real_scan = registry.scan
 
-        def scan_with_a_session_starting_after_it(*args: object, **kwargs: object):
+        # ``Any`` rather than ``object``: the probe must forward ``scan``'s own
+        # arguments, and ``object`` is not assignable to any of its parameters — a
+        # real pyright failure in CI's type-check job, caught there and not locally.
+        def scan_with_a_session_starting_after_it(*args: Any, **kwargs: Any) -> Any:
             parsed = real_scan(*args, **kwargs)
             # THE MEASURED SHAPE: a session that starts between the read and the
             # listing, with no corrupt file anywhere on the machine.
