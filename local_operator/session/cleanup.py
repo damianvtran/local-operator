@@ -387,6 +387,218 @@ def remove_session_dir(
     return True
 
 
+#: The record ``policy`` string for a delete the USER asked for, as opposed to
+#: one of the automatic limits. It is what tells the two apart in the cleanup
+#: log, which is the only durable record either of them leaves.
+EXPLICIT_DELETE_POLICY = "explicit-delete"
+
+#: The user-facing sentence for each hard guard an explicit delete can be
+#: refused by, keyed by the reason :func:`_guard` returns.
+#:
+#: ONE SENTENCE PER GUARD rather than one blanket refusal, because the remedies
+#: differ: a running session is stopped, an armed wake is cancelled, unread mail
+#: is read. The mapping is closed on purpose — a reason it does not carry still
+#: refuses through the fallback below, so a guard added to :func:`_guard` later
+#: cannot quietly become a condition the user is allowed to delete through. That
+#: direction is the whole safety property here: every path that does not
+#: positively clear is a refusal.
+_GUARD_REFUSALS: dict[str, str] = {
+    "claimed by a live process": (
+        "That conversation is open in a running session. Stop it before deleting it."
+    ),
+    "leased by a live process": (
+        "That conversation is open in a running session. Stop it before deleting it."
+    ),
+    "has an armed wake": (
+        "That conversation has a wake armed for it. Cancel the wake before deleting it."
+    ),
+    "has unread spooled mail": (
+        "That conversation has unread messages waiting. Read them before deleting it."
+    ),
+}
+
+#: Used for a guard reason with no sentence of its own, INCLUDING a guard that
+#: could not be evaluated. Deliberately says "could not be checked" rather than
+#: naming a condition it did not observe: the user's next move differs, and
+#: telling them to stop a session that is not running sends them looking for
+#: something that is not there.
+_GUARD_REFUSAL_FALLBACK = (
+    "Whether that conversation is in use could not be checked, so nothing was deleted."
+)
+
+#: Used when the deletion itself declined for a reason that is not a guard —
+#: an unmarked or foreign store, which :func:`_refusal` owns. Nothing was
+#: removed and the caller must not report success, so it is a refusal rather
+#: than an empty answer.
+_DELETE_REFUSAL_FALLBACK = "That conversation could not be deleted, so nothing was removed."
+
+
+@dataclass(frozen=True)
+class DeleteOutcome:
+    """What an explicit delete decided, in the shape both frontends answer from.
+
+    ``found=False`` is the 404 case (unknown or malformed id) and carries no
+    sentence: the caller cannot act on the difference between the two, and
+    inventing a distinction with no remedy behind it is the rule the desktop
+    pin route already applies to its own 404.
+
+    ``refusal`` non-empty means NOTHING WAS DELETED and the sentence names why
+    — the 409 case. It is a field rather than an exception because the desktop
+    route has to map it to a status and the TUI paints it as a notice, and both
+    want the same sentence.
+
+    ``children`` is how many subagent runs this conversation launched, counted
+    so a receipt can say they are KEPT. It is information about the blast
+    radius, never an input to the decision: the deletion removes one directory.
+    """
+
+    session_id: str
+    found: bool
+    deleted: bool
+    refusal: str = ""
+    children: int = 0
+
+
+def _subagent_child_count(directory: Path) -> int:
+    """How many subagent runs ``directory`` launched, best-effort, or 0.
+
+    Read from the runtime's own roster sidecar through the same reader the
+    desktop's child routes use (``session.session._read_roster_sidecar``) rather
+    than re-parsing the file, so "how many children does this conversation
+    have" has one answer per conversation.
+
+    BEST-EFFORT IN THE SAFE DIRECTION: an unreadable roster reports 0, which
+    understates what survives the deletion — and what survives is the point.
+    The removal itself takes exactly one directory whether this answers or not,
+    so a low count can never widen the blast radius; it can only make a receipt
+    less informative.
+    """
+    try:
+        from local_operator.session.session import (
+            SUBAGENT_ROSTER_SIDECAR,
+            _read_roster_sidecar,
+        )
+
+        payload = _read_roster_sidecar(directory / SUBAGENT_ROSTER_SIDECAR)
+    except Exception:  # noqa: BLE001 — bookkeeping for a receipt, never a decision
+        return 0
+    if not payload:
+        return 0
+    records = payload.get("records")
+    return len(records) if isinstance(records, list) else 0
+
+
+def delete_session(
+    config_dir: Path,
+    session_id: str,
+    *,
+    actor: str,
+    now: float | None = None,
+    dry_run: bool = False,
+) -> DeleteOutcome:
+    """Delete ONE conversation the user explicitly asked to delete.
+
+    THE ONLY ENTRY POINT BESIDES THE POLICY, and it goes through
+    :func:`remove_session_dir` like everything else — this module stays the one
+    place a session directory is removed, which is what
+    ``tests/unit/session/test_no_session_deletion.py`` enforces by walking the
+    package for a second ``rmtree``.
+
+    WHAT AN EXPLICIT DELETE IS ALLOWED THAT THE POLICY IS NOT:
+
+    * **``RECENT_KEEP`` does not apply.** That constant bounds the AUTOMATIC
+      sweep — it exists so a routine run can never take the sessions someone is
+      most likely to still want. A person who names a conversation and confirms
+      a typed ``yes`` has answered the question ``RECENT_KEEP`` is a proxy for,
+      so applying it would refuse the one deletion that is certainly intended.
+    * **``CleanupPolicy.enabled`` does not apply.** The switch gates the
+      automatic reapers (the module docstring's incident is why the default is
+      off); an explicit delete is not one of them, and a user whose cleanup is
+      disabled must still be able to delete a conversation they asked to
+      delete.
+
+    WHAT IT IS NOT ALLOWED, and every one of these is a refusal rather than a
+    silent no-op:
+
+    * **A running session.** Every hard guard in :func:`_guard` applies
+      unchanged — a live claim, a live lease, an armed wake, unread spooled
+      mail, and a guard that could not be evaluated. Deleting the directory of a
+      session that is serving a turn leaves a process writing into a path that
+      no longer exists, and the ledger the user reads would lose the record of
+      the turn in flight. The refusal NAMES the guard it hit: the remedy is
+      different for each, and a generic "in use" would send the user to stop a
+      session that was never running.
+    * **A session the user did not open.** A delegated subagent run resolves by
+      id like any other session, but it is not a conversation anyone opened, so
+      an id that is not ``is_user_session`` is answered as unknown rather than
+      deleted. Deleting is irreversible and the user cannot see the row they are
+      naming; the reversible verbs that keep hidden runs reachable (``/v1/desktop
+      .../pin``, and ``/archive``) deliberately keep the looser id-shape-only
+      admission, which is the asymmetry this sentence is here to explain.
+
+    ``children`` on the outcome is the number of subagent runs the conversation
+    launched, so a receipt can say those are KEPT: this removes exactly the
+    addressed directory. Those runs live as siblings under ``sessions/`` and
+    nothing here touches them — stated because the opposite is the natural
+    assumption to make about a delete, and a user who assumed it would not look
+    for their delegated work again.
+
+    Deleting also leaves the PIN store and the ARCHIVE store consistent without
+    touching either: both prune at read against the session store, so an id
+    whose directory is gone reads back as neither pinned nor archived. That is
+    asserted in this feature's tests rather than assumed here, and it is why
+    this function has no import of either module. The wake index IS pruned
+    explicitly, the same way the automatic path does it.
+    """
+    from local_operator.resume import is_user_session
+    from local_operator.session.catalog import session_directory_name
+
+    # The same id-shape guard the pin store applies to a stored entry, reused
+    # rather than re-spelled: ``Path.__truediv__`` does not keep an id inside
+    # ``sessions/`` (``sessions / "/tmp"`` IS ``/tmp``), so the shape test has
+    # to come before the id is joined onto the store.
+    if not session_directory_name(session_id) or session_id != Path(session_id).name:
+        return DeleteOutcome(session_id=session_id, found=False, deleted=False)
+    directory = config_dir / "sessions" / session_id
+    if not directory.is_dir() or not is_user_session(directory):
+        return DeleteOutcome(session_id=session_id, found=False, deleted=False)
+
+    children = _subagent_child_count(directory)
+    clock = time.time() if now is None else now
+    reason = _guard(directory, config_dir, clock)
+    if reason is not None:
+        return DeleteOutcome(
+            session_id=session_id,
+            found=True,
+            deleted=False,
+            refusal=_GUARD_REFUSALS.get(reason, _GUARD_REFUSAL_FALLBACK),
+            children=children,
+        )
+    removed = remove_session_dir(
+        directory,
+        config_dir=config_dir,
+        policy=EXPLICIT_DELETE_POLICY,
+        reason="the user deleted this conversation",
+        actor=actor,
+        title=_session_title(directory),
+        dry_run=dry_run,
+    )
+    if removed and not dry_run:
+        # Unreachable while the wake guard holds (an armed wake is a refusal
+        # above), and still done: a wake entry whose session is gone is an index
+        # pointing at nothing, and the guard is one config write away from being
+        # bypassed by hand. Same call the automatic path makes, for the same
+        # reason.
+        _forget_wake_entry(config_dir, session_id)
+    return DeleteOutcome(
+        session_id=session_id,
+        found=True,
+        deleted=removed,
+        refusal="" if removed else _DELETE_REFUSAL_FALLBACK,
+        children=children,
+    )
+
+
 def _append_cleanup_log(sessions_dir: Path, record: dict[str, Any]) -> None:
     try:
         with (sessions_dir / CLEANUP_LOG_NAME).open("a", encoding="utf-8") as handle:
@@ -544,40 +756,56 @@ class GuardUnavailable(Exception):
 def _picker_rows(config_dir: Path) -> list[str]:
     """Every id ``/resume`` would list, in the picker's order.
 
-    Owned by ``resume.recent_sessions`` — ONE ranking, consumed by the picker
-    and by this policy — and imported lazily because ``resume`` is heavier
-    than this module wants at import. The first :data:`RECENT_KEEP` are the
-    recent guard; the whole list is the unit ``max_sessions`` counts in. A
-    picker that cannot be listed is a guard that cannot be evaluated:
-    :class:`GuardUnavailable`, never an empty list.
+        Owned by ``resume.recent_sessions`` — ONE ranking, consumed by the picker
+        and by this policy — and imported lazily because ``resume`` is heavier
+        than this module wants at import. The first :data:`RECENT_KEEP` are the
+        recent guard; the whole list is the unit ``max_sessions`` counts in. A
+        picker that cannot be listed is a guard that cannot be evaluated:
+        :class:`GuardUnavailable`, never an empty list.
 
-    ``revalidate=True`` IS THE GUARD, NOT AN OPTIMISATION KNOB. The scan
-    normally serves an armed fast path that can report a session as hidden for
-    up to ``REVALIDATE_EVERY`` polls after its marker was removed — cheap and
-    correct for a sidebar that re-polls every 2 seconds and self-heals. But
-    the recent-N guard IS this listing, so a session missing from it is not
-    merely invisible here: it is UNPROTECTED, and this module deletes. Agent
-    review round 1 (R2) reproduced it in production order — the TUI's first
-    poll arms the path, the operator deletes ``origin.json`` by hand (the
-    supported un-hide gesture), and startup maintenance 0.75 s later chose
-    that session for removal while a fresh scan protected it as "one of the
-    10 most recent". Deletion is irreversible; a stale display is not.
+        ``revalidate=True`` IS THE GUARD, NOT AN OPTIMISATION KNOB. The scan
+        normally serves an armed fast path that can report a session as hidden for
+        up to ``REVALIDATE_EVERY`` polls after its marker was removed — cheap and
+        correct for a sidebar that re-polls every 2 seconds and self-heals. But
+        the recent-N guard IS this listing, so a session missing from it is not
+        merely invisible here: it is UNPROTECTED, and this module deletes. Agent
+        review round 1 (R2) reproduced it in production order — the TUI's first
+        poll arms the path, the operator deletes ``origin.json`` by hand (the
+        supported un-hide gesture), and startup maintenance 0.75 s later chose
+        that session for removal while a fresh scan protected it as "one of the
+        10 most recent". Deletion is irreversible; a stale display is not.
 
-    The cost is deliberate and measured: this scan is 4,101 syscalls against
-    an armed scan's 151 on a 4,000-directory store, paid ONCE per cleanup run
-    — startup maintenance and periodic sweeps — rather than every 2 seconds,
-    which is the poll this optimisation exists to make cheap. The sidebar's
-    own steady-state poll is unchanged at 266 and still flat across a 40x
-    store. It also makes the guard independent of whichever poll happened to
-    precede it, which is the property that makes this decidable at all, and it
-    does not starve the sidebar's repair: a forced revalidation rewrites the
-    verdict cache, so a hand-un-hidden session becomes visible at that scan
-    rather than later.
+        The cost is deliberate and measured: this scan is 4,101 syscalls against
+        an armed scan's 151 on a 4,000-directory store, paid ONCE per cleanup run
+        — startup maintenance and periodic sweeps — rather than every 2 seconds,
+        which is the poll this optimisation exists to make cheap. The sidebar's
+        own steady-state poll is unchanged at 266 and still flat across a 40x
+        store. It also makes the guard independent of whichever poll happened to
+        precede it, which is the property that makes this decidable at all, and it
+        does not starve the sidebar's repair: a forced revalidation rewrites the
+        verdict cache, so a hand-un-hidden session becomes visible at that scan
+        rather than later.
+
+        ``include_archived=True`` IS LOAD-BEARING, and it is the one place in the
+        codebase that must override the listing's default. An archived session is
+        hidden from every list a user browses, but it is still the user's work and
+        still something this policy protects: with the default filter it would
+    drop out of the recent-N guard the moment it was archived — precisely the
+        sessions a user archives are the OLDER ones, so it would drop straight
+        into the ranked set every limit draws from — and a routine sweep would
+        delete the archive. Archive hides a conversation; it does not declare it
+        disposable, and nothing else in this module may read the listing with the
+        archive filter on.
     """
     try:
         from local_operator.resume import recent_sessions
 
-        return [name for name, _stamp in recent_sessions(config_dir, limit=None, revalidate=True)]
+        return [
+            name
+            for name, _stamp in recent_sessions(
+                config_dir, limit=None, revalidate=True, include_archived=True
+            )
+        ]
     except Exception as exc:  # noqa: BLE001 — re-raised as the typed refusal
         raise GuardUnavailable(f"recent-session picker: {type(exc).__name__}: {exc}") from exc
 

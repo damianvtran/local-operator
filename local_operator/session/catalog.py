@@ -18,6 +18,7 @@ from typing import Any
 
 from local_operator.info.model import format_duration
 from local_operator.resume import SessionRow
+from local_operator.session.archived import archived_ids
 from local_operator.session.creation import session_category, session_created_at
 
 logger = logging.getLogger(__name__)
@@ -787,7 +788,8 @@ def cached_session_rows(
     directory: Path,
     limit: int = CATALOG_SCAN_LIMIT,
     *,
-    candidates: list[tuple[str, float, str]] | None = None,
+    candidates: list[tuple[str, float, str, bool]] | None = None,
+    include_archived: bool = False,
 ) -> list[SessionRow]:
     """:func:`recent_session_rows` for the poll, memoized on transcript stat.
 
@@ -813,7 +815,9 @@ def cached_session_rows(
     rows: list[SessionRow] = []
     fresh: dict[Path, tuple[tuple[float, int], SessionRow]] = {}
     selected = (
-        candidates if candidates is not None else _recent_sessions_with_origin(directory, limit)
+        candidates
+        if candidates is not None
+        else _recent_sessions_with_origin(directory, limit, include_archived=include_archived)
     )
     # Resolved ONCE for the store, not per row. ``Path.resolve()`` is a
     # ``realpath`` — an ``lstat`` per path component — and the loop below called
@@ -829,7 +833,7 @@ def cached_session_rows(
     # a cache MISS (a row rebuilt from disk, which is correct by construction),
     # never a wrong or stale row.
     root = (directory / "sessions").resolve()
-    for session_id, mtime, origin in selected:
+    for session_id, mtime, origin, archived in selected:
         session_dir = directory / "sessions" / session_id
         key = _row_stat_key(session_dir)
         cached = _ROW_CACHE.get(root / session_id)
@@ -838,7 +842,15 @@ def cached_session_rows(
             # cannot have changed, so neither read is repeated. `mtime` is
             # taken fresh from the scan regardless — it also tracks the inbox
             # spool. It updates displayed age, never immutable creation order.
-            row = cached[1]._replace(mtime=mtime)
+            #
+            # ``archived`` is re-stamped from THIS scan's row for the same
+            # reason ``mtime`` is: the cache key is the transcript's stat, and
+            # archiving a conversation writes nothing to the transcript — so a
+            # row built before the archive would otherwise serve
+            # ``archived=False`` for as long as the conversation is not
+            # appended to, which for the picker's reveal toggle is precisely
+            # the row it exists to reveal.
+            row = cached[1]._replace(mtime=mtime, archived=archived)
         else:
             row = SessionRow(
                 session_id,
@@ -846,6 +858,7 @@ def cached_session_rows(
                 session_name(session_dir),
                 forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
                 created_at=session_created_at(session_dir),
+                archived=archived,
             )
         rows.append(row)
         if key is not None:
@@ -893,6 +906,7 @@ def load_catalog(
     limit: int = CATALOG_SCAN_LIMIT,
     *,
     include_subagents: bool = False,
+    include_archived: bool = False,
     pinned_hidden_ids: Sequence[str] = (),
     pinned_off_page: Sequence[str] = (),
 ) -> list[CatalogEntry]:
@@ -919,6 +933,20 @@ def load_catalog(
     and default to the behaviour every existing caller already has: with the
     layer off this function issues exactly the syscalls it did before.
 
+    ``include_archived`` asks the same question of the OTHER visibility axis,
+    and it is off by default because this listing IS a default listing: an
+    archived conversation is hidden everywhere a user browses and is still
+    resumable by explicit id. The filter itself lives in ``_scan_sessions``,
+    which every listing surface reaches through, so the sidebar, the picker,
+    the desktop catalogue and the search cannot disagree about which
+    conversations exist to be offered.
+
+    THE PINS FOLLOW THE SAME RULE, which is the case worth stating because it is
+    the one a reader will look for: an archived session that is PINNED is not
+    offered here, so it cannot appear in a sidebar's pinned section — and it
+    also does not become a PHANTOM there, because ``pinned_off_page`` resolves
+    ids out of the ranked list this function already filtered. The pin store is
+    untouched, so un-archiving restores the row to its section.
     ``pinned_off_page`` keeps individually pinned sessions resolvable when the
     PAGE does not carry them — the same promise ``pinned_hidden_ids`` makes on
     the other axis, and a different one: a hidden id is absent because the
@@ -952,8 +980,11 @@ def load_catalog(
     # see the docstring above, and ``_scan_sessions`` for the boundary it draws
     # between a store that is not there (an empty listing, still) and a store
     # that cannot be read (an unavailable one).
-    candidates, hidden = _scan_sessions(directory, strict=True)
-    source = {session_id: (session_id, mtime, origin) for session_id, mtime, origin in candidates}
+    candidates, hidden = _scan_sessions(directory, strict=True, include_archived=include_archived)
+    source = {
+        session_id: (session_id, mtime, origin, archived)
+        for session_id, mtime, origin, archived in candidates
+    }
     # -- the opt-in subagent layer (PROPOSAL 5a) ----------------------------
     #
     # Every syscall this layer costs is inside this branch: with both keyword
@@ -975,6 +1006,14 @@ def load_catalog(
         pinned = [session_id for session_id in pinned_hidden_ids if session_id in hidden]
         wanted = set(hidden) if include_subagents else set()
         wanted.update(pinned)
+        # THE HIDDEN LAYER IS THE SAME LISTING, so it answers the archive
+        # question the same way. The index is read only inside this branch,
+        # which is off in every default poll: an archived subagent run is a row
+        # the user archived on purpose, and offering it here would put it back
+        # on screen through the one section a reveal toggle cannot reach.
+        archived_hidden = archived_ids(directory)
+        if not include_archived:
+            wanted = {session_id for session_id in wanted if session_id not in archived_hidden}
         stamped: list[tuple[float, str]] = []
         for session_id in wanted:
             transcript = directory / "sessions" / session_id / TRANSCRIPT_FILENAME
@@ -1000,7 +1039,12 @@ def load_catalog(
             # Added to `source` ONLY -- never to `candidates`, never to `rows`.
             # `source` is what the single `cached_session_rows` call below looks
             # rows up in, so this alone is what buys these rows their real name.
-            source[session_id] = (session_id, mtimes[session_id], "subagent")
+            source[session_id] = (
+                session_id,
+                mtimes[session_id],
+                "subagent",
+                session_id in archived_hidden,
+            )
             subagent_entries.append(
                 CatalogEntry(
                     SessionRow(
@@ -1026,8 +1070,12 @@ def load_catalog(
             mtime,
             "",
             created_at=session_created_at(directory / "sessions" / session_id),
+            # Stamped from the scan's own read so a row that never reaches
+            # ``cached_session_rows`` below (nothing here guarantees every
+            # candidate is hydrated) still states its archive state honestly.
+            archived=archived,
         )
-        for session_id, mtime, _ in candidates
+        for session_id, mtime, _origin, archived in candidates
     ]
     # One directory read plus a stat per unlisted candidate, NOT
     # ``glob("*/desktop.json")``. The glob looks equivalent and is not: a
@@ -1061,6 +1109,16 @@ def load_catalog(
         # expected reply to that stat, not a broken read.
         logger.warning("session catalogue could not probe for desktop records", exc_info=True)
         raise SessionStoreUnavailable(_store_error_detail(error)) from error
+    #: Did the desktop-marker loop contribute any row? Only that loop can
+    #: produce a row the scan's archive predicate never saw (see the filter
+    #: below it), and it runs only when the directory walk succeeded.
+    marker_rows_added = False
+    #: The archive index, read LAZILY by that loop — only when it actually
+    #: appends a row — and used for BOTH halves of the answer: which marker rows
+    #: to drop, and what flag to stamp on the ones that stay. A store with no
+    #: desktop drafts therefore pays nothing for a case it does not have, and the
+    #: one read serves the filter and the flag so the two cannot disagree.
+    archived_marker_rows: frozenset[str] | None = None
     if entries is not None:
         with entries:
             for entry in _scanned_entries(entries):
@@ -1104,14 +1162,30 @@ def load_catalog(
                 # the path taken by every directory in the store.
                 if not session_directory_name(entry.name):
                     continue
+                if archived_marker_rows is None:
+                    archived_marker_rows = archived_ids(directory)
                 rows.append(
                     SessionRow(
                         entry.name,
                         marker_mtime,
                         "",
                         created_at=session_created_at(Path(entry.path)),
+                        # Stamped from THIS listing's read, the same one the
+                        # filter below uses. Without it an archived draft would
+                        # be revealed by ``include_archived`` while claiming to
+                        # be unarchived — the flag is what the renderer paints
+                        # the mark from, so the row would be indistinguishable
+                        # from an ordinary one.
+                        archived=entry.name in archived_marker_rows,
                     )
                 )
+                marker_rows_added = True
+    # A TRANSCRIPT-LESS DRAFT IS THE ONE POPULATION THE SCAN CANNOT HAVE
+    # FILTERED, and this is why the filter is repeated for it rather than
+    # assumed: these directories have no activity, so ``_scan_sessions`` never
+    # ranks them as candidates and its archive predicate never saw them.
+    if marker_rows_added and not include_archived:
+        rows = [row for row in rows if row.id not in (archived_marker_rows or frozenset())]
     rows = decorate_rows(directory, rows, include_live=True)
     identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
     attention: dict[str, dict[str, Any]] = {}
@@ -1198,7 +1272,14 @@ def load_catalog(
         (
             replace(
                 entry,
-                row=entry.row._replace(name=named[entry.id].name, forked=named[entry.id].forked),
+                row=entry.row._replace(
+                    name=named[entry.id].name,
+                    forked=named[entry.id].forked,
+                    # From the hydrating row, which stamped it from the scan
+                    # rather than from the row cache; see
+                    # ``cached_session_rows``.
+                    archived=named[entry.id].archived,
+                ),
             )
             if entry.id in named
             else entry
