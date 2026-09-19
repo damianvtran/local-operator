@@ -15,9 +15,13 @@ import os
 import threading
 from pathlib import Path
 
+import pytest
+
+from local_operator.harness.types import StreamEndEvent
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime.inbox import (
     MAX_INBOX_ROWS,
+    SOURCE_USER,
     InboxLine,
     append_inbox,
     drain_inbox,
@@ -27,8 +31,20 @@ from local_operator.session.runtime.inbox import (
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 
-def _line(text: str) -> InboxLine:
-    return InboxLine(text=text, sender={"pid": 1, "conversation_name": "peer"})
+def _line(
+    text: str,
+    *,
+    source: str = "",
+    command_id: str = "",
+    wake: bool = False,
+) -> InboxLine:
+    return InboxLine(
+        text=text,
+        sender={"pid": 1, "conversation_name": "peer"},
+        source=source,
+        command_id=command_id,
+        wake=wake,
+    )
 
 
 def test_append_then_drain_preserves_write_order(tmp_path: Path) -> None:
@@ -361,3 +377,44 @@ def test_the_drain_reads_a_property_the_session_exposes(tmp_path: Path) -> None:
     assert delivered == 1
     assert handle.received == ["a quiet note"]
     assert not (transcript.directory / "inbox.jsonl").read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_a_twice_spooled_owner_row_steers_once_inside_the_first_turn(tmp_path: Path) -> None:
+    """The mid-turn arm's own repeat, on a REAL session (agent review round 1, R3).
+
+    ``process._drain_inbox_into`` answers a repeated owner row from the durable
+    index, but the mid-turn twin steers instead, and a queued steer reaches the
+    index only when the correction is drained at a later tool boundary — so two
+    rows carrying one ``command_id`` in ONE batch would steer the user's text
+    twice. The batch-local seen-set closes exactly that window; this cell drives
+    the real ``Session._drain_spooled_peer_inbox`` over a real spool and asserts
+    one queued correction rather than two.
+    """
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / TRANSCRIPT_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "ts": 1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for _ in range(2):
+        assert append_inbox(
+            session_dir,
+            _line("deploy the fix", source=SOURCE_USER, command_id="p" * 8, wake=True),
+        )
+
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    await session._drain_spooled_peer_inbox()
+
+    queued = session.queued_steering()
+    assert len(queued) == 1, [getattr(item, "id", "") for item in queued]

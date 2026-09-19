@@ -713,6 +713,122 @@ async def test_the_boot_drain_runs_a_spooled_owner_prompt_as_the_users_own(
 
 
 @pytest.mark.asyncio
+async def test_an_owner_row_behind_a_wake_row_is_delivered_not_swallowed(tmp_path: Path) -> None:
+    """The drain's write order makes a mid-turn owner row ORDINARY (QA round 1, Q-1).
+
+    The rows are delivered in the order they were written, and a peer
+    ``mailbox``+``wake`` row DRIVES A TURN — so an owner row spooled after one
+    lands while the session is streaming, where ``Session.prompt`` rejects
+    outright. Measured live before the fix: the receipt had already told the user
+    their message would run, the boot counted the row as delivered, and the
+    message was in NO transcript — destroyed, not deferred.
+
+    The real guard's own wording is what the double raises, because that is the
+    string the delivery path matches on.
+    """
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    append_inbox(tmp_path, InboxLine(text="fyi from a peer", sender={}, mode="mailbox", wake=True))
+    append_inbox(
+        tmp_path,
+        InboxLine(
+            text="deploy the fix",
+            sender={},
+            mode="mailbox",
+            wake=True,
+            source=SOURCE_USER,
+            command_id="p" * 8,
+        ),
+    )
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+    prompts: list[str] = []
+    steers: list[tuple[str, str]] = []
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path), session_id="s1")
+
+        def has_admitted_command(self, command_id: str) -> bool:
+            return False
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            # The peer row's wake turn is running by the time the owner row is
+            # read; this is the guard `Session.prompt` raises into.
+            raise RuntimeError("session is already streaming; use steer() to inject mid-turn")
+
+        async def steer(self, text, *, command_id=None, **kwargs):
+            steers.append((text, command_id or ""))
+            return "steering queued"
+
+        async def receive_peer_message(self, text, *, mode="mailbox", wake=False, sender=None):
+            return "recorded"
+
+    assert (
+        await child_mod._drain_inbox_into(Handle()) == 2
+    ), "a row that did not reach the session must not be counted as delivered"
+    assert prompts == []
+    assert steers == [
+        ("deploy the fix", "p" * 8)
+    ], "the owner's words must join the turn in flight, carrying their own id: " + repr(steers)
+
+
+@pytest.mark.asyncio
+async def test_a_swallowed_owner_row_is_loud_and_never_counted(tmp_path: Path, caplog) -> None:
+    """A failure of the user's own message is news, not a debug line (QA round 1, Q-1).
+
+    The receipt already told the user it would run and the spool is the only
+    place the message exists, so a row that cannot be delivered must be counted
+    as NOT delivered and named by its own id — the boot log used to claim
+    ``delivered 2`` while the operator's message was in no transcript.
+    """
+    import logging as _logging
+
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    append_inbox(
+        tmp_path,
+        InboxLine(
+            text="deploy the fix",
+            sender={},
+            mode="mailbox",
+            wake=True,
+            source=SOURCE_USER,
+            command_id="q" * 8,
+        ),
+    )
+    (tmp_path / "transcript.jsonl").write_text(
+        '{"id":"h1","ts":1,"type":"message","payload":{"kind":"message",'
+        '"role":"user","content":[]}}\n',
+        encoding="utf-8",
+    )
+
+    class Handle:
+        _session = SimpleNamespace(transcript=SimpleNamespace(directory=tmp_path), session_id="s1")
+
+        async def prompt(self, text, images=None, command_id=None, **kwargs):
+            raise RuntimeError("the provider lane died")
+
+    with caplog.at_level(_logging.ERROR):
+        delivered = await child_mod._drain_inbox_into(Handle())
+
+    assert delivered == 0, "a message that never ran must not be counted as delivered"
+    assert any("q" * 8 in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_twice_spooled_owner_prompt_runs_once(tmp_path: Path) -> None:
     """The durable index is what dedupes a handover, not the spool file.
 

@@ -600,12 +600,14 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                 # an internal token and the machinery rather than the session the
                 # operator is in (design round 1, D2). What it ALSO no longer
                 # says is "send it again" — this caller cannot watch a turn that
-                # another process will run, but the message it handed over is
+                # another process will run, but the message it handed over IS
                 # queued for exactly that process (memo §4.2 piece 3), so the
-                # sentence names the handover instead of asking for the operation
-                # the refusal just performed.
+                # sentence is the DEFERRAL, named as a deferral, rather than
+                # asking for the operation the refusal just performed (agent
+                # review round 1, R2; QA round 1, Q-2).
                 assert isinstance(caught.value, RuntimeRetiring), caught.value
-                assert RuntimeRetiring.TAIL_HANDOVER in str(caught.value), str(caught.value)
+                assert caught.value.TAIL == RuntimeRetiring.TAIL_QUEUED, caught.value.TAIL
+                assert "queued" in str(caught.value), str(caught.value)
                 assert "send it again" not in str(caught.value), str(caught.value)
 
                 # (i, continued) THE OWNER'S OWN MESSAGE IS QUEUED, NOT REFUSED.
@@ -624,6 +626,48 @@ async def test_a_busy_runtime_drains_at_the_bound_without_losing_its_turn(
                     command_id=queued_command,
                 )
                 assert queued_receipt == SPOOL_RECEIPT_PROMPT, queued_receipt
+                # AND A RETRY UNDER THE SAME ID IS NOT A SECOND TURN. The
+                # admission identity is append-only, so there are now TWO spool
+                # rows carrying one command id and the assertion further down
+                # (`[entry.id for entry in ours] == [queued_command]`) is the
+                # real-index proof that the successor ran it exactly once — the
+                # same claim the unit cells make, but against the production
+                # path rather than a double (agent review round 1, R4).
+                retry_receipt = await client.prompt(
+                    "run the report while the build moves",
+                    command_id=queued_command,
+                )
+                assert retry_receipt == SPOOL_RECEIPT_PROMPT, retry_receipt
+
+                # (i, continued 2) AND A COLD VIEWER CAN STILL JOIN THIS SESSION
+                # WHILE IT DRAINS. This is the axis the whole change exists for,
+                # and the one the first attempt broke: the engage answers a
+                # draining record with the leaving detail rather than a raise, so
+                # the joiner's bind REACHES the runtime that holds the transcript
+                # instead of reporting a live session as "reconnecting" without
+                # dialling it at all (agent review round 1, R1 — measured there
+                # as 0 dials on the broken head, 1 on main). A fresh facade is the
+                # joiner a second TUI, a `lop` mount or the desktop proxy is.
+                joiner = await asyncio.wait_for(
+                    AttachedSession.connect(
+                        record, session_id, config_dir=config, takeover_factory=_never_take_over
+                    ),
+                    timeout=30,
+                )
+                try:
+                    assert not joiner.is_cold, "a live, draining session was unreachable"
+                    assert joiner._client is not None, "the joiner holds no control connection"
+                    # ANSWERABLE too: its own message is queued for the successor
+                    # rather than refused, which is the receipt the incident's
+                    # users never got.
+                    joiner_command = str(uuid.uuid4())
+                    joiner_receipt = await joiner._client.prompt(
+                        "and resend that to the team",
+                        command_id=joiner_command,
+                    )
+                    assert joiner_receipt == SPOOL_RECEIPT_PROMPT, joiner_receipt
+                finally:
+                    await joiner.dispose()
 
                 # (iii) a peer message is spooled for the successor instead.
                 sent = subprocess.run(

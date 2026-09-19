@@ -5630,6 +5630,14 @@ class Session:
         except Exception:  # noqa: BLE001 — a bad spool must not fail the turn
             logger.warning("peer inbox drain failed", exc_info=True)
             return
+        # Rows of ONE batch carrying the same owner ``command_id``: ``drain_inbox``
+        # empties the file, so a crash between the read and its receipt can
+        # re-deliver the whole batch, and the steer arm's identity does not
+        # reach the transcript index until the correction is drained at a later
+        # tool boundary — long after this loop has moved on (agent review round
+        # 1, R3). The set makes the batch's own repeats answerable here; the
+        # durable index remains the authority for the turn arm.
+        seen_owner_ids: set[str] = set()
         for line in lines:
             try:
                 # The row's own ``wake`` is forwarded, never guessed: a row
@@ -5650,7 +5658,7 @@ class Session:
                 # acquiring a peer's provenance envelope (see
                 # ``_run_spooled_owner_prompt``).
                 if getattr(line, "source", "") == SOURCE_USER:
-                    self._run_spooled_owner_prompt(line)
+                    self._run_spooled_owner_prompt(line, seen=seen_owner_ids)
                 else:
                     await self.receive_peer_message(
                         line.text,
@@ -5661,7 +5669,7 @@ class Session:
             except Exception:  # noqa: BLE001 — one bad row is not the others' problem
                 logger.warning("spooled peer message could not be delivered", exc_info=True)
 
-    def _run_spooled_owner_prompt(self, line: Any) -> None:
+    def _run_spooled_owner_prompt(self, line: Any, *, seen: set[str]) -> None:
         """Join one spooled OWNER prompt to the turn already running.
 
         The owner's own message, spooled by a runtime that was leaving a
@@ -5680,11 +5688,19 @@ class Session:
         message id the viewer painted the row under so its announcement matches
         that row instead of adding one.
 
-        The durable index answers the twice-spooled case for the same reason it
-        does at boot (``_run_owner_prompt``): the identity is append-only, and a
-        retried prompt must not land twice.
+        The durable index answers the already-appended case for the same reason
+        it does at boot (``process._run_owner_prompt``): the identity is
+        append-only, and a retried prompt must not land twice. ``seen`` covers
+        what the index cannot — two rows of one batch with the same id, where
+        the first steer is still queued and has therefore not reached the index
+        yet (agent review round 1, R3).
         """
         command_id = str(getattr(line, "command_id", "") or "")
+        if command_id:
+            if command_id in seen:
+                logger.info("spooled prompt %s is a repeat within this batch; skipping", command_id)
+                return
+            seen.add(command_id)
         if command_id and self.has_admitted_command(command_id):
             logger.info("spooled prompt already in the transcript; not steering it twice")
             return

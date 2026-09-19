@@ -514,30 +514,19 @@ def _spawn_failure_reason(capture: Path) -> tuple[str, str]:
     return (lines[-1] if lines else ""), ""
 
 
-class _OwnerDraining(Exception):
-    """The target runtime has committed to leaving; a successor is owed.
-
-    Raised by :func:`_deliver` when the record it was handed carries a drain's
-    own phrase (``types.LEAVING_FOR_BUILD`` / ``LEAVING_ON_SIGNAL`` — written by
-    ``server.note_leaving`` in the same call that announces the ``retiring``
-    frame, so this reads state the runtime already publishes rather than a new
-    signal).
-
-    INTERNAL TO THIS MODULE, and never an error a caller sees:
-    :func:`engage_runtime` catches it and falls through to the arbitration rungs
-    below, which is where a successor comes from. Why a raise rather than a
-    returned sentence: the only errands that carry it (``WarmErrand``,
-    ``WakeErrand``) deliver nothing, because reaching a live runtime IS their
-    completed errand — so returning the drain as a ``detail`` would report a
-    COMPLETED handover for a runtime that will never run the work.
-
-    Measured cost of the lie this replaces, on the operator's host: a live,
-    heartbeating session (pid 70950, 0.59.7) latched the stale-build drain at
-    20:32:29 and refused every prompt for 1 h 40 m, while every engage that
-    followed — including the TUI's own warm re-bind on the ``retiring`` frame —
-    was answered ``runtime ready``. The bind reported success, set
-    ``_warm_engage_started``, and nothing ever started a successor.
-    """
+#: What an engage reports for a record whose runtime has COMMITTED TO LEAVING.
+#:
+#: NOT ``"runtime ready"``, because that errand is not completed: the runtime
+#: will run nothing new. NOT an error either, and that second half is the whole
+#: reason this is a detail rather than a raise: the record is LIVE and dialable,
+#: and the caller's bind must reach it — a joiner lands on the runtime that
+#: holds the transcript, which is the property the session is joinable by
+#: (memo §4.2, and ``attached.py``'s read path already names the same state
+#: ``owner-leaving``). Measured consequence of getting this wrong: raising here
+#: instead made a cold viewer unable to join a live, draining session at all —
+#: zero dials, ``ConnectionError("the runtime is reconnecting")``, which is the
+#: exact axis this change exists to fix (agent review round 1, R1).
+LEAVING_DETAIL = "owner-leaving"
 
 
 async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, bool]:
@@ -550,13 +539,24 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
         # the moment it loads (see WakeErrand). Reaching a live runtime IS the
         # completed errand for both.
         #
-        # AND THAT IS WHY A LEAVING RUNTIME CANNOT ANSWER FOR EITHER. The record
-        # is still published and the heartbeat is still fresh for the whole
-        # drain, so without this term the warm bind a viewer performs the moment
-        # it sees ``retiring`` is told the runtime is ready and stops looking.
+        # AND THAT IS WHY A LEAVING RUNTIME MUST NOT ANSWER ``runtime ready``.
+        # The record stays published and the heartbeat stays fresh for the whole
+        # drain (measured: 1 h 40 m, 21 sessions at once), so the unqualified
+        # answer made the warm re-bind every front end performs on the
+        # ``retiring`` frame report a completed errand against a runtime that
+        # will run nothing — the bind then set ``_warm_engage_started`` and
+        # nothing ever started a successor.
+        #
+        # The answer is the STATE, not a failure: ``LEAVING_DETAIL`` tells the
+        # caller the record is live and leaving, so its bind dials it (the
+        # joiner lands on the runtime holding the transcript) while nothing here
+        # claims the errand was delivered. A successor is started by whichever
+        # engage runs after this runtime's dispose releases the claim — see
+        # ``_lease_holder`` in the loop below.
         leaving = str(getattr(record, "leaving", "") or "")
         if leaving:
-            raise _OwnerDraining(leaving)
+            logger.debug("engage: %s is leaving (%s); not reporting it ready", session_id, leaving)
+            return LEAVING_DETAIL, False
         return "runtime ready", False
     if isinstance(work, PeerMessageErrand):
         detail = await send_peer_message(
@@ -574,6 +574,15 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
     try:
         await client.connect(record, session_id)
         op = "prompt" if isinstance(work, PromptErrand) else "steer"
+        # THE RECEIPT IS RETURNED AS ITSELF, deferral and all. A draining
+        # runtime answers a prompt with ``inbox.SPOOL_RECEIPT_PROMPT`` — the
+        # message is on the successor's spool, not in this runtime's history —
+        # and this detail is what the caller renders. Collapsing it into the
+        # success shape (or letting a caller hardcode "prompt admitted" over
+        # it) would report a stronger fact than the one established, which is
+        # the same defect the warm/wake arm above refuses (agent review round
+        # 1, R2). ``duplicate`` stays the runtime's own, so the idempotency
+        # seam is unchanged.
         return await client.request_ack_with_duplicate(
             op,
             text=work.text,
@@ -738,18 +747,6 @@ async def engage_runtime(
                     spawned=spawned,
                     duplicate=duplicate,
                 )
-            except _OwnerDraining as exc:
-                # THE DRAIN LATCHED BETWEEN THE SCAN AND THE DELIVERY. The
-                # record was ordinary when it was read and is leaving now, which
-                # is a window this loop cannot close by reading harder — the
-                # latch is a client-side event (``server.note_leaving``) and the
-                # engage is in another process. It is not a failure and not a
-                # retry: the errand has no completed form against this runtime,
-                # so the loop falls through to the same rungs it uses when a
-                # record is draining at scan time — the predecessor still holds
-                # the transcript claim, so the pass WAITS, and the spawn happens
-                # the moment that claim is released (``_lease_holder``, below).
-                logger.debug("engage: %s is leaving (%s); a successor is owed", session_id, exc)
             except (ConnectionError, TimeoutError) as exc:
                 # The runtime died between the scan and the dial. Re-loop: the
                 # record will be gone next pass and we spawn a fresh one.

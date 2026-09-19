@@ -38,7 +38,7 @@ from local_operator.session.runtime.inbox import (
     peek_inbox,
 )
 from local_operator.session.runtime.serving import ServingSessionHandle
-from local_operator.session.runtime.types import SIGNAL_DRAIN_CAUSE
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD, SIGNAL_DRAIN_CAUSE
 from local_operator.session.session import Session
 
 
@@ -262,6 +262,7 @@ def test_the_refusal_describes_the_departure_the_handle_latched(tmp_path: Path) 
     assert signalled.HEAD == RuntimeRetiring.HEAD_SIGNALLED, signalled.HEAD
     assert "newer build" not in str(signalled), str(signalled)
     assert "send it again" in str(signalled), "the one act left still has to be named"
+    assert signalled.TAIL == RuntimeRetiring.TAIL, signalled.TAIL
     assert SIGNAL_DRAIN_CAUSE not in str(signalled), str(signalled)
 
     host, _session = _host(tmp_path, busy=True)
@@ -271,7 +272,29 @@ def test_the_refusal_describes_the_departure_the_handle_latched(tmp_path: Path) 
     assert build.trigger == RuntimeRetiring.BUILD, build.trigger
     assert build.HEAD == RuntimeRetiring.HEAD, build.HEAD
     assert build.TAIL == RuntimeRetiring.TAIL_HANDOVER, build.TAIL
-    assert "send it again" not in str(build), "a build drain owes a successor: " + str(build)
+    # IT ASKS FOR THE RE-SEND AND NAMES THE DESTINATION, which is the pair of
+    # facts this arm can establish (UX round 1, U5). What it must NOT do is
+    # claim the message is on its way: this accessor serves the arms where the
+    # spool FAILED (an unwritable inbox) or was impossible (an attachment), and
+    # the previous wording — "a newer build is starting here to carry on" — read
+    # as carriage while the user's message had been dropped (QA round 1, Q-2).
+    assert "send it again" in str(build), "the next act has to be named: " + str(build)
+    assert "new build is up" in str(build), str(build)
+    assert "carry on" not in str(build), "this arm did not carry the message: " + str(build)
+    assert "queued" not in str(build), "this arm did not queue the message: " + str(build)
+
+    # THE FOURTH ARM: a message that IS carried. Reached where the caller cannot
+    # wait for a turn this runtime will not run — a loop's ``prompt_and_wait``,
+    # which correlates on an ``AgentEndEvent`` from THIS runtime and would
+    # otherwise be handed a refusal that tells it to re-send a message the
+    # successor already holds (``attached.prompt_and_wait``).
+    carried = RuntimeRetiring(leaving=LEAVING_FOR_BUILD, queued=True)
+    assert carried.trigger == RuntimeRetiring.BUILD, carried.trigger
+    assert carried.TAIL == RuntimeRetiring.TAIL_QUEUED, carried.TAIL
+    assert "queued" in str(carried), str(carried)
+    assert "send it again" not in str(
+        carried
+    ), "a carried message must not be handed advice to re-send it: " + str(carried)
 
     # ``/move`` and the viewer-driven rotate share that cause token and latch
     # through ``begin_retire``: no build was compared and no successor is owed,
@@ -940,15 +963,17 @@ async def test_a_committed_exit_refuses_a_prompt_instead(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_a_draining_build_refusal_says_a_successor_is_starting(tmp_path: Path) -> None:
+async def test_a_build_refusal_names_the_new_build_and_asks_for_the_resend(tmp_path: Path) -> None:
     """The refusal's own half of the handover, when it is the only answer left.
 
     A build drain OWES a successor, so the old tail — "send it again once the
     session is running again" — sent the operator to do the one thing the
-    refusal had just refused. The sentence now names the handover instead, and
-    it stops short of promising the message itself: this is the fallback path
-    (nowhere to spool, or an exit already committed), so what is established is
-    the handover, not the carriage.
+    refusal had just refused. The sentence names the new build as the place the
+    message goes, and asks for the re-send, which is the one act left: this is
+    the fallback path (nowhere to spool, or an exit already committed), so what
+    is established is the handover and the lost message, never its carriage —
+    an earlier wording promised exactly that while the spool had failed (QA
+    round 1, Q-2).
     """
     host, session = _prompt_host(tmp_path)
     assert host.begin_drain("runtime-retired", "declined 3x") is True
@@ -961,8 +986,48 @@ async def test_a_draining_build_refusal_says_a_successor_is_starting(tmp_path: P
         )
 
     assert caught.value.trigger == RuntimeRetiring.BUILD
-    assert "a newer build is starting here" in str(caught.value)
-    assert "send it again" not in str(caught.value)
+    assert "send it again once the new build is up" in str(caught.value)
+    assert "carry on" not in str(caught.value), str(caught.value)
+    assert "queued" not in str(caught.value), str(caught.value)
+    assert not [line for line in session.notes if "queued" in line]
+
+
+@pytest.mark.asyncio
+async def test_an_attached_viewer_never_decides_whether_a_drain_may_exit(tmp_path: Path) -> None:
+    """§4.6 pinned on the REAL predicate, as the confound UX round 1 handed over.
+
+    UX round 1 declined to file a finding it could not pin: "if an idle viewer
+    really does cause an early retirement that cuts a running tool, that is a
+    second mechanism for the operator's incident". The exit path's liveness is
+    ``may_refresh`` → ``is_busy``, and an attached front end is not a term in
+    either direction — a viewer must not HOLD a drain open (that is the five-hour
+    resident runtime ``may_refresh``'s own docstring exists to prevent) and must
+    not RELEASE one either. The second half is the one that would cut in-flight
+    work, so both are asserted here with a client count registered.
+
+    ``DrainHost`` stubs ``may_refresh`` for every other cell in this file, so the
+    production predicate is bound explicitly: the property under test IS the
+    production one, and a stub cannot carry it.
+    """
+    host, session = _prompt_host(tmp_path, busy=False)
+    # Bound through `Any`: this file's hosts are partial doubles of the class the
+    # real predicate is declared on, which is the point — the production method
+    # is what must hold, over the collaborators it actually reads.
+    real: Any = ServingSessionHandle.may_refresh
+
+    # No work, no viewer: free to act on a newer build.
+    assert real(host) == "", real(host)
+    # A viewer attached, still no work: STILL free. A viewer that held here is
+    # the residency bug this predicate was written to end.
+    setattr(host, "_registrant", SimpleNamespace(attach_clients=lambda: 1))
+    assert real(host) == "", "an idle viewer must never hold a runtime resident"
+
+    # Work in flight — a live turn, which is the tool that must not be cut —
+    # decides alone, and the attached viewer changes nothing about that.
+    setattr(session, "is_streaming", True)
+    assert real(host) == "busy", "a live turn must keep the drain from exiting"
+    setattr(host, "_registrant", SimpleNamespace(attach_clients=lambda: 0))
+    assert real(host) == "busy", "the WORK decides; the viewer count may not"
 
 
 @pytest.mark.asyncio
