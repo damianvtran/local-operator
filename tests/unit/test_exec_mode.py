@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelSpec,
     NoticeEvent,
+    ReasoningDeltaEvent,
     TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -552,6 +553,57 @@ def test_printable_event_message_update_carries_message_id() -> None:
     assert out["message_id"] == message.id
     assert out["delta"] == "abc"
     assert out["type"] == "message_update"
+
+
+def test_printable_event_reasoning_delta_carries_the_fragment() -> None:
+    """CL-15's sibling: a supervisor filters reasoning lines by NAME.
+
+    The reasoning channel is the one a script watches to see the model working
+    before it answers, so its JSON line is shaped explicitly rather than left to
+    the generic dump: exactly the fragment and the message it belongs to.
+    """
+    out = printable_event(ReasoningDeltaEvent(message_id="m1", delta="weighing"))
+    assert out == {"type": "reasoning_delta", "message_id": "m1", "delta": "weighing"}
+
+
+def test_reasoning_is_announced_once_on_stderr_and_never_on_stdout(capsys) -> None:
+    """Exec announces the phase; it does not stream the model's thoughts.
+
+    stdout is the run's payload — the answer in text mode — so reasoning must
+    never touch it: a caller piping the answer into a file would get the model's
+    private thoughts concatenated to it. stderr is progress chrome read by a
+    human, where a line per TOKEN would bury every tool row; so it gets ONE line
+    per phase, which is what tells a user the model is working during the wait
+    the operator reported as 3-5 s of nothing.
+    """
+    renderer = PrintRenderer(json_mode=False)
+    for fragment in ("weigh", "ing", " the", " options"):
+        renderer.handle(ReasoningDeltaEvent(message_id="m1", delta=fragment))
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("thinking") == 1
+    # Model-authored text never reaches the terminal as markup.
+    renderer.handle(ReasoningDeltaEvent(message_id="m1", delta="[red]boom[/red]"))
+    assert capsys.readouterr().err.count("thinking") == 0
+
+
+def test_each_model_call_announces_its_own_reasoning_phase(capsys) -> None:
+    """A tool-loop turn reasons before every call, once each.
+
+    The latch is per phase, not per turn: a turn that reasons, calls a tool and
+    reasons again would otherwise show its second wait as though nothing were
+    happening — the exact complaint, one call later.
+    """
+    renderer = PrintRenderer(json_mode=False)
+    message = Message.assistant("")
+    renderer.handle(MessageStartEvent(message=message))
+    renderer.handle(ReasoningDeltaEvent(message_id=message.id, delta="first"))
+    renderer.handle(MessageEndEvent(message=message))
+    renderer.handle(MessageStartEvent(message=Message.assistant("")))
+    renderer.handle(ReasoningDeltaEvent(message_id="m2", delta="second"))
+
+    assert capsys.readouterr().err.count("thinking") == 2
 
 
 def test_run_exec_prompt_raising_exits_one(fake_factory, capsys) -> None:

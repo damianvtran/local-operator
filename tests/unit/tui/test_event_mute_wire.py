@@ -46,6 +46,7 @@ from local_operator.harness.types import (
     AgentToolUpdate,
     Message,
     MessageUpdateEvent,
+    ReasoningDeltaEvent,
     SubagentProgressEvent,
     TextContent,
     ToolExecutionUpdateEvent,
@@ -90,11 +91,18 @@ async def _mute(viewer: AttachedSession, muted: bool) -> None:
 
 
 def _delta_grade(index: int) -> list[object]:
-    """One of EACH type in ``EVENT_MUTE_DROP_TYPES``, not just message_update."""
+    """One of EACH type in ``EVENT_MUTE_DROP_TYPES``, not just message_update.
+
+    Pinned against the set itself, not against a hand-kept list: a type added to
+    the owner's drop set without a sample here would make the suppression
+    assertion below vacuous for that type (it would be "not received" because it
+    was never sent), which is exactly the hole this helper exists to close.
+    """
     message = Message.assistant(f"token {index}")
     message.id = f"mute-live-{index}"
-    return [
+    events: list[object] = [
         MessageUpdateEvent(message=message, delta=f"tok{index}"),
+        ReasoningDeltaEvent(message_id=message.id, delta=f"think{index}"),
         ToolExecutionUpdateEvent(
             tool_call_id=f"mute-call-{index}",
             tool_name="read",
@@ -102,6 +110,11 @@ def _delta_grade(index: int) -> list[object]:
         ),
         SubagentProgressEvent(job_id=f"mute-job-{index}", label="child", progress="working"),
     ]
+    assert {getattr(event, "type", None) for event in events} == set(EVENT_MUTE_DROP_TYPES), (
+        "every type the owner drops while muted needs a sample here, or the "
+        "suppression assertion cannot see it"
+    )
+    return events
 
 
 def _settled_message(index: int, text: str) -> Message:

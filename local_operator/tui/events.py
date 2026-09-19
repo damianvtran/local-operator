@@ -209,6 +209,31 @@ class AssistantDelta(SessionEvent):
         self.text = text
 
 
+class ReasoningDelta(SessionEvent):
+    """Flushed, coalesced REASONING text (full accumulated text).
+
+    The reasoning channel's mirror of :class:`AssistantDelta`, and deliberately
+    a separate session event rather than a field on it: the app renders the two
+    into different blocks with different lifetimes, and a reducer that appends
+    both as prose is exactly the transcript corruption
+    ``harness/types.ReasoningDeltaEvent`` forbids.
+
+    Carries the accumulated text for the same reason the assistant delta does —
+    the app repaints the live block from one value instead of replaying every
+    fragment — and it is bounded by the block, not the wire: the wire contract
+    is one fragment per event, and this coalescing happens at the TUI's 30 Hz
+    flush, above the session and below the renderer.
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+
+
+class ReasoningEnd(SessionEvent):
+    """The reasoning phase is over for this model call."""
+
+
 class AssistantMessageStart(SessionEvent):
     """A new assistant message began streaming."""
 
@@ -534,6 +559,18 @@ class EventController:
         self._started_tools: set[str] = set()
         self._assistant_buffer: str = ""
         self._assistant_seen: str = ""
+        #: The reasoning channel's buffer, flushed on the same 30 Hz tick as the
+        #: assistant text and for the same reason: a reasoning model emits a
+        #: fragment per token, and posting one session event per fragment would
+        #: put thousands of messages through Textual's queue during a long
+        #: think.
+        self._reasoning_buffer: str = ""
+        self._reasoning_seen: str = ""
+        #: Whether a reasoning phase is currently OPEN -- at least one fragment
+        #: has been buffered and the app has not yet been told it ended. Tracked
+        #: rather than inferred so a turn that never reasons posts no
+        #: ``ReasoningEnd`` at all (see :meth:`_close_reasoning_phase`).
+        self._reasoning_open: bool = False
         self._flush_timer = None
         self._unsubscribe: Callable[[], Any] | None = None
         self._restoring_projection = False
@@ -595,6 +632,11 @@ class EventController:
         The dropped events are recoverable by construction: the owner folds
         them into ``live_events`` and ``restore_live_projection`` replays that
         seed at commit, which is the same path a mid-turn join already uses.
+        ``reasoning_delta`` is the ONE exception to that sentence, and it is the
+        exception the shared set documents: reasoning is display-only and never
+        durable, so nothing a revealed viewer holds is WRONG without it -- the
+        thinking simply starts at the reveal, which is also what a mid-turn join
+        sees. It is dropped anyway because it is the chattiest member of the set.
         """
         if parked == self._parked:
             return
@@ -623,6 +665,13 @@ class EventController:
             self._stop_flush_timer()
             self._assistant_buffer = ""
             self._assistant_seen = ""
+            # The reasoning buffer too. Not because it could have grown while
+            # parked -- the drop above means no fragment reaches the handler --
+            # but so a reveal cannot paint a stale partial phase inherited from
+            # before the drop started. ``_reasoning_seen`` is left where it is,
+            # so the flush that follows a reveal posts only what arrives after
+            # it.
+            self._reasoning_buffer = ""
 
     @property
     def parked(self) -> bool:
@@ -733,6 +782,12 @@ class EventController:
         self._started_tools.clear()
         self._assistant_buffer = ""
         self._assistant_seen = ""
+        # And the reasoning buffer: a new turn's first model call starts a new
+        # thinking phase, and a fragment inherited from the previous turn would
+        # be painted as this one's.
+        self._reasoning_buffer = ""
+        self._reasoning_seen = ""
+        self._reasoning_open = False
         self._post(TurnStarted())
 
     def _handle_agent_end(self, event: AgentEvent) -> None:
@@ -752,8 +807,10 @@ class EventController:
             return
         # Final flush BEFORE stopping the timer so no buffered tail is lost
         # (TUI-005); message_end also stops the timer after its own flush
-        # (TUI-006).
+        # (TUI-006). Reasoning rides along: a turn cut off mid-think ends with
+        # buffered fragments and no message_end at all.
         self._flush_assistant()
+        self._close_reasoning_phase()
         self._pending_tool_ends.clear()
         self._stop_flush_timer()
         # Feed usage into the status band (D10). Cost must SUM every model
@@ -838,9 +895,48 @@ class EventController:
             # message and must be painted even when the words repeat (#228).
             self._post(UserMessageStart(message.text, images, message.id))
             return
+        # A new model call: its reasoning is a NEW block, so the buffer starts
+        # empty and the app is told the previous phase is over (it may have
+        # ended with a tool call and no prose at all, which is the common shape
+        # for a tool-use turn -- `on_assistant_message_end` retires it there
+        # too, but a border-crossing phase must never inherit a stale buffer).
+        self._close_reasoning_phase()
         self._assistant_buffer = ""
         self._assistant_seen = ""
         self._post(AssistantMessageStart())
+
+    def _handle_reasoning_delta(self, event: AgentEvent) -> None:
+        # Buffer the fragment; flush on the 30 Hz timer with the assistant text
+        # (coalescing). `getattr` because the dispatch routes on ``event.type``
+        # without re-validating: a frame relayed by an older runtime reaches
+        # here as a bare AgentEvent and must degrade to nothing, not raise.
+        delta = getattr(event, "delta", "")
+        if not delta:
+            return
+        self._reasoning_buffer += delta
+        self._reasoning_open = True
+        self._request_flush_timer()
+
+    def _close_reasoning_phase(self) -> None:
+        """Flush the buffered reasoning and tell the app the phase is over.
+
+        A NO-OP when no phase was ever opened, and that is not an optimisation:
+        the app is told about every boundary, and a spurious ``ReasoningEnd``
+        posts a message the app must dispatch for a phase that does not exist
+        (it also makes the posted-message sequence of a NON-reasoning turn
+        differ from what it was before this channel existed, which is exactly
+        the kind of drift every front-end contract here tries to avoid). The
+        flag is maintained by the first fragment rather than inferred from the
+        buffer, because a flush may already have emptied the buffer while the
+        phase is still live on screen.
+        """
+        if not self._reasoning_open:
+            return
+        self._flush_reasoning()
+        self._reasoning_buffer = ""
+        self._reasoning_seen = ""
+        self._reasoning_open = False
+        self._post(ReasoningEnd())
 
     def _handle_message_update(self, event: MessageUpdateEvent) -> None:
         # Buffer the delta; flush on the 30 Hz timer (coalescing).
@@ -855,6 +951,11 @@ class EventController:
             text = self._assistant_buffer
         self._assistant_buffer = text
         self._flush_assistant()
+        # The model has stopped thinking for this call: flush whatever reasoning
+        # is still buffered and close the phase, BEFORE the assistant end event
+        # so the app sees the reasoning complete before the answer's block
+        # settles (the ordering the app's retirement relies on).
+        self._close_reasoning_phase()
         self._stop_flush_timer()
         message = event.message
         # `getattr` with a default on both: reduced event producers and
@@ -1019,6 +1120,7 @@ class EventController:
         "turn_end": _handle_turn_end,
         "message_start": _handle_message_start,
         "message_update": _handle_message_update,
+        "reasoning_delta": _handle_reasoning_delta,
         "message_end": _handle_message_end,
         "history_delta": _handle_history_delta,
         "tool_call_compose": _handle_tool_compose,
@@ -1065,9 +1167,10 @@ class EventController:
     #: and every delivery notice -- those change state a parked source is still
     #: expected to have right.
     #:
-    #: These three ARE the volume: at 12 streaming sessions they were ~229
+    #: These four ARE the volume: at 12 streaming sessions they were ~229
     #: events/s of the traffic measured, against a handful per turn for
-    #: everything above.
+    #: everything above. ``reasoning_delta`` joined them under the exception
+    #: the shared set documents.
     _PARKED_DROP_TYPES: frozenset[str] = EVENT_MUTE_DROP_TYPES
 
     # -- flush timer --------------------------------------------------------
@@ -1079,7 +1182,17 @@ class EventController:
     def start_flush_timer(self) -> None:
         """App-thread entry: actually start the 30 Hz interval."""
         if self._flush_timer is None:
-            self._flush_timer = self._app.set_interval(FLUSH_INTERVAL_S, self._flush_assistant)
+            self._flush_timer = self._app.set_interval(FLUSH_INTERVAL_S, self._flush_buffers)
+
+    def _flush_buffers(self) -> None:
+        """One tick, both delta channels.
+
+        The interval's callback rather than ``_flush_assistant``, so the
+        reasoning stream is painted at the same 30 Hz without a second timer
+        (and without the assistant flush having to know reasoning exists).
+        """
+        self._flush_assistant()
+        self._flush_reasoning()
 
     def _stop_flush_timer(self) -> None:
         if self._flush_timer is not None:
@@ -1092,6 +1205,25 @@ class EventController:
             return  # equality guard — identical text = no work
         self._assistant_seen = self._assistant_buffer
         self._post(AssistantDelta(self._assistant_buffer))
+
+    def _flush_reasoning(self) -> None:
+        """Post the buffered reasoning text, guarded by equality.
+
+        The mirror of :meth:`_flush_assistant`, on the same tick. Kept separate
+        rather than folded into it because the two have independent lifetimes: a
+        model call can reason and never write prose (a tool-only turn), and the
+        reasoning buffer must be flushed on paths that do not touch the
+        assistant one (``message_start`` of the next call, ``message_end`` of
+        this one).
+
+        An OLDER runtime never sends ``reasoning_delta`` at all, so the buffer
+        stays empty and this is a no-op -- the equality guard is what makes the
+        added tick free for every frame that carries no reasoning.
+        """
+        if self._reasoning_buffer == self._reasoning_seen:
+            return
+        self._reasoning_seen = self._reasoning_buffer
+        self._post(ReasoningDelta(self._reasoning_buffer))
 
     def _post(self, message: SessionEvent) -> None:
         # Unsubscribe cannot retract messages already in Textual's queue.

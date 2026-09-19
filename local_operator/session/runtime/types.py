@@ -131,15 +131,29 @@ EVENT_MUTE_CAPABILITY = "event-mute-v1"
 #: and muting it would buy nothing while costing a compose preview on reveal.
 #: Do not "complete" this set by adding it.
 #:
+#: ``reasoning_delta`` is the one member that satisfies clauses one and three
+#: while being UNREBUILDABLE, and it is admitted on an explicit exception that is
+#: narrower than the rule reads: reasoning is display-only and never durable
+#: (``harness/types.ReasoningDeltaEvent``), so there is nothing downstream that a
+#: gap can leave WRONG — a revealed viewer simply sees the thinking from the
+#: reveal onward. Everything else in this module's contract is state a parked
+#: source must still have right; this is not state. It is admitted because it is
+#: emitted once per reasoning token, which makes it the largest single frame
+#: family a long-thinking turn produces: leaving it out is what would let a
+#: parked viewer's queue grow without bound, the exact cost this set exists to
+#: avoid.
+#:
 #: Also deliberately absent: ``message_start``/``message_end`` (row identity and
 #: the settled row the dedupe and card pairing key on), every turn/agent
 #: boundary, tool start/end, compaction, retry, model change, and every
 #: delivery notice — those change state a parked source is still expected to
-#: have right. These three ARE the volume: at 12 streaming sessions they were
-#: ~229 events/s of the traffic measured on the reporting machine.
+#: have right. These four ARE the volume: at 12 streaming sessions they were
+#: ~229 events/s of the traffic measured on the reporting machine, before
+#: ``reasoning_delta`` joined them.
 EVENT_MUTE_DROP_TYPES = frozenset(
     {
         "message_update",  # one per assistant token
+        "reasoning_delta",  # one per reasoning token; see the exception above
         "tool_execution_update",  # one per streamed tool-output chunk
         "subagent_progress",  # one per child progress beat
     }
