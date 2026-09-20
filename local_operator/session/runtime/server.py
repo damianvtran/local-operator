@@ -1307,7 +1307,9 @@ class RuntimeServer:
         )
         #: Verified device certificates, by certificate string, with a TTL — see
         #: ``_device_cert_point`` for why this is lazy, bounded and short-lived.
-        self._device_certs: dict[str, tuple[bytes | None, float]] = {}
+        #: ``(point, deadline, device_id)``: the id is kept so REVOCATION can be
+        #: re-checked on a cache hit — see the method, and R6-1.
+        self._device_certs: dict[str, tuple[bytes | None, float, str]] = {}
         #: Every unspent operator challenge in this runtime, by challenge string,
         #: with its deadline — the AGGREGATE bound the per-connection maximum
         #: cannot be (see ``_MAX_LIVE_CHALLENGES``). Pruned on mint and on
@@ -3719,19 +3721,32 @@ class RuntimeServer:
         cached = self._device_certs.get(certificate)
         now = time.monotonic()
         if cached is not None and cached[1] > now:
-            return cached[0]
+            # REVOCATION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
+            # review round 6, R6-1 — the second half of it, and the half the
+            # certificate TTL alone does not cover). What is cached is the
+            # EXPENSIVE half: the signature and expiry verification, which cannot
+            # change. Whether the certificate's device is REVOKED can, and it is
+            # the operator's own action — so it is read from the anchor every time
+            # rather than frozen for `_DEVICE_CERT_TTL_S`. Without this, a device
+            # revoked while a runtime was running kept acting for up to five
+            # minutes after the anchor re-read that was meant to stop it.
+            point, _deadline, device_id = cached
+            if point is None:
+                return None
+            return None if device_is_revoked(anchor, device_id) else point
         parsed = operator_verify.read_device_cert(certificate)
         point = operator_verify.verify_device_cert(
             certificate, operator_spki=anchor.spki, now=int(time.time()), parsed=parsed
         )
-        if point is not None and parsed is not None:
+        device_id = parsed.device_id if parsed is not None else ""
+        if point is not None:
             # A certificate that names a REVOKED device is refused here, at the
             # point its identity is known: ``verify_device_cert`` deliberately
             # knows nothing about revocation (it checks a signature and an
             # expiry), and the revocation list is a property of the anchor.
-            if device_is_revoked(anchor, parsed.device_id):
+            if device_is_revoked(anchor, device_id):
                 point = None
-        self._device_certs[certificate] = (point, now + _DEVICE_CERT_TTL_S)
+        self._device_certs[certificate] = (point, now + _DEVICE_CERT_TTL_S, device_id)
         if len(self._device_certs) > _MAX_CACHED_DEVICE_CERTS:
             # Bounded: a client can present a new certificate string on every
             # frame, and an unbounded cache keyed by attacker-chosen strings is a

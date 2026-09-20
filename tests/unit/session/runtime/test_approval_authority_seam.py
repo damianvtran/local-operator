@@ -2919,3 +2919,233 @@ async def test_the_report_offers_loosening_to_a_local_connection_that_can_sign(
     finally:
         await bare.close(tmp_path)
         await lived.close(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The round-6 remediation's own controls, on the production paths
+# ---------------------------------------------------------------------------
+
+
+def _read_staged_as_root_owned(config_root: Path) -> Any:
+    """The staged anchor, reported the way an INSTALLED one is.
+
+    A real anchor is a root-owned file at a constant path, which this test cannot
+    create (and must not: writing it needs ``sudo``, which would raise a password
+    prompt on the operator's screen). So the root-owned FACT is supplied at the one
+    seam the runtime reads — ``trust.load_anchor`` — and the anchor itself is the
+    real file ``lop operator init`` stages, parsed by the real parser.
+
+    The file, not a fabricated object, is the point: a revocation is an EDIT to
+    that file, and the cell below has to be able to make one land.
+    """
+    import json as _json
+
+    from local_operator.operator.trust import (
+        AnchorLoad,
+        OperatorAnchor,
+        anchor_path,
+        staging_path,
+    )
+
+    body = _json.loads(staging_path(config_root).read_text())
+    parsed = OperatorAnchor.from_json(body)
+    assert parsed is not None, "the rig staged an anchor the product cannot parse"
+    return AnchorLoad(
+        anchor=parsed, path=anchor_path(), root_owned=True, exists=True, reason="ok"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_revocation_written_to_the_anchor_reaches_a_RUNNING_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE CELL AGENT REVIEW ROUND 6 (R6-1) ASKED FOR, on the production path.
+
+    What was measured before this fix, on a file-backed anchor supplied at the one
+    seam the code reads: a runtime loosened the gate BEFORE and AFTER the anchor
+    file was edited to revoke that device (``load_anchor`` calls: 1), while a
+    runtime started after the edit was refused. The revocation list was real,
+    honoured, and read exactly once per runtime lifetime — so a stolen phone whose
+    revocation the operator had installed kept loosening and approving for as long
+    as those sessions lived, which the design's own words make days.
+
+    Both halves of the fix are asserted, because either alone would be a different
+    bug: the revocation LANDS on a runtime that is already running, and it lands
+    THROUGH the window rather than per frame (the sibling cell below pins that).
+    The shortcut the original cell took — writing ``runtime._anchor_cache.load``
+    directly — is deliberately NOT used: no production path does that, so it was a
+    negative control for nothing.
+    """
+    import json as _json
+
+    from local_operator.operator import trust
+    from local_operator.operator.trust import staging_path
+    from local_operator.session.runtime import server as server_module
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    calls = {"n": 0}
+
+    def root_owned(uid: int | str | None = None) -> Any:
+        calls["n"] += 1
+        return _read_staged_as_root_owned(config_dir())
+
+    monkeypatch.setattr(trust, "load_anchor", root_owned)
+    # THE WINDOW, made to elapse rather than slept through: patched BEFORE the
+    # runtime exists, so this drives the production refresh branch rather than
+    # adding thirty seconds to the suite. The sibling cell is the control that the
+    # shipped window still pins.
+    monkeypatch.setattr(server_module, "_ANCHOR_REFRESH_S", 0.0)
+
+    _install_operator_key(config_dir())
+    device_key, device_point = await _new_device_key()
+    certificate = _issue_device_certificate(config_dir(), device_point, label="test phone")
+    _store_device(config_dir(), device_spki=device_point, certificate=certificate)
+    device_id = key_id_for(device_point)
+
+    live = await _serve(tmp_path, operator_cap=None)
+    try:
+        conn = await _dial(live.record)
+
+        async def loosen() -> dict[str, Any]:
+            challenge = await _challenge(conn, action="loosen")
+            signature = _device_signature(
+                device_key,
+                action="loosen",
+                session_id=live.record.session_id,
+                request_id="",
+                challenge=challenge,
+            )
+            return await _send(
+                conn,
+                None,
+                {
+                    "op": "slash_result",
+                    "command": "approvals",
+                    "args": "auto",
+                    "images": [],
+                    "operator_sig": signature,
+                    "operator_key_id": key_id_for(device_point),
+                    "operator_cert": certificate,
+                },
+            )
+
+        # (1) BEFORE. A refusal that was always going to happen would prove nothing.
+        allowed = await loosen()
+        assert allowed["op"] == "result", allowed
+        assert live.handle._auto_approve is True
+
+        # (2) THE OPERATOR REVOKES IT, exactly as `lop operator devices --revoke`
+        # lands it: the anchor file gains the revocation list, and the two anchors
+        # the design has are then in the state U5 measured (the root-owned list says
+        # revoked, the local record does not).
+        live.handle._auto_approve = False
+        body = _json.loads(staging_path(config_dir()).read_text())
+        body["devices"] = [{"device_id": device_id, "revoked": True}]
+        staging_path(config_dir()).write_text(_json.dumps(body))
+        before = calls["n"]
+
+        # (3) AFTER, on the SAME running runtime.
+        refused = await loosen()
+        assert refused["op"] == "error", refused
+        assert live.handle._auto_approve is False, "a revoked device still loosened the gate"
+        assert calls["n"] > before, "the anchor was never re-read, so no revocation can land"
+        conn.close()
+    finally:
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_the_shipped_window_still_reads_the_anchor_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_anchor: None
+) -> None:
+    """The control for the cell above: the pin is still a pin inside the window.
+
+    Asserted separately so a revocation cell cannot be read as proof that the
+    read-once property is gone. Re-reading per frame is the thing the original
+    cache existed to prevent — a same-uid subject that could make a runtime read
+    the root-owned file on demand — and this is the number that says it still
+    cannot.
+    """
+    from local_operator.operator import trust
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    calls = {"n": 0}
+    absent = trust.load_anchor
+
+    def counting(uid: int | str | None = None) -> Any:
+        calls["n"] += 1
+        return absent(uid)
+
+    monkeypatch.setattr(trust, "load_anchor", counting)
+    # The SHIPPED window is deliberately left alone, and the runtime takes it from
+    # `server._ANCHOR_REFRESH_S`.
+    live = await _serve(tmp_path, operator_cap=None)
+    try:
+        conn = await _dial(live.record)
+        # THREE SIGNATURE FRAMES, not three challenges: only a frame that presents a
+        # signature reaches the anchor at all (the verdict is what consults it), and
+        # a cell that asked for three challenges would count zero reads and prove
+        # nothing. The signature is a real one over a real challenge, so the frames
+        # reach the verdict rather than being refused before it.
+        _install_operator_key(config_dir())
+        device_key, device_point = await _new_device_key()
+        certificate = _issue_device_certificate(config_dir(), device_point, label="test phone")
+        for _ in range(3):
+            challenge = await _challenge(conn, action="loosen")
+            reply = await _send(
+                conn,
+                None,
+                {
+                    "op": "slash_result",
+                    "command": "approvals",
+                    "args": "auto",
+                    "images": [],
+                    "operator_sig": _device_signature(
+                        device_key,
+                        action="loosen",
+                        session_id=live.record.session_id,
+                        request_id="",
+                        challenge=challenge,
+                    ),
+                    "operator_key_id": key_id_for(device_point),
+                    "operator_cert": certificate,
+                },
+            )
+            assert reply["op"] == "error", reply
+        assert calls["n"] == 1, (
+            "the anchor was re-read inside the shipped window; the read-once pin is "
+            "what stops a same-uid subject forcing a disk read per frame"
+        )
+        conn.close()
+    finally:
+        await live.close(tmp_path)
+
+
+def test_a_symlinked_anchor_path_reports_the_redirect_not_a_missing_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-6: a redirected path was reported as "no anchor installed".
+
+    Measured before the fix: an anchor that is PRESENT but behind a symlinked
+    component took ``exists=False``, so the level report said
+    ``spawn-capability-only`` — the level for a host that never installed one —
+    while the reason field said "a component of the anchor path is a symbolic
+    link". Two states the report exists to distinguish, reported as one.
+    """
+    from local_operator.operator import trust
+
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(real)
+    (real / "501.json").write_text("{}")
+    monkeypatch.setattr(trust, "anchor_path", lambda uid=None: linked / "501.json")
+
+    loaded = trust.load_anchor()
+    assert loaded.usable is False
+    assert loaded.exists is True, "a present-but-redirected anchor is not a missing one"
+    assert "symbolic link" in loaded.reason, loaded.reason
+    from local_operator.operator import authority_level_load
+
+    level, _ = authority_level_load()
+    assert level == "anchor-unpinned", level
