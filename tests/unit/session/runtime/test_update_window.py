@@ -452,9 +452,9 @@ async def test_the_stop_arm_leaves_the_spooled_message_for_the_next_boot(
     # marker while this cell stayed green, so the regression R2-1 names (a successor
     # reporting a move a stop had cancelled) was unpinned. The successor reads the file,
     # not the attribute, so the file is what the cell has to check.
-    assert read_update_window(session.transcript.directory) == "", (
-        "a stop cancelled the move, so no successor may find a marker claiming one"
-    )
+    assert (
+        read_update_window(session.transcript.directory) == ""
+    ), "a stop cancelled the move, so no successor may find a marker claiming one"
     assert runtime.failures == [], "a stop is not a failed update"
 
 

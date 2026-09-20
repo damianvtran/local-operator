@@ -52,11 +52,16 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from local_operator import buildwatch  # noqa: E402
 from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
 
 isolate_capture()
 
+# AFTER the isolation, not before: the gallery conformance test
+# (``tests/unit/tui/test_visual_gallery.py``) requires that no ``local_operator``
+# import precedes ``isolate_capture()``, because an app module imported first has
+# already resolved the operator's HOME and config by the time the isolation runs.
+# This one only reads the update window's bounds, which the frame below names.
+from local_operator import buildwatch  # noqa: E402
 from local_operator.session.errors import RuntimeRetiring  # noqa: E402
 from local_operator.session.runtime.types import (  # noqa: E402
     LEAVING_FOR_BUILD,
