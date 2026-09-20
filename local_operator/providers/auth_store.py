@@ -705,7 +705,29 @@ class AuthStore:
             # back, and there is no loop here to stall.
             self._rearm_off_thread(install, provider, stored.id)
             return
-        loop.run_in_executor(None, self._rearm_off_thread, install, provider, stored.id)
+        try:
+            loop.run_in_executor(None, self._rearm_off_thread, install, provider, stored.id)
+        except RuntimeError:
+            # A running loop whose default executor is ALREADY SHUT DOWN — and
+            # this is the one line in the guard chain that can fail there, so it
+            # carries the guard (review round 2, M3). Measured: with
+            # `loop.shutdown_default_executor()` done and the loop still ticking,
+            # `run_in_executor` raises `RuntimeError: Executor shutdown has been
+            # called`, which propagated out of here through
+            # `_after_credential_write` and out of `upsert_credential` — i.e. out
+            # of a credential write that had already COMMITTED, reporting a
+            # successful sign-in to the operator as a failure (the house pattern
+            # for a fire-and-forget dispatch under someone else's verdict is
+            # `session/attached.py`'s guarded one).
+            #
+            # Inline rather than dropped, which is the no-loop branch's own trade
+            # and the reason it makes it: the caller is a login, and the point of
+            # this hook is that the connector comes back without a second
+            # command. Reachability is the teardown window this signature
+            # describes — a loop on its way out is not serving anyone, so the
+            # blocking call it can no longer hand to a thread costs no request,
+            # and `_rearm_off_thread` never raises.
+            self._rearm_off_thread(install, provider, stored.id)
 
     @staticmethod
     def _rearm_off_thread(install: Any, provider: str, credential_id: int) -> None:
