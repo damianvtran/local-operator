@@ -44,6 +44,7 @@ from local_operator.tui.widgets.status_line import (
     ICON_MCP,
     ICON_MODEL,
     ICON_TEAM,
+    ICON_TUNNEL,
     NAME_CELLS,
     NAME_CELLS_FLOOR,
     McpStatus,
@@ -57,6 +58,7 @@ from local_operator.tui.widgets.status_line import (
     format_duration,
     format_mcp,
     format_model_label,
+    format_tunnel,
     format_window,
     mcp_semantic,
     truncate_name,
@@ -1149,6 +1151,76 @@ def test_a_healthy_mcp_count_sheds_before_the_cwd_and_the_model_label() -> None:
         and ICON_CWD not in status.render_text(width).plain
     ]
     assert alarm_alone, "a danger count must survive a width the cwd cannot"
+
+
+def test_a_parked_connector_outlives_every_reading_and_sheds_before_the_other_alarms() -> None:
+    """D4: where the parked rung sits, and why a toast could not do this job.
+
+    The park lands within seconds of the connector dying — by definition a moment
+    the operator is not looking at the terminal, which is the whole point of a
+    tunnel — and it stands for hours. So the rung has to outlive everything the
+    next glance can re-derive (a duration, a title, a cost) and it sheds before
+    `fork`, `mcp` and `approvals`, all three of which are things a user sitting in
+    front of the screen can still act on.
+    """
+    for ladder in (
+        _DROP_LADDER,
+        _DROP_LADDER_QUIET,
+        _DROP_LADDER_ESTIMATE,
+        _DROP_LADDER_QUIET_ESTIMATE,
+    ):
+        assert ladder.index("cwd") < ladder.index("tunnel"), ladder
+        assert ladder.index("tunnel") < ladder.index("fork"), ladder
+    # Bounded — a glyph and a fixed word — so it is a legal tail neighbour.
+    assert "tunnel" not in _UNBOUNDED_RUNGS
+    assert cell_len(f"{ICON_TUNNEL} {format_tunnel(True)}") <= 24
+
+
+def test_the_parked_rung_is_an_alarm_that_appears_and_clears_live() -> None:
+    """The segment itself: present only while parked, and withdrawn when not.
+
+    Nothing about it is stateful on the band's side — the app pushes the fact
+    from the same local read the notice uses (see `_poll_tunnel_park`) — which is
+    why this drives `update` the way the app does rather than reaching into the
+    state file from a widget.
+    """
+    status, _clock = _full_band()
+    assert format_tunnel(False) == ""
+    assert "remote access off" not in status.render_text(200).plain
+
+    status.update(tunnel_parked=True)
+    row = status.render_text(200).plain
+    assert f"{ICON_TUNNEL} remote access off" in row
+    # The glyph carries the alarm, the words stay neutral: tinting the words
+    # would read as "these words are wrong", which is the same rule the MCP lamp
+    # follows one segment over.
+    danger = theme_mod.semantic_color("danger")
+    spans = [str(span.style) for span in status.render_text(200).spans]
+    assert any(danger in span for span in spans), spans
+
+    # …and a recovery withdraws it, the same way the park's own file does.
+    status.update(tunnel_parked=False)
+    assert "remote access off" not in status.render_text(200).plain
+
+
+def test_the_parked_rung_survives_a_width_that_sheds_the_readings() -> None:
+    """The rendered consequence of the rung's place, at widths a user has.
+
+    A full band at 100 cells has to be able to lose the counters and keep this —
+    the person it exists for is reading a terminal they are not in front of, so
+    "it survives where the duration did not" is the property, not the rung order.
+    """
+    status, _clock = _full_band()
+    status.update(tunnel_parked=True)
+    kept = [
+        width
+        for width in range(100, 39, -1)
+        if "remote access off" in status.render_text(width).plain
+    ]
+    assert kept, "the alarm is gone at every width down to 40 cells"
+    # One row at every width, parked or not: the band never wraps.
+    for width in (40, 60, 80, 100, 200):
+        assert len(status.render_text(width).plain.splitlines()) == 1, width
 
 
 def test_the_quiet_ladder_moves_mcp_and_the_alarm_is_last_either_way() -> None:

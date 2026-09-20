@@ -66,7 +66,7 @@ def _harnesses(
     return list(rows.values())
 
 
-def _summary(record: dict[str, Any], source: str = "live", cloud_reason: str = "") -> str:
+def _summary(record: dict[str, Any], source: str = "live", *, stopped: bool = False) -> str:
     """The cloud's own view of the tunnel, with its provenance on the status line.
 
     `source` is what stops the stale copy reading as live: when the cloud read
@@ -75,23 +75,27 @@ def _summary(record: dict[str, Any], source: str = "live", cloud_reason: str = "
     a cached copy — with the caveat trailing three lines below — is exactly how
     a withdrawn tunnel looked healthy.
 
-    `cloud_reason` separates the two ways that read can fail, which is the job
-    the old trailing caveat did badly — it named neither. Both sentences come
-    from the vocabulary, so this surface and the phone's 503 cannot word one
-    cause two ways, and neither of them can be confused with the LOGIN line
-    above, which reports what this device's credential store says rather than
-    what the cloud refused.
+    The explanatory line states PROVENANCE and no verdict (review round 1, D7).
+    It used to print the relay vocabulary's own refusal sentence — "Radient
+    refused the connector's authorization check, so the relay stopped serving" —
+    immediately under a line that had just said the cloud could not be read: a
+    verdict asserted by the command that could not obtain it, and one that
+    repeated the sign-in advice and the billing link a third time. A local verdict
+    belongs on the `Connector:` line, which reads this device; this line's job is
+    only to say which copy of the cloud's record is being shown. `--json` still
+    carries `cloud.reason` for a caller that wants the cause.
+
+    `stopped` gates the line off entirely: nothing about a tunnel the operator
+    deliberately stopped needs explaining, and the `(cached — cloud read failed)`
+    marker on the line above already names the provenance (review round 1, D5).
     """
     provenance = "" if source == "live" else " (cached — cloud read failed)"
     lines = [
         f"Tunnel: {record.get('id', 'not created')}",
         f"Status: {record.get('status', 'configured')}{provenance}",
     ]
-    if source != "live":
-        lines.append(
-            "Cloud status unavailable. "
-            + gateway.terminal_detail(cloud_reason, gateway.TERMINAL_DETAIL[gateway.REFUSED])
-        )
+    if source != "live" and not stopped:
+        lines.append("Cloud status: unavailable — showing the record stored at the last connect.")
     for harness in record.get("harnesses", []):
         if harness.get("enabled") and harness.get("hostname"):
             lines.append(f"{harness['id']}: https://{harness['hostname']}")
@@ -122,12 +126,28 @@ def _stamp(seconds: Any) -> str:
     return when.strftime("%Y-%m-%d %H:%M")
 
 
-def _status_text(payload: dict[str, Any], record: dict[str, Any], source: str) -> str:
+def _status_text(
+    payload: dict[str, Any], record: dict[str, Any], source: str, *, stopped: bool = False
+) -> str:
     """`lop tunnel status`, human form: the connector leads, then the login.
 
     The connector first because that is the thing the operator is asking about,
     and because the old order put a cached cloud record — which can read
     `active` for a connector that is not running — at the top of the answer.
+
+    ONE LINE, THEN A CONTINUATION (review round 1, D2). The first line used to be
+    a single 317-cell paragraph: at 80 columns five rendered rows whose actionable
+    clause sat on the third, with the state itself in the first three words, and
+    the sign-in advice printed again on the `Login:` line and a third time in the
+    cloud block. The read in a hurry is state → remedy → provenance, so the state
+    line carries the state and its age, the park's own sentence follows indented
+    beneath it, and the command appears once — on the `Login:` line, which is where
+    this device's credential store reports its verdict.
+
+    The command is appended HERE, from `TERMINAL_REMEDY`, and not baked into the
+    sentence the park file carries: that sentence is also printed by the TUI card
+    and forwarded to the desktop as `connector.detail`, so it names no command at
+    all (review round 1, D1/M2) and each surface appends the one it can run.
     """
     connector = payload["connector"]
     line = f"Connector: {connector['state']}"
@@ -136,19 +156,29 @@ def _status_text(payload: dict[str, Any], record: dict[str, Any], source: str) -
     since = _stamp(connector.get("since"))
     if since:
         line += f" (since {since})"
-    if connector["detail"]:
-        line += f": {connector['detail']}"
     lines = [line]
+    if connector["detail"]:
+        # Indented, because the reason it is not appended to the line above is in
+        # the docstring: a paragraph welded to the state is what buried the
+        # command four rows down.
+        lines.append(f"  {connector['detail']}")
     login = payload["login"]
     if login["state"] == "login_required":
-        command = gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]
-        lines.append(f"Login: needs re-authentication — run {command}")
+        if stopped:
+            # The fact stays, with its reason attached, and no command is offered:
+            # remote access the operator switched off is not waiting on a sign-in,
+            # which `report.remedy()` already honours for `--json` (review round
+            # 1, D5).
+            lines.append("Login: sign-in expired (not in use — tunnel stopped)")
+        else:
+            command = gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]
+            lines.append(f"Login: sign-in expired — run {command}")
     elif login["state"] == "unknown":
-        # Never "needs re-authentication": this state means the check itself
-        # could not run, and naming it anything else sends an operator whose
-        # network is down to a login that cannot help them.
+        # Never "sign-in expired": this state means the check itself could not run,
+        # and naming it anything else sends an operator whose network is down to a
+        # login that cannot help them.
         lines.append("Login: could not be checked (a refresh could not reach Radient).")
-    lines.extend(_summary(record, source, payload["cloud"].get("reason", "")).splitlines())
+    lines.extend(_summary(record, source, stopped=stopped).splitlines())
     return "\n".join(lines)
 
 
@@ -428,7 +458,7 @@ async def dispatch(args: argparse.Namespace) -> str:
         )
         if getattr(args, "json", False):
             return json.dumps(payload, allow_nan=False)
-        return _status_text(payload, record, source)
+        return _status_text(payload, record, source, stopped=bool(value.get("stopped")))
     if action == "stop":
         value["stopped"] = True
         config.save(value)

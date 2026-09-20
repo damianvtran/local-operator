@@ -325,6 +325,7 @@ from local_operator.tui.widgets.settings_view import (
     SettingsViewDismissed,
 )
 from local_operator.tui.widgets.status_line import (
+    ICON_APPROVALS,
     ICON_MCP,
     McpStatus,
     StatusLine,
@@ -1192,6 +1193,77 @@ TUNNEL_PARK_POLL_S = 5.0
 #: what keeps the mention of remote access from pulling an MCP failure out from
 #: under the user (see the rationale on `Toast.withdraw`).
 TUNNEL_PARK_NOTICE = object()
+
+#: The in-app spelling of the remedies the park file carries, as a shell command
+#: would be un-runnable here.
+#:
+#: ONE table, and the only place the mapping exists, because this is exactly the
+#: defect review round 1 opened with (D1/M2): the park's sentence used to name
+#: `/login radient` — a slash command — and that sentence is ALSO written into
+#: `state.json` and forwarded to the desktop as `connector.detail`. A surface
+#: cannot name a command the others cannot run, so the sentence now names none
+#: (`gateway.TERMINAL_DETAIL`) and every surface appends the one it can: the CLI
+#: prints `TERMINAL_REMEDY` verbatim, and this card maps it through here.
+#: Anything not in the table is shown as it stands — a shell command in a
+#: terminal the user is already sitting in front of is runnable — so a new park
+#: reason needs no entry to be told to the user honestly.
+TUNNEL_CARD_COMMANDS = {"lop login radient": "/login radient"}
+
+#: What the card calls each parked reason, as the TAIL of the line.
+#:
+#: The card leads with the COMMAND and puts the reason after it, which is the
+#: repo's own failure-line rule (`toast._FAILURE_REASON_SEP`): the card is
+#: clamped to the terminal, so whatever is lost to a clamp has to be the
+#: explanation, never the instruction — a half-printed `/logi…` is an instruction
+#: the user cannot follow (review round 1, D3).
+#:
+#: Two of the three tails are D3's own words and replace a reason LABEL that was
+#: the wrong reading out of context ("needs re-enrolment" says nothing about what
+#: the user just lost); `login_required` takes the house vocabulary this product
+#: already uses for an expired sign-in (`usage_panel`: `sign-in expired — /login
+#: {provider}`), which is D6's ask. A reason with no entry falls back to its
+#: `REASON_LABEL`, so a code from a newer connector still reads as something.
+TUNNEL_CARD_REASONS = {
+    "login_required": "Radient sign-in expired",
+    "reenrolment_required": "remote access is off",
+    "local_prerequisite": "a prerequisite is missing",
+}
+
+
+def tunnel_park_card(reason: str, command: str) -> str:
+    """The one line the parked-connector card shows: ``<command> — <reason>``.
+
+    Every branch is under 50 cells with the glyph, which is the width the toast
+    can hold on a narrow terminal without clamping (58 cells of content at the
+    ordinary cap, less as the terminal narrows) — measured in the tests against
+    `cell_len`, not eyeballed. "Run" is not spelled: the command is what the
+    clause leads with, and the verb was 4 cells of the 66- and 68-cell lines that
+    wrapped mid-command before (D3), with D6 dropping the same redundancy from
+    the card's other wording.
+
+    The GLYPH leads it (D9): every other actionable card in this app does
+    (`f"{ICON_MCP} MCP {message}"`), and the splash's warning rows lead with the
+    same mark, which is what makes the card findable at a glance rather than only
+    readable once it has been found.
+    """
+    mapped = TUNNEL_CARD_COMMANDS.get(command, command)
+    tail = TUNNEL_CARD_REASONS.get(reason) or _park_reason_label(reason)
+    if not mapped:
+        return f"{ICON_APPROVALS} {tail}"
+    return f"{ICON_APPROVALS} {mapped} — {tail}"
+
+
+def _park_reason_label(reason: str) -> str:
+    """`gateway.reason_label` for a code this app has no card wording for.
+
+    A lazy import for the reason the poll's own import is lazy: `tunnels.gateway`
+    drags httpx and starlette, and this module is on the boot path of every
+    session — including the ones that will never see a park.
+    """
+    from local_operator.tunnels import gateway
+
+    return gateway.reason_label(reason)
+
 
 #: Bucket the dock's expiry clock to this many seconds. Rows whose settle
 #: stamps fall in the same bucket therefore cross the window on the SAME
@@ -3663,6 +3735,11 @@ class OperatorApp(App[None]):
         #: raises one card per episode rather than holding the toast slot
         #: forever (see `_poll_tunnel_park`).
         self._tunnel_park_notice: str | None = None
+        #: Whether the band is carrying the parked-connector rung. Tracked beside
+        #: the episode above because the two answer different questions — the
+        #: card's is "has this park been announced?", the rung's is "is remote
+        #: access off right now?" — and only the second must survive a dismissal.
+        self._tunnel_parked = False
         #: Unsubscribes this app from the process config watcher (see
         #: :meth:`_watch_config`). ``None`` until the first session is adopted.
         self._unsubscribe_config_watch: Callable[[], None] | None = None
@@ -9181,7 +9258,8 @@ class OperatorApp(App[None]):
         # Remote access is off for a reason only a FILE on this machine knows
         # (see TUNNEL_PARK_POLL_S). Registered with the other always-on polls
         # rather than on a panel's timer: nothing else in the app is watching
-        # for this, and the notice is the only place the terminal admits it.
+        # for this, and the notice and the band rung are the only places the
+        # terminal admits it.
         self.set_interval(TUNNEL_PARK_POLL_S, self._poll_tunnel_park)
         # ALWAYS ON, deliberately not on `_sidebar_timer`. That timer is
         # registered with `pause=True` and is paused whenever the sidebar is
@@ -26367,14 +26445,25 @@ class OperatorApp(App[None]):
         condition clears and comes back, and `lop tunnel status` remains the
         place that answers the question on demand.
 
+        The BAND is told the same fact in the same read, because a card cannot
+        outlive its ten seconds and a park outlives the session that found it: on
+        the next start the card is re-raised and the band rung is already there,
+        and in between the band is the only thing still saying remote access is
+        off (review round 1, D4). This is the MCP alarm's own treatment — a toast
+        AND a standing segment — rather than a second mechanism. It is a separate
+        gate from the card's `_tunnel_park_notice`, which tracks the EPISODE;
+        this one tracks the FACT, so a re-raise after a dismissal re-asserts a
+        rung that never went away.
+
         Never fires for a machine with no tunnel, or one the operator stopped:
         `state.nag` owns that gate, because it is a fact about the state file
         rather than about this widget.
         """
-        from local_operator.tunnels import gateway, state
+        from local_operator.tunnels import state
 
         notice = state.nag()
         reason = str(notice.get("reason") or "") if notice else ""
+        self._assert_tunnel_band(bool(reason))
         if not reason:
             if self._tunnel_park_notice is not None:
                 # WITHDRAWN, not merely left to stop re-showing: a card still on
@@ -26390,17 +26479,30 @@ class OperatorApp(App[None]):
         self._tunnel_park_notice = reason
         remedy = notice.get("remedy") if notice else None
         command = str(remedy.get("command") or "") if isinstance(remedy, dict) else ""
-        if reason == gateway.LOGIN_REQUIRED:
-            # The cause the copy was written for, and the one whose remedy the
-            # user can run without leaving the app.
-            text = "Radient sign-in needed — run /login radient"
-        else:
-            text = f"Remote access is off ({gateway.reason_label(reason)})"
-            text += f" — run {command}" if command else ""
         # A FAILURE-length card (`TOAST_FAILURE_MS`), which is this app's one
         # marker for "the user has to act on this": it claims the shared slot
         # against courtesy receipts instead of being evicted by one.
-        self.query_one(Toast).show(text, duration_ms=TOAST_FAILURE_MS, owner=TUNNEL_PARK_NOTICE)
+        self.query_one(Toast).show(
+            tunnel_park_card(reason, command),
+            duration_ms=TOAST_FAILURE_MS,
+            owner=TUNNEL_PARK_NOTICE,
+        )
+
+    def _assert_tunnel_band(self, parked: bool) -> None:
+        """Keep the band's parked rung in step with the park file.
+
+        Repainted only on a CHANGE: this runs every `TUNNEL_PARK_POLL_S` and the
+        band shares the dock with the transcript the user is reading, so a
+        needless repaint per tick is a cost with no reader. `update` leaves a
+        segment alone for a caller that passes `None`, so `False` here is a real
+        assertion — the rung is withdrawn, not merely untouched.
+        """
+        if parked == self._tunnel_parked:
+            return
+        self._tunnel_parked = parked
+        status = self._status
+        if status is not None:
+            status.update(tunnel_parked=parked)
 
     def _sync_band_inset(self) -> None:
         """Give the band its top inset only while it actually holds a slot.
