@@ -50,6 +50,7 @@ from local_operator.server.routes import (
     desktop_radient,
     desktop_runtimes,
     desktop_sessions,
+    desktop_tunnel,
     desktop_wakes,
     health,
     jobs,
@@ -638,6 +639,10 @@ app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
 app.include_router(desktop_lifecycle.router)
 app.include_router(desktop_radient.router)
+# `/v1/desktop/tunnel` is a literal path, so it collides with nothing above it
+# whatever the order: no sibling declares a single-segment `/v1/desktop/{...}`
+# template that could swallow it.
+app.include_router(desktop_tunnel.router)
 # The machine-wide wake surface. Registered AFTER `desktop_sessions` and after
 # the lifecycle routes for the reason the sessions module documents about its
 # own ordering: FastAPI matches in declaration order, so a `/v1/desktop/...`

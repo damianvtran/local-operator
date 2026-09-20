@@ -21,6 +21,7 @@ from local_operator.server.dependencies import get_credential_manager
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.utils.desktop_auth import DesktopAuth, LoginOperation
+from local_operator.tunnels import report
 
 router = APIRouter(tags=["Authentication"], dependencies=[Depends(require_desktop)])
 
@@ -209,7 +210,19 @@ async def account_status(host: DesktopAuth = Depends(get_desktop_auth)):
                 ),
             }
         )
-    return _reply({"accounts": accounts})
+    # The tunnel's login verdict rides here because this is the route the
+    # account section already reads, and it is the only thing that makes that
+    # section honest about a credential that is no longer accepted: a row can be
+    # `configured` with an unexpired token and still be unusable, which is what
+    # the incident's 401s with a live access token were. The rest of the tunnel's
+    # state is on `GET /v1/desktop/tunnel`; this is deliberately the narrow fact.
+    #
+    # `reachable=False`: this route is polled beside an interactive login form,
+    # so it must not wait on a loopback socket to answer.
+    tunnel = await report.local_payload(reachable=False)
+    return _reply(
+        {"accounts": accounts, "radient_login": tunnel["login"], "tunnel_remedy": tunnel["remedy"]}
+    )
 
 
 @router.delete("/v1/auth/accounts/{account_id}", response_model=CRUDResponse[AccountRemoval])

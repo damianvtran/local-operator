@@ -1352,6 +1352,10 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "our recorded copy of the Windows task definition FILE",
     ),
+    # Both rows below arrived independently and BOTH are kept: each side
+    # appended its own entry to this tuple, so the union is the resolution —
+    # neither row supersedes the other and dropping either would let a real
+    # removal go unallow-listed (the guard would fail, not silently pass).
     # The phone web bundle's refused build (2026-09-19). The call removes
     # `<web>/dist` and nothing else: `web_dir` is `Path(__file__).parent /
     # "web"` for this install, or the snapshot tree the updater is about to
@@ -1365,6 +1369,22 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/mobile/install.py::_discard_bundle",
         "shutil.rmtree",
         "Drops <web>/dist after the bundle guard refuses it; web_dir is package/snapshot-derived",
+    ),
+    # The tunnel connector's park record (2026-09-19). `state.clear()` unlinks
+    # `tunnel/state.json` when the condition it describes is over — the connector
+    # is serving again, or retrying, or the operator stopped the tunnel — because
+    # every surface (the terminal's notice, `lop tunnel status`, the desktop
+    # route) reads that file as the truth about a process none of them can see,
+    # and a park that outlived its condition would have all of them describing a
+    # connector that is not parked. The path is `config.directory()` + a fixed
+    # basename: that is `$LOCAL_OPERATOR_CONFIG_DIR` (or `~/.local-operator`),
+    # never a session id, never a caller, and never a directory under
+    # `sessions/`; `unlink` takes the one FILE the connector itself wrote.
+    (
+        "local_operator/tunnels/state.py::clear",
+        "<path>.unlink",
+        "Removes only the park FILE tunnel/state.json under the config dir; "
+        "never a directory, never under sessions/",
     ),
 )
 
