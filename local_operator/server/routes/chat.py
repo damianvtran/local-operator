@@ -51,6 +51,7 @@ from local_operator.server.utils.job_processor_queue import (
     run_job_in_process_with_queue,
 )
 from local_operator.server.utils.operator import ExecutorInitError, create_operator
+from local_operator.server.utils.sse_publisher import publish_job_status
 from local_operator.types import ConversationRecord, ConversationRole
 
 if TYPE_CHECKING:
@@ -377,6 +378,27 @@ async def chat_async_endpoint(
             hosting=request.hosting,
             agent_id=None,
         )
+
+        # TELL THE JOB'S OWN STREAM THAT THE REQUEST WAS TAKEN, BEFORE THE WORK
+        # THAT MAKES THE CALLER WAIT. A caller attaches to ``/v1/sse/jobs/{id}``
+        # the moment this response hands it the id, and until this frame existed
+        # the channel said NOTHING about the job until the spawned child had
+        # booted its interpreter, imported the composition root and built a
+        # session — measured at p50 5.9 s (``scripts/bench_ttft.py``, scenario
+        # ``sse-jobs``) against a 202 that arrives in milliseconds. The channel
+        # was built for exactly this ordering (see ``routes/sse.py``: the job key
+        # exists so a client can attach before a record does), and the frame is
+        # the job's OWN status rather than a new event name because that is what
+        # a client already renders — the same ``pending`` ``GET /v1/jobs/{id}``
+        # reports at this instant, superseded by the child's own ``processing``
+        # when it starts. Nothing is claimed that is not yet true: the job is
+        # recorded and its runtime is not up.
+        #
+        # PUBLISHED BEFORE THE SPAWN, so the frame is ordered ahead of every
+        # frame the child can produce, and RETAINED BY THE BROKER, so a client
+        # that attaches after this route returns still receives it in replay
+        # rather than opening a stream that looks silent.
+        publish_job_status(event_broker, job.id, job.status, None)
 
         # Create and start a process for the job using the utility function
         create_and_start_job_process_with_queue(

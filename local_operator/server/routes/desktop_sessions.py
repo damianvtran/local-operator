@@ -165,6 +165,62 @@ PENDING_STEER_ADMISSION_DETAIL = (
     "pending; the steer into the turn already running is not acknowledged yet"
 )
 
+#: The session-stream frame that tells a submitting viewer its request was TAKEN,
+#: emitted BEFORE the runtime is engaged. Session-scoped for the same reason as
+#: the failure frame below, and additive in the same way (``DESKTOP_API.md``,
+#: "Stream ordering and lifecycle": a renderer that does not know the type
+#: ignores it).
+#:
+#: WHY IT EXISTS. On a session with no runtime yet, the cold engage (spawn a
+#: child, import the composition root, construct the session, bind) happens
+#: INSIDE this route's POST, and until it finishes the client is told NOTHING —
+#: measured at p50 2,622 ms and up to 4,850 ms on the quiet box the redesign was
+#: diagnosed on, and at p50 7.0-9.5 s for the same scenario under load 200
+#: (``scripts/bench_ttft.py``, scenario ``desktop-cold``) — against 28 ms warm.
+#: The user's own
+#: keystroke is the last acknowledgement they get; everything after it is the
+#: model, seconds later. Nothing in the engage can be made to emit first — it is
+#: local work in another process — so the acknowledgement is composed here, by
+#: the host that already holds the request and is about to pay for it.
+#:
+#: WHAT IT CLAIMS, EXACTLY, because a frame a renderer paints as success must not
+#: overstate: this host has RECORDED the request and has started engaging a
+#: runtime for it. It is NOT the runtime's acknowledgement — that is the HTTP
+#: receipt (``status: admitted``) and it may not arrive for seconds — and it does
+#: not promise the turn ran: a later refusal is published as
+#: :data:`ADMISSION_FAILED_FRAME`, which is why the two names are siblings.
+#: ``request_id`` is the caller's own id, the same one the receipt and the failure
+#: frame carry, so a renderer correlates all three.
+#:
+#: EMITTED ONCE, BEFORE THE DOOR IS ENTERED (``prompt`` below), and both halves
+#: of that are load-bearing:
+#:
+#: * BEFORE ``host(request).session(...)``, because that is what acquires a
+#:   bridge, and on a cold session the acquire waits on the bind lock behind any
+#:   speculative warm a visible ``/watch`` lease armed — measured at ~1.0 s
+#:   (``_BACKGROUND_YIELD_BUDGET_S``). A user whose window is mounted is exactly
+#:   the user that lease belongs to, so the acknowledgement must not queue behind
+#:   the spawn it exists to cover. ``DesktopSessions.announce`` does the publish
+#:   on the RESIDENT bridge, taking no reference and starting nothing.
+#: * ONCE per request id, because that position puts it ahead of the receipt
+#:   journal which otherwise supplies at-most-once: ``publish_once`` remembers the
+#:   ids it has announced (bounded), so a retried submit announces once, and a
+#:   request the door then refuses on a latched daemon is not announced at all.
+#:
+#: THROUGH THE BRIDGE rather than a bespoke write, because that is what makes it
+#: idempotent on reconnect: the frame takes the bridge's own monotone ``seq`` and
+#: enters its replay buffer, so a viewer that reconnects with the epoch and
+#: cursor of the connection it lost receives it exactly once instead of not at
+#: all. (A FRESH attach replays nothing by design — ``events`` gaps a subscriber
+#: that supplies no epoch — and gets the snapshot instead; the acknowledgement is
+#: about a reconnect mid-engage, which is exactly the case the replay covers.)
+#:
+#: THE SPECULATIVE WARM DOES NOT PUBLISH IT. A visible ``/watch`` lease arms a
+#: warm of its own, and that spawn races this route's engage; only the submit
+#: path owns the request and therefore only it acks, which is what keeps this
+#: frame to one per submit rather than one per racing path.
+ADMISSION_ACCEPTED_FRAME = "admission.accepted"
+
 #: The session-stream frame that carries a DETACHED admission's failure to the
 #: UI. Session-scoped because the failure concerns one session's text, and the
 #: stream is where a viewer is already listening (``DESKTOP_API.md``, "Stream
@@ -1811,6 +1867,23 @@ async def prompt(session_id: str, body: Prompt, request: Request):
     on the latch and not on the record: an announced daemon is still the only
     place its client can work (``server/retire.py``).
     """
+    # THE ACKNOWLEDGEMENT GOES OUT BEFORE THE DOOR, and that position is the
+    # whole point: the door acquires a bridge, and a cold acquire waits on the
+    # bind lock behind any speculative warm the visible ``/watch`` lease armed —
+    # measured at ~1.0 s (``_BACKGROUND_YIELD_BUDGET_S``), which is exactly the
+    # case where a mounted viewer is waiting to be told something. Publishing
+    # here costs no reference, builds nothing and can start nothing; see
+    # ``DesktopSessions.announce`` for the mechanism and the one condition
+    # (a resident bridge) under which it has an audience. It is idempotent per
+    # request id, so the retry this route already tolerates cannot announce
+    # twice, and it declines on a latched daemon rather than contradicting the
+    # door's refusal.
+    await host(request).announce(
+        session_id,
+        ADMISSION_ACCEPTED_FRAME,
+        {"request_id": body.request_id, "mode": body.mode},
+        dedupe_key=body.request_id,
+    )
     async with errors(request), host(request).session(session_id) as bridge:
 
         async def admit():
