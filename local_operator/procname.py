@@ -516,9 +516,20 @@ def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
     """
     try:
         # Function-local import: this sweep runs only on the REPLANT path, and
-        # ``procstate`` pulls ``subprocess`` in with it — the house rule here is
-        # that the common startup (a stat probe and no writes) pays for nothing
-        # it does not use (see the ``update`` and ``ctypes`` imports below).
+        # ``procstate`` is a module body nothing above this function reads — the
+        # house rule here is that the common startup (a stat probe and no writes)
+        # pays for nothing it does not use (see the ``update`` and ``ctypes``
+        # imports below).
+        #
+        # THE SAVING IS ONE MODULE, MEASURED (review round 4, MINOR 2):
+        # ``import local_operator.procname`` leaves BOTH ``procstate`` and
+        # ``subprocess`` out of ``sys.modules``, but ``subprocess`` is not what this
+        # deferral is buying. ``cli.py`` imports it at module scope, so on the ``lop``
+        # path the module-level form would add only ``procstate`` — a stdlib-only
+        # body. The deferral is kept because that body is still the whole saving and
+        # because the sweep is not on the common path at all; the locality is pinned
+        # by ``test_importing_procname_defers_procstate``, so collapsing it reads as
+        # a no-op cleanup only until that test reddens.
         from local_operator import procstate
 
         gone: list[Path] = []

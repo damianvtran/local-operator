@@ -193,6 +193,41 @@ class TestStaleness:
         assert 999999 in asked, "the sweep must ask the shared liveness probe"
         assert not orphan.exists()
 
+    def test_importing_procname_defers_procstate(self) -> None:
+        """MINOR 2 (review round 4): the sweep's import stays inside the sweep.
+
+        ``procname`` is imported on the startup path of every ``lop`` invocation, and
+        the ``procstate`` import inside :func:`close_orphaned_temps` is deliberate:
+        measured, ``import local_operator.procname`` leaves ``procstate`` out of
+        ``sys.modules``. (What it does NOT save is ``subprocess`` — ``cli.py`` imports
+        that itself — so the deferral buys one stdlib-only module body, which is the
+        whole reason the comment above it says so.) Nothing pinned that locality, so
+        restoring the module-level form — the line a merge resolution dropped — read
+        like a no-op cleanup while quietly adding a module body to every invocation.
+
+        THE PROBE RUNS IN A CHILD, like the sibling spawn/import probes above, and for
+        the same reason: this test module and the suite's other imports may already
+        have pulled ``procstate`` in, so an in-process ``sys.modules`` check would
+        assert about collection order rather than about ``procname``.
+        """
+        probe = (
+            "import sys;"
+            "sys.path.insert(0, %r);" % str(Path(__file__).resolve().parents[2])
+            + "import local_operator.procname;"
+            "print('local_operator.procstate' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "False", (
+            "importing procname must not pull procstate in: the common startup path "
+            "does not need it, and the sweep imports it for itself"
+        )
+
     def test_replants_when_libpython_points_at_the_wrong_library(self, branded):
         """Trigger (c), second half: a LIVE symlink is not automatically CORRECT.
 

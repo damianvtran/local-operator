@@ -1816,7 +1816,9 @@ class TestPruning:
         for directory in namespaces:
             assert not directory.exists(), f"neither may the prune that follows it: {directory}"
 
-    @pytest.mark.parametrize("obstructed", ["run/mobile", "run/serve", "run"])
+    @pytest.mark.parametrize(
+        "obstructed", ["run/mobile", "run/serve", "run", "run/host", "run/mobile/reaped"]
+    )
     def test_an_obstructed_namespace_keeps_every_generation(
         self, home: Path, obstructed: str
     ) -> None:
@@ -1837,6 +1839,18 @@ class TestPruning:
         THE CONTROL IS THE OTHER HALF: without it, a prune that simply never deletes
         anything passes this test, so the obstruction is removed and the SAME prune is
         required to reclaim.
+
+        ALL FOUR READERS, NOT THE TWO THAT WERE FIXED FIRST (review round 4, MAJOR 1).
+        The round-3 fix reached only ``_session_records_under`` and
+        ``_serve_records_under``; ``_boot_records_under`` and the ``reaped/`` sidecar
+        reader still listed through a glob that swallows the obstruction, so
+        ``run/host`` and ``run/mobile/reaped`` — named here by the last two
+        parameters — read "empty and COMPLETE" and the prune then deleted a generation
+        that only that namespace vouched for (measured: four generations with a real
+        boot record naming one of them, clobbered ``run/host`` → ``complete=True``,
+        ``removed`` 1 → 2, that generation gone). The ``reaped`` parameter is why the
+        sidecar reader's note is carried out of ``_reaped_records_under``: without it
+        the read is still incomplete, but the namespace is not named.
         """
         generations = [_install(f"0.60.{index}") for index in range(4)]
         root = home / ".local-operator"
