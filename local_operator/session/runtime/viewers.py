@@ -298,7 +298,7 @@ def unpublish_viewer(pid: int, root: Path | None = None) -> None:
         pass
 
 
-def scan_viewers(root: Path | None = None) -> list[ViewerRecord]:
+def scan_viewers(root: Path | None = None, *, reap: bool = True) -> list[ViewerRecord]:
     """Every LIVE viewer, freshest focus first, reaping what is dead.
 
     Only live records are returned — unlike ``registry.scan``, which reports
@@ -312,6 +312,15 @@ def scan_viewers(root: Path | None = None) -> list[ViewerRecord]:
     resolves identically: most recently focused first (the window the user was
     last in is where they expect to land), then lowest pid as a deterministic
     tiebreak so two never-focused viewers do not alternate between scans.
+
+    ``reap=False`` is READER MODE, and it exists for the same reason
+    ``registry.scan``'s does: the residency sweep asks this question to decide
+    whether an interface is attached to a runtime, and a decider that unlinked a
+    dead viewer's record as a side effect of asking would be the only mutator on
+    a path whose whole value is that it can be run against a store it does not
+    own. The verdicts are identical either way — reaping here is a SIDE EFFECT of
+    the liveness test, never an input to it — so a reader sees exactly the list
+    the reaping caller sees, minus the removals.
     """
     directory = viewer_run_dir(root)
     now = time.time()
@@ -322,16 +331,18 @@ def scan_viewers(root: Path | None = None) -> list[ViewerRecord]:
         except (OSError, ValueError, TypeError):
             # The only writer is the staged write above, so an unparseable file
             # means an interrupted crash rather than a format worth preserving.
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            if reap:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
             continue
         if not pid_alive(record.pid):
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            if reap:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
             continue
         if now - record.heartbeat_at > VIEWER_HEARTBEAT_TIMEOUT_S:
             # Alive but quiet: the process is wedged or stopped. Leave the file

@@ -117,6 +117,34 @@ MIN_SLEEP_S = 1.0
 #: for a week — the user will get the catch-up when they open it.
 STALE_AFTER_S = 7 * 24 * 3600.0
 
+#: How often the residency sweep runs, and therefore how long the loop may sleep
+#: between passes.
+#:
+#: THE SUPERVISOR HOSTS THE SWEEP because it is the one supervised process on this
+#: machine that is not a viewer and that already knows the shape of the fleet: it
+#: spawns runtimes (``_engage_one``), it reads their records (``_has_live_runtime``),
+#: and it already has a bounded, sliced loop to hang a pass on. A separate reaper
+#: process would be a second thing to install, supervise and keep alive for work
+#: that is a few hundred milliseconds a minute.
+#:
+#: MEASURED COST OF ONE PASS: a ``ps`` census (140 ms / 57 runtime rows on an idle
+#: host, 1.25 s with 1,260 processes under load) plus a machine-wide ``lsof``
+#: (200 ms idle, 476 ms loaded) plus a glob and parse of the record directories and
+#: one bounded connect per runtime that names a port. It is DETACHED (see
+#: :meth:`_ResidencySweep.kick`), so none of that is time the wake path waits for,
+#: and at 300 s it is well under a tenth of a core on average — for a process whose
+#: whole justification is staying cheap. It is paid ONLY while there are fireable
+#: wakes: this supervisor retires when there are none (see the module docstring),
+#: which is why the sweep's other door is ``lop sessions reclaim``.
+#:
+#: WHY NOT SLOWER: the confirm window (``reclaim.CONFIRM_S``, 60 s) is a MINIMUM
+#: separation, so this interval decides how long an orphan survives after it is
+#: first seen. The population this exists for had been alive over ten hours, so
+#: five minutes is a rounding error on the harm and a 5x saving on the cost. WHY
+#: NOT FASTER: every pass forks two external tools, and a 30 s cadence would double
+#: that for a class of process measured in hours.
+RESIDENCY_SWEEP_INTERVAL_S = 300.0
+
 #: How long a WAKE engage may take before the supervisor gives up on it.
 #:
 #: Deliberately not ``launch.DEFAULT_DEADLINE_S`` (30 s), which stays exactly
@@ -850,6 +878,125 @@ def _note_delivered(config_dir: Path, session_id: str, due_ms: int) -> int:
     return note_delivered(config_dir, session_id, due_ms)
 
 
+class _ResidencySweep:
+    """The residency sweep's seat in this loop: the cadence, and the memory.
+
+    **WHY A SWEEP AT ALL, AND WHY HERE.** The sweep itself lives in
+    :mod:`local_operator.session.runtime.reclaim`; this class is only its seat —
+    when the pass runs and what it remembers between passes. What the pass answers
+    is the gap the process model left open: a runtime's OWN reaper is the only
+    party that may end it, and that reaper's first term is fail-closed, so a
+    runtime whose predicate cannot be evaluated stays resident indefinitely. The
+    fleet measured on 2026-09-17 (61 runtimes, 36 of them with no record in this
+    store and the oldest alive 11.3 h) is what makes that gap expensive — and the
+    same census found those 36 holding fresh records in their OWN roots, which is
+    why the sweep refuses them and why it is the ROSTER, not the sweep, that makes
+    them visible.
+
+    **IT REMEMBERS ONLY THE CONFIRM WINDOW.** The sightings hold each candidate's
+    last-sighting time and its cumulative CPU, because the decision needs two
+    independent looks at the process table — one to see it, one to confirm it is
+    still there, still record-less and still not burning CPU. Losing that memory (a
+    restart) costs one extra window of delay and never a wrong decision, which is
+    what makes an in-memory structure the right shape for it.
+
+    **THE PASS NEVER BLOCKS THE LOOP.** The census forks ``ps`` and ``lsof``, so
+    the pass runs on a worker thread; the loop's own deadline is untouched by a
+    machine with dozens of runtimes or by a wedged ``ps``.
+    """
+
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = config_dir
+        #: ``None`` until the first pass, so the first pass is always due: a
+        #: supervisor START is the moment a fleet most needs looking at, and waiting
+        #: an interval for it would leave a fresh install blind for five minutes.
+        self.next_at: float | None = None
+        self.last_refusals: dict[str, int] | None = None
+        self._sightings: Any = None
+        self._task: "asyncio.Task[Any] | None" = None
+
+    def seconds_until(self, now: float | None = None) -> float:
+        """How long the loop may sleep before this pass is due again."""
+        moment = time.monotonic() if now is None else now
+        if self.next_at is None:
+            return 0.0
+        return max(0.0, self.next_at - moment)
+
+    def due(self, now: float | None = None) -> bool:
+        return self.seconds_until(now) <= 0.0
+
+    def kick(self) -> None:
+        """Start a pass if one is due, WITHOUT holding this loop for it.
+
+        Detached, and that is a correction rather than a preference: awaiting the
+        pass put a ``ps`` and an ``lsof`` (measured ~350 ms together on an idle
+        machine, ~0.9 s under load) inside the iteration that fires wakes, so a
+        store with a due wake paid a census before the engage — and a test that
+        drives this loop for 1.2 s observed one engagement where it expected two.
+        Nothing about the pass is urgent: it decides over a window of minutes.
+        A pass already in flight is left alone, and the next one is armed from
+        here rather than from its completion, so a slow pass cannot make the loop
+        wake every second waiting for it.
+        """
+        if self._task is not None and not self._task.done():
+            return
+        if not self.due():
+            return
+        self.next_at = time.monotonic() + RESIDENCY_SWEEP_INTERVAL_S
+        self._task = asyncio.ensure_future(asyncio.to_thread(self.sweep))
+        self._task.add_done_callback(self._finished)
+
+    def _finished(self, task: "asyncio.Task[Any]") -> None:
+        """Log a finished pass. Never raises out of a done-callback.
+
+        INFO when the picture CHANGED and DEBUG when it did not, because a
+        supervisor that logged its full census every five minutes would bury the
+        one line an operator is looking for. A pass that reclaimed something always
+        speaks: the runtime's own exit is logged in ITS log file, and these are the
+        only lines that say who asked it to leave. A FAILED pass is a warning with
+        the traceback — a reaper that silently stops reaping is worse than one that
+        never ran, because the fleet looks supervised.
+        """
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("the residency pass failed; the fleet is unchecked", exc_info=error)
+            return
+        report = task.result()
+        changed = bool(report.reclaimed) or report.refusals() != self.last_refusals
+        self.last_refusals = report.refusals()
+        (logger.info if changed else logger.debug)("%s", report.summary())
+
+    async def shutdown(self) -> None:
+        """Drop an in-flight pass at teardown.
+
+        Cancelling a ``to_thread`` task does not stop the thread, which is fine:
+        the pass reads the process table and sends SIGTERMs it already decided on,
+        and waiting for it would make this loop's teardown as slow as the census.
+        The reason to cancel at all is the loop's own bookkeeping — a task left
+        pending at loop close logs a spurious error, which is what
+        ``_Sweeper.shutdown`` exists for on the engage side.
+        """
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+
+    def sweep(self, *, apply: bool = True) -> Any:
+        """Run one pass. Blocking; callers hand it to a worker thread.
+
+        ``reclaim`` is imported here rather than at module scope because this module
+        is the LaunchAgent's ``python -m`` target and its docstring's contract is
+        that it stays import-light: the sweep pulls in ``paths``, ``registry`` and
+        ``viewers``, none of which the supervisor needs in order to start, arm a
+        wake or retire.
+        """
+        from local_operator.session.runtime.reclaim import Sightings, reclaim_runtimes
+
+        if self._sightings is None:
+            self._sightings = Sightings()
+        return reclaim_runtimes(self.config_dir, apply=apply, sightings=self._sightings)
+
+
 class _Sweeper:
     """Owns the in-flight engagements so the serve loop never waits on one.
 
@@ -1150,6 +1297,7 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     all-timeout sweep block for 540 s in round 1.
     """
     sweeper = _Sweeper()
+    residency = _ResidencySweep(config_dir)
     try:
         while True:
             index, deliveries = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
@@ -1225,12 +1373,36 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
                 delay = SLICE_S
             else:
                 delay = max(MIN_SLEEP_S, min(MAX_SLEEP_S, (upcoming - now_ms) / 1000.0))
+            # THE RESIDENCY PASS GOES LAST — after this iteration's wake work and
+            # before the sleep — and it is the only thing this loop does that is not
+            # about wakes. Last, and not first, because a pass forks ``ps`` and
+            # ``lsof`` (measured ~350 ms together, more under load): in front of the
+            # engage it would make every pass with a DUE wake pay a census before
+            # firing it. Nothing here is urgent — the pass decides over a window of
+            # minutes — and nothing this iteration read is invalidated by it, since
+            # the index is re-read for the sleep decision just below.
+            #
+            # ``--once`` therefore never sweeps: every one of its other behaviours is
+            # a read, and a mode whose whole purpose is "tell me the state of things"
+            # must not be the one that ends processes. ``lop sessions reclaim`` is the
+            # operator's door to the same pass.
+            residency.kick()
+            # THE SWEEP BOUNDS THE SLEEP. Without this the loop's own cadence is set
+            # purely by the next wake, which on a store holding one wake three hours
+            # out means three hours between passes — and a residency pass that only
+            # runs when a wake happens to be imminent is a sweep with a random period.
+            # The floor is ``MIN_SLEEP_S`` so a pass that has just run cannot turn this
+            # into a spin.
+            delay = max(MIN_SLEEP_S, min(delay, residency.seconds_until()))
             logger.debug("sleeping %.1fs until the next wake (in %.0fs slices)", delay, SLICE_S)
             await _sleep_in_slices(config_dir, delay, upcoming)
     finally:
         # A cancelled or retiring supervisor must not leave engage tasks
         # pending: they hold a semaphore slot and an event loop reference, and
-        # an un-awaited task destroyed at loop close logs a spurious error.
+        # an un-awaited task destroyed at loop close logs a spurious error. The
+        # residency pass is the same shape of background work and is dropped the
+        # same way.
+        await residency.shutdown()
         await sweeper.shutdown()
 
 

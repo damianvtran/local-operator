@@ -70,6 +70,7 @@ from typing import Any, Union
 
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import detached_popen_kwargs
+from local_operator.session.runtime.types import RUNTIME_MODULE
 
 logger = logging.getLogger(__name__)
 
@@ -411,7 +412,17 @@ def _spawn_runtime(
             # interpreter options are recognised only before ``-m``.
             # ``executable`` may name the CURRENT generation's interpreter
             # rather than this process's; see :func:`_spawn_interpreter`.
-            [argv0, SAFE_PATH_FLAG, "-m", "local_operator.session.runtime.process"],
+            # ``RUNTIME_MODULE`` is imported from ``session.runtime.types`` rather
+            # than written here, because the SWEEP identifies a runtime by this
+            # exact ``-m`` word in an argv (``reclaim.runtime_processes``) and a
+            # drift between the two is silent in the worst direction: the census
+            # matches nothing, every store reads as having no runtimes, and the
+            # residency bound goes inert with no failing test. It sits in ``types``
+            # (the runtime's shared vocabulary, no local imports) rather than in
+            # ``reclaim`` because this module must not import the sweep to write an
+            # argv — ``reclaim`` pulls in ``registry`` and ``viewers``, and this is
+            # the file the engage path loads.
+            [argv0, SAFE_PATH_FLAG, "-m", RUNTIME_MODULE],
             executable=executable,
             env=env,
             stdin=subprocess.DEVNULL,
