@@ -534,11 +534,14 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         # agent R3-5). The block wraps at its OWN content width — 40 cells at a
         # 44-column terminal, not 44 — so this 345-character copy renders as 12
         # rows, against a transcript area that is 11 rows in the tightest case
-        # measured here (`size [41,11] virtual [40,15] scroll_y=4`): the block's
-        # first TWO rows are above the fold — not "at most one", which is what
-        # this comment claimed until design round 5 re-read the frame — and what
-        # stays on screen is the rest of the reason and the remedies, which is
-        # why the copy leads with them. A wrap-based pin said "9 rows" and
+        # measured here (`region [1,1,42,13] size [41,11] virtual [40,15]
+        # scroll_y=4` — the maximum, so the transcript is at its bottom): EXACTLY
+        # ONE row of the block is above the fold, its first. The other three rows
+        # off the top are the prompt's two and the container's adaptive gap
+        # (design round 5 read them as more of the notice and said two; round 6's
+        # prose check measured one, and the frames support one). What stays on
+        # screen is the rest of the reason and the remedies, which is why the copy
+        # leads with them. A wrap-based pin said "9 rows" and
         # measured a wrapping the frame does not do; this one measures the widget.
         # The transcript is given a row of its own first so the two areas are the
         # same shape.
@@ -551,8 +554,9 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         # 12, measured: the command's 345 characters at the same 40-cell content
         # width. The block is pinned; the AREA is not, because it is a property of
         # what else is in the transcript — and it does NOT always hold the block:
-        # 13 rows in this staging, 11 in a conversation (where the block's first
-        # TWO rows are above the fold), 2 with the re-armed card docked, where the
+        # 13 rows in this staging, 11 in a conversation (where exactly one row of
+        # the block, its first, is above the fold), 2 with the re-armed card
+        # docked, where the
         # painted rows are the notice's TAIL — its last two, `blocked until
         # someone does.` / `Denying it works from here.` — not a middle slice
         # (design rounds 4b/5, D19: the claim that it fits at every height was
