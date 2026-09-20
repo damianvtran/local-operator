@@ -898,10 +898,13 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
     to the incident shape this record is deliberately not. The reason is bounded
     at 200 characters exactly as :func:`format_model_switch_message` bounds its
     own, and is OMITTED when blank rather than printed empty: a dangling
-    ``Reason:`` reads as a truncation. It is shaped COMMAND-FIRST by its callers
-    (``mcp/manager.py``), so the one part a reader must not lose lands at the
-    front of the line rather than mid-line after a restatement (design review
-    round 1, D3).
+    ``Reason:`` reads as a truncation. It is shaped COMMAND-FIRST at the two
+    auth call sites (``mcp/manager.py``), so the one part a reader must not lose
+    lands at the front of the line rather than mid-line after a restatement
+    (design review round 1, D3). The breaker site is the third caller and names
+    no verb: its remedy is a reconnect rather than a typed command, so its reason
+    states the condition (``auto-reconnect suspended after >N attempts``) and the
+    row's last line defers the recovery to the user without naming one.
     """
     lines = [f"[session warning] MCP server '{server}' is unavailable: its tools are gone for now."]
     if reason.strip():

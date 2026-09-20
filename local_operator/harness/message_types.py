@@ -120,9 +120,9 @@ SESSION_MODEL_SWITCH_MESSAGE_TYPE = "session_model_switch"
 #: pair has always been model-visible (``McpManager.on_incident`` ->
 #: ``Session._on_mcp_incident``); the recovery half was not, so an operator who
 #: ran ``/mcp login <server>`` mid-session left the model holding a death notice
-#: — and its advice, "its tools are gone ... Do not call its tools" — for a
-#: server that had been usable for the rest of the session. Observed live
-#: against ``minerva-qa``.
+#: — and its advice, "Its tools are not callable until the user restores it, and
+#: the agent should not retry them in a loop." — for a server that had been
+#: usable for the rest of the session. Observed live against ``minerva-qa``.
 #:
 #: It is a DEDICATED type rather than a ``session_incident``, and since
 #: :data:`SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE` its pair is too. The reason

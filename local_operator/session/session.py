@@ -2424,13 +2424,14 @@ class Session:
         #: the order their hooks fired, not in the order they happen to finish.
         #:
         #: The two MCP notices do different amounts of work before their live
-        #: append — ``journal_incident`` awaits a transcript write,
+        #: append — ``journal_mcp_unavailable`` awaits a transcript write,
         #: ``journal_mcp_recovery`` persists nothing — and both are launched
         #: fire-and-forget through ``_spawn_background``. Without this lock the
         #: recovery completes on its FIRST scheduling step and overtakes the
-        #: incident it exists to supersede, leaving the model reading "its tools
-        #: are gone ... Do not call its tools" as the last word on a server that
-        #: is working (review round 1, R1; measured inverted at 0-5 loop ticks).
+        #: warning it exists to supersede, leaving the model reading "Its tools
+        #: are not callable until the user restores it, and the agent should not
+        #: retry them in a loop." as the last word on a server that is working
+        #: (review round 1, R1; measured inverted at 0-5 loop ticks).
         #:
         #: A LOCK rather than a delay because ordering must not depend on how
         #: many awaits either method happens to contain: ``asyncio.Lock``
@@ -9468,10 +9469,13 @@ class Session:
         journal entry in the transcript with a blank subject, so the writer
         refuses it. The manager still arms ``_incident_announced`` off its own
         ``sink(...)`` call, so an empty name would leave a recovery armed with no
-        warning behind it — unreachable today, because all three ``on_incident``
-        sites pass a name taken from the configured server table, which cannot
-        hold an empty key. If a caller is ever added that can pass one, that
-        arming has to move rather than this guard being relaxed.
+        warning behind it — unreachable because :meth:`journal_mcp_recovery`
+        carries the SAME ``not server`` guard, so an empty name drops BOTH rows
+        and nothing is ever announced for a warning that was not written. That
+        symmetry is the load-bearing fact, not the server table: ``mcp/config.py``
+        takes whatever keys the server map holds and enforces no non-empty name,
+        so an empty key is configurable. If a caller is ever added that can pass
+        one, that arming has to move rather than this guard being relaxed.
         """
         from local_operator.incidents import format_mcp_unavailable_message
 
@@ -9506,8 +9510,9 @@ class Session:
         it, an operator who fixed a server mid-session — ``/mcp login
         minerva-qa``, which is now the ONLY thing that restores an expired
         grant, or the backoff reconnect while it is still running — left the
-        model holding a death notice, and its advice "its tools are gone ...
-        Do not call its tools", for the rest of the session. The tools were
+        model holding a death notice, and its advice "Its tools are not callable
+        until the user restores it, and the agent should not retry them in a
+        loop.", for the rest of the session. The tools were
         genuinely back (``refresh_tools`` swaps the inventory mid-turn) but the
         model had been told not to use them and had no reason to re-check.
 

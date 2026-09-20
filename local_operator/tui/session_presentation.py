@@ -1063,8 +1063,9 @@ def project_settled_rows(
             # previous turn ended" tail) was wrong for it. Measured live on
             # 2026-09-20, where an expired grant painted all three.
             #
-            # `warning`, by the role table above: "a state they must act on or
-            # know about". This row is that state, and the action is the
+            # `warning`, by the role table in ``tui/widgets/transcript.py``
+            # (``NoticeBlock._KIND_TOKENS``): "a state they must act on or know
+            # about". This row is that state, and the action is the
             # operator's — ``/mcp reauth <server>`` is theirs to run, and the
             # Reason line names it. An earlier revision painted it `note` (the
             # answer to something the user just did), which shares its ink with

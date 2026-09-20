@@ -4971,8 +4971,9 @@ async def test_incident_then_recovery_reaches_the_context_in_that_order(tmp_path
     write before its live append, ``journal_mcp_recovery`` persists nothing.
     Without the shared ``_journal_lock`` the recovery therefore finishes on its
     FIRST scheduling step and lands ahead of the warning, leaving the model
-    reading "its tools are gone ... tell the user which server is down" as the
-    LAST word on the server — precisely the state this notice exists to clear,
+    reading "Its tools are not callable until the user restores it, and the agent
+    should not retry them in a loop." as the LAST word on the server — precisely
+    the state this notice exists to clear,
     now with a superseding message that arrived too early to supersede
     anything.
 
@@ -5054,11 +5055,11 @@ async def test_mcp_unavailability_is_journalled_as_a_warning_not_an_incident(tmp
 async def test_the_persisted_reason_is_bounded_like_its_sibling(tmp_path):
     """R2: the rendered line is clipped at 200 characters; the copy was not.
 
-    ``details["reason"]`` is read back by the phone fold and by anything that
-    re-renders the row, so an unbounded copy persists exactly what the reader is
-    never shown — a whole provider error envelope. ``journal_incident`` bounds
-    its ``raw`` at 1000 for the same reason, and this mirrors it rather than
-    inventing a second bound.
+    ``details["reason"]`` goes to the transcript for good, so an unbounded copy
+    stores exactly what no surface ever shows — in the one place nothing prunes
+    it. The bound is the transcript's own rather than a rendering rule:
+    ``journal_incident`` stores its ``raw`` at 1000 for the same reason, and this
+    mirrors it instead of inventing a second bound.
     """
     stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream)
