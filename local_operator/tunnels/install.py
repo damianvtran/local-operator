@@ -266,7 +266,13 @@ def rearm_if_parked(*, provider: str, credential_id: int) -> str:
     """
     if not _rearm_allowed():
         return ""
-    if sys.platform != "darwin" and not sys.platform.startswith("linux"):
+    # `supervisors.supervisor()` rather than a `sys.platform` test: it also
+    # answers "no supervisor here at all" (a Linux without systemd, a Windows
+    # without schtasks), which is a platform this must decline on rather than
+    # raise out of a login, and it is the same question `lop tunnel install`
+    # and `action()` ask.
+    kind = supervisors.supervisor()
+    if kind is None:
         return ""
     parked = state.parked()
     if not parked or parked.get("reason") != gateway.LOGIN_REQUIRED:
@@ -290,20 +296,35 @@ def rearm_if_parked(*, provider: str, credential_id: int) -> str:
         # "this is the credential the tunnel owns", and None == None is not that.
         return ""
     try:
-        if sys.platform == "darwin":
-            path = service_path()
-            if not path.exists() or not launchd.config_lives_in_real_home(config_dir()):
+        if not supervisors.config_lives_in_real_home(config_dir()):
+            return ""
+        if kind == supervisors.SCHTASKS:
+            # Windows keeps its own copy of a task, so there is no registration
+            # FILE this installer owns to check — the addressability guard is
+            # the shared one `action()` uses for the same reason.
+            if not supervisors.task_scheduler_is_addressable(config_dir()):
                 return ""
-            # kickstart, not the bootout/bootstrap reload: the job is LOADED and
-            # not running (that is what a park is), so there is nothing to tear
-            # down, and a reload would also discard a plist repair mid-flight.
-            # The mobile installer already uses this verb for the same reason.
+            started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
+            if started.returncode:
+                raise ValueError(((started.stderr or started.stdout) or "").strip()[:200])
+            return "The Radient tunnel connector is starting again."
+        path = service_path()
+        if not path.exists():
+            return ""
+        if kind == supervisors.LAUNCHCTL:
+            # kickstart, not `launchd.reload_job`: that sequence exists for the
+            # case where the plist was just REWRITTEN, and its own docstring
+            # names this one as the deliberate exception — the parked job's
+            # plist is already correct and the job is loaded but stopped, so
+            # there is nothing to tear down and a reload would discard a
+            # pending plist repair mid-flight. The mobile installer starts its
+            # own daemon the same way.
             result = _launchctl("kickstart", "-k", f"gui/{os.getuid()}/{LABEL}")
             if result.returncode:
                 raise ValueError(result.stderr.strip())
         else:
             # Started, not restarted: the unit is inactive by definition here.
-            _run(["systemctl", "--user", "start", service_path().name])
+            _run(["systemctl", "--user", "start", path.name])
     except (OSError, ValueError, subprocess.SubprocessError):
         return "Signed in, but the tunnel connector could not be restarted; run lop tunnel install."
     return "The Radient tunnel connector is starting again."

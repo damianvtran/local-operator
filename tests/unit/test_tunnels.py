@@ -1804,9 +1804,11 @@ async def test_a_fixed_login_re_arms_the_parked_connector(
     monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
     plist = tmp_path / "com.local-operator.tunnel.plist"
     plist.write_text("plist")
-    monkeypatch.setattr(install.sys, "platform", "darwin", raising=False)
+    # The supervisor layer, not `sys.platform`: that is the one way to ask
+    # which host supervises this service, and it is what `action()` uses.
+    monkeypatch.setattr(install.supervisors, "supervisor", lambda: install.supervisors.LAUNCHCTL)
     monkeypatch.setattr(install, "service_path", lambda: plist)
-    monkeypatch.setattr(install.launchd, "config_lives_in_real_home", lambda _base: True)
+    monkeypatch.setattr(install.supervisors, "config_lives_in_real_home", lambda _base: True)
     kicks: list[tuple[str, ...]] = []
 
     def launchctl(*args: str):
@@ -1889,9 +1891,11 @@ def test_rearm_declines_everything_that_is_not_this_tunnel(
     monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
     plist = tmp_path / "com.local-operator.tunnel.plist"
     plist.write_text("plist")
-    monkeypatch.setattr(install.sys, "platform", "darwin", raising=False)
+    # The supervisor layer, not `sys.platform`: that is the one way to ask
+    # which host supervises this service, and it is what `action()` uses.
+    monkeypatch.setattr(install.supervisors, "supervisor", lambda: install.supervisors.LAUNCHCTL)
     monkeypatch.setattr(install, "service_path", lambda: plist)
-    monkeypatch.setattr(install.launchd, "config_lives_in_real_home", lambda _base: True)
+    monkeypatch.setattr(install.supervisors, "config_lives_in_real_home", lambda _base: True)
     kicks: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         install,
@@ -2104,9 +2108,11 @@ def test_rearm_refuses_a_configuration_with_no_usable_credential_id(
     monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
     plist = tmp_path / "com.local-operator.tunnel.plist"
     plist.write_text("plist")
-    monkeypatch.setattr(install.sys, "platform", "darwin", raising=False)
+    # The supervisor layer, not `sys.platform`: that is the one way to ask
+    # which host supervises this service, and it is what `action()` uses.
+    monkeypatch.setattr(install.supervisors, "supervisor", lambda: install.supervisors.LAUNCHCTL)
     monkeypatch.setattr(install, "service_path", lambda: plist)
-    monkeypatch.setattr(install.launchd, "config_lives_in_real_home", lambda _base: True)
+    monkeypatch.setattr(install.supervisors, "config_lives_in_real_home", lambda _base: True)
     kicks: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         install,
@@ -2120,3 +2126,47 @@ def test_rearm_refuses_a_configuration_with_no_usable_credential_id(
 
     assert install.rearm_if_parked(provider="radient", credential_id=0) == ""
     assert kicks == []
+
+
+def test_rearm_starts_the_windows_task_too(tmp_path, monkeypatch, connection) -> None:
+    """The same re-arm on the supervisor the product now supports on Windows.
+
+    The base this branch was rebased onto taught the four daemons to run off
+    macOS (a systemd user unit, a Task Scheduler task), so a park can now happen
+    on a host this hook must be able to end. The call it makes is the one
+    `action("start")` makes, through the shared layer rather than a second
+    spelling of it.
+    """
+    from local_operator.tunnels import install
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
+    monkeypatch.setattr(install.supervisors, "supervisor", lambda: install.supervisors.SCHTASKS)
+    monkeypatch.setattr(install.supervisors, "config_lives_in_real_home", lambda _base: True)
+    monkeypatch.setattr(install.supervisors, "task_scheduler_is_addressable", lambda _base: True)
+    runs: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install.supervisors,
+        "schtasks",
+        lambda *args: runs.append(args) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    config.save(_stored(connection, credential_id=7, gateway_port=4100))
+    state.mark_parked(reason=LOGIN_REQUIRED, detail="x", credential_id=7)
+
+    assert install.rearm_if_parked(provider="radient", credential_id=7) != ""
+    assert runs == [tuple(install.supervisors.task_run_args(install.TASK_NAME))]
+
+    # …and a task Scheduler refuses is reported, never raised: a login must not
+    # fail over a service that could not be started.
+    runs.clear()
+    monkeypatch.setattr(
+        install.supervisors,
+        "schtasks",
+        lambda *args: SimpleNamespace(returncode=1, stdout="", stderr="Access is denied."),
+    )
+    assert "could not be restarted" in install.rearm_if_parked(provider="radient", credential_id=7)
+
+    # A store that would not outlive this process reaches nothing, on Windows
+    # exactly as on the others.
+    monkeypatch.setattr(install.supervisors, "config_lives_in_real_home", lambda _base: False)
+    assert install.rearm_if_parked(provider="radient", credential_id=7) == ""
