@@ -81,6 +81,14 @@ class _FakeOwner:
     ever comes back. A dial that answers cannot fail an unbounded wait, so a
     fake that always welcomes cannot catch a read whose budget does not cover
     the welcome (review round 1, MAJOR-1).
+
+    ``answer_prompts``/``park_prompts`` are the ADMISSION leg, added for the
+    submit-acknowledgement tests: a ``prompt``/``steer`` op is recorded on every
+    arrival, held on ``park_prompts`` when one is given, and acknowledged only
+    when ``answer_prompts`` is set. A parked admission is what lets a test
+    assert that the host told its viewer something BEFORE the owner heard the
+    turn — the ordering the acknowledgement exists for — without any timing
+    bound standing in for the fact.
     """
 
     def __init__(
@@ -92,6 +100,8 @@ class _FakeOwner:
         sync_on_connect: bool = False,
         mute: bool = False,
         welcome_session_id: str | None = None,
+        answer_prompts: bool = False,
+        park_prompts: asyncio.Event | None = None,
     ) -> None:
         self.session_id = session_id
         self.welcome_session_id = welcome_session_id or session_id
@@ -99,6 +109,10 @@ class _FakeOwner:
         self.answer_watch = answer_watch
         self.sync_on_connect = sync_on_connect
         self.mute = mute
+        self.answer_prompts = answer_prompts
+        self.park_prompts = park_prompts
+        #: Every admission the owner's socket received, in order.
+        self.prompts: list[dict[str, Any]] = []
         self.port = 0
         self.conns = 0
         self.watch_calls = 0
@@ -153,6 +167,26 @@ class _FakeOwner:
                     if self.answer_watch:
                         await self._write(
                             writer, {"op": "ack", "req": frame.get("req"), "data": {}}
+                        )
+                elif frame.get("op") in ("prompt", "steer"):
+                    # RECORDED FIRST, so a test reading this list knows the
+                    # admission reached the socket even when it is held below.
+                    self.prompts.append(frame)
+                    if self.park_prompts is not None:
+                        await self.park_prompts.wait()
+                    if self.answer_prompts:
+                        await self._write(
+                            writer,
+                            {
+                                "op": "ack",
+                                "req": frame.get("req"),
+                                "detail": (
+                                    "steering queued"
+                                    if frame.get("op") == "steer"
+                                    else "prompt admitted"
+                                ),
+                                "duplicate": False,
+                            },
                         )
         except (ConnectionError, BrokenPipeError, asyncio.IncompleteReadError):
             return

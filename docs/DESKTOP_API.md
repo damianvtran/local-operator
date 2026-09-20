@@ -678,6 +678,19 @@ that. Retrying under the SAME id replays this receipt rather than re-delivering
 the text, in every disposition: `pending` and `failed` are honest answers for
 THIS id, and a re-issue therefore takes a NEW one.
 
+**A submit is ACKNOWLEDGED on the stream before the runtime is engaged.** The
+receipt above is the authority on whether the owner took the text, and on a
+session with no runtime it is seconds away — the submit POST carries the cold
+engage (spawn, import, construct, bind), measured at p50 2.6-9.5 s — so until it
+lands the viewer has nothing to paint and the user is told nothing. The host
+therefore publishes an `admission.accepted` frame on the SESSION's stream
+(`{request_id,mode}`) BEFORE it acquires the bridge, i.e. before anything can be
+engaged, and the viewer treats it as "the host has this request and is starting
+the runtime for it" — never as the owner's acknowledgement, and never as the
+turn having run. It is emitted at most once per request id, it is not emitted at
+all by a daemon that has latched against new work, and a retry under the same id
+replays its receipt without a second frame.
+
 **A `pending` admission that fails LATER is announced, not logged.** The receipt
 has been sent by then, so the failure has no caller left to reach; the host
 publishes an `admission.failed` frame on the SESSION's stream
@@ -851,7 +864,14 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    `focus_policy}`. It is NOT an `AgentEvent` and must not be painted into the
    transcript; a renderer that does not know the type ignores it and still
    advances its receipt cursor.
-6. `admission.failed` carries `{request_id,command,status,detail}` for a
+6. `admission.accepted` carries `{request_id,mode}` and is published the instant
+the host takes a `/messages` submit — BEFORE the session's bridge is acquired and
+before any runtime is engaged (see "A submit is ACKNOWLEDGED on the stream"
+above). It is NOT an `AgentEvent` and must not be painted into the transcript: it
+is a notice about a request, not a turn, and a renderer that does not know the
+type ignores it and still advances its receipt cursor. Published at most once per
+`request_id`, and never by a daemon that has latched against new work.
+7. `admission.failed` carries `{request_id,command,status,detail}` for a
    `/commands` admission whose receipt answered `pending` and which then failed
    (see "Every action receipt..." above). It is published LIVE AND RETAINED for
    the life of the ATTACHMENT: a viewer already connected reads it, but a cold

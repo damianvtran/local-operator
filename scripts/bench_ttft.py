@@ -1,9 +1,9 @@
-"""Measure TIME TO FIRST TOKEN on the three paths a user actually lives on.
+"""Measure TIME TO FIRST TOKEN on the four paths a user actually lives on.
 
 WHY THIS EXISTS
 ===============
 The complaint is not throughput or total turn time — it is the pause between
-hitting Enter and seeing the first streamed character. That pause has three
+hitting Enter and seeing the first streamed character. That pause has four
 different shapes depending on which front end you are in, and they do not share
 a fix:
 
@@ -25,6 +25,19 @@ a fix:
   difference between this and ``desktop-cold`` is exactly what a speculative
   warm buys; the difference between this and ``tui`` is the cost the daemon
   plane adds.
+* ``sse-jobs`` — ``POST /v1/chat/async`` and its ``/v1/sse/jobs/{id}`` stream:
+  the route answers a job id at once and the turn runs in a SPAWNED CHILD, so
+  the measured wait is the client's, from submit to the first frame the job
+  stream carries about that job.
+
+WHAT IS ASSERTED
+================
+Every run is also a GATE (see ``GATES``): the acknowledgement and the warm
+paths must reach the client inside 300 ms of the submit, a cold submit must
+produce exactly ONE acknowledgement, and a duplicate submit under the same id
+must replay its receipt rather than ack a second time. The before-arm of such a
+change must FAIL these gates, which is why a mark that never appears is a
+failure rather than a skip.
 
 WHAT IS FAKED, AND WHY THAT IS THE POINT
 ========================================
@@ -50,8 +63,9 @@ USAGE
     .venv/bin/python scripts/bench_ttft.py --runs 7 --json out.json
     .venv/bin/python scripts/bench_ttft.py --scenario tui --runs 20
 
-Report the MEDIAN. The first run in a process pays for cold page cache on the
-interpreter and site-packages, and the distribution has a long right tail.
+Report the MEDIAN, and read the p95/p99 beside it. The first run in a process
+pays for cold page cache on the interpreter and site-packages, and the
+distribution has a long right tail.
 """
 
 from __future__ import annotations
@@ -59,6 +73,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import secrets
 import shutil
@@ -79,13 +94,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 #: The scenario names this benchmark reports. Kept in one place so the CLI
 #: choices and the summary table cannot drift apart.
-SCENARIOS = ("tui", "desktop-cold", "desktop-warm")
+SCENARIOS = ("tui", "desktop-cold", "desktop-warm", "sse-jobs")
 
 #: How long a single first-token wait may take before the run is called a
 #: failure. Generous: a cold engage on a loaded machine plus a turn is well
 #: under this, and a genuine hang deserves to be reported as one rather than
 #: silently lengthening the median.
 FRAME_TIMEOUT_S = 60.0
+
+#: The submission ACKNOWLEDGEMENTS these gates are about, as a hard ceiling in ms
+#: from the submit: the operator's acceptance bar for "the client is told the
+#: message was accepted", and the reference point the redesign was measured
+#: against. Kept as ONE number so the assertion and the sentence cannot drift.
+#:
+#: IT IS A CONTRACT, NOT A CALIBRATED BOUND, and the distinction matters here.
+#: The work these gates cover is the host's own acknowledgement — receipt claim
+#: plus one bridge publish, tens of milliseconds, measured — while the thing it
+#: must not wait for (the cold engage) is 2.6-9.5 s on this box. Any ceiling in
+#: between discriminates the defect, so a number fitted to an observation would
+#: add nothing but the risk AGENTS.md warns about ("Calibrate ceilings from CI,
+#: never from your laptop").
+SUBMIT_TO_ACK_CEILING_MS = 300.0
 
 #: The bytecode-cache prefix every measured process runs under, set once per
 #: invocation and shared by every run — the shape the desktop app creates, where
@@ -349,6 +378,73 @@ def _is_text(frame: dict[str, Any]) -> bool:
     )
 
 
+#: The session-stream frame that acknowledges a submit BEFORE the runtime is
+#: engaged (``routes/desktop_sessions.py::ADMISSION_ACCEPTED_FRAME``). This is
+#: the frame ``submit_to_ack_ms`` is measured to, and the one the ``desktop-cold``
+#: gate is about: it is the first thing the runtime says about the request, and it
+#: is emitted by the host while the engage is still starting.
+ADMISSION_ACCEPTED = "admission.accepted"
+
+
+async def _read_until(
+    lines: Any,
+    start: float,
+    stop: Any,
+    marks: dict[str, float],
+    *,
+    stop_name: str,
+    timeout: float = FRAME_TIMEOUT_S,
+) -> None:
+    """Read frames CONCURRENTLY with the POST, timing the ones that matter.
+
+    Reading this way rather than awaiting the response first is the whole point:
+    a frame's arrival time is only observable while the response is still in
+    flight, and awaiting the POST first stamps every frame with the response's
+    own timestamp — which is the wait being measured, so the acknowledgement
+    would be reported as arriving no earlier than the engage it exists to
+    precede.
+
+    ``submit_to_ack_ms`` is the frame the host emits on acceptance (absent on a
+    tree that never emits it, which is the defect this benchmark gates on),
+    ``submit_to_first_frame_ms`` the first non-heartbeat frame of ANY kind,
+    ``submit_to_token_ms`` the first streamed assistant text, and ``stop_name``
+    the frame that ends the read. Heartbeats are skipped on purpose: they say the
+    transport is alive, never that work was accepted, so counting one as the
+    first frame would let a stalled engage read as a healthy one. ``acks`` counts
+    the acknowledgements over the whole turn, because exactly one submit must
+    produce exactly one.
+    """
+
+    async def read() -> None:
+        async for line in lines:
+            if not line.startswith("data: "):
+                continue
+            frame = json.loads(line[6:])
+            if frame.get("type") == "heartbeat":
+                continue
+            if "submit_to_first_frame_ms" not in marks:
+                marks["submit_to_first_frame_ms"] = (time.perf_counter() - start) * 1000
+            if frame.get("type") == ADMISSION_ACCEPTED:
+                marks["acks"] = marks.get("acks", 0.0) + 1
+                if "submit_to_ack_ms" not in marks:
+                    marks["submit_to_ack_ms"] = (time.perf_counter() - start) * 1000
+            if _is_text(frame) and "submit_to_token_ms" not in marks:
+                marks["submit_to_token_ms"] = (time.perf_counter() - start) * 1000
+            if stop(frame):
+                marks[stop_name] = (time.perf_counter() - start) * 1000
+                return
+        raise AssertionError("stream ended before the expected frame")
+
+    await asyncio.wait_for(read(), timeout)
+
+
+#: Frames that end a measured turn: the whole run is over when ``agent_end``
+#: lands, which is what lets the reader count every acknowledgement the submit
+#: produced rather than stopping at the first one.
+def _is_agent_end(frame: dict[str, Any]) -> bool:
+    return frame.get("type") == "event" and frame.get("payload", {}).get("type") == "agent_end"
+
+
 async def _run_desktop(config_dir: Path, cwd: Path, *, warm: bool) -> dict[str, float]:
     """One message through the desktop HTTP API, to the first streamed token."""
     import httpx
@@ -396,18 +492,28 @@ async def _run_desktop(config_dir: Path, cwd: Path, *, warm: bool) -> dict[str, 
                         and f.get("payload", {}).get("type") == "agent_end",
                     )
                     marks["prime_ms"] = (time.perf_counter() - priming) * 1000
+                request_id = str(uuid.uuid4())
+                body = {"request_id": request_id, "text": "Reply with one short sentence."}
                 start = time.perf_counter()
-                admitted = await client.post(
-                    target + "/messages",
-                    json={
-                        "request_id": str(uuid.uuid4()),
-                        "text": "Reply with one short sentence.",
-                    },
+                # CONCURRENT with the read, deliberately: see _read_until. The read
+                # runs to agent_end so the ack count covers the whole turn — a
+                # duplicate submit that re-emitted an ack would show up as 2.
+                reader = asyncio.create_task(
+                    _read_until(lines, start, _is_agent_end, marks, stop_name="turn_end_ms")
                 )
+                admitted = await client.post(target + "/messages", json=body)
                 admitted.raise_for_status()
-                marks["admitted_ms"] = (time.perf_counter() - start) * 1000
-                await _next_frame(lines, _is_text)
-                marks["first_token_ms"] = (time.perf_counter() - start) * 1000
+                marks["submit_to_response_ms"] = (time.perf_counter() - start) * 1000
+
+                # A SECOND submit under the SAME id must replay the receipt: no
+                # second ack, no second turn. Measured on this plane rather than
+                # only asserted in a unit test because this is where the duplicate
+                # travels, and declared BEFORE the reader finishes so the count
+                # below covers the frames the replay itself could produce.
+                replay = await client.post(target + "/messages", json=body)
+                replay.raise_for_status()
+                marks["duplicate_replayed"] = 1.0 if replay.json()["result"]["replayed"] else 0.0
+                await reader
         return marks
     finally:
         server.should_exit = True
@@ -418,6 +524,155 @@ async def _run_desktop(config_dir: Path, cwd: Path, *, warm: bool) -> dict[str, 
             pass
         address.close()
         _kill_children(config_dir)
+
+
+# ---------------------------------------------------------------------------
+# Scenario 4: the async job stream (`POST /v1/chat/async` -> `/v1/sse/jobs/{id}`)
+#
+# The second submission surface, and the one the diagnosis could not measure.
+# The async route answers a job id immediately and hands the work to a SPAWNED
+# CHILD process, so the interesting wait is not the POST's own latency — that is
+# milliseconds — but how long a client attached to the job stream waits before
+# the stream says anything about THIS job. Nothing is published on the job
+# channel at accept time, so the first job-scoped frame is whatever the child
+# emits once its interpreter has booted and imported the composition root: the
+# same invisible wait the desktop edge has, one process boundary further out.
+# ---------------------------------------------------------------------------
+
+
+async def _run_sse_jobs(config_dir: Path, cwd: Path) -> dict[str, float]:
+    """One async submit, timed on the job stream two ways.
+
+    TWO MARKS, because on this transport they are different questions and only
+    one of them is the change's:
+
+    * ``submit_to_live_job_event_ms`` — a cursor-less attach, i.e. what a client
+      that simply opens ``GET /v1/sse/jobs/{id}`` after the response sees. That
+      attach starts LIVE (the broker replays only when a cursor is supplied), so
+      it is bound by whatever the CHILD emits once it has booted. Reported, not
+      gated: it is the child's own startup on the critical path, not an
+      acknowledgement gate — the 202 already told this client its job was
+      accepted, in ``submit_to_response_ms``.
+    * ``submit_to_job_event_ms`` — the same attach asking for the channel from
+      its beginning (``after_seq=0``, the documented way to say that). The
+      acknowledgement the route publishes at accept is retained by the broker,
+      so this client receives it instead of waiting for the child.
+    * ``response_to_job_event_ms`` — that mark minus ``submit_to_response_ms``,
+      i.e. the wait that starts when the client can attach at all, and the one
+      THE GATE is about. The end-to-end pair is reported beside it rather than
+      gated, because this route's POST creates a job and starts a child process
+      before it answers, so its own latency tracks the machine's load and not
+      this change.
+    """
+    import httpx
+
+    del cwd  # the async route has no working-directory concept
+    address = _bind_listener()
+    server, task = await _serve(address)
+    base_url = f"http://127.0.0.1:{address.getsockname()[1]}"
+    headers = {"Authorization": "Bearer " + os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"]}
+    marks: dict[str, float] = {}
+    try:
+        async with httpx.AsyncClient(base_url=base_url, headers=headers, timeout=120) as client:
+            start = time.perf_counter()
+            submitted = await client.post(
+                "/v1/chat/async",
+                json={
+                    "prompt": "Reply with one short sentence.",
+                    "hosting": "test",
+                    "model": "mock",
+                },
+            )
+            submitted.raise_for_status()
+            job_id = submitted.json()["result"]["id"]
+            marks["submit_to_response_ms"] = (time.perf_counter() - start) * 1000
+
+            # BOTH ATTACHES AT ONCE, deliberately: a cursor-less attach is bound by
+            # whatever the child emits, and a sequential pair would charge the
+            # replayed one for the live one's whole wait. Each is a real client
+            # shape: the first simply opens the stream, the second asks for the
+            # channel from its beginning (``after_seq=0``), and the difference
+            # between them is exactly what the retained acknowledgement is worth.
+            async def read_live() -> None:
+                async with client.stream("GET", f"/v1/sse/jobs/{job_id}") as response:
+                    await _read_job_frames(
+                        response.aiter_lines(),
+                        start,
+                        marks,
+                        mark="submit_to_live_job_event_ms",
+                        stop_first=True,
+                    )
+
+            async def read_from_start() -> None:
+                async with client.stream(
+                    "GET", f"/v1/sse/jobs/{job_id}", params={"after_seq": 0}
+                ) as response:
+                    await _read_job_frames(
+                        response.aiter_lines(), start, marks, mark="submit_to_job_event_ms"
+                    )
+
+            await asyncio.gather(read_live(), read_from_start())
+            # THE DELTA THE CHANGE IS ABOUT, computed per run rather than by
+            # subtracting two medians: the client cannot ask for this channel
+            # before the response hands it the id, so the wait this frame removes
+            # starts when that response lands. The end-to-end mark is kept and
+            # reported beside it, because the POST's own latency (job creation
+            # plus ``Process.start``) is a real part of what a caller waits for —
+            # it is simply not a part this change moves, and a gate that
+            # swallowed it would be measuring the box's load instead.
+            marks["response_to_job_event_ms"] = (
+                marks["submit_to_job_event_ms"] - marks["submit_to_response_ms"]
+            )
+        return marks
+    finally:
+        server.should_exit = True
+        with_stop = asyncio.wait_for(task, 30)
+        try:
+            await with_stop
+        except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — teardown is best effort
+            pass
+        address.close()
+        _kill_children(config_dir)
+
+
+async def _read_job_frames(
+    lines: Any,
+    start: float,
+    marks: dict[str, float],
+    *,
+    mark: str,
+    stop_first: bool = False,
+) -> None:
+    """Time the first frame about THIS job, then read out the stream.
+
+    ``open`` and the connect comment are transport metadata: they exist whether
+    or not a job does, so the metric is the first frame that says something
+    about this job (``job.status``, a delta, a tool trace). Heartbeats are
+    skipped for the same reason. The read then runs to the terminal frame, so a
+    run also proves the job itself completed rather than only that it was
+    acknowledged — and a turn the change broke cannot pass as an ack that
+    arrived quickly.
+    """
+
+    async def read() -> None:
+        async for line in lines:
+            if not line.startswith("data: "):
+                continue
+            frame = json.loads(line[6:])
+            kind = frame.get("type")
+            if kind in ("open", "keepalive", "stream.open"):
+                continue
+            if mark not in marks:
+                marks[mark] = (time.perf_counter() - start) * 1000
+                if stop_first:
+                    return
+            if kind == "stream.terminal":
+                marks["submit_to_terminal_ms"] = (time.perf_counter() - start) * 1000
+                return
+        if mark not in marks:
+            raise AssertionError("job stream ended without a frame about the job")
+
+    await asyncio.wait_for(read(), FRAME_TIMEOUT_S)
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +709,8 @@ async def _one(scenario: str, index: int) -> dict[str, float]:
     try:
         if scenario == "tui":
             marks = await _run_tui_child(config_dir, cwd)
+        elif scenario == "sse-jobs":
+            marks = await _run_sse_jobs(config_dir, cwd)
         else:
             marks = await _run_desktop(config_dir, cwd, warm=scenario == "desktop-warm")
         marks["run"] = float(index)
@@ -480,19 +737,101 @@ async def _run_scenario(scenario: str, runs: int) -> list[dict[str, float]]:
     return results
 
 
+def _percentile(values: list[float], fraction: float) -> float:
+    """Nearest-rank percentile, the convention every other number here uses.
+
+    Nearest rank rather than an interpolating estimator because the question the
+    gates ask is "how slow is the slow run", and interpolation between two
+    samples invents a value no run produced. With the small run counts this
+    script is used at (7-20), the two agree to within a sample.
+    """
+    ordered = sorted(values)
+    index = max(0, math.ceil(fraction * len(ordered)) - 1)
+    return ordered[index]
+
+
 def _summarize(results: list[dict[str, float]]) -> dict[str, Any]:
+    """Median and the two tail percentiles for every mark the runs produced.
+
+    EVERY mark, not only the ``_ms`` ones: the counters this harness asserts on
+    (``acks`` must be exactly 1, ``duplicate_replayed`` must be 1) are marks, and
+    a summary that dropped them would leave the gates reading a value the JSON
+    does not carry. ``run`` is dropped because it is an index, not a measurement.
+    """
     summary: dict[str, Any] = {"runs": len(results)}
-    keys = sorted({key for result in results for key in result if key.endswith("_ms")})
+    keys = sorted({key for result in results for key in result if key != "run"})
     for key in keys:
         values = [result[key] for result in results if key in result]
         if not values:
             continue
         summary[key] = {
             "median": round(statistics.median(values), 1),
+            "p95": round(_percentile(values, 0.95), 1),
+            "p99": round(_percentile(values, 0.99), 1),
             "min": round(min(values), 1),
             "max": round(max(values), 1),
         }
     return summary
+
+
+#: The acceptance gates: ``(scenario, mark, comparison, ceiling)``. WHY A GATE
+#: AND NOT A SENTENCE — a number in a PR description is a claim, and the whole
+#: point of this change is a latency the harness can refute. The ceiling is the
+#: operator's own bar ("under 300 ms from submit to the first event emitted by
+#: the runtime and the front end") rather than a figure fitted to an
+#: observation, and the measurement it is compared against is the MEDIAN of at
+#: least seven runs, printed with its p95/p99 beside it so a hidden tail is
+#: visible next to a passing gate.
+#:
+#: The MAXIMUM is deliberately not gated: this box runs ~25 concurrent sessions,
+#: the engage is not on any of these paths, and a ceiling tuned to the worst run
+#: of one afternoon is the mis-calibration AGENTS.md warns about ("Calibrate
+#: ceilings from CI, never from your laptop"). `desktop-cold`'s first TOKEN is
+#: reported and never gated: its floor IS the engage.
+GATES: tuple[tuple[str, str, str, float], ...] = (
+    ("tui", "warm_first_delta_ms", "<", SUBMIT_TO_ACK_CEILING_MS),
+    ("desktop-warm", "submit_to_token_ms", "<", SUBMIT_TO_ACK_CEILING_MS),
+    ("desktop-cold", "submit_to_ack_ms", "<", SUBMIT_TO_ACK_CEILING_MS),
+    ("desktop-cold", "acks", "==", 1.0),
+    ("desktop-cold", "duplicate_replayed", "==", 1.0),
+    ("sse-jobs", "response_to_job_event_ms", "<", SUBMIT_TO_ACK_CEILING_MS),
+)
+
+
+def _evaluate_gates(report: dict[str, Any]) -> list[str]:
+    """Check every gate against the run's own summary; return the failures.
+
+    ONLY THE SCENARIOS THAT RAN are evaluated, so ``--scenario tui`` is a useful
+    command rather than four spurious failures about marks nothing measured.
+    Within a scenario that DID run, a mark that is ABSENT is a failure rather
+    than a skip, and that is the whole reason the cold gate can discriminate: on
+    a tree that never emits the acknowledgement there is no number to compare,
+    and "no acknowledgement" is exactly the defect. A gate quietly skipped for a
+    missing key would pass on the before-arm — the arm it exists to fail.
+    """
+    failures: list[str] = []
+    ran = set(report)
+    print("\n=== gates ===")
+    for scenario, mark, comparison, ceiling in GATES:
+        if scenario not in ran:
+            continue
+        section = report.get(scenario, {})
+        summary = section.get("summary", {})
+        stat = summary.get(mark)
+        value = stat["median"] if isinstance(stat, dict) else None
+        if value is None:
+            failures.append(f"{scenario}.{mark}: NEVER OBSERVED (gate {comparison} {ceiling:g})")
+            print(f"  FAIL  {scenario}.{mark}: never observed (gate {comparison} {ceiling:g})")
+            continue
+        numeric = float(cast(float, value))
+        ok = numeric < ceiling if comparison == "<" else numeric == ceiling
+        line = (
+            f"  {'PASS' if ok else 'FAIL'}  {scenario}.{mark}: {numeric:g} {comparison} {ceiling:g}"
+        )
+        print(line)
+        if not ok:
+            failures.append(f"{scenario}.{mark}: {numeric:g} {comparison} {ceiling:g}")
+    return failures
 
 
 async def _amain(args: argparse.Namespace) -> int:
@@ -510,12 +849,17 @@ async def _amain(args: argparse.Namespace) -> int:
             if not isinstance(stat, dict):
                 continue
             print(
-                f"  {key:<18} median={stat['median']:>8}  "
-                f"min={stat['min']:>8}  max={stat['max']:>8}"
+                f"  {key:<26} median={stat['median']:>9}  p95={stat['p95']:>9}  "
+                f"p99={stat['p99']:>9}  min={stat['min']:>9}  max={stat['max']:>9}"
             )
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"\nwrote {args.json}")
+    failures = _evaluate_gates(report)
+    if failures:
+        print("\nGATE FAILED: " + "; ".join(failures))
+        return 1
+    print("\nall gates passed")
     return 0
 
 
