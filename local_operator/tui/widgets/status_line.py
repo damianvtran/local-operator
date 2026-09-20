@@ -2054,7 +2054,13 @@ class StatusLine:
                     )
                 )
         if "tunnel" not in dropped:
-            parked = format_tunnel(self._tunnel_parked)
+            # `getattr`, not `self._tunnel_parked`, for the reason the
+            # `_starting` read below spells out: `_render` is called UNBOUND
+            # against lightweight stub bands in the fork tests, which carry only
+            # the fields their case is about, and a renderer has to tolerate the
+            # reduced hosts its own suite builds. An unparked band renders the
+            # same either way, which is what makes the default the honest one.
+            parked = format_tunnel(getattr(self, "_tunnel_parked", False))
             if parked:
                 # ALWAYS an alarm, never a reading, so it takes the same
                 # treatment as a failed-MCP lamp: the GLYPH carries the danger
