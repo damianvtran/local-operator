@@ -165,7 +165,9 @@ from local_operator.session.runtime.types import (
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
+    UPDATING,
     bound_text,
+    update_phrase,
 )
 from local_operator.slash_commands import (
     PERSIST_HINT,
@@ -781,6 +783,26 @@ QUEUED_PROMPT_DECLINE_NOTICE = "queued message kept — clear the composer, esc 
 #: session has a message waiting for the build on disk, and the two surfaces
 #: disagree about what has been said here (UX round 1, U2).
 QUEUED_ELSEWHERE_NOTICE = "a message is queued for the next runtime — it runs when the session does"
+
+#: THE UPDATE WINDOW'S SENTENCE IS NOT COMPOSED HERE, and that is a correction rather
+#: than a relocation (design review round 1, D5). This module used to hold its own
+#: copy — "updating to the newer build; your message is queued … " — while
+#: ``types.update_phrase`` composed a different one, so the sentence the operator read
+#: was not the sentence under test, and the notice was the one surface that could have
+#: named WHICH build was arriving while ``lop sessions`` and the phone already did.
+#: The vocabulary lives in ``types`` and the frame's own pair is passed through, so
+#: the notice, the fleet cell and the incident row are one sentence with three
+#: renderings (the phase tables the pin walks, ``_UPDATING_SHORT`` and
+#: ``update_short``, all read the same three tokens).
+#:
+#: THE OTHER TWO PHASES ARE NOT PAINTED HERE, and the pin asserts reachability rather
+#: than the presence of table entries it walks (agent review round 1, MINOR 3): only
+#: ``UPDATING`` ever arrives on a frame — an applied update is announced one method
+#: over by :meth:`OperatorApp._announce_refresh_completed`, and a failed one leaves the
+#: runtime SERVING, so there is no frame to carry it and the record plus the incident
+#: row are where it is read (design review round 1, D1 fixed that on the fleet and
+#: info surfaces). A table of sentences nothing can reach is what the reviewer
+#: measured; a call site that renders the phase it is given is what replaced it.
 
 #: Which sentence a draining frame earns, keyed by the TRIGGER'S OWN WORDS — the
 #: ``leaving`` phrase the runtime publishes on its record and now sends in the
@@ -18163,8 +18185,16 @@ class OperatorApp(App[None]):
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
 
-    def _on_runtime_draining(self, leaving: str = "") -> None:
+    def _on_runtime_draining(self, leaving: str = "", updating: str = "") -> None:
         """A runtime has committed to leaving while it still has work: say so.
+
+        TWO DEPARTURES REACH THIS, AND THEY NEED OPPOSITE SENTENCES. ``leaving`` is
+        the drain's phrase, whose promise is that a new message will NOT start a
+        turn; ``updating`` is an update window, whose promise is that the message is
+        ALREADY queued and runs when the successor boots. Painting the drain's
+        sentence over a window sends the operator to re-send a message that is held
+        — which is why the window has its own table, its own frame key and this
+        argument, rather than a fourth value of ``leaving`` (``types.UPDATING``).
 
         Fired from the ``retiring`` FRAME (``AttachedSession.set_drain_callback``),
         which the runtime sends immediately before it latches — so this lands
@@ -18193,7 +18223,14 @@ class OperatorApp(App[None]):
         """
         if self._interaction is None:
             return
-        notice = _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        # THE WINDOW FIRST, and the ordering is the contract: a runtime that opened a
+        # window and then latched a drain sends both, and only the window's sentence
+        # is true of the message the operator just sent (it is queued, not refused).
+        notice = (
+            update_phrase(UPDATING, updating)
+            if updating
+            else _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        )
         self._notice_for(self._interaction, notice, "note")
         self._announce_queued_elsewhere(self._interaction)
 

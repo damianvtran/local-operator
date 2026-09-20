@@ -385,6 +385,29 @@ def _overdue_cause_sentence() -> str:
     )
 
 
+def _update_failed_cause_sentence() -> str:
+    """The sentence for the bounded UPDATE WINDOW (``types.UPDATE_FAILED_CAUSE``).
+
+    A DIFFERENT EVENT from the rung above, said in the same shape, and the difference
+    is the one the operator acts on: the overdue handover LEFT (on the old build's
+    work, force-cut), while a failed update STAYED — the runtime is still here, on the
+    build it loaded, and it is the update that did not happen. Rendering the two with
+    one sentence would tell a reader to go looking for a handover that never occurred.
+
+    THE BOUND IS RENDERED FROM THE CONSTANT, never typed here, for the reason
+    ``_overdue_cause_sentence`` gives: this sentence is repeated by every surface that
+    repeats a cause, and a second copy of "5s" is a copy that drifts from the bound
+    that enforces it.
+    """
+    from local_operator import buildwatch
+    from local_operator.session.runtime.types import bound_text
+
+    return (
+        "the update to the build on disk did not finish within "
+        f"{bound_text(buildwatch.UPDATE_LOCK_S)}; the runtime kept the build it loaded"
+    )
+
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
@@ -400,6 +423,13 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # exactly that: a successor narrated the generic retirement sentence, never the
     # bound.
     "runtime-overdue": _overdue_cause_sentence(),
+    # The BOUNDED UPDATE WINDOW (``process._abandon_update_window``): the idle
+    # handover ran out of its heartbeat bound, so the runtime ABANDONED the move and
+    # kept the build it loaded (``types.UPDATE_FAILED_CAUSE``). It is NOT
+    # ``runtime-retired``, which is what a handover that SUCCEEDED records — a failed
+    # update narrated as an ordinary retirement is invisible in exactly the durable
+    # account an operator opens to ask why a session is still on yesterday's build.
+    "runtime-update-failed": _update_failed_cause_sentence(),
     "runtime-killed": (
         # The trailing clause is the POST-MARKER meaning of this token, and it
         # is decidable now in a way it was not before the durable marker

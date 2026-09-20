@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from typing import TYPE_CHECKING
 
@@ -91,6 +92,48 @@ BUILD_SETTLE_S = 10.0
 BUILD_STAGGER_S = 20.0
 
 
+#: THE UPDATE WINDOW'S BOUNDS. A timing family of their own, beside the watch
+#: timings above and for the same reason they are here: two processes and any
+#: front end reading the record must not disagree about how long a window may be
+#: silent.
+#:
+#: How long an UPDATE WINDOW may hold the admission lock WITHOUT a heartbeat
+#: before every waiter treats it as DEAD.
+#:
+#: WHAT THE WINDOW IS. An idle runtime that decides to move to the build on
+#: disk publishes ``SessionRecord.updating`` and opens a window in which it
+#: QUEUES admissions for the successor instead of refusing them (the incident
+#: of 2026-09-19: a whole fleet on a superseded build refusing the operator's
+#: messages with "send it again once the session is running again", recoverable
+#: only with ``/stop`` + ``/resume``). The window is the one moment at which a
+#: message is neither run here nor handed back, so it is also the one place the
+#: runtime could turn "briefly unavailable" into "wedged" — hence a bound.
+#:
+#: WHY FIVE SECONDS. The window's own work is an announcement plus an exit
+#: (~1 s measured on an idle handover; see ``_refresh_for``), so 5 s is 5x the
+#: healthy path and still short enough that a person waiting on a queued message
+#: does not experience the session as hung. It is deliberately of the same order
+#: as :data:`BUILD_CHECK_S` — an update that cannot complete inside one build
+#: check is a failure to report, not a wait to keep paying.
+#:
+#: HERE, beside the other build-watch timings, for the reason the module
+#: docstring gives for the settle: the runtime and the ``lop serve`` daemon (and
+#: any front end that reads the record) must not disagree about how long a window
+#: may be silent, because the one that measured a shorter bound would declare a
+#: healthy window dead and start refusing — the very failure this replaces.
+UPDATE_LOCK_S = 5.0
+
+#: How often a window heartbeats while it is making progress.
+#:
+#: MUST BE WELL UNDER :data:`UPDATE_LOCK_S`: a heartbeat at or above the bound
+#: means a live window is indistinguishable from a dead one at every sample, so
+#: the bound would fire against healthy handovers. 1 s gives five beats inside
+#: the bound — enough that a stalled loop is the only way to lose it, which is
+#: what the bound is for (a blocked event loop cannot heartbeat, and that is
+#: exactly the session a front end must stop waiting on).
+UPDATE_LOCK_HEARTBEAT_S = 1.0
+
+
 #: THE ROTATION ANSWERS, one definition each.
 #:
 #: A runtime answers ``lop refresh`` with the sentence it decided from
@@ -103,6 +146,7 @@ BUILD_STAGGER_S = 20.0
 #: ``types.LEAVING_ON_SIGNAL`` gives for living in ``types``: one module both
 #: ends import, so a reword is a loud failure at one call site instead of a
 #: silent drift across three literals.
+
 KEPT_MATCHES = "kept: build on disk matches"
 
 #: The install on disk has moved and has not settled yet. Distinct from
@@ -154,6 +198,188 @@ def build_settle_seconds() -> float:
 def build_stagger_seconds() -> float:
     """``LOP_BUILD_STAGGER_S`` (test-only) or :data:`BUILD_STAGGER_S`."""
     return positive_seconds(os.environ.get("LOP_BUILD_STAGGER_S", ""), BUILD_STAGGER_S)
+
+
+def update_lock_seconds() -> float:
+    """``LOP_UPDATE_LOCK_S`` (test-only) or :data:`UPDATE_LOCK_S`.
+
+    Read through a function for the reason the settle and the stagger are (the
+    e2e stage has to fail a window inside its budget), and read from a CALLER's
+    scope rather than captured at import so ``monkeypatch.setattr`` moves the
+    bound the rung actually applies.
+    """
+    return positive_seconds(os.environ.get("LOP_UPDATE_LOCK_S", ""), UPDATE_LOCK_S)
+
+
+def update_lock_heartbeat_seconds() -> float:
+    """``LOP_UPDATE_LOCK_HEARTBEAT_S`` (test-only) or :data:`UPDATE_LOCK_HEARTBEAT_S`."""
+    return positive_seconds(
+        os.environ.get("LOP_UPDATE_LOCK_HEARTBEAT_S", ""), UPDATE_LOCK_HEARTBEAT_S
+    )
+
+
+class UpdateLock:
+    """The update window's heartbeat-checked admission lock.
+
+    WHAT IT GUARDS, AND WHAT IT DOES NOT. It does not gate the ADMISSION — an
+    admission arriving during a window is queued, never blocked (see
+    ``serving.ServingSessionHandle.prompt``), so nothing acquires this to be let
+    in. What it does is make the window's liveness OBSERVABLE: a holder beats
+    while it is making progress, and a holder that stops beating for
+    :data:`UPDATE_LOCK_S` is DEAD, so the rung that opened the window abandons the
+    handover and keeps the build it is running rather than waiting forever.
+
+    THAT IS THE SPEC'S "never deadlocked" IN ITS ONLY MECHANICAL FORM. A lock
+    whose holder is not required to prove progress can always be held by a holder
+    that has stopped — which is how the operator's fleet ended up needing
+    ``/stop`` + ``/resume``. Because the deadline is on the HEARTBEAT rather than
+    on the acquisition, a blocked event loop (the one way a cooperating holder can
+    silently stop beating) expires the window by itself.
+
+    Stdlib-only and thread-safe, like everything else in this module: the runtime
+    beats from its own loop, while a front end that wants to ask "is this window
+    still alive" reads the same object from another thread.
+
+    ``monotonic`` rather than ``time.time``: a clock step must not be able to
+    expire a live window, and it must not be able to keep a dead one alive either.
+    """
+
+    __slots__ = ("_lock", "_held", "_handler", "_pair", "_beat")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._held = False
+        self._handler = ""
+        self._pair = ""
+        self._beat = 0.0
+
+    def acquire(self, pair: str, handler: str = "", *, now: float | None = None) -> bool:
+        """Take the lock for ``pair``. ``False``: somebody else holds it.
+
+        Deliberately non-blocking and non-queueing: a window that cannot be
+        opened is not a window to wait for (the rung keeps serving and tries
+        again on its next check), and a waiter is exactly the deadlock the
+        heartbeat exists to make impossible.
+
+        A stale holder is OVERWRITTEN rather than refused — that is the other half
+        of the bound, and the reason :meth:`expired` is consulted here at all. It
+        goes through the UNLOCKED helper because this method already holds the
+        mutex: calling the public :meth:`expired` would re-enter a non-reentrant
+        lock and wedge every caller (found by
+        ``test_a_second_holder_cannot_take_the_lock``, which is why that cell exists
+        rather than a shorter assertion about ``held``).
+        """
+        with self._lock:
+            if self._held and not self._expired_locked(now):
+                return False
+            self._held = True
+            self._handler = handler
+            self._pair = pair
+            self._beat = time.monotonic() if now is None else now
+            return True
+
+    def heartbeat(self, *, now: float | None = None) -> None:
+        """Restart the deadline. No-op when not held — a beat with no window is
+        a bug in the caller's ordering, not a state to invent here."""
+        with self._lock:
+            if not self._held:
+                return
+            self._beat = time.monotonic() if now is None else now
+
+    def release(self) -> bool:
+        """Drop the lock, whether or not it had expired. ``True`` if it was held."""
+        with self._lock:
+            held, self._held = self._held, False
+            self._handler = ""
+            self._pair = ""
+            return held
+
+    @property
+    def held(self) -> bool:
+        return self._held
+
+    @property
+    def handler(self) -> str:
+        """Who opened the window (a cause label: ``stale-build``, ``idle-exit``)."""
+        return self._handler
+
+    @property
+    def pair(self) -> str:
+        """The build pair the window is moving to, as published on the record."""
+        return self._pair
+
+    def last_heartbeat(self, *, now: float | None = None) -> float:
+        """The last beat, or ``now`` when nothing is held.
+
+        Read by tests and by a front end that has to explain a dead window; the
+        ``now`` fallback is what keeps a released lock from looking infinitely
+        stale to a caller that never checks ``held`` first.
+        """
+        with self._lock:
+            if not self._held:
+                return time.monotonic() if now is None else now
+            return self._beat
+
+    def remaining(self, *, now: float | None = None) -> float:
+        """Seconds left before this window is DEAD. ``0.0`` when not held."""
+        with self._lock:
+            if not self._held:
+                return 0.0
+            at = time.monotonic() if now is None else now
+            return max(0.0, self._beat + update_lock_seconds() - at)
+
+    def expired(self, *, now: float | None = None) -> bool:
+        """Has this window stopped proving it is alive?
+
+        A lock that is NOT held is not expired — it is absent, which is a
+        different answer and the one every "may I open a window" question
+        wants (see :meth:`acquire`).
+        """
+        with self._lock:
+            return self._expired_locked(now)
+
+    def _expired_locked(self, now: float | None) -> bool:
+        """The expiry test with the mutex ALREADY HELD. Callers: :meth:`expired`
+        and :meth:`acquire`, the second of which must not re-enter."""
+        if not self._held:
+            return False
+        at = time.monotonic() if now is None else now
+        return at - self._beat >= update_lock_seconds()
+
+    def heartbeat_interval(self) -> float:
+        """How often a holder should beat, from the one constant that defines it."""
+        return update_lock_heartbeat_seconds()
+
+
+def update_pair_text(boot: "BuildStamp | str | None", newer: "BuildStamp | str | None") -> str:
+    """``"0.59.9 → 0.59.11@ead71b6"`` — the pair an update window publishes.
+
+    The clean form of :func:`build_pair`: that one is a PARENTHETICAL composed to
+    trail a cut-off sentence (``" (old → new)"``), while this one is a field value
+    the fleet surfaces print inside their own sentence, so the brackets and the
+    leading space would be quoted prose rather than punctuation. One of each,
+    because the two callers have genuinely different jobs and threading a
+    ``parens: bool`` through one function would make both call sites unreadable.
+
+    ``""`` when either label is unreadable: a window that cannot name the pair is
+    still a window (the phrases fall back to "the build on disk"), and inventing
+    half a pair would publish a move nobody can act on.
+    """
+    old = _label(boot)
+    new = _label(newer)
+    if not old or not new:
+        return ""
+    return f"{old} → {new}"
+
+
+def _label(stamp: "BuildStamp | str | None") -> str:
+    """A build's label, for a stamp or an already-rendered label. ``""`` for none."""
+    if stamp is None:
+        return ""
+    if isinstance(stamp, str):
+        return stamp
+    label = getattr(stamp, "label", None)
+    return str(label()) if callable(label) else ""
 
 
 #: A runtime whose own scheduler will fire a wake within this window stays
