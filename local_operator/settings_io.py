@@ -1477,6 +1477,20 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("keep narration", "hide narration once tools run"),
     ),
     Setting(
+        key="display.reasoning",
+        path=("display.reasoning",),
+        section="appearance",
+        label="Live model reasoning",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Show the model's private thinking while it thinks. It collapses to "
+            "one row when the answer starts, and never joins the transcript, "
+            "so it is absent after /resume either way."
+        ),
+        choices=_bool_choices("show live reasoning", "hide reasoning"),
+    ),
+    Setting(
         key="display.rail",
         path=("display.rail",),
         section="appearance",
