@@ -36,7 +36,7 @@ from local_operator.resume import (
     session_preview,
     write_session_attachment,
 )
-from local_operator.server.models.desktop_sessions import MoveReceipt
+from local_operator.server.models.desktop_sessions import AdmissionStatus, MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
 from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
@@ -109,6 +109,46 @@ BRIDGE_COUNT = 64
 #: duplicate NOTICE, never a duplicate turn — the turn's own at-most-once guard is
 #: the receipt journal and the runtime's ``command_id`` reservation.
 ANNOUNCED_ADMISSION_HISTORY = 64
+
+#: The two session-stream frames that BOOKEND a submit's admission, published by
+#: ``DesktopSessions.announce_admission`` / ``announce_admission_failure``. They
+#: live here, beside the other frames this layer composes (``attention``,
+#: ``notification``, ``frontend.replace``), because the pool is what gives them
+#: their one property: a session-scoped frame delivered to whatever viewer is
+#: attached, acquired without a bridge and so without spawning anything.
+#:
+#: THE PAIR IS THE POINT. ``admission.accepted`` is emitted BEFORE the engage,
+#: so every refusal that follows — an unreachable runtime, an owner that leaves
+#: mid-admission, a daemon that latches — lands with an acknowledgement already
+#: on the viewer's stream; a viewer (or a second viewer, from the replay) that
+#: never receives the outcome holds a promise that does not resolve. Both frames
+#: carry the caller's own ``request_id``, so a renderer correlates them with each
+#: other and with the HTTP receipt.
+#:
+#: WHAT ``admission.accepted`` CLAIMS, EXACTLY, because a frame a renderer paints
+#: as success must not overstate: this host has RECORDED the request and has
+#: started engaging a runtime for it. It is NOT the runtime's acknowledgement —
+#: that is the HTTP receipt (``status: admitted``), which may be seconds away —
+#: and it does not promise the turn ran.
+#:
+#: BOTH ARE DELIVERED THROUGH THE BRIDGE rather than as a bespoke write, which is
+#: what makes them idempotent on reconnect: each takes the bridge's own monotone
+#: ``seq`` and enters its replay buffer, so a viewer that reconnects with the
+#: epoch and cursor of the connection it lost receives each exactly once instead
+#: of not at all. (A FRESH attach replays nothing by design — ``events`` gaps a
+#: subscriber that supplies no epoch — and gets the snapshot instead; these frames
+#: are about a reconnect mid-admission, which is exactly the case the replay
+#: covers.)
+#:
+#: AND EACH IS BOUNDED, in two ways a reader should not have to reverse-engineer:
+#: at most once per request id PER BRIDGE (``publish_once``,
+#: ``ANNOUNCED_ADMISSION_HISTORY``), and only for the life of the attachment —
+#: the bridge's replay is cleared on an epoch change, so a viewer that arrives
+#: after the session went cold reads the durable transcript and the receipt
+#: instead. Neither is a durable record of anything.
+ADMISSION_ACCEPTED_FRAME = "admission.accepted"
+ADMISSION_FAILED_FRAME = "admission.failed"
+FAILED_ADMISSION_STATUS: AdmissionStatus = "failed"
 
 #: The BRIDGE's subscription lease: what the renderer renews with a heartbeat,
 #: and how long a bridge-backed warm intent lives with no beat behind it.
@@ -3366,10 +3406,8 @@ class DesktopSessions:
         task.add_done_callback(forget)
         return task
 
-    async def announce(
-        self, session_id: str, kind: str, payload: dict[str, Any], *, dedupe_key: str
-    ) -> bool:
-        """Tell an ALREADY-ATTACHED viewer something, without acquiring a bridge.
+    async def announce_admission(self, session_id: str, *, request_id: str, mode: str) -> bool:
+        """Tell an ALREADY-ATTACHED viewer THIS HOST took a submit, before engaging.
 
         WHY THIS IS NOT A ROUTE THAT PUBLISHES FOR ITSELF. The honest place to
         acknowledge a submit is immediately after the receipt claims it and
@@ -3401,8 +3439,7 @@ class DesktopSessions:
         ``publish`` is synchronous and takes the bridge's own state, so holding
         pool state here would be the same defect ``session`` documents.
         """
-        async with self.lock:
-            bridge = self.bridges.get(session_id)
+        bridge = await self._resident_bridge(session_id)
         if bridge is None:
             return False
         # A LATCHED DAEMON ANNOUNCES NOTHING. The refusal itself is the DOOR's
@@ -3411,9 +3448,68 @@ class DesktopSessions:
         # by a 503 saying "leaving" is the one contradiction an acknowledgement
         # must never produce. Read BEFORE the publish, and only ever a decline —
         # the caller's request still reaches the door and is refused there.
+        #
+        # THE OUTCOME FRAME BELOW IS DELIBERATELY NOT GATED ON THIS: a daemon
+        # that latches AFTER the acknowledgement is the very case the viewer
+        # needs resolved, and suppressing that outcome would leave the
+        # acknowledgement hanging on exactly the refusal it exists for.
         if self.retiring_probe():
             return False
-        return bridge.publish_once(kind, payload, dedupe_key=dedupe_key)
+        return bridge.publish_once(
+            ADMISSION_ACCEPTED_FRAME,
+            {"request_id": request_id, "mode": mode},
+            dedupe_key=f"accepted:{request_id}",
+        )
+
+    async def announce_admission_failure(
+        self, session_id: str, *, request_id: str, mode: str, detail: str
+    ) -> bool:
+        """Resolve an acknowledgement this host already made, on the same stream.
+
+        THE OTHER HALF OF :meth:`announce_admission`, and the half whose absence
+        was a defect rather than a missing nicety: the acknowledgement is
+        published BEFORE the door, so every refusal that can follow it — a
+        runtime that cannot be reached, an owner that leaves mid-admission, a
+        daemon that latches — happens with an ``admission.accepted`` already on
+        the viewer's stream. Without this frame the viewer holds a promise that
+        never resolves, and a SECOND viewer of the same session inherits it from
+        the replay. Published through the same reference-free path, so it works
+        in the state the acknowledge failed in (the door is exactly what is
+        broken) and cannot start anything.
+
+        ``detail`` is the VETTED sentence (``_admission_failure_detail``),
+        never a transport's own text — this crosses to a renderer.
+
+        Its dedupe key is per-purpose, so publishing the outcome never consumes
+        the acknowledgement's key and vice versa.
+        """
+        bridge = await self._resident_bridge(session_id)
+        if bridge is None:
+            return False
+        return bridge.publish_once(
+            ADMISSION_FAILED_FRAME,
+            {
+                "request_id": request_id,
+                "mode": mode,
+                "status": FAILED_ADMISSION_STATUS,
+                "detail": detail,
+            },
+            dedupe_key=f"failed:{request_id}",
+        )
+
+    async def _resident_bridge(self, session_id: str) -> DesktopSessionBridge | None:
+        """The bridge this session ALREADY has, or ``None`` — never a new one.
+
+        The shared half of the two announcements above, and the reason both can
+        be called from a request that has not acquired anything: the pool lock
+        is held for the lookup alone (a dict read), so no caller waits on another
+        session's open and nothing is built, bound or spawned. A bridge exists
+        exactly while something holds one — a route or the ``/events``
+        subscription a renderer reads — so ``None`` means there is no reader, not
+        that the session is unknown.
+        """
+        async with self.lock:
+            return self.bridges.get(session_id)
 
     @contextlib.asynccontextmanager
     async def session(

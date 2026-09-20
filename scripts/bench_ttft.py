@@ -116,6 +116,22 @@ FRAME_TIMEOUT_S = 60.0
 #: never from your laptop").
 SUBMIT_TO_ACK_CEILING_MS = 300.0
 
+#: The ceiling that actually holds on a busy host, as the p95 of the same mark.
+#:
+#: WHY THERE ARE TWO, and why the second is not a loosened first: the operator's
+#: requirement is 300 ms and it is met where it is measured — the MEDIAN, which
+#: sits at 60-75 ms on this box even under load. The TAIL does not stay inside
+#: 300 ms and pretending it does would be the harness asserting a bound the
+#: measurement contradicts: across the passes recorded on the PR the ack's p95
+#: was 148 ms, 219 ms and 326 ms at load 100-220, and QA's independent matrix saw
+#: one cold submit of 333 ms in seven at load 140-190. Half a second is the bound
+#: those numbers support, stated with the load they were taken at, and the median
+#: gate above remains the contract's own number.
+#:
+#: A run that fails THIS gate is a real reading about the host, not a flake to
+#: re-run away: report the load beside it, as the PR's table does.
+SUBMIT_TO_ACK_P95_CEILING_MS = 500.0
+
 #: The bytecode-cache prefix every measured process runs under, set once per
 #: invocation and shared by every run — the shape the desktop app creates, where
 #: one cache under userData is read by the daemon and by every runtime child.
@@ -774,27 +790,33 @@ def _summarize(results: list[dict[str, float]]) -> dict[str, Any]:
     return summary
 
 
-#: The acceptance gates: ``(scenario, mark, comparison, ceiling)``. WHY A GATE
-#: AND NOT A SENTENCE — a number in a PR description is a claim, and the whole
-#: point of this change is a latency the harness can refute. The ceiling is the
-#: operator's own bar ("under 300 ms from submit to the first event emitted by
-#: the runtime and the front end") rather than a figure fitted to an
-#: observation, and the measurement it is compared against is the MEDIAN of at
-#: least seven runs, printed with its p95/p99 beside it so a hidden tail is
-#: visible next to a passing gate.
+#: The acceptance gates: ``(scenario, mark, percentile, comparison, ceiling)``.
+#: WHY A GATE AND NOT A SENTENCE — a number in a PR description is a claim, and
+#: the whole point of this change is a latency the harness can refute. The median
+#: ceiling is the operator's own bar ("under 300 ms from submit to the first event
+#: emitted by the runtime and the front end") rather than a figure fitted to an
+#: observation; the p95 ceilings are the TOLERANCE that holds on a loaded host and
+#: are named as such (see ``SUBMIT_TO_ACK_P95_CEILING_MS``). Every run's load
+#: average is recorded in the report beside them, because a latency number without
+#: its host is not evidence.
 #:
 #: The MAXIMUM is deliberately not gated: this box runs ~25 concurrent sessions,
 #: the engage is not on any of these paths, and a ceiling tuned to the worst run
 #: of one afternoon is the mis-calibration AGENTS.md warns about ("Calibrate
 #: ceilings from CI, never from your laptop"). `desktop-cold`'s first TOKEN is
 #: reported and never gated: its floor IS the engage.
-GATES: tuple[tuple[str, str, str, float], ...] = (
-    ("tui", "warm_first_delta_ms", "<", SUBMIT_TO_ACK_CEILING_MS),
-    ("desktop-warm", "submit_to_token_ms", "<", SUBMIT_TO_ACK_CEILING_MS),
-    ("desktop-cold", "submit_to_ack_ms", "<", SUBMIT_TO_ACK_CEILING_MS),
-    ("desktop-cold", "acks", "==", 1.0),
-    ("desktop-cold", "duplicate_replayed", "==", 1.0),
-    ("sse-jobs", "response_to_job_event_ms", "<", SUBMIT_TO_ACK_CEILING_MS),
+GATES: tuple[tuple[str, str, str, str, float], ...] = (
+    ("tui", "warm_first_delta_ms", "median", "<", SUBMIT_TO_ACK_CEILING_MS),
+    ("desktop-warm", "submit_to_token_ms", "median", "<", SUBMIT_TO_ACK_CEILING_MS),
+    ("desktop-cold", "submit_to_ack_ms", "median", "<", SUBMIT_TO_ACK_CEILING_MS),
+    # The tail gate, on the same mark: the median says the acknowledgement is
+    # where the contract puts it, and this says how far the slowest run in seven
+    # may drift on a loaded host (see SUBMIT_TO_ACK_P95_CEILING_MS).
+    ("desktop-cold", "submit_to_ack_ms", "p95", "<", SUBMIT_TO_ACK_P95_CEILING_MS),
+    ("desktop-cold", "acks", "median", "==", 1.0),
+    ("desktop-cold", "duplicate_replayed", "median", "==", 1.0),
+    ("sse-jobs", "response_to_job_event_ms", "median", "<", SUBMIT_TO_ACK_CEILING_MS),
+    ("sse-jobs", "response_to_job_event_ms", "p95", "<", SUBMIT_TO_ACK_P95_CEILING_MS),
 )
 
 
@@ -810,27 +832,28 @@ def _evaluate_gates(report: dict[str, Any]) -> list[str]:
     missing key would pass on the before-arm — the arm it exists to fail.
     """
     failures: list[str] = []
-    ran = set(report)
+    # Scenarios only: the report also carries environment facts (the load the
+    # run was taken at), and a gate is never asked for one.
+    ran = set(report) & set(SCENARIOS)
     print("\n=== gates ===")
-    for scenario, mark, comparison, ceiling in GATES:
+    for scenario, mark, percentile, comparison, ceiling in GATES:
         if scenario not in ran:
             continue
         section = report.get(scenario, {})
         summary = section.get("summary", {})
         stat = summary.get(mark)
-        value = stat["median"] if isinstance(stat, dict) else None
+        value = stat.get(percentile) if isinstance(stat, dict) else None
+        label = f"{scenario}.{mark}[{percentile}]"
         if value is None:
-            failures.append(f"{scenario}.{mark}: NEVER OBSERVED (gate {comparison} {ceiling:g})")
-            print(f"  FAIL  {scenario}.{mark}: never observed (gate {comparison} {ceiling:g})")
+            failures.append(f"{label}: NEVER OBSERVED (gate {comparison} {ceiling:g})")
+            print(f"  FAIL  {label}: never observed (gate {comparison} {ceiling:g})")
             continue
         numeric = float(cast(float, value))
         ok = numeric < ceiling if comparison == "<" else numeric == ceiling
-        line = (
-            f"  {'PASS' if ok else 'FAIL'}  {scenario}.{mark}: {numeric:g} {comparison} {ceiling:g}"
-        )
+        line = f"  {'PASS' if ok else 'FAIL'}  {label}: {numeric:g} {comparison} {ceiling:g}"
         print(line)
         if not ok:
-            failures.append(f"{scenario}.{mark}: {numeric:g} {comparison} {ceiling:g}")
+            failures.append(f"{label}: {numeric:g} {comparison} {ceiling:g}")
     return failures
 
 
@@ -852,6 +875,13 @@ async def _amain(args: argparse.Namespace) -> int:
                 f"  {key:<26} median={stat['median']:>9}  p95={stat['p95']:>9}  "
                 f"p99={stat['p99']:>9}  min={stat['min']:>9}  max={stat['max']:>9}"
             )
+    load = os.getloadavg()
+    report["load_average"] = {
+        "1m": round(load[0], 2),
+        "5m": round(load[1], 2),
+        "15m": round(load[2], 2),
+    }
+    print(f"\nload average: {load[0]:.1f} {load[1]:.1f} {load[2]:.1f}")
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"\nwrote {args.json}")
