@@ -77,6 +77,12 @@ from tests.unit.secrets.credential_shape_corpus import (
 SENTINEL = "mongodb+srv://svc_user:sh4pedSentinelPw@db.internal/app"
 
 
+#: The credential INSIDE ``SENTINEL`` — the part a mask has to remove. Derived
+#: from the sentinel rather than written again, so no test in this file has to
+#: spell a credential-shaped literal of its own.
+SENTINEL_FRAGMENT = SENTINEL.split(":", 1)[1].rsplit("@", 1)[0]
+
+
 def _store(text: str) -> str:
     return VariableStore(cwd=".").redact(text)
 
@@ -481,10 +487,11 @@ def test_the_session_hook_reports_the_shapes_that_fired() -> None:
     session._pending_shape_incidents.clear()
     session._reported_shape_incidents.clear()
     text = session._redact_tool_result_text(SENTINEL)
-    assert "sh4pedSentinelPw" not in text
-    assert [labels for _tool, labels, _summary in session._pending_shape_incidents] == [
-        ["dsn-password"]
-    ]
+    assert SENTINEL_FRAGMENT not in text
+    assert [
+        (labels, reached_model)
+        for _tool, labels, _summary, reached_model in session._pending_shape_incidents
+    ] == [(["dsn-password"], False)]
 
 
 def test_the_incident_names_the_tool_and_carries_no_value() -> None:
@@ -903,13 +910,18 @@ def test_the_live_pending_text_matches_the_card() -> None:
     assert builtin._LIVE_PENDING_TEXT == LIVE_HEADER_PENDING
 
 
-def test_a_hit_is_reported_only_when_the_whole_value_was_masked() -> None:
+def test_a_hit_is_graded_before_it_is_announced() -> None:
     """Never announce a masking that did not happen.
 
-    The row tells the operator a credential "was masked before you saw it", and
-    the operator acts on that by NOT rotating. A false all-clear is therefore
-    worse than silence. This was live: a DSN password containing ``@`` was masked
-    to the first ``@`` while the row promised the whole thing was gone.
+    The containment row tells the operator a credential "was masked before you saw
+    it", and the operator acts on that by NOT cleaning the copy up. A false
+    all-clear is therefore worse than silence. This was live: a DSN password
+    containing ``@`` was masked to the first ``@`` while the row promised the whole
+    thing was gone.
+
+    Under the current policy the surviving hit is not silent either: it is the one
+    case that escalates (readable material in the model's context), while the
+    withheld-claim-but-contained case — a truncated PEM — announces nothing at all.
     """
     from local_operator.redaction_shapes import ShapeHit, _only_fully_masked
 
@@ -934,9 +946,14 @@ def test_a_hit_is_reported_only_when_the_whole_value_was_masked() -> None:
         assert fragment not in scrubbed, scrubbed
 
 
+@pytest.mark.parametrize(
+    ("reached_model", "marker"),
+    [(True, "rotate"), (False, "no exposure")],
+    ids=["reached-the-model", "contained"],
+)
 @pytest.mark.asyncio
 async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
-    tmp_path: Path,
+    tmp_path: Path, reached_model: bool, marker: str
 ) -> None:
     """Both halves of "the operator sees it", which is the row's whole purpose.
 
@@ -944,6 +961,10 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
     Replay: the fold must have a branch for the record, or a resumed session
     shows nothing (a custom message falls through every role-based branch).
     Measured before this wiring: the row reached the model and painted nowhere.
+
+    Parametrised over the CLASSIFICATION, because the contained text is a second
+    new string on the same path and the failure mode this test exists for — a row
+    that paints nowhere — does not care which wording it is carrying.
     """
     from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
     from local_operator.harness.types import NoticeEvent
@@ -960,17 +981,19 @@ async def test_the_incident_row_reaches_the_operator_live_and_on_replay(
     )
     events: list[Any] = []
     session.subscribe(events.append)
-    await session.journal_shape_incident("bash", ["dsn-password"], "kubectl exec api -- env")
+    await session.journal_shape_incident(
+        "bash", ["dsn-password"], "kubectl exec api -- env", reached_model=reached_model
+    )
 
     notices = [event for event in events if isinstance(event, NoticeEvent)]
     assert notices, "the incident emitted no live receipt"
     assert notices[0].kind == "warning"
-    assert "rotate" in notices[0].text
+    assert marker in notices[0].text
 
     # Replay: the same record, folded through the real settlement path.
     rows = _fold_incident_row(SESSION_INCIDENT_MESSAGE_TYPE, notices[0].text)
     assert rows, "the incident row folded to nothing"
-    assert any("rotate" in row for row in rows)
+    assert any(marker in row for row in rows)
 
 
 def _fold_incident_row(custom_type: str, text: str) -> list[str]:
@@ -1456,3 +1479,287 @@ def test_a_fresh_store_does_not_inherit_another_stores_containment() -> None:
     # The boundary, stated as an assertion so it cannot drift into a claim: A's value is
     # not contained in B, because containment is per store by design.
     assert "storeASecret1234" not in b.redaction_values()
+
+
+# --- the classification: contained, or in the model's context -----------------
+
+
+def test_the_grading_separates_contained_from_exposed() -> None:
+    """``exposed`` is the severity, ``complete`` is the claim, and they differ.
+
+    Three outcomes are possible for one hit and the design needs all three: a value
+    masked whole (contained — the ordinary case), a value whose mask was withheld
+    because its extent cannot be proven (a truncated PEM: contained, unclaimable),
+    and a value with readable material still in the text (exposed — the one case
+    that is a compromise). Collapsing the first two into the third is what made
+    every masking event look like a compromise, and having no third at all is what
+    kept the real one silent.
+    """
+    import local_operator.redaction_shapes as rs
+
+    value = "regional-opensearch-admin-9"
+    hit = rs.ShapeHit(label="credential-assignment", value=value, window=value)
+
+    contained = rs._only_fully_masked([hit], "OPENSEARCH_PASSWORD=[redacted]")[0]
+    assert (contained.complete, contained.exposed) == (True, False)
+
+    exposed = rs._only_fully_masked([hit], f"OPENSEARCH_PASSWORD=x  # kept: {value}")[0]
+    assert (exposed.complete, exposed.exposed) == (False, True)
+
+    # The third outcome: a key whose extent is unknown. Everything visible is
+    # masked, so nothing reached the model, and the claim is still withheld.
+    truncated = f'{{"private_key": "-----BEGIN RSA PRIVATE KEY-----\n{_PEM_BODY}\n"}}'
+    _, pem_hits = rs.scrub_shapes_with_hits(truncated)
+    assert pem_hits, "the truncated block filed no hit"
+    assert not any(h.complete for h in pem_hits), "a truncated key claimed a whole mask"
+    assert not any(h.exposed for h in pem_hits), "a masked truncated key is not an exposure"
+
+
+def test_the_contained_notice_names_the_tool_and_carries_no_value() -> None:
+    """Contained: it happened, it was handled, there is no exposure, clean up.
+
+    This is the ordinary outcome — a credential reached a tool and was masked
+    before the model could read it — so the notice may not use the escalation's
+    words: no rotation demand, no "compromised". What it owes instead is the one
+    action this path has: delete any plaintext copy WITHOUT reading it, stated
+    explicitly because reading it is what would turn this case into the other one.
+    """
+    from local_operator.incidents import format_shape_incident_message
+
+    text = format_shape_incident_message(
+        "bash", ["dsn-password"], "kubectl exec api -- env", reached_model=False
+    )
+    assert "bash" in text
+    assert "dsn-password" in text
+    assert "no exposure" in text
+    assert "rm -f" in text and "not to be done" in text
+    assert "rotate" not in text
+    assert "compromised" not in text
+    assert "sh4pedSentinelPw" not in text
+
+
+def test_the_escalated_notice_still_demands_a_rotation() -> None:
+    """A value in the MODEL's context keeps the rotate-it severity, and says why.
+
+    The one exposure this design cannot undo: the text the model reads is journaled
+    in plain text, replays into later requests and may reach training data. The
+    notice names that fact rather than the masking, because the fact is what the
+    rotation decision turns on — and the default (no argument) is this case, so a
+    caller that cannot classify cannot quietly file the quieter notice.
+    """
+    from local_operator.incidents import format_shape_incident_message
+
+    text = format_shape_incident_message("bash", ["dsn-password"], "kubectl exec api -- env")
+    assert "rotate" in text
+    assert "context" in text
+    assert "compromised" in text
+    assert "sh4pedSentinelPw" not in text
+    # One action, not two: a cleanup line here would dilute the sentence that
+    # matters, and the copy on disk is the least of this case's problems.
+    assert "rm -f" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_contained_result_files_an_informational_incident(tmp_path: Path) -> None:
+    """End to end: the store's classification reaches the transcript and the operator.
+
+    The value below is masked WHOLE, which is the contained case, and every artefact
+    has to agree — the queued flag, the journaled record and the live receipt.
+    Measured before this change: all of them said "rotate it".
+    """
+    from local_operator.harness.types import NoticeEvent
+
+    session = _session(tmp_path)
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    events: list[Any] = []
+    session.subscribe(events.append)
+
+    assert SENTINEL_FRAGMENT not in session._redact_tool_result_text(SENTINEL)
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [False]
+
+    await session._flush_shape_incidents()
+
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert notices, "the contained incident emitted no live receipt"
+    assert "no exposure" in notices[0].text and "rotate" not in notices[0].text
+
+    body = (tmp_path / "session" / "transcript.jsonl").read_text()
+    rows = [json.loads(line) for line in body.splitlines() if "session_incident" in line]
+    assert rows, "the contained incident was not journaled"
+    assert rows[-1]["payload"]["details"]["reached_model"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_exposure_with_no_contained_label_still_files_the_rotation(tmp_path: Path) -> None:
+    """The case that used to be silent, and the one a labels-only gate would drop.
+
+    A hit that left readable material has ``complete=False``, so it contributes no
+    LABEL — the labels mean "masked whole". A notice gated on labels alone therefore
+    goes quiet on the single event that must be raised, which is why the
+    classification travels beside the labels and why ``report_shape_hits`` files an
+    empty label list when the exposure flag is set.
+    """
+    from local_operator.harness.redaction import (
+        report_shape_hits,
+        reset_shape_hit_reporter,
+        set_shape_hit_reporter,
+    )
+    from local_operator.harness.types import NoticeEvent
+
+    session = _session(tmp_path)
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    events: list[Any] = []
+    session.subscribe(events.append)
+    token = set_shape_hit_reporter(session._queue_shape_incident)
+    try:
+        report_shape_hits([], reached_model=True)
+    finally:
+        reset_shape_hit_reporter(token)
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
+
+    await session._flush_shape_incidents()
+
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert notices, "the exposure emitted no receipt"
+    assert "rotate" in notices[0].text
+
+
+def test_the_live_stream_reports_its_classification_too() -> None:
+    """The pipe filter files its own incident, so it needs its own classification.
+
+    It is the only layer that sees a credential existing ONLY in a command's
+    output — the production case this whole feature was written for — and it masks
+    the bytes before any result exists, so nothing later can report it. Its hits
+    are contained (the bytes were masked before publication), and the notice it
+    files has to say so rather than demand a rotation.
+    """
+    from local_operator.harness.redaction import (
+        reset_shape_hit_reporter,
+        set_shape_hit_reporter,
+    )
+
+    session = _session()
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    token = set_shape_hit_reporter(session._queue_shape_incident)
+    try:
+        redactor = builtin._PipeRedactor([])
+        redactor.feed(SENTINEL.encode())
+        redactor.feed(b"", final=True)
+    finally:
+        reset_shape_hit_reporter(token)
+    assert session._pending_shape_incidents, "the live stream reported nothing"
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [False]
+
+
+def test_the_classification_separates_two_incidents_from_one_tool() -> None:
+    """Contained from bash and EXPOSED from bash are two facts, not one duplicate.
+
+    Deduping on ``(tool, labels)`` alone would drop the escalation as a duplicate of
+    the informational notice whenever the same tool produced both in one turn —
+    exactly the turn where losing the louder one costs the most.
+    """
+    session = _session()
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    session._queue_shape_incident(["dsn-password"], False)
+    session._queue_shape_incident(["dsn-password"], True)
+    session._queue_shape_incident(["dsn-password"], True)
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [False, True]
+
+
+def test_a_store_without_the_report_view_keeps_the_escalated_reading() -> None:
+    """A store that cannot classify must not be read as a containment.
+
+    ``VariableStore`` always reports, but ``_redact_tool_text`` composes with any
+    store offering the older labels-only view (the broker work shipped separately).
+    Taking that list as "nothing was exposed" would silently downgrade a real
+    compromise to an informational notice, so the labels-only path keeps the
+    escalated text it filed before the classification existed.
+    """
+    from local_operator.harness.redaction import (
+        reset_shape_hit_reporter,
+        set_shape_hit_reporter,
+    )
+
+    class _LabelsOnly:
+        """The pre-classification surface: labels, and no way to say "exposed"."""
+
+        def redact(self, text: str) -> str:
+            return text.replace(SENTINEL_FRAGMENT, REDACTION_MARKER)
+
+        def redact_with_hits(self, text: str) -> tuple[str, list[str]]:
+            if SENTINEL_FRAGMENT not in text:
+                return text, []
+            return text.replace(SENTINEL_FRAGMENT, REDACTION_MARKER), ["dsn-password"]
+
+    session = _session()
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    # ``model_construct`` because ``ToolContext.variables`` is validated against the
+    # store PROTOCOL, and the point of this stub is that it is NOT a
+    # ``VariableStore``: it is the older surface, with the two methods the live path
+    # looks for by name.
+    context = ToolContext.model_construct(cwd=".", variables=_LabelsOnly())
+    token = set_shape_hit_reporter(session._queue_shape_incident)
+    try:
+        assert SENTINEL_FRAGMENT not in builtin._redact_tool_text(SENTINEL, context)
+    finally:
+        reset_shape_hit_reporter(token)
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
+
+
+def test_prose_after_a_flag_can_match_but_may_never_demand_a_rotation() -> None:
+    """The other half of the measured misfire, pinned rather than declared away.
+
+    ``--token was masked`` reads as a flag with a value, and the word after the flag
+    is masked. That is an OVER-mask rather than an alarm, and it is left in place
+    deliberately: the value is contained before the model sees it, so all it can
+    produce is an informational notice — while a flag whose value really is a short
+    word (``--password swordfish``) is a leak if the rule stops firing on
+    word-shaped values. The asymmetry is what decides it: one masked English word
+    costs a reader nothing, and the opposite mistake is unrecoverable.
+
+    What it may never do is ask for a rotation, and that is asserted here because it
+    is the thing the operator acts on.
+    """
+    from local_operator.incidents import format_shape_incident_message
+
+    prose = "the " + "--" + "token" + " was masked before it reached bash"
+    assert "cli-credential-flag" in match_shape_names(prose)
+
+    notice = format_shape_incident_message(
+        "bash", ["cli-credential-flag"], "cat WATCH.md", reached_model=False
+    )
+    assert "rotate" not in notice
+    assert "no exposure" in notice
+
+
+def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
+    """The production misfire: a flag naming a stored secret.
+
+    ``lop secret run --secret [redacted] -- <command>`` is the documented way to hand a
+    stored secret to a child, and the token after that flag is the secret's NAME —
+    the one thing an operator needs to be able to read. On 2026-09-19 a watch-log
+    entry quoting that command was masked, and filed a rotation ticket in a
+    production transcript for a credential that was not in the text at all. A value
+    spelled as an environment variable AND ending in a credential word is now read
+    as the reference it is.
+    """
+    # Joined from its segments so the literal never exists as a flag value in this
+    # SOURCE: "flag followed by a value" is precisely the shape a redaction pass
+    # rewrites, and this test's own text would otherwise be a casualty of it.
+    name = "_".join(("OS", "PROD2", "ADMIN", "PASSWORD"))
+    quoted = (
+        "The correct mechanism was available and I did not use it: "
+        f"`lop secret run --secret {name} -- <command>` and "
+        "`lop secret file NAME -- <command>` keep the value inside the broker"
+    )
+    assert "cli-credential-flag" not in match_shape_names(quoted)
+    assert scrub_shapes(quoted) == quoted
+
+    # ...and a value that could be a credential is still masked, which is what the
+    # corpus's own flag cases pin (they run over every surface above).
+    assert "cli-credential-flag" in match_shape_names("server --token=" + "Sup3rTokenValue91")

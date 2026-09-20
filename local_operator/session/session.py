@@ -55,7 +55,7 @@ from collections.abc import (
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from local_operator.compaction.cutpoint import (
     ELISION_GENUINE_COUNT_KEY,
@@ -170,6 +170,7 @@ from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
 )
+from local_operator.redaction_shapes import ShapeReport
 from local_operator.references import expand_references
 from local_operator.session.goal import GoalState
 from local_operator.session.mcp_status import McpStartupOutcome
@@ -2392,7 +2393,7 @@ class Session:
         #: ``assistant(tool_use) -> user -> tool_result`` and brick the session
         #: (see ``_append_or_park_journal``). The flush is at the turn boundary,
         #: next to the other parked notices.
-        self._pending_shape_incidents: list[tuple[str, list[str], str]] = []
+        self._pending_shape_incidents: list[tuple[str, list[str], str, bool]] = []
         # The sink for shape hits observed by layers that mask BEFORE a result
         # exists — the live pipe filter and the live/peek/abort text path. The
         # production shape this feature exists for (``kubectl exec … env``) has
@@ -2405,7 +2406,7 @@ class Session:
         #: echoes the same credential ten times, or a poller that prints the
         #: same DSN every tick, is ONE fact about the session; reporting it per
         #: result would bury the transcript in identical rows.
-        self._reported_shape_incidents: set[tuple[str, tuple[str, ...]]] = set()
+        self._reported_shape_incidents: set[tuple[str, tuple[str, ...], bool]] = set()
         #: Serialises the ASYNC journal notices so they reach the live context in
         #: the order their hooks fired, not in the order they happen to finish.
         #:
@@ -9293,18 +9294,22 @@ class Session:
     def _redact_tool_result_text(self, text: str) -> str:
         """``LoopConfig.redact_tool_result``. Mask, then REPORT what was masked.
 
-        The masking half is :meth:`VariableStore.redact_with_hits`: exact values
+        The masking half is :meth:`VariableStore.redact_with_report`: exact values
         first, then the credential-SHAPE pass, with every matched credential
         registered back as a value to scrub for the rest of the session.
 
-        The reporting half is the shape labels, and it exists because a shape
-        match is the ONLY signal that a credential the session never knew about
-        reached a tool result — a live production DSN was found in a transcript
-        with nothing anywhere saying it had happened, and every such miss today
-        is discovered by accident. One :data:`SESSION_INCIDENT_MESSAGE_TYPE` row
-        names the tool and the shapes, so it becomes a rotation ticket rather
-        than a footnote. Labels only: a notice carrying the credential would be
-        the leak it exists to report.
+        The reporting half is that report — the shape labels AND the
+        classification — and it exists because a shape match is the ONLY signal
+        that a credential the session never knew about reached a tool result: a
+        live production DSN was found in a transcript with nothing anywhere saying
+        it had happened, and every such miss today is discovered by accident. One
+        :data:`SESSION_INCIDENT_MESSAGE_TYPE` row names the tool and the shapes, so
+        it becomes a ticket rather than a footnote. The classification is what kind
+        of ticket: a value that was masked whole before the model could read it is
+        contained and owes only cleanup, while readable material left in the text is
+        the one case that asks the operator for a rotation. Labels only, never
+        values: a notice carrying the credential would be the leak it exists to
+        report.
 
         Called with text alone, so the tool identity rides
         :func:`local_operator.harness.redaction.current_tool_source` — published
@@ -9319,36 +9324,62 @@ class Session:
         if store is None:
             return text
         try:
-            scrubbed, labels = store.redact_with_hits(text)
+            # Cast rather than probed, like ``tools/builtin._redact_tool_text`` does
+            # for the same call: ``getattr`` yields ``object``, and this is the
+            # store's own public surface, so the Callable annotation is the honest
+            # description of what is being looked for.
+            report_aware = cast(
+                Callable[[str], tuple[str, ShapeReport]] | None,
+                getattr(store, "redact_with_report", None),
+            )
+            if callable(report_aware):
+                scrubbed, report = report_aware(text)
+                labels, reached_model = list(report.labels), report.reached_model
+            else:
+                # A store that predates the classification: labels only, so the
+                # escalated reading is the only one its report supports. Claiming
+                # containment from a list that cannot express exposure would be the
+                # silent downgrade this classification exists to prevent.
+                scrubbed, labels = store.redact_with_hits(text)
+                reached_model = bool(labels)
         except Exception:  # noqa: BLE001 — see the docstring's never-raises note
             logger.warning("credential shape pass failed; withholding this text", exc_info=True)
             return "[output withheld: this session's credential redaction sink could not be read]"
-        if labels:
-            self._queue_shape_incident(labels)
+        if labels or reached_model:
+            self._queue_shape_incident(labels, reached_model)
         return scrubbed
 
-    def _queue_shape_incident(self, labels: list[str]) -> None:
+    def _queue_shape_incident(self, labels: list[str], reached_model: bool) -> None:
         """Record one shape-masked result for the boundary flush. Never raises."""
         try:
             tool, summary = current_tool_source()
-            key = (tool, tuple(labels))
+            # The classification is part of the identity: the first result of a
+            # turn can be contained and a later one from the same tool can carry
+            # readable material, and deduping on (tool, labels) alone would drop
+            # the rotation notice as a duplicate of the informational one —
+            # exactly the case where silence costs the most.
+            key = (tool, tuple(labels), reached_model)
             if key in self._reported_shape_incidents:
                 return
             self._reported_shape_incidents.add(key)
-            self._pending_shape_incidents.append((tool, labels, summary))
+            self._pending_shape_incidents.append((tool, labels, summary, reached_model))
         except Exception:  # noqa: BLE001 — reporting must not break the turn
             logger.debug("shape incident queue failed", exc_info=True)
 
     async def _flush_shape_incidents(self) -> None:
         """Journal the queued shape reports. Called at the turn boundary."""
         pending, self._pending_shape_incidents = self._pending_shape_incidents, []
-        for tool, labels, summary in pending:
+        for tool, labels, summary, reached_model in pending:
             try:
-                await self.journal_shape_incident(tool, labels, summary)
+                await self.journal_shape_incident(
+                    tool, labels, summary, reached_model=reached_model
+                )
             except Exception:  # noqa: BLE001 — a notice is not worth a turn
                 logger.warning("could not journal a credential-shape incident", exc_info=True)
 
-    async def journal_shape_incident(self, tool: str, labels: list[str], summary: str) -> None:
+    async def journal_shape_incident(
+        self, tool: str, labels: list[str], summary: str, *, reached_model: bool = True
+    ) -> None:
         """Tell the model (and the transcript) that a result was masked.
 
         Rendered rather than classified: this is not a FAILURE, and running it
@@ -9357,20 +9388,32 @@ class Session:
         turn that ended for its own reasons — the same reason a credential
         change and a model switch carry their own formatter.
 
-        Persisted, unlike an MCP recovery: what it records (a credential reached
-        a tool result, it is contained for this session, and it must be rotated)
-        is still true in a resumed session, and the value stays contained
+        ``reached_model`` is the severity, and its default is the ESCALATED one so
+        that a caller which does not know cannot make the quieter claim.
+
+        Persisted, unlike an MCP recovery: what it records (a credential reached a
+        tool result, and either it was contained there or it is readable in this
+        context) is still true in a resumed session, and the value stays contained
         because the store re-registers it from the transcript's own redaction.
         """
         from local_operator.incidents import format_shape_incident_message
 
         if self._disposed:
             return
-        text = format_shape_incident_message(tool, labels, summary)
+        text = format_shape_incident_message(tool, labels, summary, reached_model=reached_model)
         message = CustomMessage(
             custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
             attribution="system",
-            details={"text": text, "tool": tool, "shapes": list(labels), "summary": summary},
+            details={
+                "text": text,
+                "tool": tool,
+                "shapes": list(labels),
+                "summary": summary,
+                # Recorded so a resumed session, a notification and the TUI can
+                # tell an informational containment from the compromise case
+                # without re-parsing the prose.
+                "reached_model": reached_model,
+            },
         )
         try:
             async with self._journal_lock:
@@ -9381,12 +9424,16 @@ class Session:
             return
         # THE LIVE RECEIPT, and the reason this method exists in the shape it
         # does: a row written to the transcript and to the model's context is not
-        # a rotation ticket — the operator has to SEE it. Measured before this
+        # a ticket — the operator has to SEE it. Measured before this
         # emit: the row reached the model, persisted, and painted on no operator
         # surface at all, live or on replay.
         #
-        # `warning` ink: a credential that reached a tool result is a state the
-        # operator has to act on, not a receipt they can skim past.
+        # `warning` ink for BOTH classifications, deliberately: the event is one
+        # the operator asked to be shown either way (a credential touched a tool,
+        # and a plaintext copy may be sitting on disk to clean up), and the
+        # severity difference is carried by the text rather than by the ink. A
+        # quieter ink for the contained case is a DESIGN decision on the notice
+        # row, not something this change should make by the back door.
         try:
             await self._emit(NoticeEvent(text=text, kind="warning", headline="credential masked"))
         except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
