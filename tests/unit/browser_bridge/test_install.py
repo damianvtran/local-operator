@@ -1276,27 +1276,71 @@ def test_the_legacy_registration_is_empty_on_windows(
 
 
 class _LaunchctlRig:
-    """`install()` with everything outside itself faked, and the calls recorded."""
+    """`install()` with everything outside itself faked, and the calls recorded.
+
+    ``job_running`` is faked rather than exercised because the browser derives
+    its label PER CONFIG ROOT (a sandbox gets a suffixed label, so this arm can
+    never address the operator's bridge — unlike the mobile and tunnel arms,
+    whose labels are fixed constants). The identity guard those two need is
+    pinned at the launchd level and by the mobile installer's own sandbox cell.
+    """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         self.plist = tmp_path / "com.local-operator.browser.plist"
         self.calls: list[list[str]] = []
         self.running = True
+        self.answering = True
         monkeypatch.setattr(install, "plist_path", lambda: self.plist)
         monkeypatch.setattr(install, "log_path", lambda: tmp_path / "log" / "browser.log")
         monkeypatch.setattr(install, "_supervisor", lambda: "launchctl")
         monkeypatch.setattr(install, "legacy_registration", lambda: None)
-        monkeypatch.setattr(install, "health", lambda *a, **k: {"ok": True})
+        # ANSWERING is part of the skip decision (round 1, R-5/Q-1): a job
+        # launchd holds a live pid for but that no longer answers must not be
+        # left as it is, which is what liveness alone did.
+        monkeypatch.setattr(
+            install, "health", lambda *a, **k: {"ok": True} if self.answering else None
+        )
         monkeypatch.setattr(install, "_launchctl", self._launchctl)
         monkeypatch.setattr(install.launchd, "job_running", lambda **kwargs: self.running)
+        monkeypatch.setattr(install.launchd, "kickstart", self._kickstart)
 
     def _launchctl(self, *cmd: str) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(cmd))
         return subprocess.CompletedProcess(list(cmd), 0, "pid = 4242", "")
 
+    def _kickstart(self, **kwargs: object) -> bool:
+        self.calls.append(["kickstart", "-k", str(kwargs.get("label"))])
+        self.answering = True  # the restart brought it back
+        return True
+
     def write_current_plist(self, port: int) -> None:
         self.plist.parent.mkdir(parents=True, exist_ok=True)
         self.plist.write_bytes(plistlib.dumps(install.render_plist(port)))
+
+
+def test_a_loaded_but_wedged_bridge_is_repaired_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-5/Q-1: a pid that no longer answers is not a reason to leave it alone.
+
+    Liveness alone skipped this state, and the install then failed its own
+    health check — the wedged bridge the old unconditional reload used to repair
+    as a side effect. The gate is now liveness AND serving, the mobile twin's
+    shape; the plist is still not rewritten, because the file is correct.
+    """
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4099)
+    rig.answering = False
+    before = rig.plist.stat().st_mtime_ns
+
+    result = install.install(4099)
+
+    assert result["ok"] is True, result
+    assert rig.plist.stat().st_mtime_ns == before, "the plist was already correct"
+    assert [call[:2] for call in rig.calls] == [["kickstart", "-k"]], rig.calls
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert not any("left it loaded" in step for step in steps), steps
 
 
 def test_install_skips_a_plist_that_already_says_what_it_would_write(

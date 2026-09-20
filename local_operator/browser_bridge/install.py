@@ -813,31 +813,40 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     supervisor = _supervisor()
     if supervisor == "launchctl":
         plist_path().parent.mkdir(parents=True, exist_ok=True)
-        # WRITE AND RELOAD ONLY WHEN SOMETHING WOULD CHANGE. This daemon is a
-        # LaunchAgent, and an EDR reads "Persistence: launchd job / plist file
-        # modification" (MITRE T1543.001) from exactly the two signals an
-        # unconditional install emits: a plist rewritten with identical bytes,
-        # then a bootout/bootstrap. The bridge's plist path is stable, so a
-        # re-run is normally a no-op — and `wakes.install` has skipped on equal
-        # content for this reason since it shipped.
+        # WRITE AND RELOAD ONLY WHEN SOMETHING WOULD CHANGE, and what that claim
+        # is and is not (review round 1, R-3): an install that would change
+        # nothing no longer emits the two signals an EDR reads as "Persistence:
+        # launchd job / plist file modification" (MITRE T1543.001) — an
+        # identical-bytes rewrite followed by a bootout/bootstrap. It does NOT
+        # explain the 2026-09-19 incident's plist modification, which came from
+        # the `[daemons] refresh` child and a genuinely stale plist; see the
+        # longer note in `mobile/install.py`.
         wanted = render_plist(port)
         current = _plist_is_current(plist_path(), wanted)
         if not dry_run and not current:
             plist_path().write_bytes(plistlib.dumps(wanted))
         steps.append(f"wrote {plist_path()}" if not current else "LaunchAgent already current")
         if not dry_run:
-            # A DEAD JOB IS STILL REPAIRED. The reload is skipped only when the
-            # file is current AND launchd holds a live pid for this label;
-            # `kickstart -k` is the narrower repair for a loaded-but-stopped job
-            # (it does not briefly unregister the label), and anything else —
-            # not registered, not running, changed bytes — falls through to the
-            # shared reload, which is today's behaviour exactly.
+            # A DEAD OR WEDGED JOB IS STILL REPAIRED. The reload is skipped only
+            # when the file is current, launchd holds a live pid for this label
+            # AND the bridge is answering — the same liveness-plus-serving
+            # predicate the mobile installer's twin uses. Liveness alone was not
+            # enough: a job with a pid that no longer answers was left in place
+            # and the install then failed its own health check below, which the
+            # old unconditional reload used to repair (round 1, R-5/Q-1). A
+            # health probe is safe to add HERE because `job_running` is asked
+            # first: launchd can only hold a pid for OUR label, so a leftover
+            # foreground daemon on the port cannot fake it.
             reload_needed = True
-            running = current and launchd.job_running(label=label(), run=_launchctl)
-            if running:
+            healthy = (
+                current
+                and launchd.job_running(label=label(), path=plist_path(), run=_launchctl)
+                and health(port) is not None
+            )
+            if healthy:
                 reload_needed = False
                 steps.append("LaunchAgent already current and running; left it loaded")
-            elif current and launchd.kickstart(label=label(), run=_launchctl):
+            elif current and launchd.kickstart(label=label(), path=plist_path(), run=_launchctl):
                 reload_needed = False
                 steps.append("restarted the loaded LaunchAgent (its file was already current)")
             if reload_needed:
