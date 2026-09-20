@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 from rich.cells import cell_len
 
-from local_operator.tui.app import OperatorApp
+from local_operator.tui.app import OperatorApp, tunnel_park_card
 from local_operator.tui.widgets.toast import Toast
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -196,6 +196,36 @@ async def test_another_reason_names_its_own_command(tmp_path) -> None:
         assert toast.display is True
         assert toast.message == "! lop tunnel connect — remote access is off"
         assert "/login radient" not in toast.message
+
+
+def test_the_card_wording_is_pinned_to_the_vocabulary_it_mirrors() -> None:
+    """The two tables in `app.py` name the vocabulary's own strings, so pin them.
+
+    The card cannot import `tunnels.gateway` at module scope (the poll's own
+    import is lazy: that module drags httpx and starlette onto every session's
+    boot path), so its reasons and commands are literals — the same trade
+    `toast.py` makes for its mirrored MCP copy, and the same reason it needs a pin
+    rather than a comment. A renamed park code or remedy is exactly the drift the
+    round-1 review opened with (one condition, two commands); this is what makes
+    that drift fail here instead of reaching a user.
+    """
+    from local_operator.tui.app import TUNNEL_CARD_COMMANDS, TUNNEL_CARD_REASONS
+    from local_operator.tui.widgets.status_line import ICON_APPROVALS
+    from local_operator.tunnels import gateway
+
+    # The three codes the connector can park with (see `service.py`), by the
+    # vocabulary's own names rather than by a second spelling of them.
+    assert set(TUNNEL_CARD_REASONS) == {
+        gateway.LOGIN_REQUIRED,
+        gateway.REENROLMENT_REQUIRED,
+        gateway.LOCAL_PREREQUISITE,
+    }
+    assert set(TUNNEL_CARD_COMMANDS) == {gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]}
+    # The one mapping this app performs, exercised end to end rather than trusted.
+    assert (
+        tunnel_park_card(gateway.LOGIN_REQUIRED, gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED])
+        == f"{ICON_APPROVALS} /login radient — Radient sign-in expired"
+    )
 
 
 def test_every_card_branch_leads_with_its_command_and_fits_one_row() -> None:
