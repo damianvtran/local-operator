@@ -2156,3 +2156,460 @@ class TestUsageAwareFirstPick:
         assert store._usage_aware_pick is True
         # Close the streams' http clients without awaiting: no loop is running.
         del stream, stream2
+
+
+class TestTheRotatingRefreshTokenIsNeverRePresented:
+    """The three defences a rejected refresh POST needs, and why.
+
+    Radient rotates its refresh token and runs reuse detection, so presenting a
+    token that was already consumed answers ``invalid_grant`` AND revokes the
+    whole token family — every session at once, not one failed request. The
+    operator's grant died twice in ~17 hours this way, each time restored by a
+    fresh ``lop login radient``. These tests drive each defence from the store's
+    own surface; ``local_operator/mcp/auth.py`` carries the same three for MCP
+    grants and is the design this follows.
+    """
+
+    @staticmethod
+    def _row(store: AuthStore, provider: str = "radient", **creds: Any) -> Any:
+        return store.upsert_credential(
+            provider, {**_oauth(refresh="rotating-token", access="access-1"), **creds}
+        )
+
+    async def test_a_lost_response_arms_the_marker_and_the_token_is_never_presented_again(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The write-ahead marker, driven through the store's own refresh path.
+
+        The exchange is handed the refresh token and no answer comes back, so
+        the IdP may already have spent it. The marker is armed BEFORE the POST
+        because a process that dies mid-request takes all in-memory knowledge
+        with it; here the exchange lives long enough to prove the ordering.
+
+        Without the marker the second attempt re-presents ``rotating-token``,
+        which is the reuse-detection POST — the assertion that ``posts`` stops
+        at one is the whole test.
+        """
+        from local_operator.providers.auth_store import REFRESH_SEND_UNCONFIRMED_KEY
+
+        row = self._row(store, expires=0)
+        posts: list[str] = []
+
+        async def lost_response(creds: dict[str, Any]) -> dict[str, Any]:
+            posts.append(creds["refresh"])
+            stored = store.get_credential(row.id)
+            assert stored is not None
+            marker = stored.data.get(REFRESH_SEND_UNCONFIRMED_KEY)
+            # ARMED BEFORE THE POST, not after it: the assertion is inside the
+            # exchange, which is the only place that can see the ordering.
+            assert isinstance(marker, dict) and marker["digest"], "marker was not armed first"
+            # A request that went out and was never answered: the outcome is
+            # unknown, so the marker must survive this.
+            raise RuntimeError("connection reset after the request was written")
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: lost_response)
+        with pytest.raises(AuthStoreError):
+            await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert posts == ["rotating-token"]
+
+        after = store.get_credential(row.id)
+        assert after is not None
+        assert REFRESH_SEND_UNCONFIRMED_KEY in after.data
+        assert after.data["refresh"] == "rotating-token"
+
+        # The second attempt refuses to present it, says so, and does not clear
+        # the marker — clearing is reserved for a DEFINITIVE answer.
+        with pytest.raises(AuthStoreError, match="never acknowledged"):
+            await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert posts == ["rotating-token"]
+        still = store.get_credential(row.id)
+        assert still is not None and REFRESH_SEND_UNCONFIRMED_KEY in still.data
+
+    async def test_a_marker_about_a_rotated_token_does_not_suppress_a_healthy_refresh(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The narrow false-positive window, bounded from both sides.
+
+        A marker whose digest belongs to a DIFFERENT token is stale — a peer has
+        rotated the row since — and believing it would suppress a healthy token
+        and cost the user a browser sign-in for nothing. Expiry is what stops a
+        marker that never resolved from suppressing the account for ever.
+        """
+        from local_operator.providers.auth_store import (
+            REFRESH_SEND_UNCONFIRMED_KEY,
+            UNCONFIRMED_SEND_TTL_S,
+            _refresh_token_digest,
+        )
+
+        row = self._row(store, expires=0)
+        marker_key = REFRESH_SEND_UNCONFIRMED_KEY
+        stale = {"digest": _refresh_token_digest("some-other-token"), "at": store._now_ms()}
+        store._conn.execute(
+            "UPDATE auth_credentials SET data = ? WHERE id = ?",
+            (
+                json.dumps(
+                    dict(_oauth(refresh="rotating-token", expires=0), **{marker_key: stale})
+                ),
+                row.id,
+            ),
+        )
+        store._conn.commit()
+        assert store.send_unconfirmed(row.id) is False
+        cleared = store.get_credential(row.id)
+        assert cleared is not None and marker_key not in cleared.data
+
+        expired = {
+            "digest": _refresh_token_digest("rotating-token"),
+            "at": store._now_ms() - int(UNCONFIRMED_SEND_TTL_S * 1000) - 1,
+        }
+        store._conn.execute(
+            "UPDATE auth_credentials SET data = ? WHERE id = ?",
+            (
+                json.dumps(
+                    dict(
+                        _oauth(refresh="rotating-token", expires=0),
+                        **{marker_key: expired},
+                    )
+                ),
+                row.id,
+            ),
+        )
+        store._conn.commit()
+        assert store.send_unconfirmed(row.id) is False
+
+        posts: list[str] = []
+
+        async def ok(creds: dict[str, Any]) -> dict[str, Any]:
+            posts.append(creds["refresh"])
+            expires_at = store._now_ms() + 3600_000
+            return {"access": "access-2", "refresh": "rotated", "expires": expires_at}
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: ok)
+        data = await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert data["access"] == "access-2"
+        assert posts == ["rotating-token"]
+        # A persisted rotation clears the marker: the answer IS the ack.
+        written = store.get_credential(row.id)
+        assert written is not None and marker_key not in written.data
+
+    async def test_a_refusal_is_recorded_as_data_and_every_reader_says_so(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The IdP's own refusal, persisted — with the incident's real body.
+
+        Radient answers a refused refresh with prose rather than an RFC 6749
+        code. WHICH refusals are terminal is decided one layer down
+        (``is_terminal_grant_response``, widened for this exact body by #1342);
+        the store's half is to record the verdict so every row-reading surface is
+        honest, and to honour it without a second POST.
+        """
+        from local_operator.providers.auth_store import (
+            GRANT_DEAD_AT_KEY,
+            REFRESH_SEND_UNCONFIRMED_KEY,
+        )
+
+        body = '{"error": "Token refresh failed: refresh token is expired or revoked"}'
+        row = self._row(store, expires=0)
+        posts: list[str] = []
+
+        async def refused(creds: dict[str, Any]) -> dict[str, Any]:
+            posts.append(creds["refresh"])
+            raise InvalidGrantError(f"Radient refresh failed: HTTP 401 {body}")
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refused)
+        with pytest.raises(CredentialInvalidError):
+            await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert posts == ["rotating-token"]
+
+        after = store.get_credential(row.id)
+        assert after is not None
+        assert after.data[GRANT_DEAD_AT_KEY] > 0
+        # The refusal is the definitive answer, so the send marker is resolved.
+        assert REFRESH_SEND_UNCONFIRMED_KEY not in after.data
+        # REPORTED, never retired: the login is still the user's.
+        assert after.disabled_cause is None
+        assert store.grant_is_dead(row.id) is True
+
+        # Every row-reading surface is honest from the row alone, with no POST
+        # to re-earn the verdict: this is the state that used to render as a
+        # perfectly healthy login while every refresh was being refused.
+        accesses = await store.list_oauth_accesses("radient")
+        assert [a.credential_invalid for a in accesses] == [True]
+        assert accesses[0].access_token == ""
+        assert posts == ["rotating-token"]
+
+        # A later attempt is refused from the persisted verdict, without POSTing.
+        with pytest.raises(CredentialInvalidError):
+            await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert posts == ["rotating-token"]
+
+    async def test_the_tombstone_survives_a_rotation_and_only_a_login_clears_it(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A token minted by a refresh belongs to the family the IdP revoked.
+
+        A sibling can mark the grant dead while our POST is in flight, and the
+        IdP can then answer us with a rotation. Persisting it would resurrect a
+        login the IdP has revoked, so the rotation is dropped and the tombstone
+        stands. Only an interactive login (``upsert_credential``) clears it, and
+        clearing it is what re-enables the refresh path.
+        """
+        from local_operator.providers.auth_store import GRANT_DEAD_AT_KEY
+
+        row = self._row(store, expires=0)
+        posts: list[str] = []
+
+        async def refresh_lost_to_a_tombstone(creds: dict[str, Any]) -> dict[str, Any]:
+            posts.append(creds["refresh"])
+            # A sibling tombstones the SAME row while our POST is in flight.
+            dead = {**_oauth(refresh="rotating-token", access="old"), GRANT_DEAD_AT_KEY: 1}
+            store._conn.execute(
+                "UPDATE auth_credentials SET data = ? WHERE id = ?",
+                (json.dumps(dead), row.id),
+            )
+            store._conn.commit()
+            return {"access": "minted", "refresh": "rotated", "expires": store._now_ms() + 3600_000}
+
+        monkeypatch.setattr(
+            AuthStore, "_refresh_fn", lambda self_, provider: refresh_lost_to_a_tombstone
+        )
+        with pytest.raises(CredentialInvalidError):
+            await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert posts == ["rotating-token"]
+
+        after = store.get_credential(row.id)
+        assert after is not None
+        assert after.data[GRANT_DEAD_AT_KEY] > 0
+        assert after.data.get("refresh") == "rotating-token", "a dead family got a rotation"
+
+        # An interactive login is the only thing that clears it.
+        self._row(store, expires=0)
+        cleared = store.get_credential(row.id)
+        assert cleared is not None and GRANT_DEAD_AT_KEY not in cleared.data
+        assert store.grant_is_dead(row.id) is False
+        second: list[str] = []
+
+        async def ok(creds: dict[str, Any]) -> dict[str, Any]:
+            second.append(creds["refresh"])
+            return {"access": "fresh-access", "expires": store._now_ms() + 3600_000}
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: ok)
+        data = await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert data["access"] == "fresh-access"
+        assert second == ["rotating-token"]
+
+    async def test_the_refresh_lease_outlives_the_request_it_guards(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A peer must not be able to take the lease inside the in-doubt window.
+
+        The holder's critical section is one POST bounded by the provider HTTP
+        timeout. While it was equal to the lease TTL, a peer's lease expired at
+        the same instant the holder's request would time out, so the peer took
+        the lease and re-presented the SAME rotating token. The clock is advanced
+        by exactly one whole HTTP timeout — the moment the holder's request could
+        still be on the wire — and the peer must still be locked out.
+        """
+        import time as _time
+
+        from local_operator.providers.auth_store import (
+            AUTH_REFRESH_LEASE_MS,
+            PROVIDER_REFRESH_HTTP_TIMEOUT_S,
+        )
+
+        # The structural half first: the relation is the invariant, and it must
+        # hold whatever either number becomes.
+        assert AUTH_REFRESH_LEASE_MS > PROVIDER_REFRESH_HTTP_TIMEOUT_S * 1000
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        db = tmp_path / "auth.db"
+        holder = AuthStore(db)
+        peer = AuthStore(db)
+        row = holder.upsert_credential("openai", _oauth(expires=int(_time.time() * 1000) + 1000))
+        assert holder._try_refresh_lease(row.id) is True
+
+        one_timeout_later = AuthStore._now_ms() + int(PROVIDER_REFRESH_HTTP_TIMEOUT_S * 1000) + 1000
+        monkeypatch.setattr(AuthStore, "_now_ms", staticmethod(lambda: one_timeout_later))
+        assert (
+            peer._try_refresh_lease(row.id) is False
+        ), "a peer took the lease while the holder's request could still be in flight"
+        holder.close()
+        peer.close()
+
+    async def test_a_contended_caller_is_never_served_an_expired_bearer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The store half of PR #1340's stale-bearer defect.
+
+        The loser used to be handed whatever the row held — including an access
+        token that was past its expiry — and a peer session measured exactly that
+        bearer being spent upstream as though it were live. It must be a
+        classified failure instead, which is what lets the cascade rotate to a
+        sibling rather than send a request that cannot authenticate.
+        """
+        import time as _time
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        db = tmp_path / "auth.db"
+        holder = AuthStore(db)
+        loser = AuthStore(db)
+        expired = _oauth(access="expired-access", expires=int(_time.time() * 1000) - 60_000)
+        row = holder.upsert_credential("openai", expired)
+        posts: list[str] = []
+        held = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_refresh(creds: dict[str, Any]) -> dict[str, Any]:
+            posts.append(creds["refresh"])
+            held.set()
+            await release.wait()
+            expires_at = int(_time.time() * 1000) + 3600_000
+            return {"access": "access-2", "refresh": "rotated", "expires": expires_at}
+
+        monkeypatch.setattr(holder, "_refresh_fn", lambda provider: slow_refresh)
+        monkeypatch.setattr(loser, "_refresh_fn", lambda provider: slow_refresh)
+
+        task = asyncio.create_task(holder.get_api_key("openai"))
+        await asyncio.wait_for(held.wait(), 2)
+        assert loser._try_refresh_lease(row.id) is False  # the holder owns it
+        # The loser POSTs nothing and is served no expired bearer.
+        assert await loser.get_api_key("openai") is None
+        assert posts == [expired["refresh"]]
+
+        release.set()
+        assert await task == "access-2"
+        assert posts == [expired["refresh"]]
+        holder.close()
+        loser.close()
+
+    async def test_a_contended_caller_is_still_served_a_bearer_inside_its_lifetime(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The narrow exception, pinned so the fix cannot widen.
+
+        A row needs a refresh up to ``OAUTH_REFRESH_SKEW_MS`` BEFORE the token
+        dies, so refusing every contended caller would fail requests whose bearer
+        still works. Only the EXPIRED case is refused — that is the difference
+        between an honest failure and a stale spend.
+        """
+        import time as _time
+
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        db = tmp_path / "auth.db"
+        holder = AuthStore(db)
+        loser = AuthStore(db)
+        still_live = _oauth(access="skew-live", expires=int(_time.time() * 1000) + 5_000)
+        row = holder.upsert_credential("openai", still_live)
+        posts: list[str] = []
+        held = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_refresh(creds: dict[str, Any]) -> dict[str, Any]:
+            posts.append(creds["refresh"])
+            held.set()
+            await release.wait()
+            expires_at = int(_time.time() * 1000) + 3600_000
+            return {"access": "access-2", "refresh": "rotated", "expires": expires_at}
+
+        monkeypatch.setattr(holder, "_refresh_fn", lambda provider: slow_refresh)
+        monkeypatch.setattr(loser, "_refresh_fn", lambda provider: slow_refresh)
+
+        task = asyncio.create_task(holder.get_api_key("openai"))
+        await asyncio.wait_for(held.wait(), 2)
+        assert loser._try_refresh_lease(row.id) is False
+        assert await loser.get_api_key("openai") == "skew-live"
+        assert posts == [still_live["refresh"]]
+        release.set()
+        assert await task == "access-2"
+        holder.close()
+        loser.close()
+
+    async def test_a_refused_send_frees_the_lease_instead_of_stranding_a_peer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal path must not hold the lease it refused to use.
+
+        With the longer TTL and the no-stale-serve rule, a lease left behind by
+        a refusing exit strands every other process for the whole window, so the
+        release is a ``finally`` over the leased section rather than the six call
+        sites it used to be. The marker is produced through the real
+        lost-response path rather than written by hand, so this exercises the
+        same sequence a crashed exchange leaves behind.
+        """
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        db = tmp_path / "auth.db"
+        store = AuthStore(db)
+        peer = AuthStore(db)
+        row = store.upsert_credential("openai", _oauth(expires=0))
+
+        async def lost(creds: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("connection reset after the request was written")
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: lost)
+        with pytest.raises(AuthStoreError):
+            await store._ensure_oauth_fresh(store.get_credential(row.id))
+        # The next attempt refuses (the marker) — and must free the lease.
+        with pytest.raises(AuthStoreError, match="never acknowledged"):
+            await store._ensure_oauth_fresh(store.get_credential(row.id), force=True)
+        assert peer._try_refresh_lease(row.id) is True
+        store.close()
+        peer.close()
+
+    async def test_the_verdict_is_the_classifiers_call_and_the_token_is_guarded_either_way(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The boundary with the classifier, driven through the REAL one.
+
+        Which refusals are terminal is not the store's call: it is
+        ``is_terminal_grant_response``'s, and Radient's prose body is the exact
+        case #1342 widens it for. So the store's rule is evidence-gated to an
+        IdP 4xx verdict as the classifier reports it, and this test asserts the
+        half that is the store's whatever that answer is — a token whose
+        exchange may have spent it is NEVER presented twice — then asserts the
+        persisted verdict against the classifier's own answer, so it neither
+        hedges nor has to be rewritten when #1342 lands.
+        """
+        from local_operator.providers.auth_store import (
+            GRANT_DEAD_AT_KEY,
+            REFRESH_SEND_UNCONFIRMED_KEY,
+        )
+        from local_operator.providers.oauth.callback_server import (
+            is_terminal_grant_response,
+            raise_for_refresh_failure,
+        )
+
+        # Radient's own refusal, verbatim, from the incident.
+        body = '{"error": "Token refresh failed: refresh token is expired or revoked"}'
+        row = self._row(store, expires=0)
+        posts: list[str] = []
+
+        async def refused(creds: dict[str, Any]) -> dict[str, Any]:
+            posts.append(creds["refresh"])
+            # The REAL classifier, entered exactly the way refresh_radient_token
+            # enters it: Radient's wording preserved verbatim.
+            raise_for_refresh_failure(
+                "Radient",
+                401,
+                body,
+                message=f"Radient refresh failed: HTTP 401 {body}",
+            )
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refused)
+        with pytest.raises(AuthStoreError):
+            await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert posts == ["rotating-token"]
+
+        terminal = is_terminal_grant_response(401, body)
+        after = store.get_credential(row.id)
+        assert after is not None
+        assert store.grant_is_dead(row.id) is terminal
+        assert (GRANT_DEAD_AT_KEY in after.data) is terminal
+        if not terminal:
+            # Not yet a verdict: the row is a retryable failure, and the TOKEN
+            # is still guarded — the marker the exchange armed is live, so the
+            # repeated attempt below refuses rather than re-presenting a token
+            # the IdP may already have spent.
+            assert REFRESH_SEND_UNCONFIRMED_KEY in after.data
+        with pytest.raises(AuthStoreError):
+            await store._ensure_oauth_fresh(store.get_credential(row.id))
+        assert posts == ["rotating-token"], "the token was presented twice"
