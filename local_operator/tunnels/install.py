@@ -17,7 +17,7 @@ from pathlib import Path
 
 from local_operator import launchd, procname, procstate, supervisors
 from local_operator.paths import CONFIG_DIR_ENV, config_dir
-from local_operator.tunnels import config
+from local_operator.tunnels import config, gateway, state
 
 LABEL = "com.local-operator.tunnel"
 
@@ -227,6 +227,133 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
         return outcome
     except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
         return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
+
+
+def rearm_if_parked(*, provider: str, credential_id: int) -> str:
+    """Start a parked connector again after the login that parked it is fixed.
+
+    A park withdraws remote access on purpose, so the operator has to be able to
+    end it — and the act that ends it is the one they were already told to
+    perform. Nothing else notices: the connector exited 0, which is precisely
+    what stops its supervisor from retrying it, so without this hook the phone
+    stays dark until someone runs a local command they have no reason to run.
+
+    Called from the credential-write path (`AuthStore.upsert_credential`), which
+    is the ONE place a TUI `/login`, a `lop login`, and the desktop
+    ``POST /v1/auth/login`` all land, and from `lop tunnel status`/`start` as a
+    self-heal. Cheap by construction: every guard below is a stat or a small
+    file read, and the first one returns for the overwhelmingly common case —
+    nothing is parked at all.
+
+    Deliberately narrow, in four ways, each for its own reason:
+
+    * Only ``login_required``. A connector parked for a missing prerequisite or
+      a console re-enrolment needs a DIFFERENT local command, and starting it
+      early would only park it again — noisily, in a log this exists to quiet.
+    * Only a tunnel that is configured and not deliberately stopped: `stopped`
+      means the operator is not using the tunnel, so there is nothing to re-arm.
+    * Only the credential THIS tunnel owns. Every writer in the process reaches
+      here (see the hook's comment), so an unrelated provider login — or a
+      Radient login for a different account — must touch nothing.
+    * Only when the store this process is acting on lives in the real home, and
+      the unit is actually installed. `launchctl` addresses the real user's
+      session whatever ``HOME`` says, so a sandboxed run (a test, a review
+      worktree) would otherwise reach out and restart the operator's live
+      connector. `LaunchAgent repair` carries the same guard for the same reason.
+
+    TO REHEARSE THIS END TO END FROM A SANDBOX, PIN THE LABEL (QA round 1, Q2).
+    The last two guards together mean a rig that leaves both alone cannot reach
+    the happy path at all: it declines, correctly, because its config root is not
+    the real home — and relaxing the real-home guard without the pin is worse,
+    since the fixed `LABEL` above resolves to whatever plist already holds it,
+    i.e. the operator's live connector. The shape that works, and the one QA's
+    own rehearsal used: rebuild this module's `LABEL` to the RIG's own label
+    (monkeypatch/`importlib.reload` the constant, never the plist on disk) and
+    force ONLY `supervisors.config_lives_in_real_home`, leaving every other guard
+    — provider, credential id, `stopped`, park reason, plist presence — the
+    production one, so a broken guard shows up as a `launchctl` call the rig
+    recorded rather than as an incident. Put a record-only `launchctl` shim on
+    PATH for the containment case, which is run UNPINNED.
+
+    Never raises: a re-arm that fails must not fail the login that triggered it.
+    Returns a sentence for the caller to show, or "" when it did nothing.
+    """
+    if not _rearm_allowed():
+        return ""
+    # `supervisors.supervisor()` rather than a `sys.platform` test: it also
+    # answers "no supervisor here at all" (a Linux without systemd, a Windows
+    # without schtasks), which is a platform this must decline on rather than
+    # raise out of a login, and it is the same question `lop tunnel install`
+    # and `action()` ask.
+    kind = supervisors.supervisor()
+    if kind is None:
+        return ""
+    parked = state.parked()
+    if not parked or parked.get("reason") != gateway.LOGIN_REQUIRED:
+        return ""
+    try:
+        value = config.load()
+    except ValueError:
+        return ""
+    if value.get("stopped"):
+        return ""
+    owns = value.get("credential_id")
+    if (
+        provider != "radient"
+        or not isinstance(owns, int)
+        or isinstance(owns, bool)
+        or owns != credential_id
+    ):
+        # `isinstance` as well as the comparison, because a configuration with no
+        # usable id (hand-edited, or written by a build that stored it as a
+        # string) must not match a `credential_id` of the same kind: the guard is
+        # "this is the credential the tunnel owns", and None == None is not that.
+        return ""
+    try:
+        if not supervisors.config_lives_in_real_home(config_dir()):
+            return ""
+        if kind == supervisors.SCHTASKS:
+            # Windows keeps its own copy of a task, so there is no registration
+            # FILE this installer owns to check — the addressability guard is
+            # the shared one `action()` uses for the same reason.
+            if not supervisors.task_scheduler_is_addressable(config_dir()):
+                return ""
+            started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
+            if started.returncode:
+                raise ValueError(((started.stderr or started.stdout) or "").strip()[:200])
+            return "The Radient tunnel connector is starting again."
+        path = service_path()
+        if not path.exists():
+            return ""
+        if kind == supervisors.LAUNCHCTL:
+            # kickstart, not `launchd.reload_job`: that sequence exists for the
+            # case where the plist was just REWRITTEN, and its own docstring
+            # names this one as the deliberate exception — the parked job's
+            # plist is already correct and the job is loaded but stopped, so
+            # there is nothing to tear down and a reload would discard a
+            # pending plist repair mid-flight. The mobile installer starts its
+            # own daemon the same way.
+            result = _launchctl("kickstart", "-k", f"gui/{os.getuid()}/{LABEL}")
+            if result.returncode:
+                raise ValueError(result.stderr.strip())
+        else:
+            # Started, not restarted: the unit is inactive by definition here.
+            _run(["systemctl", "--user", "start", path.name])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "Signed in, but the tunnel connector could not be restarted; run lop tunnel install."
+    return "The Radient tunnel connector is starting again."
+
+
+def _rearm_allowed() -> bool:
+    """Whether the credential-write hook may start a supervised service.
+
+    An environment opt-out rather than a module flag because the hook is
+    reached from tests, review worktrees and the installed product alike, and
+    the run that must not touch launchd is the one that already knows it is a
+    test — it can say so in its own environment.
+    """
+    value = os.environ.get("LOP_TUNNEL_NO_REARM", "").strip().lower()
+    return value not in {"1", "true", "yes", "on"}
 
 
 def install() -> None:

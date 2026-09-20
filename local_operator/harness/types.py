@@ -1473,6 +1473,53 @@ class MessageEndEvent(AgentEvent[Literal["message_end"]]):
     message: AgentMessage
 
 
+class ReasoningDeltaEvent(AgentEvent[Literal["reasoning_delta"]]):
+    """A fragment of the model's PRIVATE reasoning channel reached the harness.
+
+    The wire clients have always emitted ``StreamReasoningDelta``
+    (``providers/clients.py``), but the loop had no case for it and dropped it:
+    nothing about the model's thinking reached any front end, so the whole
+    reasoning phase was a still screen. Measured, on the same question: the
+    first reasoning fragment arrives 455 ms before the first text token on a
+    102-token prompt, and 1,750 ms before it on a 142k-token cached prompt --
+    and 86.5% of deepseek-flash turns reason at all. This event is that channel
+    made visible, and nothing more.
+
+    DISPLAY-ONLY is the contract, and it is load-bearing in three places:
+
+    * it never enters an assistant message's content, so it never reaches the
+      transcript, the compaction summariser, or the next request's messages;
+    * it is never written back as ``reasoning_content`` on the wire -- the echo
+      deepseek 400s on, and the reason ``providers.clients._replay_chat_message``
+      validates provenance at all;
+    * ``Content`` (``TextContent | ImageContent``) is deliberately NOT extended
+      with a reasoning block. A content type would make reasoning legal
+      transcript state, which is exactly what the two points above forbid; the
+      event channel is the whole of its representation, so no consumer can
+      accidentally persist it by appending content.
+
+    ``message_id`` is the assistant message streaming when the fragment
+    arrived, so a consumer can group one model call's reasoning and retire it
+    when the answer starts. ``delta`` is the ONE fragment, never the accumulated
+    text: reasoning arrives token by token, and a re-dumped accumulation is what
+    made the desktop's frames oversize (``session/runtime/server.py``).
+
+    A consumer that does not know this event renders exactly what it rendered
+    before -- nothing.
+
+    The ``type`` token is deliberately the wire fragment's OWN name
+    (``StreamReasoningDelta``): this event is a 1:1 republication of that
+    channel, so the shared word reads as one thing. The two are never seen by
+    one dispatcher -- the wire union is consumed inside the harness's stream
+    branch and this union only downstream of it -- so the name is not an
+    ambiguity to resolve later.
+    """
+
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    message_id: str = ""
+    delta: str
+
+
 class HistoryDeltaEvent(AgentEvent[Literal["history_delta"]]):
     """Settled transcript rows that became durable while no frontend painted them.
 
@@ -2799,11 +2846,17 @@ class StreamReasoningDelta(BaseModel):
     output" without it, and the two call for opposite responses (re-prompt the
     model / fix the client).
 
-    Emitted on the reasoning channel only. It is deliberately NOT reasoning
-    rendered anywhere user-visible: private reasoning never enters the
-    transcript or the model-visible context, and no consumer is required to
-    act on this event. It exists so a caller that wants to know whether the
-    model produced anything can ask.
+    Emitted on the reasoning channel only, and the harness turns every fragment
+    into an ``ReasoningDeltaEvent`` (the loop's stream dispatch), which is
+    DISPLAY-ONLY: it reaches the front ends -- the TUI's transient block, the
+    SSE ``reasoning.delta`` name, the desktop frames, the mobile projection and
+    exec's JSON channel -- and never enters the transcript, the model-visible
+    context, or the next request. So private reasoning stays private on the
+    wire while the user can watch the phase happen. No consumer is REQUIRED to
+    act on it: a consumer that does not simply renders what it rendered before,
+    and the two that know the event and still drop it (a subagent's bounded
+    trajectory, the record-keyed SSE channel) do so deliberately, because
+    neither surface has a row to put it in.
     """
 
     type: Literal["reasoning_delta"] = "reasoning_delta"

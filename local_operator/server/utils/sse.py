@@ -123,6 +123,17 @@ class EventName:
     #: Incremental assistant text: ``delta`` plus a cumulative ``snapshot``.
     #: Maps to ``runtime.agent.item.delta``.
     MESSAGE_DELTA = "message.delta"
+    #: The model's PRIVATE reasoning, streamed: ``delta``, display-only.
+    #:
+    #: Deliberately its own name rather than a flag on ``message.delta``. A
+    #: consumer that does not know this name renders exactly what it rendered
+    #: before; a consumer that DID know ``message.delta`` and received reasoning
+    #: under it would append the model's private thinking to the answer it is
+    #: painting, which is transcript corruption, not a rendering choice. It
+    #: carries no cumulative ``snapshot``: reasoning is never persisted, so
+    #: there is nothing for a late or lossy consumer to repaint from, and a
+    #: supervisor re-mapping this family names its own event.
+    REASONING_DELTA = "reasoning.delta"
     #: Tool invocation announced. Maps to ``runtime.agent.item.started`` with
     #: an item type of ``command_execution``.
     TOOL_START = "tool.start"

@@ -84,19 +84,33 @@ record the last local `create`, `connect`, or `configure` stored, so changing a
 harness port in the console alone stops the connector until you re-approve it
 locally. That keeps a console session from silently repointing a harness at an
 unrelated loopback service and handing it this device's relay credentials. The
-connector writes the reason and the remedy to
-`~/.local-operator/tunnel/service.log`:
+connector records the reason, the remedy and the local state file, and writes a
+timestamped line to `~/.local-operator/tunnel/service.log`:
 
 ```
-Tunnel connector stopped: Harness port for local-operator changed in the console. Run lop tunnel connect again.
-Tunnel connector stopped: Harness opencode is not approved on this device. Run lop tunnel connect again.
+2026-09-19T14:32:07-07:00 local_operator.tunnels.service: connector parked reason=reenrolment_required attempts=1 — run lop tunnel connect: Harness port for local-operator changed in the console. Run lop tunnel connect again.
 ```
 
-`lop tunnel status` reports the cloud's own view and does not show harness
-ports, so it still reads `Status: active` while the connector is refusing to
-start — that log is where this state is visible. Run `lop tunnel connect` to
-accept the console's current ports on this device; the connector restarts on
-its own once the record matches. Harnesses run
+Two things are load-bearing in that line. It is **parked**, not stopped: the
+connector exits successfully so its supervisor stops retrying it (see
+[A dead Radient login](#a-dead-radient-login-parked-connector) for why a retry
+loop was the bug), and it keeps the reason and the remedy in
+`~/.local-operator/tunnel/state.json` where every surface can read them. And it
+is rate-limited: a repeat of the same park is silent, so a supervisor that does
+restart the unit (a reload, a reboot loop) cannot fill this log again.
+
+`lop tunnel status` now leads with the connector's own state, so the condition
+is visible there rather than only in the log:
+
+```
+Connector: parked — needs re-enrolment (since 14:32): Harness port for local-operator changed in the console. Run lop tunnel connect again.
+Tunnel: tunnel-1
+Status: active
+```
+
+Run `lop tunnel connect` to accept the console's current ports on this device;
+`lop tunnel status`, `lop tunnel install` and `lop tunnel start` each re-arm a
+parked connector once the record matches. Harnesses run
 separately; the tunnel does not install OpenCode or change its server's bind
 address.
 
@@ -151,12 +165,110 @@ on this computer, or its configuration changed.
 normally clears by itself within a few seconds.
 
 `lop tunnel status` prints the same cause beside the connector state, worded for
-a terminal: it names the commands a phone cannot run (`/login radient`, `lop
+a terminal: it names the commands a phone cannot run (`lop login radient`, `lop
 tunnel install`), which the relay's own sentence leaves out, and links the
-console wherever the console is the remedy. The states it reports are
+console wherever the console is the remedy. The one sentence that travels to
+more than one surface — a park's — names no command at all, because it is also
+written into `state.json`, forwarded to the desktop as `connector.detail` and
+rendered by the terminal's own card: each of those appends the command in the
+spelling it can run (`lop login radient` in a shell, `/login radient` in the
+app's composer). The states it reports are
 `connected`, `connecting`, `not serving` (the gateway answered and is refusing,
-with cloudflared possibly still attached to the edge), and `stopped` — with the
-line saying so when nothing answered on the gateway port at all.
+with cloudflared possibly still attached to the edge), `stopped` — with the line
+saying so when nothing answered on the gateway port at all — and `parked`, the
+connector's own state, described next.
+
+## A dead Radient login (parked connector)
+
+The connector owns the tunnel with one Radient login, and no retry can restore
+a login the identity provider has stopped accepting. Before, the connector
+exited 1 on that failure and its supervisor restarted it every 10 seconds for
+ever: 870 identical lines in `service.log` with no timestamp and no state beside
+them, while `lop tunnel status` kept reading `Status: active` off its cached
+cloud record, and the phone was simply unreachable.
+
+A login the credential store judges dead is now a **park**. The connector writes
+why to `~/.local-operator/tunnel/state.json` (0600, written atomically), logs one
+timestamped line, and exits 0 — the one exit both launchd and systemd read as
+"do not restart me". A park covers the three failures a retry cannot fix: a dead
+login (`login_required`), a missing local prerequisite (`local_prerequisite`:
+cloudflared, the mobile relay), and an enrolment the console invalidated
+(`reenrolment_required`). Everything else keeps the old behaviour, including a
+suspended or disabled tunnel, which comes back by itself at the 10-second floor
+once the operator tops up credit or reactivates it.
+
+```console
+$ lop tunnel status
+Connector: parked — login required (since 14:32)
+  The connector's Radient login is no longer valid, so it stopped and will not retry by itself. Signing in again starts it again on its own.
+Login: sign-in expired — run lop login radient
+Tunnel: tunnel-1
+Status: active (cached — cloud read failed)
+Cloud status: unavailable — showing the record stored at the last connect.
+mobile: https://lo-divine-frost.radient.run
+```
+
+The state line carries the state and its age; the park's own sentence is a
+continuation row beneath it; the command appears once, on `Login:`, which is the
+line this device answers for. A tunnel the operator stopped is told no command
+at all (`Login: sign-in expired (not in use — tunnel stopped)`, and no cloud
+line), which is what `--json`'s `null` remedy has always said.
+
+Three things are being said separately there, deliberately. `Connector:` is this
+machine. `Login:` is this device's credential store, checked locally, which is
+the only thing that can answer while the login is dead. `Status:` is the cloud's
+record, marked **cached** whenever this command could not read it fresh — reading
+`active` off a cached copy is exactly how a withdrawn tunnel looked healthy. The
+line under it states that provenance and no cause: a verdict from the relay's own
+vocabulary, printed by a command that has just said it could not read the cloud,
+is what used to sit there. The cause stays available as data — `cloud.reason`.
+
+`--json` emits the same three as data, for the desktop app and for scripts:
+
+```json
+{
+  "tunnel_id": "tunnel-1",
+  "cloud": {"status": "active", "source": "cached", "reason": "control_plane_unreachable"},
+  "connector": {
+    "state": "parked",
+    "reason": "login_required",
+    "detail": "The connector's Radient login is no longer valid, …",
+    "since": 1789857517,
+    "remedy": {"command": "lop login radient", "url": "https://console.radienthq.com/dashboard/tunnels"}
+  },
+  "login": {"credential_id": 50, "state": "login_required"},
+  "remedy": {"command": "lop login radient", "url": "https://console.radienthq.com/dashboard/tunnels"}
+}
+```
+
+`connector.state` is one of `parked`, `connected`, `connecting`, `not serving`,
+`stopped`; `login.state` is one of `ok`, `login_required`, `unknown` — and
+`unknown` means the check itself could not run (a refresh could not reach
+Radient), never "your login is dead". `remedy` is an OBJECT
+(`{"command": str, "url": str}`), not a bare command string, and `connector`
+carries the same shape for a park. `connector.detail` is the park's own sentence:
+it names NO command, because it is read by a shell, by the TUI and by the desktop
+app, so each of those appends `remedy.command` in its own spelling.
+`connector.since` and `.first_at`-style stamps are epoch seconds. The desktop app
+reads the same shape from `GET /v1/desktop/tunnel`; see
+[DESKTOP_API.md](DESKTOP_API.md).
+
+**Signing in restores it, without touching the service.** A successful Radient
+login on this machine re-arms a connector parked for its login: the credential
+write path kickstarts the unit (launchd `kickstart`, or `systemctl --user start`
+on Linux) as soon as the grant is stored, so `/login radient` is the whole
+remedy. It is guarded to touch nothing else — only this tunnel's own credential,
+only while it is parked for its login, only for a tunnel that is configured and
+not deliberately stopped. `lop tunnel status` and `lop tunnel start` re-arm too,
+for a machine whose login was fixed somewhere else. The terminal also raises one
+`! /login radient — Radient sign-in expired` card when it finds a park on startup
+or sees the state change while it is open, and withdraws it when the park clears.
+A card is ten seconds and a park is hours, so the card is not the whole story: the
+status band keeps a standing `! remote access off` for as long as the park lasts,
+which is the same treatment the MCP alarm gets (a toast AND a segment) and the
+only thing still saying it to an operator who was not at the machine when it
+parked. Both read the same local state file, and neither appears for a machine
+with no tunnel or one the operator stopped.
 
 ## Trust boundaries and transport
 

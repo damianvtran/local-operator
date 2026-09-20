@@ -251,6 +251,11 @@ def _size_of(payload: Any) -> int:
 #: Examples for the minimal instance of each event class, keyed by FIELD name.
 #: Kept here rather than inline so a new event type whose required field is
 #: unfamiliar fails with a message naming the field instead of a stack trace.
+#: The sweep demands a sample for every REQUIRED field of EVERY ``AgentEvent``
+#: subclass, so a new event with a required ``delta`` -- the reasoning channel's
+#: ``reasoning_delta`` is the first -- needs a line here or the whole sweep
+#: reports itself incomplete (which is the sweep working as designed: the
+#: alternative is a silently partial audit of the wire).
 _FIELD_EXAMPLES: dict[str, Any] = {
     "message": Message(id="m1", role="assistant", content=[TextContent(text="hi")]),
     "result": ToolResult(tool_call_id="c1", tool_name="Read", content=[]),
@@ -258,6 +263,7 @@ _FIELD_EXAMPLES: dict[str, Any] = {
     "tool_call_id": "c1",
     "tool_name": "Read",
     "text": "hi",
+    "delta": "tok",
     "body": "hi",
     "reason": "auto",
     "success": True,

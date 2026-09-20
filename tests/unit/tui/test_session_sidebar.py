@@ -308,6 +308,64 @@ async def test_hover_reresolves_when_a_refresh_reorders_under_the_pointer():
 
 
 @pytest.mark.asyncio
+async def test_a_wedged_rows_tooltip_carries_the_remedy_and_an_error_rows_does_not():
+    """Two owners on one tooltip: the backend says the state, the client the remedy.
+
+    ``session/catalog.py`` owns what the state SAYS — "Not answering · process
+    alive (last heartbeat 4m ago)" is also the app's ``status.label``, and a
+    renderer that re-authored it would put two spellings of one fact on two
+    surfaces. What this surface adds is the clause only it can name, because the
+    affordance is its own: a terminal user has ``lop stop``, and a wedged session
+    is one to STOP rather than reopen.
+
+    The ``error`` row is the reopen case, so the pairing matters as much as the
+    presence: the clause must not travel to a row whose remedy is different.
+    """
+    from local_operator.session.catalog import WEDGED_STATUS
+    from local_operator.tui.widgets.session_sidebar import WEDGED_REMEDY
+
+    now = time.time()
+    wedged = CatalogEntry(SessionRow("quiet0000001", now, "Quiet owner", live_state="wedged"))
+    failed = CatalogEntry(
+        SessionRow("failed000001", now, "Failed turn"), unseen=True, completion_kind="error"
+    )
+    assert wedged.status == WEDGED_STATUS
+    assert failed.status == "Unseen error"
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30), tooltips=True) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+b")
+        await pilot.pause()
+        assert app._sidebar_timer is not None
+        app._sidebar_timer.pause()
+        app._sidebar_refresh_generation += 1
+        sidebar = app._session_sidebar
+        sidebar.set_entries([wedged, failed])
+        await pilot.pause()
+
+        def _row_y(entry_id: str) -> int:
+            return next(
+                y
+                for y in range(1, sidebar.size.height)
+                if (entry := sidebar._entry_at(y)) is not None and entry.id == entry_id
+            )
+
+        await pilot.hover("#session-sidebar", offset=(8, _row_y(wedged.id)))
+        await pilot.pause()
+        lines = str(sidebar.tooltip or "").splitlines()
+        assert len(lines) == 3, lines
+        assert WEDGED_STATUS in lines[1], lines
+        assert lines[1].endswith(WEDGED_REMEDY), lines
+
+        await pilot.hover("#session-sidebar", offset=(8, _row_y(failed.id)))
+        await pilot.pause()
+        other = str(sidebar.tooltip or "")
+        assert "Unseen error" in other, other
+        assert WEDGED_REMEDY not in other, other
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("position", ["left", "right"])
 async def test_switch_session_attaches_from_the_composer_and_wraps(position):
     """The shortcut ATTACHES, keeps the caret, and wraps at both ends.
@@ -1669,12 +1727,17 @@ async def test_no_reachable_unseen_row_pairs_a_glyph_with_the_wrong_words():
 
     from local_operator.session.catalog import WEDGED_STATUS
     from local_operator.tui.terminal_title import SPINNER_FRAMES
+    from local_operator.tui.widgets.session_picker import WEDGED_MARKER
 
-    #: Which words may accompany each glyph on an unseen row.
+    #: Which words may accompany each glyph on an unseen row. ``✗`` carries
+    #: ``Unseen error`` ONLY, and the wedged state carries its own glyph:
+    #: before this, ``✗`` was listed for both, which is the contradiction the
+    #: pairing check exists to catch — a wedged row wore the failure mark.
     ALLOWED = {
         "✓": {"Unseen completion"},
-        "✗": {"Unseen error", WEDGED_STATUS},
+        "✗": {"Unseen error"},
         "⊘": {"Unseen interruption"},
+        WEDGED_MARKER: {WEDGED_STATUS},
         "!": {"Approval needed", "Answer needed"},
     }
     now = time.time()

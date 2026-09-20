@@ -110,6 +110,27 @@ STOPPED_REASON = "owner stopped the session"
 #: retires only when idle (``ServingSessionHandle.may_refresh``).
 RETIRING_REASON = "owner retired for a newer build"
 
+#: Disconnect reason for a connection the owner could not BIND — its canonical
+#: ``frontend_sync`` never arrived and the runtime closed this one connection.
+#:
+#: The third member of the reason class above, and the one whose absence was a
+#: lie: with no frame carrying it, the closed socket fell through to
+#: :data:`_pump`'s default (``"owner exited"``), so a viewer told the person
+#: their SESSION had died when the truth was that the process was alive, the
+#: session untouched, and one connection unbound. The frame that carries it
+#: (``bind_failed``) is additive — an older client ignores an unknown op and
+#: reports exactly what it reported before.
+#:
+#: THE SENTENCE CARRIES THE TWO THINGS THE OTHER REASONS LEAVE IMPLICIT, and it
+#: has to, because this one is the only reason whose truth is the OPPOSITE of
+#: what the neighbouring string says: ``"owner exited"`` is the default this
+#: replaces, so a reader who has learned that class of sentence will assume the
+#: session is gone unless told otherwise. Hence the liveness clause, and hence a
+#: remedy in the shape this module's refusal copy uses (``"owner returned no
+#: fork; retry /fork"``): a bare cause leaves the person with a dead socket and
+#: nothing to do. Review round 3, UX U3.
+BIND_FAILED_REASON = "owner could not prepare this view; the session is alive — reconnect to retry"
+
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
 #: the writer refuses to exceed it and the reader refuses to read past it, so
 #: two different numbers would mean a frame the owner considers sendable is one
@@ -1279,6 +1300,16 @@ class AttachClient:
                             self._on_retiring(frame)
                         except Exception:  # noqa: BLE001
                             continue
+                elif op == "bind_failed":
+                    # The owner could not prepare THIS connection (its canonical
+                    # state never arrived and the socket is about to close).
+                    # Carried in the disconnect reason like ``stopping`` and
+                    # ``retiring`` above, and for the same reason: the EOF is
+                    # moments away and every consumer already reads that string.
+                    # What it buys is the truth — without it the close fell
+                    # through to the pump's default and the person was told
+                    # their session had died.
+                    reason = BIND_FAILED_REASON
                 elif op in ("ack", "error", "result"):
                     req = frame.get("req")
                     future = self._pending.pop(req, None)

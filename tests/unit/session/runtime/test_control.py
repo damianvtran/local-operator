@@ -515,6 +515,209 @@ def test_withdrawal_takes_back_only_this_ladders_own_rung_one_marker(tmp_path: P
     assert registry.read_stop_marker(conversation) is None
 
 
+def test_an_involuntary_marker_keeps_the_run_key_and_never_claims_a_stop(
+    tmp_path: Path,
+) -> None:
+    """I3: the same schema, written by a party that is not the stop ladder.
+
+    Every path that can take a runtime away — the prune that removes the generation
+    it is importing from, an in-place install rewriting it — stages this BEFORE it
+    acts, because afterwards the runtime cannot record anything and on 2026-09-18
+    twenty-five of them left no artifact naming an actor. Two properties make the
+    reader work unchanged: the RUN KEY is spelled from the same three fields (so
+    ``attention._stop_marker_covers_run`` refuses a stale marker exactly as before),
+    and ``deliberate`` is false (so nothing can read the death as the user's own
+    stop).
+
+    The deliberate payload is asserted to have NO ``actor``/``mechanism`` keys in the
+    same breath: absent rather than empty, so a marker of that kind stays
+    byte-identical to what every reader has already been taught.
+    """
+    from local_operator.session.runtime.types import session_dir
+
+    record = SessionRecord(
+        pid=4243,
+        kind="daemon",
+        session_id="s-involuntary",
+        conversation_name="involuntary",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    record.started_at = 1_760_000_000.0
+    record.version = "0.59.2"
+    record.source_ref = "abc1234"
+    conversation = session_dir(tmp_path, record.session_id)
+    conversation.mkdir(parents=True)
+
+    assert control.note_involuntary_stop(
+        record,
+        tmp_path,
+        mechanism="generation-prune",
+        actor="lop install prune",
+    )
+
+    marker = registry.read_stop_marker(conversation)
+    assert marker is not None
+    assert marker["session_id"] == "s-involuntary"
+    assert marker["pid"] == 4243
+    assert marker["started_at"] == 1_760_000_000.0
+    assert marker["deliberate"] is False
+    assert marker["mechanism"] == "generation-prune"
+    assert marker["actor"] == "lop install prune"
+    assert marker["killer"] == {
+        "pid": os.getpid(),
+        "argv0": marker["killer"]["argv0"],
+        "command": "lop install prune",
+    }
+    assert marker["build"] == "0.59.2@abc1234"
+
+    deliberate = control._stop_marker_payload(record, "socket", command="/stop")
+    assert "actor" not in deliberate and "mechanism" not in deliberate
+    assert deliberate["deliberate"] is True
+
+
+def test_an_involuntary_marker_reads_a_boot_record_as_the_same_run(tmp_path: Path) -> None:
+    """A runtime in its FIRST SECOND is attestable, and its build is spelled its way.
+
+    The window a prune can catch a runtime in is the ~1.2 s between the boot record
+    and the first heartbeat, so the writer must accept a ``BootRecord`` — which
+    spells the build ``build_version``/``build_ref`` where a ``SessionRecord`` says
+    ``version``/``source_ref``. ONE payload shape for both, rather than a second
+    builder free to disagree about the run key.
+    """
+    from local_operator.session.runtime.journal import BootRecord
+    from local_operator.session.runtime.types import session_dir
+
+    record = BootRecord(
+        pid=4244, session_id="s-booting", build_version="0.59.2", build_ref="def5678"
+    )
+    conversation = session_dir(tmp_path, record.session_id)
+    conversation.mkdir(parents=True)
+
+    assert control.note_involuntary_stop(
+        record, tmp_path, mechanism="generation-prune", actor="lop update"
+    )
+
+    marker = registry.read_stop_marker(conversation)
+    assert marker is not None
+    assert (marker["session_id"], marker["pid"]) == ("s-booting", 4244)
+    assert marker["build"] == "0.59.2@def5678"
+    assert marker["deliberate"] is False
+
+
+def test_withdrawing_an_involuntary_marker_takes_back_only_our_own(tmp_path: Path) -> None:
+    """MINOR 2: the writer's counterpart, and everything it must refuse to touch.
+
+    The prune and the in-place install stage a marker BEFORE the irreversible step;
+    when the step is then not taken — ``_remove_tree`` reports the tree still there,
+    the installer exits non-zero — the marker is the only artifact left saying
+    otherwise, and it is keyed to the live RUN, so it would narrate any later death
+    of that runtime as this act's. The withdrawal decides what is ours by READING
+    the file, exactly as the ladder's own withdrawal does, rather than by trusting
+    that we wrote one: another front end's marker for the same run and a rung's
+    marker both have to survive it.
+    """
+    from local_operator.session.runtime.types import session_dir
+
+    record = SessionRecord(
+        pid=4245,
+        kind="daemon",
+        session_id="s-withdraw",
+        conversation_name="withdraw",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    record.started_at = 1_760_000_000.0
+    conversation = session_dir(tmp_path, record.session_id)
+    conversation.mkdir(parents=True)
+
+    # ANOTHER ACT'S MARKER FOR THE SAME RUN is not this withdrawal's to take: the
+    # act it names is still the truth about why this runtime is gone.
+    assert control.note_involuntary_stop(
+        record, tmp_path, mechanism="in-place-install", actor="lop update"
+    )
+    assert (
+        control.withdraw_involuntary_stop(record, tmp_path, mechanism="generation-prune") is False
+    )
+    assert registry.read_stop_marker(conversation) is not None
+
+    # ...and neither is a marker whose killer is a DIFFERENT process.
+    staged = registry.read_stop_marker(conversation)
+    assert staged is not None
+    staged["killer"] = dict(staged["killer"], pid=os.getpid() + 1)
+    registry.write_stop_marker(conversation, staged)
+    assert (
+        control.withdraw_involuntary_stop(record, tmp_path, mechanism="in-place-install") is False
+    )
+
+    # A DIFFERENT RUN of the same session is not this run: the key is the pid too,
+    # which is what keeps an older run's attestation from narrating a newer death.
+    older = SessionRecord(
+        pid=9999,
+        kind="daemon",
+        session_id="s-withdraw",
+        conversation_name="withdraw",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    older.started_at = 1_700_000_000.0
+    assert control.withdraw_involuntary_stop(older, tmp_path, mechanism="in-place-install") is False
+
+    # OURS, for the mechanism that staged it: taken back, and the file is gone.
+    staged["killer"] = dict(staged["killer"], pid=os.getpid())
+    registry.write_stop_marker(conversation, staged)
+    assert control.withdraw_involuntary_stop(record, tmp_path, mechanism="in-place-install") is True
+    assert registry.read_stop_marker(conversation) is None
+
+    # THE LADDER'S OWN RUNG MARKER IS NEVER WITHDRAWN HERE even when it covers this
+    # run: it says a person asked for the stop, which is a statement about an act
+    # that did happen.
+    control._write_stop_marker(record, tmp_path, "socket", command="/stop")
+    assert (
+        control.withdraw_involuntary_stop(record, tmp_path, mechanism="generation-prune") is False
+    )
+    assert registry.read_stop_marker(conversation) is not None
+
+
+def test_an_involuntary_marker_without_a_conversation_is_refused_not_invented(
+    tmp_path: Path,
+) -> None:
+    """The writer reports the gap instead of creating a directory to hide it in.
+
+    ``registry.write_stop_marker`` deliberately does not create the conversation
+    directory, and an involuntary act must not either: a ``lop serve`` daemon has no
+    conversation at all, and a session whose directory was deleted has no reader for
+    a marker that would only be found by recreating it. Both return False, which the
+    caller (``update.note_doomed_runtimes``) logs — an unattestable runtime is a real
+    gap in the artifact, and silence there would read afterwards as "nobody was
+    affected".
+    """
+    from local_operator.session.runtime.types import session_dir
+
+    record = SessionRecord(
+        pid=4245,
+        kind="daemon",
+        session_id="s-gone",
+        conversation_name="gone",
+        cwd="/tmp",
+        model_label="m",
+        control_port=1,
+        control_key="k",
+    )
+    assert not control.note_involuntary_stop(record, tmp_path, mechanism="generation-prune")
+    assert not session_dir(tmp_path, record.session_id).exists()
+
+    session_less = mock.MagicMock()
+    session_less.session_id = ""
+    assert not control.note_involuntary_stop(session_less, tmp_path, mechanism="generation-prune")
+
+
 def test_record_retired_reads_the_root_the_caller_injected(tmp_path: Path) -> None:
     """A stop's landing is decided against the root the caller TARGETED.
 

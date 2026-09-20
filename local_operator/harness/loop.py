@@ -72,11 +72,13 @@ from local_operator.harness.types import (
     ModelSpec,
     NoticeEvent,
     ProviderTurnStartEvent,
+    ReasoningDeltaEvent,
     RenderedStreamError,
     StaleAside,
     StreamEndEvent,
     StreamEvent,
     StreamModelEvent,
+    StreamReasoningDelta,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -2227,6 +2229,28 @@ class AgentLoop:
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
                     yield MessageUpdateEvent(message=assistant, delta=event.delta)
+                elif isinstance(event, StreamReasoningDelta):
+                    # The model is THINKING, and the user can see it from here.
+                    #
+                    # DELIBERATELY NOT a mutation of ``assistant``: a reasoning
+                    # fragment is not transcript content, so it is not appended
+                    # to ``text_parts`` and no content block is opened for it.
+                    # ``ReasoningDeltaEvent`` carries the whole of it (see its
+                    # docstring for the three places display-only is
+                    # load-bearing, and for why the wire's ``reasoning_content``
+                    # echo must never carry anything a front end painted).
+                    #
+                    # ``event.delta``, never an accumulation: the provider
+                    # already sends fragments, and the desktop's frame path
+                    # sizes and merges this family as deltas.
+                    #
+                    # ``assistant.id`` groups one model call's thinking. It is
+                    # the same id ``message_start``/``message_end`` announce, so
+                    # a consumer can attribute the fragments and retire them
+                    # when the answer starts -- including across a retry, which
+                    # re-emits ``reasoning_delta`` under the same id (see
+                    # ``providers/failover._RETRY_SAFE_STREAM_EVENTS``).
+                    yield ReasoningDeltaEvent(message_id=assistant.id, delta=event.delta)
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
                         event.index,

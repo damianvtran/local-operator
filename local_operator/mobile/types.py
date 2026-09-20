@@ -451,6 +451,13 @@ EntryKind = Literal[
     # An inbound message from another local lop session (`lop send`). Rendered
     # as a distinct cross-session card, never as the user's own turn.
     "peer_message",
+    # The model's own PRIVATE reasoning, streamed while it thinks. Transient by
+    # construction: it never joins the durable transcript, so this row is gone
+    # after the next sync and must not be rendered as, or folded into, the
+    # assistant's answer. A client that does not know this kind renders it
+    # through its unknown-kind path, which is exactly what it rendered before
+    # the runtime emitted reasoning at all.
+    "reasoning",
 ]
 
 ToolState = Literal["composing", "queued", "running", "done", "failed", "interrupted"]

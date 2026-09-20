@@ -44,6 +44,7 @@ from typing import (
     cast,
 )
 
+from local_operator.buildwatch import UpdateLock
 from local_operator.buildwatch import wake_within_window as _wake_within_window
 from local_operator.harness.approval import (
     GATE_TIMEOUT_CUSTOM_TYPE as _GATE_TIMEOUT_CUSTOM_TYPE,
@@ -704,6 +705,44 @@ class ServingSessionHandle(SessionHandle):
         #: a refusal would lose that where a deferral does not. Cleared by
         #: nothing: the drain ends in an exit.
         self._draining = False
+        #: The UPDATE WINDOW (see ``types.UPDATING``): this runtime has decided to
+        #: move to the build on disk, and for as long as the window is open an
+        #: admission is SPOOLED for the successor rather than refused. The value is
+        #: the build pair it is moving to, and it is published verbatim on the
+        #: record — one field, so the admission and every surface read the same
+        #: string (``RuntimeServer.note_updating``).
+        #:
+        #: DISTINCT FROM :attr:`_draining`, and the difference is what the two
+        #: promise. A drain is a runtime with work still to finish that will exit
+        #: when it does; a window is an IDLE runtime on its way out in about a
+        #: second. Both spool, but only the window can CLOSE AGAIN with the runtime
+        #: still serving — which is the whole point of the bound — so this one is
+        #: cleared (``end_update``) where ``_draining`` never is.
+        self._updating = ""
+        #: The pair a window FAILED to move to, so the reaper's rung does not
+        #: re-open a window for it on every check. A failure that keeps retrying
+        #: with no successor to hand anything to is churn, and it hides the one
+        #: thing the operator needs to see (``record.update_failed``). ONE retry is
+        #: allowed before that latch closes (``_update_retried``), because zero
+        #: retries left a stale session stale until its process exited.
+        self._update_failed = ""
+        #: The pair whose ONE retry has already been spent, so a second failure of
+        #: the same move is final (see :meth:`begin_update`). Kept beside
+        #: ``_update_failed`` rather than folded into it so the two facts a reader
+        #: needs — "this failed" and "it is not being tried again" — stay separable.
+        self._update_retried = ""
+        #: The window's heartbeat lock (``buildwatch.UpdateLock``). Held only while
+        #: a window is open, and NEVER waited on by an admission — the admission
+        #: paths read :attr:`_updating` and spool, which is what makes "no
+        #: admission can block past ``UPDATE_LOCK_S``" structural rather than
+        #: timed (see ``prompt``).
+        self._update_lock = UpdateLock()
+        #: The pair a handover APPLIED, read off the marker the predecessor left
+        #: (``inbox.read_update_window``) at boot. Copied onto this runtime's record
+        #: by ``RuntimeServer``, which owns the record — the handle is only where
+        #: the boot fact lands, because the server does not exist yet when the drain
+        #: that consumes the marker runs.
+        self._applied_update = ""
         #: Set by :meth:`begin_retire`, the rung that takes the exit IN THIS
         #: STEP. The distinction is what keeps the cut-off taxonomy honest: a
         #: turn aborted after THIS flag must be labelled with the retirement
@@ -1647,6 +1686,174 @@ class ServingSessionHandle(SessionHandle):
                 logger.debug("could not divert wakes to the inbox", exc_info=True)
         return True
 
+    # -- the update window -------------------------------------------------
+    #
+    # The IDLE handover's admission window. ``begin_retire`` is a one-way door that
+    # refuses every admission from the instant it takes the exit; the window is the
+    # same move with the admissions QUEUED instead. It exists because the refusal
+    # was the incident (see ``types.UPDATING``): an idle runtime is leaving
+    # precisely because it has no work, so refusing the operator's message protected
+    # nothing and cost them their text.
+    #
+    # THE ORDER IS THE CONTRACT: open the window (publish + heartbeat) BEFORE the
+    # announce, exactly as ``process._begin_drain`` announces before it latches. A
+    # window opened after the exit was committed would be a queue nobody drains.
+
+    def begin_update(self, pair: str, handler: str = "stale-build") -> bool:
+        """Open the admission window for a move to ``pair``. False: not ours.
+
+        Returns False when a live window is already open (the lock is held and
+        beating), when ``pair`` is EMPTY, or when this pair has already spent its
+        retry.
+
+        ONE RETRY, THEN STOP, and the count lives here rather than in a caller
+        flag (agent review round 1, NIT 1). The previous shape took
+        ``retry_failed=True`` from "an explicit operator refresh" — a caller that
+        did not exist — so a failed window was never retried by anything and the
+        pair stayed refused until the process exited: the stale session the
+        incident was about, made permanent. A second failure for the SAME pair is
+        final instead, because a handover that fails the bound twice is failing
+        for a reason a third attempt repeats.
+
+        AN EMPTY PAIR IS REFUSED, not opened. ``""`` is the record's "no window"
+        sentinel and the admission gate both, so a window holding it would be
+        invisible on every surface AND would queue nothing — while the sender got
+        a receipt for it (agent review round 1, NIT 2). Callers that cannot name
+        the pair publish ``types.UPDATE_UNNAMED_PAIR`` instead.
+
+        The marker is written here, synchronously, so the successor can report the
+        move as applied even if this process dies between the announce and the
+        exit. A failed write costs only that fact (see
+        ``inbox.write_update_window``), never the window.
+
+        NOTHING HERE AWAITS, and that is load-bearing: this runs inside the idle
+        decision, and an await would let a turn open between the idle sample and
+        the commit — the gap ``begin_retire`` exists to close.
+        """
+        if not pair:
+            return False
+        if self._updating:
+            return False
+        if pair == self._update_failed and pair == self._update_retried:
+            return False
+        if not self._update_lock.acquire(pair, handler):
+            return False
+        if pair == self._update_failed:
+            # The ONE retry: recorded on the attempt rather than after a second
+            # failure, so a retry that itself dies mid-handover still counts.
+            self._update_retried = pair
+        self._updating = pair
+        directory = self._session_directory()
+        if directory is not None:
+            from local_operator.session.runtime.inbox import write_update_window
+
+            write_update_window(directory, pair)
+        server = getattr(self, "_server", None)
+        note = getattr(server, "note_updating", None)
+        if callable(note):
+            note(pair)
+        return True
+
+    def heartbeat_update(self) -> None:
+        """Prove the window is still making progress.
+
+        Called from the refresh rung's own pump rather than from a task of this
+        handle's own: the beat has to mean "this handover is alive", and only the
+        code doing the handover can know that. A beat with no window is a no-op
+        (``UpdateLock.heartbeat``), so a racing close cannot resurrect one.
+        """
+        self._update_lock.heartbeat()
+
+    def end_update(self, *, keep_marker: bool = False) -> bool:
+        """Close the window. ``True`` if one was open.
+
+        THE MARKER'S DISPOSITION IS THE CALLER'S, because the three arms disagree
+        about it and only the caller knows which one it is in (agent review round 2,
+        R2-1). Clearing it says "a move was announced and did not happen" — the stop
+        arm (a stop landed, this process is exiting, the next boot owes the operator
+        the message, not an `updated` fact) and the abandon arm (the bound expired and
+        the runtime KEPT the build it loaded). ``keep_marker=True`` says the opposite:
+        the handover COMMITTED and this process is on its way out, so the successor is
+        running the build on disk and owes the record the ``updated`` fact — deleting
+        the marker there loses "the update was done", which is the operator's own
+        requirement, in exactly the slow-exit case the incident measured at minutes.
+
+        What is common to all three: the lock is released, the record's window field is
+        cleared, and no admission is queued against a window that is over.
+        """
+        if not self._updating and not self._update_lock.held:
+            return False
+        self._updating = ""
+        if not keep_marker:
+            directory = self._session_directory()
+            if directory is not None:
+                from local_operator.session.runtime.inbox import clear_update_window
+
+                clear_update_window(directory)
+        server = getattr(self, "_server", None)
+        note = getattr(server, "note_updating", None)
+        if callable(note):
+            note("")
+        return self._update_lock.release()
+
+    def note_applied_update(self, pair: str) -> None:
+        """Remember that THIS process exists because an update applied.
+
+        Called once at boot from the consumed handover marker. The record is written
+        by ``RuntimeServer``, which does not exist yet at that point, so the fact
+        waits here and is seeded onto the record when the server is built.
+        """
+        self._applied_update = pair or ""
+
+    def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
+        """Remember that a window for ``pair`` ran out of bound.
+
+        The record's half of the failure (``RuntimeServer.note_update_failed`` is
+        the writer that publishes it); this half is what stops the automatic rung
+        re-opening the same window on the next check.
+        """
+        self._update_failed = pair or ""
+
+    @property
+    def updating(self) -> str:
+        """The pair an open window is moving to, or ``""``."""
+        return self._updating
+
+    @property
+    def update_failed_pair(self) -> str:
+        """The pair a failed window could not move to, or ``""``."""
+        return self._update_failed
+
+    @property
+    def applied_update(self) -> str:
+        """The pair this process's boot applied, or ``""``."""
+        return self._applied_update
+
+    def update_lock_remaining(self) -> float:
+        """Seconds left before the open window is DEAD. ``0.0`` when none is open.
+
+        THIS IS THE BOUND THE HOLDER APPLIES, not a convenience report (agent review
+        round 1, MINOR 2, which measured the previous shape: ``asyncio.wait_for``
+        applied a total-duration bound of its own, so neither this reading nor the
+        heartbeat it is derived from decided anything and deleting the pump changed
+        no test). ``_await_live_window`` polls it, so the window expires at
+        ``UPDATE_LOCK_S`` after the last BEAT — which is what makes a blocked event
+        loop the failure the bound holds, and a slow-but-beating handover not one.
+        """
+        return self._update_lock.remaining()
+
+    def _session_directory(self) -> "Path | None":
+        """This session's directory, or ``None`` for a handle that has no session.
+
+        The same two-hop read ``_spool_for_successor`` makes (``transcript`` or the
+        private ``_transcript``), factored out here because the marker's write, its
+        clear and the spool all have to agree about WHICH directory they mean.
+        """
+        session = getattr(self, "_session", None)
+        transcript = getattr(session, "transcript", None) or getattr(session, "_transcript", None)
+        directory = getattr(transcript, "directory", None)
+        return directory if isinstance(directory, Path) else None
+
     def _retiring_refusal(self) -> RuntimeRetiring:
         """The refusal an admission gets once this runtime has committed to leaving.
 
@@ -2318,6 +2525,50 @@ class ServingSessionHandle(SessionHandle):
         if self._disposing:
             self._command_reservations.reject(command_id)
             raise RuntimeError("session is closing; prompt was not admitted")
+        # THE UPDATE WINDOW: an idle handover that QUEUES instead of refusing.
+        #
+        # This arm is the 2026-09-19 incident's repair. The idle rung leaves in
+        # about a second, so the window is short — but it is precisely the window
+        # in which the operator was typing: the TUI had just told them "it will
+        # switch to the new version when it is next idle", and the message they
+        # sent was handed straight back ("send it again once the session is
+        # running again"), recoverable only with ``/stop`` + ``/resume``. The
+        # runtime was IDLE, so nothing was protected by refusing: the successor
+        # would have run the message had anyone held it.
+        #
+        # IT OUTRANKS THE ``_retiring_cause`` BLOCK BELOW, and the ordering is
+        # the contract rather than an accident. Once the window is open the move
+        # is committed to a successor that owes this message a turn, so the
+        # message is carried — and if the window turns out to ABORT (the bound
+        # expired), the runtime re-admits this same spool itself
+        # (``process._refresh_for``), so the queue is never a promise to a
+        # successor that does not come.
+        if self._updating:
+            if blocks:
+                # An inbox row is text, so carrying an image-carrying prompt
+                # would shed the user's file while promising it was queued. The
+                # refusal returns the draft, which is true here — the text IS
+                # still theirs — and it names no build: the window's own phrase
+                # would claim "the one it loaded is gone from disk", which is
+                # false for a superseded tree (the D10/MAJOR-2 class).
+                self._command_reservations.reject(command_id)
+                raise self._retiring_refusal()
+            try:
+                receipt = await self._spool_for_successor(
+                    text,
+                    mode="mailbox",
+                    wake=True,
+                    sender={},
+                    source=SOURCE_USER,
+                    command_id=command_id,
+                )
+            finally:
+                # Rejected on both outcomes, for the reason the refusal below
+                # rejects: this command is not in the transcript, so the
+                # identity must not be spent. A retry that re-spools is
+                # deduplicated by whoever drains it against the durable index.
+                self._command_reservations.reject(command_id)
+            return receipt
         if self._retiring_cause:
             # Refused, not queued: a turn admitted here is aborted one await
             # later by the dispose that is already on its way, after the
@@ -2736,6 +2987,39 @@ class ServingSessionHandle(SessionHandle):
             prompt_transfer=True,
         ):
             return "already admitted"
+        # THE UPDATE WINDOW, and a steer is the one admission that cannot simply
+        # wait: ``Session.steer`` queues against a TURN, and this runtime is idle
+        # by construction (the window only opens when ``may_refresh`` reports
+        # nothing to lose) and exits about a second later — so handing it over
+        # would queue the correction against a turn this process never runs and
+        # then dispose it. It is the owner's own words, so it takes the spool and
+        # the owner's receipt: the successor runs it, at the head of the turn the
+        # prompt above it opens.
+        #
+        # IMAGES ARE THE ONE THING THE VEHICLE CANNOT CARRY and take the refusal,
+        # exactly as an image-carrying prompt does (see that arm for why an inbox
+        # row cannot hold them). Checked on the RAW argument rather than on the
+        # decoded blocks because the decision has to happen before the attach, and
+        # a non-empty ``images`` is the same fact one decode earlier.
+        if self._updating:
+            if images:
+                self._command_reservations.reject(command_id)
+                raise self._retiring_refusal()
+            try:
+                receipt = await self._spool_for_successor(
+                    text,
+                    mode="mailbox",
+                    wake=True,
+                    sender={},
+                    source=SOURCE_USER,
+                    command_id=command_id,
+                )
+            finally:
+                # A spooled steer is not in this session's transcript, so its
+                # producer identity must stay retryable — the same rule the
+                # refusal's reject keeps below.
+                self._command_reservations.reject(command_id)
+            return receipt
         # Images ride the steer too. Producer identity follows the queued user
         # row so a reconnect cannot inject the same correction twice.
         fields: dict[str, Any] = {}
@@ -2794,8 +3078,15 @@ class ServingSessionHandle(SessionHandle):
         # refused: the runtime is still here (it has work to finish first), so
         # the message can be deferred to the successor that is already owed.
         # A COMMITTED exit has no such window and keeps the refusal.
-        if self._retiring_cause and (wake or mode != "mailbox"):
-            if self._draining and not self._exit_committed:
+        #
+        # AN UPDATE WINDOW has the same answer, and it is the sibling of the
+        # owner's own prompt one method up rather than a second mechanism: the
+        # runtime is going to the build on disk and a successor is owed, so a
+        # peer's wake is spooled instead of refused (see ``types.UPDATING``). The
+        # window is checked as its own term because it is open BEFORE the cause
+        # is latched — the announce and the latch come after it.
+        if (self._retiring_cause or self._updating) and (wake or mode != "mailbox"):
+            if self._updating or (self._draining and not self._exit_committed):
                 return await self._spool_for_successor(
                     text, mode=mode, wake=wake, sender=sender or {}
                 )
