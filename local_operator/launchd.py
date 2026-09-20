@@ -61,6 +61,7 @@ from __future__ import annotations
 import logging
 import os
 import plistlib
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -341,6 +342,36 @@ def job_domain() -> str:
         ) from exc
 
 
+def job_running(*, label: str, run: Callable[..., object]) -> bool:
+    """Whether launchd holds a LIVE PID for ``label`` right now.
+
+    The question a compare-then-skip has to answer before it declines to
+    reload: with the file already correct, a running job needs nothing, and a
+    DEAD one needs the reload the old unconditional rewrite was silently
+    providing. Getting this wrong is not cosmetic — skipping a needed reload
+    leaves the daemon down.
+
+    ``launchctl print`` and not a health probe, because only launchd knows
+    which process it is running: a leftover FOREGROUND daemon on the same port
+    answers every probe while the supervised one is dead (the trap
+    ``mobile.install._our_daemon_listening`` was written for). A label that is
+    not registered at all answers non-zero, which is also "not running" — and
+    the caller then reloads, which is what registers it.
+
+    Never raises: an unanswerable supervisor returns False, and False means the
+    caller does the work it did before.
+    """
+    result, _ = _call(run, "print", f"{job_domain()}/{label}")
+    if result is None:
+        return False
+    if getattr(result, "returncode", 1) != 0:
+        return False
+    # `pid = 47545` is printed only while a process is alive behind the label
+    # (the same reading `wakes.install._parse_supervisor_state` makes).
+    live_pid = re.search(r"^\s*pid = \d+", _text(getattr(result, "stdout", "")), re.MULTILINE)
+    return live_pid is not None
+
+
 def _registration(target: str, run: Callable[..., object]) -> tuple[bool, str]:
     """``(registered, why)`` for one guarded ``launchctl print``.
 
@@ -411,6 +442,24 @@ def _await_registration(
             return False, why
         _sleep(backoff)
         backoff = min(backoff * 2, _BOOTSTRAP_BACKOFF_CAP_S)
+
+
+def kickstart(*, label: str, run: Callable[..., object]) -> bool:
+    """Restart a job launchd already has LOADED, from its in-memory definition.
+
+    THE NARROW REPAIR for a stopped-but-loaded job: the plist is correct and the
+    process is not running, which is the one state a compare-then-skip has to
+    keep repairing rather than walk past (the unconditional
+    ``bootout``+``bootstrap`` used to fix it as a side effect of the rewrite).
+    ``kickstart -k`` does not briefly unregister the label, and it is what
+    ``wakes.install`` already chose for this exact case.
+
+    False means the caller must fall through to :func:`reload_job`, which is
+    right for the other reason a job is not running: launchd has forgotten the
+    label entirely, and only a bootstrap registers it.
+    """
+    result, _ = _call(run, "kickstart", "-k", f"{job_domain()}/{label}")
+    return result is not None and getattr(result, "returncode", 1) == 0
 
 
 def reload_job(

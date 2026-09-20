@@ -777,6 +777,27 @@ def repair(port: int | None = None, root: Path | None = None) -> dict[str, Any]:
     return {"ok": True, "steps": steps, "error": ""}
 
 
+def _plist_is_current(path: Path, wanted: dict[str, object]) -> bool:
+    """Whether the LaunchAgent on disk already says what ``wanted`` says.
+
+    Content rather than existence: a plist from an older build names a different
+    interpreter and port and must still be replaced. An unreadable or
+    unparseable file answers ``False``, the rewrite direction.
+    """
+    try:
+        return plistlib.loads(path.read_bytes()) == wanted
+    except (OSError, ValueError):
+        return False
+
+
+def _systemd_unit_is_current(path: Path, rendered: str) -> bool:
+    """The systemd twin of :func:`_plist_is_current`, text rather than plist."""
+    try:
+        return path.read_text(encoding="utf-8") == rendered
+    except (OSError, ValueError):
+        return False
+
+
 def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, object]:
     steps: list[str] = []
     log_path().parent.mkdir(parents=True, exist_ok=True)
@@ -792,25 +813,59 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     supervisor = _supervisor()
     if supervisor == "launchctl":
         plist_path().parent.mkdir(parents=True, exist_ok=True)
+        # WRITE AND RELOAD ONLY WHEN SOMETHING WOULD CHANGE. This daemon is a
+        # LaunchAgent, and an EDR reads "Persistence: launchd job / plist file
+        # modification" (MITRE T1543.001) from exactly the two signals an
+        # unconditional install emits: a plist rewritten with identical bytes,
+        # then a bootout/bootstrap. The bridge's plist path is stable, so a
+        # re-run is normally a no-op — and `wakes.install` has skipped on equal
+        # content for this reason since it shipped.
+        wanted = render_plist(port)
+        current = _plist_is_current(plist_path(), wanted)
+        if not dry_run and not current:
+            plist_path().write_bytes(plistlib.dumps(wanted))
+        steps.append(f"wrote {plist_path()}" if not current else "LaunchAgent already current")
         if not dry_run:
-            plist_path().write_bytes(plistlib.dumps(render_plist(port)))
-        steps.append(f"wrote {plist_path()}")
-        if not dry_run:
-            # The shared reload rather than an inline pair: it tolerates an
-            # absent job, waits for launchd to release the label, retries past
-            # the measured teardown race, and only then reports the load. The
-            # old shape returned launchd's raw stderr as the whole error and, on
-            # success, said "loaded the LaunchAgent" without checking. See
-            # :mod:`local_operator.launchd`.
-            reloaded = launchd.reload_job(label=label(), path=plist_path(), runner=_launchctl)
-            if not reloaded.ok:
-                return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
-            steps.append(f"loaded the LaunchAgent ({label()})")
+            # A DEAD JOB IS STILL REPAIRED. The reload is skipped only when the
+            # file is current AND launchd holds a live pid for this label;
+            # `kickstart -k` is the narrower repair for a loaded-but-stopped job
+            # (it does not briefly unregister the label), and anything else —
+            # not registered, not running, changed bytes — falls through to the
+            # shared reload, which is today's behaviour exactly.
+            reload_needed = True
+            running = current and launchd.job_running(label=label(), run=_launchctl)
+            if running:
+                reload_needed = False
+                steps.append("LaunchAgent already current and running; left it loaded")
+            elif current and launchd.kickstart(label=label(), run=_launchctl):
+                reload_needed = False
+                steps.append("restarted the loaded LaunchAgent (its file was already current)")
+            if reload_needed:
+                # The shared reload rather than an inline pair: it tolerates an
+                # absent job, waits for launchd to release the label, retries past
+                # the measured teardown race, and only then reports the load. The
+                # old shape returned launchd's raw stderr as the whole error and, on
+                # success, said "loaded the LaunchAgent" without checking. See
+                # :mod:`local_operator.launchd`.
+                reloaded = launchd.reload_job(label=label(), path=plist_path(), runner=_launchctl)
+                if not reloaded.ok:
+                    return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
+                steps.append(f"loaded the LaunchAgent ({label()})")
     elif supervisor == "systemctl":
         systemd_path().parent.mkdir(parents=True, exist_ok=True)
         if not dry_run:
-            systemd_path().write_text(render_systemd(port), encoding="utf-8")
-        steps.append(f"wrote {systemd_path()}")
+            # Same idea, minus the launchd half: an unchanged unit file is not
+            # written again. The `daemon-reload` and `enable --now` below stay,
+            # because they are the LOAD rather than the write and neither
+            # restarts a unit that is already running.
+            rendered = render_systemd(port)
+            if not _systemd_unit_is_current(systemd_path(), rendered):
+                systemd_path().write_text(rendered, encoding="utf-8")
+                steps.append(f"wrote {systemd_path()}")
+            else:
+                steps.append(f"unit file already current ({systemd_path()})")
+        else:
+            steps.append(f"wrote {systemd_path()}")
         if not dry_run:
             # Lingering BEFORE enable --now: without a user manager the enable
             # itself fails with the bus error, and enabling linger is what
