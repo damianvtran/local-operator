@@ -31,6 +31,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.unreaped import unreaped_child
 
 pytestmark = pytest.mark.e2e
@@ -94,6 +95,7 @@ def test_a_runtime_takes_over_a_claim_held_by_a_zombie(tmp_path: Path) -> None:
     # child idle-exit with no work at all, which would have "proved" nothing.
     # Only the names this test means to set are put back.
     env = {key: value for key, value in os.environ.items() if not key.startswith(("LOP_", "CMUX_"))}
+    env.update(NO_NOTIFY_ENV)
     env.update(
         {
             "HOME": str(tmp_path),

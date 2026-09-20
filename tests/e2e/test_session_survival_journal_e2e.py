@@ -180,6 +180,7 @@ async def test_a_clean_idle_exit_withdraws_its_boot_record(headless_tui_env: Pat
     import subprocess
     import sys
 
+    from tests.e2e.harness import NO_NOTIFY_ENV
     from tests.e2e.test_cut_off_turns_e2e import _child_env
 
     config = headless_tui_env
@@ -189,6 +190,11 @@ async def test_a_clean_idle_exit_withdraws_its_boot_record(headless_tui_env: Pat
     # is untouched (3.0 s by default); this is the suite's existing seam for
     # moving the deadline rather than the behaviour.
     env = _child_env(config, session_id)
+    # The shared builder already gates what it builds; re-asserted here so this
+    # file states the property itself rather than resting on another module's
+    # helper (and so the sweep in ``tests/unit/test_notification_isolation.py``
+    # can see it).
+    env.update(NO_NOTIFY_ENV)
     env["LOP_SESSION_GRACE_S"] = "3"
     child = subprocess.Popen(
         [sys.executable, "-m", "local_operator.session.runtime.process"],

@@ -25,9 +25,14 @@ mechanical:
   a headless test did exactly that, and the shell rule ("unset these first")
   is the kind of instruction the next runner forgets. Scrubbed here it cannot
   leak, and scrubbing on import also lands before any application code reads it.
-* ``NO_COLOR`` unset, ``TERM=xterm-256color``, shimmer/notifications/title
-  off — the same sandbox ``visual_capture.isolate_capture`` builds, so the
-  two cannot drift.
+* ``NO_COLOR`` unset, ``TERM=xterm-256color``, shimmer/title off, and the
+  desktop switches (notifications, desktop launch) set as literals — this
+  module's contract is to run before any ``local_operator`` import, so the names
+  come from ``tui.notify.ENV_DISABLE`` by PIN rather than by import (see
+  ``tests/unit/test_notification_isolation.py``). ``visual_capture.
+  isolate_capture`` sets the same two, so the two cannot drift. They DID drift
+  before: this module set the notification switch and the capture sandbox did
+  not, and 68 shot scripts boot the real app through the latter.
 * If ``local_operator`` (or any submodule) is ALREADY in ``sys.modules``
   the import raises: isolation after the fact protects nothing.
 
@@ -62,6 +67,16 @@ os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(SANDBOX / "config")
 os.environ.pop("NO_COLOR", None)
 os.environ["TERM"] = "xterm-256color"
 os.environ["LOCAL_OPERATOR_NO_SHIMMER"] = "1"
+# The desktop switches, spelled as literals rather than imported: this module's
+# whole contract is to run BEFORE any `local_operator` import (it raises if one
+# is already loaded, a few lines below), so it cannot read them from
+# `local_operator.tui.notify`. The names and their "on" value are pinned to that
+# module's `ENV_DISABLE`/`ENV_DISABLE_VALUE` by
+# `tests/unit/test_notification_isolation.py`, which is what stops a rename from
+# leaving this sandbox silently un-gated — and the same two literals have to
+# land in `visual_capture.isolate_capture` (which 68 shot scripts call), or the
+# two sandboxes drift, the claim this module's docstring already makes.
 os.environ["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = "1"
+os.environ["LOCAL_OPERATOR_NO_DESKTOP_LAUNCH"] = "1"
 os.environ["LOCAL_OPERATOR_NO_TERMINAL_TITLE"] = "1"
 (SANDBOX / "config").mkdir(parents=True, exist_ok=True)
