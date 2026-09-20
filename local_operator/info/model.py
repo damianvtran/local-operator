@@ -179,6 +179,18 @@ class SessionLine:
     #: update fields, and which one a surface should render, is
     #: ``types.update_phase``'s decision — not a reader's.
     update_failed: str = ""
+    #: Seconds of NO PROGRESS the last beat measured (``SessionRecord.beat_lag_s``),
+    #: or ``None`` for a runtime that does not report it. Rides beside
+    #: :attr:`heartbeat_age_s` because the two answer different questions about the
+    #: same quiet: the age says how long the owner has been silent, while this says
+    #: how silent it had already been when it last spoke — and with the CPU pair
+    #: below it separates a runtime starved by its own work from one the host
+    #: stopped scheduling, which ``wedged`` alone cannot (2026-09-20: five sessions,
+    #: 1.5-7.2 h each, all reading as that one word).
+    beat_lag_s: float | None = None
+    #: CPU time this process spent since its previous beat — all threads, read
+    #: in-process (``time.process_time()``), never a ``ps`` fork per tick.
+    cpu_since_beat_s: float | None = None
     detached: bool = False
     version: str = ""
     source_ref: str = ""
