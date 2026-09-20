@@ -228,6 +228,14 @@ def _reduce_cells(
             load_per_cpu=load_per_cpu,
             errors=len(errored),
         )
+        admission = M.judge_admission(
+            (channel, arm),
+            stats,
+            concurrency=concurrency,
+            provider_kind=provider_kind,
+            load_per_cpu=load_per_cpu,
+            errors=len(errored),
+        )
         warnings: list[str] = []
         for sample in errored:
             warnings.append(f"sample died instead of being measured: {sample['error']}")
@@ -294,6 +302,20 @@ def _reduce_cells(
                         and provider_kind == M.ENFORCED_PROVIDER
                     ),
                 },
+                # The ACKNOWLEDGEMENT verdict, where the channel acknowledges at all
+                # (``None`` elsewhere — see ``M.judge_admission``). Carried from the
+                # ack-before-engage branch's own gate so the mark that branch moved
+                # stays asserted by the instrument that replaced its file.
+                "admission": (
+                    None
+                    if admission is None
+                    else {
+                        "status": admission.status,
+                        "reason": admission.reason,
+                        "ceiling_ms": M.ADMISSION_CEILING_MS,
+                        "p95_ceiling_ms": M.ADMISSION_P95_CEILING_MS,
+                    }
+                ),
             }
         )
     return cells
@@ -488,9 +510,21 @@ async def _amain(args: argparse.Namespace) -> int:
             _remove_quietly(created)
         _write_json(args.json, report)
 
-    failures = [cell for cell in report["cells"] if cell["verdict"]["status"] in M.FAILURE_STATUSES]
+    def _statuses(entry: dict[str, Any]) -> list[str]:
+        """Every verdict a cell carries, so one exit-code rule covers both gates."""
+        statuses = [str((entry.get("verdict") or {}).get("status") or "")]
+        admission = entry.get("admission") or {}
+        if admission:
+            statuses.append(str(admission.get("status") or ""))
+        return statuses
+
+    failures = [
+        cell for cell in report["cells"] if any(s in M.FAILURE_STATUSES for s in _statuses(cell))
+    ]
     indeterminate = [
-        cell for cell in report["cells"] if cell["verdict"]["status"] in M.INDETERMINATE_STATUSES
+        cell
+        for cell in report["cells"]
+        if any(s in M.INDETERMINATE_STATUSES for s in _statuses(cell))
     ]
     if not args.assert_budget:
         if failures or indeterminate:
@@ -509,6 +543,9 @@ async def _amain(args: argparse.Namespace) -> int:
                 f"{cell['verdict']['reason']}",
                 file=sys.stderr,
             )
+            admission = cell.get("admission") or {}
+            if admission.get("status") in M.FAILURE_STATUSES:
+                print(f"    acknowledgement: {admission['reason']}", file=sys.stderr)
         return 2
     if indeterminate:
         print("\nNOT JUDGED (exit 3, neither pass nor fail):", file=sys.stderr)

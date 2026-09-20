@@ -25,6 +25,7 @@ from scripts.ttft.channels import (
     TurnMarks,
     classify_agent_event,
     desktop_paint,
+    is_admission_ack,
     jobs_paint,
     names_reasoning,
     phone_reasoning,
@@ -629,6 +630,7 @@ def _drive_amain(
     argv,
     paints,
     dead_channels=(),
+    load=1.0,
 ):
     """Run ``_amain`` with the drivers stubbed, and return its exit code.
 
@@ -660,6 +662,11 @@ def _drive_amain(
     )
     monkeypatch.setattr(bench_ttft, "strip_inherited_runtime_env", lambda: {})
     monkeypatch.setattr(bench_ttft, "pin_shared_caches", lambda *a, **k: None)
+    # THE BAND IS PINNED, because an exit-code assertion that reads the box's load is
+    # the defect QA Q2 found wearing a test's clothes: on a busy evening these cells
+    # would be OUT-OF-BAND and the assertion would fail for a reason that has nothing
+    # to do with the code. The band's own behaviour is pinned separately.
+    monkeypatch.setattr(bench_ttft, "load_per_cpu", lambda: load)
     args = bench_ttft.build_parser().parse_args(
         [*argv, "--pycache-prefix", str(tmp_path / "pc"), "--tiktoken-cache", str(tmp_path / "tk")]
     )
@@ -710,12 +717,12 @@ def test_the_gate_exit_code_is_pinned_by_the_observable(monkeypatch, tmp_path):
 
 def test_the_gate_exit_code_is_three_when_it_cannot_judge(monkeypatch, tmp_path, capsys):
     """Out of band is not a pass: the pipeline must not read green out of it."""
-    monkeypatch.setattr(bench_ttft, "load_per_cpu", lambda: M.BUDGET_LOAD_PER_CPU_MAX + 5)
     code = _drive_amain(
         monkeypatch,
         tmp_path,
         argv=["--channels", "tui", "--arms", "warm", "--provider", M.ENFORCED_PROVIDER],
         paints={"tui": 40.0},
+        load=M.BUDGET_LOAD_PER_CPU_MAX + 5,
     )
     assert code == M.INDETERMINATE_EXIT_CODE
     assert "NOT JUDGED" in capsys.readouterr().err
@@ -849,3 +856,121 @@ def test_a_consistent_sample_is_not_flagged():
         provider_kind=M.ENFORCED_PROVIDER,
     )
     assert cells[0]["warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# The acknowledgement, carried from the ack-before-engage branch (#1343)
+# ---------------------------------------------------------------------------
+
+
+def test_the_acknowledgement_is_matched_on_the_submits_own_request_id():
+    """The stream carries every turn's frames, so the name alone is not enough.
+
+    A previous turn's acknowledgement arriving late would otherwise be read as this
+    one's — which on the cold arm would report the new change's best case as an old
+    turn's leftover.
+    """
+    mine = {"type": "admission.accepted", "payload": {"request_id": "abc", "mode": "turn"}}
+    theirs = {"type": "admission.accepted", "payload": {"request_id": "zzz", "mode": "turn"}}
+    nested = {"type": "event", "payload": {"type": "admission.accepted", "request_id": "abc"}}
+    assert is_admission_ack(mine, "abc")
+    assert not is_admission_ack(theirs, "abc")
+    assert is_admission_ack(nested, "abc")
+    assert not is_admission_ack({"type": "message_update", "payload": {}}, "abc")
+    assert not is_admission_ack(mine, "")
+
+
+def test_the_acknowledgement_gate_holds_the_median_and_the_tail():
+    """Two ceilings, and the tail is the second (see ADMISSION_CEILING_MS)."""
+    fast = {M.ADMITTED: {"n": 7, "p50": 62.0, "p95": 148.0}}
+    slow_median = {M.ADMITTED: {"n": 7, "p50": 340.0, "p95": 380.0}}
+    slow_tail = {M.ADMITTED: {"n": 7, "p50": 190.0, "p95": 620.0}}
+    assert (
+        M.judge_admission(("desktop", "cold"), fast, provider_kind=M.ENFORCED_PROVIDER).status
+        == "PASS"
+    )
+    assert (
+        M.judge_admission(
+            ("desktop", "cold"), slow_median, provider_kind=M.ENFORCED_PROVIDER
+        ).status
+        == "FAIL"
+    )
+    tail = M.judge_admission(("desktop", "cold"), slow_tail, provider_kind=M.ENFORCED_PROVIDER)
+    assert tail is not None and tail.status == "FAIL"
+    assert "tail bound" in tail.reason
+
+
+def test_the_acknowledgement_is_only_scored_where_it_exists_and_in_scope():
+    """No frame on the other channels, no verdict; and the same scope rules apply."""
+    stats = {M.ADMITTED: {"n": 7, "p50": 62.0, "p95": 148.0}}
+    assert M.judge_admission(("tui", "warm"), stats, provider_kind=M.ENFORCED_PROVIDER) is None
+    assert M.judge_admission(("exec", "cold"), stats, provider_kind=M.ENFORCED_PROVIDER) is None
+    assert (
+        M.judge_admission(("desktop", "cold"), stats, provider_kind="loopback") is None
+    ), "the real-wire arm is never asserted, the ack included"
+    assert (
+        M.judge_admission(
+            ("desktop", "cold"), stats, concurrency=4, provider_kind=M.ENFORCED_PROVIDER
+        )
+        is None
+    )
+    assert (
+        M.judge_admission(("desktop", "cold"), stats, provider_kind=M.ENFORCED_PROVIDER) is not None
+    )
+
+
+def test_an_acknowledgement_that_never_arrived_is_no_data_not_a_pass():
+    verdict = M.judge_admission(
+        ("desktop", "cold"),
+        {M.ADMITTED: {"n": 0, "p50": M.UNAVAILABLE}},
+        provider_kind=M.ENFORCED_PROVIDER,
+    )
+    assert verdict is not None and verdict.status == "NO-DATA"
+    assert verdict.indeterminate
+
+
+def test_the_acknowledgement_gate_is_in_the_exit_code(monkeypatch, tmp_path):
+    """A missed acknowledgement must move the exit code, not just the table."""
+
+    async def fake_one_run(**kwargs):
+        return [
+            {"arm": arm, M.FIRST_PAINT: 40.0, M.FIRST_TEXT: 50.0, M.ADMITTED: 900.0}
+            for arm in kwargs["arms"]
+            for _ in range(kwargs["concurrency"])
+        ]
+
+    monkeypatch.setattr(bench_ttft, "_one_run", fake_one_run)
+    monkeypatch.setattr(
+        "scripts.bench_tree.describe",
+        lambda rev: {
+            "rev": "deadbeef",
+            "worktree_head": "deadbeef",
+            "subtree": "local_operator",
+            "verified": True,
+        },
+    )
+    monkeypatch.setattr(bench_ttft, "strip_inherited_runtime_env", lambda: {})
+    monkeypatch.setattr(bench_ttft, "pin_shared_caches", lambda *a, **k: None)
+    # Pinned: an exit-code assertion that reads the box's load would fail on a busy
+    # evening for a reason that has nothing to do with the code (QA Q2's lesson).
+    monkeypatch.setattr(bench_ttft, "load_per_cpu", lambda: 1.0)
+    args = bench_ttft.build_parser().parse_args(
+        [
+            "--channels",
+            "desktop",
+            "--arms",
+            "cold",
+            "--concurrency",
+            "1",
+            "--provider",
+            M.ENFORCED_PROVIDER,
+            "--pycache-prefix",
+            str(tmp_path / "pc"),
+            "--tiktoken-cache",
+            str(tmp_path / "tk"),
+        ]
+    )
+    import asyncio
+
+    code = asyncio.run(bench_ttft._amain(args))
+    assert code == 2, "the paint is inside budget and the acknowledgement is not"

@@ -537,7 +537,30 @@ IDLE_MARKER = "●"
 
 #: A live pid whose heartbeat went stale. Distinguished from cold because the
 #: remedy differs: a wedged session is one to `lop stop`, not to reopen.
-WEDGED_MARKER = "✗"
+#:
+#: ``≈`` (U+2248 ALMOST EQUAL TO), NOT ``✗``, because the state is not a
+#: failure and the mark must not say it is. ``✗`` was
+#: ``COMPLETION_MARKERS["error"]`` — a turn that FAILED — so a wedged row drawn
+#: with it was byte-identical, glyph AND ink, to a row whose last turn broke:
+#: the operator read a working session as a failed one, which is the report this
+#: glyph answers. ``≈`` says what the evidence supports. The owner has not
+#: REPORTED: ``registry.classify`` is explicit that a stale beat is not a verdict
+#: on the process (measured on the reference host at 105.8 s and 205.8 s gaps
+#: with CPU still advancing), and "approximately equal" is the typographic mark
+#: for exactly that. The product already reads it that way elsewhere — the cost
+#: row prints ``≈ list price × tokens`` — so this reuses a meaning rather than
+#: inventing one.
+#:
+#: ONE CELL, like every marker here, and a shape nothing else in the column
+#: shares: the wave is the only horizontal-stroke glyph in the set. That matters
+#: more than the ink, because the CVD simulation below collapses ``warning`` and
+#: ``danger`` into two near-identical olives — ink is reinforcement, shape is the
+#: signal. Rings (``◌``/``◍``) and quadrant circles (``◔``/``◕``) were rejected
+#: for crowding ``○``/``●``/``◷``, ``⚠`` because danger ink and the tool cards
+#: already own it, ``⋯`` because it means "still going", and ``~`` because the
+#: picker's soft-match gutter has it. Verified one cell with
+#: ``rich.cells.cell_len`` like every marker above.
+WEDGED_MARKER = "≈"
 
 #: An unacknowledged completion, by kind. The sidebar paints these over the
 #: live-state glyph for a row whose last turn finished unread; they live here
@@ -576,14 +599,46 @@ WEDGED_MARKER = "✗"
 #: all. Any future state added here must earn a distinct GLYPH; recolouring an
 #: existing one is not a fix.
 #:
-#: CONSTRAINT — ``warning`` is now a TWO-MEMBER class, not a synonym for
-#: "answer this gate". ``NEEDS_YOU_MARKER`` (``!``) and ``interrupted``
-#: (``⊘``) resolve to the identical fill and can sit rows apart in the same
-#: list. That is intended: both mean "this wants you", and ``!`` against ``⊘``
-#: is a large enough shape difference to carry it while the tooltips
-#: disambiguate. But the class is at its capacity — a THIRD amber marker would
-#: leave the eye grouping three states as one before it resolves any shape, so
-#: adding one needs a design round, not a free slot.
+#: CONSTRAINT — ``warning`` is a THREE-MEMBER class, not a synonym for
+#: "answer this gate". ``NEEDS_YOU_MARKER`` (``!``), ``interrupted`` (``⊘``)
+#: and ``WEDGED_MARKER`` (``≈``) resolve to the identical fill and can sit rows
+#: apart in the same list. That is intended: all three mean the same thing,
+#: *this row is not merely resting — look at it*, instantiated as needs-you
+#: (``!``), unfinished work (``⊘``) and not-answering (``≈``).
+#:
+#: The THIRD member is a DECISION, not a free slot, and this comment is where
+#: that decision is recorded. The rule it replaces said a third amber marker
+#: "needs a design round" — the concern being that the eye groups several
+#: states as one before it resolves any shape. That round was held and its
+#: finding is that these three silhouettes are pairwise LARGE: a thin vertical
+#: bar with a dot (``!``), a slashed ring (``⊘``), two horizontal waves
+#: (``≈``). No two share a stroke direction, and the pair that WOULD have
+#: crowded the class — two rings, which is why the ring candidates were
+#: rejected for ``≈`` — is not in it. The capacity rule exists to stop the
+#: cluster reading as one blob; three shapes this different are not that
+#: failure, and the render that settled it is the mixed-state column frame
+#: captured for the change that added ``≈`` — re-renderable in one command with
+#: the rig named in the PR (``~/workspace/lop-wedged/column_shot.py``), and
+#: reproduced independently by three review rounds. It is NOT attached to that
+#: PR: GitHub's asset-upload endpoint answers 404 to a token and this harness has
+#: no file-picker path, so the frame is named rather than embedded. Review round
+#: 1 (F5/D1/U5) caught this comment asserting an attachment that did not exist;
+#: the fix is here, in the claim, because the substance was never the problem.
+#:
+#: ``≈`` is also not new to this UI, which a fourth candidate's author should
+#: weigh rather than rediscover: ``session_panel.py`` already renders it twice
+#: (``≈ estimated tokens``), where it means "about, not exact". No collision —
+#: different surface, and the panel's use is inside a prose qualifier rather
+#: than a one-cell state column — but it is the second precedent for the glyph
+#: and the reason it reads as a measure rather than an alarm.
+#:
+#: The fallback, should a later round judge the class too crowded in a rendered
+#: frame, is to keep the SHAPE and drop the ink to ``muted`` — that is what
+#: shape-as-signal already permits (it is why ``interrupted`` could be re-inked
+#: without a new glyph). It is a fallback rather than the recommendation: a
+#: muted ``≈`` beside the muted ``○``/``●`` presence pair reads as barely
+#: present at all, and the row it marks is the one whose next action can
+#: silently fail.
 #:
 #: One cell each, like every marker above: ``STATE_COL_CELLS`` reserves glyph
 #: plus separator, and a two-cell glyph eats the separator (the ⏰ regression
@@ -923,8 +978,10 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     The picker is the one place a user can see the whole fleet, so it is where
     "which of these is actually running, and which one wants me" has to be
     answerable at a glance. Precedence is by URGENCY, not by state machine:
-    needs-you outranks everything (a person is blocked), then wedged (broken),
-    then busy, then an ARMED wake, then the runtime's own presence.
+    needs-you outranks everything (a person is blocked), then wedged (not
+    answering), then busy, then an ARMED wake, then the runtime's own presence.
+    The wedged-above-busy order is a tie-break that can never fire —
+    ``live_state`` is ONE token per row — so it is left exactly as it was.
 
     **An armed wake outranks the IDLE glyph**, which is a change from the
     original ordering and is what the user asked for: "show the wake symbol if
@@ -961,7 +1018,15 @@ def row_state_mark(row: SessionRow, frame: int) -> tuple[str, str]:
     if row.pending:
         return NEEDS_YOU_MARKER, "warning"
     if row.live_state == "wedged":
-        return WEDGED_MARKER, "danger"
+        # ``warning``, not ``danger``, and the ink is the point of the change:
+        # this state is "the owner has not reported", not "something broke".
+        # ``danger`` is the ramp's *a failure happened* hue, so the row was read
+        # as a failed turn — which is what the operator reported. ``warning`` is
+        # the ink this module already reserves for "read this, nothing has
+        # broken", the same reasoning that moved ``interrupted`` off ``danger``
+        # when seven interrupted sessions read as seven errors. The LADDER
+        # position above is deliberately untouched (see the docstring).
+        return WEDGED_MARKER, "warning"
     if row.live_state == "busy":
         return SPINNER_FRAMES[frame % len(SPINNER_FRAMES)], "accent"
     if row.live_state == "attached":
@@ -3359,8 +3424,10 @@ _SOFT_LEGEND: tuple[str, str] = (SOFT_MATCH_MARKER, "fuzzy match")
 #: "one-shot headless task"), but headless describes HOW it runs and one-shot
 #: describes how long it lasts, which is the fact the legend exists to add
 #: (design round 1, D5). No new visual grammar, no third ink — an amber `[exec]`
-#: was the other candidate and is rejected on the record, because `warning` is
-#: already a two-member class this file's own comments call "at its capacity".
+#: was the other candidate and is rejected on the record: `warning` is a
+#: THREE-member class (`!`, `⊘`, `≈`) whose capacity the comments above argue
+#: from a rendered frame, and a FOURTH amber mark would be exactly the
+#: grouping failure that argument exists to prevent.
 _EXEC_LEGEND: tuple[str, str] = (EXEC_MARKER.strip(), "one-shot, may end")
 
 

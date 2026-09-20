@@ -55,7 +55,12 @@ from local_operator.session.runtime.types import (
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
     SIGNAL_DRAIN_S,
+    UPDATE_FAILED,
+    UPDATING,
+    UPDATING_DONE,
     bound_text,
+    update_phase,
+    update_short,
 )
 from local_operator.tui.widgets.analytics_panel import (
     _row_prefix,
@@ -223,6 +228,26 @@ _LEAVING_SHORT: dict[str, str] = {
 
 #: The fallback above: no trigger named, no bound claimed, nothing false.
 _LEAVING_SHORT_OTHER = "leaving"
+
+#: The shelf form of an UPDATE WINDOW, keyed by the PHASE TOKEN rather than by the
+#: sentence — the one structural difference from ``_LEAVING_SHORT`` above, and it is
+#: forced: every updating sentence carries a build pair, so a table keyed by the
+#: sentence could not be written at all (``types.UPDATING``).
+#:
+#: THE THREE ARE NOT DEGREES OF ONE THING, which is why the shelf keeps them apart
+#: even at ~15 cells: ``updating`` means the message is already held and arrives in a
+#: second, while ``update failed`` means it is NOT coming and the session is still on
+#: the build it loaded. A narrow reader who cannot tell those apart either re-sends a
+#: queued message or waits on a handover that was abandoned.
+_UPDATING_SHORT: dict[str, str] = {
+    UPDATING: "updating",
+    UPDATING_DONE: "updated",
+    UPDATE_FAILED: "update failed",
+}
+
+#: The fallback above: a phase this build cannot place says only that a move is
+#: happening, and claims neither the queue nor the outcome.
+_UPDATING_SHORT_OTHER = "moving to a new build"
 
 
 @dataclass
@@ -784,14 +809,54 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         body.note("No other lop sessions are running on this machine.")
         return
     for line in sessions.lines:
+        # THE PHASE IS READ FIRST, because the MARKER's ink is part of the answer (design
+        # review round 2, D6). It is a pure function of the row, so where it is computed
+        # is only about who may see it.
+        phase, pair = update_phase(line.updating, "", line.update_failed)
         if line.state == "wedged":
-            glyph, ink = WEDGED_MARKER, "danger"
+            # The glyph follows ``WEDGED_MARKER`` (imported at the top) and the
+            # ink is ``warning``, not ``danger``: the state is "the owner has not
+            # reported", not "something broke". This is the same row the sidebar
+            # draws, so the two surfaces must not disagree about it — and this
+            # panel's own header already words it "not answering", with the
+            # caveat below it spelling out that the counts are as of the last
+            # heartbeat.
+            glyph, ink = WEDGED_MARKER, "warning"
         elif line.is_self:
             glyph, ink = ATTACHED_MARKER, "muted"
         elif line.busy or line.leaving:
             # A draining session IS working (``busy`` is true of it), so it keeps
             # the working ink; what changes is the words beside it, above.
+            #
+            # THIS BRANCH PRECEDES THE FAILED UPDATE BELOW, deliberately (agent review
+            # round 3, NIT). Both are true of a row that failed an update and has since
+            # latched a drain — ``update_failed`` is cleared only by the next window, so
+            # the two do co-occur — and before this ordering the failure arm came first,
+            # which took the accent marker off a row that is leaving and left the drain
+            # fact inked by nothing. One ink per row means one of the two has to yield,
+            # and the drain wins because it is the fact that is still true of the
+            # process: the abandoned move has already been reported by the time the
+            # reader sees this row, and the words beside it still name the departure.
             glyph, ink = IDLE_MARKER, "accent"
+        elif phase == UPDATE_FAILED:
+            # A FAILED UPDATE IS THE ONE ROW STATE THE OPERATOR IS EXPECTED TO ACT ON,
+            # and it used to wear the idle row's exact ink set — same marker, same meta
+            # — so it was found only by reading every meta in a twelve-session fleet
+            # (design review round 2, D6, measured from the frame's span classes). The
+            # panel already distinguishes "news" by more than wording on this row class
+            # (``leaving`` takes the accent marker), so a failure takes the ink the panel
+            # reserves for a state that needs the reader's attention.
+            #
+            # ``warning`` RATHER THAN ``danger``, and that is main's own rule as of the
+            # cross-platform work that landed under this branch: the WEDGED row was moved
+            # from danger to warning in this same file ("the state is 'the owner has not
+            # reported', not 'something broke'"), so danger is this panel's ink for an
+            # ERROR — a failed subagent row, an MCP load failure — while a session-row
+            # state a reader must act on is amber. A failed update is exactly that: the
+            # session runs, on the build it loaded, and the abandoned move needs
+            # reporting. The queued window deliberately takes nothing, because it is a
+            # calm, self-resolving fact.
+            glyph, ink = IDLE_MARKER, "warning"
         else:
             glyph, ink = IDLE_MARKER, "muted"
         # Built widest-first and shed WHOLE ITEMS from the right, because the
@@ -810,6 +875,17 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # this row the age is the reason the reader is looking at it at all.
         if line.state == "wedged":
             bits.append(f"last heartbeat {format_duration(line.heartbeat_age_s)} ago")
+        # THE UPDATE WINDOW RANKS ABOVE THE DRAIN, AND IS APPENDED FIRST SO THAT IT
+        # SHEDS LAST (design review round 1, D2; round 2, D7). The shed drops whole
+        # items from the RIGHT, so the ORDER of these two appends is their ranking on a
+        # narrow frame — and appending the window after the drain phrase made the wide
+        # ladder drop the QUEUED FACT first, between roughly 65 and 100 columns, while
+        # the shelf (``short_meta``) ranked the window first at 64. Two renderings of one
+        # state with inverse rankings, and the loser was the fact the operator is acting
+        # on: the message they just sent is held. The window goes first here for the same
+        # reason the shelf prefers it, and the drain phrase goes back to being what it
+        # is — the departure, which outlives the window only because it cannot be
+        # cancelled.
         # THE DRAIN, BEFORE the facts this row sheds. It is placed high in the
         # list on purpose: the shed drops whole items from the RIGHT, so a fact
         # appended after the memory figure is the first to go on a narrow frame
@@ -823,6 +899,8 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # and the phrase is written by the same call that carries the drain to
         # the APP (``RuntimeServer.announce_retiring``), so the two cannot
         # disagree about whether this row is draining at all.
+        if phase:
+            bits.append(update_short(phase, pair))
         if line.leaving:
             bits.append(line.leaving)
         bits.append(format_duration(line.uptime_s))
@@ -864,6 +942,11 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # told both that it is leaving and how long that can take.
         if line.state == "wedged":
             short_meta = "not answering"
+        elif phase:
+            # The SHELF form, keyed by the PHASE the row is in — the failed phase
+            # included, so a fleet whose only news is an abandoned update says so at
+            # the narrowest width too (design review round 1, D1/D2).
+            short_meta = _UPDATING_SHORT.get(phase, _UPDATING_SHORT_OTHER)
         elif line.leaving:
             short_meta = _LEAVING_SHORT.get(line.leaving, _LEAVING_SHORT_OTHER)
         else:
