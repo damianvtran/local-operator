@@ -28,8 +28,7 @@ import { useState } from "react";
 import { requestOperatorChallenge, sendCommandWithProof } from "../api";
 import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
-import { NotPairedError } from "../lib/operator-device";
-import { operatorFieldsFor } from "../lib/operator-device";
+import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
 import { PairPromptSheet } from "../screens/pair";
 
 type Mode = "ask" | "auto";
