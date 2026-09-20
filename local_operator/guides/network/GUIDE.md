@@ -66,16 +66,32 @@ rendering is not a contract.
 5. Verify from both sides: `lop network peers --json` must show the other device
    with `reachable: true`, and `lop network ls --json` must agree on the epoch
    and member count. `peers` exits 1 and returns
-   `{"ok": false, "error": "the relay is not running"}` when this device's relay
-   is down — fix that (`lop network start --json`) before reading anything into
-   an empty list.
-   MEMBERSHIP CONVERGES ON CONTACT, so a device does not have to have been
-   present when someone joined: `ls`, `show` and `peers` each contact the members
-   before answering, a link formed for any other reason does the same, and the
-   admitting device contacts the rest of the network when it admits. A device
-   that has been switched off still shows the table it had when it went down
-   until its next contact, and a member that IS reachable is never hidden by
-   that: run any of those three commands rather than restarting the relay.
+   `{"ok": false, "code": "relay_unavailable", "message": ...}` when this device's
+   relay cannot answer — the message names which relay it was (a stopped one and a
+   wedged one are different incidents), so fix that (`lop network start --json`)
+   before reading anything into an empty list.
+   MEMBERSHIP CONVERGES ON A SCHEDULE, NOT ON A LINK BEING ESTABLISHED. A member
+   admitted after this device joined becomes visible without anything being
+   restarted and without anyone running a command: a live link is asked for its
+   member table again every fifteen seconds or so, and because a table transfers
+   transitively, a device two hops from the newcomer learns it too — including on a
+   dial-only machine whose only neighbour never holds a link to the newcomer. A
+   peer that accepts the connection and then does not answer its table read is
+   skipped after four seconds and asked again on the next pass, so one unresponsive
+   member delays nobody else's convergence. A
+   device that has been switched off still shows the table it had when it went down
+   until its next contact, and a member that IS reachable is never hidden by that:
+   run any of `ls`, `show`, `peers` rather than restarting the relay.
+   **Say what the count rests on.** Every member count travels beside a
+   `membership` block, and that block is what to read before believing the number:
+   `membership.table.answered` is the peers whose table answered, `not_answered`
+   names the ones that could not be asked and why, and `complete` is true only when
+   EVERY other active member answered. A device with no route to a peer reads
+   `complete: false` permanently — that is the honest answer, not a fault — and
+   the human `ls` line carries the short form of it (`[members verified with 7 of
+   9 peer(s)]`, or `[members NOT verified: no peer answered]`). `--all-peers`
+   refreshes the table before it merges, so an incomplete peer set is named rather
+   than silently merged.
 6. Tell the user what they now have: a relay this device supervises, an identity
    keypair other networks will address it by, and a member list they can inspect.
    The next section says what the session plane can and cannot do across the mesh.
@@ -114,7 +130,16 @@ means nothing answered at any address it declared, `unreachable: <address>
 <why>; …` names every address it declared and what each one did (a member often
 has one address that is a black hole from where you are and one that answers),
 and `not_attempted:` means nothing was dialled at all — the listing gave up
-before this member's turn rather than claiming anything about it. A device with
+before this member's turn rather than claiming anything about it.
+`handshake_refused:*` means the peer ACCEPTED the connection and then closed it
+during the handshake: that is what a REFUSAL looks like on this wire, because the
+protocol never explains one (an open port that answers "that token is not mine"
+would let a stranger enumerate what is real). The suffix keeps what was observed —
+`ConnectionError` is a close, `TimeoutError` is a peer that never answered — and
+`lop network ls`/`doctor` say the interpretation: the network is marked
+`[refused_by_peers]` and `doctor` carries a `membership` check naming the states
+that look like this (this device was removed, the network was marked untrusted
+after a panic, or this device's epoch is behind). A device with
 several addresses is probed at ALL of them at once, so the order its row happens
 to list them in cannot decide whether it looks reachable. `lop network doctor
 --json` reports the same per link, one row per address plus the handshake, and
@@ -142,16 +167,27 @@ Diagnose in this order, and stop at the first answer that explains it:
    present, and (with the relay up) each endpoint actually dialled: latency,
    `epoch_skew`, and the failure name (`connect_failed:*`, `no_answer`, a refusal
    code). A row that was not dialled says so and is `ok: false` rather than
-   passing unchecked. The `relay` field is read from the relay itself — replied
-   to, `running (pid N)` and, if its control socket did not answer, that too.
+   passing unchecked. A `{"check": "membership"}` row appears ONLY when something
+   is wrong with this device's own standing, and it carries the sentence and the
+   remedies — read it before the endpoint rows, because a removed or refused
+   device's endpoints all fail for one reason. The `relay` field is read from the
+   relay itself — replied to, `running (pid N)` and, if its control socket did not
+   answer, that too (a relay that is up but silent is a WEDGED relay: its pid is
+   alive and it is not answering, which is a different incident from a stopped
+   one).
 2. `lop network log --since 1h --json` — what actually happened: `member_admitted`,
    `member_removed`, `membership_learned`, `invite_minted`, `panic_raised`,
-   `trust_changed`, `pairing_refused`, each with `ts_iso`, `event`, `outcome`,
-   `network_id` and a `detail` object.
+   `trust_changed`, `pairing_refused`, `handshake_refused`, each with `ts_iso`,
+   `event`, `outcome`, `network_id` and a `detail` object. `handshake_refused` with
+   `detail.cause: "peer_closed_silently"` is THIS device being refused by a peer —
+   the only place that fact is written down, since the peer never says it.
 3. `lop network peers --json` — reachability right now, per peer: `device_id`,
    `name`, `network_id`, `reachable`, `reason`, `endpoints`.
-4. `lop network status --json` — install and health: `relay_running`, `relay`,
-   `identity_present`, the per-network rows and the log path.
+4. `lop network status --json` — install and health: `relay_running`,
+   `relay_answering`, `relay_state` (`live` / `wedged` / `stopped`), `relay`,
+   `identity_present`, the per-network rows and the log path. `relay_running` is
+   true whenever a relay process of ours exists, so it is never false beside a
+   `record.pid`; `relay_answering` is what this probe actually got back.
 
 Two things that look like failures and are not: a peer that is unreachable is
 **not** an error and its sessions are simply not reachable from here; a network
@@ -181,6 +217,34 @@ and panic invalidates an invite or a session the user may be in the middle of.
 ```bash
 lop network trust <network> --active --json      # re-admit after a panic
 lop network trust <network> --untrusted --json   # refuse it again
+```
+
+**A REMOVED DEVICE LEARNS IT FROM ITS OWN SURFACE, AND RE-ADMISSION HAS ONE
+ROUTE.** If this device was removed by an admin, its own `ls`/`show`/`status` say
+`this device is no longer a member of <network> (removed by <who>)` — from the
+tombstone the rotation delivered, or, if it was offline when that happened, from
+the refusal it observes on its next dial. Its epoch and member list are the last
+delivered state, and its `doctor` carries a `membership` check with a code
+(`removed` / `refused`), so an operator is not left reading a transport error
+alongside `trust: active`.
+
+Re-admitting it is NOT `lop network trust`: that verb re-admits a NETWORK that was
+marked untrusted after a panic, and it does not restore a member that was removed —
+the removed device id is burned on every device that saw the rotation (`removed_ids`,
+kept forever on purpose), and a fresh invite does not revive it. Do not tell a user
+to try it, and do not retry a join that already answered `device_id_conflict`.
+The route that works is a NEW IDENTITY on the removed device:
+
+```bash
+lop network identity rotate --json    # on the removed device: mints a new id
+# then mint a fresh invite on a member, and join with it as usual
+```
+
+The refusal now says so on the joiner's own screen: `device_id_conflict` comes back
+with the admitting device's sentence plus that remedy, instead of the bare code.
+
+```bash
+lop network identity rotate --json    # for a suspected key compromise
 ```
 
 ## What never to do

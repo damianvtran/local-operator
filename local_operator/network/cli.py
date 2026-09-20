@@ -417,6 +417,19 @@ def _resolve(target: str, root: Path | None = None) -> Any:
 
 
 def _summarise(record: Any, links: int = 0) -> dict[str, Any]:
+    """One network's row on the NO-RELAY path (`ls`/`show` when nothing answers).
+
+    The membership block is present and says it is UNVERIFIED, because this row is
+    built from the local record alone: no peer was asked, so the member count is
+    this device's last known table rather than a checked one, and a count that does
+    not say which it is is the failure that made an incomplete list act like an
+    authoritative one (Q-R2-1). The state sentence is the same one the relay's own
+    row carries (:func:`membership_state`), so a removed device reads the truth
+    whether or not its relay is up — which is precisely when it has nothing else.
+    """
+    from local_operator.network.relay import membership_state
+
+    state = membership_state(record)
     return {
         "network_id": record.network_id,
         "name": record.name,
@@ -426,6 +439,22 @@ def _summarise(record: Any, links: int = 0) -> dict[str, Any]:
         "members": len(record.active_members()),
         "links": links,
         "stale": record.stale,
+        "self_device_id": record.self_device_id,
+        "membership_state": state["state"],
+        "membership": {
+            **state,
+            "table": {
+                "complete": False,
+                "answered": [],
+                "not_answered": [],
+                "oldest_answer_age_s": None,
+                "learned": [],
+                "sentence": (
+                    "members NOT verified: this device's relay did not answer, so no "
+                    "peer was asked for its table"
+                ),
+            },
+        },
     }
 
 
@@ -550,6 +579,7 @@ def _unwrap_list_answer(live: Any) -> Any:
 
 def _cmd_ls(args: argparse.Namespace) -> int:
     from local_operator.network import store
+    from local_operator.network.relay import membership_lines, membership_marker
 
     # A LISTING THAT CONTACTS ITS PEERS, so it needs the relay's own budget plus
     # slack rather than the 5 s default: the table it reports is refreshed from the
@@ -560,16 +590,16 @@ def _cmd_ls(args: argparse.Namespace) -> int:
     rows = live if live else [_summarise(record) for record in records]
     if not rows:
         return _emit(args, {"ok": True, "networks": []}, ["no networks on this device"])
-    return _emit(
-        args,
-        {"ok": True, "networks": rows},
-        [
+    lines: list[str] = []
+    for row in rows:
+        lines.append(
             f"{row['name']}  {row['network_id']}  epoch {row['epoch']}  {row['role']}  "
             f"{row['members']} member(s)  {row['trust']}"
             + (f"  [{row['stale']}]" if row.get("stale") else "")
-            for row in rows
-        ],
-    )
+            + membership_marker(row)
+        )
+        lines.extend(membership_lines(row))
+    return _emit(args, {"ok": True, "networks": rows}, lines)
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
@@ -605,10 +635,18 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 
 def _show_lines(payload: dict[str, Any]) -> list[str]:
+    from local_operator.network.relay import membership_lines
+
     lines = [
         f"{payload.get('name')}  {payload.get('network_id')}  epoch {payload.get('epoch')}  "
         f"trust {payload.get('trust')}",
     ]
+    # THE TABLE'S PROVENANCE, printed before the table itself: a member list is the
+    # thing an operator reads and acts on, so what it rests on comes first.
+    table = (payload.get("membership") or {}).get("table") or {}
+    if int(payload.get("members") or 0) > 1 and table.get("sentence"):
+        lines.append(f"  members: {table['sentence']}")
+    lines.extend(membership_lines(payload))
     for member in payload.get("members_detail") or []:
         mark = "active" if member["active"] else "REMOVED"
         suspect = "  [suspect: key may be copied]" if member.get("suspect") else ""
@@ -1055,7 +1093,11 @@ def _join_one(
             # attribute 'sas_mismatch_sentence'`` instead of refusing (QA round 1,
             # F-1). Going through the one function also gets the invite-shaped
             # reasons (``invite_already_used``, ``invite_in_use``) their sentences.
-            raise refusal_from_pairing(str(answer.get("reason") or "aborted"))
+            # The refusing device's own sentence comes too: it is the only place the
+            # joiner can learn which id was refused and what to do about it (Q-R3-3).
+            raise refusal_from_pairing(
+                str(answer.get("reason") or "aborted"), detail=str(answer.get("detail") or "")
+            )
         if not answer.get("admit"):
             raise MeshRefusal("not_admitted", "the other device did not admit this machine")
         record = _persist_join(
@@ -1459,12 +1501,30 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     )
 
 
+def _status_membership_lines(row: dict[str, Any]) -> list[str]:
+    """`status` prints this device's own standing; the body is ``relay``'s."""
+    from local_operator.network.relay import membership_lines
+
+    return membership_lines(row)
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     relay_mod = _import_relay()
     payload = relay_mod.status()
+    # THE HUMAN LINE IS DERIVED FROM THE SAME FIELDS AS THE PAYLOAD, so the two
+    # cannot disagree: `relay_running` and `relay_answering` are the facts, and a
+    # relay that is up but silent says so here instead of reading as "not running"
+    # beside its own pid (Q-R3-4).
     relay_line = "not running"
-    if payload["relay"]:
-        relay_line = f"running, pid {payload['relay']['pid']}"
+    if payload.get("relay_running"):
+        pid = (payload.get("relay") or {}).get("pid") or (payload.get("record") or {}).get("pid")
+        if payload.get("relay_answering"):
+            relay_line = f"running, pid {pid}"
+        else:
+            relay_line = (
+                f"running (pid {pid}), NOT answering its control socket "
+                f"(state: {payload.get('relay_state')})"
+            )
     lines = [
         f"installed:  {'yes' if payload['installed'] else 'no'}"
         + ("" if payload["supported"] else "  (no launchd on this platform)"),
@@ -1479,6 +1539,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
             f"  {network['name']}  {network['network_id']}  epoch {network['epoch']}  "
             f"{count} link(s)"
         )
+        # A network whose own standing is not `active` says so here too: `status` is
+        # the first command an agent runs (the guide's step 1), so it is where a
+        # removed device must find the sentence rather than the member list it
+        # holds (Q-R3-2). The member-count marker is NOT printed here — this command
+        # does not refresh the table, and the row's own `membership.table` says so.
+        lines.extend(_status_membership_lines(network))
     return _emit(args, {"ok": True, **payload}, lines)
 
 
@@ -1492,16 +1558,18 @@ def _cmd_peers(args: argparse.Namespace) -> int:
         # ONE REFUSAL SHAPE FOR THE WHOLE FAMILY: ``code`` + ``message``, the same
         # keys every other `lop network` refusal uses and the only shape an agent
         # path has to parse. This one used to answer with a bare ``error`` key, so
-        # a consumer that read ``code`` saw nothing at all (QA round 1, F-6).
+        # a consumer that read ``code`` saw nothing at all (QA round 1, F-6). The
+        # sentence distinguishes a stopped relay from a wedged one (Q-R3-4).
+        message = _relay_unavailable_message()
         return _emit(
             args,
             {
                 "ok": False,
                 "code": "relay_unavailable",
-                "message": "the relay is not running; start it with `lop network start`",
+                "message": message,
                 "peers": [],
             },
-            ["the relay is not running; start it with `lop network start`"],
+            [message],
         )
     # ``net_peer_ls`` answers a LIST (a peer table), so the control client wraps it
     # as ``{"value": [...]}`` rather than pretending it is a mapping.
@@ -1913,9 +1981,16 @@ def _relay_state() -> tuple[str, bool]:
     round 2, Q-R2-6).
 
     Three answers, in the order they can be established: a relay that ANSWERS over
-    its own control socket is running; a live relay RECORD whose socket did not
-    answer is running but not answering — worth telling apart, because "it crashed"
-    and "it is wedged" want different remedies — and no record is not running.
+    its own control socket is running; a relay RECORD whose socket did not answer is
+    running but not answering — worth telling apart, because "it crashed" and "it is
+    wedged" want different remedies — and no record is not running.
+
+    THE RECORD IS READ BY :func:`store.scan_own_relay`, which reports ``wedged`` as
+    well as ``live``. That is the difference between this branch being REACHED and
+    only being POSSIBLE: a SIGSTOPped relay stops writing heartbeats, so within the
+    timeout its record classifies as ``wedged`` and a live-only scan returns nothing
+    — the branch added for the wedge sat behind a read that could never see one, and
+    `doctor` went on calling a stopped process "not running" (QA round 3, Q-R3-4).
     """
     from local_operator.network import relay as relay_mod
     from local_operator.network import store
@@ -1923,13 +1998,42 @@ def _relay_state() -> tuple[str, bool]:
     live = relay_mod.health()
     if live is not None:
         return f"running, pid {live.get('pid')}", True
-    record = store.find_own_relay()
+    record, state = store.scan_own_relay()
     if record is not None:
-        return (
-            f"running (pid {record.pid}), and its control socket did not answer this probe",
-            True,
+        detail = (
+            "its control socket did not answer this probe, and its heartbeat has gone "
+            "stale as well, so its owner is not reporting either"
+            if state == "wedged"
+            else "its control socket did not answer this probe"
         )
+        return f"running (pid {record.pid}), and {detail}", True
     return "not running", False
+
+
+def _relay_unavailable_message() -> str:
+    """Why an op that needed the relay did not get an answer — named, not guessed.
+
+    "THE RELAY IS NOT RUNNING" IS A CLAIM ABOUT A PROCESS, and this family of verbs
+    printed it whenever the CONTROL SOCKET went unanswered — including on a machine
+    whose own status payload carried the relay's live pid. The two incidents want
+    different remedies (start it, versus kill -CONT or restart a wedged one), so the
+    record is consulted rather than assumed (QA round 3, Q-R3-4).
+    """
+    from local_operator.network import store
+
+    record, state = store.scan_own_relay()
+    if record is None:
+        return "the relay is not running; start it with `lop network start`"
+    suffix = (
+        " and its heartbeat has gone stale, so its owner is not reporting"
+        if state == "wedged"
+        else ""
+    )
+    return (
+        f"this device's relay (pid {record.pid}) is running but did not answer its "
+        f"control socket{suffix}; that is a wedged relay rather than a stopped one — "
+        "stop and start it with `lop network restart`"
+    )
 
 
 def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
@@ -1945,6 +2049,7 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
     """
     from local_operator.network import store
     from local_operator.network.identity import identity_path
+    from local_operator.network.relay import membership_state
 
     relay_line, relay_up = _relay_state()
     checks: list[dict[str, Any]] = []
@@ -1965,6 +2070,21 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
                 "network_id": record.network_id,
             }
         )
+        # THE SAME MEMBERSHIP ROW THE RELAY'S OWN DOCTOR EMITS, so a device whose
+        # relay is down still learns what its own standing is — which is exactly the
+        # device a removed member is, once nothing answers it (Q-R3-2).
+        standing = membership_state(record)
+        if standing["state"] != "active":
+            checks.append(
+                {
+                    "check": "membership",
+                    "network_id": record.network_id,
+                    "ok": False,
+                    "code": standing["state"],
+                    "detail": standing["sentence"],
+                    "remedies": standing["remedies"],
+                }
+            )
         for member in record.active_members():
             if member.device_id == record.self_device_id:
                 continue

@@ -621,9 +621,37 @@ def find_own_relay(root: Path | None = None) -> PeerRecord | None:
     reaped-but-not-yet-removed record can still be present. Callers dial the
     record's ``control_port`` with its ``control_key`` — the CLI is a different
     process, which is exactly why the record carries those two fields.
+
+    THIS ANSWERS "IS THERE A RELAY TO TALK TO", NOT "IS A RELAY RUNNING". A
+    record whose owner has stopped heartbeating is deliberately excluded here,
+    because every caller is about to dial the control socket and would only hang.
+    A DIAGNOSTIC asks the other question and must use :func:`scan_own_relay`:
+    reporting a wedged relay as an absent one beside a payload that carries its pid
+    is a diagnostic contradicting itself (QA round 3, Q-R3-4).
     """
     records = peer_records(root)
     return records[0] if records else None
+
+
+def scan_own_relay(root: Path | None = None) -> tuple[PeerRecord | None, str]:
+    """This install's relay record with the classifier's verdict for it.
+
+    Returns ``(record, state)`` where ``state`` is ``registry.classify``'s word —
+    ``live`` (pid alive, heartbeat fresh) or ``wedged`` (pid alive, the owner has
+    not reported inside ``HEARTBEAT_TIMEOUT_S``; NOT proof the process is dead) —
+    and ``(None, "")`` when this install has no relay process at all. A record
+    whose pid is gone is reaped by the underlying scan and is not a relay.
+
+    The record and the verdict travel TOGETHER, so a caller cannot print a pid
+    without also holding the answer to "and is it answering", which is the one way
+    a status payload came to report ``relay_running: false`` next to a live
+    ``record.pid``. A caller that wants to DIAL the relay still wants
+    :func:`find_own_relay`; this one is for describing the machine.
+    """
+    for record, state in scan_peer_records(root):
+        if state in ("live", "wedged"):
+            return record, state
+    return None, ""
 
 
 # ---------------------------------------------------------------------------

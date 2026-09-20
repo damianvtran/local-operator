@@ -566,10 +566,17 @@ def test_revocation_rotates_the_epoch_and_refuses_the_removed_device_afterwards(
     # A FRESH connection from the removed device is refused, which is the whole of
     # R5: no visit, no cooperation, no warning.
     # The refusal is SILENT by design: a closed socket, no error frame, and the
-    # reason only in the removing device's own audit record.
+    # reason only in the removing device's own audit record — WHICH IS WHY THE
+    # DIALER'S OWN REASON IS NAMED FOR WHAT IT OBSERVED. It used to say
+    # ``handshake_failed:ConnectionError``, a transport fact that a removed device's
+    # operator could not act on; it now says ``handshake_refused:ConnectionError``,
+    # because a peer that accepts the connection and closes it during the handshake
+    # is what this protocol's refusal looks like (QA round 3, Q-R3-2). The transport
+    # class stays in the suffix: `handshake_refused:TimeoutError` is a peer that never
+    # answered, which is a different incident.
     link, reason = server_b.dial(record.network_id, host=f"{host}:{port}", epoch=1)
     assert link is None
-    assert reason.startswith("handshake_failed") or reason in ("not_a_member", "epoch_stale")
+    assert reason.startswith("handshake_refused") or reason in ("not_a_member", "epoch_stale")
     assert "member_removed" in _events(server_a)
     assert "handshake_refused" in _events(server_a)
 

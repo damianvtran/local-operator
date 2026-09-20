@@ -249,6 +249,37 @@ def test_a_stale_epoch_is_refused() -> None:
     assert excinfo.value.code == "epoch_stale"
 
 
+def test_a_rotation_is_admitted_by_the_epoch_gate() -> None:
+    """A ``net_epoch`` frame carries the epoch we do NOT have yet, and that is the point.
+
+    Measured on a real link, before this rule: a rotation to epoch 2 reached a peer at
+    epoch 1 and was refused ``epoch_stale`` by this gate — the check required the
+    frame's own epoch to equal the receiver's, which no rotation can ever satisfy.
+    The consequence was that NO member removal propagated over a live link to anyone,
+    so a removed device was never told it had been removed (QA round 3, Q-R3-2).
+
+    The gate keeps its purpose: the LINK must be at the epoch the record holds. What a
+    rotation's epoch means is the apply path's rule (§8.1 step 4), and the two used to
+    be two copies of one rule that disagreed.
+    """
+    authorizer, _audit = make(state=FakeState(epoch=1))
+    granted = authorizer.check(
+        link(epoch=1, capabilities={"admin"}), {"op": "net_epoch", "req": 1, "epoch": 2}
+    )
+    assert granted.action == "net_epoch"
+
+
+def test_a_rotation_on_a_link_that_is_not_at_our_epoch_is_still_refused() -> None:
+    """The half that must NOT move: a rotation arriving on a link authenticated against
+    an epoch this record no longer holds is refused before the frame is read."""
+    authorizer, _audit = make(state=FakeState(epoch=5))
+    with pytest.raises(types.Refusal) as excinfo:
+        authorizer.check(
+            link(epoch=4, capabilities={"admin"}), {"op": "net_epoch", "req": 1, "epoch": 6}
+        )
+    assert excinfo.value.code == "epoch_stale"
+
+
 def test_a_network_this_device_left_refuses_the_link() -> None:
     authorizer, _audit = make(state=FakeState(present=False))
     with pytest.raises(types.Refusal) as excinfo:

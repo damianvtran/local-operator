@@ -146,6 +146,56 @@ CATALOG_CACHE_S = 2.0
 #: in the tree rather than one per namespace.
 HEARTBEAT_S = float(HEARTBEAT_INTERVAL_S)
 
+#: How often ONE link answers a member-table pull (`net_member_list`).
+#:
+#: MEMBERSHIP IS A DISTRIBUTED FACT AND A LINK IS NOT ENOUGH ON ITS OWN. The pull
+#: used to run at link ESTABLISHMENT only, on the theory that "contact
+#: re-evaluates membership" — but a healthy pair holds its link open indefinitely
+#: (`wire.KEEPALIVE_S` against `LINK_IDLE_S`: the writer keepalives, the peer acks,
+#: and the link never idles out), so on the ordinary history of a mesh no link is
+#: ever established again and nothing is ever re-pulled. A member admitted
+#: afterwards stayed invisible to every device whose links predated it, for as long
+#: as they stayed up, and it failed between two DIRECTLY REACHABLE devices as
+#: readily as across a NAT (QA round 3, Q-R2-1: `members: 3` against `4` for four
+#: minutes, on the dial-only Mac AND on an in-VPC peer).
+#:
+#: So a pull is due on a SCHEDULE, not on an event, and the schedule is per link:
+#: an established link is asked again once this interval has passed (see
+#: :meth:`RelayServer.refresh_membership`). 15 s is one heartbeat: slow enough that
+#: a 32-link relay spends ~2 frames/s on table refresh, fast enough that a member
+#: admitted anywhere in a mesh is visible everywhere inside one watch of a listing.
+MEMBERSHIP_PULL_MIN_INTERVAL_S = 15.0
+
+#: How often the relay walks its live links looking for a table refresh that is due.
+#:
+#: SHORTER THAN THE INTERVAL ABOVE ON PURPOSE: this is the granularity of "due",
+#: not the rate of asking, so a link whose interval expired is re-pulled promptly
+#: after a learning event instead of waiting for the next tick of a coarse clock.
+#: Nothing here needs a surface to be touched: a mesh converges with no operator
+#: action and no restart, which is what the round-3 watch demanded and what a
+#: cadence on a LISTING cannot provide (a device nobody lists is still a member).
+MEMBERSHIP_PULL_PASS_S = 5.0
+
+
+#: How long ONE member-table read may wait before the refresh gives up on it.
+#:
+#: NOT ``op_wait_s`` (10 s), which is what this read used: it runs INSIDE the
+#: relay's membership loop, and that loop is serial, so ONE peer that accepts the
+#: connection and then does not answer held up every other link for ten seconds per
+#: pass — with two links that is a permanently stalled refresh, which is one of the
+#: ways a two-hop mesh took minutes to converge on real hardware while a
+#: loopback proof converged instantly (QA round 3, Q-R2-1). Bounded, that peer costs
+#: one pass and the next pass asks it again.
+MEMBERSHIP_PULL_TIMEOUT_S = 4.0
+
+#: How long a link waits for its own writer before closing anyway.
+#:
+#: Long enough for the frames a caller queued one line earlier to reach the socket
+#: (they are small, and the writer is already awake), short enough that a peer that
+#: stopped reading cannot hold a close — and its callers — past a blink. See
+#: :meth:`PeerLink.close` for what losing that window cost.
+CLOSE_FLUSH_S = 1.0
+
 
 @dataclass(frozen=True)
 class NetworkSettings:
@@ -661,8 +711,8 @@ def admit(
     if record.is_burned(device_id):
         raise MeshRefusal(
             "device_id_conflict",
-            f"{device_id} was removed from this network and its id cannot be admitted again; "
-            "the device must re-pair with a new invite",
+            f"{device_id} was removed from this network; a burned id is never admitted "
+            "again, however the invite is minted",
         )
     existing = record.member(device_id)
     if existing is not None and existing.public_key and existing.public_key != public_key:
@@ -837,14 +887,17 @@ def apply_epoch(
         rows = [MemberRecord.from_json(row) for row in members if isinstance(row, dict)]
     except (TypeError, ValueError):
         return ApplyOutcome(False, "members_unparsable")
-    inconsistent = _members_inconsistent(rows, self_device_id=record.self_device_id)
+    removing_us = record.self_device_id in (frame.get("removed") or [])
+    inconsistent = _members_inconsistent(
+        rows, self_device_id=record.self_device_id, expect_self_active=not removing_us
+    )
     if inconsistent:
         return ApplyOutcome(False, inconsistent)
     if frame.get("members_digest") and str(frame["members_digest"]) != members_digest_of(
         _record_with(record, rows)
     ):
         return ApplyOutcome(False, "members_digest_mismatch")
-    if record.self_device_id in (frame.get("removed") or []):
+    if removing_us:
         # This device was removed by the rotation that carries it. It must NOT
         # learn the new secret: it is not a member any more, and the design says so
         # explicitly ("a removed device does not learn the new secret").
@@ -872,6 +925,181 @@ def apply_epoch(
     return ApplyOutcome(True, "applied")
 
 
+@dataclass
+class MembershipReport:
+    """What a claim about a member table rests on, per network, per report.
+
+    A MEMBER COUNT IS AN ANSWER SOMEBODY GAVE, and until round 4 the surfaces
+    presented one without saying who had been asked. `lop network ls` printed
+    "3 member(s)" while the fourth device had been admitted and was known to two
+    of the four devices, and `--all-peers` merged an incomplete peer set as though
+    it were the whole network — the failure mode an operator acts on, which is why
+    QA called it out separately from the convergence bug itself (Q-R2-1: "an
+    incomplete list presented as authoritative is worse than an error").
+
+    So every surface that reports a member count now reports this beside it: how
+    many peers were asked, which answered with a table, which could not be asked
+    and why, and the age of the OLDEST answer — the weakest evidence in the
+    argument, because one fresh answer and one stale one is only as good as the
+    stale one.
+
+    ``complete`` is the strongest honest claim available: EVERY other active member
+    answered, so the table is a merge of every member's own view. It is not a proof
+    that nobody is missing — a member this device cannot reach and cannot be told
+    about by anyone else is invisible to it — and that is exactly why the
+    incompleteness is reported as a list of names and reasons rather than as a
+    boolean.
+    """
+
+    network_id: str
+    refreshed_at: float
+    #: Members this device holds a live link to, so their table could be read.
+    answered: list[str] = field(default_factory=list)
+    #: Age of each answer, positionally matching :attr:`answered`.
+    answer_ages: list[float] = field(default_factory=list)
+    #: Members that could NOT answer, each with the reason the surface prints.
+    silent: list[dict[str, str]] = field(default_factory=list)
+    #: Members whose answer is INSIDE the pull cadence, so this pass did not ask again.
+    #: They are evidence (with an age), not gaps — see :meth:`sentence`.
+    not_due: list[dict[str, Any]] = field(default_factory=list)
+    #: Device ids this refresh ADDED to the table — the ones that were invisible.
+    learned: list[str] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        return not self.silent and bool(self.answered)
+
+    @property
+    def oldest_answer_age_s(self) -> float | None:
+        return max(self.answer_ages) if self.answer_ages else None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "network_id": self.network_id,
+            "complete": self.complete,
+            "answered": list(self.answered),
+            "not_due": [dict(row) for row in self.not_due],
+            "not_answered": [dict(row) for row in self.silent],
+            "oldest_answer_age_s": self.oldest_answer_age_s,
+            "learned": list(self.learned),
+            "sentence": self.sentence(),
+        }
+
+    def sentence(self) -> str:
+        """One sentence a person reads, and the honest one in every case."""
+        age = self.oldest_answer_age_s
+        age_text = "just now" if age is None or age < 1.5 else f"{int(age)}s ago"
+        if self.complete:
+            return f"members verified with all {len(self.answered)} peer(s) ({age_text})"
+        if not self.answered:
+            detail = ", ".join(f"{row['device_id']} ({row['reason']})" for row in self.silent)
+            return (
+                "members NOT verified: no peer answered a table read this time"
+                + (f" — {detail}" if detail else "")
+            )
+        detail = ", ".join(f"{row['device_id']} ({row['reason']})" for row in self.silent)
+        return (
+            f"members verified with {len(self.answered)} of "
+            f"{len(self.answered) + len(self.silent)} peer(s) ({age_text}); "
+            f"NOT verified with {detail}"
+        )
+
+
+#: This device's standing in one network, as its own surfaces read it.
+MEMBERSHIP_STATES = ("active", "removed", "refused", "untrusted", "disconnected")
+
+
+def membership_state(record: NetworkRecord) -> dict[str, Any]:
+    """What this device's OWN standing in ``record`` is, and what to do about it.
+
+    THE DEVICE THAT WAS REMOVED IS THE ONE WHOSE OWN SURFACE LIED (Q-R3-2). It held
+    a full member list, `trust: "active"`, and `handshake_failed:ConnectionError`
+    beside it — a healthy-looking network whose every attempt failed as a transport
+    error, which is precisely the shape an operator cannot diagnose. Two facts were
+    available locally and unused: our own row, which the last applied rotation
+    tombstoned (`removed_at`/`removed_by`), and ``record.stale``, which the refusal
+    path sets to ``refused_by_peers`` (the design's own words for it, §8.3).
+
+    So the standing is derived HERE, once, for every surface that shows it — `ls`,
+    `show` and `doctor` — because three copies of this rule would disagree, and the
+    one that disagreed would be the one nobody was looking at.
+
+    A state this device cannot establish is never claimed: with a fresh table and
+    no refusal the answer is ``active``, and an unreachable PEER is not evidence
+    about OUR membership (that is the peer's row, reported by `peers`).
+
+    The remedies name what actually works. `lop network trust <net> --active`
+    re-admits a network marked UNTRUSTED after a panic — it is the documented path
+    for that state and it is NOT a way to restore a member that was removed: the
+    removed id is burned on every device that saw the rotation (``removed_ids``,
+    §4.2, "forever"), so a fresh invite cannot revive it either. Measured in round
+    4: `member rm` → `trust --active` → invite → join is still refused
+    `device_id_conflict`; `identity rotate` + a fresh invite is admitted.
+    """
+    self_row = record.self_member()
+    removed = record.self_device_id in record.removed_ids or (
+        self_row is not None and not self_row.active
+    )
+    if removed:
+        by = self_row.removed_by if self_row is not None else ""
+        who = ""
+        if by:
+            remover = record.member(by)
+            who = f" (removed by {remover.name if remover else by})"
+        return {
+            "state": "removed",
+            "removed_by": by,
+            "removed_at": self_row.removed_at if self_row is not None else 0.0,
+            "sentence": f"this device is no longer a member of {record.name}{who}",
+            "remedies": [
+                "re-join with a FRESH identity: `lop network identity rotate` on this "
+                "device, then `lop network join` with a new invite from an admin — the "
+                "removed id is burned on every device that saw the rotation, so no "
+                "invite revives it",
+                "`lop network trust <network> --active` is for a DIFFERENT state — a "
+                "network marked untrusted after a panic — and does not restore a "
+                "removed member",
+            ],
+        }
+    if record.stale == "refused_by_peers":
+        return {
+            "state": "refused",
+            "removed_by": "",
+            "removed_at": 0.0,
+            "sentence": (
+                f"peers are refusing this device's handshakes into {record.name}: every "
+                "attempt reaches the peer and is closed during the handshake with no "
+                "reason given, which is what this protocol's silent refusal looks like"
+            ),
+            "remedies": [
+                "if an admin removed this device, re-join with a fresh identity "
+                "(`lop network identity rotate`, then a new invite): a removed id "
+                "cannot be re-admitted",
+                "if the network was marked untrusted after a panic, an admin re-admits "
+                "everyone with `lop network trust <network> --active`",
+            ],
+        }
+    if record.trust != "active":
+        return {
+            "state": str(record.trust),
+            "removed_by": "",
+            "removed_at": 0.0,
+            "sentence": f"this device has {record.trust} {record.name}",
+            "remedies": (
+                [f"re-admit it with `lop network trust {record.name} --active`"]
+                if record.trust == "untrusted"
+                else ["join it again with a fresh invite"]
+            ),
+        }
+    return {
+        "state": "active",
+        "removed_by": "",
+        "removed_at": 0.0,
+        "sentence": f"this device is an active member of {record.name}",
+        "remedies": [],
+    }
+
+
 def _record_with(record: NetworkRecord, rows: list[MemberRecord]) -> NetworkRecord:
     """A shallow copy of ``record`` carrying ``rows`` — for digest computation only."""
     clone = NetworkRecord(
@@ -883,16 +1111,39 @@ def _record_with(record: NetworkRecord, rows: list[MemberRecord]) -> NetworkReco
     return clone
 
 
-def _members_inconsistent(rows: list[MemberRecord], *, self_device_id: str) -> str:
-    """The consistency rules a received member list must satisfy, as a reason code."""
+def _members_inconsistent(
+    rows: list[MemberRecord], *, self_device_id: str, expect_self_active: bool = True
+) -> str:
+    """The consistency rules a received member list must satisfy, as a reason code.
+
+    ``expect_self_active`` is FALSE FOR EXACTLY ONE FRAME: the rotation that removes
+    THIS device. The rule below exists so a peer cannot quietly age us out of our own
+    network with a member list that simply omits us — but the frame that removes us
+    says so OUT LOUD, in its own ``removed`` array, signed by the rotation's initiator
+    with a matching ``rotation_id`` and digest, and it necessarily carries our row as
+    a tombstone rather than an active member. Requiring the active row there made the
+    removal frame unappliable BY THE ONE DEVICE IT WAS ADDRESSED TO: the removed
+    device refused it as `self_absent_from_members` and kept reporting its old epoch,
+    its old member list and `trust: active` while every attempt to reach the network
+    failed as a transport error (QA round 3, Q-R3-2, measured on the wire: the
+    removing device's audit shows `not_a_member` and the removed device's own record
+    shows nothing at all).
+
+    The exemption is narrow on purpose — it is granted only when this device's id is
+    named in the frame's ``removed`` list, never to a frame that merely drops us —
+    and every other rule still applies to that frame: the sender is an active member,
+    the epoch is strictly greater, the rotation is attributed to the sender, the rows
+    are internally consistent and the digest matches (§8.1 step 4).
+    """
     ids = [row.device_id for row in rows]
     if len(ids) != len(set(ids)):
         return "duplicate_member_ids"
-    mine = [row for row in rows if row.device_id == self_device_id]
-    if not mine or not mine[0].active:
-        # A list that does not contain us as an active member is either a mistake
-        # or an attempt to age us out of our own network; both are refusals.
-        return "self_absent_from_members"
+    if expect_self_active:
+        mine = [row for row in rows if row.device_id == self_device_id]
+        if not mine or not mine[0].active:
+            # A list that does not contain us as an active member is either a mistake
+            # or an attempt to age us out of our own network; both are refusals.
+            return "self_absent_from_members"
     for row in rows:
         if not row.public_key:
             return "member_without_key"
@@ -942,6 +1193,48 @@ def leave(
     if persist:
         store.save(record, root)
     return member
+
+
+def membership_marker(row: dict[str, Any]) -> str:
+    """The short suffix a listing puts after a member count, so the count is never bare.
+
+    A COUNT WITHOUT ITS PROVENANCE IS THE DEFECT (QA round 3, Q-R2-1): ``3 member(s)``
+    was printed by a device that held a four-member table's worth of evidence to the
+    contrary and had asked nobody. A one-member network has nobody to ask and gets no
+    marker; every other row says how many peers answered, or that none did. ONE OWNER,
+    because the CLI and the agent's own tool render this line from the same JSON and a
+    second copy would be free to disagree about what "verified" means.
+    """
+    if int(row.get("members") or 0) <= 1:
+        return ""
+    table = (row.get("membership") or {}).get("table") or {}
+    answered = len(table.get("answered") or [])
+    pending = len(table.get("not_answered") or [])
+    if table.get("complete"):
+        return f"  [members verified with all {answered} peer(s)]"
+    if answered:
+        return f"  [members verified with {answered} of {answered + pending} peer(s)]"
+    states = ", ".join(
+        f"{item.get('device_id')} ({item.get('reason')})"
+        for item in (table.get("not_answered") or [])
+    )
+    return f"  [members NOT verified: no peer answered{': ' + states if states else ''}]"
+
+
+def membership_lines(row: dict[str, Any]) -> list[str]:
+    """The lines a surface prints when THIS device's own standing is not `active`.
+
+    ``trust: active`` beside a network that cannot be reached was the shape an
+    operator could not act on (QA round 3, Q-R3-2), so the state is stated, with the
+    remedies the code actually supports — :func:`membership_state` owns that
+    reasoning, and this renders it for every surface rather than one.
+    """
+    membership = row.get("membership") or {}
+    if membership.get("state", "active") == "active":
+        return []
+    lines = [f"  this device: {membership.get('sentence')}"]
+    lines.extend(f"    - {remedy}" for remedy in membership.get("remedies") or [])
+    return lines
 
 
 def announce_identity_rotation(
@@ -1360,6 +1653,16 @@ class PeerLink:
         self.opened_at = time.time()
         self.last_frame_at = time.time()
         self.frames_in = 0
+        #: When this link last ANSWERED a member-table pull (`net_member_list`).
+        #: Zero means "never", and it is the whole of the due-gate in
+        #: :meth:`RelayServer.refresh_membership`: membership is re-read on a
+        #: SCHEDULE per link rather than at establishment only, because a healthy
+        #: pair keeps its link open indefinitely and establishment therefore never
+        #: comes round again (QA round 3, Q-R2-1).
+        self.member_pulled_at = 0.0
+        #: The device ids the last table pull ADDED, so a refresh pass can report
+        #: what it learned rather than only that it asked.
+        self.member_pull_added: list[str] = []
         #: Replies that matched no waiter — a late answer to a timed-out request, or a
         #: peer answering something nobody asked. Counted, never logged per frame (A7);
         #: see the drop path in ``_handle`` for why it must not be dispatched.
@@ -1372,6 +1675,11 @@ class PeerLink:
         self._droppable: dict[str, dict[str, Any]] = {}
         self._droppable_lock = threading.Lock()
         self._wake = threading.Event()
+        # THE CLOSE HANDSHAKE (see :meth:`close`): ``_flushing`` asks the writer to
+        # finish what is queued, and ``_flushed`` is the writer's answer that both
+        # queues are empty and on the wire.
+        self._flushing = threading.Event()
+        self._flushed = threading.Event()
         self._reader: threading.Thread | None = None
         self._writer: threading.Thread | None = None
         self._context = LinkContext(
@@ -1449,11 +1757,34 @@ class PeerLink:
                     # ack or rotation is a state divergence, not a stale repaint.
                     return False
 
-    def close(self, reason: str = "we-closed") -> None:
+    def close(self, reason: str = "we-closed", *, flush_s: float = CLOSE_FLUSH_S) -> None:
+        """Close the link — AFTER handing the writer what is already queued.
+
+        ``send`` is asynchronous on purpose (a producer must not block on a peer's
+        socket), and the write loop drains the queue on its own schedule. Closing the
+        socket therefore used to DISCARD whatever was still queued, and the two frames
+        that matter most are exactly the ones sent immediately before a close: the
+        ``net_epoch`` rotation that ``_rehandshake_network`` pushes down every link to
+        change keys, and the ``net_bye`` queued a line above the close it announces.
+        Measured: a rotation to epoch 2 never reached the peer over a live link with
+        no delay inserted, and DID reach it (and was then refused by the epoch gate —
+        the separate defect in ``authorizer._check_epoch``) once the close was delayed
+        by a second. Losing a rotation is losing the only signal that revokes a
+        device's authority, one level below the bug that was being chased.
+
+        So the close asks the writer to finish first, bounded: the handshake is an
+        event pair the writer answers when both queues are empty (the frames are
+        written synchronously by then, so "empty" means "on the wire"), and a wedged
+        or dead writer cannot hold the close past ``flush_s``. A link whose peer is
+        gone blocks in ``sendall`` for at most that same bound.
+        """
         if self._closed.is_set():
             return
-        self._closed.set()
+        self._flushing.set()
         self._wake.set()
+        self._flushed.wait(flush_s)
+        self._closed.set()
+        self._flushing.clear()
         try:
             self.sock.shutdown(socket.SHUT_RDWR)
         except OSError:
@@ -1540,7 +1871,19 @@ class PeerLink:
         try:
             while not self._closed.is_set():
                 sent = self._drain()
+                if self._flushing.is_set() and self._reliable.empty() and not self._droppable:
+                    # BOTH QUEUES EMPTY AND DRAINED BY THIS THREAD: everything a
+                    # closing caller queued has been written, which is what
+                    # :meth:`close` is waiting for. Checked HERE rather than in the
+                    # producer because "written" is only knowable on this side.
+                    self._flushed.set()
                 if sent:
+                    continue
+                if self._flushing.is_set():
+                    # Do not emit a keepalive into a link that is closing: it would be
+                    # a frame the peer reads after the peer's own close attempt.
+                    self._wake.wait(timeout=0.02)
+                    self._wake.clear()
                     continue
                 # Keepalive on an idle link; the reader enforces the other half
                 # (``link_idle_s`` without a frame closes it).
@@ -1550,7 +1893,7 @@ class PeerLink:
                 self._wake.wait(timeout=0.5)
                 self._wake.clear()
         except (OSError, wire.LinkCryptoError):
-            self.close("error")
+            self.close("error", flush_s=0.0)
 
     def _drain(self) -> bool:
         wrote = False
@@ -1823,6 +2166,11 @@ class RelayServer:
             (self._accept_loop, "mesh-accept"),
             (self._control_loop, "mesh-control"),
             (self._heartbeat_loop, "mesh-heartbeat"),
+            # MEMBERSHIP CONVERGES ON ITS OWN CLOCK, not on a link being established
+            # and not on someone running a listing: a member nobody lists is still a
+            # member, and a healthy pair holds its link open forever, so there is no
+            # "next contact" to hang the refresh on (Q-R2-1, QA round 3).
+            (self._membership_loop, "mesh-membership"),
         ):
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
@@ -1949,20 +2297,26 @@ class RelayServer:
 
     # -- membership at rest, and the one read that keeps it current ---------
 
-    def _pull_members(self, link: "PeerLink") -> bool:
+    def _pull_members(self, link: "PeerLink") -> str:
         """Learn the member table from a peer, WITHOUT ever failing the caller.
 
-        This runs inside ``dial`` and ``register_link`` — the two places a link is
-        established — so an exception escaping it would be reported as "the link
-        failed" while the link is, in fact, up and started. A stale table is the
-        state this exists to improve on; it is not a reason to drop a good link.
+        Returns the empty string when the peer ANSWERED (whether or not its table
+        told us anything new) and a short reason when it did not. The distinction
+        is the whole of the reporting contract downstream: "the peer answered with
+        the same table" is proof the table is current, and reporting it as a failure
+        would leave `ls` unable to say what its member count rests on.
+
+        This runs at link establishment AND from the refresh pass, so an exception
+        escaping it would be reported as "the link failed" while the link is, in
+        fact, up and started. A stale table is the state this exists to improve on;
+        it is not a reason to drop a good link.
         """
         try:
             return self._learn_members_from(link)
         except Exception:  # noqa: BLE001 — see the docstring: never fails its caller
-            return False
+            return "error"
 
-    def _learn_members_from(self, link: "PeerLink") -> bool:
+    def _learn_members_from(self, link: "PeerLink") -> str:
         """The pull itself: ask, merge, persist, audit. See :meth:`_pull_members`.
 
         THE WIRE HAS EXACTLY ONE MEMBERSHIP READ (``net_member_list``, §6.4) and
@@ -1974,27 +2328,34 @@ class RelayServer:
         the normal history of a mesh (QA round 2, Q-R2-1: `members: 2` on the
         device that had joined first against `3` on both others).
 
-        Contact is what re-evaluates membership (§8.4), and a link IS contact, so
-        this runs at link establishment on BOTH ends: whichever side dialled,
-        each side learns the other's table. It is best effort by construction —
-        an older peer answers ``unknown op``, a peer that has gone quiet costs
-        one op wait and nothing else — because a membership refresh that could
-        fail a link would be a worse bug than the stale table it fixes.
+        Contact is what re-evaluates membership (§8.4), and a link IS contact —
+        but contact does not only mean ESTABLISHMENT: a healthy pair keeps its link
+        open indefinitely, so "on the next contact" never arrives and a table can
+        stay stale for the life of the link (QA round 3). What makes this converge
+        is the schedule in :meth:`refresh_membership`; this method is the read, and
+        the read TRANSFERS the table transitively — ``adopt_members`` merges the
+        peer's whole member list, so a device one hop from a newcomer learns it
+        from a device two hops away with no link to the newcomer at all.
+
+        It is best effort by construction — an older peer answers ``unknown op``, a
+        peer that has gone quiet costs one op wait and nothing else — because a
+        membership refresh that could fail a link would be a worse bug than the
+        stale table it fixes.
         """
         if not link.alive:
-            return False
+            return "link_down"
         reply = link.request(
             {"op": "net_member_list", "req": self._next_relay_req(), "locality": "remote"},
-            timeout=self.settings.op_wait_s,
+            timeout=MEMBERSHIP_PULL_TIMEOUT_S,
         )
-        if reply is None or reply.get("op") != "ack":
-            return False
+        if reply is None:
+            return "no_answer"
+        if reply.get("op") != "ack":
+            return str(reply.get("code") or reply.get("op") or "refused")
         detail = reply.get("detail")
-        if not isinstance(detail, dict):
-            return False
-        rows = detail.get("members")
-        if not isinstance(rows, list):
-            return False
+        if not isinstance(detail, dict) or not isinstance(detail.get("members"), list):
+            return "bad_answer"
+        rows = detail["members"]
         record = next(
             (
                 item
@@ -2004,10 +2365,15 @@ class RelayServer:
             None,
         )
         if record is None:
-            return False
+            return "unknown_network"
+        # STAMPED BEFORE THE MERGE, and stamped on an answer that changed nothing:
+        # the stamp is evidence that this peer's TABLE answered, not that its table
+        # differed, and the reporting surfaces read it as exactly that.
+        link.member_pulled_at = time.time()
         changed, added = adopt_members(record, rows)
+        link.member_pull_added = list(added)
         if not changed:
-            return False
+            return ""
         store.save(record, self.root)
         self.audit.record(
             AuditEvent(
@@ -2025,18 +2391,100 @@ class RelayServer:
                 },
             )
         )
-        return True
+        return ""
 
-    def contact_peers(self, *, budget_s: float | None = LISTING_PROBE_BUDGET_S) -> None:
-        """Contact every peer once, within ``budget_s``, to refresh the member table.
+    def refresh_membership(self, *, budget_s: float | None = None) -> dict[str, MembershipReport]:
+        """Re-pull the member table from every LIVE link whose pull is DUE.
 
-        Called before a surface REPORTS membership (``net_show``, ``net_ls``). A
-        member table is a distributed fact, and a report built from the local
-        snapshot alone is how a device that joined earlier never learns about a
-        newcomer (Q-R2-1). The refresh itself happens in ``_pull_members`` at link
-        establishment — this only forces the contact, so a command that reports
-        membership is never answered from a snapshot that another member has
-        already made stale.
+        THE BLOCKER THIS CLOSES (QA rounds 2 and 3, Q-R2-1). Membership convergence
+        may not depend on which links happen to exist, on which link was established
+        last, or on an operator touching a surface. So the trigger is a per-link
+        SCHEDULE — every link answers a table pull again once
+        :data:`MEMBERSHIP_PULL_MIN_INTERVAL_S` has passed — and it runs with no
+        surface involved (:meth:`_membership_loop`), which is what lets a mesh
+        converge with nothing restarted. `show`/`ls`/`peers` also force a refresh
+        before they report (:meth:`contact_peers`), so a command answers with the
+        table it can vouch for rather than the one it happens to hold.
+
+        NO DIALS HERE. This walks the links that exist; the surfaces' own contact
+        path is what dials. That split is deliberate: a link held by a dial-only
+        device is the only route to it, and re-pulling over it needs no address at
+        all — the device behind a NAT is exactly the one whose table nobody can
+        fetch by dialling.
+
+        Returns one :class:`MembershipReport` per network, which is what the
+        reporting surfaces attach to a member count; that return value is the only
+        reason a caller can say not just how many members it holds but how many
+        peers agreed. Best effort and bounded: it never raises, and a peer that does
+        not answer costs its op wait and nothing else.
+        """
+        deadline = None if budget_s is None else time.monotonic() + budget_s
+        now = time.time()
+        reports: dict[str, MembershipReport] = {}
+        for record in store.list_networks(self.root):
+            report = MembershipReport(network_id=record.network_id, refreshed_at=now)
+            for member in record.active_members():
+                if member.device_id == record.self_device_id:
+                    continue
+                link = self._link_for(member.device_id)
+                if link is None or not link.alive:
+                    report.silent.append(
+                        {"device_id": member.device_id, "reason": "no_live_link"}
+                    )
+                    continue
+                age = now - link.member_pulled_at
+                if age < MEMBERSHIP_PULL_MIN_INTERVAL_S:
+                    # AN ANSWER INSIDE THE CADENCE IS STILL EVIDENCE. Skipping the ask
+                    # must not turn into "no peer answered": a `show` one second after
+                    # a refresh would otherwise claim the table was never checked
+                    # while holding an answer that is one second old. The age is
+                    # reported, so nothing is implied to be fresher than it is.
+                    report.answered.append(member.device_id)
+                    report.answer_ages.append(max(0.0, age))
+                    report.not_due.append(
+                        {"device_id": member.device_id, "age_s": round(max(0.0, age), 3)}
+                    )
+                    continue
+                if deadline is not None and time.monotonic() >= deadline:
+                    report.silent.append(
+                        {
+                            "device_id": member.device_id,
+                            "reason": (
+                                "not_asked: the refresh budget ran out before "
+                                "this peer's turn"
+                            ),
+                        }
+                    )
+                    continue
+                reason = self._pull_members(link)
+                if reason:
+                    report.silent.append(
+                        {"device_id": member.device_id, "reason": f"no_table:{reason}"}
+                    )
+                    continue
+                report.learned.extend(link.member_pull_added)
+                age = time.time() - link.member_pulled_at
+                report.answered.append(member.device_id)
+                report.answer_ages.append(max(0.0, age))
+            reports[record.network_id] = report
+        return reports
+
+    def contact_peers(
+        self, *, budget_s: float | None = LISTING_PROBE_BUDGET_S
+    ) -> dict[str, MembershipReport]:
+        """Contact every peer once, within ``budget_s``, and refresh the table.
+
+        Called before a surface REPORTS membership (``net_show``, ``net_ls``,
+        ``network_detail``, ``federated_rows``). A member table is a distributed
+        fact, and a report built from the local snapshot alone is how a device that
+        joined earlier never learns about a newcomer (Q-R2-1).
+
+        TWO STEPS PER MEMBER, and the second is the one round 2's fix was missing:
+        dial the member (which is what makes an unreachable one show up as
+        unreachable rather than absent), and then RE-PULL over the link that exists —
+        including a link that was established long ago, because
+        ``_ensure_link_with_reason`` returns an existing link untouched and the
+        pull it used to rely on therefore never ran again.
 
         Best effort and bounded: an unreachable peer costs its probe budget and
         contributes nothing, exactly as it does in ``peer_status``. It CANNOT raise:
@@ -2053,11 +2501,34 @@ class RelayServer:
                     continue
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
-                    return
+                    break
                 try:
                     self._ensure_link_with_reason(member.device_id, probe_timeout_s=remaining)
                 except Exception:  # noqa: BLE001 — see the docstring: never fails its caller
                     continue
+        return self.refresh_membership(
+            budget_s=None if deadline is None else max(0.0, deadline - time.monotonic())
+        )
+
+    def _membership_loop(self) -> None:
+        """The scheduled half of membership convergence, with no surface involved.
+
+        A CADENCE ON A LISTING IS NOT CONVERGENCE: a member that nobody lists is
+        still a member, and the round-3 watch showed a listing-driven refresh that
+        only ran at link establishment leave four devices disagreeing for minutes
+        (Q-R2-1). This pass exists so the table converges on its own, the way the
+        heartbeat already republishes the relay record for the same reason.
+
+        The interval is :data:`MEMBERSHIP_PULL_PASS_S` and the per-link gate is
+        :data:`MEMBERSHIP_PULL_MIN_INTERVAL_S`, so the traffic is bounded per link
+        whatever a mesh's diameter is. Every failure is swallowed and retried on the
+        next pass: one unreachable peer must never be able to stop a relay's clock.
+        """
+        while not self._stop.wait(MEMBERSHIP_PULL_PASS_S):
+            try:
+                self.refresh_membership()
+            except Exception:  # noqa: BLE001 — a refresh must never kill the loop
+                continue
 
     def peer_record(self) -> PeerRecord:
         networks = []
@@ -2363,6 +2834,10 @@ class RelayServer:
         )
         if record is not None:
             self._note_peer_endpoints(record, result.peer_device_id, handshake.peer_endpoints)
+            # The LISTENER's half of "a completed handshake clears the refusal mark":
+            # this device did not dial, so nothing else here would notice that a peer
+            # is talking to it again (see `_clear_refusal_mark`).
+            self._clear_refusal_mark(record)
         self.audit.record(
             AuditEvent(
                 event="link_opened",
@@ -4094,12 +4569,12 @@ class RelayServer:
             # devices already in the network were told nothing, so a member
             # admitted later stays invisible to them forever (Q-R2-1). There is no
             # membership PUSH on the wire (§6.4 has one membership read,
-            # `net_member_list`), so the delivery is a contact: this device dials
-            # each peer it can reach, and the peer's own end of that link pulls
-            # the current table from here (`_pull_members`, called by
-            # `register_link` on their side). Bounded and best effort — a peer
-            # this device cannot dial is one that will pull when it next
-            # contacts, which is the honest limit of a dial-only member.
+            # `net_member_list`), so the delivery is a contact: this device makes
+            # one, and every live link — INCLUDING the links that were already up
+            # before this admission — re-pulls the table from here
+            # (`refresh_membership`). Bounded and best effort: a peer this device
+            # cannot dial is one that will pull when it next contacts, which is the
+            # honest limit of a dial-only member.
             self.contact_peers()
         except (MeshRefusal, wire.LinkCryptoError, OSError) as exc:
             reason = getattr(exc, "code", "error")
@@ -4107,7 +4582,19 @@ class RelayServer:
                 if record is not None and acquire_invite(record, invite_id):
                     consume(record, invite_id, outcome=reason)
                     store.save(record, self.root)
-                sock.sendall(codec.seal(pair_abort_frame(req=0, reason=reason)))
+                # THE REFUSING DEVICE'S OWN SENTENCE GOES WITH THE CODE. It is the
+                # only place the joiner can learn WHICH id was refused and what to do
+                # about it: `device_id_conflict` alone is a dead end, and this is the
+                # line where that explanation used to be dropped (Q-R3-3).
+                sock.sendall(
+                    codec.seal(
+                        pair_abort_frame(
+                            req=0,
+                            reason=reason,
+                            detail=getattr(exc, "sentence", "") or str(exc),
+                        )
+                    )
+                )
             except OSError:
                 pass
             self.audit.record(
@@ -4316,8 +4803,10 @@ class RelayServer:
             self._note_peer_endpoints(record, result.peer_device_id, handshake.peer_endpoints)
             # CONTACT RE-EVALUATES MEMBERSHIP (§8.4). A link is the one moment both
             # ends are known to be up, and the member table is a distributed fact
-            # the local record can hold a stale snapshot of (Q-R2-1).
+            # the local record can hold a stale snapshot of (Q-R2-1). The stamp on
+            # the link is what `refresh_membership` reads to decide what is due.
             self._pull_members(link)
+            self._clear_refusal_mark(record)
             return link, "ok"
         except MeshRefusal as refusal:
             _close_quietly(sock)
@@ -4325,7 +4814,82 @@ class RelayServer:
             return None, refusal.code
         except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
             _close_quietly(sock)
-            return None, f"handshake_failed:{exc.__class__.__name__}"
+            self._note_refused_handshake(record, host, mode)
+            return None, f"handshake_refused:{exc.__class__.__name__}"
+
+    def _clear_refusal_mark(self, record: NetworkRecord) -> None:
+        """A COMPLETED handshake clears a ``refused_by_peers`` mark.
+
+        The mark says "peers refused this device"; the moment a peer accepts it,
+        that sentence is no longer true and leaving it up would turn a transient
+        into a permanent accusation — the same dead-instrument failure as asserting
+        a state nobody re-checked (Q-R2-6). The refusal path sets it
+        (:meth:`_note_refused_handshake`) and every successful handshake, in either
+        direction, clears it here: one writer for each transition.
+        """
+        if record.stale != "refused_by_peers":
+            return
+        record.stale = ""
+        store.save(record, self.root)
+
+    def _note_refused_handshake(
+        self, record: NetworkRecord, host: str, mode: str
+    ) -> None:
+        """Name a peer's SILENT refusal of this device's handshake, LOCALLY.
+
+        THE REFUSAL IS SILENT BY DESIGN AND THAT LEFT THIS DEVICE WITHOUT A CLUE. A
+        listener that explains every refusal is an oracle — it would tell a stranger
+        which tokens are real and which device ids exist — so every refusal closes
+        the socket with no reply frame (``_audit_handshake_refusal``, §5.2). The
+        cost of that trade was paid entirely on the refused side: the connection had
+        been ACCEPTED (so this is not ``connect_failed:*``), the handshake was cut
+        mid-way, and the only thing this device could say about the network it
+        belongs to was ``handshake_failed:ConnectionError`` beside a full member list
+        and ``trust: active``. An operator cannot act on a transport error, and QA
+        round 3 (Q-R3-2) found exactly that on a device that had just been removed:
+        its own audit held nothing at all about the removal, and its own surface
+        described a healthy four-member mesh.
+
+        So the LOCAL facts are written down and said out loud. Two of them:
+
+        * the audit gains ``handshake_refused`` with the code
+          ``peer_closed_silently`` — what was observed, in the words of what was
+          observed, so a reviewer is not told a cause nobody established;
+        * the network is marked ``stale: refused_by_peers`` — the design's own
+          value for this state (§8.3: "its copy of the network is then marked
+          ``stale: refused_by_peers`` so ``lop network ls`` says something true"),
+          which is what makes every surface report the refusal instead of the
+          member list it holds. ``membership_state`` turns that into the sentence a
+          person reads, remedies included.
+
+        WHAT THIS DELIBERATELY DOES NOT CLAIM: which of the three states that look
+        like this it is. A removed device, a network marked untrusted after a panic,
+        and a member whose epoch is behind all refuse this way, and the wire cannot
+        tell them apart — that is the same silence, one level up. The sentence names
+        all three and the remedies name the two that have one; claiming the removal
+        would be the dead-instrument failure this repository has a section about.
+
+        It is cleared on the next successful handshake (:meth:`dial`), so a peer that
+        restarted mid-handshake does not leave a permanent mark.
+        """
+        self.audit.record(
+            AuditEvent(
+                event="handshake_refused",
+                actor="unknown",
+                subject=host,
+                outcome="refused",
+                network_id=record.network_id,
+                cause="auth_failed",
+                detail={
+                    "cause": "peer_closed_silently",
+                    "their_device": host,
+                    "mode": mode or "member",
+                },
+            )
+        )
+        if record.stale != "refused_by_peers":
+            record.stale = "refused_by_peers"
+            store.save(record, self.root)
 
     def _rehandshake_network(self, network_id: str, *, reason: str) -> None:
         """Close and redial every live link at the new epoch.
@@ -4510,10 +5074,15 @@ class RelayServer:
 
         Contacts peers first, for the same reason ``network_detail`` does: "how
         many members" is a distributed fact and the local record is only a
-        snapshot of it, taken when this device joined (Q-R2-1).
+        snapshot of it, taken when this device joined (Q-R2-1). The refresh's own
+        result travels with the rows, so the count and its provenance cannot be
+        separated by a consumer that only reads the number.
         """
-        self.contact_peers()
-        return [self.network_summary(record) for record in store.list_networks(self.root)]
+        reports = self.contact_peers()
+        return [
+            self.network_summary(record, report=reports.get(record.network_id))
+            for record in store.list_networks(self.root)
+        ]
 
     def _ctl_invite(self, frame: dict[str, Any]) -> dict[str, Any]:
         record = self._require_network(str(frame.get("network") or ""))
@@ -4964,6 +5533,12 @@ class RelayServer:
         two fields §9.2 pins. The MERGE is by construction here rather than by a
         client comparison: a row is filed under the device that answered for it,
         so no surface has to infer remoteness from an id's shape.
+
+        THE PEER SET IS REFRESHED FIRST, because a merge over a stale table
+        silently omits a device and its sessions: `--all-peers` returning three of
+        four peers as though that were the network is worse than an error, since an
+        operator acts on it (Q-R2-1). The refresh is also what the ``membership``
+        block reports, so the answer says how many peers agreed with the set.
         """
         rows: list[dict[str, Any]] = []
         for row in self.local_session_rows():
@@ -4971,12 +5546,21 @@ class RelayServer:
             item["locality"] = "local"
             item["peer"] = None
             rows.append(item)
+        # REFRESH OVER THE LINKS THAT EXIST, then let the fan-out dial (`_fan_out_catalog`
+        # already probes every member it knows). One dial budget per listing: a listing
+        # that both refreshed by dialling AND fanned out by dialling would pay the
+        # probe budget twice for one answer.
+        reports = self.refresh_membership()
         peers, sessions = self._fan_out_catalog()
         rows.extend(sessions)
         return {
             "ok": True,
             "sessions": rows,
             "peers": peers,
+            "membership": {
+                network_id: report.to_json()
+                for network_id, report in sorted(reports.items())
+            },
             "device_id": self.identity.device_id,
             "device_name": self.identity.name,
         }
@@ -5005,12 +5589,44 @@ class RelayServer:
 
     # -- reporting ----------------------------------------------------------
 
-    def network_summary(self, record: NetworkRecord) -> dict[str, Any]:
+    def network_summary(
+        self, record: NetworkRecord, *, report: MembershipReport | None = None
+    ) -> dict[str, Any]:
+        """One network's row, with what the member count RESTS ON.
+
+        ``report`` is the refresh that just ran (:meth:`contact_peers`); when a
+        caller has one it is attached, so no surface has to say "3 member(s)" on
+        its own authority. ``membership_state`` is this DEVICE's standing, which is
+        a different fact from any peer's reachability and is the one a removed
+        device's operator needs (Q-R3-2).
+        """
         links = [
             link
             for link in self.links.values()
             if link.network_id == record.network_id and link.alive
         ]
+        state = membership_state(record)
+        if report is not None:
+            state = {**state, "table": report.to_json()}
+            state["sentence"] = f"{state['sentence']}; {report.sentence()}"
+        else:
+            # NO REFRESH RAN, so no peer was asked, and the row says exactly that
+            # instead of leaving a bare count to be read as authoritative — the
+            # failure QA named separately from the convergence bug itself.
+            state = {
+                **state,
+                "table": {
+                    "complete": False,
+                    "answered": [],
+                    "not_answered": [],
+                    "oldest_answer_age_s": None,
+                    "learned": [],
+                    "sentence": (
+                        "members NOT verified: this row is the local table and no peer "
+                        "was asked for its own"
+                    ),
+                },
+            }
         return {
             "network_id": record.network_id,
             "name": record.name,
@@ -5022,6 +5638,8 @@ class RelayServer:
             "links": len(links),
             "stale": record.stale,
             "self_device_id": record.self_device_id,
+            "membership_state": state["state"],
+            "membership": state,
         }
 
     def network_detail(self, target: str) -> dict[str, Any]:
@@ -5029,9 +5647,12 @@ class RelayServer:
         # MEMBERSHIP IS A DISTRIBUTED FACT, so a report about it contacts the other
         # members first (Q-R2-1). This command is where the stale snapshot was
         # measured, and answering it from the local record alone is what made a
-        # third member invisible to a device that had joined earlier.
-        self.contact_peers()
-        base = self.network_summary(record)
+        # third member invisible to a device that had joined earlier. The refresh
+        # RE-PULLS over links that already exist (`refresh_membership`), which is
+        # the half round 2's fix was missing: a healthy pair never establishes its
+        # link twice, so "on the next contact" never arrived.
+        reports = self.contact_peers()
+        base = self.network_summary(record, report=reports.get(record.network_id))
         # ONE DIGEST PER TABLE, and the SAME one the wire carries: `net_member_list`
         # and the admission frame both send `members_digest`, so two devices
         # comparing their `show` output can tell "same members" from "same count".
@@ -5169,6 +5790,25 @@ class RelayServer:
                         "network_id": record.network_id,
                         "ok": False,
                         "detail": record.stale,
+                    }
+                )
+            # THIS DEVICE'S OWN STANDING, in words and with a code, because
+            # ``refused_by_peers`` alone was the whole of what a removed device
+            # could find: its own surface had no check that named the removal, so
+            # `doctor` reported `unhealthy` about a per-endpoint list and left the
+            # operator to guess (Q-R3-2). Absent on a healthy device — a check that
+            # can only ever pass is noise, and the point of a diagnostic is that its
+            # rows mean something.
+            standing = membership_state(record)
+            if standing["state"] != "active":
+                findings.append(
+                    {
+                        "check": "membership",
+                        "network_id": record.network_id,
+                        "ok": False,
+                        "code": standing["state"],
+                        "detail": standing["sentence"],
+                        "remedies": standing["remedies"],
                     }
                 )
             for member in record.active_members():
@@ -5824,13 +6464,40 @@ def health(timeout: float = 3.0) -> dict[str, Any] | None:
 
 
 def status(port: int = DEFAULT_PORT) -> dict[str, Any]:
-    """What a human needs: is it installed, is it running, what does it see."""
-    record = store.find_own_relay()
+    """What a human needs: is it installed, is it running, what does it see.
+
+    ONE ANSWER PER FACT, AND NO FIELD CONTRADICTS ANOTHER. This payload used to
+    derive ``relay_running`` from the CONTROL SOCKET alone while deriving
+    ``record`` from the record's liveness, so a relay whose process was alive but
+    whose socket did not answer this probe (SIGSTOP is the clean way to make one)
+    produced ``"relay_running": false`` in a payload whose own ``record`` block
+    carried ``"pid": 21094`` — a diagnostic contradicting itself in the one place
+    an operator looks first (QA round 3, Q-R3-4).
+
+    So the record AND its verdict are read together (:func:`store.scan_own_relay`,
+    which reports ``live`` and ``wedged`` — a wedged relay is a RUNNING process
+    whose owner has not reported recently, never proof it is dead), the answer to
+    "did it reply" is its own field, and ``relay_running`` is the union:
+
+    * ``relay_running`` — a process of ours exists (a live record, or something that
+      answered). True beside a pid, and only true when there is a process;
+    * ``relay_answering`` — its control socket answered THIS probe;
+    * ``relay_state`` — ``live`` (alive and reporting), ``wedged`` (alive, not
+      reporting), ``stopped`` (no process).
+
+    A wedged relay therefore reads ``running: true, answering: false, state:
+    "wedged"``, which is what it is: the remedy is ``kill -CONT``/a restart, not
+    "start it".
+    """
+    record, state = store.scan_own_relay()
     live = health()
+    running = live is not None or state in ("live", "wedged")
     return {
         "installed": plist_path().exists(),
         "supported": is_supported(),
-        "relay_running": live is not None,
+        "relay_running": running,
+        "relay_answering": live is not None,
+        "relay_state": state if running else "stopped",
         "relay": live,
         "record": record.to_json() if record is not None else None,
         "port": port,

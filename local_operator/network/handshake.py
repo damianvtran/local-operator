@@ -889,8 +889,25 @@ def pair_ready_frame(*, req: int, typed_sas: str) -> dict[str, Any]:
     return {"op": "net_pair_ready", "req": req, "sas": typed_sas}
 
 
-def pair_abort_frame(*, req: int, reason: str) -> dict[str, Any]:
-    return {"op": "net_pair_abort", "req": req, "reason": reason}
+def pair_abort_frame(*, req: int, reason: str, detail: str = "") -> dict[str, Any]:
+    """The inviter's refusal of a pairing, with the SENTENCE it refused with.
+
+    ``reason`` is the machine code and stays the contract; ``detail`` is the refusing
+    device's own sentence, which is the only thing that can explain a refusal the
+    joiner cannot see the reason for. Without it every refusal read as
+    ``the pairing was refused (device_id_conflict)`` — a code with no remedy, on the
+    one screen where the operator has just done something and needs to know what to
+    do next (QA round 3, Q-R3-3: the admitting device's message named the burned id
+    and the remedy, and all of it was dropped one line before the wire).
+
+    Bounded, because this frame travels inside the handshake's line budget and a
+    sentence is not allowed to be the reason a link cannot open.
+    """
+    frame: dict[str, Any] = {"op": "net_pair_abort", "req": req, "reason": reason}
+    text = " ".join(str(detail or "").split())[:PAIR_ABORT_DETAIL_MAX]
+    if text:
+        frame["detail"] = text
+    return frame
 
 
 def pair_result_frame(
@@ -958,8 +975,73 @@ def pair_timeout_seconds(ttl_s: float) -> float:
     return min(ttl_s, PAIR_CONFIRM_TIMEOUT_S)
 
 
-def refusal_from_pairing(reason: str) -> PairingRefusal:
-    """Map a pair-phase abort reason onto a refusal a CLI can print."""
+#: How much of a refusing device's own sentence travels in ``net_pair_abort``. The
+#: frame is sealed inside the handshake's line budget, and a long explanation must
+#: never be the reason a pairing dial fails.
+PAIR_ABORT_DETAIL_MAX = 400
+
+#: What an operator can DO about each pairing refusal.
+#:
+#: A CODE IS NOT A REMEDY. ``device_id_conflict`` is the one that cost a round: the
+#: admitting device's own sentence named the burned id and the way out, the joiner was
+#: told the code and nothing else, and the way out that actually exists is not the one
+#: a reader would guess — a removed device's id is burned on every device that saw the
+#: rotation (``removed_ids``, §4.2) and NO invite revives it, while
+#: `lop network trust <net> --active` re-admits a network marked untrusted after a
+#: panic and does not restore a removed member. SAID HERE, once, next to the frame
+#: that carries the refusal, because a remedy three screens away from the error is a
+#: remedy nobody executes.
+PAIRING_REMEDIES: dict[str, str] = {
+    # THE ONE REMEDY AN OPERATOR GETS WRONG HERE, so it is stated and not implied: a
+    # burned id is not revived by anything on the admitting device, and the verb that
+    # LOOKS like the fix (`trust --active`) belongs to a different incident. Measured
+    # (QA round 3, Q-R3-3): the joiner was told `device_id_conflict` and nothing else,
+    # and a fresh invite plus `trust --active` is what an operator tries next.
+    "device_id_conflict": (
+        "a removed id is burned on every device that saw the rotation, so no invite "
+        "revives it — and `lop network trust <network> --active` does not restore a "
+        "removed member (it re-admits a NETWORK marked untrusted after a panic). The "
+        "way back is a new identity on this device: `lop network identity rotate "
+        "--json`, then a fresh invite"
+    ),
+    "invite_already_used": (
+        "mint a new one on a member of that network: `lop network invite --role drive --json`"
+    ),
+    "invite_in_use": (
+        "that token is being redeemed right now: wait for it to finish, or mint a fresh invite"
+    ),
+    "invite_epoch_stale": (
+        "the token predates the network's current epoch: mint a fresh invite on a member"
+    ),
+    "unknown_invite": (
+        "the device being dialled does not know this token: mint a fresh invite on it, or "
+        "dial the device that issued this one"
+    ),
+    "invite_device_mismatch": (
+        "the token is bound to another device id: mint an invite for THIS device, or use "
+        "the device it was bound to"
+    ),
+    "untrusted": (
+        "that device has marked the network untrusted: an admin runs "
+        "`lop network trust <network> --active` there"
+    ),
+    "sas_mismatch": (
+        "the two screens disagreed: start over with a fresh invite and compare the code "
+        "on both devices before typing"
+    ),
+    "declined_remote": "the other device declined: ask its operator",
+    "timeout": "run it again and answer the prompt on both devices",
+}
+
+
+def refusal_from_pairing(reason: str, *, detail: str = "") -> PairingRefusal:
+    """Map a pair-phase abort reason onto a refusal a CLI can print.
+
+    The sentence is composed from three things, in this order: what the refusing
+    device said (``detail``, the most specific fact available), the reason's own
+    sentence, and then the REMEDY — because a refusal an operator cannot act on is a
+    refusal that gets retried in the dark (Q-R3-3).
+    """
     sentences = {
         "sas_mismatch": sas_mismatch_sentence(),
         "declined_local": "this device declined the pairing",
@@ -968,7 +1050,17 @@ def refusal_from_pairing(reason: str) -> PairingRefusal:
         "invite_already_used": "that invite has already been used",
         "invite_in_use": "that invite is already being redeemed",
     }
-    return PairingRefusal(reason, sentences.get(reason, f"the pairing was refused ({reason})"))
+    remote = " ".join(str(detail or "").split())
+    base = sentences.get(reason) or (
+        f"the pairing was refused: {remote}" if remote else f"the pairing was refused ({reason})"
+    )
+    # The refusing device's own words are KEPT BESIDE the mapped sentence when both
+    # exist: they are the only place a joiner can learn which id or which device the
+    # refusal was about.
+    if remote and remote not in base:
+        base = f"{base} — {remote}"
+    remedy = PAIRING_REMEDIES.get(reason, "")
+    return PairingRefusal(reason, f"{base}. {remedy}" if remedy else base)
 
 
 def frame_size_ok(frame: dict[str, Any]) -> bool:
