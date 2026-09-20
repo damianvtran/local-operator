@@ -2,7 +2,7 @@
 
 Usage: python scripts/info_shot.py OUTDIR 100x30 [scenario]
   scenarios: populated | empty | degraded | nested | shadowed | loading
-             fleet | fleet-mixed | fleet-unread | fleet-update
+             fleet | fleet-mixed | fleet-unread | fleet-update | fleet-update-both
              today-quiet | race | one | one-older | queued-only | queued-many
 
 Every scenario feeds a hand-built :class:`InfoSnapshot` rather than the
@@ -430,6 +430,45 @@ def snapshot_for(scenario: str) -> InfoSnapshot | None:
                     SubagentLine(job_id="j3", label="qa-tester", status="queued", depth=0),
                 ),
             ),
+            captured_at=CAPTURED_AT,
+        )
+
+    if scenario == "fleet-update-both":
+        # ONE RECORD CARRYING BOTH FACTS, which is the state design review round 2 (D7)
+        # measured: a runtime that opened a window and then latched a drain. The meta
+        # ladder sheds whole items from the right, so the ORDER of the two facts is
+        # their ranking on a narrow frame — and the two renderings disagreed about it
+        # (the wide metas dropped the queued fact first while the shelf ranked it first).
+        # The pair is the real formatter's output, for the reason ``fleet-update`` gives.
+        from local_operator import buildwatch
+        from local_operator.update import BuildStamp
+
+        pair = buildwatch.update_pair_text(
+            BuildStamp(version="0.59.9", source_ref=""),
+            BuildStamp(version="0.59.11", source_ref="ead71b673a9a24e6925338bcb51315e0ac5d44f"),
+        )
+        lines = (
+            _session_line(4243, "Investigate request latency", is_self=True, busy=True),
+            _session_line(
+                4244,
+                "Window then drain",
+                updating=pair,
+                leaving="leaving for the build on disk when its turn ends",
+            ),
+            _session_line(4245, "Credential broker", busy=True),
+            _session_line(4246, "OSWorld benchmark", update_failed=pair),
+            _session_line(4247, "Add /move command"),
+        )
+        return InfoSnapshot(
+            install=_install(),
+            process=_process(),
+            sessions=SessionsInfo(
+                lines=lines,
+                total=len(lines),
+                live=len(lines),
+                busy=sum(1 for line in lines if line.busy),
+            ),
+            agents=AgentsInfo(profiles=20, teams=3),
             captured_at=CAPTURED_AT,
         )
 
