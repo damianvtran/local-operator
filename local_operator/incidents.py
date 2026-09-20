@@ -17,13 +17,13 @@ the texts come from every provider's error envelope and no taxonomy covers
 them all. Unknown is a valid answer — the raw text always rides along.
 
 It also carries the formatters for the other model-visible session records
-that are NOT classified failures — a credential change, a model switch, and
-an MCP recovery. Each has its own custom type and its own formatter for the
-same reason: running them through :func:`classify_incident` would attach a
-failure category and a "this is why the previous turn ended" tail to a
-message that is not about a failure at all.
+that are NOT classified failures — a credential change, a model switch, an MCP
+recovery, and an MCP server becoming unavailable. Each has its own custom type
+and its own formatter for the same reason: running them through
+:func:`classify_incident` would attach a failure category and a "this is why the
+previous turn ended" tail to a message that is not about a failure at all.
 
-The MARKERS those four records carry are no longer defined here. They moved to
+The MARKERS those five records carry are no longer defined here. They moved to
 :mod:`local_operator.harness.message_types`, the one neutral home that a
 surface barred from importing this module can reach: the shared renderer
 (``harness/render.py``) has to recognise a ``session_incident`` to replay it,
@@ -259,7 +259,26 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
             "protocolerror",  # covers RemoteProtocolError and LocalProtocolError
         ),
     ),
-    ("mcp", ("mcp", "model context protocol", "tool bridge", "circuit breaker")),
+    # NO ``mcp`` RULE, deliberately, and its absence is the fix rather than an
+    # omission. An MCP server going unavailable is not a FAILURE of the turn —
+    # it is a missing capability — and the rule that used to sit here matched the
+    # bare substring "mcp", so it caught every MCP-mentioning failure and gave
+    # it ``_HINTS["mcp"]`` plus ``Incident.render``'s "This is why the previous
+    # turn ended." That last line was false: an MCP server failing to connect
+    # (or its OAuth grant expiring) never ends a turn. Measured live on
+    # 2026-09-20 against ``minerva-qa``, where the operator's session was told a
+    # turn had died that had not.
+    #
+    # Deleted rather than narrowed. A future rule for whatever MCP text really
+    # does describe a dead turn is welcome; what must not come back is a rule
+    # keyed on the substring shared by BOTH halves of the MCP story, which is
+    # also why removing the hint matters as much as removing the rule — a rule
+    # without a hint still stamps a failure category, and a hint without a rule
+    # is unreachable text the next reader has to check twice.
+    #
+    # The MCP-unavailable text lives in
+    # :func:`format_mcp_unavailable_message` instead, on the same dedicated-
+    # formatter argument as :func:`format_mcp_recovery_message`.
     ("content-filter", ("content policy", "content filter", "safety system", "flagged")),
 ]
 
@@ -310,8 +329,6 @@ _HINTS: dict[str, str] = {
     "answer — retrying or switching target is reasonable. If this machine could "
     "not reach the network at all, retrying is usually right, and a repeat means "
     "checking this machine's connectivity rather than switching provider.",
-    "mcp": "An MCP server is unavailable: its tools are gone until it reconnects. "
-    "Do not call its tools in a tight loop; say which server is down.",
     "content-filter": "The provider refused the content: change the approach "
     "rather than resending the same request.",
     # A cut-off is the harness's own verdict, not a provider's, and its advice is
@@ -836,25 +853,71 @@ def format_shape_incident_message(tool: str, labels: "list[str]", summary: str =
     )
 
 
+def format_mcp_unavailable_message(server: str, reason: str) -> str:
+    """Render the MCP-unavailability text injected into the model's context.
+
+    The counterpart to :func:`format_mcp_recovery_message`, and a dedicated
+    formatter for the same reason: neither row is about a FAILED turn, so
+    neither may go through :func:`classify_incident`. The classifier used to
+    catch this text on its ``mcp`` rule — the bare substring "mcp" — and hand
+    it ``_HINTS["mcp"]`` plus ``Incident.render``'s "This is why the previous
+    turn ended", the last of which was simply false: an MCP server going away
+    never ends a turn. Measured live on 2026-09-20 against ``minerva-qa``, whose
+    expired grant told the operator a turn had died that had not.
+
+    Present-tense STATE, like :func:`format_model_switch_message`, so the model
+    treats it as context for the turns that follow rather than an instruction
+    to acknowledge. The three lines carry three different jobs:
+
+    * the head states the CAPABILITY change — the server is unavailable and its
+      tools are gone — because that is what stops the model calling them;
+    * ``Reason:`` carries the operator's own remedy (``/mcp reauth <server>``,
+      a breaker that suspended auto-reconnect), which is what lets the model
+      tell the user what to do rather than only that something is wrong;
+    * the last line forbids the tight retry loop and asks for the server to be
+      NAMED instead — the one action the model can take on its own.
+
+    No failure category and no ``suggested action:`` line, both of which belong
+    to the incident shape this record is deliberately not. The reason is bounded
+    at 200 characters exactly as :func:`format_model_switch_message` bounds its
+    own, and is OMITTED when blank rather than printed empty: a dangling
+    ``Reason:`` reads as a truncation.
+    """
+    lines = [
+        f"[session warning] MCP server '{server}' is unavailable: its tools are "
+        "gone until it reconnects."
+    ]
+    if reason.strip():
+        lines.append(f"Reason: {reason.strip()[:200]}")
+    lines.append(
+        "Do not call that server's tools in a tight loop; tell the user which "
+        "server is down rather than retrying."
+    )
+    return "\n".join(lines)
+
+
 def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     """Render the MCP-recovery text injected into the model's context.
 
-    The counterpart to the ``mcp`` incident category, and the reason it is a
-    dedicated formatter rather than another :func:`classify_incident` category:
-    the classifier matches the substring "mcp" and would append
-    ``_HINTS["mcp"]`` — "its tools are gone until it reconnects. Do not call
-    its tools in a tight loop" — plus ``Incident.render``'s "This is why the
-    previous turn ended", to a message announcing the exact opposite.
+    The counterpart to :func:`format_mcp_unavailable_message`, and the reason
+    it is a dedicated formatter rather than a :func:`classify_incident`
+    category: the recovery announces the exact opposite of a failure, so
+    classifying it would have appended a failure category plus
+    ``Incident.render``'s "This is why the previous turn ended". The ``mcp``
+    rule that used to be the live example of that mismatch — it matched the bare
+    substring "mcp", so it took both halves of this pair — is deleted; both
+    halves now have their own formatter instead.
 
     Present-tense STATE, like :func:`format_model_switch_message`, so the model
     treats it as context for the turns that follow rather than an instruction
     to acknowledge.
 
     The SUPERSEDE sentence is load-bearing and must not be trimmed to a bare
-    "reconnected": the model is holding an earlier ``session_incident`` for
-    this server whose hint explicitly says "do not call its tools", and two
-    live claims leave it free to defer to the older, more emphatic one. It must
-    be told the earlier notice no longer applies.
+    "reconnected": the model is holding an earlier
+    :func:`format_mcp_unavailable_message` row for this server that says its
+    tools are gone and not to call them, and two live claims leave it free to
+    defer to the older, more emphatic one. It must be told the earlier notice
+    no longer applies.
 
     ``tool_count`` is the REGISTERED tool count
     (``len(McpManager.get_server_tools(server))``), not ``len(conn.tools)``:
@@ -867,18 +930,18 @@ def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     the model its tools "are usable now, so call them normally" against an
     empty inventory is false in the one direction that costs a wasted turn:
     the model goes looking for tools that are not there. The connection is
-    still worth announcing, because it is what supersedes the incident and
+    still worth announcing, because it is what supersedes the warning and
     stops the model reporting the server as down.
     """
     if not tool_count:
         # Honest about the CONNECTION and silent about callable tools: no
         # "available again", no "call them normally". The supersede clause is
-        # still required — the model is holding an incident that says the
+        # still required — the model is holding a warning that says the
         # server is unreachable, which is no longer true.
         return (
             f"[mcp recovery] MCP server '{server}' is connected again, but it "
             "currently exposes no enabled tools. This supersedes the earlier "
-            "session incident about this server: the server itself is no "
+            "warning about this server: the server itself is no "
             "longer failing, so stop reporting it as unavailable — but do not "
             "expect callable tools from it until some are enabled."
         )
@@ -888,7 +951,7 @@ def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     tools = "1 tool is" if tool_count == 1 else f"{tool_count} tools are"
     return (
         f"[mcp recovery] MCP server '{server}' is connected again and {tools} "
-        "available again. This supersedes the earlier session incident about "
+        "available again. This supersedes the earlier warning about "
         "this server: its tools are usable now, so call them normally and stop "
         "reporting it as unavailable."
     )
