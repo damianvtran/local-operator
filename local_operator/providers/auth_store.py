@@ -640,7 +640,7 @@ class AuthStore:
                     (credential_type, data_json, now, row[0]),
                 )
                 self._conn.commit()
-                return self._reread_after_write(row[0])
+                return self._after_credential_write(provider, row[0])
 
         cursor = self._conn.execute(
             "INSERT INTO auth_credentials "
@@ -649,7 +649,48 @@ class AuthStore:
             (provider, credential_type, data_json, identity, now, now),
         )
         self._conn.commit()
-        return self._reread_after_write(cursor.lastrowid)
+        return self._after_credential_write(provider, cursor.lastrowid)
+
+    def _after_credential_write(self, provider: str, credential_id: int | None) -> StoredCredential:
+        """Read the row back, then run what a completed write implies.
+
+        One exit for both the update and the insert path, so a later caller
+        cannot land in a branch that skips the re-arm.
+        """
+        stored = self._reread_after_write(credential_id)
+        self._rearm_parked_tunnel_login(provider, stored)
+        return stored
+
+    def _rearm_parked_tunnel_login(self, provider: str, stored: StoredCredential) -> None:
+        """Let a login that fixed a dead grant bring the tunnel connector back.
+
+        The connector cannot notice by itself: parking exits SUCCESSFULLY
+        (that is what stops its supervisor retrying it, see
+        ``tunnels/service.py``), so the operator's login is the only event that
+        can end the park. Called from here because this one write path is shared
+        by the TUI's `/login`, `lop login`, and the desktop login route, and
+        because the fix has to be durable first — this runs after the commit,
+        never before it.
+
+        Unconditional and cheap on purpose: `tunnels.install.rearm_if_parked`
+        decides whether the write concerns the tunnel at all, and its first
+        guard is the park file, which does not exist in the ordinary case. The
+        import is lazy because `tunnels.install` reaches `launchd`, `paths` and
+        the tunnels package, none of which belong on the import path of a
+        credential write — and because this module is imported BY that package.
+        """
+        try:
+            from local_operator.tunnels import install
+
+            note = install.rearm_if_parked(provider=provider, credential_id=stored.id)
+        except Exception:  # noqa: BLE001 — a login must not fail over a service restart
+            logger.warning(
+                "could not re-arm a parked tunnel connector for %s after a login",
+                provider,
+            )
+            return
+        if note:
+            logger.info("%s (provider=%s)", note, provider)
 
     def _reread_after_write(self, credential_id: int | None) -> StoredCredential:
         """Re-read a row this connection just wrote.

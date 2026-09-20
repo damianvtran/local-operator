@@ -53,6 +53,20 @@ UNREACHABLE = "control_plane_unreachable"
 REFUSED = "authorization_refused"
 NOT_AUTHORIZED = "tunnel_not_authorized"
 LEASE_PENDING = "authorization_lease_pending"
+# The connector's own terminal states, not relay refusals: the connector exited
+# (successfully, so its supervisor does not retry it) because something needs a
+# person. They travel in this vocabulary anyway, so the sentence an operator
+# reads in `lop tunnel status`, the one a parked connector writes to
+# `state.json`, and the 503 a phone would see if a live gateway ever reported
+# one cannot drift into several wordings of one cause.
+#
+# `LOGIN_REQUIRED` is the one the incident needed. The other two only ever park:
+# a live gateway never refuses relayed traffic for them, which is why they have
+# no `RELAY_DETAIL` entry — inventing phone copy for a state no phone can reach
+# would be copy that nothing can ever display.
+LOGIN_REQUIRED = "login_required"
+LOCAL_PREREQUISITE = "local_prerequisite"
+REENROLMENT_REQUIRED = "reenrolment_required"
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
 # there is nothing to type on that surface.
@@ -77,6 +91,11 @@ RELAY_DETAIL = {
         "The relay has not renewed its authorization yet. This normally clears by "
         "itself within a few seconds."
     ),
+    LOGIN_REQUIRED: (
+        "This computer's Radient login is no longer valid, so remote access is off "
+        "until it is signed in again on this computer (check this tunnel's billing at "
+        f"{CONSOLE_URL})."
+    ),
 }
 
 # What `lop tunnel status` prints for the same cause. It differs where a terminal
@@ -100,7 +119,62 @@ TERMINAL_DETAIL = {
         "and usually clears a few seconds after the connector starts. Run lop tunnel "
         "status again shortly; if it persists, run lop tunnel install."
     ),
+    LOGIN_REQUIRED: (
+        "The connector's Radient login is no longer valid, so it stopped and will not "
+        "retry by itself. Run /login radient; the connector starts again on its own "
+        "once the login succeeds. Check this tunnel's billing at "
+        f"{CONSOLE_URL}."
+    ),
 }
+
+#: The structured form of the remedy each sentence above already names in prose,
+#: plus the two codes whose sentence is the failure's own literal (they name
+#: their own missing prerequisite). The desktop route and the TUI need the
+#: command as a value — an operator's terminal is the only surface that can act
+#: on this one, so there is nothing to button — and keeping it here, beside the
+#: sentences, is what stops the command a surface prints from drifting out of the
+#: command the copy tells you to run.
+#: `UNREACHABLE` and `LEASE_PENDING` name the CHECK rather than a fix, because
+#: their copy says the connector clears those by itself: handing the operator a
+#: repair command there would send them to fix something that is not broken.
+TERMINAL_REMEDY = {
+    UNREACHABLE: "lop tunnel status",
+    REFUSED: "lop login radient",
+    NOT_AUTHORIZED: "lop tunnel connect",
+    LEASE_PENDING: "lop tunnel status",
+    LOGIN_REQUIRED: "lop login radient",
+    # The two local-repair codes: their sentences are the failure's own fixed
+    # literal rather than an entry above (each one names its own missing
+    # prerequisite, which no single sentence could), so this table is where the
+    # COMMAND the operator has to run is pinned in one place.
+    LOCAL_PREREQUISITE: "lop tunnel install",
+    REENROLMENT_REQUIRED: "lop tunnel connect",
+}
+
+
+#: Readable forms of the reason codes, for surfaces that show a short state on
+#: one line (`Connector: parked — login required (since 14:32)`). The CODE is
+#: what travels in `state.json` and in JSON output; this is only its label, and
+#: it lives beside the vocabulary so a new code cannot ship without one.
+REASON_LABEL = {
+    UNREACHABLE: "control plane unreachable",
+    REFUSED: "authorization refused",
+    NOT_AUTHORIZED: "not authorized",
+    LEASE_PENDING: "waiting for authorization",
+    LOGIN_REQUIRED: "login required",
+    LOCAL_PREREQUISITE: "prerequisite missing",
+    REENROLMENT_REQUIRED: "needs re-enrolment",
+}
+
+
+def reason_label(reason: str) -> str:
+    """The short label for a reason code, or the code itself if unknown.
+
+    A code this build does not know is shown verbatim rather than as "unknown":
+    a daemon from another version naming its own state is more useful to an
+    operator than a shrug, and `terminal_detail` already takes that position.
+    """
+    return REASON_LABEL.get(reason, reason)
 
 
 def terminal_detail(reason: str, relay_detail: str) -> str:
