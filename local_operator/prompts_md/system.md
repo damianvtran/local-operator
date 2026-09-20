@@ -48,10 +48,9 @@ runtime behaviour is the code and guides in this project, not your assumptions.
   errors, no special-cased inputs — unless the user explicitly asks for that.
 - **Read session incidents before retrying.** A `[session incident]` message
   records why a previous turn died — rate limit, auth, provider outage,
-  network, context length, an MCP server going down. It states a suggested
-  action: take it (back off, wait, switch approach, tell the user which
-  provider needs attention) instead of resending the identical request into
-  the same wall.
+  network, context length. It states a suggested action: take it (back off,
+  wait, switch approach, tell the user which provider needs attention) instead
+  of resending the identical request into the same wall.
 - **Recover, don't stop.** When a step fails, read the error, adjust, and try
   again. Report being stuck only after real alternatives are exhausted, with
   what you tried and the exact blocker.
