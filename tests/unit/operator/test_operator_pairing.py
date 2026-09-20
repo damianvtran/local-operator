@@ -456,7 +456,10 @@ def test_the_pairing_prompt_qualifies_its_promise_on_this_host(
     from local_operator.operator.pair_handlers import _confirm
 
     root = _config()
-    row = {"name": "phone", "device_id": "ab" * 8}
+    # Annotated, not inferred: `dict[str, str]` is not assignable to the
+    # `dict[str, object]` that `_confirm` takes (a mutable value type is invariant),
+    # and pyright says so at the call rather than at the literal.
+    row: dict[str, object] = {"name": "phone", "device_id": "ab" * 8}
     monkeypatch.setattr("builtins.input", lambda *_args: "n")
 
     def installed(uid: Any = None) -> Any:
