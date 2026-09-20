@@ -1,0 +1,5021 @@
+"""The relay: one supervised process per install, and the membership it enforces.
+
+WHAT IT IS, AND WHAT IT IS NOT (R1). The relay owns device identity, the network
+records and their secrets, the peer listener and every link, invite state, the
+authorisation decision for every inbound frame, the audit log's writer, and a
+loopback control surface the CLI dials. It owns NO transcript: it never writes a
+session file, never holds a session lease, never runs a turn, and it never
+receives a session's control key. Its knowledge of the local session plane is a
+read-through cache over ``session.runtime.registry.scan()``.
+
+Why that distinction is enforced rather than intended: if the relay owned
+sessions, two writers could exist for one transcript (the thing the lease and the
+``exclusive-move-v1`` fence exist to prevent), ``lop network stop`` would be a way
+to lose work, and a relay crash would orphan every session it owned on every
+network.
+
+THREADS, NOT ASYNCIO. Deliberate: the payload is a coalescible event stream rather
+than a byte stream, and the CLI is synchronous, so a thread per link keeps the
+whole transport in one programming model instead of two. The fleet is small by
+construction (``MAX_LINKS``), each link is one reader and one writer, and the
+alternative would put an event loop between the CLI and every peer.
+
+THE LISTENER IS THE ONE NON-LOOPBACK LISTENER IN THIS TREE. That is a deliberate,
+single exception to an invariant the repository states in three places, and it is
+why: (a) the listener authenticates completely before any op dispatches, (b) it
+never proxies a raw local control socket and never transmits a control key, (c) it
+is bound by an explicit config key with a dial-only mode (``listen_address:
+127.0.0.1``), and (d) its auth failure path is silence plus a local audit record —
+no reply frame, no error oracle. Every other listener keeps binding loopback.
+
+NOT IN THIS SLICE, and named so nobody assumes otherwise: ``net_sync``
+(``mesh-compute-pool.md`` §7's sync primitive), ``net_broker``
+(``mesh-credentials.md``), ``net_session_move`` (``mesh-session-mobility.md``
+§6's mobility, the next slice), and archive/restore on a peer (its §8 — the
+local implementation lives on ``feat/session-archive-delete`` and there is no
+``session/archived.py`` in this build, so the op refuses BY NAME). Those ops are
+AUTHORISED here — the chokepoint resolves the inner capability for
+``net_forward`` — and then answered with a sentence naming the design document
+that owns them, which is what keeps the seam visible instead of silent.
+
+WHAT THIS SLICE DOES IMPLEMENT is the session plane's piloting half
+(``mesh-session-mobility.md`` §2.2/§3.2/§4.3): ``net_session_create``,
+``net_session_engage``, ``net_session_stop``, the ``net_forward`` carrier, the
+``net_stream`` carrier that makes one viewer connection a pass-through, and the
+five ``peer_*`` local ops a viewer's CLI drives."""
+
+from __future__ import annotations
+
+import asyncio
+import hmac
+import json
+import os
+import plistlib
+import queue
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Any, Callable
+
+from local_operator.network import dial as session_dial
+from local_operator.network import store, wire
+from local_operator.network.audit import AuditEvent, AuditLog
+from local_operator.network.authorizer import Authorizer, NetworkState
+from local_operator.network.handshake import (
+    HANDSHAKE_TIMEOUT_S,
+    REASON_SELF,
+    Credential,
+    Handshake,
+    ListenerPolicy,
+    pair_abort_frame,
+    pair_result_frame,
+    pair_timeout_seconds,
+    sas_matches,
+)
+from local_operator.network.identity import (
+    DeviceIdentity,
+    IdentityUseTracker,
+    load_or_mint,
+    mint_instance_id,
+    rotation_statement,
+    verify_rotation_statement,
+)
+from local_operator.network.invite import (
+    MintedInvite,
+    claim,
+    consume,
+    invite_credential_for,
+    inviter_prompt_for,
+)
+from local_operator.network.invite import mint as mint_invite
+from local_operator.network.types import (
+    LinkContext,
+    LinkPhase,
+    MemberRecord,
+    MeshRefusal,
+    NetworkRecord,
+    PairDecision,
+    PairingRefusal,
+    PeerRecord,
+    PendingPairing,
+    Refusal,
+    SecretState,
+    capabilities_for_role,
+)
+from local_operator.paths import config_dir, log_dir
+from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, PROTOCOL_VERSION
+
+# ---------------------------------------------------------------------------
+# Defaults, beside their readers (AGENTS.md, "Adding a configuration key")
+# ---------------------------------------------------------------------------
+
+#: The relay's bind address. Three meaningful values: ``127.0.0.1`` is DIAL-ONLY
+#: (this install never accepts an inbound link), ``0.0.0.0`` accepts on every
+#: interface, or a specific interface address. Dial-only is a supported
+#: configuration, not a degraded one: no design here assumes inbound reachability.
+DEFAULT_LISTEN_ADDRESS = "0.0.0.0"
+DEFAULT_PORT = 4097  # 4098 mobile, 4099 browser bridge, 4100 tunnel gateway taken
+DEFAULT_ADVERTISE_HOSTS: tuple[str, ...] = ()
+DEFAULT_MAX_LINKS = 32
+DEFAULT_AUTOSTART = True
+
+#: Reconcile grants: at most this many per device per network per hour. "I keep
+#: presenting an old epoch" is also what a replayed credential looks like.
+RECONCILE_MAX_PER_HOUR = 3
+RECONCILE_WINDOW_S = 3600.0
+
+#: A second LOCAL rotation inside this window is refused (``rotation_in_progress``):
+#: concurrent rotations are made unlikely before the deterministic tie-break has to
+#: resolve them.
+ROTATION_LOCK_S = 30.0
+
+#: The local session catalogue is cached this long, so a sidebar polling every
+#: second does not turn into a scan storm.
+CATALOG_CACHE_S = 2.0
+
+#: The audit log has one writer, and it is this process. The heartbeat reuses the
+#: session runtime's interval so a reader needs ONE freshness rule for every record
+#: in the tree rather than one per namespace.
+HEARTBEAT_S = float(HEARTBEAT_INTERVAL_S)
+
+
+@dataclass(frozen=True)
+class NetworkSettings:
+    """The relay's configuration, with the module-level defaults above.
+
+    ``from_config`` reads the ``network.*`` keys; a missing key means the default
+    here, which is what makes the relay work before anybody edits ``config.yml``.
+    The ``/settings`` registry entries for these keys live with the settings
+    registry and are the settings slice's to add — see this module's report note;
+    the defaults beside the readers are the code's single source of truth either
+    way.
+    """
+
+    listen_address: str = DEFAULT_LISTEN_ADDRESS
+    port: int = DEFAULT_PORT
+    advertise_hosts: tuple[str, ...] = DEFAULT_ADVERTISE_HOSTS
+    handshake_timeout_s: float = HANDSHAKE_TIMEOUT_S
+    keepalive_s: float = wire.KEEPALIVE_S
+    link_idle_s: float = wire.LINK_IDLE_S
+    reconnect_max_s: float = wire.RECONNECT_MAX_S
+    op_wait_s: float = wire.OP_WAIT_S
+    queue_frames: int = wire.QUEUE_FRAMES
+    queue_bytes: int = wire.QUEUE_BYTES
+    max_inflight: int = wire.MAX_INFLIGHT
+    max_links: int = DEFAULT_MAX_LINKS
+    autostart: bool = DEFAULT_AUTOSTART
+
+    @classmethod
+    def from_config(cls, root: Path | None = None) -> NetworkSettings:
+        """Read ``network.*`` from the config store, defaulting to the values above.
+
+        Through ``store.read_config``, the ONE reader this package uses, so a key
+        read here and a key read by ``AuditLog`` cannot land in different places.
+        """
+        from functools import partial
+
+        read = partial(store.read_config, root=root)
+        hosts = read(("network", "advertise_hosts"), list(DEFAULT_ADVERTISE_HOSTS))
+        return cls(
+            listen_address=str(read(("network", "listen_address"), DEFAULT_LISTEN_ADDRESS)),
+            port=int(read(("network", "port"), DEFAULT_PORT)),
+            advertise_hosts=tuple(str(host) for host in (hosts or [])),
+            handshake_timeout_s=float(
+                read(("network", "handshake_timeout_s"), HANDSHAKE_TIMEOUT_S)
+            ),
+            keepalive_s=float(read(("network", "keepalive_s"), wire.KEEPALIVE_S)),
+            link_idle_s=float(read(("network", "link_idle_s"), wire.LINK_IDLE_S)),
+            reconnect_max_s=float(read(("network", "reconnect_max_s"), wire.RECONNECT_MAX_S)),
+            op_wait_s=float(read(("network", "op_wait_s"), wire.OP_WAIT_S)),
+            queue_frames=int(read(("network", "queue_frames"), wire.QUEUE_FRAMES)),
+            queue_bytes=int(read(("network", "queue_bytes"), wire.QUEUE_BYTES)),
+            max_inflight=int(read(("network", "max_inflight"), wire.MAX_INFLIGHT)),
+            max_links=int(read(("network", "max_links"), DEFAULT_MAX_LINKS)),
+            autostart=bool(read(("network", "autostart"), DEFAULT_AUTOSTART)),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Membership: the ONLY writer of network records
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RotationOutcome:
+    """A rotation, and how to talk to each recipient about it."""
+
+    epoch: int
+    previous_epoch: int
+    removed: list[str]
+    record: NetworkRecord
+
+
+def epoch_frame(
+    record: NetworkRecord,
+    state: SecretState,
+    *,
+    reason: str,
+    target_device_id: str = "",
+    members_digest: str = "",
+) -> dict[str, Any]:
+    """The ``net_epoch`` broadcast frame — WITHOUT the secret for a removed peer.
+
+    THE CONVERGENCE RULE, ENFORCED AT THE FRAME'S CONSTRUCTION. A rotation's whole
+    purpose is that a removed device must not learn the new secret, so a frame
+    built for a recipient named in ``removed`` (or already tombstoned) omits it.
+    Panic is the one exception: ``panic`` broadcasts a secret to every reachable
+    peer because the operator has declared the network compromised and every
+    receiver goes untrusted — see :func:`panic_frame`.
+    """
+    frame: dict[str, Any] = {
+        "op": "net_epoch",
+        "epoch": record.epoch,
+        "previous_epoch": state.previous_epoch,
+        "sequence": record.sequence,
+        "rotation_id": record.rotations.get(str(record.epoch), ""),
+        "members_digest": members_digest or members_digest_of(record),
+        "members": [member.to_json() for member in record.members],
+        "removed": list(record.removed_ids),
+        "reason": reason,
+    }
+    member = record.member(target_device_id) if target_device_id else None
+    # THE CONVERGENCE RULE: a recipient named in ``removed``, one already
+    # tombstoned, or one whose row is gone gets NO secret. ``target_device_id == ""``
+    # means a broadcast, which is the panic path and keeps the secret.
+    if target_device_id and (
+        target_device_id in record.removed_ids or member is None or not member.active
+    ):
+        return frame
+    frame["secret"] = state.secret
+    return frame
+
+
+def members_digest_of(record: NetworkRecord) -> str:
+    """``sha256`` over the canonical member list, so a receiver can verify it landed.
+
+    Computed from the MEMBERSHIP fields only (not ``last_seen_at`` or
+    ``duplicate_count``, which change constantly): a digest that moved every time
+    somebody's link refreshed would make "did your list match mine" unanswerable.
+    """
+    payload = [
+        {
+            "device_id": member.device_id,
+            "public_key": member.public_key,
+            "role": member.role,
+            "capabilities": sorted(member.capabilities),
+            "lifecycle": member.lifecycle,
+            "removed_at": member.removed_at,
+        }
+        for member in sorted(record.members, key=lambda row: row.device_id)
+    ]
+    return wire.hex64(wire.sha256(wire.canonical_json(payload)))
+
+
+def admit(
+    record: NetworkRecord,
+    *,
+    device_id: str,
+    public_key: str,
+    name: str = "",
+    role: str = "read",
+    capabilities: list[str] | None = None,
+    added_by: str = "",
+    added_via: str = "invite",
+    endpoints: list[str] | None = None,
+    kind: str = "device",
+    root: Path | None = None,
+    now: float | None = None,
+    persist: bool = True,
+) -> MemberRecord:
+    """Write a member row, refusing the two cases a member list must never absorb.
+
+    * **A burned id.** ``removed_ids`` is forever (R5): re-admitting a removed
+      device would make revocation a temporary state an attacker can wait out.
+    * **A conflicting id.** The same ``device_id`` presented with a DIFFERENT
+      public key (``device_id_conflict``): an id is a name, and two keys claiming
+      one name is either a collision or an attack, and neither may be absorbed
+      silently. This is also why the id is not authority — the key is.
+    """
+    moment = time.time() if now is None else now
+    if record.is_burned(device_id):
+        raise MeshRefusal(
+            "device_id_conflict",
+            f"{device_id} was removed from this network and its id cannot be admitted again; "
+            "the device must re-pair with a new invite",
+        )
+    existing = record.member(device_id)
+    if existing is not None and existing.public_key and existing.public_key != public_key:
+        raise MeshRefusal(
+            "device_id_conflict",
+            f"{device_id} is already a member with a different public key; the member list "
+            "refuses to reinterpret an id",
+        )
+    if existing is None:
+        existing = MemberRecord(device_id=device_id)
+        record.members.append(existing)
+    existing.public_key = public_key or existing.public_key
+    existing.name = name or existing.name
+    existing.kind = kind  # type: ignore[assignment]
+    existing.lifecycle = "active"
+    existing.role = role
+    existing.capabilities = sorted(
+        capabilities if capabilities is not None else capabilities_for_role(role)
+    )
+    existing.added_at = existing.added_at or moment
+    existing.added_by = added_by or existing.added_by
+    existing.added_via = added_via
+    existing.endpoints = list(endpoints or existing.endpoints)
+    existing.removed_at = None
+    existing.removed_by = None
+    if persist:
+        store.save(record, root)
+    return existing
+
+
+def remove_member(
+    record: NetworkRecord,
+    state: SecretState,
+    *,
+    device_id: str,
+    by: str,
+    root: Path | None = None,
+    now: float | None = None,
+    persist: bool = True,
+) -> RotationOutcome:
+    """Tombstone a member, rotate the secret and bump the epoch (R5).
+
+    The order matters: the tombstone is written FIRST, so the very next handshake
+    from that device fails the membership check even if the rotation has not been
+    delivered anywhere yet. Revocation therefore takes effect on this device
+    immediately and on the others as soon as they receive the frame.
+    """
+    moment = time.time() if now is None else now
+    member = record.member(device_id)
+    if member is None:
+        raise MeshRefusal("unknown_member", f"{device_id} is not a member of {record.name}")
+    member.removed_at = moment
+    member.removed_by = by
+    member.lifecycle = "expired"
+    if device_id not in record.removed_ids:
+        record.removed_ids.append(device_id)
+    record.pending = [entry for entry in record.pending if entry.get("device_id") != device_id]
+    outcome = rotate_epoch(
+        record,
+        state,
+        by=by,
+        reason="member_removed",
+        removed=[device_id],
+        root=root,
+        now=moment,
+        persist=persist,
+    )
+    return outcome
+
+
+def rotate_epoch(
+    record: NetworkRecord,
+    state: SecretState,
+    *,
+    by: str,
+    reason: str,
+    removed: list[str] | None = None,
+    root: Path | None = None,
+    now: float | None = None,
+    persist: bool = True,
+) -> RotationOutcome:
+    """Mint a fresh secret, bump the epoch, record who did it.
+
+    The secret is NEW RANDOM BYTES rather than a ratchet: a ratchet buys forward
+    secrecy against an attacker who already holds a device key, and that attacker
+    can read the disk anyway; a fresh random value is simpler to reason about, is
+    what an operator expects from "rotate", and cannot be predicted from a leaked
+    older one.
+
+    ``rotations[epoch] = by`` is both the audit of who rotated and the tie-break
+    key for the concurrent-rotation rule. The lock is written too, so a second
+    local rotation inside ``ROTATION_LOCK_S`` is refused with a sentence rather
+    than producing two secrets nobody can reconcile.
+    """
+    from secrets import token_bytes
+
+    moment = time.time() if now is None else now
+    if record.rotation_lock_until > moment:
+        raise MeshRefusal(
+            "rotation_in_progress",
+            f"a rotation of {record.name} is already in progress; wait "
+            f"{int(record.rotation_lock_until - moment)}s and try again",
+        )
+    previous_epoch = record.epoch
+    record.epoch = record.epoch + 1
+    state.rotate(wire.b64u(token_bytes(32)), record.epoch)
+    record.rotations[str(record.epoch)] = by
+    record.rotation_lock_until = moment + ROTATION_LOCK_S
+    record.sequence += 1
+    record.trust = "active"
+    if persist:
+        store.save(record, root)
+        store.save_secrets(state, root)
+    return RotationOutcome(
+        epoch=record.epoch,
+        previous_epoch=previous_epoch,
+        removed=list(removed or []),
+        record=record,
+    )
+
+
+@dataclass
+class ApplyOutcome:
+    """What happened to a received epoch frame."""
+
+    applied: bool
+    detail: str
+
+
+def apply_epoch(
+    record: NetworkRecord,
+    state: SecretState,
+    frame: dict[str, Any],
+    *,
+    sender_device_id: str,
+    root: Path | None = None,
+    now: float | None = None,
+    persist: bool = True,
+) -> ApplyOutcome:
+    """Apply a received ``net_epoch``, or refuse it with a reason.
+
+    Acceptance rules, in order: the sender is an ACTIVE member; the epoch is
+    strictly greater than ours (which absorbs duplicates and the ordinary race
+    where both sides announce the same rotation); ``rotation_id`` matches the
+    sender's own device id (a peer may announce a rotation, but not one attributed
+    to somebody else); the member list is internally consistent; and the digest
+    matches. Then the record and secret are written atomically and the caller
+    re-handshakes.
+
+    The receiver applies the new secret ONLY IF IT IS STILL A MEMBER, because a
+    newly-removed device is named in the same frame: refusing here is what stops a
+    removal from handing the removed device the key that would let it read on.
+    """
+    moment = time.time() if now is None else now
+    sender = record.member(sender_device_id)
+    if sender is None or not sender.active:
+        return ApplyOutcome(False, "not_a_member")
+    # A rotation frame is also proof the sender is alive, so it refreshes the row's
+    # liveness stamp: it is the only signal an offline-ish peer gives us, and
+    # discarding it would leave `lop network show` reporting a device as unseen
+    # while it is in fact delivering traffic.
+    sender.last_seen_at = moment
+    incoming_epoch = int(frame.get("epoch") or 0)
+    if incoming_epoch <= record.epoch:
+        return ApplyOutcome(False, "already_at_epoch")
+    if str(frame.get("rotation_id") or "") != sender_device_id:
+        return ApplyOutcome(False, "rotation_id_mismatch")
+    members = frame.get("members")
+    if not isinstance(members, list) or not members:
+        return ApplyOutcome(False, "members_missing")
+    try:
+        rows = [MemberRecord.from_json(row) for row in members if isinstance(row, dict)]
+    except (TypeError, ValueError):
+        return ApplyOutcome(False, "members_unparsable")
+    inconsistent = _members_inconsistent(rows, self_device_id=record.self_device_id)
+    if inconsistent:
+        return ApplyOutcome(False, inconsistent)
+    if frame.get("members_digest") and str(frame["members_digest"]) != members_digest_of(
+        _record_with(record, rows)
+    ):
+        return ApplyOutcome(False, "members_digest_mismatch")
+    if record.self_device_id in (frame.get("removed") or []):
+        # This device was removed by the rotation that carries it. It must NOT
+        # learn the new secret: it is not a member any more, and the design says so
+        # explicitly ("a removed device does not learn the new secret").
+        record.members = rows
+        record.epoch = incoming_epoch
+        record.rotations[str(incoming_epoch)] = sender_device_id
+        record.removed_ids = sorted(set(record.removed_ids) | set(frame.get("removed") or []))
+        record.stale = "refused_by_peers"
+        if persist:
+            store.save(record, root)
+        return ApplyOutcome(False, "removed_by_this_rotation")
+
+    material = str(frame.get("secret") or "")
+    if not material:
+        return ApplyOutcome(False, "secret_missing")
+    record.members = rows
+    record.epoch = incoming_epoch
+    record.rotations[str(incoming_epoch)] = sender_device_id
+    record.sequence = max(record.sequence, int(frame.get("sequence") or 0))
+    record.removed_ids = sorted(set(record.removed_ids) | set(frame.get("removed") or []))
+    state.rotate(material, incoming_epoch)
+    if persist:
+        store.save(record, root)
+        store.save_secrets(state, root)
+    return ApplyOutcome(True, "applied")
+
+
+def _record_with(record: NetworkRecord, rows: list[MemberRecord]) -> NetworkRecord:
+    """A shallow copy of ``record`` carrying ``rows`` — for digest computation only."""
+    clone = NetworkRecord(
+        network_id=record.network_id,
+        name=record.name,
+        epoch=record.epoch,
+        members=rows,
+    )
+    return clone
+
+
+def _members_inconsistent(rows: list[MemberRecord], *, self_device_id: str) -> str:
+    """The consistency rules a received member list must satisfy, as a reason code."""
+    ids = [row.device_id for row in rows]
+    if len(ids) != len(set(ids)):
+        return "duplicate_member_ids"
+    mine = [row for row in rows if row.device_id == self_device_id]
+    if not mine or not mine[0].active:
+        # A list that does not contain us as an active member is either a mistake
+        # or an attempt to age us out of our own network; both are refusals.
+        return "self_absent_from_members"
+    for row in rows:
+        if not row.public_key:
+            return "member_without_key"
+        if not set(row.capabilities) <= set(capabilities_for_role("admin")):
+            return "member_capability_unknown"
+    return ""
+
+
+def lowest_id_admin(record: NetworkRecord, *, excluding: str = "") -> str:
+    """The deterministic rotator after a member leaves: the lowest-id active admin.
+
+    Lowest id rather than an election: every remaining member computes the same
+    answer from the same list, so no round trip is needed and two devices cannot
+    both decide they are the rotator.
+    """
+    candidates = sorted(
+        row.device_id
+        for row in record.active_members()
+        if row.role == "admin" and row.device_id != excluding
+    )
+    return candidates[0] if candidates else ""
+
+
+def leave(
+    record: NetworkRecord,
+    *,
+    device_id: str,
+    root: Path | None = None,
+    now: float | None = None,
+    persist: bool = True,
+) -> MemberRecord:
+    """Tombstone a peer that announced its own departure (``net_leave``).
+
+    A leave is not a reason to trust the device less, but it IS a reason to stop it
+    being able to read new traffic — the leaving device still holds the old secret
+    — so the caller rotates afterwards, from the lowest-id active admin.
+    """
+    moment = time.time() if now is None else now
+    member = record.member(device_id)
+    if member is None:
+        raise MeshRefusal("unknown_member", f"{device_id} is not a member of {record.name}")
+    member.removed_at = moment
+    member.removed_by = device_id
+    member.lifecycle = "expired"
+    if device_id not in record.removed_ids:
+        record.removed_ids.append(device_id)
+    if persist:
+        store.save(record, root)
+    return member
+
+
+def announce_identity_rotation(
+    server: RelayServer,
+    old: DeviceIdentity,
+    new: DeviceIdentity,
+    *,
+    root: Path | None = None,
+) -> dict[str, int]:
+    """Announce a device-key rotation to every network this device is in.
+
+    One signed statement per network, because the statement names the network it
+    rotates within (a statement usable anywhere would be a skeleton key for the
+    device's other memberships). Live peers get it now; offline ones get it queued,
+    which is the documented cost of rotating while nobody is reachable — if it is
+    never delivered and the old key is gone, the device is simply unknown to its
+    peers and must re-pair, which is correct, because nothing can prove continuity
+    without the old key.
+    """
+    sent = 0
+    queued = 0
+    for record in store.list_networks(root or server.root):
+        if record.self_device_id == new.device_id:
+            continue
+        statement = rotation_statement(old, new, record.network_id)
+        frame = {
+            "op": "net_identity_rotate",
+            "statement": statement,
+            "locality": "remote",
+        }
+        for link in list(server.links.values()):
+            if link.network_id == record.network_id and link.send(dict(frame)):
+                sent += 1
+        for member in record.active_members():
+            if member.device_id == record.self_device_id:
+                continue
+            if server._link_for(member.device_id) is not None:
+                continue
+            store.enqueue_frame(
+                member.device_id, dict(frame), removed=False, root=root or server.root
+            )
+            queued += 1
+        # The row's own id changes with the key, so the record is rewritten here
+        # rather than by the caller: leaving the old id in `self_device_id` would
+        # make the next handshake verify against a key this device no longer holds.
+        old_member = record.self_member()
+        if old_member is not None and old_member.device_id == old.device_id:
+            old_member.previous_ids = [*old_member.previous_ids, old.device_id]
+            old_member.device_id = new.device_id
+            old_member.public_key = new.public_key
+            old_member.rotated_at = time.time()
+            record.self_device_id = new.device_id
+            store.save(record, root or server.root)
+    return {"sent": sent, "queued": queued}
+
+
+def set_trust(
+    record: NetworkRecord,
+    *,
+    trust: str,
+    reason: str = "",
+    root: Path | None = None,
+    persist: bool = True,
+) -> None:
+    """Move a network between ``active`` and ``untrusted`` (or ``disconnected``).
+
+    ``untrusted`` refuses every link for that network — the handshake checks it as
+    step 3 and dispatch checks it again — so recovery is explicit and local
+    (``lop network trust <net> --active``).
+    """
+    if trust not in ("active", "untrusted", "disconnected"):
+        raise MeshRefusal("bad_trust", f"unknown trust state {trust!r}")
+    record.trust = trust  # type: ignore[assignment]
+    record.untrusted_reason = reason
+    if trust == "active":
+        record.untrusted_reason = ""
+    if persist:
+        store.save(record, root)
+
+
+def panic_frame(
+    record: NetworkRecord, state: SecretState, *, reason: str = "operator_panic"
+) -> dict[str, Any]:
+    """The incident broadcast. It carries the secret to EVERYONE, on purpose.
+
+    The one place the "no secret to a removed peer" rule is deliberately absent: a
+    panic declares the network compromised, every receiver goes untrusted, and the
+    operator re-admits devices by hand afterwards — so there is no set of
+    recipients for whom withholding the new secret would help.
+    """
+    frame = {
+        "op": "net_panic",
+        "epoch": record.epoch,
+        "sequence": record.sequence,
+        "rotation_id": record.rotations.get(str(record.epoch), record.self_device_id),
+        "secret": state.secret,
+        "reason": reason,
+        "members": [member.to_json() for member in record.members],
+        "members_digest": members_digest_of(record),
+    }
+    return frame
+
+
+def panic(
+    record: NetworkRecord,
+    state: SecretState,
+    *,
+    by: str,
+    is_admin: bool,
+    reason: str = "operator_panic",
+    root: Path | None = None,
+    now: float | None = None,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Raise the alarm: rotate if this device may, and return the frame to fan out.
+
+    A NON-ADMIN panic rotates nothing and carries no secret (§8.2 / §16 Q3): the
+    safe half of the same signal is "every receiver goes untrusted", which forces
+    an operator to re-admit — a false alarm costs a human action, a suppressed
+    alarm costs the network.
+    """
+    moment = time.time() if now is None else now
+    if is_admin:
+        rotate_epoch(record, state, by=by, reason="panic", root=root, now=moment, persist=persist)
+        return panic_frame(record, state, reason=reason)
+    return {
+        "op": "net_panic",
+        "epoch": record.epoch,
+        "sequence": record.sequence,
+        "rotation_id": by,
+        "reason": reason,
+    }
+
+
+def apply_panic(
+    record: NetworkRecord,
+    frame: dict[str, Any],
+    *,
+    sender_device_id: str,
+    root: Path | None = None,
+    persist: bool = True,
+) -> ApplyOutcome:
+    """Mark this network untrusted on receipt. The secret, if any, is NOT applied.
+
+    A panic does not rotate anything on the receiving side either: the network is
+    untrusted, which refuses every link, so a new secret would be a secret for a
+    network nobody may talk on.
+    """
+    set_trust(
+        record,
+        trust="untrusted",
+        reason=f"panic received from {sender_device_id}",
+        root=root,
+        persist=persist,
+    )
+    return ApplyOutcome(True, "untrusted")
+
+
+def apply_device_rotation(
+    record: NetworkRecord,
+    statement: dict[str, Any],
+    *,
+    root: Path | None = None,
+    now: float | None = None,
+    persist: bool = True,
+) -> MemberRecord:
+    """Rewrite a member's row in place after a key rotation (§3.3).
+
+    The statement must be signed by the OLD key and the old id must be an ACTIVE
+    member, so a rotation cannot be used to re-identify as anybody. The old id is
+    kept in ``previous_ids`` for a bounded window so an in-flight link at the old
+    id is not cut mid-turn.
+    """
+    old_id = str(statement.get("old_device_id") or "")
+    member = record.member(old_id)
+    if member is None or not member.active:
+        raise MeshRefusal(
+            "unknown_member",
+            f"a device rotation names {old_id}, which is not an active member of {record.name}",
+        )
+    verify_rotation_statement(statement, member.public_key)
+    new_id = str(statement["new_device_id"])
+    other = record.member(new_id)
+    if other is not None and other.device_id != member.device_id:
+        raise MeshRefusal("device_id_conflict", f"{new_id} is already a member of this network")
+    member.previous_ids = [*member.previous_ids, member.device_id]
+    member.device_id = new_id
+    member.public_key = str(statement["new_public_key"])
+    member.rotated_at = time.time() if now is None else now
+    if persist:
+        store.save(record, root)
+    return member
+
+
+# ---------------------------------------------------------------------------
+# The relay's view of the store, as the authoriser's ``NetworkState``
+# ---------------------------------------------------------------------------
+
+
+class StoreView(NetworkState):
+    """The authoriser's world: the store, read per question rather than cached.
+
+    Reading per question is what makes a relay restart stateless AND what makes the
+    CLI's direct writes safe: a ``lop network init`` that lands while the relay is
+    running is visible to the very next authorisation decision, with no cache to
+    invalidate and no lock to take.
+    """
+
+    def __init__(self, root: Path | None = None, *, sessions: Callable[[], set[str]] | None = None):
+        self._root = root
+        self._sessions = sessions or (lambda: set())
+
+    def network(self, network_id: str) -> NetworkRecord | None:
+        try:
+            return store.load(network_id, self._root)
+        except FileNotFoundError:
+            return None
+
+    def local_session_ids(self) -> set[str]:
+        return self._sessions()
+
+
+#: How long a mesh-requested engage may take before the op answers with a
+#: sentence. Longer than a local caller's own budget because this one spans a
+#: spawn plus a construction on a machine that may be busy with its own work,
+#: and shorter than any front end's patience with a "starting" row.
+ENGAGE_DEADLINE_S = 60.0
+
+#: ``control.StopOutcome.method`` (socket | sigterm | sigkill | gone | refused |
+#: busy) → the coarse word a viewer's receipt uses. The RUNG is reported verbatim
+#: beside it; this map only answers "did it end?", and it lives here rather than
+#: in ``control.py`` because a second caller of that ladder should not force its
+#: vocabulary on the one that already had one.
+_STOP_OUTCOME_WORD: dict[str, str] = {
+    "socket": "stopped",
+    "sigterm": "stopped",
+    "sigkill": "killed",
+    "gone": "already-gone",
+    "refused": "refused",
+    "busy": "skipped",
+}
+
+
+@dataclass
+class _Stream:
+    """One forwarded viewer connection, from either end of the mesh (§3.2).
+
+    The SAME object serves both halves of the pipe, because they are one fact
+    seen from two relays: ``viewer_sock`` is set on the device the person is at,
+    ``dial`` on the device that owns the session. Exactly one of the two is set
+    at a time, and leaving both optional says so instead of inventing two classes
+    that would drift apart.
+
+    ``pending`` exists for ONE ordering hazard. The opening relay writes the
+    stream's ack to its own viewer BEFORE any owner frame reaches the viewer, but
+    the peer relay can push the welcome before that ack has been written — the
+    two travel on different sockets. Frames arriving in that window are held here
+    and flushed when the viewer socket is marked ready, which is deterministic
+    where a sleep would merely usually work.
+    """
+
+    stream_id: str
+    session_id: str
+    peer_device_id: str
+    link: "PeerLink | None" = None
+    viewer_sock: "socket.socket | None" = None
+    viewer: "session_dial.LineReader | None" = None
+    dial: "session_dial.OwnerDial | None" = None
+    ready: bool = False
+    closed: bool = False
+    pending: list[dict[str, Any]] = field(default_factory=list)
+    #: One lock per stream: the link's reader thread pushes from the peer while
+    #: this device's control connection thread writes the viewer's own frames,
+    #: and two writers on one socket interleave into unparseable JSON.
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    pump: "threading.Thread | None" = None
+
+    def write_to_viewer(self, frame: dict[str, Any]) -> bool:
+        """Write one session frame to the viewer socket, or buffer it."""
+        with self.lock:
+            if self.closed or self.viewer_sock is None or not self.ready:
+                self.pending.append(frame)
+                return True
+            try:
+                self.viewer_sock.sendall(
+                    (json.dumps(frame, default=str, ensure_ascii=False) + "\n").encode("utf-8")
+                )
+            except OSError:
+                self.closed = True
+                return False
+            return True
+
+    def flush(self) -> None:
+        """Deliver everything buffered before the viewer was ready."""
+        with self.lock:
+            queued = self.pending
+            self.pending = []
+            self.ready = True
+        for frame in queued:
+            if not self.write_to_viewer(frame):
+                return
+
+
+def local_session_ids(root: Path | None = None) -> set[str]:
+    """Session ids that live on THIS device, from the session run directory.
+
+    A read-through: the relay opens no session file and holds no lease. It only
+    needs the ids, so it asks the registry (the same discovery every viewer uses)
+    rather than reading a transcript.
+
+    OWNERSHIP IS NOT LIVENESS, and this function answers the first question —
+    it is the whole of the authoriser's session-scope rule (§7.2, INV-1). A
+    session that is merely COLD still belongs to this device: its directory is
+    here, no peer owns it, and refusing a session-scoped op against it would
+    refuse exactly the ops that exist to bring it back (`net_session_engage`
+    warms a cold session; `net_session_lifecycle` deletes a stopped one). So the
+    answer is the union of the live records and the session directories this
+    device owns — a directory whose ``mesh.json`` names another device is NOT
+    ours, because that is the crash window a handoff can leave behind (§6.5) and
+    answering "mine" for it is how a moved-away session is resurrected here.
+    """
+    from local_operator.session.placement import read_stamp
+    from local_operator.session.runtime import registry
+
+    owned = {record.session_id for record, _state in registry.scan(root)}
+    sessions_dir = (Path(root) if root is not None else config_dir()) / "sessions"
+    self_id = _self_device_id(root)
+    try:
+        children = list(sessions_dir.iterdir())
+    except OSError:
+        return owned
+    for child in children:
+        if not child.is_dir():
+            continue
+        stamp = read_stamp(Path(root) if root is not None else config_dir(), child.name)
+        home = stamp.home_device if stamp is not None else ""
+        if home and self_id and home != self_id:
+            continue
+        owned.add(child.name)
+    return owned
+
+
+def _self_device_id(root: Path | None = None) -> str:
+    """This device's mesh id, or ``""`` when it has no identity file.
+
+    ``identity.load`` and never ``load_or_mint``: a relay read that minted a
+    device key would give a device that never joined a network an identity as a
+    side effect of somebody listing a session.
+    """
+    try:
+        from local_operator.network import identity
+
+        loaded = identity.load(root)
+    except Exception:  # noqa: BLE001 — an unreadable identity is "no identity"
+        return ""
+    return str(getattr(loaded, "device_id", "") or "")
+
+
+# ---------------------------------------------------------------------------
+# Links
+# ---------------------------------------------------------------------------
+
+
+class LinkKind:
+    """The two queue classes. Dropping the wrong one loses work; blocking on the
+    wrong one stalls a chat."""
+
+    #: ``projection`` and other session-state pushes: at most ONE pending per
+    #: (link, stream), a newer push replacing the older. The existing event
+    #: vocabulary is already a full repaint with no deltas, which is exactly a
+    #: coalescible frame.
+    DROPPABLE = "droppable"
+    #: Acks, catalogues, membership and rotations: the producer waits and then
+    #: FAILS the op with a sentence rather than dropping it.
+    RELIABLE = "reliable"
+
+
+class PeerLink:
+    """One authenticated link: a socket, a codec, a reader and a writer."""
+
+    def __init__(
+        self,
+        *,
+        server: RelayServer,
+        sock: socket.socket,
+        result: Any,
+        codec: wire.LinkCrypto,
+        settings: NetworkSettings,
+    ) -> None:
+        self.server = server
+        self.sock = sock
+        self.result = result
+        self.codec = codec
+        self.settings = settings
+        self.link_id = result.link_id
+        self.device_id = result.peer_device_id
+        self.instance_id = result.peer_instance_id
+        self.network_id = result.network_id
+        self.epoch = result.epoch
+        self.phase: LinkPhase = result.phase
+        self.capabilities = frozenset(result.peer_capabilities)
+        self.peer_addr = ""
+        self.opened_at = time.time()
+        self.last_frame_at = time.time()
+        self.frames_in = 0
+        #: Replies that matched no waiter — a late answer to a timed-out request, or a
+        #: peer answering something nobody asked. Counted, never logged per frame (A7);
+        #: see the drop path in ``_handle`` for why it must not be dispatched.
+        self.stray_replies = 0
+        self.frames_out = 0
+        self.bytes_in = 0
+        self.bytes_out = 0
+        self._closed = threading.Event()
+        self._reliable: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=settings.queue_frames)
+        self._droppable: dict[str, dict[str, Any]] = {}
+        self._droppable_lock = threading.Lock()
+        self._wake = threading.Event()
+        self._reader: threading.Thread | None = None
+        self._writer: threading.Thread | None = None
+        self._context = LinkContext(
+            link_id=self.link_id,
+            device_id=self.device_id,
+            instance_id=self.instance_id,
+            network_id=self.network_id,
+            epoch=self.epoch,
+            capabilities=frozenset(self.role_capabilities()),
+            phase=self.phase,
+            peer_addr="",
+        )
+
+    def role_capabilities(self) -> set[str]:
+        """The capabilities resolved from the MEMBER ROW at the current epoch.
+
+        Read per use rather than captured at the handshake, because a rotation that
+        narrows a member's authority must take effect on an already-open link the
+        moment the record changes — the same reason revocation is evaluated against
+        the current member list rather than a cached one.
+        """
+        record = self.server.store_view.network(self.network_id)
+        if record is None:
+            return set()
+        member = record.member(self.device_id)
+        return set(member.capabilities) if member and member.active else set()
+
+    @property
+    def context(self) -> LinkContext:
+        return LinkContext(
+            link_id=self.link_id,
+            device_id=self.device_id,
+            instance_id=self.instance_id,
+            network_id=self.network_id,
+            epoch=self.epoch,
+            capabilities=frozenset(self.role_capabilities()),
+            phase=self.phase,
+            peer_addr=self.peer_addr,
+        )
+
+    def start(self) -> None:
+        self._reader = threading.Thread(
+            target=self._read_loop, name=f"mesh-read-{self.link_id[:8]}", daemon=True
+        )
+        self._writer = threading.Thread(
+            target=self._write_loop, name=f"mesh-write-{self.link_id[:8]}", daemon=True
+        )
+        self._reader.start()
+        self._writer.start()
+
+    @property
+    def alive(self) -> bool:
+        return not self._closed.is_set()
+
+    def send(
+        self, frame: dict[str, Any], *, kind: str = LinkKind.RELIABLE, stream: str = ""
+    ) -> bool:
+        """Queue a frame. Returns False when it could not be queued at all."""
+        if self._closed.is_set():
+            return False
+        if kind == LinkKind.DROPPABLE:
+            with self._droppable_lock:
+                self._droppable[stream or "link"] = frame
+            self._wake.set()
+            return True
+        deadline = time.monotonic() + self.settings.op_wait_s
+        while True:
+            try:
+                self._reliable.put(frame, timeout=0.1)
+                self._wake.set()
+                return True
+            except queue.Full:
+                if time.monotonic() > deadline or self._closed.is_set():
+                    # The producer FAILS the op rather than dropping it: a dropped
+                    # ack or rotation is a state divergence, not a stale repaint.
+                    return False
+
+    def close(self, reason: str = "we-closed") -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        self._wake.set()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.server.link_closed(self, reason)
+
+    # -- threads ------------------------------------------------------------
+
+    def _read_loop(self) -> None:
+        reader = wire.FrameReader(self.sock)
+        try:
+            while not self._closed.is_set():
+                deadline = time.monotonic() + self.settings.link_idle_s
+                payload = reader.read_record_payload(deadline)
+                self.bytes_in += len(payload)
+                frame = self.codec.open(payload)
+                self.frames_in += 1
+                self.last_frame_at = time.time()
+                self.server.identity_use.note_frame(self.device_id)
+                self._handle(frame)
+        except TimeoutError:
+            self.server.audit_idle(self)
+            self.close("timeout")
+        except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError):
+            # Every failure here is fatal to the LINK and none is repaired: there is
+            # no resynchronisation and no partial-trust phase.
+            self.close("error")
+        except Exception:  # noqa: BLE001 — a handler must not kill the accept loop
+            self.close("error")
+
+    def _handle(self, frame: dict[str, Any]) -> None:
+        if wire.is_keepalive(frame):
+            self.send({"op": "ack", "req": frame.get("req"), "detail": "pong"})
+            return
+        if wire.is_bye(frame):
+            self.server.audit_link(self, "link_closed", cause="peer-closed")
+            self.close("peer-closed")
+            return
+        # A reply to a request THIS side made is delivered to the waiter that is
+        # blocked on its ``req`` rather than dispatched: a link also receives
+        # unsolicited events, and an ack that satisfied the wrong caller would be a
+        # cross-wired answer that looks like success.
+        if frame.get("op") in ("ack", "error"):
+            if self.server.deliver_reply(self, frame):
+                return
+            # A reply nobody is waiting for is DROPPED, never dispatched. Dispatching
+            # it is a livelock, not merely wasteful: an unknown op is refused with an
+            # ``error`` frame, the peer refuses that in turn, and the two devices
+            # answer each other's refusals until one link's queue fills — measured
+            # here as ~360 frames in three seconds for one idle pair, and caught by
+            # the e2e test rather than by review. The counter is kept rather than a
+            # log line: a stray reply is usually a late answer to a timed-out
+            # request, and a per-frame log line is exactly what A7 forbids.
+            self.stray_replies += 1
+            return
+        if frame.get("op") == "net_stream":
+            # STREAM PUSHES AND CLOSES ARE NOT REQUESTS. Checked BEFORE dispatch,
+            # for the reason the stray-reply branch below gives: a push has no
+            # reply, and answering one would start exactly the refuse-each-other
+            # livelock that comment measures. Authorisation is this relay's own
+            # stream table (only a peer that opened that stream can push on it),
+            # which is a stronger check than a capability string and is why no
+            # capability row is consulted here.
+            action = str(frame.get("action") or "")
+            if action == "push" and self.server.route_stream_push(self, frame):
+                return
+            if action == "closed" and self.server.route_stream_closed(self, frame):
+                return
+        reply = self.server.dispatch(self, frame)
+        if reply is not None:
+            self.send(reply)
+
+    def _write_loop(self) -> None:
+        try:
+            while not self._closed.is_set():
+                sent = self._drain()
+                if sent:
+                    continue
+                # Keepalive on an idle link; the reader enforces the other half
+                # (``link_idle_s`` without a frame closes it).
+                if time.time() - self.last_frame_at > self.settings.keepalive_s:
+                    record = self.server.peer_record()
+                    self._write(wire.keepalive_frame(record.pid if record else 0))
+                self._wake.wait(timeout=0.5)
+                self._wake.clear()
+        except (OSError, wire.LinkCryptoError):
+            self.close("error")
+
+    def _drain(self) -> bool:
+        wrote = False
+        while True:
+            try:
+                frame = self._reliable.get_nowait()
+            except queue.Empty:
+                break
+            self._write(frame)
+            wrote = True
+        with self._droppable_lock:
+            pending = list(self._droppable.values())
+            self._droppable.clear()
+        for frame in pending:
+            self._write(frame)
+            wrote = True
+        return wrote
+
+    def _write(self, frame: dict[str, Any]) -> None:
+        if self._closed.is_set():
+            return
+        payload = self.codec.seal(frame)
+        self.sock.sendall(payload)
+        self.bytes_out += len(payload)
+        self.frames_out += 1
+
+    def request(
+        self, frame: dict[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any] | None:
+        """Send one RELIABLE op and wait for its reply.
+
+        The reply is matched on ``req`` rather than on arrival order, because a
+        link also receives unsolicited events; a caller waiting for its own ack
+        must not be handed someone else's ping answer.
+        """
+        req = frame.get("req")
+        waiter = self.server.expect_reply(self.link_id, req) if req is not None else None
+        if not self.send(frame):
+            return None
+        if waiter is None:
+            return None
+        return waiter.wait(self.settings.op_wait_s if timeout is None else timeout)
+
+
+# ---------------------------------------------------------------------------
+# The listener's policy: the relay's answers to the handshake's questions
+# ---------------------------------------------------------------------------
+
+
+class ServerPolicy(ListenerPolicy):
+    """``ListenerPolicy`` backed by the store — the handshake's only window onto it.
+
+    Every method here is a security decision, so each one is as narrow as the
+    question it answers: an ACTIVE member's key or ``None`` (never a tombstone's),
+    the current epoch key or ``None``, and an invite's key only while that invite is
+    minted, fresh and named to this device as its inviter.
+    """
+
+    def __init__(self, server: RelayServer, network_id: str) -> None:
+        self._server = server
+        self._network_id = network_id
+        self._record: NetworkRecord | None = None
+        try:
+            self._record = store.load(network_id, server.root)
+            self._state = store.require_secrets(network_id, server.root)
+        except (FileNotFoundError, MeshRefusal):
+            self._record = None
+            self._state = SecretState(network_id=network_id, epoch=0)
+
+    @property
+    def current_epoch(self) -> int:
+        return self._record.epoch if self._record else 0
+
+    @property
+    def previous_epoch(self) -> int | None:
+        return self._state.previous_epoch
+
+    def network_known(self, network_id: str) -> bool:
+        return self._record is not None and self._record.network_id == network_id
+
+    def trust_active(self, network_id: str) -> bool:
+        return bool(self._record and self._record.trust == "active")
+
+    def epoch_key(self, network_id: str, epoch: int) -> bytes | None:
+        if not self._record:
+            return None
+        if epoch == self._state.epoch and self._state.secret:
+            return wire.epoch_key(self._state.secret, network_id, epoch)
+        if epoch == self._state.previous_epoch and self._state.previous_secret:
+            return wire.epoch_key(self._state.previous_secret, network_id, epoch)
+        return None
+
+    def active_member_public_key(self, network_id: str, device_id: str) -> str | None:
+        """The member row's key — ONLY for a live member at the CURRENT epoch.
+
+        This one method carries R5's teeth: a tombstoned device, or one absent from
+        the current list, resolves to ``None`` and is refused at step 6 before any
+        key is tried.
+        """
+        if not self._record:
+            return None
+        member = self._record.member(device_id)
+        if member is None or not member.active:
+            return None
+        return member.public_key or None
+
+    def invite_credential(self, network_id: str, invite_id: str) -> Credential | None:
+        """The invite's MAC key, or ``None`` when the token may not be redeemed.
+
+        Freshness is judged against the MINTING device's clock, which is this one —
+        the token carries a duration, never an absolute expiry, so pairing involves
+        no cross-host clock comparison at all.
+        """
+        if not self._record or not invite_id:
+            return None
+        invite = self._record.invite(invite_id)
+        if invite is None or invite.state != "minted" or not invite.is_fresh(time.time()):
+            return None
+        if invite.role not in ("read", "drive", "admin"):
+            return None
+        if not self._state.secret:
+            return None
+        return Credential(
+            "invite",
+            self._record.epoch,
+            wire.invite_key(self._state.secret, network_id, invite.invite_id),
+        )
+
+    def invite_device_binding(self, network_id: str, invite_id: str) -> str:
+        if not self._record:
+            return ""
+        invite = self._record.invite(invite_id)
+        return invite.device_id if invite else ""
+
+
+# ---------------------------------------------------------------------------
+# The relay
+# ---------------------------------------------------------------------------
+
+
+class RelayServer:
+    """The listener, the links, the dispatch, and the loopback control surface."""
+
+    def __init__(
+        self,
+        *,
+        root: Path | None = None,
+        settings: NetworkSettings | None = None,
+        identity: DeviceIdentity | None = None,
+        instance_id: str | None = None,
+        audit: AuditLog | None = None,
+    ) -> None:
+        self.root = root
+        self.settings = settings or NetworkSettings.from_config(root)
+        self.identity = identity or load_or_mint(root)
+        self.instance_id = instance_id or mint_instance_id()
+        # `from_config`, not the default constructor: the cap, the generation count
+        # and the age bound are registered settings (settings_io.SETTINGS, section
+        # `network`), and an explicit `audit=` argument still wins for a test.
+        self.audit = audit or AuditLog.from_config(root)
+        self.store_view = StoreView(root, sessions=lambda: local_session_ids(root))
+        #: Forwarded viewer streams, keyed by an unpredictable id (os.urandom).
+        #: On the device the viewer sits at these are streams it OPENED; on the
+        #: owning device they are streams it ACCEPTED. One table for both roles,
+        #: because a stream id is unique per opening relay and the roles cannot
+        #: collide. See _Stream for why the unguessable id is the authorisation
+        #: for a PUSH (a push is not a request and is deliberately not
+        #: dispatched — see PeerLink._handle).
+        self._streams: dict[str, _Stream] = {}
+        self._streams_lock = threading.Lock()
+        #: req numbers for relay-initiated requests on a link (stream opens).
+        #: A separate counter from any other user's, so a reply can never be
+        #: matched by the wrong waiter.
+        self._relay_req = 0
+        self.authorizer = Authorizer(self.store_view, self.audit)
+        self.identity_use = IdentityUseTracker()
+        self.links: dict[str, PeerLink] = {}
+        self._links_lock = threading.RLock()
+        self._listener: socket.socket | None = None
+        self._control: socket.socket | None = None
+        self._control_key = wire.b64u(os.urandom(32))
+        self._control_port = 0
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._reply_waiters: dict[tuple[str, Any], "_ReplyWaiter"] = {}
+        #: Serialises invite claim + mark, so two concurrent redemptions of one
+        #: token cannot both pass the `minted` check.
+        self._invite_lock = threading.Lock()
+        self._reconcile_grants: dict[tuple[str, str], list[float]] = {}
+        self._handlers: dict[str, Callable[[PeerLink, dict[str, Any]], dict[str, Any] | None]] = {
+            "ping": self._op_ping,
+            "net_bye": self._op_bye,
+            "net_catalog": self._op_catalog,
+            "net_member_list": self._op_member_list,
+            "net_epoch": self._op_epoch,
+            "net_reconcile": self._op_reconcile,
+            "net_leave": self._op_leave,
+            "net_panic": self._op_panic,
+            "net_trust": self._op_trust,
+            "net_identity_rotate": self._op_identity_rotate,
+            # THE SESSION PLANE (mesh-session-mobility.md §2.2/§3.2/§4.3). The
+            # carriers and the three ops that make a session on this device
+            # reachable from another one. net_sync/net_broker/net_session_move
+            # are deliberately ABSENT: they belong to other slices, and their
+            # absence is answered by the same sentence-naming fallback dispatch
+            # has always used (_owning_document).
+            "net_forward": self._op_forward,
+            "net_stream": self._op_stream,
+            "net_session_create": self._op_session_create,
+            "net_session_engage": self._op_session_engage,
+            "net_session_stop": self._op_session_stop,
+            "net_session_lifecycle": self._op_session_lifecycle,
+            "net_pair_ready": self._op_pair_ready,
+            "net_pair_abort": self._op_pair_abort,
+        }
+        self.started_at = time.time()
+        #: Computed ONCE: the build stamp is decoration, and asking packaging
+        #: metadata again on every heartbeat would be a per-15-seconds import for a
+        #: string that cannot change while this process lives.
+        self.build = _build_stamp()
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def bind(self) -> tuple[str, int]:
+        """Bind the peer listener. Returns the address it actually bound."""
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((self.settings.listen_address, self.settings.port))
+        listener.listen(16)
+        self._listener = listener
+        host, port = listener.getsockname()[:2]
+        return str(host), int(port)
+
+    def bind_control(self) -> tuple[str, int]:
+        control = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        control.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        control.bind(("127.0.0.1", 0))
+        control.listen(8)
+        self._control = control
+        host, port = control.getsockname()[:2]
+        self._control_port = int(port)
+        return str(host), int(port)
+
+    def start(self, *, background: bool = False) -> None:
+        if self._listener is None:
+            self.bind()
+        if self._control is None:
+            self.bind_control()
+        assert self._listener is not None and self._control is not None
+        for target, name in (
+            (self._accept_loop, "mesh-accept"),
+            (self._control_loop, "mesh-control"),
+            (self._heartbeat_loop, "mesh-heartbeat"),
+        ):
+            thread = threading.Thread(target=target, name=name, daemon=True)
+            thread.start()
+            self._threads.append(thread)
+        self.publish()
+        self._flush_outboxes()
+
+    def serve_forever(self) -> None:
+        """The foreground runner (``lop network serve``): block until signalled."""
+        self.start()
+        stop = threading.Event()
+
+        def _handle_signal(signum: int, _frame: Any) -> None:
+            self.audit.record(
+                AuditEvent(event="disconnect_initiated", actor="self", actor_kind="relay")
+            )
+            stop.set()
+
+        previous = signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+        try:
+            while not stop.wait(0.5):
+                pass
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            self.stop()
+
+    def stop(self) -> None:
+        """Stop accepting, say goodbye on every link, unpublish, flush the audit log.
+
+        Sessions are UNTOUCHED: a reconnecting peer sees them again on the next
+        handshake, and nothing here owns a transcript to lose.
+        """
+        self._stop.set()
+        with self._links_lock:
+            links = list(self.links.values())
+        for link in links:
+            link.send({"op": "net_bye", "reason": "stopping"})
+        time.sleep(0.05)
+        for link in links:
+            link.close("we-closed")
+        for sock in (self._listener, self._control):
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        store.unpublish_peer_record(os.getpid(), self.root)
+        self.audit.flush()
+
+    # -- discovery record ---------------------------------------------------
+
+    def advertised_endpoints(self) -> list[str]:
+        """Where peers should try to reach this device.
+
+        ``network.advertise_hosts`` first (the sanctioned way to name a tunnel
+        hostname), then the detected local addresses. Loopback is included ONLY in
+        dial-only mode, where it is the honest answer: it says "you cannot reach me
+        from another machine", which is exactly what a peer needs to know.
+        """
+        hosts = list(self.settings.advertise_hosts)
+        if hosts:
+            return hosts
+        if self.settings.listen_address == "127.0.0.1":
+            return [f"127.0.0.1:{self.settings.port}"]
+        addresses: list[str] = []
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                address = info[4][0]
+                if address not in addresses and not address.startswith("127."):
+                    addresses.append(address)
+        except OSError:
+            addresses = []
+        return [f"{address}:{self.settings.port}" for address in addresses]
+
+    def peer_record(self) -> PeerRecord:
+        networks = []
+        for record in store.list_networks(self.root):
+            networks.append(
+                {
+                    "network_id": record.network_id,
+                    "name": record.name,
+                    "epoch": record.epoch,
+                    "role": record.self_role,
+                    "trust": record.trust,
+                    "members": len(record.active_members()),
+                    "links": sum(
+                        1
+                        for link in self.links.values()
+                        if link.network_id == record.network_id and link.alive
+                    ),
+                }
+            )
+        build = self.build
+        return PeerRecord(
+            pid=os.getpid(),
+            session_protocol=int(PROTOCOL_VERSION),
+            device_id=self.identity.device_id,
+            device_name=self.identity.name,
+            instance_id=self.instance_id,
+            control_port=self._control_port,
+            # 0600 record = the loopback boundary; the key's protection is the
+            # account, exactly as a session record's is.
+            control_key=self._control_key,
+            listen={
+                "address": self.settings.listen_address,
+                "port": self.settings.port,
+                "advertised": self.advertised_endpoints(),
+            },
+            networks=networks,
+            links=len([link for link in self.links.values() if link.alive]),
+            capabilities=list(wire.LINK_CAPABILITIES),
+            version=build.get("version", ""),
+            source_ref=build.get("source_ref", ""),
+            started_at=self.started_at,
+        )
+
+    def publish(self) -> None:
+        store.publish_peer_record(self.peer_record(), self.root)
+
+    def _heartbeat_loop(self) -> None:
+        """Re-publish the record and flush the audit tail, on the session
+        runtime's own heartbeat interval so a reader needs ONE freshness rule."""
+        while not self._stop.wait(HEARTBEAT_S):
+            try:
+                self.publish()
+                self.audit.flush()
+            except OSError:
+                continue
+
+    # -- accepting links ----------------------------------------------------
+
+    def _accept_loop(self) -> None:
+        assert self._listener is not None
+        while not self._stop.is_set():
+            try:
+                sock, addr = self._listener.accept()
+            except OSError:
+                if self._stop.is_set():
+                    return
+                continue
+            if len(self.links) >= self.settings.max_links:
+                sock.close()
+                continue
+            thread = threading.Thread(
+                target=self._handshake_inbound,
+                args=(sock, addr),
+                name="mesh-handshake",
+                daemon=True,
+            )
+            thread.start()
+
+    def _handshake_inbound(self, sock: socket.socket, addr: Any) -> None:
+        """Complete a listener-side handshake, or close silently and audit.
+
+        NO REPLY on any failure: an open port that answers wrong keys with errors is
+        an oracle, and the reason is written to the LOCAL audit record instead.
+        """
+        deadline = wire.deadline_in(self.settings.handshake_timeout_s)
+        mode = "member"
+        network_id = ""
+        peer_addr = f"{addr[0]}:{addr[1]}" if isinstance(addr, tuple) else str(addr)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            reader = wire.FrameReader(sock)
+            # Peek at the hello only far enough to learn which network and mode it
+            # claims (a policy object cannot exist before that); every field is then
+            # re-validated by `accept_hello`, and nothing is trusted from it before
+            # the verification order runs.
+            peek = reader.read_line(deadline)
+            network_id = str(peek.get("network_id") or "")
+            mode = str(peek.get("mode") or "member")
+            policy = ServerPolicy(self, network_id)
+            handshake = Handshake.new(
+                role="listener",
+                identity=self.identity,
+                network_id=network_id,
+                epoch=int(peek.get("epoch") or 0),
+                instance_id=self.instance_id,
+                session_protocol=_session_protocol(),
+                mode="join" if mode == "join" else "member",
+                capabilities=list(wire.LINK_CAPABILITIES),
+                build=self.build,
+            )
+            handshake.accept_hello(peek)
+            if handshake.mode == "join":
+                # THE INVITE IS CLAIMED HERE, BEFORE the challenge goes out and
+                # before any human sees a code: `redeemed` on disk is what makes a
+                # second redemption of one token fail, and a crash between "a valid
+                # redemption arrived" and "a person looked" must not leave a
+                # replayable token behind. The lock is what keeps two concurrent
+                # redemptions from both passing the `minted` check.
+                with self._invite_lock:
+                    joined = store.load(network_id, self.root)
+                    invite_id = str(handshake.join_block.get("invite_id") or "")
+                    claim(
+                        joined,
+                        invite_id,
+                        device_id=handshake.peer_device_id,
+                        epoch=handshake.epoch,
+                    )
+                    open_invite = joined.invite(invite_id)
+                    assert open_invite is not None  # `claim` just proved it exists
+                    open_invite.state = "redeemed"
+                    open_invite.redeemed_by = handshake.peer_device_id
+                    open_invite.redeemed_at = time.time()
+                    store.save(joined, self.root)
+                    joined_secrets = store.require_secrets(network_id, self.root)
+                    handshake.credential = invite_credential_for(
+                        joined, joined_secrets.secret, invite_id
+                    )
+            handshake.send_challenge(sock, policy)
+            handshake.verify_auth(reader, deadline, policy)
+            result = handshake.establish()
+        except MeshRefusal as refusal:
+            self._audit_handshake_refusal(refusal, network_id, peer_addr, mode)
+            _close_quietly(sock)
+            return
+        except (wire.LinkCryptoError, ConnectionError, OSError, TimeoutError):
+            _close_quietly(sock)
+            return
+        except Exception as exc:  # noqa: BLE001 — never kill the accept loop
+            self.audit.record(
+                AuditEvent(
+                    event="handshake_refused",
+                    outcome="failed",
+                    network_id=network_id,
+                    cause="internal",
+                    detail={"cause": str(exc)[:120], "mode": mode},
+                )
+            )
+            _close_quietly(sock)
+            return
+
+        record = store.load(network_id, self.root) if network_id else None
+        welcome = handshake.welcome_frame(
+            phase=result.phase,
+            epoch=result.epoch,
+            nets=[_net_summary(record)] if record else [],
+            capabilities=list(wire.LINK_CAPABILITIES),
+            members_digest=members_digest_of(record) if record else "",
+            network_name=record.name if record else "",
+        )
+        try:
+            handshake.send_welcome(sock, welcome)
+        except OSError:
+            _close_quietly(sock)
+            return
+        if result.phase == "pair":
+            self._run_pair_listener(sock, handshake, result, peer_addr)
+            return
+        self.register_link(sock, handshake, result, peer_addr)
+
+    def _audit_handshake_refusal(
+        self, refusal: MeshRefusal, network_id: str, peer_addr: str, mode: str
+    ) -> None:
+        # A self-connection is its own event kind, not a generic refusal: it is the
+        # one handshake failure that is usually the OPERATOR's mistake rather than an
+        # attack, and `lop network log` should say which it was.
+        if refusal.code == REASON_SELF:
+            self.audit.record(
+                AuditEvent(
+                    event="self_link",
+                    actor="self",
+                    subject=peer_addr,
+                    outcome="refused",
+                    network_id=network_id,
+                    detail={"instance_id": ""},
+                )
+            )
+            return
+        cause = {
+            "unknown_network": "policy",
+            "untrusted": "untrusted",
+            "epoch_stale": "epoch_stale",
+            "invite_epoch_stale": "epoch_stale",
+            "not_a_member": "not_a_member",
+            "bad_signature": "auth_failed",
+            "bad_mac": "auth_failed",
+            "protocol_mismatch": "protocol_mismatch",
+            "invite_device_mismatch": "wrong_device",
+            "invite_invalid": "policy",
+            "self_link": "policy",
+        }.get(refusal.code, "policy")
+        self.audit.record(
+            AuditEvent(
+                event="handshake_refused",
+                actor="unknown",
+                subject=peer_addr,
+                outcome="refused",
+                network_id=network_id,
+                cause=cause,
+                detail={"cause": refusal.code, "mode": mode, "their_device": peer_addr},
+            )
+        )
+
+    def register_link(
+        self, sock: socket.socket, handshake: Handshake, result: Any, peer_addr: str
+    ) -> PeerLink:
+        """Admit a fully-authenticated link, applying the duplicate-identity fence."""
+        link = PeerLink(
+            server=self,
+            sock=sock,
+            result=result,
+            codec=handshake.codec(),
+            settings=self.settings,
+        )
+        link.peer_addr = peer_addr
+        verdict = self.identity_use.observe(
+            result.peer_device_id,
+            instance_id=result.peer_instance_id,
+            link_id=result.link_id,
+        )
+        if verdict.kind == "duplicate" and verdict.evicted is not None:
+            evicted = self.links.get(verdict.evicted.link_id)
+            if evicted is not None:
+                # Newest wins in both branches, because refusing the new link would
+                # let a stale copy pin a device's slot and deny service.
+                evicted.send({"op": "net_bye", "reason": "duplicate_identity"})
+                evicted.close("replaced")
+            self._note_duplicate(result.peer_device_id, result.peer_instance_id)
+        elif verdict.kind == "restart":
+            self.audit.record(
+                AuditEvent(
+                    event="link_replaced",
+                    actor=result.peer_device_id,
+                    subject=result.network_id,
+                    network_id=result.network_id,
+                    epoch=result.epoch,
+                    detail={
+                        "instance_id": result.peer_instance_id,
+                        "age_s": round(
+                            time.time()
+                            - (verdict.evicted.last_frame_at if verdict.evicted else 0.0),
+                            2,
+                        ),
+                    },
+                )
+            )
+        with self._links_lock:
+            self.links[result.link_id] = link
+        link.start()
+        self.audit.record(
+            AuditEvent(
+                event="link_opened",
+                actor=result.peer_device_id,
+                subject=result.network_id,
+                network_id=result.network_id,
+                epoch=result.epoch,
+                detail={"role": "listener", "epoch": result.epoch, "phase": result.phase},
+            )
+        )
+        return link
+
+    def _note_duplicate(self, device_id: str, instance_id: str) -> None:
+        """Record a second live claim on one device id, and flag the member after
+        three distinct instances inside the window. Detection is behavioural and the
+        flag is ADVISORY: it denies nothing, and the operator's removal is what
+        denies."""
+        self.audit.record(
+            AuditEvent(
+                event="duplicate_identity",
+                actor=device_id,
+                outcome="ok",
+                detail={
+                    "instance_id": instance_id,
+                    "duplicate_count": self.identity_use.recent_instance_count(device_id),
+                },
+            )
+        )
+        for record in store.list_networks(self.root):
+            member = record.member(device_id)
+            if member is None:
+                continue
+            member.duplicate_count += 1
+            member.last_seen_instance = instance_id
+            if self.identity_use.recent_instance_count(device_id) >= 3:
+                member.suspect = True
+            store.save(record, self.root)
+
+    def link_closed(self, link: PeerLink, reason: str) -> None:
+        with self._links_lock:
+            self.links.pop(link.link_id, None)
+        self.identity_use.released(link.device_id, link.link_id)
+        self.audit.record(
+            AuditEvent(
+                event="link_closed",
+                actor=link.device_id,
+                subject=link.network_id,
+                outcome="ok",
+                network_id=link.network_id,
+                epoch=link.epoch,
+                detail={
+                    "cause": reason,
+                    "frames_in": link.frames_in,
+                    "frames_out": link.frames_out,
+                },
+            )
+        )
+
+    def audit_idle(self, link: PeerLink) -> None:
+        self.audit.record(
+            AuditEvent(
+                event="link_idle",
+                actor=link.device_id,
+                subject=link.network_id,
+                network_id=link.network_id,
+                epoch=link.epoch,
+                cause="timeout",
+                detail={
+                    "last_seen_at": round(link.last_frame_at, 3),
+                    "missed_beats": max(
+                        1, int((time.time() - link.last_frame_at) / self.settings.keepalive_s)
+                    ),
+                },
+            )
+        )
+
+    def audit_link(self, link: PeerLink, event: str, *, cause: str = "peer-closed") -> None:
+        self.audit.record(
+            AuditEvent(
+                event=event,
+                actor=link.device_id,
+                subject=link.network_id,
+                network_id=link.network_id,
+                epoch=link.epoch,
+                detail={"cause": cause},
+            )
+        )
+
+    # -- dispatch (the ONE call site of the authoriser) ---------------------
+
+    def dispatch(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any] | None:
+        """Authorise, then handle. The chokepoint, and the only place it is called.
+
+        ``check`` runs BEFORE any field of the frame other than ``op`` and ``req``
+        is read, so an unauthorised frame cannot influence what the relay does by
+        being malformed in an interesting way.
+        """
+        req = frame.get("req")
+        try:
+            granted = self.authorizer.check(link.context, frame)
+        except Refusal as refusal:
+            return wire.refusal_frame(req, refusal.sentence)
+        # DISPATCH ON THE OP THAT ARRIVED, not on what the authoriser resolved it
+        # TO. For every op but a carrier those are the same string; for
+        # ``net_forward`` they are not — the chokepoint deliberately resolves the
+        # INNER op (so the capability checked is the inner one's), while the
+        # handler that must run is the CARRIER's, whose whole job is to carry that
+        # inner frame. Looking up ``granted.action`` alone answered a forwarded
+        # prompt with "prompt is not implemented in this build yet", which is how a
+        # carrier that IS implemented reads as one that is not.
+        carrier = str(frame.get("op") or "")
+        handler = self._handlers.get(carrier) or self._handlers.get(granted.action)
+        if handler is None:
+            return wire.refusal_frame(
+                req,
+                f"{granted.action} is not implemented in this build yet "
+                f"({_owning_document(granted.action)})",
+            )
+        if granted.action in ("net_pair_ready", "net_pair_abort", "net_pair_result"):
+            return wire.refusal_frame(
+                req, f"{granted.action} is only valid on a link that is still pairing"
+            )
+        try:
+            result = handler(link, frame)
+        except MeshRefusal as refusal:
+            return wire.refusal_frame(req, refusal.sentence)
+        except Exception as exc:  # noqa: BLE001 — a handler bug must not close the link
+            self.audit.record(
+                AuditEvent(
+                    event="authorisation_refused",
+                    actor=link.device_id,
+                    subject=link.network_id,
+                    network_id=link.network_id,
+                    epoch=link.epoch,
+                    outcome="failed",
+                    cause="internal",
+                    detail={"op": granted.action, "capability": ""},
+                )
+            )
+            return wire.refusal_frame(req, f"{granted.action} failed on this device: {exc}")
+        # A REPLY IS ALWAYS AN ACK (design §10.2): ``{"op": "ack", "req": …,
+        # "detail": …}``. A handler that answered with its own op name would be
+        # indistinguishable from a REQUEST of that name at the peer, which is not a
+        # cosmetic problem — two peers then answer each other's replies as if they
+        # were new requests, forever (measured at ~600 frames a second on one idle
+        # pair before this was fixed, and caught by the e2e test rather than by
+        # review).
+        if result is None:
+            return {"op": "ack", "req": req, "detail": ""}
+        if result.get("op") in ("ack", "error"):
+            return result
+        return {"op": "ack", "req": req, "detail": result}
+
+    # -- reply plumbing -----------------------------------------------------
+
+    def expect_reply(self, link_id: str, req: Any) -> "_ReplyWaiter":
+        waiter = _ReplyWaiter()
+        with self._links_lock:
+            self._reply_waiters[(link_id, req)] = waiter
+        return waiter
+
+    def deliver_reply(self, link: PeerLink, frame: dict[str, Any]) -> bool:
+        key = (link.link_id, frame.get("req"))
+        with self._links_lock:
+            waiter = self._reply_waiters.pop(key, None)
+        if waiter is None:
+            return False
+        waiter.set(frame)
+        return True
+
+    # -- peer-scope handlers ------------------------------------------------
+
+    def _op_ping(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        return {"op": "ack", "req": frame.get("req"), "detail": "pong"}
+
+    def _op_pair_ready(self, link: PeerLink, _frame: dict[str, Any]) -> dict[str, Any]:
+        """Refuse: a pairing frame on an ESTABLISHED link is a protocol error.
+
+        The ceremony runs on a raw socket inside ``_run_pair_listener``, before any
+        link exists — so a ``net_pair_ready`` arriving here means a peer is trying to
+        drive the pairing state machine through the ordinary dispatch path, which is
+        the shape of an attempt to reach a pair-phase exemption from a member link.
+        """
+        raise MeshRefusal(
+            "protocol_error",
+            "a pairing frame arrived on an established link; pairing happens before one exists",
+        )
+
+    def _op_pair_abort(self, link: PeerLink, _frame: dict[str, Any]) -> dict[str, Any]:
+        """Same refusal as ``net_pair_ready``: see that handler."""
+        raise MeshRefusal(
+            "protocol_error",
+            "a pairing frame arrived on an established link; pairing happens before one exists",
+        )
+
+    def _op_bye(self, link: PeerLink, frame: dict[str, Any]) -> None:
+        self.audit_link(link, "link_closed", cause="peer-closed")
+        link.close("peer-closed")
+        return None
+
+    def _op_catalog(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """This peer's session rows — a READ-THROUGH of the local run directory.
+
+        One scan per request with a short TTL, because a sidebar polling every
+        second must not become a scan storm. The rows carry no transcript content:
+        an id, a name, a cwd, a model label and liveness, which is what a listing
+        needs and nothing more.
+        """
+        return {
+            "complete": True,
+            "device": {
+                "device_id": self.identity.device_id,
+                "name": self.identity.name,
+            },
+            "generated_at": time.time(),
+            "sessions": self.local_session_rows(),
+        }
+
+    def local_session_rows(self) -> list[dict[str, Any]]:
+        """This device's rows: every LIVE session, then every stored one.
+
+        A COLD SESSION IS STILL A ROW, and that is not a listing convenience: a
+        session that is idle on a peer must still list as remote (mobility §1.2 —
+        the record exists only while a runtime does, which is exactly why
+        placement cannot live on the record alone), and `net_session_engage`'s
+        whole job is to warm an id a viewer can already see. Live rows keep their
+        registry state; a stored row says `stored` and carries no pid, so a
+        viewer can tell "resident" from "on disk" without a second read.
+
+        The stamp travels with the row (§5.1): placement is additive, always
+        present on a row this build writes (`mode: "local"` for an ordinary
+        session), so a reader can distinguish "local" from "written by a build
+        that does not know about the mesh".
+        """
+        from local_operator.session.placement import local_placement, read_stamp
+        from local_operator.session.runtime import registry
+
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for record, state in registry.scan(self.root):
+            seen.add(record.session_id)
+            stamp = read_stamp(self.root, record.session_id)
+            rows.append(
+                {
+                    "session_id": record.session_id,
+                    "conversation_name": record.conversation_name,
+                    "cwd": record.cwd,
+                    "model_label": record.model_label,
+                    "busy": record.busy,
+                    "pending": record.pending,
+                    "detached": record.detached,
+                    "started": record.started,
+                    "pid": record.pid,
+                    "kind": record.kind,
+                    "capabilities": list(record.capabilities),
+                    "state": state,
+                    "age_s": 0.0,
+                    "placement": (
+                        stamp.placement.to_json()
+                        if stamp is not None
+                        else local_placement().to_json()
+                    ),
+                    "origin": dict(stamp.origin) if stamp is not None and stamp.origin else None,
+                    "archived": None,
+                }
+            )
+        for row in self._stored_rows():
+            if row.get("session_id") in seen:
+                continue
+            rows.append(row)
+        return rows
+
+    def _stored_rows(self) -> list[dict[str, Any]]:
+        """Sessions with a directory and no live record — the idle half.
+
+        Read through `session.catalog.load_catalog`, the same ranking the sidebar
+        adopts as membership, so a stored row here names and dates a conversation
+        exactly as the local UI does rather than by a second reading of the
+        directory.
+
+        Best effort BY DESIGN: a store that cannot be walked contributes no
+        stored rows and leaves the live ones standing. This is a catalogue
+        answer, and a device whose `sessions/` is unreadable is a device whose
+        live sessions a viewer can still reach.
+        """
+        from local_operator.session.catalog import load_catalog
+        from local_operator.session.placement import local_placement, read_stamp
+
+        rows: list[dict[str, Any]] = []
+        try:
+            entries = load_catalog(self.root)
+        except Exception:  # noqa: BLE001 — a listing is not an error path
+            return rows
+        for entry in entries:
+            session_id = str(getattr(entry.row, "id", "") or "")
+            if not session_id:
+                continue
+            stamp = read_stamp(self.root, session_id)
+            rows.append(
+                {
+                    "session_id": session_id,
+                    "conversation_name": str(getattr(entry.row, "name", "") or ""),
+                    "cwd": "",
+                    "model_label": "",
+                    "busy": False,
+                    "pending": bool(entry.unseen),
+                    "detached": True,
+                    "started": float(getattr(entry.row, "mtime", 0.0) or 0.0),
+                    "pid": 0,
+                    "kind": "daemon",
+                    "capabilities": [],
+                    "state": "stored",
+                    "age_s": 0.0,
+                    "placement": (
+                        stamp.placement.to_json()
+                        if stamp is not None
+                        else local_placement().to_json()
+                    ),
+                    "origin": (dict(stamp.origin) if stamp is not None and stamp.origin else None),
+                    "archived": None,
+                }
+            )
+        return rows
+
+    def _op_member_list(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        return {
+            "op": "ack",
+            "req": frame.get("req"),
+            "detail": {
+                "network_id": record.network_id,
+                "epoch": record.epoch,
+                "members": [member.to_json() for member in record.members],
+                "members_digest": members_digest_of(record),
+            },
+        }
+
+    def _op_epoch(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Apply a rotation from a peer, with the deterministic conflict rules."""
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        state = store.require_secrets(record.network_id, self.root)
+        incoming = int(frame.get("epoch") or 0)
+        if incoming == record.epoch and str(frame.get("rotation_id") or "") != record.rotations.get(
+            str(record.epoch), ""
+        ):
+            # THE CONCURRENT-ROTATION RULE: same epoch, different rotator. The
+            # receiver refuses, audits the conflict, and answers with its own state
+            # so the sender learns it lost the race. Convergence comes from the
+            # lowest-id rule when both frames arrive before either is applied.
+            self.audit.record(
+                AuditEvent(
+                    event="epoch_conflict",
+                    actor=link.device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=incoming,
+                    outcome="refused",
+                    cause="epoch_stale",
+                    detail={
+                        "epoch": incoming,
+                        "rotation_id": str(frame.get("rotation_id") or ""),
+                        "winner": record.rotations.get(str(record.epoch), ""),
+                    },
+                )
+            )
+            self._queue_epoch_for(link.device_id, record, state, reason="epoch_conflict")
+            return {
+                "op": "ack",
+                "req": frame.get("req"),
+                "detail": {
+                    "epoch": record.epoch,
+                    "rotation_id": record.rotations.get(str(record.epoch), ""),
+                },
+            }
+        outcome = apply_epoch(record, state, frame, sender_device_id=link.device_id, root=self.root)
+        if outcome.applied:
+            self.audit.record(
+                AuditEvent(
+                    event="epoch_rotated",
+                    actor=link.device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=record.epoch,
+                    detail={
+                        "epoch_before": state.previous_epoch,
+                        "epoch_after": record.epoch,
+                        "rotation_id": record.rotations.get(str(record.epoch), ""),
+                        "removed": list(frame.get("removed") or []),
+                    },
+                )
+            )
+            self._rehandshake_network(record.network_id, reason="epoch_stale")
+        return {
+            "op": "ack",
+            "req": frame.get("req"),
+            "detail": {"epoch": record.epoch, "applied": outcome.applied, "reason": outcome.detail},
+        }
+
+    def _op_reconcile(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Answer a previous-epoch link with the current epoch state, and ONLY that.
+
+        Rate limited per device per network: "I keep presenting an old epoch" is
+        also what a replayed credential looks like, so a member gets three grants an
+        hour and the fourth is refused with a named reason.
+        """
+        if link.phase != "reconcile":
+            raise MeshRefusal("phase_forbidden", "this link is already at the current epoch")
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        member = record.member(link.device_id)
+        if member is None or not member.active:
+            # A REMOVED device presenting the previous epoch gets NOTHING here —
+            # its row is a tombstone and that is checked before any key was tried.
+            self.audit.record(
+                AuditEvent(
+                    event="reconcile_refused",
+                    actor=link.device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=link.epoch,
+                    outcome="refused",
+                    cause="not_a_member",
+                    detail={"cause": "not_a_member", "grants_used": 0},
+                )
+            )
+            raise MeshRefusal("not_a_member", "that device is not a member of this network")
+        key = (record.network_id, link.device_id)
+        now = time.time()
+        grants = [
+            stamp
+            for stamp in self._reconcile_grants.get(key, [])
+            if now - stamp < RECONCILE_WINDOW_S
+        ]
+        if len(grants) >= RECONCILE_MAX_PER_HOUR:
+            self.audit.record(
+                AuditEvent(
+                    event="reconcile_refused",
+                    actor=link.device_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=link.epoch,
+                    outcome="refused",
+                    cause="reconcile_rate_limited",
+                    detail={"cause": "reconcile_rate_limited", "grants_used": len(grants)},
+                )
+            )
+            raise MeshRefusal(
+                "reconcile_rate_limited",
+                "too many reconcile requests from this device in the last hour; re-pair if "
+                "it is genuinely behind",
+            )
+        grants.append(now)
+        self._reconcile_grants[key] = grants
+        state = store.require_secrets(record.network_id, self.root)
+        self.audit.record(
+            AuditEvent(
+                event="reconcile_granted",
+                actor=link.device_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={
+                    "epoch_from": link.epoch,
+                    "epoch_to": record.epoch,
+                    "grants_used": len(grants),
+                },
+            )
+        )
+        return {
+            "epoch": record.epoch,
+            "secret": state.secret,
+            "members": [row.to_json() for row in record.members],
+            "members_digest": members_digest_of(record),
+            "rotations": dict(record.rotations),
+            "close_after": True,
+        }
+
+    def _op_leave(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """A peer announces its own departure; the lowest-id active admin rotates.
+
+        The rotation is not optional: the leaving device still holds the old
+        secret, so continuing to use it would let a device that has left read new
+        traffic. Only one member rotates (the deterministic lowest id), so three
+        peers receiving the same leave do not produce three epochs.
+        """
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        state = store.require_secrets(record.network_id, self.root)
+        leave(record, device_id=link.device_id, root=self.root)
+        self.audit.record(
+            AuditEvent(
+                event="member_left",
+                actor=link.device_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={"epoch": record.epoch},
+            )
+        )
+        rotator = lowest_id_admin(record)
+        if rotator == record.self_device_id:
+            outcome = rotate_epoch(
+                record, state, by=record.self_device_id, reason="member_left", root=self.root
+            )
+            self._broadcast_epoch(record, state, reason="member_left", removed=outcome.removed)
+        return {"op": "ack", "req": frame.get("req"), "detail": {"left": link.device_id}}
+
+    def _op_panic(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        apply_panic(record, frame, sender_device_id=link.device_id, root=self.root)
+        self.audit.record(
+            AuditEvent(
+                event="panic_received",
+                actor=link.device_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=int(frame.get("epoch") or 0),
+                outcome="ok",
+                detail={
+                    "from_device": link.device_id,
+                    "epoch_before": int(frame.get("epoch") or 0),
+                    "epoch_after": record.epoch,
+                    "reason": str(frame.get("reason") or ""),
+                },
+            )
+        )
+        # Every link for this network closes, and a connection that arrives
+        # afterwards is refused at handshake step 3 — "refuse all further peer
+        # traffic" is a state, not a one-off action.
+        for other in list(self.links.values()):
+            if other.network_id == record.network_id:
+                other.send({"op": "net_bye", "reason": "untrusted"})
+                other.close("we-closed")
+        return {"op": "ack", "req": frame.get("req"), "detail": "untrusted"}
+
+    def _op_trust(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        trust = str(frame.get("trust") or "active")
+        set_trust(record, trust=trust, reason=f"set by {link.device_id}", root=self.root)
+        return {"op": "ack", "req": frame.get("req"), "detail": {"trust": trust}}
+
+    def _op_identity_rotate(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self.store_view.network(link.network_id)
+        if record is None:
+            raise MeshRefusal("not_a_member", "this device is not in that network")
+        statement = frame.get("statement")
+        if not isinstance(statement, dict):
+            raise MeshRefusal("bad_rotation_statement", "no rotation statement was carried")
+        member = apply_device_rotation(record, statement, root=self.root)
+        self.audit.record(
+            AuditEvent(
+                event="device_rotated",
+                actor=member.device_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={
+                    "old_device": str(statement.get("old_device_id") or ""),
+                    "new_device": member.device_id,
+                },
+            )
+        )
+        return {"op": "ack", "req": frame.get("req"), "detail": {"device_id": member.device_id}}
+
+    # -- the session plane: create / engage / stop / forward / stream --------
+    #
+    # WHAT IS HERE. `mesh-session-mobility.md` §2.2's three ops, its §3.3 refusal
+    # rules, and the two carriers that make a remote session behave like a local
+    # one: `net_forward` (one ControlOp frame, its reply returned) and
+    # `net_stream` (a whole viewer connection, pass-through).
+    #
+    # THE SHAPE THAT MAKES IT SMALL: every one of these ops ends in the same two
+    # moves — dial this device's runtime for a session it owns, then hand frames
+    # to it. The peer relay implements no session API of its own; it is a dialer.
+    # That is what keeps "a remote session is the SAME object as a local one"
+    # true rather than aspirational: the vocabulary on the wire is the runtime's
+    # own, unchanged.
+    #
+    # WHY THESE HANDLERS BLOCK. They run on the link's reader thread, so a
+    # create/engage (a real spawn, 1-3 s) delays other inbound frames on that
+    # link for its duration. Bounded and deliberate for v1: the client waits for
+    # this op's answer anyway, and a per-op worker thread would need its own
+    # ordering rule against stream pushes on the same link.
+
+    def _peer_block(self, link: PeerLink) -> dict[str, Any]:
+        """The dialing peer's identity, for a refusal that has to name it (§4.4)."""
+        name = ""
+        record = self.store_view.network(link.network_id)
+        if record is not None:
+            member = record.member(link.device_id)
+            name = member.name if member is not None else ""
+        return {"device_id": link.device_id, "name": name}
+
+    def _session_record(self, session_id: str) -> Any:
+        """The live discovery record for one of THIS device's sessions, or None.
+
+        Read through `registry.scan` — the same discovery every viewer uses —
+        rather than from a cache, because the answer is about a pid that may have
+        died a heartbeat ago and a stale yes is the one that kills the wrong
+        process.
+        """
+        from local_operator.session.runtime import registry
+
+        for record, _state in registry.scan(self.root):
+            if record.session_id == session_id:
+                return record
+        return None
+
+    def _dial_owned(
+        self,
+        session_id: str,
+        *,
+        capabilities: Any = (),
+        auth: dict[str, Any] | None = None,
+        link: "PeerLink | None" = None,
+    ) -> "session_dial.OwnerDial":
+        """Dial a session THIS device owns, as a relay (locality `remote`).
+
+        Raises `dial.OwnerUnreachable`. The capability set comes from the LINK,
+        not from the frame: §3.3's rule is that the resolved set is the only
+        input that decides the runtime's locality gates, and the relaying device
+        is the one that resolved it.
+        """
+        return session_dial.dial_owner(
+            self.root,
+            session_id,
+            capabilities=sorted(str(item) for item in capabilities),
+            auth=auth or {},
+            peer=self._peer_block(link) if link is not None else None,
+            _record=self._session_record(session_id),
+        )[0]
+
+    # -- the ops ------------------------------------------------------------
+
+    def _op_forward(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Carry ONE ControlOp frame to a session on this device (§3.3, §6.4).
+
+        A carrier, NOT an authorisation bypass: the authoriser already resolved
+        the inner frame's op through `INNER_OP_CAPABILITY` and the session-scope
+        rule already proved this device owns the id, both before this ran. So
+        the work is a dial, a write, and the reply.
+
+        THE REPLY IS RE-CORRELATED to the OUTER req. The inner reply carries the
+        req the inner frame used (the viewer's own numbering), and a requesting
+        relay matches replies on the req IT sent — returning the inner reply
+        verbatim would leave the requester's waiter unsatisfied and time the op
+        out on an answer that had already arrived.
+        """
+        outer_req = frame.get("req")
+        inner = frame.get("frame")
+        if not isinstance(inner, dict):
+            raise MeshRefusal(
+                "protocol_error", "a net_forward frame must carry the frame it forwards"
+            )
+        session_id = str(inner.get("session_id") or "")
+        if not session_id:
+            raise MeshRefusal("protocol_error", "a forwarded session frame must name its session")
+        try:
+            dial = self._dial_owned(session_id, capabilities=link.context.capabilities, link=link)
+        except session_dial.OwnerUnreachable as exc:
+            raise MeshRefusal("session_unreachable", str(exc)) from exc
+        try:
+            reply = dial.exchange(inner, timeout_s=self.settings.op_wait_s)
+        finally:
+            dial.close()
+        if reply is None:
+            raise MeshRefusal(
+                "session_unreachable",
+                "that session's runtime stopped answering before it replied",
+            )
+        if reply.get("op") == "error":
+            return {
+                "op": "error",
+                "req": outer_req,
+                "message": str(reply.get("message") or "the owner refused that op"),
+                "detail": {"frame": reply},
+            }
+        return {"op": "ack", "req": outer_req, "detail": {"frame": reply}}
+
+    def _op_session_create(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Create a session ON this device, at another device's request (R8, §5.3).
+
+        THE PEER MINTS THE ID, and that is the rule rather than an implementation
+        detail: an id that exists in two places at once is the permanent routing
+        ambiguity §2 exists to prevent. So a create frame naming a session id is
+        refused, and the id this device mints is the id both ends use from then
+        on.
+
+        The steps are the ordinary local `/new` path, executed here: mint, CLAIM
+        BEFORE mkdir (the fork invariant — a claimed directory is never one an
+        idle sweep could reap), stamp `mesh.json` with `home_device = self`,
+        engage a runtime, then admit the optional first prompt.
+        """
+        if frame.get("session_id"):
+            raise MeshRefusal(
+                "protocol_error",
+                "the device that will own a session mints its id; this frame named one",
+            )
+        from local_operator.fork import new_session_id
+        from local_operator.session.creation import ensure_session_created_at
+        from local_operator.session.placement import (
+            MeshStamp,
+            SessionPlacement,
+            write_stamp,
+        )
+        from local_operator.session.retention import claim_session, release_session
+
+        session_id = new_session_id()
+        session_dir = self.root / "sessions" / session_id
+        cwd = str(frame.get("cwd") or "") or str(Path.home())
+        stamp = MeshStamp(
+            session_id=session_id,
+            network_id=link.network_id,
+            home_device=self.identity.device_id,
+            placement=SessionPlacement(
+                # `peer` rather than `local`: this device runs it, but it is here
+                # because ANOTHER device asked for it, and the placement field's
+                # job is to say how the session came to be where it is (§5.1).
+                mode="peer",
+                network_id=link.network_id,
+                home_device=self.identity.device_id,
+                policy="pinned",
+                stamp_revision=1,
+            ),
+            origin={
+                "kind": str(frame.get("origin") or "user"),
+                "source_device": link.device_id,
+                "source_session_id": "",
+            },
+        )
+        try:
+            # CLAIM BEFORE mkdir, then RELEASE — and the release is not an
+            # afterthought. ``claim_session`` writes the CLAIMING process's pid
+            # into ``.session.pid``, which is the transcript lease: in
+            # ``fork_session`` the claimer and the owner are the same process, so
+            # the marker is superseded by the spawned runtime's own claim a moment
+            # later. Here the claimer is the RELAY, which owns no session at all
+            # (R1) — and a lease naming the relay's live pid is exactly the state
+            # ``launch`` reads as "somebody is constructing this right now", so the
+            # runtime we then spawn waits out the whole engage deadline and the
+            # create fails on a claim its own relay wrote. The claim exists for the
+            # mkdir window (so a retention sweep never sees an unclaimed
+            # directory); the ownership statement is the stamp, and the lease
+            # belongs to whoever runs the session.
+            claim_session(session_dir)
+            session_dir.mkdir(parents=True, exist_ok=True)
+            ensure_session_created_at(session_dir, time.time())
+            write_stamp(self.root, stamp)
+            release_session(session_dir)
+        except OSError as exc:
+            raise MeshRefusal(
+                "session_create_failed", f"the session directory could not be created: {exc}"
+            ) from exc
+
+        name = str(frame.get("name") or "")
+        if name:
+            try:
+                (session_dir / "title.json").write_text(
+                    json.dumps({"title": name, "names": [name]}), encoding="utf-8"
+                )
+            except OSError:
+                # Cosmetic: a title that could not be written is the fork's
+                # borrowed-name case, not a failed create.
+                pass
+
+        engage_error = self._engage_locally(session_id, cwd=cwd)
+        if engage_error:
+            return {
+                "session_id": session_id,
+                "admitted": False,
+                "duplicate": False,
+                "detail": engage_error,
+                "record": self._row_for(session_id),
+            }
+
+        model_result: dict[str, Any] = {"applied": False, "detail": ""}
+        model = frame.get("model")
+        if isinstance(model, dict) and model.get("provider") and model.get("model_id"):
+            model_result = self._set_model_on(session_id, model)
+        admitted = False
+        prompt_detail = ""
+        prompt = str(frame.get("prompt") or "")
+        if prompt:
+            admitted, prompt_detail = self._prompt_on(session_id, prompt, frame.get("images"))
+        elif frame.get("images"):
+            # Images with no text are not a turn. Refused rather than silently
+            # dropped, because a create that discarded them would look like it
+            # had started something.
+            raise MeshRefusal("protocol_error", "a create frame carried images but no prompt text")
+        return {
+            "session_id": session_id,
+            "admitted": admitted,
+            "duplicate": False,
+            "detail": prompt_detail,
+            "model": model_result,
+            "record": self._row_for(session_id),
+        }
+
+    def _op_session_engage(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Make an owner exist for one of this device's sessions (warm).
+
+        Carries NO prompt (§2.2): a prompt smuggled into an engage would be a
+        second way to start a turn, and the one way is `prompt`.
+        """
+        session_id = str(frame.get("session_id") or "")
+        cwd = str(frame.get("cwd") or "")
+        error = self._engage_locally(session_id, cwd=cwd)
+        if error:
+            return {"engaged": False, "detail": error, "session_id": session_id}
+        return {"engaged": True, "detail": "runtime joining", "session_id": session_id}
+
+    def _op_session_stop(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Run THIS device's own kill-switch ladder for one of its sessions (§4.3).
+
+        One implementation, four front ends: `lop stop`, `/stop`, the phone and
+        now a peer all reach `control.stop_session`, so the pid-identity proofs,
+        the escalation ladder and the refusal sentences are the ones the owning
+        machine already has. The viewer renders the peer's vocabulary verbatim
+        rather than re-deriving a sentence, because the peer is the only party
+        that can see which rung fired.
+        """
+        from local_operator.session.runtime import control
+
+        session_id = str(frame.get("session_id") or "")
+        mode = str(frame.get("mode") or "graceful")
+        record = self._session_record(session_id)
+        if record is None:
+            # The design's own vocabulary: a stop of a session that is not
+            # running is an outcome, not an error (`StopOutcome` has "gone").
+            return {
+                "rung": "none",
+                "outcome": "not_running",
+                "pid": 0,
+                "session_id": session_id,
+                "detail": f"{session_id} is not running on this device.",
+            }
+        outcome = asyncio.run(
+            control.stop_session(
+                record,
+                # `immediate` is the explicit opt-in the ladder documents: it
+                # admits the record-field identity proof when the socket cannot
+                # answer, instead of refusing on an unprovable pid.
+                force=mode == "immediate",
+                _root=self.root,
+                _command="mesh net_session_stop",
+            )
+        )
+        return {
+            "rung": outcome.method,
+            "outcome": _STOP_OUTCOME_WORD.get(outcome.method, "stopped"),
+            "pid": outcome.pid,
+            "session_id": session_id,
+            "wakes_dormant": outcome.wakes_dormant,
+            "detail": outcome.line,
+        }
+
+    def _op_session_lifecycle(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """Archive/restore/delete on a peer — REFUSED BY NAME in this build.
+
+        `mesh-session-mobility.md` §8 routes these to the OWNER's own
+        implementation rather than replicating it: archive is
+        `session/archived.py`'s durable index and delete is
+        `cleanup.delete_session`, and neither exists in this build — both land
+        with `feat/session-archive-delete` (PR #1328). Refusing by name, with the
+        document and the module, is the honest answer: half-implementing a delete
+        here would put a second `rmtree` of a session directory in the tree,
+        which `tests/unit/session/test_no_session_deletion.py` exists to prevent.
+        """
+        action = str(frame.get("action") or "")
+        raise MeshRefusal(
+            "not_implemented",
+            f"{action or 'that'} on a peer is not available in this build: it runs the "
+            "owner's own implementation (mesh-session-mobility.md §8), which lands with "
+            "session/archived.py and cleanup.delete_session",
+        )
+
+    # -- the two local helpers the ops above share --------------------------
+
+    def _engage_locally(self, session_id: str, *, cwd: str) -> str:
+        """Start or join a runtime for a session this device owns.
+
+        Returns an EMPTY STRING on success and a sentence on failure, so the
+        two callers (create, engage) can put the sentence in their own frame
+        without either of them inventing a second error vocabulary.
+
+        ``cwd`` defaults to this device's home when the caller supplied none —
+        §5.3 step 2: an omitted working directory means "the peer decides", and
+        the peer's decision is its own home rather than the requesting
+        device's path, which would not exist here.
+        """
+        from local_operator.session.runtime.launch import WarmErrand, engage_runtime
+
+        if not (self.root / "sessions" / session_id).is_dir():
+            return f"this device does not hold a session {session_id}"
+        started = cwd or str(Path.home())
+        try:
+            asyncio.run(
+                engage_runtime(
+                    session_id,
+                    started,
+                    # Delivers nothing: warming is the whole job here, and the
+                    # runtime materialises what it needs when real work arrives.
+                    WarmErrand(),
+                    config_dir=self.root,
+                    deadline_s=ENGAGE_DEADLINE_S,
+                )
+            )
+        except (TimeoutError, RuntimeError, ConnectionError, OSError) as exc:
+            return f"this device could not start that session: {exc}"
+        return ""
+
+    def _set_model_on(self, session_id: str, model: dict[str, Any]) -> dict[str, Any]:
+        """Apply a create's model choice through the runtime's own `set_model`.
+
+        Deliberately NOT parsed here: the runtime validates a model selection
+        against the provider catalogue it actually has, and a second validator in
+        the relay would be a second answer to "is this model usable". A refusal
+        is reported (never swallowed) because a create that silently ran a
+        different model than the caller asked for is the kind of quiet wrongness
+        that costs a session.
+        """
+        try:
+            dial = self._dial_owned(session_id, capabilities=())
+        except session_dial.OwnerUnreachable as exc:
+            return {"applied": False, "detail": str(exc)}
+        try:
+            reply = dial.exchange(
+                {
+                    "op": "set_model",
+                    "req": 1,
+                    "provider": str(model.get("provider")),
+                    "model_id": str(model.get("model_id")),
+                    **({"effort": str(model["effort"])} if model.get("effort") else {}),
+                },
+                timeout_s=self.settings.op_wait_s,
+            )
+        finally:
+            dial.close()
+        if reply is None:
+            return {"applied": False, "detail": "the runtime did not answer"}
+        if reply.get("op") == "error":
+            return {"applied": False, "detail": str(reply.get("message") or "refused")}
+        return {"applied": True, "detail": ""}
+
+    def _prompt_on(self, session_id: str, text: str, images: Any) -> tuple[bool, str]:
+        """Admit the first prompt of a freshly created session.
+
+        The `command_id` is minted HERE and is a real idempotency key: it rides
+        the runtime's own durable-admission path, so a retry of this create
+        cannot run the turn twice.
+        """
+        try:
+            dial = self._dial_owned(session_id, capabilities=("prompt",))
+        except session_dial.OwnerUnreachable as exc:
+            return False, str(exc)
+        try:
+            reply = dial.exchange(
+                {
+                    "op": "prompt",
+                    "req": 1,
+                    "command_id": str(uuid.uuid4()),
+                    "text": text,
+                    "images": list(images or []),
+                },
+                timeout_s=self.settings.op_wait_s,
+            )
+        finally:
+            dial.close()
+        if reply is None:
+            return False, "the runtime did not admit the prompt"
+        if reply.get("op") == "error":
+            return False, str(reply.get("message") or "the runtime refused the prompt")
+        detail = reply.get("detail")
+        return True, "" if detail is None else str(detail)
+
+    def _row_for(self, session_id: str) -> dict[str, Any] | None:
+        """One session's row from the SAME builder `net_catalog` uses."""
+        for row in self.local_session_rows():
+            if row.get("session_id") == session_id:
+                return row
+        return None
+
+    # -- net_stream: the carrier that makes one viewer connection a pipe -------
+    #
+    # WHY A SECOND CARRIER EXISTS. `net_forward` carries ONE frame and returns
+    # its reply. An `AttachedSession` needs more than that: its attach handshake
+    # is a welcome projection, then a continuous stream of events, frontend syncs
+    # and acks, with the viewer's frames interleaved. `stream_open`'s
+    # pass-through mode (mesh-transport-identity.md §2.5, R-IF-1) is the viewer
+    # side of that, and `net_stream` is the LINK side of it.
+    #
+    # WHAT THE PEER RELAY IS, THEREFORE: a pump. On `open` it dials the owning
+    # runtime ONCE and keeps the socket; its reader thread pushes every runtime
+    # frame to the opening relay as `action: push`; `action: send` writes one
+    # viewer frame into the same socket. It never interprets a session frame, so
+    # the vocabulary on the wire is the runtime's own — which is what makes
+    # `RemoteSessionClient` able to inherit every method of `AttachClient`.
+    #
+    # DIRECTION AND RELIABILITY. Viewer→peer frames are REQUESTS because a refusal
+    # must reach the viewer (a read-only member's `prompt` through a stream is
+    # refused with a sentence, not dropped). Peer→viewer frames are PUSHES and are
+    # never answered: answering a push is the livelock `PeerLink._handle`
+    # documents. Both directions ride the RELIABLE queue: the transport's
+    # DROPPABLE class coalesces per (link, stream) and that is right for a
+    # repaint, but a coalesced `event` frame is a LOST TRANSCRIPT ROW, so this
+    # carrier does not use it. Cost stated plainly: one link round trip per frame
+    # per direction until the transport's windowed send lands.
+
+    def _next_relay_req(self) -> int:
+        with self._streams_lock:
+            self._relay_req += 1
+            return self._relay_req
+
+    def _op_stream(self, link: PeerLink, frame: dict[str, Any]) -> dict[str, Any]:
+        """The link half of a forwarded viewer stream (§3.2)."""
+        action = str(frame.get("action") or "")
+        stream_id = str(frame.get("stream") or "")
+        if not stream_id:
+            raise MeshRefusal("protocol_error", "a net_stream frame must name its stream")
+        if action == "open":
+            return self._accept_stream(link, frame, stream_id)
+        if action == "send":
+            return self._accept_stream_frame(link, frame, stream_id)
+        if action == "close":
+            self._close_stream(stream_id)
+            return {"stream": stream_id, "closed": True}
+        raise MeshRefusal("protocol_error", f"{action!r} is not a stream action")
+
+    def _accept_stream(
+        self, link: PeerLink, frame: dict[str, Any], stream_id: str
+    ) -> dict[str, Any]:
+        """Open the owner-side half: dial the runtime once, then pump.
+
+        The session-scope rule has already run at the chokepoint, so a stream for
+        an id this device does not own never reaches here (INV-1).
+        """
+        session_id = str(frame.get("session_id") or "")
+        auth = frame.get("auth") if isinstance(frame.get("auth"), dict) else {}
+        try:
+            # CAPABILITIES COME FROM THE LINK, never from the frame (§3.3): the
+            # relaying device is the one that resolved them from the member row,
+            # and a frame claiming its own grant would be a client deciding its
+            # own authority.
+            dial, welcome = session_dial.dial_owner(
+                self.root,
+                session_id,
+                capabilities=sorted(link.context.capabilities),
+                auth=auth,
+                peer=self._peer_block(link),
+                _record=self._session_record(session_id),
+            )
+        except session_dial.OwnerUnreachable as exc:
+            raise MeshRefusal("session_unreachable", str(exc)) from exc
+        stream = _Stream(
+            stream_id=stream_id,
+            session_id=session_id,
+            peer_device_id=link.device_id,
+            link=link,
+            dial=dial,
+        )
+        with self._streams_lock:
+            self._streams[stream_id] = stream
+        # The welcome goes back as the stream's first frame. It is queued BEFORE
+        # this handler's ack, and that is safe rather than an ordering bug: the
+        # opening relay buffers every push until it has written its own ack to
+        # its viewer (see _Stream.pending), so the viewer still reads the
+        # response to stream_open first.
+        link.send({"op": "net_stream", "action": "push", "stream": stream_id, "frame": welcome})
+        stream.pump = threading.Thread(
+            target=self._stream_pump,
+            args=(stream,),
+            name=f"mesh-stream-{stream_id}",
+            daemon=True,
+        )
+        stream.pump.start()
+        self.audit.record(
+            AuditEvent(
+                event="session_stream_opened",
+                actor=link.device_id,
+                subject=session_id,
+                outcome="ok",
+                network_id=link.network_id,
+                epoch=link.epoch,
+                detail={"stream": stream_id},
+            )
+        )
+        return {"stream": stream_id, "session_id": session_id, "opened": True}
+
+    def _accept_stream_frame(
+        self, link: PeerLink, frame: dict[str, Any], stream_id: str
+    ) -> dict[str, Any]:
+        """Write one viewer frame into the owner's socket, or refuse it by name.
+
+        THE SECOND CAPABILITY CHECK, and the reason `net_stream` is not a bypass:
+        opening a stream costs `view`, and that would let a read-only member then
+        write anything it liked down the pipe. Each forwarded frame is therefore
+        resolved through `INNER_OP_CAPABILITY` exactly as `net_forward`'s inner
+        frame is — one table, one answer, for both carriers.
+        """
+        stream = self._streams.get(stream_id)
+        if stream is None or stream.closed or stream.dial is None:
+            raise MeshRefusal("unknown_stream", "that stream is not open on this device")
+        inner = frame.get("frame")
+        if not isinstance(inner, dict):
+            raise MeshRefusal("protocol_error", "a stream frame must carry the frame it forwards")
+        inner_op = str(inner.get("op") or "")
+        from local_operator.network.types import INNER_OP_CAPABILITY
+
+        required = INNER_OP_CAPABILITY.get(inner_op)
+        if required is None:
+            raise MeshRefusal(
+                "unknown_op",
+                f"the forwarded op {inner_op!r} has no capability decision, so it was "
+                "refused rather than carried",
+            )
+        if required not in link.context.capabilities:
+            raise MeshRefusal(
+                "not_authorised",
+                f"{link.device_id} may not do that here (it does not hold the "
+                f"{required!r} capability)",
+            )
+        try:
+            stream.dial.send(inner)
+        except OSError as exc:
+            self._close_stream(stream_id)
+            raise MeshRefusal(
+                "session_unreachable", f"the owner's socket went away: {exc}"
+            ) from exc
+        return {"stream": stream_id, "delivered": True}
+
+    def _stream_pump(self, stream: _Stream) -> None:
+        """Push the owner's frames to the opening relay until either end goes."""
+        dialect = stream.dial
+        assert dialect is not None
+        while not stream.closed and not self._stop.is_set():
+            frame = dialect.recv(0.5)
+            if frame is None:
+                if dialect.eof:
+                    break
+                continue
+            if stream.link is None or not stream.link.send(
+                {"op": "net_stream", "action": "push", "stream": stream.stream_id, "frame": frame}
+            ):
+                break
+        stream.closed = True
+        # Tell the opening relay the owner is gone so its viewer stops waiting.
+        if stream.link is not None:
+            stream.link.send(
+                {
+                    "op": "net_stream",
+                    "action": "closed",
+                    "stream": stream.stream_id,
+                    "reason": "owner-gone",
+                }
+            )
+        self._drop_stream(stream.stream_id)
+
+    # -- the opening relay's half of a stream --------------------------------
+
+    def _resolve_peer(self, target: str) -> str:
+        """The DEVICE ID a person meant, from an id or a name they typed.
+
+        A shell user types ``build-box`` and a device id is a fingerprint
+        (``d_6010dd…``); every op below takes the id, so the translation happens
+        once, here. An ambiguous name is REFUSED rather than guessed: two devices
+        called ``laptop`` is a real possibility on a network with two of them, and
+        asking the wrong one about a session is not a mistake a refusal fixes.
+        A removed member is not a match at all — it is not a device you can ask.
+        """
+        if not target:
+            raise MeshRefusal("peer_required", "name a device: --peer <device id or name>")
+        matches: set[str] = set()
+        for record in store.list_networks(self.root):
+            for member in record.members:
+                if member.device_id == self.identity.device_id or not member.active:
+                    continue
+                if target in (member.device_id, member.name):
+                    matches.add(member.device_id)
+        if not matches:
+            raise MeshRefusal(
+                "unknown_peer",
+                f"this device is not in a network with anything called {target!r}",
+            )
+        if len(matches) > 1:
+            raise MeshRefusal(
+                "ambiguous_peer",
+                f"{target!r} matches {len(matches)} devices; use the device id",
+            )
+        return matches.pop()
+
+    def _ensure_link(self, device_id: str) -> "PeerLink | None":
+        """A live link to ``device_id``, dialling its recorded endpoints if needed.
+
+        A viewer's relay must be able to reach a peer the viewer was told about,
+        and on a dial-only install the relay holds no inbound link at all — so a
+        missing link is a dial to the endpoint the member row records, not an
+        error. The member's own endpoints are the only place a device has ever
+        advertised where it can be reached.
+        """
+        found = self._link_for(device_id)
+        if found is not None:
+            return found
+        for record in store.list_networks(self.root):
+            member = record.member(device_id)
+            if member is None or not member.active:
+                continue
+            for endpoint in member.endpoints or ():
+                link, _reason = self.dial(record.network_id, host=endpoint, epoch=record.epoch)
+                if link is not None:
+                    return link
+        return None
+
+    def _open_viewer_stream(self, frame: dict[str, Any]) -> tuple[dict[str, Any], _Stream | None]:
+        """The `stream_open` local op: reach a peer and open the pipe.
+
+        The ack is written to the viewer BEFORE any owner frame, and the stream
+        carries a random id rather than the session id so that a PUSH can be
+        authorised by "you opened this stream" rather than by a capability the
+        pushing side would have to be trusted about.
+        """
+        req = frame.get("req")
+        peer = str(frame.get("peer") or "")
+        session_id = str(frame.get("session_id") or "")
+        auth = frame.get("auth") if isinstance(frame.get("auth"), dict) else {}
+        if not peer or not session_id:
+            return {
+                "op": "error",
+                "req": req,
+                "message": "a stream needs both a peer and a session id",
+            }, None
+        link = self._ensure_link(peer)
+        if link is None:
+            return {
+                "op": "error",
+                "req": req,
+                "message": f"{peer} cannot be reached from this device right now",
+            }, None
+        stream_id = "s" + os.urandom(8).hex()
+        stream = _Stream(
+            stream_id=stream_id,
+            session_id=session_id,
+            peer_device_id=peer,
+            link=link,
+        )
+        with self._streams_lock:
+            self._streams[stream_id] = stream
+        reply = link.request(
+            {
+                "op": "net_stream",
+                "req": self._next_relay_req(),
+                "action": "open",
+                "stream": stream_id,
+                "session_id": session_id,
+                "auth": auth,
+                "locality": "remote",
+            },
+            timeout=self.settings.op_wait_s,
+        )
+        if reply is None or reply.get("op") != "ack":
+            message = str(
+                (reply or {}).get("message") or "the device holding that session did not answer"
+            )
+            self._drop_stream(stream_id)
+            return {"op": "error", "req": req, "message": message}, None
+        self.audit.record(
+            AuditEvent(
+                event="session_stream_opened",
+                actor=self.identity.device_id,
+                subject=session_id,
+                outcome="ok",
+                network_id=link.network_id,
+                epoch=link.epoch,
+                detail={"stream": stream_id, "peer": peer},
+            )
+        )
+        return {
+            "op": "ack",
+            "req": req,
+            "detail": {"stream": stream_id, "session_id": session_id, "peer": peer},
+        }, stream
+
+    def _forward_stream_frame(self, stream: _Stream, frame: dict[str, Any]) -> None:
+        """One viewer frame down the pipe; a refusal is written back to it."""
+        if stream.link is None:
+            self._close_stream(stream.stream_id)
+            return
+        reply = stream.link.request(
+            {
+                "op": "net_stream",
+                "req": self._next_relay_req(),
+                "action": "send",
+                "stream": stream.stream_id,
+                "frame": frame,
+            },
+            timeout=self.settings.op_wait_s,
+        )
+        if reply is None or reply.get("op") == "error":
+            message = str(
+                (reply or {}).get("message") or "the device holding that session stopped answering"
+            )
+            stream.write_to_viewer({"op": "error", "req": frame.get("req"), "message": message})
+            self._close_stream(stream.stream_id)
+
+    def route_stream_push(self, link: PeerLink, frame: dict[str, Any]) -> bool:
+        """Deliver one pushed session frame, or answer "not mine".
+
+        Called from `PeerLink._handle` BEFORE dispatch, because a push is not a
+        request: it has no reply, and answering it would be the livelock that
+        method's stray-reply comment describes. Authorised by THIS device's own
+        stream table — only a peer that successfully opened the (unpredictably
+        named) stream can push on it.
+        """
+        stream_id = str(frame.get("stream") or "")
+        with self._streams_lock:
+            stream = self._streams.get(stream_id)
+        if stream is None or stream.link is not link:
+            return False
+        payload = frame.get("frame")
+        if isinstance(payload, dict):
+            stream.write_to_viewer(payload)
+        return True
+
+    def route_stream_closed(self, link: PeerLink, frame: dict[str, Any]) -> bool:
+        """Mark a stream dead when the peer says the owner is gone."""
+        stream_id = str(frame.get("stream") or "")
+        with self._streams_lock:
+            stream = self._streams.get(stream_id)
+        if stream is None or stream.link is not link:
+            return False
+        self._close_stream(stream_id, notify_peer=False)
+        return True
+
+    def _drop_stream(self, stream_id: str) -> None:
+        """Forget a stream without touching either socket."""
+        with self._streams_lock:
+            self._streams.pop(stream_id, None)
+
+    def _close_stream(self, stream_id: str, *, notify_peer: bool = True) -> None:
+        """End one stream: close what this device opened, and only that.
+
+        QUIT SAFETY LIVES HERE. Closing the viewer's stream closes the peer
+        relay's DIAL — one attach client — and nothing else: the runtime on the
+        peer keeps its transcript, its lease and its life, so a laptop quitting
+        its TUI cannot stop a session on another device. The op that would look
+        like it is `retire_if_pristine`, and the peer relay never sends it on a
+        remote viewer's behalf (§3.3).
+        """
+        with self._streams_lock:
+            stream = self._streams.pop(stream_id, None)
+        if stream is None:
+            return
+        stream.closed = True
+        if stream.dial is not None:
+            stream.dial.close()
+        if stream.viewer_sock is not None:
+            try:
+                _close_quietly(stream.viewer_sock)
+            except OSError:
+                pass
+        if notify_peer and stream.dial is not None and stream.link is not None:
+            stream.link.send({"op": "net_stream", "action": "close", "stream": stream_id})
+
+    # -- the pair ceremony, listener side -----------------------------------
+
+    def _inviter_human_step(
+        self,
+        *,
+        record: NetworkRecord,
+        invite_id: str,
+        result: Any,
+        joiner_id: str,
+        joiner_name: str,
+        transcribed: str,
+        peer_addr: str,
+    ) -> PairDecision:
+        """Design §5.3's second half: a person on the INVITING device confirms the code.
+
+        The joiner's transcription has already been checked against this device's
+        derivation. This is the other direction, and it is the half that makes the
+        check mutual rather than decorative: the inviter's human reads the code THIS
+        device derived and says whether the other screen shows the same digits. Both
+        must hold, so a single mistyped digit anywhere ends the ceremony.
+
+        WHY IT CAN BE ANSWERED LATER. The relay is usually a launchd daemon with no
+        terminal, so the question is parked in a 0600 pending record that carries
+        both codes, the relay prints it when it HAS a terminal, and otherwise the
+        operator answers with `lop network confirm`. Parking it is what makes the
+        prompt work in the deployment the design actually runs in; printing it and
+        blocking would hang a daemon forever.
+        """
+        invite = record.invite(invite_id)
+        role = (invite.role if invite is not None else "read") or "read"
+        window = pair_timeout_seconds(invite.ttl_s if invite is not None else 0.0)
+        pending = PendingPairing(
+            invite_id=invite_id,
+            network_id=record.network_id,
+            network_name=record.name,
+            joiner_device_id=joiner_id,
+            joiner_name=joiner_name,
+            sas=result.sas,
+            fingerprint=wire.transcript_fingerprint(bytes.fromhex(result.transcript_hash)),
+            transcribed=transcribed,
+            peer_addr=peer_addr,
+            expires_at=time.time() + window,
+            prompt=inviter_prompt_for(
+                network_name=record.name,
+                role=role,
+                device_id=joiner_id,
+                name=joiner_name,
+                transcribed=transcribed,
+                derived=result.sas,
+            ),
+        )
+        store.save_pending_pairing(pending, self.root)
+        self.audit.record(
+            AuditEvent(
+                event="pairing_awaiting_confirmation",
+                actor=joiner_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={
+                    "subject": joiner_id,
+                    "role": role,
+                    "seconds_left": round(window, 1),
+                },
+            )
+        )
+        try:
+            decision = self._await_pairing_decision(pending, window)
+        finally:
+            # Cleared either way: the code must not outlive the ceremony it belongs
+            # to, and a leftover decision must never be read by the NEXT pairing.
+            store.clear_pending_pairing(invite_id, self.root)
+            store.clear_pair_decision(invite_id, self.root)
+        self.audit.record(
+            AuditEvent(
+                event="pairing_confirmed" if decision.matched else "pairing_refused",
+                actor=joiner_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                outcome="ok" if decision.matched else "refused",
+                cause="" if decision.matched else (decision.reason or "declined"),
+                detail={
+                    "subject": joiner_id,
+                    "role": role,
+                    "answered_by": decision.answered_by,
+                    "cause": decision.reason,
+                },
+            )
+        )
+        return decision
+
+    def _await_pairing_decision(self, pending: PendingPairing, window: float) -> PairDecision:
+        """The human's answer: inline when this process owns a terminal, else from disk."""
+        if self._has_terminal():
+            answer = self._ask_in_terminal(pending)
+            if answer is None:
+                # EOF or ctrl-c at the prompt. Not a licence to admit: an answer that
+                # never arrived is a refusal, exactly like the timeout.
+                return PairDecision(
+                    invite_id=pending.invite_id,
+                    decision="decline",
+                    matched=False,
+                    reason="unanswered",
+                    answered_by="human",
+                )
+            return PairDecision(
+                invite_id=pending.invite_id,
+                decision="admit" if answer else "decline",
+                matched=answer,
+                reason="" if answer else "declined",
+                answered_by="human",
+            )
+        deadline = time.monotonic() + window
+        while time.monotonic() < deadline:
+            decision = store.pair_decision(pending.invite_id, self.root)
+            if decision is not None:
+                return decision
+            time.sleep(0.2)
+        return PairDecision(
+            invite_id=pending.invite_id,
+            decision="decline",
+            matched=False,
+            reason="timeout",
+            answered_by="relay",
+        )
+
+    @staticmethod
+    def _has_terminal() -> bool:
+        """Whether THIS process can ask a human directly.
+
+        A launchd daemon has no controlling terminal and a redirected run has no
+        TTY either, so the answer is not assumed: `serve` in a terminal prompts
+        inline, and every other shape reads the decision `lop network confirm`
+        writes. `isatty` can raise on a closed stream, and a relay that crashed
+        while asking would be a worse failure than one that asks on disk.
+        """
+        return _has_terminal()
+
+    @staticmethod
+    def _ask_in_terminal(pending: PendingPairing) -> bool | None:
+        """Show both codes and take a yes/no. ``None`` means no answer arrived."""
+        print(pending.prompt)
+        sys.stdout.flush()
+        try:
+            answer = input(f"confirm {pending.joiner_device_id}? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return answer in ("y", "yes")
+
+    def _run_pair_listener(
+        self, sock: socket.socket, handshake: Handshake, result: Any, peer_addr: str
+    ) -> None:
+        """The inviter's half of the human step, then admission.
+
+        Fail closed at every branch, and the invite is consumed in EVERY one of
+        them: an attacker's next attempt then needs a fresh invite, which is
+        another human action on the inviter.
+        """
+        record = store.load(result.network_id, self.root)
+        invite_id = str(handshake.join_block.get("invite_id") or "")
+        joiner_id = result.peer_device_id
+        joiner_key = str(handshake.join_block.get("joiner_public_key") or "")
+        joiner_name = str(handshake.join_block.get("joiner_name") or "")
+        codec = handshake.codec()
+        reader = wire.FrameReader(sock)
+        deadline = wire.deadline_in(
+            min(self.settings.handshake_timeout_s, _ttl_of(record, invite_id))
+        )
+        member_row: MemberRecord | None = None
+        try:
+            ready = codec.open(reader.read_record_payload(deadline))
+            if ready.get("op") != "net_pair_ready":
+                raise PairingRefusal("protocol_error", "the joining device did not confirm a code")
+            typed = str(ready.get("sas") or "")
+            if not sas_matches(result.sas, typed):
+                raise PairingRefusal("sas_mismatch", "the transcribed code did not match")
+            # The SAS check is mutual and local: this device's own derivation is the
+            # only thing it compares against, which is why a peer cannot echo it.
+            decision = self._inviter_human_step(
+                record=record,
+                invite_id=invite_id,
+                result=result,
+                joiner_id=joiner_id,
+                joiner_name=joiner_name,
+                transcribed=typed,
+                peer_addr=peer_addr,
+            )
+            if not (decision.decision == "admit" and decision.matched):
+                # A timeout and a decline are both refusals: an unanswered question
+                # must never admit a device, and §5.4 makes every one of these
+                # terminal for the invite.
+                raise PairingRefusal(
+                    "timeout" if decision.reason == "timeout" else "declined_remote",
+                    (
+                        "the pairing timed out before both people confirmed"
+                        if decision.reason == "timeout"
+                        else "the code was not confirmed on the inviting device, so nothing "
+                        "was admitted"
+                    ),
+                )
+            member_row = admit(
+                record,
+                device_id=joiner_id,
+                public_key=joiner_key,
+                name=joiner_name,
+                role=_invite_role(record, invite_id),
+                capabilities=sorted(_invite_capabilities(record, invite_id)),
+                added_by=record.self_device_id,
+                added_via="invite",
+                endpoints=[peer_addr],
+                root=self.root,
+            )
+            consume(record, invite_id, outcome="admitted")
+            store.save(record, self.root)
+            state = store.require_secrets(result.network_id, self.root)
+            frame = pair_result_frame(
+                req=ready.get("req"),
+                admit=True,
+                network={
+                    "network_id": record.network_id,
+                    "name": record.name,
+                    "epoch": record.epoch,
+                    "sequence": record.sequence,
+                    "trust": record.trust,
+                },
+                member=member_row.to_json(),
+                members=[row.to_json() for row in record.members],
+                members_digest=members_digest_of(record),
+                material=state.secret,
+                rotations=dict(record.rotations),
+            )
+            sock.sendall(codec.seal(frame))
+            self.audit.record(
+                AuditEvent(
+                    event="member_admitted",
+                    actor=joiner_id,
+                    subject=record.network_id,
+                    network_id=record.network_id,
+                    epoch=record.epoch,
+                    detail={
+                        "role": member_row.role,
+                        "member_kind": member_row.kind,
+                        "epoch": record.epoch,
+                    },
+                )
+            )
+            # The link's phase flips to member IN PLACE: no re-handshake. The SAS
+            # already proved the channel end to end with both humans at the
+            # keyboard at that instant; the secrets did not change; and tearing down
+            # and redialling would create a window in which the joiner holds the
+            # secret but is not yet a member.
+            result.phase = "member"
+            link = PeerLink(
+                server=self, sock=sock, result=result, codec=codec, settings=self.settings
+            )
+            link.peer_addr = peer_addr
+            with self._links_lock:
+                self.links[result.link_id] = link
+            link.start()
+        except (MeshRefusal, wire.LinkCryptoError, OSError) as exc:
+            reason = getattr(exc, "code", "error")
+            try:
+                if record is not None and acquire_invite(record, invite_id):
+                    consume(record, invite_id, outcome=reason)
+                    store.save(record, self.root)
+                sock.sendall(codec.seal(pair_abort_frame(req=0, reason=reason)))
+            except OSError:
+                pass
+            self.audit.record(
+                AuditEvent(
+                    event="pairing_refused",
+                    actor=joiner_id,
+                    subject=record.network_id if record else "",
+                    outcome="refused",
+                    network_id=record.network_id if record else "",
+                    cause=_PAIR_CAUSE.get(reason, "policy"),
+                    detail={"cause": reason, "subject": joiner_id},
+                )
+            )
+            _close_quietly(sock)
+
+    # -- fan-out and the durable outbox -------------------------------------
+
+    def _broadcast_epoch(
+        self, record: NetworkRecord, state: SecretState, *, reason: str, removed: list[str]
+    ) -> None:
+        """Send ``net_epoch`` to every live link, and QUEUE it for the offline ones.
+
+        The frame is built PER RECIPIENT by :func:`epoch_frame`, which withholds the
+        secret from a device named in ``removed`` — and the queued copy goes through
+        ``store.enqueue_frame``, which refuses to persist a secret for a removed
+        recipient at all.
+        """
+        for link in list(self.links.values()):
+            if link.network_id != record.network_id:
+                continue
+            link.send(epoch_frame(record, state, reason=reason, target_device_id=link.device_id))
+        online = {
+            link.device_id for link in self.links.values() if link.network_id == record.network_id
+        }
+        for member in record.active_members():
+            if member.device_id in online or member.device_id == record.self_device_id:
+                continue
+            self._queue_epoch_for(member.device_id, record, state, reason=reason)
+
+    def _queue_epoch_for(
+        self, device_id: str, record: NetworkRecord, state: SecretState, *, reason: str
+    ) -> None:
+        member = record.member(device_id)
+        removed = member is None or not member.active
+        try:
+            store.enqueue_frame(
+                device_id,
+                epoch_frame(record, state, reason=reason, target_device_id=device_id),
+                removed=removed,
+                root=self.root,
+            )
+        except MeshRefusal as refusal:
+            # The rule fires here, at the writer, where it cannot be forgotten.
+            self.audit.record(
+                AuditEvent(
+                    event="epoch_rotated",
+                    actor=record.self_device_id,
+                    subject=device_id,
+                    network_id=record.network_id,
+                    epoch=record.epoch,
+                    outcome="refused",
+                    cause="revoked",
+                    detail={
+                        "epoch_before": record.epoch - 1,
+                        "epoch_after": record.epoch,
+                        "rotation_id": record.rotations.get(str(record.epoch), ""),
+                        "removed": [device_id],
+                    },
+                )
+            )
+            del refusal
+
+    def _flush_outboxes(self) -> None:
+        """Replay queued frames to peers that are reachable again."""
+        for record in store.list_networks(self.root):
+            for member in record.active_members():
+                queued = store.queued_frames(member.device_id, self.root)
+                if not queued:
+                    continue
+                link = self._link_for(member.device_id)
+                if link is None:
+                    continue
+                for path, frame in queued:
+                    if link.send(frame):
+                        store.drop_frame(path)
+
+    def _link_for(self, device_id: str) -> PeerLink | None:
+        for link in self.links.values():
+            if link.device_id == device_id and link.alive:
+                return link
+        return None
+
+    def dial(
+        self,
+        network_id: str,
+        *,
+        host: str,
+        epoch: int | None = None,
+        mode: str = "member",
+        invite: str = "",
+        invite_material: str = "",
+        joiner_name: str = "",
+    ) -> tuple[PeerLink | None, str]:
+        """Dial a peer and complete the handshake. Returns the link and a reason.
+
+        Dial-only installs reach their peers from here, which is the supported
+        configuration where neither side can accept an inbound connection.
+
+        ``invite_material`` is the secret the TOKEN carried. A join's only
+        credential is that token — the joiner does not hold the network secret yet,
+        which is the point of a join — so it arrives as a parameter rather than
+        being looked up, because on this side there is nothing to look it up from.
+        """
+        record = store.load(network_id, self.root)
+        state = store.require_secrets(network_id, self.root)
+        address, _, port_text = host.rpartition(":")
+        try:
+            port = int(port_text)
+        except ValueError:
+            return None, "bad_endpoint"
+        try:
+            sock = socket.create_connection(
+                (address or host, port), timeout=self.settings.handshake_timeout_s
+            )
+        except OSError as exc:
+            return None, f"connect_failed:{exc.__class__.__name__}"
+        deadline = wire.deadline_in(self.settings.handshake_timeout_s)
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            handshake = Handshake.new(
+                role="dialer",
+                identity=self.identity,
+                network_id=network_id,
+                epoch=record.epoch if epoch is None else epoch,
+                instance_id=self.instance_id,
+                session_protocol=_session_protocol(),
+                mode="join" if mode == "join" else "member",
+                capabilities=list(wire.LINK_CAPABILITIES),
+                build=self.build,
+            )
+            if mode == "join":
+                handshake.join_block = {
+                    "invite_id": invite,
+                    "joiner_public_key": self.identity.public_key,
+                    "joiner_name": joiner_name or self.identity.name,
+                }
+                credential = Credential(
+                    "invite",
+                    handshake.epoch,
+                    wire.invite_key(invite_material, network_id, invite),
+                )
+            else:
+                key = wire.epoch_key(state.secret, network_id, record.epoch)
+                credential = Credential("epoch", record.epoch, key)
+            handshake.send_hello(sock)
+            reader = wire.FrameReader(sock)
+            handshake.read_challenge(reader, deadline)
+            handshake.send_auth(sock, credential)
+            frame = handshake.read_welcome(reader, deadline)
+            result = handshake.establish()
+            result.phase = str(frame.get("phase") or result.phase)
+            if result.phase == "pair":
+                return None, "pair_phase_requires_the_ceremony"
+            link = PeerLink(
+                server=self,
+                sock=sock,
+                result=result,
+                codec=handshake.codec(),
+                settings=self.settings,
+            )
+            link.peer_addr = host
+            with self._links_lock:
+                self.links[result.link_id] = link
+            link.start()
+            return link, "ok"
+        except MeshRefusal as refusal:
+            _close_quietly(sock)
+            self._audit_handshake_refusal(refusal, network_id, host, mode)
+            return None, refusal.code
+        except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
+            _close_quietly(sock)
+            return None, f"handshake_failed:{exc.__class__.__name__}"
+
+    def _rehandshake_network(self, network_id: str, *, reason: str) -> None:
+        """Close and redial every live link at the new epoch.
+
+        v1 closes and redials rather than rekeying in place: "one way to change
+        keys" is worth more than the round trip, and an in-place rekey is a second
+        protocol with its own bugs.
+        """
+        for link in list(self.links.values()):
+            if link.network_id == network_id:
+                link.send({"op": "net_bye", "reason": reason})
+                link.close("epoch_stale")
+
+    # -- the loopback control surface ---------------------------------------
+
+    def _control_loop(self) -> None:
+        assert self._control is not None
+        while not self._stop.is_set():
+            try:
+                sock, _addr = self._control.accept()
+            except OSError:
+                if self._stop.is_set():
+                    return
+                continue
+            threading.Thread(
+                target=self._control_connection, args=(sock,), name="mesh-control-conn", daemon=True
+            ).start()
+
+    def _control_connection(self, sock: socket.socket) -> None:
+        """One local client: authenticate, then serve ops — or become a stream.
+
+        The auth frame is compared with ``hmac.compare_digest`` against the key in
+        the 0600 peers record, and anything else closes WITHOUT a reply — the same
+        reasoning the session runtime's control socket states: an open port that
+        answers wrong keys with errors is an oracle.
+
+        A SUCCESSFUL ``stream_open`` CHANGES WHAT THIS CONNECTION ACCEPTS
+        (transport §2.5, R-IF-1): from that point every line the viewer writes is a
+        session frame forwarded verbatim and every frame the peer pushes is
+        written back unmodified. The viewer's ack is written BEFORE the stream is
+        marked ready, so the ordering the client depends on (response to
+        ``stream_open`` first, then the owner's welcome) cannot be inverted by a
+        push that arrived while the peer was still dialling.
+
+        ONE READER FOR THE WHOLE CONNECTION, deliberately: the control ops and the
+        session frames share a socket, and a second reader would lose whatever the
+        first had already buffered. The session-frame bound is therefore the
+        bound for both, which is the safe direction for an authenticated local
+        client whose frames are otherwise capped at a welcome projection's size.
+        """
+        reader = session_dial.LineReader(sock)
+        stream: _Stream | None = None
+        try:
+            first = reader.read_frame(10.0)
+            if first is None or not hmac.compare_digest(
+                str(first.get("key") or ""), self._control_key
+            ):
+                return
+            while not self._stop.is_set():
+                frame = reader.read_frame(3600.0)
+                if frame is None:
+                    if reader.eof:
+                        break
+                    continue
+                if stream is not None:
+                    self._forward_stream_frame(stream, frame)
+                    if stream.closed:
+                        break
+                    continue
+                op = str(frame.get("op") or "")
+                if op == "stream_open":
+                    reply, opened = self._open_viewer_stream(frame)
+                    sock.sendall(wire.encode_line(reply))
+                    if opened is None:
+                        continue
+                    stream = opened
+                    stream.viewer_sock = sock
+                    stream.viewer = reader
+                    stream.flush()
+                    continue
+                reply = self.control_dispatch(op, frame)
+                sock.sendall(wire.encode_line(reply))
+        except (OSError, ConnectionError, TimeoutError):
+            return
+        finally:
+            if stream is not None:
+                # The viewer went away (a TUI quitting, a laptop closing). This
+                # closes OUR stream and the relay's own dial on the far side —
+                # never the runtime, which is the whole quit-safety guarantee.
+                self._close_stream(stream.stream_id)
+            _close_quietly(sock)
+
+    def control_dispatch(self, op: str, frame: dict[str, Any]) -> dict[str, Any]:
+        """The relay's LOCAL op vocabulary (§2.5). Not reachable over a peer link.
+
+        Distinct from the peer ops on purpose: a reader can tell from the frame
+        alone which boundary it crossed, which is what stops a local op being
+        mistaken for something a peer may ask for.
+        """
+        req = frame.get("req")
+        try:
+            handler = self._control_handlers().get(op)
+            if handler is None:
+                # OPERATOR LANGUAGE, NOT A DEVELOPER STRING. This path is what a
+                # viewer, the TUI or the agent tool reaches when it asks for
+                # something this build does not serve — the session plane, until
+                # that slice lands — and `unknown local op 'net_forward_session'`
+                # told the reader nothing about what to do next. So the answer
+                # names the capability the op needs and the document that owns it,
+                # and says plainly that nothing changed (a refusal that leaves the
+                # caller guessing whether it half-ran is a worse refusal).
+                owner = _owning_document(op)
+                planned = owner != "the design documents"
+                return {
+                    "op": "error",
+                    "req": req,
+                    "code": "not_implemented" if planned else "unknown_local_op",
+                    "message": (
+                        f"{op} is not in this build: {owner} owns that slice. Nothing "
+                        "was changed and no session was touched. `lop network doctor` "
+                        "reports what this build does serve."
+                        if planned
+                        else (
+                            f"this relay does not know the action {op!r}. Nothing was "
+                            "changed. Check the spelling, or run `lop network doctor` "
+                            "for what this build serves."
+                        )
+                    ),
+                }
+            return {"op": "ack", "req": req, "detail": handler(frame)}
+        except MeshRefusal as refusal:
+            # THE CODE CROSSES THIS BOUNDARY TOO. A --json consumer branches on it
+            # and the sentence is for the person; the same two-parts discipline
+            # MeshRefusal states, kept all the way out to the CLI.
+            return {
+                "op": "error",
+                "req": req,
+                "code": refusal.code,
+                "message": refusal.sentence,
+            }
+
+    def _control_handlers(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
+        return {
+            "net_status": lambda frame: self.status(),
+            "net_ls": lambda frame: [
+                self.network_summary(record) for record in store.list_networks(self.root)
+            ],
+            "net_show": lambda frame: self.network_detail(str(frame.get("network") or "")),
+            "net_peer_ls": lambda frame: self.peer_status(),
+            "net_invite": self._ctl_invite,
+            "net_member_rm": self._ctl_member_rm,
+            "net_trust_local": self._ctl_trust,
+            "net_panic_local": self._ctl_panic,
+            "net_pair_pending": self._ctl_pair_pending,
+            "net_pair_confirm": self._ctl_pair_confirm,
+            "net_disconnect": self._ctl_disconnect,
+            "net_log": lambda frame: self.audit.tail(
+                int(frame.get("limit") or 50),
+                network_id=str(frame.get("network") or "") or None,
+                since=frame.get("since"),
+            ),
+            "net_doctor": lambda frame: self.doctor(peer=str(frame.get("peer") or "")),
+            # THE SESSION PLANE'S LOCAL VOCABULARY. `stream_open` is the transport's
+            # §2.5 name and puts this connection into pass-through mode (handled in
+            # _control_connection, because a mode change is not a value); the five
+            # `peer_*` names are this slice's, and they are deliberately not
+            # `net_*`: a name in LOCAL_OPS may never appear in OP_CAPABILITY
+            # (authorizer.op_tables_are_total), and a viewer asking ITS OWN relay
+            # to ask a peer is a local act with a local name.
+            "stream_open": lambda _frame: _not_implemented(
+                "stream_open", "network/control.py (handled in the control loop)"
+            ),
+            "stream_send": self._ctl_stream_send,
+            "stream_close": self._ctl_stream_close,
+            "peer_session_rows": lambda _frame: self.federated_rows(),
+            "peer_session_facts": self._ctl_peer_facts,
+            "peer_session_create": self._ctl_peer_create,
+            "peer_session_engage": self._ctl_peer_engage,
+            "peer_session_stop": self._ctl_peer_stop,
+        }
+
+    def _ctl_invite(self, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self._require_network(str(frame.get("network") or ""))
+        state = store.require_secrets(record.network_id, self.root)
+        minted: MintedInvite = mint_invite(
+            record,
+            state.secret,
+            role=str(frame.get("role") or "read"),
+            ttl_s=float(frame.get("ttl_s") or 600.0),
+            hosts=[str(host) for host in frame.get("hosts") or []] or None,
+            device_id=str(frame.get("device_id") or ""),
+        )
+        record.invites.append(minted.record)
+        store.save(record, self.root)
+        path = store.save_invite_token(minted.record.invite_id, minted.token, self.root)
+        self.audit.record(
+            AuditEvent(
+                event="invite_minted",
+                actor=record.self_device_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={
+                    "role": minted.record.role,
+                    "expires_at": minted.record.expires_at,
+                    "bound_device": minted.record.device_id,
+                },
+            )
+        )
+        # The token is NEVER in the reply: a token in a JSON payload is a token in
+        # the agent's transcript, and the transcript is replayed to the provider.
+        return {
+            "invite_id": minted.record.invite_id,
+            "path": str(path),
+            "expires_at": minted.record.expires_at,
+            "expires_in_s": minted.record.ttl_s,
+            "role": minted.record.role,
+            "hosts": list(minted.record.hosts),
+            "network_id": record.network_id,
+            "network_name": record.name,
+        }
+
+    def _ctl_member_rm(self, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self._require_network(str(frame.get("network") or ""))
+        state = store.require_secrets(record.network_id, self.root)
+        device_id = str(frame.get("device_id") or "")
+        outcome = remove_member(
+            record, state, device_id=device_id, by=record.self_device_id, root=self.root
+        )
+        self.audit.record(
+            AuditEvent(
+                event="member_removed",
+                actor=record.self_device_id,
+                subject=device_id,
+                network_id=record.network_id,
+                epoch=outcome.epoch,
+                detail={
+                    "initiated_by": record.self_device_id,
+                    "rekeyed": True,
+                    "epoch_after": outcome.epoch,
+                },
+            )
+        )
+        self._broadcast_epoch(record, state, reason="member_removed", removed=outcome.removed)
+        self._rehandshake_network(record.network_id, reason="epoch_stale")
+        return {
+            "network_id": record.network_id,
+            "removed": device_id,
+            "epoch": outcome.epoch,
+            "queued": len(store.queued_frames(device_id, self.root)),
+        }
+
+    def _ctl_trust(self, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self._require_network(str(frame.get("network") or ""))
+        before = record.trust
+        set_trust(
+            record,
+            trust=str(frame.get("trust") or "active"),
+            reason=str(frame.get("reason") or "operator"),
+            root=self.root,
+        )
+        self.audit.record(
+            AuditEvent(
+                event="trust_changed",
+                actor=record.self_device_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={"from": before, "to": record.trust, "reason": "operator"},
+            )
+        )
+        return {"network_id": record.network_id, "trust": record.trust}
+
+    def _ctl_pair_pending(self, _frame: dict[str, Any]) -> list[dict[str, Any]]:
+        """The pairings parked for a human, oldest first. A list is the answer.
+
+        A method rather than a lambda in the handler table: the CLI and the harness
+        drive this path, and a missing method would fail as an `AttributeError`
+        inside whatever is waiting for the answer — which is how a two-sided test
+        ends up waiting for a timeout instead of reporting the real fault.
+        """
+        return [pending.to_json() for pending in store.pending_pairings(self.root)]
+
+    def _ctl_pair_confirm(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """Record the inviter's human answer to a parked pairing.
+
+        The CLI does the ASKING (it has the terminal) and this stores the answer
+        where the waiting pairing loop will find it — so the relay stays the only
+        writer of pairing state and the human's answer is audited with everything
+        else. ``matched`` must be true for an admission: a decision file that says
+        admit without a matching comparison is a file nothing should have written.
+        """
+        invite_id = str(frame.get("invite_id") or "")
+        pending = store.pending_pairing(invite_id, self.root) if invite_id else None
+        if pending is None:
+            open_pairings = store.pending_pairings(self.root)
+            if not open_pairings:
+                raise MeshRefusal(
+                    "no_pending_pairing",
+                    "no device is waiting to pair with this one right now. Run "
+                    "`lop network confirm --json` to see the queue, or mint an invite "
+                    "with `lop network invite`.",
+                )
+            pending = open_pairings[0]
+        admit = str(frame.get("decision") or "admit") == "admit"
+        matched = bool(frame.get("matched")) and admit
+        decision = PairDecision(
+            invite_id=pending.invite_id,
+            decision="admit" if matched else "decline",
+            matched=matched,
+            reason="" if matched else str(frame.get("reason") or "declined"),
+            answered_by=str(frame.get("answered_by") or "human"),
+        )
+        store.save_pair_decision(decision, self.root)
+        return {
+            "invite_id": pending.invite_id,
+            "decision": decision.decision,
+            "matched": decision.matched,
+            "joiner_device_id": pending.joiner_device_id,
+        }
+
+    def _ctl_panic(self, frame: dict[str, Any]) -> dict[str, Any]:
+        record = self._require_network(str(frame.get("network") or ""))
+        state = store.require_secrets(record.network_id, self.root)
+        member = record.self_member()
+        is_admin = bool(member and "admin" in member.capabilities)
+        outbound = panic(
+            record,
+            state,
+            by=record.self_device_id,
+            is_admin=is_admin,
+            reason=str(frame.get("reason") or "operator_panic"),
+            root=self.root,
+        )
+        self.audit.record(
+            AuditEvent(
+                event="panic_raised",
+                actor=record.self_device_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={
+                    "epoch_before": record.epoch - (1 if is_admin else 0),
+                    "epoch_after": record.epoch,
+                    "reachable_peers": len(self.links),
+                },
+            )
+        )
+        # PANIC KEEPS ITS BROADCAST BEHAVIOUR: the frame carries the new secret to
+        # every reachable peer.
+        delivered = 0
+        for link in list(self.links.values()):
+            if link.network_id == record.network_id and link.send(dict(outbound)):
+                delivered += 1
+        for link in list(self.links.values()):
+            if link.network_id == record.network_id:
+                link.close("we-closed")
+        set_trust(
+            record,
+            trust="untrusted",
+            reason="this device raised a panic",
+            root=self.root,
+        )
+        return {
+            "network_id": record.network_id,
+            "epoch": record.epoch,
+            "rotated": is_admin,
+            "broadcast_to": delivered,
+        }
+
+    def _ctl_disconnect(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """This device leaves: say goodbye, stop trusting, keep the audit trail.
+
+        The local secret is DELETED — the record and its membership stay, so the
+        operator can see what happened and re-pair deliberately. Leaving is not a
+        reason to trust the device less; it is a reason to stop it being able to
+        read new traffic, which the peers' rotation handles.
+        """
+        record = self._require_network(str(frame.get("network") or ""))
+        reachable = 0
+        for link in list(self.links.values()):
+            if link.network_id != record.network_id:
+                continue
+            if link.send(
+                {"op": "net_leave", "network_id": record.network_id, "locality": "remote"}
+            ):
+                reachable += 1
+        time.sleep(0.05)
+        for link in list(self.links.values()):
+            if link.network_id == record.network_id:
+                link.close("we-closed")
+        secrets_file = store.secrets_path(record.network_id, self.root)
+        if secrets_file.exists():
+            secrets_file.unlink()
+        set_trust(
+            record,
+            trust="disconnected",
+            reason="this device disconnected",
+            root=self.root,
+        )
+        self.audit.record(
+            AuditEvent(
+                event="disconnect_initiated",
+                actor=record.self_device_id,
+                subject=record.network_id,
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={"epoch": record.epoch, "reachable_peers": reachable},
+            )
+        )
+        return {
+            "network_id": record.network_id,
+            "reachable_peers": reachable,
+            "secret_deleted": True,
+        }
+
+    # -- the local session-plane ops (the viewer's CLI drives these) ----------
+    #
+    # ONE TRANSLATION, IN ONE PLACE. Each of these asks a peer to run ITS OWN
+    # implementation of the same op (`net_session_create`/`_engage`/`_stop`). None
+    # of them re-implements anything: the whole point of routing rather than
+    # replicating (mobility §8.1) is that the guards, the ladder and the sentences
+    # stay on the device that owns the disk.
+
+    def _local_peer_call(self, op: str, peer: str, **fields: Any) -> dict[str, Any]:
+        """Run one peer op on ``peer`` and return its detail.
+
+        A refusal from the peer is turned into a MeshRefusal carrying the PEER'S
+        sentence verbatim — never a sentence re-derived here. The peer is the only
+        party that can see which guard or which ladder rung fired, and a second
+        sentence table on this side is exactly how two devices come to disagree
+        about the remedy (§8.2).
+        """
+        link = self._ensure_link(self._resolve_peer(peer))
+        if link is None:
+            raise MeshRefusal(
+                "peer_unreachable",
+                f"{peer} cannot be reached from this device right now, so it was not asked",
+            )
+        reply = link.request(
+            {"op": op, "req": self._next_relay_req(), "locality": "remote", **fields},
+            timeout=max(self.settings.op_wait_s, ENGAGE_DEADLINE_S),
+        )
+        if reply is None:
+            raise MeshRefusal(
+                "peer_unreachable",
+                f"{peer} stopped answering before it replied",
+            )
+        if reply.get("op") == "error":
+            raise MeshRefusal(
+                str(reply.get("code") or "peer_refused"),
+                str(reply.get("message") or "that device refused"),
+            )
+        detail = reply.get("detail")
+        return detail if isinstance(detail, dict) else {"value": detail}
+
+    def _ctl_peer_create(self, frame: dict[str, Any]) -> dict[str, Any]:
+        return self._local_peer_call(
+            "net_session_create",
+            str(frame.get("peer") or ""),
+            cwd=str(frame.get("cwd") or ""),
+            model=frame.get("model"),
+            name=str(frame.get("name") or ""),
+            prompt=str(frame.get("prompt") or ""),
+            images=list(frame.get("images") or []),
+            origin=str(frame.get("origin") or "user"),
+        )
+
+    def _ctl_peer_engage(self, frame: dict[str, Any]) -> dict[str, Any]:
+        return self._local_peer_call(
+            "net_session_engage",
+            str(frame.get("peer") or ""),
+            session_id=str(frame.get("session_id") or ""),
+            cwd=str(frame.get("cwd") or ""),
+            warm=frame.get("warm") if isinstance(frame.get("warm"), dict) else {},
+        )
+
+    def _ctl_peer_stop(self, frame: dict[str, Any]) -> dict[str, Any]:
+        return self._local_peer_call(
+            "net_session_stop",
+            str(frame.get("peer") or ""),
+            session_id=str(frame.get("session_id") or ""),
+            mode=str(frame.get("mode") or "graceful"),
+        )
+
+    def _ctl_peer_facts(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """What the peer knows about one of its sessions, for a resolver (§3.4).
+
+        ``published`` is the third registry state: a peer may report a claim with
+        no usable record, and `_bind_under_lock` branches on that difference —
+        so it is reported rather than collapsed into "not running".
+        """
+        peer = str(frame.get("peer") or "")
+        session_id = str(frame.get("session_id") or "")
+        try:
+            # The resolver takes an id OR a name, like every other entry point a
+            # person drives; an unresolvable target is not an error here because
+            # this op's answer is ``owned: false`` either way.
+            peer = self._resolve_peer(peer) if peer else ""
+        except MeshRefusal:
+            pass
+        _peers, sessions = self._fan_out_catalog()
+        row = next(
+            (
+                item
+                for item in sessions
+                if item.get("session_id") == session_id
+                and (not peer or (item.get("peer") or {}).get("device_id") == peer)
+            ),
+            None,
+        )
+        if row is None:
+            return {"owned": False, "published": False, "pid": None, "record": None}
+        pid = int(row.get("pid") or 0)
+        return {
+            "owned": True,
+            "published": bool(pid) and row.get("state") not in ("stored", ""),
+            "pid": pid or None,
+            "record": row,
+        }
+
+    def _ctl_stream_send(self, frame: dict[str, Any]) -> dict[str, Any]:
+        """The multiplexed form: one frame on one opened stream (§2.5).
+
+        Kept because the transport specifies it and because it is what a test can
+        drive frame-at-a-time without holding a pass-through connection. The
+        viewer path uses the pass-through mode instead.
+        """
+        stream_id = str(frame.get("stream") or "")
+        stream = self._streams.get(stream_id)
+        if stream is None:
+            raise MeshRefusal("unknown_stream", "that stream is not open on this device")
+        inner = frame.get("frame")
+        if not isinstance(inner, dict):
+            raise MeshRefusal("protocol_error", "a stream frame must carry the frame it forwards")
+        self._forward_stream_frame(stream, inner)
+        return {"stream": stream_id, "delivered": not stream.closed}
+
+    def _ctl_stream_close(self, frame: dict[str, Any]) -> dict[str, Any]:
+        stream_id = str(frame.get("stream") or "")
+        existed = stream_id in self._streams
+        self._close_stream(stream_id)
+        return {"stream": stream_id, "closed": existed}
+
+    def _fan_out_catalog(self) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+        """Ask every peer for its rows, once. Returns ``(peers, sessions)``.
+
+        A LIVE read rather than the transport's cached fan-out (§9.4): that cache,
+        its TTL and its delta op belong to the transport slice, and a second
+        cache here would be a second staleness rule for one fact. Every row this
+        returns is one the peer just answered — strictly fresher than a cached
+        row, and never a claim the peer did not make.
+
+        A peer that does not answer contributes a ``reachable: false`` peer block
+        and NO rows (§8.3): a listing must not show phantom rows for a device that
+        is switched off, and it must still say the device exists.
+        """
+        peers: dict[str, dict[str, Any]] = {}
+        sessions: list[dict[str, Any]] = []
+        for record in store.list_networks(self.root):
+            for member in record.active_members():
+                if member.device_id == self.identity.device_id:
+                    continue
+                # ``_ensure_link`` and NOT a bare lookup: a listing that only
+                # read the links it happened to hold would report a peer we can
+                # reach as unreachable, which is the one thing the reachability
+                # field must never say. It dials the member's own recorded
+                # endpoints, so a dial-only install lists like any other.
+                link = self._ensure_link(member.device_id)
+                block = {
+                    "device_id": member.device_id,
+                    "name": member.name,
+                    "network_id": record.network_id,
+                    "reachable": link is not None,
+                    "age_s": 0.0,
+                    "reason": "" if link is not None else "not connected to this device",
+                }
+                if link is None:
+                    peers.setdefault(member.device_id, block)
+                    continue
+                reply = link.request(
+                    {"op": "net_catalog", "req": self._next_relay_req(), "locality": "remote"},
+                    timeout=self.settings.op_wait_s,
+                )
+                if reply is None or reply.get("op") != "ack":
+                    block["reachable"] = False
+                    block["reason"] = "asked, and it did not answer"
+                    peers.setdefault(member.device_id, block)
+                    continue
+                peers[member.device_id] = block
+                detail = reply.get("detail") if isinstance(reply.get("detail"), dict) else {}
+                for row in detail.get("sessions") or ():
+                    if not isinstance(row, dict):
+                        continue
+                    item = dict(row)
+                    item["locality"] = "remote"
+                    item["peer"] = block
+                    sessions.append(item)
+        return peers, sessions
+
+    def federated_rows(self) -> dict[str, Any]:
+        """The federated listing: this device's rows plus every peer's (R6, §9).
+
+        Each row carries ``locality`` and, for a remote one, the peer block — the
+        two fields §9.2 pins. The MERGE is by construction here rather than by a
+        client comparison: a row is filed under the device that answered for it,
+        so no surface has to infer remoteness from an id's shape.
+        """
+        rows: list[dict[str, Any]] = []
+        for row in self.local_session_rows():
+            item = dict(row)
+            item["locality"] = "local"
+            item["peer"] = None
+            rows.append(item)
+        peers, sessions = self._fan_out_catalog()
+        rows.extend(sessions)
+        return {
+            "ok": True,
+            "sessions": rows,
+            "peers": peers,
+            "device_id": self.identity.device_id,
+            "device_name": self.identity.name,
+        }
+
+    def _require_network(self, target: str) -> NetworkRecord:
+        records = store.list_networks(self.root)
+        if not target:
+            if len(records) == 1:
+                return records[0]
+            raise MeshRefusal(
+                "ambiguous_network",
+                "name a network: this device is in "
+                + (", ".join(record.name for record in records) or "none"),
+            )
+        matches = store.match_networks(records, target)
+        if not matches:
+            raise MeshRefusal(
+                "unknown_network", f"this device is not in a network called {target!r}"
+            )
+        if len(matches) > 1:
+            raise MeshRefusal(
+                "ambiguous_network",
+                f"{target!r} matches {len(matches)} networks; use the network id",
+            )
+        return matches[0]
+
+    # -- reporting ----------------------------------------------------------
+
+    def network_summary(self, record: NetworkRecord) -> dict[str, Any]:
+        links = [
+            link
+            for link in self.links.values()
+            if link.network_id == record.network_id and link.alive
+        ]
+        return {
+            "network_id": record.network_id,
+            "name": record.name,
+            "epoch": record.epoch,
+            "role": record.self_role,
+            "capabilities": list(record.self_capabilities),
+            "trust": record.trust,
+            "members": len(record.active_members()),
+            "links": len(links),
+            "stale": record.stale,
+            "self_device_id": record.self_device_id,
+        }
+
+    def network_detail(self, target: str) -> dict[str, Any]:
+        record = self._require_network(target)
+        base = self.network_summary(record)
+        base["members_detail"] = [
+            {
+                "device_id": member.device_id,
+                "name": member.name,
+                "kind": member.kind,
+                "lifecycle": member.lifecycle,
+                "role": member.role,
+                "capabilities": list(member.capabilities),
+                "endpoints": list(member.endpoints),
+                "added_via": member.added_via,
+                "active": member.active,
+                "suspect": member.suspect,
+                "duplicate_count": member.duplicate_count,
+                "last_seen_instance": member.last_seen_instance,
+            }
+            for member in record.members
+        ]
+        base["rotations"] = dict(record.rotations)
+        base["invites"] = [
+            {
+                "invite_id": invite.invite_id,
+                "state": invite.state,
+                "role": invite.role,
+                "bound_device": invite.device_id,
+                "expires_at": invite.expires_at,
+            }
+            for invite in record.invites
+        ]
+        base["audit_tail"] = self.audit.tail(5, network_id=record.network_id)
+        return base
+
+    def peer_status(self) -> list[dict[str, Any]]:
+        peers: list[dict[str, Any]] = []
+        for record in store.list_networks(self.root):
+            for member in record.active_members():
+                if member.device_id == record.self_device_id:
+                    continue
+                link = self._link_for(member.device_id)
+                peers.append(
+                    {
+                        "device_id": member.device_id,
+                        "name": member.name,
+                        "network_id": record.network_id,
+                        "reachable": bool(link and link.alive),
+                        "reason": "" if link else "no_link",
+                        "endpoints": list(member.endpoints),
+                        "last_seen_at": member.last_seen_at,
+                        "suspect": member.suspect,
+                    }
+                )
+        return peers
+
+    def status(self) -> dict[str, Any]:
+        """Install state, health, links, log paths — what ``lop network status`` prints."""
+        record = self.peer_record()
+        return {
+            "pid": os.getpid(),
+            "device_id": self.identity.device_id,
+            "device_name": self.identity.name,
+            "instance_id": self.instance_id,
+            "listen": record.listen,
+            "control_port": self._control_port,
+            "networks": [self.network_summary(row) for row in store.list_networks(self.root)],
+            "links": [
+                {
+                    "link_id": link.link_id,
+                    "device_id": link.device_id,
+                    "network_id": link.network_id,
+                    "epoch": link.epoch,
+                    "phase": link.phase,
+                    "frames_in": link.frames_in,
+                    "frames_out": link.frames_out,
+                }
+                for link in self.links.values()
+            ],
+            "audit_degraded": self.audit.degraded,
+            "audit_degraded_reason": self.audit.degraded_reason,
+            "audit_path": str(store.audit_path(self.root)),
+            "log_path": str(log_path()),
+            "uptime_s": round(time.time() - self.started_at, 1),
+        }
+
+    def doctor(self, *, peer: str = "") -> dict[str, Any]:
+        """Diagnose a link: reachability, handshake, epoch skew, clock skew.
+
+        It never claims reachability it has not just proven: every endpoint it
+        reports on was dialled in this call, and a failure names which failure it
+        was (``connect_timeout``, ``connection_refused``, a refusal code). Clock
+        skew is REPORTED and never enforced — nothing in the design compares clocks
+        across hosts, and a diagnostic that refused on skew would reintroduce the
+        dependency the design removed.
+        """
+        findings: list[dict[str, Any]] = []
+        identity = store.network_root(self.root)
+        if self.identity is None or not self.identity.device_id:
+            findings.append({"check": "identity", "ok": False, "detail": "identity_missing"})
+        for record in store.list_networks(self.root):
+            if record.stale:
+                findings.append(
+                    {
+                        "check": "network",
+                        "network_id": record.network_id,
+                        "ok": False,
+                        "detail": record.stale,
+                    }
+                )
+            for member in record.active_members():
+                if member.device_id == record.self_device_id:
+                    continue
+                if peer and member.device_id != peer:
+                    continue
+                for endpoint in member.endpoints or ["<no endpoint>"]:
+                    result = self._probe_endpoint(record, member, endpoint)
+                    findings.append(result)
+        return {
+            "checks": findings,
+            "identity_dir": str(identity),
+            "listen": self.peer_record().listen,
+            "epochs": {row.network_id: row.epoch for row in store.list_networks(self.root)},
+        }
+
+    def _probe_endpoint(
+        self, record: NetworkRecord, member: MemberRecord, endpoint: str
+    ) -> dict[str, Any]:
+        if endpoint == "<no endpoint>":
+            return {
+                "check": "reachability",
+                "device_id": member.device_id,
+                "endpoint": "",
+                "ok": False,
+                "detail": "no_endpoint",
+            }
+        address, _, port_text = endpoint.rpartition(":")
+        started = time.monotonic()
+        try:
+            link, reason = self.dial(record.network_id, host=endpoint, epoch=record.epoch)
+        except MeshRefusal as refusal:
+            return {
+                "check": "handshake",
+                "device_id": member.device_id,
+                "endpoint": endpoint,
+                "ok": False,
+                "detail": refusal.code,
+            }
+        latency_ms = round((time.monotonic() - started) * 1000, 1)
+        if link is None:
+            return {
+                "check": "handshake",
+                "device_id": member.device_id,
+                "endpoint": endpoint,
+                "latency_ms": latency_ms,
+                "ok": False,
+                "detail": reason,
+            }
+        skew = None
+        if link.epoch != record.epoch:
+            skew = link.epoch - record.epoch
+        link.close("we-closed")
+        return {
+            "check": "handshake",
+            "device_id": member.device_id,
+            "endpoint": endpoint,
+            "latency_ms": latency_ms,
+            "ok": True,
+            "detail": "ok",
+            "epoch_skew": skew,
+        }
+
+    # -- pair phase, listener-side helpers ---------------------------------
+
+
+def _has_terminal() -> bool:
+    """Whether THIS process can ask a human a question directly.
+
+    One implementation for the two places that need the answer — the pairing loop's
+    inline prompt and ``uninstall --purge-identity``'s confirmation — because the
+    two must never disagree about whether a human is present. `isatty` can raise on
+    a closed stream, and "cannot tell" must mean "no terminal": the failure
+    direction of a wrong `True` is a destructive action taken without a human.
+    """
+    try:
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
+    except (ValueError, OSError):
+        return False
+
+
+def _owning_document(op: str) -> str:
+    owners = {
+        "net_forward": "mesh-session-mobility.md",
+        "net_sync": "mesh-session-mobility.md (R22)",
+        "net_broker": "mesh-credentials.md",
+        "net_session_lifecycle": "mesh-session-mobility.md",
+        "net_session_move": "mesh-session-mobility.md",
+        "net_forward_session": "mesh-session-mobility.md",
+    }
+    return owners.get(op, "the design documents")
+
+
+def _not_implemented(op: str, owner: str) -> Any:
+    raise MeshRefusal(
+        "not_implemented",
+        f"{op} is not implemented in this build; {owner} owns that slice",
+    )
+
+
+def _close_quietly(sock: socket.socket) -> None:
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+def _session_protocol() -> int:
+    from local_operator.session.runtime.types import PROTOCOL_VERSION
+
+    return int(PROTOCOL_VERSION)
+
+
+def _build_stamp() -> dict[str, str]:
+    """This build's version and source ref, for the record and the hello frame.
+
+    Best effort and never fatal: a stamp is decoration, and a relay that refused to
+    start because packaging metadata was unreadable would be a worse failure than a
+    record with an empty version. Both imports are function-local because both reach
+    past the stdlib, and this module is imported while ``lop network --help`` builds.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            number = version("local-operator")
+        except PackageNotFoundError:
+            number = ""
+    except Exception:  # noqa: BLE001
+        number = ""
+    ref = ""
+    try:
+        from local_operator.update import source_ref
+
+        ref = str(source_ref() or "")
+    except Exception:  # noqa: BLE001
+        ref = ""
+    return {"version": number, "source_ref": ref}
+
+
+def _net_summary(record: NetworkRecord | None) -> dict[str, Any]:
+    if record is None:
+        return {}
+    return {
+        "network_id": record.network_id,
+        "name": record.name,
+        "epoch": record.epoch,
+        "sequence": record.sequence,
+        "trust": record.trust,
+    }
+
+
+def _ttl_of(record: NetworkRecord | None, invite_id: str) -> float:
+    if record is None:
+        return 60.0
+    invite = record.invite(invite_id)
+    return invite.ttl_s if invite else 60.0
+
+
+def _invite_role(record: NetworkRecord, invite_id: str) -> str:
+    invite = record.invite(invite_id)
+    return invite.role if invite else "read"
+
+
+def _invite_capabilities(record: NetworkRecord, invite_id: str) -> set[str]:
+    invite = record.invite(invite_id)
+    return set(invite.capabilities) if invite else set()
+
+
+def acquire_invite(record: NetworkRecord, invite_id: str) -> bool:
+    invite = record.invite(invite_id)
+    return invite is not None and invite.state != "consumed"
+
+
+_PAIR_CAUSE: dict[str, str] = {
+    "sas_mismatch": "sas_mismatch",
+    "declined_local": "policy",
+    "timeout": "timeout",
+    "invite_already_used": "policy",
+    "invite_in_use": "policy",
+    "protocol_error": "auth_failed",
+}
+
+
+class _ReplyWaiter:
+    """A one-shot reply slot keyed by (link, req)."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._frame: dict[str, Any] | None = None
+
+    def set(self, frame: dict[str, Any]) -> None:
+        self._frame = frame
+        self._event.set()
+
+    def wait(self, timeout: float) -> dict[str, Any] | None:
+        if not self._event.wait(timeout):
+            return None
+        return self._frame
+
+
+# ---------------------------------------------------------------------------
+# Supervision: the launchd shape `lop mobile serve` established
+# ---------------------------------------------------------------------------
+
+LABEL = "com.local-operator.network"
+
+#: The role template rendered into argv[0]. Defined HERE rather than in
+#: ``procname`` because this slice may not edit that module; it is the same shape
+#: and the same brand substitution, which is what keeps the four supervised
+#: daemons from collapsing into one ``Local Operator`` row in Activity Monitor.
+LABEL_TEMPLATE = "{brand} [network relay] port={port}"
+
+
+def log_path() -> Path:
+    return log_dir() / "network.log"
+
+
+def plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+
+def is_supported() -> bool:
+    return sys.platform == "darwin" and shutil.which("launchctl") is not None
+
+
+def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
+    """The supervised-unit plan, as one pure function every consumer reads."""
+    from local_operator import procname
+
+    return {
+        "Label": LABEL,
+        **procname.launchd_job(
+            "local_operator.network.relay",
+            "--port",
+            str(port),
+            label=procname.branded_argv0(LABEL_TEMPLATE, port=port),
+        ),
+        "RunAtLoad": True,
+        # Crash restarts, a deliberate refusal (exit 2: no identity, unusable
+        # store) does not flap.
+        "KeepAlive": {"SuccessfulExit": False},
+        "StandardOutPath": str(log_path()),
+        "StandardErrorPath": str(log_path()),
+        # A relay holds long-lived sockets and timers; App Nap would suspend them.
+        "ProcessType": "Interactive",
+    }
+
+
+def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=15)
+
+
+def _domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def refresh_plist_if_stale() -> Any:
+    """Bring the LaunchAgent up to date, and restart it if it changed.
+
+    Every refresh goes through ``launchd.reload_job`` rather than ``kickstart -k``
+    (measured: a kickstart after a rewrite keeps running the previous argv), and
+    every path is guarded by ``launchd.is_own_plist`` so a sandboxed run cannot
+    restart the operator's relay.
+    """
+    from local_operator import launchd
+
+    name = "network"
+    try:
+        if not is_supported():
+            return launchd.PlistRefresh(name=name, kind="unsupported")
+        path = plist_path()
+        if not launchd.is_own_plist(path, LABEL):
+            return launchd.PlistRefresh(name=name, kind="not-addressable")
+        port = launchd.int_arg(launchd.load(path), "--port", DEFAULT_PORT)
+        outcome = launchd.rewrite_if_stale(name=name, path=path, rendered=render_plist(port))
+        if outcome.kind != "repaired":
+            return outcome
+        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+        if not reloaded.ok:
+            return reloaded.as_refresh_failure(name=name, path=path, recovery="lop network install")
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — a repair must never fail an upgrade
+        from local_operator import launchd
+
+        return launchd.PlistRefresh(name=name, kind="failed", detail=str(exc))
+
+
+def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any]:
+    """Install-or-refresh the LaunchAgent and verify the relay answers."""
+    from local_operator import launchd
+
+    steps: list[str] = []
+    if not is_supported():
+        return {
+            "ok": False,
+            "steps": steps,
+            "error": (
+                "install needs macOS launchd; run `lop network serve` in the foreground "
+                "elsewhere"
+            ),
+        }
+    if not _plist_is_addressable():
+        # R6: say why, in the operator's terms. The launchd guard's own wording
+        # ("is not the LaunchAgent the real home owns") is correct and about
+        # launchd; the person reading this is running a redirected HOME and needs
+        # to know it is expected and what to do instead.
+        return {
+            "ok": False,
+            "steps": steps,
+            "reason": "isolated_home",
+            "error": (
+                "no LaunchAgent is available here: this run's HOME is not the home "
+                "launchd supervises, so launchd cannot own a unit for it and nothing "
+                "was installed. That is what an isolated or redirected HOME looks "
+                "like, and it is expected. Run the relay in the foreground with "
+                "`lop network serve` (or skip the start with `lop network init "
+                "--no-start` / `lop network serve --no-launchd`); from a normal login, "
+                "`lop network start` uses the real home's LaunchAgent."
+            ),
+        }
+    plist_path().parent.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        plist_path().write_bytes(plistlib.dumps(render_plist(port)))
+    steps.append(f"wrote {plist_path()}")
+    if dry_run:
+        steps.append("dry run: skipped load and verification")
+        return {"ok": True, "steps": steps}
+    reloaded = launchd.reload_job(label=LABEL, path=plist_path(), runner=_launchctl)
+    if not reloaded.ok:
+        return {"ok": False, "steps": steps, "error": str(reloaded.detail)[:300]}
+    steps.append("loaded the LaunchAgent")
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        probe = health(timeout=1.0)
+        if probe is not None:
+            steps.append("the relay answered its local control socket")
+            return {"ok": True, "steps": steps}
+        time.sleep(0.5)
+    return {
+        "ok": False,
+        "steps": steps,
+        "error": f"the relay did not answer within 20s; see {log_path()}",
+    }
+
+
+def uninstall(
+    *,
+    purge: bool = False,
+    purge_identity: bool = False,
+    networks: list[str] | None = None,
+    root: Path | None = None,
+    dry_run: bool = False,
+    assume_tty: bool | None = None,
+    answer: Callable[[str], str] | None = None,
+) -> dict[str, Any]:
+    """Remove the LaunchAgent; ``--purge`` forgets networks; ``--purge-identity``
+    destroys the device keypair, and only after a human confirms by name.
+
+    ONE FLAG, ONE BLAST RADIUS (design §6 and §12, and the invariant
+    ``purge_identity_needs_a_named_tty_confirmation``):
+
+    * ``--purge`` deletes the network records, invites, outbound queues, parked
+      pairings and the audit log for the networks being uninstalled. It does NOT
+      touch the device identity keypair.
+    * ``--purge-identity`` is what deletes that keypair, and it requires an
+      interactive terminal plus a confirmation that NAMES every network still known
+      to the identity. Without a terminal it is refused outright, naming ``--purge``
+      — the flag that does work — because this key is unrecoverable and is what
+      every OTHER network addresses this device by.
+
+    ``assume_tty`` and ``answer`` are the test seam: the production path reads the
+    real terminal, and a test injects both to exercise the confirmation WITHOUT
+    pretending a redirected process has a TTY.
+    """
+    steps: list[str] = []
+    known = store.list_networks(root)
+    targets = [record.network_id for record in known] if networks is None else list(networks)
+    selected = [record for record in known if record.network_id in set(targets)]
+
+    if purge_identity and not (_has_terminal() if assume_tty is None else assume_tty):
+        raise MeshRefusal(
+            "purge_identity_needs_tty",
+            "deleting this device's identity keypair needs a terminal you can answer at, "
+            "because the key is unrecoverable and every other network addresses this "
+            "device by it. `lop network uninstall --purge` removes the network records "
+            "without touching the keypair; run this from a terminal to go further.",
+        )
+
+    if not dry_run:
+        # The launchctl half is skipped when this run is not the real home's: the
+        # guard inside `launchd` is right, and the honest answer to "why did nothing
+        # happen" belongs in this message rather than in a launchd detail string.
+        addressable = _plist_is_addressable()
+        if addressable:
+            _launchctl("bootout", _domain(), str(plist_path()))
+        if plist_path().exists():
+            plist_path().unlink()
+        steps.append(
+            "removed the LaunchAgent and its plist"
+            if addressable
+            else (
+                "no LaunchAgent to remove here: this run's HOME is not the one launchd "
+                "supervises, so nothing was loaded or unloaded. `--no-start` (or "
+                "`serve --no-launchd`) is how to run without launchd at all."
+            )
+        )
+    receipt: dict[str, Any] = {
+        "ok": True,
+        "steps": steps,
+        "networks": [f"{record.name} ({record.network_id})" for record in selected],
+        "deleted": {},
+        "identity": "kept",
+        "dry_run": dry_run,
+    }
+    if purge:
+        if dry_run:
+            receipt["deleted"] = {
+                "networks": receipt["networks"],
+                "invites": sum(len(record.invites) for record in selected),
+                "queues": 0,
+                "pending": 0,
+                "audit_files": [],
+                "audit_kept": False,
+                "catalog": False,
+            }
+        else:
+            receipt["deleted"] = store.purge_network_artifacts(targets, root)
+        deleted = receipt["deleted"]
+        steps.append(
+            f"deleted {len(deleted['networks'])} network record(s), "
+            f"{deleted['invites']} invite token file(s), {deleted['queues']} outbound "
+            f"queue(s), {deleted['pending']} parked pairing file(s)"
+        )
+        if deleted["audit_files"]:
+            steps.append(f"deleted the audit log ({', '.join(deleted['audit_files'])})")
+        elif deleted.get("audit_kept"):
+            steps.append(
+                "kept the audit log: it is one file per install and records networks "
+                "this purge did not cover. `lop network log --export` copies it first."
+            )
+        if deleted.get("catalog"):
+            steps.append("deleted the cached session catalogue")
+        steps.append(
+            "the device identity keypair was NOT deleted: other networks address this "
+            "device by it"
+        )
+    if purge_identity:
+        steps.extend(_purge_identity_step(selected, root=root, dry_run=dry_run, answer=answer))
+        receipt["identity"] = "deleted"
+    return receipt
+
+
+def _purge_identity_step(
+    networks: list[NetworkRecord],
+    *,
+    root: Path | None,
+    dry_run: bool,
+    answer: Callable[[str], str] | None,
+) -> list[str]:
+    """The named confirmation, then the delete.
+
+    The prompt LISTS the networks still known to this identity, because that list is
+    what the human is being asked to destroy the key for: a device whose keypair
+    goes away stops being addressable by every one of them, and the operator cannot
+    weigh that if the command only says "delete the identity?".
+    """
+    identity = load_or_mint(root)
+    listing = (
+        ", ".join(f"{record.name} ({record.network_id})" for record in networks)
+        or "no networks (this identity is not in any)"
+    )
+    prompt = (
+        f"This deletes the device identity {identity.device_id}, permanently and with no "
+        f"recovery. It is how these networks address this device: {listing}.\n"
+        f"Type the device id to confirm: "
+    )
+    reader = answer if answer is not None else input
+    try:
+        typed = reader(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        typed = ""
+    if typed != identity.device_id:
+        raise MeshRefusal(
+            "purge_identity_not_confirmed",
+            "the device id was not typed back, so the identity keypair was left alone. "
+            "Nothing was deleted. `lop network uninstall --purge` removes the network "
+            "records without touching the keypair.",
+        )
+    if dry_run:
+        return [f"dry run: would delete the device identity {identity.device_id}"]
+    deleted = store.purge_identity(root)
+    return [f"deleted the device identity {identity.device_id} ({', '.join(deleted) or 'nothing'})"]
+
+
+def _plist_is_addressable() -> bool:
+    """Whether a LaunchAgent here would be the one the REAL home owns.
+
+    A redirected HOME (every isolated test run, and the harness) has no
+    LaunchAgent: launchd supervises the passwd home's units only. Asking first
+    keeps a sandbox from writing a plist into its own home and then reporting a
+    launchd detail string the operator cannot act on.
+    """
+    from local_operator import launchd
+
+    return launchd.is_own_plist(plist_path(), LABEL)
+
+
+def service_action(action: str) -> dict[str, Any]:
+    """start|stop|restart via launchctl, bootstrapping a plist that was never loaded."""
+    if not _plist_is_addressable():
+        return {
+            "ok": False,
+            "reason": "isolated_home",
+            "error": (
+                f"`lop network {action}` drives launchd, and this run's HOME is not the "
+                "home launchd supervises, so there is no unit to drive. Run the relay in "
+                "the foreground with `lop network serve`, or run this from a normal login "
+                "where the real home's LaunchAgent exists."
+            ),
+        }
+    if action in ("start", "restart") and plist_path().exists():
+        printed = _launchctl("print", f"{_domain()}/{LABEL}")
+        if printed.returncode != 0:
+            bootstrap = _launchctl("bootstrap", _domain(), str(plist_path()))
+            if bootstrap.returncode != 0:
+                return {"ok": False, "error": bootstrap.stderr.strip()[:300]}
+    if action == "start":
+        result = _launchctl("kickstart", f"{_domain()}/{LABEL}")
+    elif action == "stop":
+        result = _launchctl("kill", "SIGTERM", f"{_domain()}/{LABEL}")
+    else:
+        result = _launchctl("kickstart", "-k", f"{_domain()}/{LABEL}")
+    ok = result.returncode == 0
+    return {"ok": ok, "error": "" if ok else result.stderr.strip()[:300]}
+
+
+def health(timeout: float = 3.0) -> dict[str, Any] | None:
+    """Ask the running relay for its status over the loopback control socket."""
+    record = store.find_own_relay()
+    if record is None:
+        return None
+    reply = control_request(record, "net_status", timeout=timeout)
+    if reply is None:
+        return None
+    detail = reply.get("detail")
+    return detail if isinstance(detail, dict) else None
+
+
+def status(port: int = DEFAULT_PORT) -> dict[str, Any]:
+    """What a human needs: is it installed, is it running, what does it see."""
+    record = store.find_own_relay()
+    live = health()
+    return {
+        "installed": plist_path().exists(),
+        "supported": is_supported(),
+        "relay_running": live is not None,
+        "relay": live,
+        "record": record.to_json() if record is not None else None,
+        "port": port,
+        "log": str(log_path()),
+        "listening": live.get("listen") if live else None,
+        "identity_present": (store.network_root() / "identity" / "device.json").exists(),
+        # Local records when no relay is running: this command is most useful
+        # precisely when the relay is DOWN, and reporting "no networks" then would be
+        # the status tool lying at the moment it is asked the only question that
+        # matters. With a relay up, the relay's own view wins (it includes links).
+        "networks": (
+            live.get("networks")
+            if live
+            else [
+                {
+                    "network_id": row.network_id,
+                    "name": row.name,
+                    "epoch": row.epoch,
+                    "role": row.self_role,
+                    "trust": row.trust,
+                    "members": len(row.active_members()),
+                    "links": 0,
+                    "stale": row.stale,
+                }
+                for row in store.list_networks()
+            ]
+        ),
+    }
+
+
+def control_request(
+    record: PeerRecord, op: str, *, timeout: float = 5.0, **fields: Any
+) -> dict[str, Any] | None:
+    """Dial the relay's loopback control socket and run one op.
+
+    The client half of §2.5. A CLI, a TUI or the desktop daemon all use this rather
+    than opening peer links themselves, which is what keeps ONE place that speaks
+    the peer protocol and one place that holds a control key.
+    """
+    try:
+        sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=timeout)
+    except OSError:
+        return None
+    try:
+        reader = wire.FrameReader(sock)
+        sock.sendall(wire.encode_line({"key": record.control_key, "client": "cli"}))
+        sock.sendall(wire.encode_line({"op": op, "req": 1, **fields}))
+        return reader.read_line(wire.deadline_in(timeout))
+    except (OSError, ConnectionError, TimeoutError, wire.LinkCryptoError):
+        return None
+    finally:
+        _close_quietly(sock)
+
+
+# ---------------------------------------------------------------------------
+# The foreground runner (`lop network serve`)
+# ---------------------------------------------------------------------------
+
+
+def amain(argv: list[str] | None = None) -> int:
+    """``python -m local_operator.network.relay`` — the process launchd supervises.
+
+    Foreground by design and installed with ``--module``; it never double-forks and
+    never writes a pidfile of its own, because supervision belongs to launchd (or
+    to a developer's terminal) and a self-daemonizing process is one nobody can
+    stop.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run the lop mesh relay in the foreground")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--address", default="")
+    args = parser.parse_args(argv)
+
+    settings = NetworkSettings.from_config()
+    if args.port:
+        settings = replace(settings, port=int(args.port))
+    if args.address:
+        settings = replace(settings, listen_address=args.address)
+
+    from local_operator.logger import configure_console_logging, quiet_wire_clients
+
+    configure_console_logging()
+    # Without this pin a dependency's ``basicConfig`` floods the supervised log file
+    # with one record per request — the same reason the mobile daemon calls both.
+    quiet_wire_clients()
+    server = RelayServer(settings=settings)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - the supervised entry point
+    raise SystemExit(amain())
