@@ -8333,6 +8333,17 @@ def main() -> int:
                 # missing attribute must read as "off", never raise.
                 control=bool(getattr(args, "control", False)),
                 tools=getattr(args, "tools", None),
+                # THE SUPERVISOR'S DESCRIPTOR, forwarded here or nowhere (stage E).
+                # Its absence was a real gap rather than a tidy-up: `run_session`
+                # reads the field off this ExecArgs object — not off the argparse
+                # Namespace — so omitting it here made `--supervisor-fd` a flag that
+                # parsed, validated, and then silently did nothing: the run minted no
+                # capability and wrote nothing upward, and a supervisor waited out
+                # its whole timeout. Found by the e2e cell that drives a real
+                # supervised run (`test_a_supervised_run_is_approved_through_the_
+                # handoff`), which is why that cell exists rather than an in-process
+                # probe (agent review round 6, R6-5).
+                supervisor_fd=getattr(args, "supervisor_fd", None),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast
