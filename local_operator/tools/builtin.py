@@ -11625,7 +11625,12 @@ async def _browser_download(
             "browser",
             "nothing was saved: " + "; ".join(refused_intake) + ".",
         )
-    if not candidates and reason and _reason_is_refusal(reason):
+    # A bare prefix carries no clause ("refused:" with nothing after it), so there
+    # is nothing to render and the no-op answer stands rather than an empty
+    # sentence: neither host composes one, and the guard is here so that no host
+    # answer can produce a message with nothing in it.
+    host_refusal = _refusal_clause(reason) if _reason_is_refusal(reason) else ""
+    if not candidates and host_refusal:
         # The host ARMED the capture and then refused the transfer, and reported
         # neither files nor an error: its `reason` IS the answer, and the app
         # host — the one that always arms — answers every refusal this way. The
@@ -11639,7 +11644,6 @@ async def _browser_download(
         # nothing was written. `no_download` is the third state — a call where
         # nothing started and the host said nothing — and folding a refusal into
         # it is the defect this branch exists to fix.
-        clause = _refusal_clause(reason)
         _download_audit(
             call_id=call_id,
             session_id=session_id,
@@ -11648,9 +11652,9 @@ async def _browser_download(
             origin=origin,
             name="",
             verdict="armed_refused",
-            reason=clause,
+            reason=host_refusal,
         )
-        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {clause}")
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {host_refusal}")
     if not candidates:
         wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
         _download_audit(

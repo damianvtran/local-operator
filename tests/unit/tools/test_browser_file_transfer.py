@@ -526,6 +526,24 @@ def test_a_no_op_with_no_reason_keeps_todays_answer_exactly() -> None:
     assert [(row["verdict"], row["reason"]) for row in rows] == [("no_download", "nothing started")]
 
 
+def test_a_bare_refusal_prefix_is_not_an_empty_sentence() -> None:
+    """A prefix with no clause renders the no-op answer, never nothing at all.
+
+    Neither host composes a bare `refused:`, and this is the guard that keeps that
+    true from mattering: the branch that renders a host refusal needs a clause to
+    render, so a host answer that carries none cannot produce a message with
+    nothing in it.
+    """
+    host = FakeHost(
+        methods=("download",), result={"files": [], "armed": True, "reason": "refused:"}
+    )
+    result = _download(host)
+    assert result.is_error
+    assert result.text.startswith("no download started within 120 s.")
+    rows = _download_rows()
+    assert [(row["verdict"], row["reason"]) for row in rows] == [("no_download", "nothing started")]
+
+
 def test_a_pre_arm_refusal_reads_the_same_whether_the_host_prefixed_it() -> None:
     """State (a): one composer, so the prefix cannot be doubled or dropped.
 
