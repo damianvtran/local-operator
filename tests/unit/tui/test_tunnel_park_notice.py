@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.toast import Toast
@@ -55,8 +56,12 @@ def _park(tmp_path: Path, *, reason: str = "login_required", stopped: bool = Fal
 
     The store itself is exercised in `tests/unit/test_tunnels.py`; what matters
     here is that the terminal reads the FILES and nothing else, so the fixture
-    is the files.
+    is the files. The remedy's command still comes from the vocabulary rather
+    than from a literal, because it is the command the card is judged on: a
+    fixture that hard-coded one would test a park no connector writes.
     """
+    from local_operator.tunnels import gateway
+
     directory = _tunnel_dir(tmp_path)
     (directory / "config.json").write_text(
         json.dumps(
@@ -75,7 +80,10 @@ def _park(tmp_path: Path, *, reason: str = "login_required", stopped: bool = Fal
                 "state": "parked",
                 "reason": reason,
                 "detail": "the connector stopped and will not retry by itself",
-                "remedy": {"command": "lop tunnel connect", "url": "https://example.invalid"},
+                "remedy": {
+                    "command": gateway.TERMINAL_REMEDY.get(reason, "lop tunnel status"),
+                    "url": "https://example.invalid",
+                },
                 "credential_id": 7,
                 "at": 1_800_000_000,
                 "first_at": 1_800_000_000,
@@ -106,7 +114,12 @@ async def test_a_park_is_announced_once_and_withdrawn_when_it_clears(tmp_path) -
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display, "an app that starts parked must say so"
-        assert toast.message == "Radient sign-in needed — run /login radient"
+        assert toast.message == "! /login radient — Radient sign-in expired"
+        # …and the BAND carries it too, which is the half that survives the
+        # card's ten seconds (D4). Read out of the rendered row rather than
+        # asked of `is_showing`, which reports whether the LADDER shed a rung
+        # and not whether the segment had anything to paint.
+        assert "remote access off" in app._status.render_text(120).plain
 
         # The same episode, polled again: the card is left alone. `show`
         # re-arms its own dismissal timer, so re-raising here would hold a
@@ -115,29 +128,34 @@ async def test_a_park_is_announced_once_and_withdrawn_when_it_clears(tmp_path) -
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.generation == first_generation, "a second poll re-raised the card"
+        assert "remote access off" in app._status.render_text(120).plain
 
         # The user signs in: the park is gone from disk (the connector cleared
-        # it, or `lop tunnel status` did), and the claim on screen goes with it.
+        # it, or `lop tunnel status` did), and both claims go with it.
         state.clear()
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is False, "a cleared park must retract its claim"
+        assert "remote access off" not in app._status.render_text(120).plain
 
         # …and a park that comes BACK is news again.
         _park(tmp_path)
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is True
+        assert "remote access off" in app._status.render_text(120).plain
 
 
 @pytest.mark.asyncio
 async def test_the_nag_gate_never_mentions_a_tunnel_that_is_not_in_use(tmp_path) -> None:
-    """No tunnel, or a deliberately stopped one, is silent.
+    """No tunnel, or a deliberately stopped one, is silent — card AND band.
 
     Both are states where nothing has gone wrong: a machine that never enrolled
     a tunnel has no remote access to restore, and `stopped` is a decision the
     operator already made. Nagging about either is how a notice trains people to
-    ignore it.
+    ignore it — and the band is the harder half of the gate, because it does not
+    expire: a rung left standing over a tunnel the user switched off would sit
+    there for the life of the session.
     """
     from local_operator.tunnels import state
 
@@ -150,6 +168,7 @@ async def test_the_nag_gate_never_mentions_a_tunnel_that_is_not_in_use(tmp_path)
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is False
+        assert "remote access off" not in app._status.render_text(120).plain
 
         # A park behind a deliberate stop, which is not a park to act on. The
         # connector clears it itself when it runs; the terminal must not depend
@@ -158,13 +177,15 @@ async def test_the_nag_gate_never_mentions_a_tunnel_that_is_not_in_use(tmp_path)
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is False
+        assert "remote access off" not in app._status.render_text(120).plain
         assert state.read() is not None, "the fixture really did leave a park on disk"
 
 
 @pytest.mark.asyncio
 async def test_another_reason_names_its_own_command(tmp_path) -> None:
     """The login is the common case, not the only one: a console re-enrolment
-    says which local command clears it, from the park's own remedy."""
+    says which local command clears it, from the park's own remedy — and the
+    command comes FIRST, because it is the part a clamp must never eat."""
     _park(tmp_path, reason="reenrolment_required")
     app = await _boot()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -173,5 +194,46 @@ async def test_another_reason_names_its_own_command(tmp_path) -> None:
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is True
-        assert "needs re-enrolment" in toast.message
+        assert toast.message == "! lop tunnel connect — remote access is off"
         assert "/login radient" not in toast.message
+
+
+def test_every_card_branch_leads_with_its_command_and_fits_one_row() -> None:
+    """D3/D9 held to numbers rather than to a frame: width, order and glyph.
+
+    50 cells is the budget rather than the 58-cell content box, because the box
+    shrinks with the terminal (`toast_max_width`) while a card that has to be
+    re-read by someone the incident happened to should not start clamping until
+    well below the ordinary size. Measured with `cell_len`, which is the one
+    width model this codebase uses — the em dash is one cell and the glyph is
+    one cell, and neither is obvious from `len()`.
+    """
+    from local_operator.tui.app import tunnel_park_card
+    from local_operator.tui.widgets.status_line import ICON_APPROVALS
+
+    cases = [
+        ("login_required", "lop login radient", "/login radient — Radient sign-in expired"),
+        ("reenrolment_required", "lop tunnel connect", "lop tunnel connect — remote access is off"),
+        (
+            "local_prerequisite",
+            "lop tunnel install",
+            "lop tunnel install — a prerequisite is missing",
+        ),
+    ]
+    for reason, command, body in cases:
+        card = tunnel_park_card(reason, command)
+        assert card == f"{ICON_APPROVALS} {body}", card
+        assert cell_len(card) <= 50, (reason, cell_len(card))
+        # The command leads, the reason trails: the tail is what a clamp may lose.
+        assert card.index(body.split(" — ")[0]) == cell_len(ICON_APPROVALS) + 1
+
+    # A reason this build has no wording for still reads as something, and an
+    # unknown command is shown as it stands — a shell command in a terminal is
+    # runnable, so there is nothing to guess at. `reason_label` returns an
+    # unknown code verbatim rather than as "unknown", which is why the tail here
+    # is the code itself.
+    assert tunnel_park_card("some_new_code", "lop tunnel status") == (
+        f"{ICON_APPROVALS} lop tunnel status — some_new_code"
+    )
+    # A park with no remedy at all names no command rather than an empty one.
+    assert tunnel_park_card("login_required", "") == (f"{ICON_APPROVALS} Radient sign-in expired")

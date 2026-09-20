@@ -150,6 +150,24 @@ ICON_MCP = "⊙"
 #: above: this one is an ALARM, not a reading, and it reuses the app-wide
 #: warning glyph so it reads the same as a warning notice in the transcript.
 ICON_APPROVALS = "!"
+#: Parked-connector alarm. The same mark as the approvals alarm, for the same
+#: reason and by the same rule — it is a warning about the state of this machine,
+#: not a reading, and the transcript spends `!` on warnings too. Aliased rather
+#: than re-spelled so the two cannot drift apart; the brand glyph, the spinner
+#: and this band's segment icons stay the only other marks on the row.
+ICON_TUNNEL = ICON_APPROVALS
+
+#: What the parked-connector rung says.
+#:
+#: The CONSEQUENCE, not the mechanism, and one word for all three park reasons.
+#: This rung exists for exactly the situation the toast cannot cover — the
+#: operator is away from the machine, which is the whole point of a tunnel — and
+#: they are not reading `lop tunnel status` to find out which of a dead login, a
+#: missing prerequisite or a console re-enrolment it was. What they need from the
+#: band is "my remote access is off", and the card, the CLI and `--json` carry
+#: the reason, which none of them has to fit in a fixed one-row band beside eight
+#: other segments.
+TUNNEL_PARKED_TEXT = "remote access off"
 
 #: Fork tag for the WINDOW/TAB title of a fork that has not named itself yet.
 #: The same word, brackets and case the /resume picker's row marker uses
@@ -380,6 +398,19 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
+    # A PARKED CONNECTOR — remote access is off and only a person can restore it
+    # (review round 1, D4). Authored as the FIRST of the alarm group, so it sheds
+    # before `fork`, `mcp` and `approvals` and after every reading above them:
+    # later here means kept longer, and the three that outlive it are all things
+    # the user can still act on from this very screen (`esc` withdraws a fork, a
+    # failed-MCP lamp and a disarmed gate are standing session warnings),
+    # while — counter-intuitively — the case this rung exists for is the one
+    # where the user is NOT here, so it has to be the LAST thing that goes. A
+    # toast cannot do that job: it is 10 seconds against a condition that lasts
+    # hours (measured: the post-toast frame is byte-identical to one from a
+    # machine with no tunnel at all), which is why the MCP alarm is a toast AND
+    # a rung and why this one is too. `format_tunnel` decides the word.
+    "tunnel",
     # A PENDING fork, and it outlives every reading above for the reason the
     # approval alarm does: it is a transient STATE the user can still act on
     # (esc withdraws it), not a figure they can re-derive. It exists at all only
@@ -714,6 +745,19 @@ def format_jobs(count: int) -> str:
     return f"{count} job" if count == 1 else f"{count} jobs"
 
 
+def format_tunnel(parked: bool) -> str:
+    """``remote access off`` while this machine's connector is parked, else ``""``.
+
+    A state, not a count, so it has no zero form to render: the rung is inert
+    until a park exists and then it is the same words for every reason (see
+    :data:`TUNNEL_PARKED_TEXT`). A boolean rather than a reason string because
+    the band does not render the reason — and because the one caller already
+    knows the park from the state file, so passing a code here would invite a
+    second reader of it.
+    """
+    return TUNNEL_PARKED_TEXT if parked else ""
+
+
 @dataclass(frozen=True)
 class McpStatus:
     """The facts the MCP segment renders from.
@@ -1012,6 +1056,12 @@ class StatusLine:
         # a window opening minutes later with no visible cause.
         self._fork_pending: bool = False
         self._mcp: McpStatus = McpStatus()
+        #: True while this machine's tunnel connector is parked: remote access is
+        #: off and a person is the only thing that can restore it. Pushed by the
+        #: app from the same local read the notice uses (`_poll_tunnel_park`), for
+        #: the same reason every other segment is pushed rather than read off the
+        #: session: the band never reaches into the world.
+        self._tunnel_parked: bool = False
         # Which segments the drop ladder shed on the LAST render. Every segment
         # is dropped until something has been rendered, which is the honest
         # starting state: nothing has been shown yet.
@@ -1328,6 +1378,7 @@ class StatusLine:
         forked: bool | None = None,
         fork_pending: bool | None = None,
         mcp: McpStatus | None = None,
+        tunnel_parked: bool | None = None,
         approvals_auto: bool | None = None,
         approvals_always: bool | None = None,
     ) -> None:
@@ -1364,6 +1415,8 @@ class StatusLine:
             self._jobs = jobs
         if mcp is not None:
             self._mcp = mcp
+        if tunnel_parked is not None:
+            self._tunnel_parked = tunnel_parked
         if approvals_auto is not None:
             self._approvals_auto = approvals_auto
         if approvals_always is not None:
@@ -1893,7 +1946,7 @@ class StatusLine:
         seam: Style,
         accent: Style,
     ) -> Text:
-        """model › effort › team › agent › cwd › mcp (+ the working indicator).
+        """model › effort › team › agent › cwd › mcp › tunnel (+ the working indicator).
 
         Each segment is ``icon value``, the icon a step dimmer than its value so
         it frames the number rather than competing with it. Separators point
@@ -1998,6 +2051,24 @@ class StatusLine:
                             color=theme_mod.semantic_color(semantic),
                             bold=semantic == "danger",
                         ),
+                    )
+                )
+        if "tunnel" not in dropped:
+            parked = format_tunnel(self._tunnel_parked)
+            if parked:
+                # ALWAYS an alarm, never a reading, so it takes the same
+                # treatment as a failed-MCP lamp: the GLYPH carries the danger
+                # colour (tinting the words would read as "the words are
+                # wrong") and the weight is bold, which is what makes two alarms
+                # in one band weigh the same. `danger` rather than `warning`: the
+                # user's remote access is off and nothing on this machine will
+                # bring it back without them.
+                parts.append(
+                    (
+                        ICON_TUNNEL,
+                        parked,
+                        Style(color=theme_mod.semantic_color("fg")),
+                        Style(color=theme_mod.semantic_color("danger"), bold=True),
                     )
                 )
 

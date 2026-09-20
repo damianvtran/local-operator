@@ -890,6 +890,23 @@ def _refusal_from_an_unreachable_control_plane() -> ValueError:
         return refusal
 
 
+def _refusal_from_a_dead_grant():
+    """The token-endpoint answer that means the grant is gone, as an exception.
+
+    Built from the incident's own prose body through the shared raiser, so this
+    is the same `InvalidGrantError` a real refused refresh produces rather than a
+    hand-made exception shaped like one (review round 1, M1's first defect was
+    exactly this body being read as retryable).
+    """
+    from local_operator.providers.oauth.callback_server import raise_for_refresh_failure
+
+    try:
+        raise_for_refresh_failure("Radient", 401, RADIENT_PROSE_REFUSAL)
+    except Exception as refusal:  # noqa: BLE001 — the type is the store's business
+        return refusal
+    raise AssertionError("a prose refusal must raise")
+
+
 def test_harness_port_change_in_the_console_alone_cannot_repoint_the_tunnel(connection):
     """A3: the console may replace harness ports wholesale, and the gateway
     attaches this device's relay credential to whatever answers on them. Only
@@ -1415,57 +1432,90 @@ async def test_tunnel_status_survives_a_foreign_listener_on_the_gateway_port(
     assert "Connector: not serving" in receipt
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "failure,expected,absent",
-    [
-        (
-            httpx.ConnectError("network is unreachable"),
-            TERMINAL_DETAIL[UNREACHABLE],
-            "authorization check",
-        ),
-        (
-            ValueError("The tunnel's Radient login expired; log in again."),
-            TERMINAL_DETAIL[REFUSED],
-            "could not reach Radient to renew the relay authorization",
-        ),
-        # A refresh that could not reach Radient is a ValueError too, so the
-        # exception class cannot carry this decision: only the chain can.
-        (
-            _refusal_from_an_unreachable_control_plane(),
-            TERMINAL_DETAIL[UNREACHABLE],
-            "authorization check",
-        ),
-    ],
-)
-async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
-    tmp_path, monkeypatch, connection, failure, expected, absent
-):
-    """One shared line sent both causes to /login radient.
+async def _status_receipt_with_a_stale_credential(
+    tmp_path, monkeypatch, connection, refusal: BaseException
+) -> str:
+    """`lop tunnel status` for a machine whose cloud read fails AND whose login must be re-checked.
 
-    They are different jobs for the operator — one is a connection, the other an
-    interactive login — and the cloud read is unavailable for both, so the status
-    command is the only place that can tell them apart. The split now has two
-    halves: the CLOUD line repeats the vocabulary sentence the relay would show a
-    phone for this cause, and the LOGIN line is a separate fact decided on this
-    device (its absence here is the assertion that a refused cloud read is not
-    blamed on a credential this machine can still use, which is the failure mode
-    that sent a lost network to /login).
+    A stale access token, so the verdict has to ASK the token endpoint — without
+    one the stored token is served as-is and nothing is attempted, which is the
+    case these tests are not about. The cloud read fails separately, so both
+    halves of the output are populated.
     """
+    from local_operator.providers import auth_store
     from local_operator.tunnels import cli
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
-    config.save(_stored(connection))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stored-access",
+                "refresh": "refresh-token",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    async def refresh(credentials):  # noqa: ANN001 — the store's own refresh fn
+        raise refusal
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: refresh)
     api = AsyncMock()
-    api.request.side_effect = failure
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
     monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
-    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
-    assert expected in receipt
-    assert absent not in receipt
-    # A cached read must never read as a live one, whichever half failed.
+    return await dispatch(parser.parse_args(["tunnel", "status"]))
+
+
+@pytest.mark.asyncio
+async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
+    tmp_path, monkeypatch, connection
+):
+    """One shared line sent both causes to /login radient — the LOGIN line tells them apart.
+
+    They are different jobs for the operator — one is a connection, the other an
+    interactive login — and the cloud read is unavailable for both, so the status
+    command is the only surface that can. Since round 1 the distinction lives in
+    ONE place rather than two: the CLOUD line states provenance and no cause at all
+    (D7 — a refusal verdict printed by a command that had just said it could not
+    read the cloud, in the vocabulary that had already answered on line 1), and
+    this device's credential store answers the question the operator is asking.
+    `cloud.reason` still carries the cause as data.
+    """
+    receipt = await _status_receipt_with_a_stale_credential(
+        tmp_path, monkeypatch, connection, httpx.ConnectError("network is unreachable")
+    )
+
+    assert "Login: could not be checked (a refresh could not reach Radient)." in receipt
+    assert "sign-in expired" not in receipt
+    # A cached read must never read as a live one, and the line that explains it
+    # states provenance rather than a cause it cannot know.
     assert "Status: active (cached — cloud read failed)" in receipt
+    assert "Cloud status: unavailable — showing the record stored at the last connect." in receipt
+    assert TERMINAL_DETAIL[REFUSED] not in receipt
+
+
+@pytest.mark.asyncio
+async def test_tunnel_status_names_a_refused_grant_as_a_dead_login(
+    tmp_path, monkeypatch, connection
+):
+    """The other half of the same split: the grant itself was refused.
+
+    The incident's own prose body (not an RFC 6749 code), through the shared
+    raiser, so this is the answer Radient really gives for a revoked refresh
+    token — and it has to arrive as "sign-in expired", which is the one reading
+    that tells the operator to do something.
+    """
+    receipt = await _status_receipt_with_a_stale_credential(
+        tmp_path, monkeypatch, connection, _refusal_from_a_dead_grant()
+    )
+
+    assert "Login: sign-in expired — run lop login radient" in receipt
+    assert "could not be checked" not in receipt
 
 
 @pytest.mark.asyncio
@@ -2067,8 +2117,12 @@ async def test_status_names_a_dead_login_even_while_radient_is_unreachable(
 
     The access token was still unexpired while the grant behind it was revoked,
     so the cloud read failed AND the local check was the only thing that could
-    say why. Both halves have to appear, in their own words: the network is the
-    cloud line's, the credential is the login line's.
+    say why. Two lines have to appear: the state, and the credential, which is the
+    one fact here that is decided on this device. The network's own cause does NOT
+    (review round 1, D7): the sentence that used to carry it was a relay verdict
+    printed by a command that had just said it could not read the cloud, so it now
+    travels as DATA — which this asserts too, because a cause dropped from both
+    surfaces would be a defect rather than a fix.
     """
     from local_operator.providers import auth_store
     from local_operator.providers.oauth.callback_server import InvalidGrantError
@@ -2100,9 +2154,114 @@ async def test_status_names_a_dead_login_even_while_radient_is_unreachable(
 
     receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
 
-    assert "Login: needs re-authentication — run lop login radient" in receipt
-    assert TERMINAL_DETAIL[UNREACHABLE] in receipt
+    assert "Login: sign-in expired — run lop login radient" in receipt
+    assert TERMINAL_DETAIL[UNREACHABLE] not in receipt
+    assert "Cloud status: unavailable — showing the record stored at the last connect." in receipt
     assert "Status: active (cached — cloud read failed)" in receipt
+
+    payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
+    assert payload["cloud"] == {"status": "active", "source": "cached", "reason": UNREACHABLE}
+    assert payload["login"] == {"credential_id": row.id, "state": "login_required"}
+
+
+def test_the_shared_park_sentence_names_no_command() -> None:
+    """D1/M2: the sentence travels to surfaces that cannot run a command.
+
+    It is written into `state.json`, printed by `lop tunnel status`, forwarded to
+    the desktop as `connector.detail` and rendered by the TUI card, so a command
+    baked into it is a command at least one of those readers cannot run — which is
+    exactly what shipped: `/login radient` on a shell surface and in a desktop
+    payload. Each surface appends `TERMINAL_REMEDY` in its own spelling instead,
+    and this is the assertion that keeps the shared copy command-free.
+    """
+    from local_operator.tunnels import gateway
+
+    sentence = gateway.TERMINAL_DETAIL[gateway.LOGIN_REQUIRED]
+    assert "signing in again starts it again on its own" in sentence.lower()
+    assert gateway.CONSOLE_URL not in sentence, "the terminal prints a billing block of its own"
+    # No surface-specific spelling in the two entries this finding covers: not the
+    # composer's slash form, and not a shell command either. (The lease-pending
+    # entry is excluded on purpose, and its own note above says why: its advice is
+    # a forward pointer for the terminal printing it, never a park's sentence.)
+    for code in (gateway.LOGIN_REQUIRED, gateway.REFUSED):
+        detail = gateway.TERMINAL_DETAIL[code]
+        assert "/login" not in detail, code
+        assert "lop " not in detail, code
+    assert gateway.TERMINAL_DETAIL[gateway.REFUSED].count("Signing in again") == 1
+    # ...while the command itself still exists as a VALUE, which is what the CLI's
+    # `Login:` line, the TUI card and the park file each render their own way.
+    assert gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED] == "lop login radient"
+
+
+@pytest.mark.asyncio
+async def test_the_status_first_line_is_a_state_line_not_a_paragraph(
+    tmp_path, monkeypatch, connection
+):
+    """D2: state → remedy → provenance, one fact per line, one command in all of it.
+
+    Measured before: the first line was **317 cells** at 80 columns — five
+    rendered rows whose actionable clause sat on the third — and the sign-in
+    advice appeared again on the `Login:` line and a third time in the cloud
+    block, with a billing URL welded into two of them (D2/D8). The numbers here
+    are the whole finding, so they are the assertions.
+    """
+    from local_operator.tunnels import cli, gateway
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection))
+    state.mark_parked(
+        reason=LOGIN_REQUIRED, detail=gateway.TERMINAL_DETAIL[LOGIN_REQUIRED], credential_id=7
+    )
+    api = AsyncMock()
+    api.request.return_value = connection["tunnel"]
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+    lines = receipt.splitlines()
+
+    assert lines[0].startswith("Connector: parked — login required")
+    assert len(lines[0]) <= 80, lines[0]
+    assert lines[1].startswith("  "), "the park's own sentence is a continuation row"
+    assert lines[2].startswith("Login: sign-in expired — run lop login radient")
+    # The command appears ONCE, and the billing URL is not welded to the login
+    # copy: the terminal has a billing block for the line that is about billing.
+    assert receipt.count(gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]) == 1
+    assert receipt.count(gateway.CONSOLE_URL) <= 1
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_tunnel_is_never_told_to_sign_in(tmp_path, monkeypatch, connection):
+    """D5: the text surface honours `stopped`, as `--json` already did.
+
+    A deliberately stopped tunnel is one the operator is not using, and the
+    machine-readable surface says so (`remedy` is null). The human one used to
+    print `Login: ... run lop login radient` and a cloud block that ended in the
+    same instruction — a nag about remote access they switched off, which is the
+    one thing `report.remedy()`'s own comment rules out.
+    """
+    from local_operator.tunnels import cli, gateway
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection, stopped=True))
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+
+    # The fact stays, with its reason attached…
+    assert "Login: sign-in expired (not in use — tunnel stopped)" in receipt
+    # …and nothing in the output asks for an action.
+    assert gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED] not in receipt
+    assert "Cloud status:" not in receipt
+
+    payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
+    assert payload["remedy"] is None
+    assert payload["connector"]["state"] == "stopped"
 
 
 @pytest.mark.asyncio

@@ -98,10 +98,17 @@ RELAY_DETAIL = {
     ),
 }
 
-# What `lop tunnel status` prints for the same cause. It differs where a terminal
-# can run the command a phone cannot. The lease-pending advice points forward —
-# retry in a moment — rather than repeating the command that is printing the line,
-# which is the circularity this split exists to avoid.
+# What `lop tunnel status` prints for the same cause. The two entries a PARKED
+# connector's sentence travels in name no command, and by the same rule the shared
+# copy is never allowed one: the park's `detail` is written into `state.json`, is
+# forwarded to the desktop as `connector.detail`, and is rendered by the TUI card —
+# so a command baked in here is a command some of those readers cannot run. Each
+# surface appends its own spelling of `TERMINAL_REMEDY` instead. (`REFUSED` carried
+# the same `/login radient` prose, so it took the same pass.) The lease-pending
+# entry is the deliberate exception, and it is not the same thing: its sentence is
+# advice for the terminal that is printing it — retry in a moment — and both
+# commands in it are shell commands, which is also why the entry repeats the
+# command that is printing the line, the circularity this split exists to avoid.
 TERMINAL_DETAIL = {
     UNREACHABLE: (
         "This computer could not reach Radient to renew the relay authorization (its "
@@ -111,29 +118,46 @@ TERMINAL_DETAIL = {
     ),
     REFUSED: (
         "Radient refused the connector's authorization check, so the relay stopped "
-        "serving. Log in again with /login radient, and check this tunnel's billing at "
-        f"{CONSOLE_URL}."
+        "serving. Signing in again, or checking this tunnel's billing, is what clears "
+        f"it: {CONSOLE_URL}."
     ),
     LEASE_PENDING: (
         "The relay has not renewed its authorization yet. It retries every 10 seconds "
         "and usually clears a few seconds after the connector starts. Run lop tunnel "
         "status again shortly; if it persists, run lop tunnel install."
     ),
+    # COMMAND-FREE, and that is the point of this entry rather than a style
+    # choice: the sentence travels further than this surface. It is written into
+    # the park file, printed verbatim by `lop tunnel status`, and forwarded to
+    # the desktop as `connector.detail` (DESKTOP_API.md), so a command baked in
+    # here is a command every one of those surfaces has to be able to run. The
+    # one it used to carry (`/login radient`) is a TUI slash command, which a
+    # shell answers with `no such file or directory` and a desktop callout can
+    # only render as text. Each surface appends `TERMINAL_REMEDY` in its own
+    # spelling instead (the CLI's `Login:` line and the TUI card do exactly
+    # that), and `test_tunnels.py` holds this sentence to naming no command at
+    # all.
+    #
+    # No console URL either: the terminal prints the billing block on the line
+    # that is about billing when there is anything to bill, and a dead grant is
+    # not a billing event. The PHONE copy above keeps its link because a phone
+    # has no billing block to read it from.
     LOGIN_REQUIRED: (
         "The connector's Radient login is no longer valid, so it stopped and will not "
-        "retry by itself. Run /login radient; the connector starts again on its own "
-        "once the login succeeds. Check this tunnel's billing at "
-        f"{CONSOLE_URL}."
+        "retry by itself. Signing in again starts it again on its own."
     ),
 }
 
-#: The structured form of the remedy each sentence above already names in prose,
-#: plus the two codes whose sentence is the failure's own literal (they name
-#: their own missing prerequisite). The desktop route and the TUI need the
-#: command as a value — an operator's terminal is the only surface that can act
-#: on this one, so there is nothing to button — and keeping it here, beside the
-#: sentences, is what stops the command a surface prints from drifting out of the
-#: command the copy tells you to run.
+#: The ONE command that clears each cause, as a value: the surface-specific half
+#: of the copy, kept beside the sentences so the two cannot disagree. The
+#: sentence above describes the condition; this table names the fix, and each
+#: surface renders it in its own spelling — the CLI prints it verbatim
+#: (`Login: sign-in expired — run lop login radient`), the TUI maps it to the
+#: command a composer can run (`/login radient`), the park file persists it for
+#: every reader, and the desktop route forwards it as `remedy.command`. The rule
+#: this table exists to enforce is therefore the reverse of what a sentence
+#: carrying its own command enforced: nothing is duplicated, so nothing can
+#: drift.
 #: `UNREACHABLE` and `LEASE_PENDING` name the CHECK rather than a fix, because
 #: their copy says the connector clears those by itself: handing the operator a
 #: repair command there would send them to fix something that is not broken.
