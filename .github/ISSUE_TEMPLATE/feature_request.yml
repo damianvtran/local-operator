@@ -1,0 +1,40 @@
+name: "✨ Feature Request"
+description: "💡 Suggest an innovative new feature for Local Operator."
+title: "[FEATURE] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to suggest a new feature for Local Operator! Please use the form below to describe your idea in detail.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Feature Summary
+      description: Provide a short summary for your feature request.
+      placeholder: "E.g., Add support for new data source integration"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Detailed Description
+      description: Describe your feature request in detail, including how it should work and its benefits.
+      placeholder: "A detailed description of the proposed feature..."
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation and Use Case
+      description: Explain why this feature is necessary and how you envision it benefiting users.
+      placeholder: "Explain the use case and the benefits of including this feature..."
+    validations:
+      required: true
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context or Screenshots
+      description: Provide any extra information, references, or screenshots that might help clarify your suggestion.
+      placeholder: "Optional: add links, screenshots, or further details..." 

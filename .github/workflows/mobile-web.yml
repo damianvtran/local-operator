@@ -1,0 +1,76 @@
+name: Mobile web
+
+# The phone UI's TypeScript had NO pre-release gate. `pnpm build` (which is
+# `tsc -b && vite build`, so it is also the only typecheck) ran in exactly one
+# place: publish.yml, at release time, after the tag exists. ci.yml has no
+# mobile-web job at all.
+#
+# That is a trap rather than a gap. Vitest does not typecheck, so a PR adding
+# type-invalid tests goes green on every check GitHub shows — 16/16 — and the
+# TS2322 detonates on whoever cuts the next tag, who is not the author and has
+# no context. Observed on PR #864: five `pid={1}` props against `pid: string`
+# passed the vitest suite in 24 ms while `pnpm build` was red.
+#
+# Paths-gated as a separate workflow, matching extension.yml, because that is
+# how this repo already gates a pnpm subproject: ci.yml gates nothing by path
+# and would make every Python-only PR pay a Node toolchain install for a bundle
+# it cannot affect. The gate keys on the web sources only — the TS build does
+# not read Python, so widening it to projection.py would spend a job for no
+# signal.
+
+on:
+  push:
+    branches:
+      # `main` only, matching ci.yml and extension.yml: a `dev-*` branch with an
+      # open PR would otherwise fire a push run and a pull_request run for one
+      # identical result.
+      - main
+    paths:
+      - 'local_operator/mobile/web/**'
+      - '.github/workflows/mobile-web.yml'
+  pull_request:
+    paths:
+      - 'local_operator/mobile/web/**'
+      - '.github/workflows/mobile-web.yml'
+  workflow_dispatch:
+
+# Matches ci.yml, including the per-SHA group for `main` so a merge commit's run
+# can never be evicted by the next merge. See the long note in ci.yml.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'shared' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Bounded so a wedged step cannot hold a concurrency slot for GitHub's
+    # 360-minute default; the real run is well under a minute.
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: local_operator/mobile/web
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: local_operator/mobile/web/pnpm-lock.yaml
+
+      - name: Install mobile web dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Build FIRST and separately from the tests. `pnpm build` is `tsc -b &&
+      # vite build`, so this step is the typecheck the vitest suite does not
+      # perform — the failure this workflow exists to catch surfaces here, with
+      # a job name that says which surface broke.
+      - name: Build the phone bundle (typechecks)
+        run: pnpm build
+
+      - name: Run mobile web tests
+        run: pnpm test

@@ -1,0 +1,63 @@
+# Ignore Python compiled files
+*.pyc
+__pycache__/
+.env
+# No trailing slash on purpose: `.venv/` matches only a directory, so a `.venv`
+# SYMLINK into a shared venv (how a throwaway worktree borrows one) slipped
+# past it and was committed by a `git add -A`. The slash-less spelling matches
+# a file, a symlink and a directory alike, so it is the one that covers this.
+.venv
+.DS_Store
+dist/
+node_modules/
+# pnpm's content-addressable store. Normally it lives once under ~/Library or
+# ~/.local/share and never appears here — but pnpm hard-links from the store
+# into node_modules, and hard links cannot cross filesystems, so a checkout on
+# a DIFFERENT filesystem than the home store (a `git worktree add /tmp/...`,
+# which is how this repo is routinely worked) makes pnpm fall back to a local
+# store beside the package. That is 34 MB of regenerable cache that a
+# `git add -A` in such a worktree would otherwise commit.
+.pnpm-store/
+local-operator-extension.zip
+# google-github-actions/auth creates these only when credential-file export is
+# enabled; ignore them defensively so a local workflow experiment cannot commit
+# a short-lived credential alongside the extension artifact.
+gha-creds-*.json
+*.egg-info/
+.pytest_cache/
+.vscode/
+.coverage*
+htmlcov/
+build/
+# pytest-textual-snapshot report artifact — regenerable, and it embeds the
+# environment (including secrets) in its HTML dump. Never commit it.
+snapshot_report.html
+
+# `uv` resolution artifact. This project pins nothing through it: CI and the
+# documented install both run `pip install -e ".[dev]"` against pyproject, so a
+# committed lockfile is a second source of truth that nothing reads and no job
+# validates. It landed by accident in a TUI commit.
+#
+# EXCEPTION: an adapter distribution under `benchmarks/` IS a separately-locked
+# workspace — its `uv.lock` is the pinned dependency set the wheel and digests
+# are attested against, so those locks are committed deliberately.
+uv.lock
+!benchmarks/*/uv.lock
+
+# Throwaway validation aids: the tidy-tree prototype and the captured org-chart
+# screenshot matrix live here so the reviewer/designer can look at them, but
+# they are not shipped code — committing them would put the prototype (which is
+# deliberately not type-clean) under the pyright/black gate and re-bill the
+# SVGs as repo weight. The shipped code is the promoted `org_layout.py`.
+scratch/
+
+# The local measurement store for the `scripts/bench_*.py` harnesses: the
+# before/after JSON dumps and the tables built from them. It is regenerable
+# output, not source, so the evidence belongs on the PR that cites it and never
+# in the tree (`AGENTS.md`, "Evidence goes on the PR, never into the repository")
+# — committing it made every clone pay forever for numbers one PR cared about.
+# Ignored here so a re-run still has somewhere to write (`bench_info_snapshot.py`
+# creates the directory itself, because git does not materialise an ignored one);
+# the numbers that were committed are one `git show` away at `ba225070`, the
+# `main` this sweep branched from, where the whole store is still present.
+bench/

@@ -1,0 +1,104 @@
+name: "🐞 Bug Report"
+description: "🚨 Report a bug in Local Operator."
+title: "[Bug] <mode>: <brief description>"
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug in Local Operator. Please provide as much detail as possible so we can reproduce and address the issue.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Brief Summary
+      description: Provide a short summary of the bug.
+      placeholder: "Local Operator crashes when executing command XYZ"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      description: Select the mode you were using when the bug occurred.
+      options:
+        - CLI
+        - Single Execution
+        - Server
+    validations:
+      required: true
+  - type: dropdown
+    id: hosting_platform
+    attributes:
+      label: Hosting Platform
+      description: Select the hosting platform in use.
+      options:
+        - DeepSeek
+        - OpenAI
+        - OpenRouter
+        - Anthropic
+        - Kimi
+        - Alibaba
+        - Google
+        - Mistral
+        - Ollama
+        - Other
+  - type: input
+    id: model_name
+    attributes:
+      label: Model Name
+      description: Specify the model you were using.
+      placeholder: "e.g., gpt-4o, deepseek-v3, claude-3.5-sonnet"
+  - type: input
+    id: local_operator_version
+    attributes:
+      label: Local Operator Version
+      description: Specify the version of Local Operator you are using.
+      placeholder: "e.g., 0.1.1"
+  - type: input
+    id: python_version
+    attributes:
+      label: Python Version
+      description: Specify your Python version.
+      placeholder: "e.g., 3.12.0"
+  - type: input
+    id: operating_system
+    attributes:
+      label: Operating System
+      description: Specify your operating system.
+      placeholder: "e.g., macOS, Ubuntu, Windows"
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: |
+        Please list the steps to reproduce the bug. Include any relevant command line instructions or contextual details.
+      placeholder: |
+        1. Start with command:
+        2. Follow-up with:
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: Describe what you expected to happen.
+      placeholder: "The application should complete the task successfully."
+    validations:
+      required: true
+  - type: textarea
+    id: actual_behavior
+    attributes:
+      label: Actual Behavior
+      description: Describe what actually happened.
+      placeholder: "The application crashes with a stack trace or error message."
+    validations:
+      required: true
+  - type: textarea
+    id: error_logs
+    attributes:
+      label: Error Logs (if applicable)
+      description: Paste any error logs or screenshots that might help diagnose the issue.
+      placeholder: "Optional: include error messages or stack traces"
