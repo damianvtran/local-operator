@@ -98,13 +98,19 @@ def mark_parked(
     """
     at = int(time.time()) if now is None else now
     previous = parked()
-    same = bool(previous) and previous.get("reason") == reason
-    attempts = int(previous.get("attempts", 0)) + 1 if same else 1
-    first_at = int(previous["first_at"]) if same and "first_at" in previous else at
-    logged_at = previous.get("logged_at") if same else None
-    logged_attempts = previous.get("logged_attempts") if same else None
+    # Narrowed explicitly rather than through a `same` flag: the two facts below
+    # (this cause's age, and whether the line is news) both depend on the
+    # previous RECORD, not on an equality that has already been folded away.
+    unchanged = previous is not None and previous.get("reason") == reason
+    if unchanged and previous is not None:
+        attempts = int(previous.get("attempts", 0)) + 1
+        first_at = int(previous.get("first_at", at))
+        logged_at = previous.get("logged_at")
+        logged_attempts = previous.get("logged_attempts")
+    else:
+        attempts, first_at, logged_at, logged_attempts = 1, at, None, None
     announce = (
-        not same
+        not unchanged
         or not isinstance(logged_at, int)
         or not isinstance(logged_attempts, int)
         or at - logged_at >= REPEAT_LOG_SECONDS
