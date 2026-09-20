@@ -885,16 +885,17 @@ def test_the_acknowledgement_gate_holds_the_median_and_the_tail():
     fast = {M.ADMITTED: {"n": 7, "p50": 62.0, "p95": 148.0}}
     slow_median = {M.ADMITTED: {"n": 7, "p50": 340.0, "p95": 380.0}}
     slow_tail = {M.ADMITTED: {"n": 7, "p50": 190.0, "p95": 620.0}}
-    assert (
-        M.judge_admission(("desktop", "cold"), fast, provider_kind=M.ENFORCED_PROVIDER).status
-        == "PASS"
+    # Bound to a name and narrowed before the attribute read: `judge_admission`
+    # returns None where the channel does not acknowledge, and the tests below are
+    # about the verdicts rather than that case.
+    fast_verdict = M.judge_admission(("desktop", "cold"), fast, provider_kind=M.ENFORCED_PROVIDER)
+    assert fast_verdict is not None
+    assert fast_verdict.status == "PASS"
+    slow_verdict = M.judge_admission(
+        ("desktop", "cold"), slow_median, provider_kind=M.ENFORCED_PROVIDER
     )
-    assert (
-        M.judge_admission(
-            ("desktop", "cold"), slow_median, provider_kind=M.ENFORCED_PROVIDER
-        ).status
-        == "FAIL"
-    )
+    assert slow_verdict is not None
+    assert slow_verdict.status == "FAIL"
     tail = M.judge_admission(("desktop", "cold"), slow_tail, provider_kind=M.ENFORCED_PROVIDER)
     assert tail is not None and tail.status == "FAIL"
     assert "tail bound" in tail.reason
