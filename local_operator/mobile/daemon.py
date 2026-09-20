@@ -2172,7 +2172,20 @@ class MobileDaemon:
             self.table.notify_list_changed()
             _fan_out(entry, self)
 
-        client = AttachClient(repaint, lambda _reason: None, locality="remote")
+        client = AttachClient(
+            repaint,
+            lambda _reason: None,
+            locality="remote",
+            # A PROMPT RAISED FOR A RELAY'S OWN SIGNATURE NAMES THE SESSION IN THE
+            # LOG (UX round 6, U3 = design round 6, D3). There is no human at this
+            # process's terminal — the person who asked is on the phone, and the
+            # gesture is on the machine — so `warning` rather than the reader-facing
+            # pane notice the TUI paints, and it is the only channel this surface
+            # has. Deliberately passed rather than left to `AttachClient`'s
+            # debug-level fallback: a machine-side presence prompt with nobody
+            # looking is the event an operator most needs to find afterwards.
+            on_operator_prompt=lambda copy: logger.warning("relay: %s", copy),
+        )
         self._phone_attaches[session_id] = client
         try:
             await client.connect(record, session_id)
@@ -2421,7 +2434,12 @@ class MobileDaemon:
                     if record is None or record.pid != process.pid:
                         return
                     client = AttachClient(
-                        lambda _projection: None, lambda _reason: None, locality="remote"
+                        lambda _projection: None,
+                        lambda _reason: None,
+                        locality="remote",
+                        # Same reason as the phone attach above: the machine's key is
+                        # what signs here and the log is this surface's only channel.
+                        on_operator_prompt=lambda copy: logger.warning("relay: %s", copy),
                     )
                     try:
                         await client.connect(record, session_id)
@@ -3066,7 +3084,20 @@ def build_app(daemon: MobileDaemon):
             # to its stable retry message while retaining the original command.
             return JSONResponse({"error": str(exc)[:200]}, status_code=502)
         except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=422)
+            # THE TYPED CODE TRAVELS WITH THE COPY (UX round 6, U6 = design round 6,
+            # D5's mechanism). The phone is a REMOTE surface whose next step depends
+            # on WHICH refusal this is — "operator authority is not installed on that
+            # machine" is a different instruction from "that machine refused your
+            # signature" — and it was left matching substrings of English that this
+            # branch had already rewritten twice. `error` keeps the copy verbatim for
+            # every client that exists today; `code` is additive and carries the
+            # category alone, which is the same rule the module boundary states for
+            # frames: an enumerated token, never prose this side composed.
+            body: dict[str, Any] = {"error": str(exc)}
+            code = getattr(exc, "code", "")
+            if isinstance(code, str) and code:
+                body["code"] = code
+            return JSONResponse(body, status_code=422)
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
         return JSONResponse({"ok": True, "detail": reply.get("detail", "")})
@@ -3196,10 +3227,16 @@ def build_app(daemon: MobileDaemon):
                 status_code=422,
             )
         device_id = devices.new_device_id(spki)
-        if devices.is_revoked_here(root, device_id):
+        if devices.is_revoked(root, device_id):
             # A revoked device must not be able to re-pair on a fresh code and
             # quietly become a signer again. The renaming attack is closed by the
             # id being DERIVED from the key rather than chosen.
+            #
+            # `is_revoked`, not `is_revoked_here` (UX round 6, U5): the anchor is
+            # the authoritative list, and an operator who revokes by editing it —
+            # which is the documented way to revoke a device whose certificate
+            # this machine still holds — left the local record silent. Measured
+            # before the fix: that device re-paired on a fresh code with HTTP 200.
             return JSONResponse({"error": "this device has been revoked"}, status_code=403)
         name = str(body.get("name") or "")[:64]
         devices.write_pending(

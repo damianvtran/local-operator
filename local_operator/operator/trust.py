@@ -45,6 +45,7 @@ import os
 import re
 import stat
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -261,11 +262,19 @@ def load_anchor(uid: int | str | None = None) -> AnchorLoad:
     """
     path = anchor_path(uid)
     if not _path_is_symlink_free(path):
+        # ``exists=True``, because something IS in the anchor's place and the
+        # runtime will not trust it: that is a pinned-but-unusable anchor
+        # (``anchor-unpinned``), not a host that never installed one
+        # (``spawn-capability-only``). Reporting the second for the first state
+        # told a reader with a redirect in the path the wrong reason (agent
+        # review round 6, R6-6) in a report whose whole job is to distinguish
+        # them.
         return AnchorLoad(
             anchor=None,
             path=path,
             root_owned=False,
             reason="a component of the anchor path is a symbolic link",
+            exists=True,
         )
     opened = _open_no_follow(path)
     if opened is None:
@@ -416,23 +425,92 @@ def is_presence_backend(backend: str) -> bool:
 AnchorProvider = Any
 
 
+#: How long a runtime may keep trusting the REVOCATION LIST it read at first need.
+#:
+#: A window is needed at all because caching the anchor forever meant an
+#: installed revocation never reached a runtime already running: the operator
+#: edited the root-owned anchor, and every session started before that edit went
+#: on honouring the revoked phone for as long as it lived — which the design's own
+#: words make days (agent review round 6, R6-1, measured on a file-backed anchor).
+#:
+#: Thirty seconds rather than the certificate TTL's five minutes: a revocation is
+#: a security action taken about a device that may already be in someone else's
+#: hands, and this is the number the revoke receipt can be honest about. The cost
+#: is one read of a small root-owned file per runtime per window, which is nothing.
+ANCHOR_REFRESH_S = 30.0
+
+
 @dataclass
 class AnchorCache:
-    """A read-once, in-memory view of the anchor for one runtime.
+    """A read-once-in-memory view of the anchor, refreshed under a bound.
 
     READ ONCE, at first need, rather than per frame: the anchor is a file on
     disk, and a runtime that re-read it on every increasing frame would let a
     same-uid subject race the read. The design's phrase is "read once and pinned
-    in memory", and this is where that pin lives. A successful load is cached
-    forever; a FAILED load is cached too, and that is deliberate — an attacker who
-    can make the anchor unreadable could otherwise force a re-read per frame, and
-    a cache that only remembers successes would re-read on every frame an
-    attacker sends.
+    in memory", and this is where that pin lives. A successful load is cached, and
+    a FAILED load is cached too — an attacker who can make the anchor unreadable
+    could otherwise force a re-read per frame.
+
+    IT IS REFRESHED, though, and that is the correction agent review round 6
+    (R6-1) measured the need for. Caching forever made the pin absolute, and the
+    pin is only supposed to be about WHO made the file and how often it is read —
+    not about a revocation list frozen for the lifetime of a session:
+
+    * the re-read happens at most once per :data:`ANCHOR_REFRESH_S`, never per
+      frame, so the property the pin exists for is intact: a same-uid subject
+      still cannot make a runtime read the root-owned file on demand;
+    * it is adopted only when it names the SAME operator key id. A key
+      ROTATION is a privileged step the operator takes deliberately, and a
+      running session must not silently swap its root of trust underneath
+      itself; a rotation therefore still takes effect at each runtime's next
+      start, which is what the design says and what the level report reads;
+    * a re-read that is no longer USABLE is adopted, because that direction is
+      stricter: an anchor deleted, chmod-ed or replaced mid-session drops this
+      runtime to the spawn capability rather than keeping device authority it
+      can no longer justify.
+
+    A cache whose ``load`` was INJECTED (the ``operator_anchor`` constructor
+    seam a test or a caller uses) is never refreshed: a caller who hands one in
+    owns its lifetime, and re-reading the real path from under it would replace
+    the value it explicitly passed with a file it deliberately did not read.
     """
 
     load: AnchorLoad = field(default=None)  # type: ignore[assignment]
+    #: The refresh window, a field rather than the constant so the runtime can
+    #: pass its own (and a test can shrink it to zero) without a private poke at
+    #: the loaded value.
+    refresh_s: float = ANCHOR_REFRESH_S
+    #: When the next re-read is due, on ``time.monotonic``. Also the flag that
+    #: says whether this cache may refresh at all: it is set only by a read THIS
+    #: object performed, so an injected load leaves it at zero and never
+    #: refreshes.
+    _refreshable: bool = False
+    _next_refresh: float = 0.0
 
     def get(self) -> AnchorLoad:
-        if self.load is None:
-            self.load = load_anchor()
+        now = time.monotonic()
+        if self.load is None or (self._refreshable and now >= self._next_refresh):
+            fresh = load_anchor()
+            self._next_refresh = now + self.refresh_s
+            if self.load is None or self._is_adoptable(fresh):
+                self.load = fresh
+                self._refreshable = True
+            return self.load
         return self.load
+
+    def _is_adoptable(self, fresh: AnchorLoad) -> bool:
+        """Whether a re-read may replace the pinned anchor.
+
+        Two ways, and the asymmetry is the point: a load that is still USABLE
+        has to name the same operator key (a rotation must not take effect
+        mid-session), while a load that is no longer usable is adopted
+        unconditionally because refusing a downgrade would keep authority the
+        runtime can no longer justify — the one direction a cache must never
+        fail in.
+        """
+        pinned = self.load
+        if pinned is None:  # pragma: no cover - the caller reads None first
+            return True
+        if not fresh.usable:
+            return True
+        return pinned.anchor is not None and pinned.anchor.key_id == fresh.anchor.key_id

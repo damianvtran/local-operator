@@ -633,6 +633,30 @@ OPERATOR_AUTHORITY_REQUIRED_NOTICE = (
     "--yolo or tool_approval_mode: auto."
 )
 
+#: The same refusal on a host where NEITHER named remedy can work yet.
+#:
+#: THE STATE THIS EXISTS FOR, because it is the DEFAULT one and that is what made it
+#: a defect rather than an edge case (UX round 6, U1; design round 6, D5's sibling):
+#: ``lop operator init`` STAGES the anchor and a separate privileged step installs it,
+#: so between those two — which is exactly where a user following the pairing
+#: instructions stands — a correctly paired phone signs and the runtime refuses,
+#: because the anchor it would verify against is absent. The copy above answers that
+#: with "this machine (Touch ID) or your paired phone": the reader is ON the paired
+#: phone, and the machine refuses its own gesture for the same missing reason, while
+#: the one command that unlocks both was named nowhere. Same facts, one remedy moved
+#: to the front, and the command that ends the state named.
+#:
+#: Two constants rather than a branch inside a formatter, for the reason the existing
+#: pair already records: the runtime SENDS the token and the far side rebuilds the
+#: sentence locally, so the copy cannot drift between the two ends.
+OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE = (
+    "this session's gate is still at ask: /approvals auto removes it and needs the "
+    "operator's own consent — but operator authority is not installed on this machine, so "
+    "the remedies below cannot work yet. Run `lop operator install` there (one privileged "
+    "step), then authorise from this machine or from your paired phone. /approvals ask "
+    "still tightens it here."
+)
+
 #: The same refusal for the CARD, which is a different situation for the person
 #: reading it: they never typed ``/approvals auto``, they pressed a key on a
 #: parked question, and what they need to know is whether the question survived.
@@ -650,6 +674,15 @@ CARD_APPROVAL_REFUSED_NOTICE = (
     "this approval is still waiting: only the operator can allow it — authorise it from the "
     "machine running the session (Touch ID) or from your paired phone — and the tool stays "
     "blocked until someone does. Denying it works from here."
+)
+
+#: The card refusal for the host with no usable anchor — see the unconfigured notice above.
+#: The one action that DOES work from wherever the reader is (deny) stays named, because it
+#: is the same fact on both hosts; what changes is that the remedy is not reachable yet.
+CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE = (
+    "this approval is still waiting: only the operator can allow it, and operator authority "
+    "is not installed on the machine running the session, so this cannot be signed yet — run "
+    "`lop operator install` there (one privileged step). Denying it works from here."
 )
 
 
@@ -678,7 +711,7 @@ CARD_APPROVAL_REFUSED_NOTICE = (
 #:
 #: It stays under the 400-character error-frame cap (``server.py``'s
 #: ``str(exc)[:400]``) so it travels whole rather than truncated mid-remedy.
-def approvals_default_notice(*, may_loosen: bool | None) -> str:
+def approvals_default_notice(*, may_loosen: bool | None, anchor_unusable: bool = False) -> str:
     switch = (
         "/approvals ask|auto switches this session now"
         if may_loosen
@@ -686,6 +719,20 @@ def approvals_default_notice(*, may_loosen: bool | None) -> str:
         "operator's own consent — from this machine (Touch ID) or your paired phone "
         "— and a NEW session can start loosened with --yolo or tool_approval_mode: auto"
     )
+    if not may_loosen and anchor_unusable:
+        # THE HOST STATE IS NAMED BEFORE THE LEVERS IT DISABLES (UX round 6, U1/U2).
+        # Naming two remedies on a host where neither can run is the same defect as
+        # the refusal above, on the surface an operator reads BEFORE acting: they
+        # take the sentence at its word, try, and are refused. ``anchor_unusable``
+        # is the caller's answer (it is the only side that can read the level) and
+        # defaults False so an implementation that does not pass it keeps the
+        # pre-existing sentence rather than acquiring a claim it did not compute.
+        switch = (
+            "/approvals ask switches this session now; /approvals auto needs the operator's "
+            "own consent, and authority is not installed on this machine — run "
+            "`lop operator install` there; a NEW session can start loosened with --yolo or "
+            "tool_approval_mode: auto"
+        )
 
     return (
         "/approvals default writes the config file of the machine this session runs on — "

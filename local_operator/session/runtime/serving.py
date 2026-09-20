@@ -5489,11 +5489,39 @@ class ServingSessionHandle(SessionHandle):
 
         remedy = f"/approvals {saved} adopts it in this session"
         if transition_authority("approvals", saved) == "authority-increasing" and not may_loosen:
+            # THE SPAWNER CLAUSE IS GONE (revision 2 §5; agent review round 6 R6-3
+            # = design round 6 D1 = UX round 6 U4). It read "typed in the terminal
+            # or app window that started this session", which was true under
+            # spawner authority and is not any more: §3 gives a pane attached to a
+            # runtime another process started, the desktop app for any session, and
+            # the phone the same one-presence-gesture loosening. So the report
+            # withheld capability that now exists, from the surface whose whole job
+            # is to say what is in effect and why.
             return (
-                f"/approvals {saved} adopts it, typed in the terminal or app window that "
-                "started this session"
+                f"/approvals {saved} adopts it with the operator's own consent — authorise it "
+                "from this machine (Touch ID) or from a paired phone"
             )
         return remedy
+
+    @staticmethod
+    def _uninstalled_anchor_clause() -> str:
+        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+
+        THIS REPLACES THE DELETED "retire and reopen the session here" clause, and
+        it replaces it with the one thing that clause was standing in for: a
+        sentence naming the route that actually works from where the reader is.
+        On a host with no usable anchor the two levers the report names cannot run
+        yet, so the report has to say so and name the command that fixes it
+        (UX round 6, U1/U2 — the same gap the refusal copy had).
+        """
+        from local_operator.operator import operator_authority_unusable
+
+        if not operator_authority_unusable():
+            return ""
+        return (
+            "; but operator authority is not installed on this machine yet: neither can run "
+            "until `lop operator install` has (one privileged step)"
+        )
 
     def _approvals_slash(
         self, session: Any, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
@@ -5531,10 +5559,13 @@ class ServingSessionHandle(SessionHandle):
             # machine the SESSION runs on rather than "this machine", which reads
             # as the reader's own filesystem from a phone (design round 3, D16).
             from local_operator.harness.approval import approvals_default_notice
+            from local_operator.operator import operator_authority_unusable
 
             return SlashResult(
                 kind="notice",
-                text=approvals_default_notice(may_loosen=may_loosen),
+                text=approvals_default_notice(
+                    may_loosen=may_loosen, anchor_unusable=operator_authority_unusable()
+                ),
                 style="warning",
             )
         if not argument:
@@ -5571,17 +5602,24 @@ class ServingSessionHandle(SessionHandle):
                     transition_authority("approvals", on_disk) == "authority-increasing"
                     and not may_loosen
                 ):
-                    # THE ROUTE THAT WORKS IS NAMED HERE TOO (UX round 2, U9):
-                    # the refusal copy carries it, but the REPORT is the sentence
-                    # an operator reads *before* acting, and a report that only
-                    # says "type it in the window that started this session" left
-                    # them to discover the re-engage route by being refused first
-                    # — on the background-started case where no such window
-                    # exists at all.
-                    remedy += (
-                        "; or let this session's runtime retire and reopen the session here — "
-                        "the window that opens a runtime owns its gate"
-                    )
+                    # THE ROUTE THAT WORKS IS NAMED HERE TOO (UX round 2, U9): the
+                    # refusal copy carries it, but the REPORT is the sentence an
+                    # operator reads *before* acting, and a report that only says
+                    # "type it in the window that started this session" left them to
+                    # discover the real route by being refused first — on the
+                    # background-started case where no such window exists at all.
+                    #
+                    # WHAT IT NAMES CHANGED WITH THE MODEL (revision 2 §5; agent
+                    # review round 6 R6-3 = design round 6 D1 = UX round 6 U4): the
+                    # clause that stood here was "let this session's runtime retire
+                    # and reopen the session here — the window that opens a runtime
+                    # owns its gate", which is verbatim the remedy this redesign
+                    # deletes, shipped on the one surface a reader consults BEFORE
+                    # being refused. Beyond the deleted remedy it withheld the
+                    # capability that now exists (a pane attached to another
+                    # process's runtime can loosen), so a reader with a working lever
+                    # was told to retire a runtime instead of using it.
+                    remedy += self._uninstalled_anchor_clause()
                 return SlashResult(
                     kind="notice",
                     text=(

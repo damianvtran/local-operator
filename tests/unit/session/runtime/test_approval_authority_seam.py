@@ -40,7 +40,9 @@ import pytest
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import (
     AUTHORITY_OPS,
+    CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE,
     OPERATOR_AUTHORITY_REQUIRED_NOTICE,
+    OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE,
     handshake_proof_ok,
     is_wire_hex,
     mint_operator_cap,
@@ -264,7 +266,7 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "run", "mobile", "*.json"
 @pytest.mark.asyncio
 @pytest.mark.slow
 async def test_a_model_authored_subprocess_cannot_loosen_the_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_anchor: None
 ) -> None:
     """THE ISSUE'S REGRESSION SHAPE, driven from a real same-uid process.
 
@@ -312,10 +314,17 @@ async def test_a_model_authored_subprocess_cannot_loosen_the_gate(
         # remedies for a gate, and the CARD's tells the reader the question is
         # still parked and that a deny works from where they are (UX round 2,
         # U8 — a phone user was handed advice they could not take).
-        from local_operator.harness.approval import CARD_APPROVAL_REFUSED_NOTICE
-
+        # THE UNCONFIGURED PAIR, because `no_anchor` pins this host as one with no
+        # anchor at all: each refusal names the reader's situation, and on this host
+        # that situation is that neither named surface can act until
+        # `lop operator install` has run (UX round 6, U1/U2). The ordinary pair is
+        # pinned by the injected-anchor cells, where a usable anchor exists and the
+        # levers are real.
         assert out.count(_REFUSAL) == 1, out
-        assert out.count(CARD_APPROVAL_REFUSED_NOTICE) == 1, out
+        assert out.count(OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE) == 1, out
+        assert out.count("this approval is still waiting") == 1, out
+        assert out.count(CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE) == 1, out
+        assert "lop operator install" in out, out
         assert "slash_result error" in out, out
         assert "approval_answer error" in out, out
 
@@ -1199,9 +1208,40 @@ async def _follower(tmp_path: Path, record: Any) -> Any:
     return remote
 
 
+@pytest.fixture
+def no_anchor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin "this host has no usable anchor", whatever the developer's machine has.
+
+    WHY A PIN AND NOT AN INHERITED FACT. The refusal now names the install step
+    when the anchor is unusable (UX round 6, U1/U2), so a cell that asserts WHICH
+    sentence a host with no anchor sends has to pin the host fact. Inheriting it
+    would make the suite depend on the developer's machine: a host with an
+    installed anchor takes the other branch, and the cell would go red for a
+    reason that says nothing about the code.
+
+    Patched at ``trust.load_anchor`` — the single read ``AnchorCache`` performs —
+    rather than at the runtime's constructor seam, because the runtime's
+    ``operator_anchor`` injection would make this the OTHER case (a usable anchor
+    handed in), which is the branch the replay and forged-certificate cells
+    already pin.
+    """
+    from local_operator.operator import trust
+
+    def absent(uid: int | str | None = None) -> Any:
+        return trust.AnchorLoad(
+            anchor=None,
+            path=trust.anchor_path(uid),
+            root_owned=False,
+            reason="pinned absent by the test",
+            exists=False,
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", absent)
+
+
 @pytest.mark.asyncio
 async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_anchor: None
 ) -> None:
     """The desktop route's real code path, on a backend that did not spawn it.
 
@@ -1225,12 +1265,28 @@ async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_st
         # copy, which is what stops the desktop answering 503
         # "runtime_unreachable" for a deliberate refusal (agent review round 1,
         # R1-2 = design D1 = UX U4 = QA Q1).
-        from local_operator.session.errors import OperatorAuthorityRequired
+        # THE UNCONFIGURED VARIANT, because this runtime has no anchor at all
+        # (`no_anchor` pins that): on such a host neither "this machine (Touch ID)"
+        # nor "your paired phone" can work, so the refusal names the command that
+        # makes them able to — `lop operator install` (UX round 6, U1/U2). The
+        # class is a SUBCLASS of the ordinary one, which is what keeps every route
+        # that keys on `operator_authority_required` working unchanged.
+        from local_operator.session.errors import (
+            OperatorAuthorityRequired,
+            OperatorAuthorityUnconfigured,
+        )
 
         with pytest.raises(OperatorAuthorityRequired) as refused:
             await remote.route_shared_slash("approvals", "auto")
-        assert refused.value.code == "operator_authority_required"
-        assert OPERATOR_AUTHORITY_REQUIRED_NOTICE in str(refused.value)
+        assert isinstance(refused.value, OperatorAuthorityUnconfigured), refused.value
+        assert refused.value.code == "operator_authority_unconfigured"
+        assert OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE in str(refused.value)
+        assert "lop operator install" in str(refused.value)
+        # ...and it does NOT offer the two remedies that cannot run here, which is
+        # the whole of U1: the reader is ON the paired phone.
+        assert "authorise it from this machine (Touch ID) or from your paired" not in str(
+            refused.value
+        )
         assert live.handle._auto_approve is False
     finally:
         if remote is not None:
@@ -2772,7 +2828,7 @@ async def test_a_challenge_cannot_be_spent_on_another_connection(
 
 @pytest.mark.asyncio
 async def test_a_connection_to_a_runtime_with_no_anchor_is_refused_with_the_typed_copy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_anchor: None
 ) -> None:
     """No anchor means no operator source, and the refusal is the typed one.
 
@@ -2801,7 +2857,13 @@ async def test_a_connection_to_a_runtime_with_no_anchor_is_refused_with_the_type
             },
         )
         assert reply["op"] == "error", reply
-        assert reply.get("error_code") == "operator_authority_required", reply
+        # THE UNCONFIGURED CODE, and it is the one a PHONE can act on: the relay
+        # forwards the typed code, so a remote surface that receives it can say
+        # "that machine has not installed its operator authority" rather than
+        # re-reading English that has already been rewritten twice
+        # (UX round 6, U1 + U6).
+        assert reply.get("error_code") == "operator_authority_unconfigured", reply
+        assert "lop operator install" in reply.get("message", ""), reply
         assert live.handle._auto_approve is False
         conn.close()
     finally:

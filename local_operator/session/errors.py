@@ -314,6 +314,15 @@ class OperatorAuthorityRequired(ValueError, RuntimeError):
 
     code = "operator_authority_required"
 
+    #: Whether this refusal is the UNCONFIGURED variant — the host has no usable
+    #: anchor, so NEITHER named remedy can work until `lop operator install` has
+    #: run there (UX round 6, U1/U2 — the two halves of one gap). It
+    #: selects a different sentence, exactly as ``trigger`` does, and it crosses
+    #: the transport as its own CODE rather than as a field, for the reason the
+    #: module docstring gives for codes: the far side rebuilds the sentence
+    #: locally, so only an enumerated value may ride along.
+    unconfigured = False
+
     #: The op a refusal came from, as one of the enumerated control ops that can
     #: carry an increasing request. ``""`` means the raiser did not say, which
     #: rebuilds the command's sentence — the pre-trigger behaviour.
@@ -326,15 +335,45 @@ class OperatorAuthorityRequired(ValueError, RuntimeError):
         if message is None:
             from local_operator.harness.approval import (
                 CARD_APPROVAL_REFUSED_NOTICE,
+                CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE,
                 OPERATOR_AUTHORITY_REQUIRED_NOTICE,
+                OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE,
             )
 
-            message = (
-                CARD_APPROVAL_REFUSED_NOTICE
-                if self.trigger in self.CARD_OPS
-                else OPERATOR_AUTHORITY_REQUIRED_NOTICE
-            )
+            if self.trigger in self.CARD_OPS:
+                message = (
+                    CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE
+                    if self.unconfigured
+                    else CARD_APPROVAL_REFUSED_NOTICE
+                )
+            else:
+                message = (
+                    OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE
+                    if self.unconfigured
+                    else OPERATOR_AUTHORITY_REQUIRED_NOTICE
+                )
         super().__init__(message)
+
+
+class OperatorAuthorityUnconfigured(OperatorAuthorityRequired):
+    """The same refusal on a host where no anchor is USABLE, so the remedies differ.
+
+    WHY THIS IS A DIFFERENT CATEGORY RATHER THAN DIFFERENT PROSE. The default state
+    of a fresh host between ``lop operator init`` (which only STAGES the anchor) and
+    ``lop operator install`` (the privileged step that lands it) is: a correctly
+    paired phone signs, and the runtime refuses it — the anchor it would verify
+    against is present-but-untrusted or absent. The old sentence named "this
+    machine (Touch ID) or your paired phone", and on that host NEITHER can work,
+    while the one command that unlocks both was named nowhere (UX round 6, U1/U2).
+
+    A subclass rather than a flag on the message so the code, the level and the
+    sentence stay one decision: every route that keys on
+    ``operator_authority_required`` keeps working for the ordinary case (it is the
+    base class), and the phone can key on this code to say what is actually left.
+    """
+
+    code = "operator_authority_unconfigured"
+    unconfigured = True
 
 
 class ProfileRegistryUnavailable(ValueError):
@@ -534,6 +573,10 @@ def admission_error(
             trigger=trigger if isinstance(trigger, str) else "",
             leaving=leaving if isinstance(leaving, str) else "",
         )
+    if code == OperatorAuthorityUnconfigured.code:
+        # Ahead of the base class only for legibility: the two codes are
+        # distinct strings, so neither can shadow the other.
+        return OperatorAuthorityUnconfigured(trigger=trigger if isinstance(trigger, str) else "")
     if code == OperatorAuthorityRequired.code:
         # No PROSE off the wire: the sentence is rebuilt from the constant, and
         # ``trigger`` — one token from a closed set — only chooses which of the

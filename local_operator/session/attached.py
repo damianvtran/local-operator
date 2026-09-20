@@ -1195,6 +1195,11 @@ class AttachedSession:
         # the authoritative op, and the owner's confirmed count replaces the
         # optimistic notice through this app-installed callback.
         self._cancel_resolution: Callable[[int], None] | None = None
+        # "What this signature is about to authorise", from ``effect_copy``, for the
+        # app to paint while the presence prompt is up — see
+        # ``set_operator_prompt_notice`` for why this pane is the surface that has
+        # to carry it and why nothing else can.
+        self._operator_prompt_notice: Callable[[str], None] | None = None
         self._cancel_task: asyncio.Task[None] | None = None
         # Esc-recall's twin of the pair above: the synchronous protocol method
         # answers optimistically from local state and the owner's REJECTION —
@@ -3947,6 +3952,15 @@ class AttachedSession:
             ),
             on_retiring=lambda frame: (
                 self._on_retiring_frame(frame) if self._client is client else None
+            ),
+            # THE PRODUCTION WIRING FOR THE PROMPT COPY (UX round 6, U3 = design
+            # round 6, D3). This client is the pane a human is standing at when the
+            # machine's key raises its presence prompt, so it is the one surface
+            # where naming the session and the effect changes a decision. Scoped to
+            # THIS client for the same reason `on_retiring` is: a copy about one
+            # connection must not paint on a conversation another has adopted.
+            on_operator_prompt=lambda copy: (
+                self._on_operator_prompt(copy) if self._client is client else None
             ),
         )
         try:
@@ -6952,6 +6966,38 @@ class AttachedSession:
         count to the authoritative one. ``None`` disarms it.
         """
         self._cancel_resolution = resolver
+
+    def _on_operator_prompt(self, copy: str) -> None:
+        """Hand the effect sentence to the app, or log it when the app has no slot.
+
+        The fallback is not silence: ``logger.info`` is exactly what
+        ``AttachClient`` did before any production site passed a callback, so a
+        host that installs nothing loses nothing it had — and every host that DOES
+        install one (the TUI, today) gains the sentence on screen while the prompt
+        is up.
+        """
+        if self._operator_prompt_notice is None:
+            logger.info("attach: %s", copy)
+            return
+        self._operator_prompt_notice(copy)
+
+    def set_operator_prompt_notice(self, handler: Callable[[str], None] | None) -> None:
+        """Install the app's handler for "what this signature is about to authorise".
+
+        WHY THIS EXISTS (UX round 6, U3 = design round 6, D3). ``effect_copy`` builds
+        the one sentence that names the session and the effect, and ``AttachClient``
+        fires it through ``on_operator_prompt`` — which no production construction
+        site passed, so the sentence took the fallback branch and became a log line.
+        The mitigation the design names for its prompt-misread residual ("make the
+        copy name session + effect") therefore reached no human on any surface. The
+        OS sheet cannot carry it either (`SecKeyCreateSignature` takes no parameters
+        dictionary; ``kSecUseOperationPrompt`` was deprecated in macOS 11), so the
+        product's own surfaces are the whole of it — and this is the pane's.
+
+        Called with the operator-facing sentence from the connection's reader thread;
+        an app that installs nothing keeps the log line rather than silence.
+        """
+        self._operator_prompt_notice = handler
 
     # -- SessionProtocol runtime role --------------------------------------
     # This facade owns no loop: turns execute in the runtime process on the
