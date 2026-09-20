@@ -103,9 +103,16 @@ def _app_hop_timeout_note(budget: float = _APP_HOP_TIMEOUT_S) -> str:
     Names the budget and the two things a reader needs to act on it (the app is
     busy, the budget is the client's patience divided by one and a half) rather
     than a bare ``TimeoutError``, because this message is what reaches a
-    follower's terminal through an error frame. Named for the BUDGET rather than
-    read from the module constant so a caller that passed its own still gets a
-    sentence that is true.
+    follower's terminal through an error frame.
+
+    THE PARAMETER IS NOT USED BY THE EXPIRY PATHS TODAY, and the sentence is
+    therefore ALWAYS the interactive budget's. Every raise site goes through
+    ``_on_app``'s local ``expired()``, which passes nothing, so a caller that
+    runs its own shorter budget (the tests do, and they say so) still reports
+    "within 10s". The parameter is kept because it is the knob a caller would
+    pass through once a non-interactive budget exists; until then, reading this
+    sentence as a report of the CALLER's deadline is wrong (review round 3,
+    MINOR 2 / UX U1 / QA Q2).
     """
     return (
         f"the terminal did not answer within {budget:.0f}s "

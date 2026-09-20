@@ -788,29 +788,47 @@ _UNCHAINED_OPS = frozenset({"ping"})
 #: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
 #: of it: each mutates only this connection's own relay state and never touches
 #: the session, so none can act on a connection that has not yet been made
-#: authoritative — which is the whole reason the priority set is closed. They must
-#: be admitted, because the dial path itself sends three of them immediately after
-#: reading the welcome and BEFORE it awaits the sync frame
-#: (``session/attached.py``: the event-mute, ``viewer_watch`` and
-#: ``desktop_watch`` re-asserts), each with its own bound; refusing them would
-#: turn every reconnect of a parked viewer into three error frames.
+#: authoritative — which is the whole reason the priority set is closed. They
+#: must be admitted, because the dial path re-asserts some of them immediately
+#: after reading the welcome and BEFORE it awaits the sync frame, each under its
+#: own bound; refusing those would turn every reconnect of a parked viewer into
+#: an error frame.
 #:
-#: SIX of the eight are already treated as connection-local by ``_dispatch``'s
-#: push exemption — ``watch``, ``unwatch``, ``watch_job``, ``unwatch_job``,
-#: ``event_mute``, ``event_unmute`` — which is what makes those a mirror of an
-#: existing decision rather than a second one. ``desktop_watch`` and
-#: ``viewer_watch`` are NOT in that tuple (it exempts an op from the post-ack
-#: repaint, and those two answer with a receipt instead), so they are admitted
-#: on their own reason: their ``_dispatch`` arms touch only this connection's own
-#: watch/presence state and notify this connection, never the session.
+#: READ THE GATES PER MEMBER; DO NOT SUMMARISE THE SET. This paragraph carried a
+#: count and a class for four consecutive review rounds and was wrong every time
+#: (the artifact held a different set each round: ``watch_job``/``unwatch_job``
+#: were called daemon-gated although they carry no shape gate at all, and the
+#: attach-gated members went unnamed). So, from the ``_on_request`` arms:
 #:
-#: FOUR OF THE EIGHT ARE DAEMON-GATED IN EFFECT, and the set says so rather than
-#: leaving a reader to find out from the branches: ``watch``/``unwatch`` move the
-#: phone-watcher count and are ignored unless ``conn.kind == "daemon"`` (an
-#: attach client's frame is accepted and changes nothing), while
-#: ``watch_job``/``unwatch_job`` and ``desktop_watch`` each refuse themselves
-#: outside their own connection shape. That is why the remaining four — and not
-#: the set — are what the dial path actually relies on.
+#: * ``watch`` / ``unwatch`` — gated to a REGISTERED DAEMON, and SILENTLY so:
+#:   the arm runs only for ``conn.kind == "daemon"`` on a registered writer; an
+#:   attach client's frame is accepted and changes nothing, deliberately, because
+#:   only the daemon's count is ever cleared. Present here for the daemon's dial.
+#: * ``watch_job`` / ``unwatch_job`` — NO SHAPE GATE AT ALL. The arm validates
+#:   only that ``job_id`` is a non-empty string and then adds or discards it on
+#:   this connection's own ``watched_jobs``; attach and daemon are treated
+#:   identically.
+#: * ``desktop_watch`` — REFUSED BY SHAPE: a registered ``kind == "attach"``
+#:   connection whose ``surface == "desktop"``, plus boolean ``visible`` /
+#:   ``can_notify``; anything else gets the error frame.
+#: * ``viewer_watch`` — REFUSED BY SHAPE: a registered ``kind == "attach"``
+#:   connection and a boolean ``displaying``.
+#: * ``event_mute`` / ``event_unmute`` — REFUSED BY SHAPE: attach-only, because
+#:   the relay they mute is never sent to a daemon at all.
+#:
+#: The dial path depends on the event mute, ``viewer_watch`` and ``desktop_watch``
+#: — three of the four refusal-by-shape members enumerated above — which
+#: ``session/attached.py`` re-asserts right after the welcome, exactly in the
+#: window where the canonical sync is still in flight. The ``watch`` and
+#: ``watch_job`` families are here for the daemon and child-page dials that send
+#: them, not for that reconnect.
+#:
+#: Their ``_dispatch`` push exemption is what makes them a MIRROR of an existing
+#: decision rather than a second one, and it covers ``watch``, ``unwatch``,
+#: ``watch_job``, ``unwatch_job``, ``event_mute`` and ``event_unmute`` — every
+#: member of this set except ``desktop_watch`` and ``viewer_watch``, which are
+#: exempt from nothing there because they answer with a receipt rather than a
+#: repaint.
 _SYNC_LOCAL_OPS = frozenset(
     {
         "watch",
