@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -608,3 +609,126 @@ def _read_all(fd: int) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+# -- the update window's handover marker ---------------------------------------
+#
+# The inbox file above carries the MESSAGES a leaving runtime spooled. This
+# carries the FACT that a handover was in flight, and the two are separate files
+# because they have different lifetimes and different readers:
+#
+#   * the spool is read by the successor's own delivery path and is EMPTY until
+#     somebody sends something;
+#   * the marker is written by the window's OPEN and read (once) by the
+#     successor's BOOT, whether or not a single message was queued.
+#
+# WHY A FILE AND NOT A FIELD. The pair has to cross a process boundary in the
+# one direction the record cannot serve: the predecessor's record is gone by the
+# time the successor imports, and the successor's own record is written before
+# any of this could be consulted (``_bind_boot_instrumentation`` runs before the
+# inbox drain). The session directory is the only durable handover surface both
+# ends already share, and the predecessor ALREADY owns it.
+#
+# IT SURVIVES A FAILED WINDOW ON PURPOSE, in one direction only: the runtime that
+# opens a window clears this marker when it aborts (``end_update``), so a marker
+# that outlives its writer is evidence of a process that died mid-move. The
+# successor still reports the update as applied, which is the honest reading —
+# it IS running the newer build — and is exactly the case the operator could
+# never see before this existed.
+UPDATE_WINDOW_NAME = "update-window.json"
+
+
+def update_window_path(session_dir: Path) -> Path:
+    return session_dir / UPDATE_WINDOW_NAME
+
+
+def write_update_window(session_dir: Path, pair: str) -> bool:
+    """Record that an update window is moving to ``pair``. ``False`` on failure.
+
+    Written through a temporary in the same directory and renamed into place, so
+    a reader can never observe a half-written marker (the window opens
+    synchronously inside the idle decision, where there is no second rung to
+    retry from). Failure is NOT fatal to the window: the messages still spool and
+    the successor still runs them — what is lost is only the "updated" fact, which
+    is the cheaper half.
+
+    THE TEMPORARY NAME IS UNIQUE PER WRITER, and that is a fix rather than
+    tidiness (agent review round 1, MINOR 4). ``path.with_suffix('.tmp')`` — the
+    obvious spelling, and the hazard ``model/catalogue.py`` documents for the same
+    construct — is ONE name for every writer of one session directory, and two
+    runtimes can serve one directory: that is exactly the shape a blocked loop
+    provokes, where the supervisor spawns a replacement while the predecessor is
+    still in its exit leg. Measured against that shape (2 writers x 3000 writes):
+    **59** reads of an absent-or-corrupt marker, and **2374** writes reporting
+    failure (``FileNotFoundError: update-window.tmp -> update-window.json`` — the
+    other writer had already renamed it away). The two failure modes are both
+    silent in the direction that matters: a writer whose ``os.replace`` installs
+    the other's truncated file returns ``True``, and the successor then publishes
+    no ``updated`` fact at all.
+
+    ``mkstemp`` also gives O_EXCL, so two writers cannot open the same temporary
+    in the first place. The temporary is removed on every failure path: a leaked
+    ``.tmp`` inside a session directory is a file nothing else knows about.
+    """
+    path = update_window_path(session_dir)
+    fd = -1
+    tmp = ""
+    try:
+        # ``dir=`` puts the temporary on the same filesystem, which is what makes
+        # the ``os.replace`` below atomic.
+        fd, tmp = tempfile.mkstemp(dir=session_dir, prefix=UPDATE_WINDOW_NAME + ".", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            # ``os.fdopen`` takes ownership of ``fd``; ``stream`` marks that here so
+            # the ``finally`` below does not close a descriptor the file object
+            # already closed.
+            fd = -1
+            json.dump({"pair": pair, "pid": os.getpid()}, handle)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        logger.warning(
+            "could not write the update-window marker for %s", session_dir.name, exc_info=True
+        )
+        return False
+    finally:
+        if fd >= 0:  # pragma: no cover - only the failed-fdopen path reaches this
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass  # the rename moved it, which is the success path
+            except OSError:  # pragma: no cover - a leaked temp is not worth a raise
+                logger.debug("could not remove the marker temporary %s", tmp, exc_info=True)
+
+
+def read_update_window(session_dir: Path) -> str:
+    """The pair a handover was moving to, or ``""`` when no marker is present.
+
+    An unreadable or malformed marker reads as absent rather than raising: a boot
+    must not fail because a sidecar from an older or killed build is malformed,
+    and the cost of missing one is a fact that is merely nice to have.
+    """
+    try:
+        raw = json.loads(update_window_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    pair = raw.get("pair") if isinstance(raw, dict) else ""
+    return pair if isinstance(pair, str) else ""
+
+
+def clear_update_window(session_dir: Path) -> bool:
+    """Remove the marker, whether or not one is there. ``True`` if it was."""
+    try:
+        update_window_path(session_dir).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning(
+            "could not clear the update-window marker for %s", session_dir.name, exc_info=True
+        )
+        return False

@@ -87,8 +87,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/procname.py::_plant_hardlink",
         "os.unlink",
-        "Clears this pid's own .tmp link in <venv>/bin before/after linking",
-        2,
+        # THREE calls, and each is the SAME ``tmp`` name (``.<brand>.<pid>.tmp``)
+        # in the merged venv's ``bin/``: before the link (a leftover from this
+        # pid), after ``os.replace`` (a same-inode replace is a documented no-op
+        # and consumes nothing, so the temp would otherwise leak once per replant
+        # — 609 leftovers across 16 generations measured on the reporting host),
+        # and on the error path. Never ``link`` itself, and never a path derived
+        # from a session id or a config dir.
+        "Clears this pid's own .tmp link in <venv>/bin before, after and on error",
+        3,
     ),
     (
         "local_operator/procname.py::_plant_libpython",
@@ -983,6 +990,34 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         ".session.pid marker FILE",
     ),
+    # The update window's handover marker (2026-09-19): the outgoing runtime drops a
+    # FILE beside the inbox so its successor can report the move as applied
+    # (``types.UPDATING``). Both calls are built from ``update_window_path``, i.e.
+    # ``<the passed session dir>/update-window.json`` — one fixed basename, no caller
+    # input, no session id, and neither can name a DIRECTORY, so a session directory
+    # is not reachable from either: the unlink removes only the marker itself.
+    #
+    # THE TEMPORARY IS A UNIQUE ``mkstemp`` NAME, not ``update-window.json.tmp``
+    # (agent review round 1, MINOR 4): that one shared name measured 59 absent-or-
+    # corrupt reads and 2374 failed writes when two runtimes served one session
+    # directory, so the temp is now created by ``mkstemp`` with this fixed PREFIX
+    # inside the same directory — still a fixed basename plus a random suffix from
+    # the kernel, and still unable to name a directory.
+    (
+        "local_operator/session/runtime/inbox.py::write_update_window",
+        "os.replace",
+        "temp FILE -> update-window.json, both fixed names inside the session dir",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::write_update_window",
+        "os.unlink",
+        "removes only this call's own mkstemp sidecar temp file",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::clear_update_window",
+        "<path>.unlink",
+        "update-window.json marker FILE",
+    ),
     (
         "local_operator/session/runtime/registry.py::scan",
         "<path>.unlink",
@@ -1339,6 +1374,40 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "our recorded copy of the Windows task definition FILE",
     ),
+    # Both rows below arrived independently and BOTH are kept: each side
+    # appended its own entry to this tuple, so the union is the resolution —
+    # neither row supersedes the other and dropping either would let a real
+    # removal go unallow-listed (the guard would fail, not silently pass).
+    # The phone web bundle's refused build (2026-09-19). The call removes
+    # `<web>/dist` and nothing else: `web_dir` is `Path(__file__).parent /
+    # "web"` for this install, or the snapshot tree the updater is about to
+    # install, and the removed path is always that tree's `dist/` — a vite
+    # artifact the build itself just wrote, dropped when the bundle guard
+    # refuses it so a utility-less stylesheet cannot be served as "built".
+    # Never derived from a session id, the config dir, or caller input, and the
+    # argument always ends in "dist" (`_dist_dir`). One row because the removal
+    # has one owner (`_discard_bundle`) rather than three call sites.
+    (
+        "local_operator/mobile/install.py::_discard_bundle",
+        "shutil.rmtree",
+        "Drops <web>/dist after the bundle guard refuses it; web_dir is package/snapshot-derived",
+    ),
+    # The tunnel connector's park record (2026-09-19). `state.clear()` unlinks
+    # `tunnel/state.json` when the condition it describes is over — the connector
+    # is serving again, or retrying, or the operator stopped the tunnel — because
+    # every surface (the terminal's notice, `lop tunnel status`, the desktop
+    # route) reads that file as the truth about a process none of them can see,
+    # and a park that outlived its condition would have all of them describing a
+    # connector that is not parked. The path is `config.directory()` + a fixed
+    # basename: that is `$LOCAL_OPERATOR_CONFIG_DIR` (or `~/.local-operator`),
+    # never a session id, never a caller, and never a directory under
+    # `sessions/`; `unlink` takes the one FILE the connector itself wrote.
+    (
+        "local_operator/tunnels/state.py::clear",
+        "<path>.unlink",
+        "Removes only the park FILE tunnel/state.json under the config dir; "
+        "never a directory, never under sessions/",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
@@ -1526,6 +1595,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> update-window.json (the update window's handover marker)
+        "local_operator/session/runtime/inbox.py::write_update_window",
         "local_operator/session/frontend_state.py::SnapshotJobs.__init__",  # str.replace
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",

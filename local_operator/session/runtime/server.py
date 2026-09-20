@@ -51,7 +51,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, cast
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -267,6 +267,36 @@ def _frame_size_without_delta(frame: dict[str, Any]) -> int:
     # ``- 2`` removes the two quotes of the blanked delta: the caller adds the
     # real value back including its own quotes.
     return _frame_line_bytes(probe) - 2
+
+
+def _mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
+    """The in-flight stream one queued frame carries a fragment of, or ``None``.
+
+    Compaction folds ADJACENT frames of the same stream into one, and the only
+    thing that decides "same stream" is this key. Two families are delta-grade
+    and mergeable:
+
+    * ``message_update`` — the assistant's visible text, keyed by the message it
+      accumulates into;
+    * ``reasoning_delta`` — the model's private reasoning, keyed by the message
+      it belongs to (the field is ``message_id``, not a whole ``message``: a
+      reasoning frame carries no message, which is also why it is cheap to
+      merge).
+
+    The FAMILY is part of the key, so a text fragment and a reasoning fragment
+    can never fold together — merging the model's thinking into the answer
+    being painted would corrupt the transcript on the viewer's screen, and the
+    two arrive interleaved.
+
+    Everything else returns ``None`` and is left alone: a frame that must not
+    merge is never compared to its neighbour at all.
+    """
+    kind = payload.get("type")
+    if kind == "message_update":
+        return f"message_update:{(payload.get('message') or {}).get('id') or ''}"
+    if kind == "reasoning_delta":
+        return f"reasoning_delta:{payload.get('message_id') or ''}"
+    return None
 
 
 #: Line bytes the shedding stage deliberately leaves UNSPENT.
@@ -728,6 +758,21 @@ _PUBLISH_WAIT_TIMEOUT_S = 15.0
 #: identity from either side, where a local one would only work by luck.
 _WORK_ARRIVED = object()
 
+#: How long ``_shutdown_impl`` waits for requests the reader loops have ALREADY
+#: admitted to finish answering, before it closes the sockets they answer on.
+#:
+#: Five seconds, and the number is chosen from the two bounds it sits between:
+#: a hop into another thread's event loop is milliseconds when that loop is
+#: healthy (measured: a TUI hop returns in 0.0-0.1 s), and every client
+#: speaking to this socket gives a reply 15 s (``attach_client.ACK_TIMEOUT_S``)
+#: — so a shutdown that waits a few seconds gets the ack out while still being
+#: far below the caller's own patience. The wait exists because the ``stop`` op
+#: is answered by a hook that tears this runtime down (see
+#: ``_await_in_flight_requests``); a longer grace would buy nothing (a request
+#: still parked after 5 s is parked on something that is not going to answer)
+#: and would delay every genuine shutdown by that much.
+_SHUTDOWN_REPLY_GRACE_S = 5.0
+
 _PAYLOAD_OPS = {
     "slash_result",
     "cancel_subagents",
@@ -768,30 +813,74 @@ _PAYLOAD_OPS = {
 #: necessary: a connection that is reachable but not yet AUTHORITATIVE must not be
 #: allowed to act on state it has not been told about.
 #:
-#: So: health, and the three ways to regain control of a turn. ``stop``/``abort``/
-#: ``cancel`` are the kill switch in its three rungs, and withholding them until a
-#: sync lands would deny a supervisor the ability to stop a runaway session
-#: precisely when its loop is stuck — the situation this set exists for.
+#: So: health, and the FOUR ways to regain control of a turn — ``stop``,
+#: ``abort``, ``steer`` and ``cancel``. The first three (with ``cancel``, whose
+#: ``immediate`` mode routes to ``abort``) are the kill switch in its rungs, and
+#: withholding them until a sync lands would deny a supervisor the ability to
+#: stop a runaway session precisely when its loop is stuck — the situation this
+#: set exists for.
 _SYNC_PRIORITY_OPS = frozenset({"ping", "stop", "abort", "steer", "cancel"})
+
+#: Ops exempt from their connection's op CHAIN. A different question from
+#: :data:`_SYNC_PRIORITY_OPS`: that set decides what may run before the sync
+#: lands (ADMISSION), this one decides what may run without waiting for an
+#: earlier op to finish (ORDERING).
+#:
+#: ``ping`` alone, and the argument is that its answer cannot depend on session
+#: state: it reports that the runtime's loop is alive and serving. Chaining it
+#: made it report something else entirely — measured over a real socket (review
+#: round 1, UX U3), a ``ping`` sent after a parked ``steer`` on the SAME
+#: connection went unanswered for 8-15 s, so the one request a surface speaks to
+#: ask "are you there" was queued behind a mutation. Everything else keeps its
+#: place in the chain, because ordering is what stops two mutations interleaving
+#: and only a liveness probe has no state to be ordered against.
+_UNCHAINED_OPS = frozenset({"ping"})
+
 
 #: Connection-LOCAL ops admitted alongside the priority set above. Not a widening
 #: of it: each mutates only this connection's own relay state and never touches
 #: the session, so none can act on a connection that has not yet been made
-#: authoritative — which is the whole reason the priority set is closed. They must
-#: be admitted, because the dial path itself sends three of them immediately after
-#: reading the welcome and BEFORE it awaits the sync frame
-#: (``session/attached.py``: the event-mute, ``viewer_watch`` and
-#: ``desktop_watch`` re-asserts), each with its own bound; refusing them would
-#: turn every reconnect of a parked viewer into three error frames.
+#: authoritative — which is the whole reason the priority set is closed. They
+#: must be admitted, because the dial path re-asserts some of them immediately
+#: after reading the welcome and BEFORE it awaits the sync frame, each under its
+#: own bound; refusing those would turn every reconnect of a parked viewer into
+#: an error frame.
 #:
-#: SIX of the eight are already treated as connection-local by ``_dispatch``'s
-#: push exemption — ``watch``, ``unwatch``, ``watch_job``, ``unwatch_job``,
-#: ``event_mute``, ``event_unmute`` — which is what makes those a mirror of an
-#: existing decision rather than a second one. ``desktop_watch`` and
-#: ``viewer_watch`` are NOT in that tuple (it exempts an op from the post-ack
-#: repaint, and those two answer with a receipt instead), so they are admitted
-#: on their own reason: their ``_dispatch`` arms touch only this connection's own
-#: watch/presence state and notify this connection, never the session.
+#: READ THE GATES PER MEMBER; DO NOT SUMMARISE THE SET. This paragraph carried a
+#: count and a class for four consecutive review rounds and was wrong every time
+#: (the artifact held a different set each round: ``watch_job``/``unwatch_job``
+#: were called daemon-gated although they carry no shape gate at all, and the
+#: attach-gated members went unnamed). So, from the ``_on_request`` arms:
+#:
+#: * ``watch`` / ``unwatch`` — gated to a REGISTERED DAEMON, and SILENTLY so:
+#:   the arm runs only for ``conn.kind == "daemon"`` on a registered writer; an
+#:   attach client's frame is accepted and changes nothing, deliberately, because
+#:   only the daemon's count is ever cleared. Present here for the daemon's dial.
+#: * ``watch_job`` / ``unwatch_job`` — NO SHAPE GATE AT ALL. The arm validates
+#:   only that ``job_id`` is a non-empty string and then adds or discards it on
+#:   this connection's own ``watched_jobs``; attach and daemon are treated
+#:   identically.
+#: * ``desktop_watch`` — REFUSED BY SHAPE: a registered ``kind == "attach"``
+#:   connection whose ``surface == "desktop"``, plus boolean ``visible`` /
+#:   ``can_notify``; anything else gets the error frame.
+#: * ``viewer_watch`` — REFUSED BY SHAPE: a registered ``kind == "attach"``
+#:   connection and a boolean ``displaying``.
+#: * ``event_mute`` / ``event_unmute`` — REFUSED BY SHAPE: attach-only, because
+#:   the relay they mute is never sent to a daemon at all.
+#:
+#: The dial path depends on the event mute, ``viewer_watch`` and ``desktop_watch``
+#: — three of the four refusal-by-shape members enumerated above — which
+#: ``session/attached.py`` re-asserts right after the welcome, exactly in the
+#: window where the canonical sync is still in flight. The ``watch`` and
+#: ``watch_job`` families are here for the daemon and child-page dials that send
+#: them, not for that reconnect.
+#:
+#: Their ``_dispatch`` push exemption is what makes them a MIRROR of an existing
+#: decision rather than a second one, and it covers ``watch``, ``unwatch``,
+#: ``watch_job``, ``unwatch_job``, ``event_mute`` and ``event_unmute`` — every
+#: member of this set except ``desktop_watch`` and ``viewer_watch``, which are
+#: exempt from nothing there because they answer with a receipt rather than a
+#: repaint.
 _SYNC_LOCAL_OPS = frozenset(
     {
         "watch",
@@ -1116,6 +1205,16 @@ class _ClientConn:
     # task per event. Held for shutdown and slow-client eviction.
     event_writer_task: asyncio.Task[None] | None = None
     frontend_unsubscribe: Callable[[], None] | None = None
+    #: The chain of ops this connection has ADMITTED: each waits for the one
+    #: before it, so ordering is preserved, and none of them parks the reader —
+    #: which is what lets a ``ping`` be answered while a mutation is still in
+    #: flight. See ``RuntimeServer._dispatch_frame`` for the measured failure
+    #: the shape fixes (a parked ``steer`` made the whole connection mute).
+    op_chain: asyncio.Task[None] | None = None
+    #: Strong references to those tasks. A bare ``create_task`` can be collected
+    #: mid-await, which would leave an op half-run and its reply never written —
+    #: the same reason ``RuntimeServer._event_sends`` exists.
+    op_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     # Job ids whose trajectory deltas this connection wants (``watch_job``).
     # Empty by default and per-connection by necessity: the snapshot ships no
     # trajectories at all (they overflow ``_MAX_LINE_BYTES``), so a viewer
@@ -1341,6 +1440,13 @@ class RuntimeServer:
         #: handle: this is the runtime's own decision to leave, which no handle
         #: predicate knows.
         self._leaving = ""
+        #: The update window this runtime has opened (``SessionRecord.updating``),
+        #: kept here so :meth:`note_updating` can dedupe like :meth:`note_leaving`.
+        #: The HANDLE owns the window's admission behaviour and its lock; this is
+        #: only the record's copy, written from the one place that owns the record.
+        self._updating = ""
+        #: The pair a window FAILED to move to, for :attr:`SessionRecord.update_failed`.
+        self._update_failed = ""
         #: Subagent trajectory counts, ``None`` until the handle answers the
         #: probe at least once. Starting at ``None`` rather than 0 is what
         #: makes a runtime whose handle cannot report indistinguishable from
@@ -1423,6 +1529,13 @@ class RuntimeServer:
             conversation_name=seed.conversation_name,
             cwd=seed.cwd,
             model_label=seed.model_label,
+            # THE ONE-SHOT "an update applied" FACT, and this is the only writer
+            # that can publish it: the marker the outgoing runtime left was
+            # consumed at boot (``process._consume_update_marker``) BEFORE this
+            # server existed, so it waits on the handle and is seeded onto the
+            # record here. ``""`` for every ordinary boot, which is also what a
+            # runtime too old to carry the attribute reads as.
+            updated=getattr(handle, "applied_update", "") or "",
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
             # Independent capabilities, each gated by its own condition. The
@@ -1558,6 +1671,19 @@ class RuntimeServer:
         # Strong references to the one event writer per subscribed client. A
         # bare create_task can be collected mid-flight, which drops frames.
         self._event_sends: set[asyncio.Task[None]] = set()
+        #: Requests the reader loops have ADMITTED and not yet answered, and the
+        #: event that fires when the count returns to zero. ``_shutdown_impl``
+        #: waits on it so a reply the runtime has already admitted reaches its
+        #: socket — see ``_await_in_flight_requests`` for why a shutdown can
+        #: otherwise beat its own ack, and why the counter (rather than one
+        #: long-lived Event) is what makes a later request wait on its own
+        #: admission rather than on an older one's completion.
+        self._in_flight_requests = 0
+        self._in_flight_idle: asyncio.Event | None = None
+        #: Frontend binds abandoned by a connection that died mid-bind, held
+        #: until they land so their release callback can still fire (nothing
+        #: awaits them any more — see ``_release_when_landed``).
+        self._abandoned_binds: set[asyncio.Task[Any]] = set()
         # N authenticated connections keyed by id(writer): one daemon (a new
         # daemon dial evicts the old — that IS its reconnect story) plus up to
         # ATTACH_MAX_CLIENTS attach clients. A single _writer could not carry
@@ -2051,6 +2177,24 @@ class RuntimeServer:
             # signalled runtime with the build sentence (agent review round 4,
             # MAJOR-1).
             "leaving": leaving,
+            # THE UPDATE WINDOW, additive like ``draining`` and ``leaving`` above,
+            # and it is the key that makes an IDLE handover speakable at all: that
+            # rung sends ``draining=False``, so before this key a viewer had
+            # nothing to paint while the one handover that QUEUES messages was in
+            # flight. ``""`` for every departure that is not a window, and for
+            # every runtime older than this key.
+            #
+            # READ OFF THE RECORD rather than taken as an argument, and that is a
+            # correction rather than a shortcut. A parameter here would be a second
+            # copy of a field the server already holds, and — worse — a caller whose
+            # ``announce_retiring`` predates the parameter would take a TypeError
+            # inside the ``except Exception`` that guards a viewer's writer, so the
+            # whole announcement would be swallowed by the failure path meant for
+            # something else (measured: ``test_process_refresh``'s fake registrant
+            # lost its only frame that way). The window is published on the record
+            # BEFORE the announce — that ordering is the window's own contract — so
+            # the record is the one place both ends can read it from.
+            "updating": self._record.updating,
         }
         viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
         await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))
@@ -2440,8 +2584,96 @@ class RuntimeServer:
         """Join idempotent teardown from a coroutine on the runtime loop."""
         await asyncio.shield(self._ensure_shutdown_task())
 
+    def _admit_request(self) -> None:
+        """Count one request as in flight. Called on the runtime's loop."""
+        self._in_flight_requests += 1
+        if self._in_flight_requests == 1:
+            # A FRESH event per span, so a request admitted after an earlier one
+            # finished waits on its OWN admission: an event that was left set
+            # would make ``_await_in_flight_requests`` return immediately and
+            # silently drop the guarantee it exists for.
+            self._in_flight_idle = asyncio.Event()
+
+    def _release_request(self) -> None:
+        """Release one admitted request and wake the shutdown fence at zero."""
+        self._in_flight_requests -= 1
+        if not self._in_flight_requests and self._in_flight_idle is not None:
+            self._in_flight_idle.set()
+
+    async def _await_in_flight_requests(self) -> None:
+        """Let admitted requests answer before the sockets they answer on close.
+
+        WHY THIS IS A FENCE AND NOT A COURTESY. The ``stop`` op is answered by a
+        host hook that tears its own runtime down: ``TuiSessionHandle.request_stop``
+        schedules the app's teardown, the teardown closes the registrant, and
+        :meth:`_shutdown_impl` drops every client — including the one waiting
+        for the ack of the op that is doing the stopping. Losing that race turns
+        a successful graceful stop into a client-side ``OwnerAckTimeout``, and
+        the ladder then escalates to the signal rung on a session that had
+        already ended politely. Measured on 2026-09-19 with a trace of
+        ``_send_to``/``_shutdown_impl``/``_drop_client``: the shutdown ran at
+        +1.035 s and dropped the connection with reason ``runtime shutdown``
+        BEFORE the ack was written, and the client read
+        ``ConnectionError('runtime closed the connection')``.
+
+        THE RACE IS NOT NEW — the guarantee was. Until ``mobile/tui_handle``
+        stopped blocking its own loop on the hop into Textual, the serving loop
+        was held by that hop for the whole dispatch, so the teardown (which
+        needs this loop to progress) could not overtake the ack. That was
+        accidental, and removing it was the point of the change; this restores
+        the guarantee deliberately, as the thing the runtime actually owes its
+        client: **a request it has admitted is answered before the socket
+        closes.**
+
+        BOUNDED, because what this waits for may be another thread's event loop
+        (a hop into Textual): a genuinely wedged app must not turn ``close``
+        into a hang. After the grace the shutdown proceeds and drops the
+        connection — the pre-existing behaviour — with a warning naming how many
+        requests were still open.
+
+        THE GRACE IS BOUNDED AGAINST THE CLIENT, NOT AGAINST THE CALLER, and
+        that distinction is the whole reason the two numbers differ. Every
+        client speaking to this socket gives a reply 15 s
+        (``attach_client.ACK_TIMEOUT_S``), so five seconds is what gets an ack
+        out while staying well inside its patience. A thread-hosted runtime's
+        own caller waits less — ``aclose_remote`` awaits ``close``, whose join
+        of the runtime thread is 2 s (``daemon=True``) — so THIS WAIT CAN
+        OUTLIVE THE CALLER THAT ASKED FOR THE SHUTDOWN, and that is safe rather
+        than an oversight: ``close`` already documents returning with the thread
+        still finishing its own teardown, the thread owns this fence, and what
+        the ack needs in order to land is the LOOP still running — not the
+        caller still waiting. Matching the grace to the join instead would trade
+        a live client's reply for the caller's tidiness. Measured in composition
+        (``aclose_remote`` → ``close``, a real thread-hosted runtime with one
+        admitted ``stop`` parked in its hook): a 1.5 s park — inside the grace —
+        has the caller return at 1.51 s with the ack already written and nothing
+        left in flight; a 6.0 s park — beyond both bounds — has the caller return
+        at its 2.00 s join while the fence runs on to its grace, warns, and then
+        proceeds to drop the connection. In that second case the parked op is
+        left to unwind on its own, exactly as it was before this fence existed
+        (``_dispatch_frame`` documents why op tasks are never cancelled), so the
+        composition costs nothing that was not already spent.
+        """
+        idle = self._in_flight_idle
+        if idle is None or not self._in_flight_requests:
+            return
+        try:
+            await asyncio.wait_for(idle.wait(), timeout=_SHUTDOWN_REPLY_GRACE_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.warning(
+                "session runtime: closing with %d request(s) still in flight; "
+                "a reply may not reach its client",
+                self._in_flight_requests,
+            )
+
     async def _shutdown_impl(self) -> None:
         """Cancel and join every object owned by the runtime event loop."""
+        # FIRST, and before anything else here touches a connection: a reply the
+        # runtime has already admitted goes out. See
+        # :meth:`_await_in_flight_requests` for the measured failure this
+        # prevents (a ``stop`` whose ack lost a race with its own teardown) and
+        # for why the wait is bounded.
+        await self._await_in_flight_requests()
         if self._heartbeat_task is not None:
             self._heartbeat_task.cancel()
         if self._attention_task is not None:
@@ -2638,6 +2870,10 @@ class RuntimeServer:
         handle cannot bind belongs on the connection path, where the socket still
         exists to be closed, not inside a task.
         """
+        # Declared before the ``try`` so the failure path can hand the bind task
+        # to ``_release_when_landed`` even when the raise happened before it was
+        # created (a capability check, a sync-payload build).
+        bind_task: asyncio.Task[Any] | None = None
         try:
 
             def on_update(update: Any) -> None:
@@ -2677,13 +2913,32 @@ class RuntimeServer:
             # how a later reader concludes that one of them is redundant and
             # removes the wrong one.
             #
-            # It is also the one hop that can be SLOW, and that is the admitted
-            # cost of this change rather than an oversight: a guest joining
-            # mid-turn still waits for the turn's current synchronous step,
-            # exactly as the TUI kind does today. What this change buys is that
-            # the wait is a hop whose result is awaited, not the runtime's own
-            # loop parked — so the welcome, the `ping` and the heartbeat keep
-            # flowing while it happens (see ``_serve``'s registrations).
+            # It is also the one hop that can be SLOW, and what that slowness
+            # costs is the viewer's canonical state and nothing else: this call
+            # is made from ``_serve_frontend_sync``, a per-connection task, so
+            # the connection is already in its reader loop and being served
+            # while the hop is parked — and the accept, the heartbeat and every
+            # other connection keep flowing for the same reason, because the
+            # wait is on this task rather than on the runtime's loop.
+            #
+            # AND THE HOP IS DELIBERATELY LEFT UNBOUNDED, which reads at first
+            # like the opposite of a fix. A budget belongs to a CALLER that is
+            # waiting for an answer; the only caller here is a task nothing
+            # awaits, so a budget buys it nothing and costs a live viewer its
+            # connection (``mobile/tui_handle._on_app``'s unbounded branch
+            # carries that measurement: a viewer dialled into a busy terminal
+            # was welcomed and then killed at 10.01 s with ``owner exited``
+            # while the app was merely busy). The bind therefore lands late
+            # instead, and the interactive budget stays where a caller is
+            # actually waiting.
+            #
+            # The seam is SINGLE for both handle shapes, and that is why no hop
+            # is added here: ``ServingSessionHandle.subscribe_frontend`` carries
+            # ``@_on_session_loop`` (daemon/exec), and the TUI handle hops
+            # through its own ``_on_app`` — a handle that publishes no
+            # ``session_loop`` is served inline by
+            # ``_handle_call_on_session_loop``, so the TUI kind keeps the hop it
+            # already had rather than gaining a second.
             async def bind() -> Any:
                 outcome = (
                     subscribe_frontend(on_update, display_window=True)
@@ -2792,12 +3047,34 @@ class RuntimeServer:
             # bind failure: re-raise so the task settles as cancelled and the
             # subscription teardown stays in ``_drop_client``'s hands.
             raise
-        except Exception:  # noqa: BLE001 — one client's bind must not take the runtime down
+        except Exception as exc:  # noqa: BLE001 — one client's bind must not take the runtime down
             logger.warning(
                 "session runtime: frontend bind failed for %s — dropping the connection",
                 conn.surface,
                 exc_info=True,
             )
+            # A BIND THAT LANDS LATE STILL OWNS A SUBSCRIPTION (review round 2,
+            # U7). The bind task is shielded, so a failure of THIS await does not
+            # abort it: if it goes on to register a subscriber, that subscription
+            # has no owner left to record it — the caller is unwinding — and the
+            # session would keep pushing canonical state to it for the life of
+            # the app. Measured on the timeout path this patch removes (BASELINE
+            # subscribers = 2 → AFTER = 3, once per timed-out bind, compounding
+            # with each redial). The same release the cancellation path uses
+            # (F3) therefore runs here too: releasing a subscription nobody
+            # received is always correct, and it makes the leak impossible by
+            # construction rather than by the absence of a timeout.
+            if bind_task is not None:
+                self._release_when_landed(bind_task)
+            # AND THE CLIENT IS TOLD WHAT HAPPENED (review round 2, U6). The
+            # drop below closes a socket, and a closed socket reads to the far
+            # side as "owner exited" — which is false and alarming: the process
+            # is alive, this one connection could not be bound. Announced BEFORE
+            # the drop, the same ordering ``stop``'s ``stopping`` frame uses and
+            # for the same reason (there is no socket left afterwards); it is
+            # additive on the wire, so an older client that does not know the op
+            # falls back to exactly today's copy.
+            await self._announce_bind_failure(conn, exc)
             self._drop_client(conn, reason="frontend bind failed")
         finally:
             # Opened by ``_on_connection`` before this task was created, and
@@ -2805,6 +3082,24 @@ class RuntimeServer:
             # connection is gone and the gate no longer matters, and the
             # cancellation case, where ``_drop_client`` has already removed it.
             conn.frontend_sync_pending = False
+
+    async def _announce_bind_failure(self, conn: _ClientConn, exc: BaseException) -> None:
+        """Tell a viewer its connection could not be bound, before closing it.
+
+        The frame is unsolicited (no ``req``) because the failure belongs to the
+        CONNECTION, not to a request: it is the same shape as the ``stopping``
+        and ``retiring`` announcements, and it is carried the same way — the
+        client turns it into the reason string it reports when the socket closes
+        moments later, so the person reads "owner could not prepare this
+        session's interface" instead of "owner exited".
+
+        Best-effort: a failure to announce must never stop the drop that
+        follows, and the send path drops the client itself when the write fails.
+        """
+        try:
+            await self._send_to(conn, {"op": "bind_failed", "message": str(exc)[:400]})
+        except Exception:  # noqa: BLE001 — announcing is best-effort
+            logger.debug("bind-failure announcement write failed", exc_info=True)
 
     def _release_when_landed(self, bind_task: asyncio.Task[Any]) -> None:
         """Release a viewer subscription whose connection died MID-BIND.
@@ -3159,12 +3454,114 @@ class RuntimeServer:
                 except ValueError:
                     continue
                 conn.last_seen = time.monotonic()
-                await self._on_request(frame, conn)
+                self._dispatch_frame(conn, frame)
         except (ConnectionResetError, BrokenPipeError):
             self._drop_client(conn, reason="reader reset")
             return
         finally:
             self._drop_client(conn, reason="reader eof")
+
+    def _dispatch_frame(self, conn: _ClientConn, frame: dict[str, Any]) -> None:
+        """Run one admitted request OFF this connection's reader loop.
+
+        WHY THE READER NO LONGER AWAITS IT. The reader used to
+        ``await self._on_request(...)``, which made a connection strictly serial
+        — right for ORDERING (two mutations must not interleave) but wrong for
+        LIVENESS: while one op is parked inside a hop into the session's loop,
+        the reader cannot read the next frame, so everything else that client
+        sent waits behind it. Measured over a real socket (review round 1, UX
+        U3): a parked ``steer`` left ``ping`` on that same connection unanswered
+        for 8-15 s — the one request a surface speaks to ask "are you there",
+        queued behind a mutation. New connections were never affected (a fresh
+        dial, its ping and its refusals all answered in 0.00 s), so "always
+        connectable" held while "prioritize the health check" did not.
+
+        ORDERING IS PRESERVED BY CHAINING, not by concurrency: each op waits for
+        the one admitted before it, so a connection's frames still run one at a
+        time and in arrival order. What changes is only that the READER stays
+        free while it waits, and therefore keeps answering whatever else that
+        client sends.
+
+        The chain link is waited on with :func:`asyncio.wait`, which REPORTS a
+        task's outcome rather than raising it: the earlier op's failure is its
+        own business (``_on_request`` answers its own errors with an error
+        frame), and an ordering link must never be an error channel that takes
+        the next request down with it.
+
+        ``ping`` is exempt from the chain (see :data:`_UNCHAINED_OPS`): a health
+        check queued behind a mutation answers the wrong question, and measured
+        (review round 1, UX U3) it did exactly that — 8-15 s of silence on a
+        connection whose only sin was a parked ``steer``. An exempt op also does
+        NOT become the chain head, and that is load-bearing rather than tidiness:
+        the head is what the next mutation waits on, so letting a ping (which
+        finishes at once) take it would let the mutation admitted after the ping
+        overtake the one still in flight — reproduced before this line existed,
+        where a parked ``steer`` was overtaken by the next ``steer`` because a
+        ``ping`` had been admitted in between. The head therefore stays with the
+        last CHAINED op, and the chain is transitive: waiting on the head is
+        waiting on everything admitted before it.
+
+        Cancellation is deliberately NOT propagated to these tasks. An op parked
+        on a dead connection is left to unwind on its own, exactly as before
+        this change (``_drop_client``'s ``phone_watchers`` note depends on that:
+        an evicted daemon parked inside ``_on_request`` returns on its own), and
+        ``conn.op_tasks`` holds the strong references meanwhile.
+        """
+        # ``isinstance`` FIRST, and it is load-bearing rather than defensive: a
+        # frame that parses as a bare JSON scalar (``12345``, ``null``,
+        # ``"str"`` — reachable when an oversized line is discarded and its
+        # surviving TAIL happens to parse) reaches here as an int/None/str, and
+        # ``.get`` on one raises. That exception would escape the reader loop's
+        # ``ConnectionResetError``/``BrokenPipeError`` handler and take the
+        # connection down — the exact session death
+        # ``test_a_junk_scalar_frame_does_not_kill_the_connection`` exists to
+        # prevent, which the reader loop already guards against INSIDE
+        # ``_on_request``. This check must therefore never become a second,
+        # crashing gate in front of it: a non-dict frame is chained like any
+        # other and left to the dispatch to reject.
+        chained = not (isinstance(frame, dict) and frame.get("op") in _UNCHAINED_OPS)
+        previous = conn.op_chain if chained else None
+
+        async def run() -> None:
+            if previous is not None:
+                await asyncio.wait({previous})
+            # ADMITTED BEFORE IT RUNS, and released when it settles however it
+            # settles: this span is what ``_shutdown_impl`` waits on so the
+            # reply to an admitted request is written before the socket it
+            # belongs to is closed.
+            self._admit_request()
+            try:
+                await self._on_request(frame, conn)
+            finally:
+                self._release_request()
+
+        task = asyncio.create_task(run())
+        if chained:
+            conn.op_chain = task
+        conn.op_tasks.add(task)
+        task.add_done_callback(lambda completed: self._op_settled(conn, completed))
+
+    def _op_settled(self, conn: _ClientConn, completed: asyncio.Task[None]) -> None:
+        """Retire a dispatched op and consume its outcome.
+
+        The strong reference goes away here, and an exception is LOGGED rather
+        than left for the garbage collector: ``_on_request`` answers its own
+        failures with an error frame, so anything that escapes it is a bug in
+        the dispatch path, and an unretrieved task exception would surface much
+        later as an asyncio "never retrieved" warning naming no connection.
+        """
+        conn.op_tasks.discard(completed)
+        if completed.cancelled():
+            return
+        error = completed.exception()
+        if error is not None:
+            logger.warning(
+                "session runtime: an admitted request failed outside its own "
+                "error frame for %s client %s",
+                conn.kind,
+                conn.writer.get_extra_info("peername"),
+                exc_info=error,
+            )
 
     def _drop_client(self, conn: _ClientConn, *, reason: str = "unspecified") -> None:
         """Remove one connection from the registry and close its socket.
@@ -3350,6 +3747,85 @@ class RuntimeServer:
         self._leaving = phrase
         self._record.leaving = phrase
         self._republish()
+
+    def note_updating(self, pair: str) -> None:
+        """Publish that an UPDATE WINDOW is open for ``pair`` (``""`` clears it).
+
+        THE ONE WRITER of ``SessionRecord.updating``, so the record and the handle's
+        admission state cannot drift: ``serving.ServingSessionHandle.begin_update``
+        and ``end_update`` both reach it through the server they hold, and a runtime
+        whose handle is not this server's (a reduced host) simply never publishes.
+
+        Written THROUGH to the record in the same synchronous step as the
+        assignment, like :meth:`note_leaving` and for a sharper version of its
+        reason: the window is about a second long, so a field that waited for the
+        15 s heartbeat would be published only AFTER the handover it describes had
+        ended — and the surfaces that read a record would never once see a session
+        mid-update, which is the whole feature.
+
+        Deduped like :meth:`set_busy`. Idempotent on the clear, because both
+        ``end_update`` and :meth:`note_update_failed` close a window and neither can
+        tell whether the other already has.
+        """
+        if self._updating == pair:
+            return
+        self._updating = pair
+        self._record.updating = pair
+        if pair:
+            # A NEW WINDOW SUPERSEDES THE LAST FAILURE (agent review round 1, NIT 4).
+            # Without this the record keeps describing an abandoned move for the rest
+            # of the process's life — a fleet row that says "update failed" about a
+            # session which has since moved on, or is moving right now — because
+            # nothing else clears the field: the success arm's exit takes the whole
+            # record away, and the abandon arm is what writes it. The field is
+            # re-published by ``note_update_failed`` if THIS attempt fails too.
+            self._record.update_failed = ""
+        self._republish()
+
+    async def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
+        """Publish that the window for ``pair`` ran out of its bound.
+
+        THE FAILURE HAS TO BE REPORTABLE, which is the operator's own requirement
+        ("indicate that the update failed so that it can be reported as an issue and
+        addressed"), and it is stated twice on purpose, because the two surfaces
+        answer different questions and either alone is a hole:
+
+        * the RECORD (``update_failed``) is what a front end that was not watching
+          at the time can still read — the TUI's fleet row, ``lop sessions``, the
+          phone's projection, the desktop feed. It is also what says the runtime is
+          still SERVING, which is the part a person acts on;
+        * the INCIDENT ROW is the durable account in the conversation, carrying
+          ``types.UPDATE_FAILED_CAUSE`` so every surface that repeats a cause can
+          render it as a sentence (``incidents.CUT_OFF_CAUSES``). Without it the
+          bounded window would be exactly the silent failure the bound was written
+          to prevent — the shape of QA round 1, Q-2, where the overdue handover
+          shipped with a token nothing could render.
+
+        NEVER RAISES. The caller is the rung that has just decided to KEEP this
+        runtime serving, and a runtime that stayed is a successful outcome even if
+        its own bookkeeping could not be written.
+        """
+        self._updating = ""
+        self._record.updating = ""
+        self._update_failed = pair
+        self._record.update_failed = pair
+        self._republish()
+
+        session = getattr(self._handle, "_session", None)
+        journal = getattr(session, "journal_incident", None)
+        if not callable(journal):
+            return
+        write_incident = cast(Callable[..., Awaitable[None]], journal)
+        from local_operator import incidents
+        from local_operator.session.runtime.types import UPDATE_FAILED_CAUSE
+
+        rendered = incidents.render_cut_off_reason(
+            UPDATE_FAILED_CAUSE, detail=f"({pair})" if pair else ""
+        )
+        try:
+            await write_incident(UPDATE_FAILED_CAUSE, token=UPDATE_FAILED_CAUSE, rendered=rendered)
+        except Exception:  # noqa: BLE001 — a failure notice never breaks the runtime
+            logger.warning("could not journal the failed update", exc_info=True)
 
     def set_record_started(self, started: bool) -> None:
         """Record that this session has run at least one real turn.
@@ -3937,15 +4413,17 @@ class RuntimeServer:
         try:
             # A CONNECTION THAT IS STILL BINDING IS REACHABLE BUT NOT YET
             # AUTHORITATIVE. ``_on_connection`` starts this connection's reader
-            # loop before the canonical ``frontend_sync`` is on the wire (the why
-            # is there: the bind is a cross-thread hop onto the session's loop,
-            # and running it inline used to leave a follower's socket deaf, so a
-            # guest could neither steer nor stop the session it was looking at).
-            # The price of that reachability is this gate: while the sync is
-            # pending, the connection may run :data:`_SYNC_PRIORITY_OPS` — health,
-            # and the three ways to regain control of a turn — plus the
-            # connection-local bookkeeping in :data:`_SYNC_LOCAL_OPS` that the dial
-            # path itself sends before it awaits the sync.
+            # loop before the canonical ``frontend_sync`` is on the wire (the
+            # why is there: the bind takes the cross-thread hop into a busy app
+            # loop, and running it inline used to leave the socket mute, so a
+            # user could neither steer nor stop the session they were looking
+            # at). The price of that reachability is this gate: while the sync
+            # is pending, the connection may run :data:`_SYNC_PRIORITY_OPS` —
+            # health, and the four ways to regain control of a turn (``stop``,
+            # ``abort``, ``steer`` and ``cancel``, which joined the set in review
+            # round 1) — plus the connection-local bookkeeping in
+            # :data:`_SYNC_LOCAL_OPS` that the dial path itself sends before it
+            # awaits the sync.
             #
             # Everything else is REFUSED, through the ordinary error-frame path
             # below rather than by running it or silently dropping it: a
@@ -5493,14 +5971,25 @@ class RuntimeServer:
             self._enqueue_client_frame(conn, frame)
 
     def _compact_event_queue(self, conn: _ClientConn) -> bool:
-        """Fold the two compactible frame families in place.
+        """Fold the delta-grade and compose frame families in place.
 
-        Merges runs of same-message ``message_update`` frames, and keeps only
-        the NEWEST ``tool_call_compose`` per ``tool_call_id``.
+        Merges runs of same-stream ``message_update`` and ``reasoning_delta``
+        frames, and keeps only the NEWEST ``tool_call_compose`` per
+        ``tool_call_id``. Which frames belong to one stream is
+        :func:`_mergeable_delta_key`'s rule, and it is the only family-specific
+        thing here: the size accounting below is delta-sized and therefore
+        family-agnostic.
 
         Both are lossless by construction. For ``message_update`` the later
         event's ``message`` already contains the earlier one's text, and
         concatenating ``delta`` preserves the append contract UIs rely on. For
+        ``reasoning_delta`` there is no accumulated payload at all — the frame
+        carries one fragment, a ``message_id`` both frames agree on, and the
+        same concatenation reproduces the two fragments in arrival order. This
+        matters as much as it does for text: reasoning arrives once per token,
+        and a long-thinking turn is thousands of frames, so without the fold a
+        stalled viewer's FIFO fills with incompressible reasoning frames and is
+        dropped — the same failure the compose fold below was written for. For
         ``tool_call_compose`` the argument is the one ``_fold_live_event``
         (``frontend_state.py``) already relies on for the reconnect seed: a
         compose frame is a SNAPSHOT of a call being dictated (``tool_name``,
@@ -5643,17 +6132,17 @@ class RuntimeServer:
             ):
                 data = frame.get("data") or {}
                 prior = previous.get("data") or {}
-                if (
-                    data.get("type") == "message_update"
-                    and prior.get("type") == "message_update"
-                    and (data.get("message") or {}).get("id")
-                    == (prior.get("message") or {}).get("id")
-                ):
+                merge_key = _mergeable_delta_key(data)
+                if merge_key is not None and merge_key == _mergeable_delta_key(prior):
                     # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
                     # merged frame re-serializes the unchanged accumulated
                     # ``message`` — hundreds of KB — on every merge, which is
                     # quadratic in queue depth: one 64-frame compaction
                     # serialized 67.4 MB and took 152 ms on the runtime loop.
+                    # A ``reasoning_delta`` frame has no ``message`` to re-dump,
+                    # so the same arithmetic is simply cheap there; it is the
+                    # SAME arithmetic, which is what keeps the reasoning family
+                    # from needing an accounting of its own.
                     # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
                     # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
                     # dropped it — manufacturing the very false disconnect this

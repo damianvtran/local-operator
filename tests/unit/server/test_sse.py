@@ -519,6 +519,33 @@ def test_resume_into_recreated_channel_reports_a_gap() -> None:
     sub.close()
 
 
+def test_reasoning_delta_never_rides_the_record_channel() -> None:
+    """A display-only frame stays off the channel installed clients append to.
+
+    ``message_channel(<assistant id>)`` is the compatibility surface a client
+    follows one record's ``message.delta``/``record.update`` frames on, and a
+    reducer that appends ``data.delta`` from every frame there -- the shape this
+    transport was built to preserve -- would splice the model's private thinking
+    into the answer being painted (review round 1, MINOR-3). The job channel still
+    carries it, which is where a client that knows the name reads it.
+    """
+    broker = EventBroker()
+    publish_agent_event(
+        broker,
+        "job-1",
+        {"type": "reasoning_delta", "message_id": "rec-1", "delta": "a thought"},
+    )
+    assert broker.retained(message_channel("rec-1")) == []
+    assert [e.name for e in broker.retained(job_channel("job-1"))] == [EventName.REASONING_DELTA]
+    # And the text family keeps the record channel it has always had.
+    publish_agent_event(
+        broker,
+        "job-1",
+        {"type": "message_update", "message": {"id": "rec-2"}, "delta": "x"},
+    )
+    assert [e.name for e in broker.retained(message_channel("rec-2"))] == [EventName.MESSAGE_DELTA]
+
+
 def test_message_delta_routes_to_the_record_channel_via_nested_id() -> None:
     """Regression (review B-4): engine message events carry the id nested at
     ``message.id``; the record channel must still receive ``message.delta``."""

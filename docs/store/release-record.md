@@ -52,6 +52,90 @@ comparison; that is tracked as a follow-up (see the note under v0.1.5).
 
 ---
 
+## v0.1.18 — submitted 2026-09-20, pending review as of 2026-09-20
+
+| Field | Value |
+| --- | --- |
+| Extension version | 0.1.18 |
+| Item ID | `omibaecbjdhgbbcedbnnnmjpmopfheof` (the same item; a revision of it) |
+| Listing URL | https://chromewebstore.google.com/detail/local-operator/omibaecbjdhgbbcedbnnnmjpmopfheof |
+| Source commit | `deb6231b` — the merge commit of #1343, i.e. `main` itself at dispatch time. `main` has since moved on (#1341's mobile-bundle fix, no `extension/` changes: `git log --oneline deb6231b..origin/main -- extension/` is empty), so `git rev-parse origin/main:extension` still returns the tree hash below |
+| `extension/` tree hash | `3341f4324e8368648213a22d585b636de0e0692b` (`git rev-parse deb6231bc9ee5bd18377d876a2ef5612ec8c799e:extension`) |
+| Artifact SHA-256 | *not recoverable — same automated-path limitation as v0.1.17, v0.1.12, v0.1.10 and earlier* |
+| Artifact size | 13 files, no source maps (`validated Chrome Web Store package v0.1.18`) — the built package, not a count of the 21-file source tree below |
+| Bridge protocol version | `PROTO_VERSION = 1` (unchanged — the news is the additive `capabilities` frame, so no already-released daemon is closed by this build) |
+| Submission route | **Automated** — `chrome-web-store.yml`, [run 35514131365](https://github.com/damianvtran/local-operator/actions/runs/35514131365), dispatched by `damianvtran` at 2026-09-20T13:39:09Z with `ref=main` `version=0.1.18` (`headBranch=main`, `headSha=deb6231b…`, conclusion `success`, ended 13:40:13Z). Its own build/validate step reports **283 tests, 0 fail** and `validated Chrome Web Store package v0.1.18 (13 files, no source maps)` |
+| Promotion route | **Pending** — dispatch `chrome-web-store-promote.yml -f version=0.1.18` once the store reports the revision `STAGED`. No promote dispatch has been made since this submission (`gh run list --workflow chrome-web-store-promote.yml`, checked 2026-09-20); the last promote anywhere, [run 35289401051](https://github.com/damianvtran/local-operator/actions/runs/35289401051) (2026-09-18T00:01:40Z), failed like every promote since 0.1.10's success — the gap recorded under v0.1.12, v0.1.15 and v0.1.17, live for this entry too |
+| Store state | `PENDING_REVIEW` — the submission's own raw response: `submitted Chrome Web Store extension omibaecbjdhgbbcedbnnnmjpmopfheof v0.1.18 with STAGED_PUBLISH (PENDING_REVIEW)` |
+| State last checked | 2026-09-20T13:40:10Z — the timestamp of that response line, i.e. the run's own reading. No later probe of the queue state exists as of this entry |
+| Approval timestamp | ***Not applicable — the revision is in review.*** There is no approval instant to record, so none is invented. Google publishes no SLA, and a `debugger` + `<all_urls>` extension has drawn extended manual review before (v0.1.8 ≈ 4.5 days). When it is approved this row is **not** rewritten: the correction is appended below, which is what this file requires of a shipped entry |
+| Previously published | v0.1.17, `PUBLISHED` at 100% — store fields `submitted <absent>; published state=PUBLISHED distributionChannels=[crxVersion=0.1.17 deployPercentage=100]` (run [35289401051](https://github.com/damianvtran/local-operator/actions/runs/35289401051), read 2026-09-18T00:04:25Z — the last status reading before this submission), and independently confirmed on the public listing (checked 2026-09-20): **"Version 0.1.17"**, **"Updated September 16, 2026"**, **119KiB** |
+
+**What this number names, measured against the published 0.1.17 tree rather
+than summarised.** `git diff bc3cfba6c13623b036588afd67cb109426821056
+3341f4324e8368648213a22d585b636de0e0692b` — the two `extension/` trees, so the
+comparison needs no commit — is **21 files, +1192/-28**, across five commits
+(`git log --oneline ae560d4d8..deb6231b -- extension/`: `6d0176db`,
+`5ecc5569`, `83fbc7cf`, `d697c8e0`, `7d0d11a0`). The headline is **browser
+file transfer**: the extension now advertises the wire methods it actually
+serves (a new additive `capabilities` frame, which is why `PROTO_VERSION`
+stays 1) and serves **`upload`** — attaching local files to a page's file
+input through `DOM.setFileInputFiles` on the tab-scoped debugger session it
+already holds, which the existing `debugger` permission covers, so no new
+`chrome.*` permission (and none of the permission-driven re-review one would
+bring) is added. The new modules are `src/commands/upload.ts` (+237),
+`src/driver/file-transfer-policy.ts` (+200, the host-free name and credential
+check, generated-from-Python tables beside it in
+`src/driver/file-transfer.tables.gen.ts`, +118) and
+`tests/file-transfer.test.mjs` (+134); `src/commands/input.ts` and
+`src/worker.ts` change with them, and every `driver/` module is vendored into
+`ui-vendor/` for the desktop app to consume, which is where **11 of those 21
+paths** come from. The same window carries #1338's additive console/surface
+error-code vocabulary (11 new `ErrorCode` members in the generated
+`src/protocol.gen.ts`) and the version move itself. The design of record is
+`docs/design/browser-file-transfer.md`.
+
+**`download` is in the vocabulary and served by nothing — deliberately.**
+`EXTENSION_CANNOT_SERVE = ['download']` is generated into the protocol for the
+same reason `capabilities` is: Chrome denies a tab-scoped `chrome.debugger`
+session both CDP primitives that could answer "where does this download go"
+(`Page.setDownloadBehavior` returns `-32000`, `Browser.setDownloadBehavior`
+`-32601`, and no browser target is attachable — measured on Chrome 153.0.8010.53,
+`docs/design/browser-file-transfer.md` §17.1). So the request is answered
+`capability_unsupported`, naming the desktop app's browser tab as the host that
+can serve it, rather than failing as a missing handler. The daemon side gates the
+other half on this version and no other:
+`CAPABILITY_MIN_EXTENSION_VERSION = {"upload": "0.1.18"}` in
+`local_operator/browser_bridge/protocol.py`.
+
+**This submission is not the #1169 renumber, and the difference is the diff.**
+The paragraph above records #1169 as history: it proposed moving *this number*
+onto the tree the store **already had in review**, where staging it would have
+re-submitted *identical* content for another multi-day review, and it was closed
+unmerged for exactly that reason. That paragraph stands unedited. What was
+submitted here is the opposite shape, and it fails the renumber test on the one
+measure this file already rests on: a renumber has **no diff at all** against the
+tree it borrows — that is what made #1169 a renumber, and why the note says
+"identical content" — whereas this number landed on a tree that differs from the
+published 0.1.17 tree by **21 files, +1192/-28**, four of them new source modules
+with their tests. So 0.1.18 pins exactly one tree, that tree is not the one the
+store shipped as 0.1.17, and nothing here re-opens, amends or contradicts the
+#1169 note. It supersedes it as a description of *this* submission, whose
+justification is the diff rather than the number.
+
+**How this entry's fields were derived.** Every value above was re-read on
+2026-09-20 from `gh` and `git` at the moment of writing rather than carried over
+from the dispatch order: the version sites (`manifest.json`, `package.json` and
+`EXPECTED_EXTENSION_VERSION` in both `protocol.gen.ts` files) all read `0.1.18`
+on `main`; the tree hash is `git rev-parse` against the recorded source commit
+and separately against `origin/main`; the run's `headBranch`, `headSha`,
+timestamps and both raw lines come from `gh run view 35514131365`; and the
+`PUBLISHED` half of `Previously published` is confirmed on the public listing,
+not from a workflow's success — a workflow exit code is not evidence that a
+version is live.
+
+---
+
 ## v0.1.17 — submitted 2026-09-15, pending review as of 2026-09-15
 
 | Field | Value |

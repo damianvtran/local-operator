@@ -506,21 +506,26 @@ def test_the_list_column_explains_a_plain_request_the_row_word_covers() -> None:
     killed = render_cut_off_reason("runtime-killed", detail=" (0.54.39@dec7933, pid 1)")
     assert outcome_summary(killed) == (
         "the runtime disappeared without exiting cleanly while this turn was running, "
-        "and nothing recorded a stop"
+        "and no stop was asked for"
     )
 
 
-def test_runtime_killed_says_nothing_recorded_a_stop() -> None:
+def test_runtime_killed_says_no_stop_was_asked_for() -> None:
     """D4: the post-marker meaning of the token, in the sentence itself.
 
     The row above a deliberate stop reads ``Interrupted``, so "asked for" versus
     "never asked" is decided by this copy — and after this change that is
     decidable from the artifacts rather than guessed at.
+
+    The clause says "asked for" rather than "nothing recorded a stop" because an
+    INVOLUNTARY marker now records an act that is not a stop (a prune, an in-place
+    install), so the old wording contradicted the attribution its own reason
+    carries. The discriminator it was written for is unchanged.
     """
     from local_operator.incidents import cause_from_reason, render_cut_off_reason
 
     sentence = render_cut_off_reason("runtime-killed", detail=" (build, pid 1)")
-    assert "nothing recorded a stop" in sentence
+    assert "no stop was asked for" in sentence
     # The inverse still recovers the token from the longer sentence.
     assert cause_from_reason(sentence) == "runtime-killed"
 

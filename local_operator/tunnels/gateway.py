@@ -53,6 +53,20 @@ UNREACHABLE = "control_plane_unreachable"
 REFUSED = "authorization_refused"
 NOT_AUTHORIZED = "tunnel_not_authorized"
 LEASE_PENDING = "authorization_lease_pending"
+# The connector's own terminal states, not relay refusals: the connector exited
+# (successfully, so its supervisor does not retry it) because something needs a
+# person. They travel in this vocabulary anyway, so the sentence an operator
+# reads in `lop tunnel status`, the one a parked connector writes to
+# `state.json`, and the 503 a phone would see if a live gateway ever reported
+# one cannot drift into several wordings of one cause.
+#
+# `LOGIN_REQUIRED` is the one the incident needed. The other two only ever park:
+# a live gateway never refuses relayed traffic for them, which is why they have
+# no `RELAY_DETAIL` entry — inventing phone copy for a state no phone can reach
+# would be copy that nothing can ever display.
+LOGIN_REQUIRED = "login_required"
+LOCAL_PREREQUISITE = "local_prerequisite"
+REENROLMENT_REQUIRED = "reenrolment_required"
 
 # What a phone is shown: self-contained, and carrying any link it needs, because
 # there is nothing to type on that surface.
@@ -77,12 +91,24 @@ RELAY_DETAIL = {
         "The relay has not renewed its authorization yet. This normally clears by "
         "itself within a few seconds."
     ),
+    LOGIN_REQUIRED: (
+        "This computer's Radient login is no longer valid, so remote access is off "
+        "until it is signed in again on this computer (check this tunnel's billing at "
+        f"{CONSOLE_URL})."
+    ),
 }
 
-# What `lop tunnel status` prints for the same cause. It differs where a terminal
-# can run the command a phone cannot. The lease-pending advice points forward —
-# retry in a moment — rather than repeating the command that is printing the line,
-# which is the circularity this split exists to avoid.
+# What `lop tunnel status` prints for the same cause. The two entries a PARKED
+# connector's sentence travels in name no command, and by the same rule the shared
+# copy is never allowed one: the park's `detail` is written into `state.json`, is
+# forwarded to the desktop as `connector.detail`, and is rendered by the TUI card —
+# so a command baked in here is a command some of those readers cannot run. Each
+# surface appends its own spelling of `TERMINAL_REMEDY` instead. (`REFUSED` carried
+# the same `/login radient` prose, so it took the same pass.) The lease-pending
+# entry is the deliberate exception, and it is not the same thing: its sentence is
+# advice for the terminal that is printing it — retry in a moment — and both
+# commands in it are shell commands, which is also why the entry repeats the
+# command that is printing the line, the circularity this split exists to avoid.
 TERMINAL_DETAIL = {
     UNREACHABLE: (
         "This computer could not reach Radient to renew the relay authorization (its "
@@ -92,15 +118,105 @@ TERMINAL_DETAIL = {
     ),
     REFUSED: (
         "Radient refused the connector's authorization check, so the relay stopped "
-        "serving. Log in again with /login radient, and check this tunnel's billing at "
-        f"{CONSOLE_URL}."
+        "serving. Signing in again, or checking this tunnel's billing, is what clears "
+        f"it: {CONSOLE_URL}."
     ),
     LEASE_PENDING: (
         "The relay has not renewed its authorization yet. It retries every 10 seconds "
         "and usually clears a few seconds after the connector starts. Run lop tunnel "
         "status again shortly; if it persists, run lop tunnel install."
     ),
+    # COMMAND-FREE, and that is the point of this entry rather than a style
+    # choice: the sentence travels further than this surface. It is written into
+    # the park file, printed verbatim by `lop tunnel status`, and forwarded to
+    # the desktop as `connector.detail` (DESKTOP_API.md), so a command baked in
+    # here is a command every one of those surfaces has to be able to run. The
+    # one it used to carry (`/login radient`) is a TUI slash command, which a
+    # shell answers with `no such file or directory` and a desktop callout can
+    # only render as text. Each surface appends `TERMINAL_REMEDY` in its own
+    # spelling instead (the CLI's `Login:` line and the TUI card do exactly
+    # that), and `test_tunnels.py` holds this sentence to naming no command at
+    # all.
+    #
+    # No console URL either: the terminal prints the billing block on the line
+    # that is about billing when there is anything to bill, and a dead grant is
+    # not a billing event. The PHONE copy above keeps its link because a phone
+    # has no billing block to read it from.
+    #
+    # LENGTH: 138 cells, two rendered rows at 80 columns as the indented
+    # continuation `lop tunnel status` prints (140 cells with that two-cell
+    # indent, which is how QA round 1's Q1 counted it). Deliberately NOT trimmed
+    # on the round-2 pass, and the reason is what the sentence has to carry for
+    # readers that have no other line: the CAUSE (a Radient login that is no
+    # longer valid), the CONSEQUENCE that makes this a park rather than a retry
+    # (it stopped and will not retry by itself — the incident's own shape, and the
+    # one clause a reader cannot recover from any other surface once the
+    # connector has exited), and the REMEDY's shape (signing in again starts it
+    # again on its own, i.e. no restart command is needed). It is also the copy
+    # `state.json` persists and `DESKTOP_API.md` forwards as `connector.detail`,
+    # so a shorter sentence here is a shorter sentence everywhere. What D2 fixed
+    # was the WELDING — this sentence is now its own indented continuation row
+    # under a ONE-ROW state line, wrapping in the terminal the way prose does,
+    # rather than being the third clause of a 317-cell paragraph that buried the
+    # command. A future trim should weigh those three clauses against each other
+    # rather than against the row count.
+    LOGIN_REQUIRED: (
+        "The connector's Radient login is no longer valid, so it stopped and will not "
+        "retry by itself. Signing in again starts it again on its own."
+    ),
 }
+
+#: The ONE command that clears each cause, as a value: the surface-specific half
+#: of the copy, kept beside the sentences so the two cannot disagree. The
+#: sentence above describes the condition; this table names the fix, and each
+#: surface renders it in its own spelling — the CLI prints it verbatim
+#: (`Login: sign-in expired — run lop login radient`), the TUI maps it to the
+#: command a composer can run (`/login radient`), the park file persists it for
+#: every reader, and the desktop route forwards it as `remedy.command`. The rule
+#: this table exists to enforce is therefore the reverse of what a sentence
+#: carrying its own command enforced: nothing is duplicated, so nothing can
+#: drift.
+#: `UNREACHABLE` and `LEASE_PENDING` name the CHECK rather than a fix, because
+#: their copy says the connector clears those by itself: handing the operator a
+#: repair command there would send them to fix something that is not broken.
+TERMINAL_REMEDY = {
+    UNREACHABLE: "lop tunnel status",
+    REFUSED: "lop login radient",
+    NOT_AUTHORIZED: "lop tunnel connect",
+    LEASE_PENDING: "lop tunnel status",
+    LOGIN_REQUIRED: "lop login radient",
+    # The two local-repair codes: their sentences are the failure's own fixed
+    # literal rather than an entry above (each one names its own missing
+    # prerequisite, which no single sentence could), so this table is where the
+    # COMMAND the operator has to run is pinned in one place.
+    LOCAL_PREREQUISITE: "lop tunnel install",
+    REENROLMENT_REQUIRED: "lop tunnel connect",
+}
+
+
+#: Readable forms of the reason codes, for surfaces that show a short state on
+#: one line (`Connector: parked — login required (since 14:32)`). The CODE is
+#: what travels in `state.json` and in JSON output; this is only its label, and
+#: it lives beside the vocabulary so a new code cannot ship without one.
+REASON_LABEL = {
+    UNREACHABLE: "control plane unreachable",
+    REFUSED: "authorization refused",
+    NOT_AUTHORIZED: "not authorized",
+    LEASE_PENDING: "waiting for authorization",
+    LOGIN_REQUIRED: "login required",
+    LOCAL_PREREQUISITE: "prerequisite missing",
+    REENROLMENT_REQUIRED: "needs re-enrolment",
+}
+
+
+def reason_label(reason: str) -> str:
+    """The short label for a reason code, or the code itself if unknown.
+
+    A code this build does not know is shown verbatim rather than as "unknown":
+    a daemon from another version naming its own state is more useful to an
+    operator than a shrug, and `terminal_detail` already takes that position.
+    """
+    return REASON_LABEL.get(reason, reason)
 
 
 def terminal_detail(reason: str, relay_detail: str) -> str:

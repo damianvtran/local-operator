@@ -142,16 +142,45 @@ def _forced_browser_backend() -> Iterator[None]:
         namespace.update(saved)
 
 
+@contextmanager
+def _forced_console_backend() -> Iterator[None]:
+    """Make ``build_console_tool`` say yes regardless of the host.
+
+    The SECOND capability whose gate probes the machine rather than reading the
+    :class:`ToolContext` (the browser above is the first): the console tool exists
+    only where the desktop app publishes a console-capable record, so on a CI
+    runner and on this fleet's hosts alike it would be gated off and the measured
+    surface would be one tool lighter than a real session's. It is the same
+    green-by-fiction the browser forcing exists to prevent, arriving through the
+    same door: a budget guard whose answer depends on which machine ran it.
+
+    Patched through ``__globals__`` for the reason :func:`_forced_browser_backend`
+    spells out at length — a checkout both on ``sys.path`` and pip-installed can
+    hold two distinct module objects, and patching the imported copy silently
+    changes nothing in the namespace the builder reads.
+    """
+    from local_operator.tools.builtin import build_console_tool
+
+    namespace = build_console_tool.__globals__
+    name = "ui_console_advertisable"
+    saved = namespace[name]
+    namespace[name] = lambda: True
+    try:
+        yield
+    finally:
+        namespace[name] = saved
+
+
 def build_real_tools(cwd: str) -> list[AgentTool]:
     """The default tool set as a fully-capable session would advertise it.
 
     DETERMINISTIC across hosts: the count must not depend on whether the
-    machine running the benchmark happens to have cmux. See
-    :func:`_forced_browser_backend`. Callers that report a measurement should
-    also report ``len()`` of this, so a drop below the full surface is visible
-    rather than silent.
+    machine running the benchmark happens to have cmux or the desktop app. See
+    :func:`_forced_browser_backend` and :func:`_forced_console_backend`. Callers
+    that report a measurement should also report ``len()`` of this, so a drop
+    below the full surface is visible rather than silent.
     """
-    with _forced_browser_backend():
+    with _forced_browser_backend(), _forced_console_backend():
         return registry.create_tools(build_real_tool_context(cwd))
 
 

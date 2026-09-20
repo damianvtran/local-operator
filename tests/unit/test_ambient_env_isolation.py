@@ -128,6 +128,10 @@ _HARMLESS: dict[str, str] = {
     "LOP_BUILD_STAGGER_S": "runtime self-refresh stagger; a duration",
     "LOP_RUNTIME_DEBUG_STACKS": "debug dump switch",
     "LO_MOBILE_NO_DIAL": "disables the mobile dial-out; safer ON",
+    "LOP_TUNNEL_NO_REARM": (
+        "disables the re-arm on a credential write; it can only withhold starting a "
+        "parked connector, never cause one"
+    ),
     # -- evaluation adapter fds: only meaningful inside a spawned adapter ----
     "LO_ADAPTER_LAUNCH_IDENTITY": "adapter child handshake; unset outside the harness",
     "LO_ADAPTER_OWNER_FD": "adapter child fd; unset outside the harness",

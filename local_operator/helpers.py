@@ -1144,3 +1144,18 @@ def setup_cross_platform_environment():
             )
         except Exception as e:
             logger.error(f"Error during verification step trying to find '{test_command}': {e}")
+
+
+def retention_label(seconds: float) -> str:
+    """A retention window in the words the log lines and reasons read: ``24h``, ``30m``.
+
+    ONE IMPLEMENTATION FOR TWO NAMESPACES (review round 3, NIT 1). The ``run/host``
+    reaper ages a torn boot record out on ``registry.REAPED_MAX_AGE_S``, and
+    ``update``'s crash-debris rule on its own ``_PARTIAL_TTL_S``; each had grown a
+    private ``_ttl_label`` beside its constant — same shape, different spellings
+    (if/return against a conditional expression), and nothing tying the two to a
+    common answer. Both call this with their own constant now, so the label follows
+    the policy it describes instead of drifting from it.
+    """
+    hours = seconds / 3600
+    return f"{hours:g}h" if hours >= 1 else f"{seconds / 60:g}m"

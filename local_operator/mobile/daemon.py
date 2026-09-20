@@ -556,6 +556,15 @@ class SessionTable:
                     # that does not know it renders exactly as before (UX
                     # round 2, U8).
                     "leaving": (str(getattr(entry.record, "leaving", "") or "") if entry else ""),
+                    # THE UPDATE WINDOW, carried the same way and for the same reason as
+                    # the phrase one line up: an idle runtime moving to the build on disk
+                    # is alive, accepting messages and about to run them, and the phone's
+                    # row would otherwise describe it exactly as it describes an idle
+                    # session — the one state the operator most needs to be told about,
+                    # because it is the one where their message is queued rather than
+                    # refused (``types.UPDATING``). The value is the build pair; a client
+                    # that does not know the field renders exactly as before.
+                    "updating": (str(getattr(entry.record, "updating", "") or "") if entry else ""),
                     "needs_attention": bool(p and p.pending),
                     "pending_kind": p.pending.kind if p and p.pending else "",
                     "subagents_running": sum(
@@ -2354,6 +2363,7 @@ class MobileDaemon:
         # `sys.executable` on Linux (see `procname.spawn_identity`).
         from local_operator import procname
         from local_operator.interpreter import SAFE_PATH_FLAG
+        from local_operator.session.runtime.types import RUNTIME_MODULE
 
         argv0, executable = procname.spawn_identity(
             procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
@@ -2372,7 +2382,10 @@ class MobileDaemon:
             argv0,
             SAFE_PATH_FLAG,
             "-m",
-            "local_operator.session.runtime.process",
+            # THE SPAWN CONTRACT, from its one home: the residency sweep's census
+            # matches this module by this exact argv word, so a literal here could
+            # drift from ``session/runtime/launch.py``'s without anything failing.
+            RUNTIME_MODULE,
             executable=executable,
             env=env,
             # Detached stdio: the child speaks through its record and socket;

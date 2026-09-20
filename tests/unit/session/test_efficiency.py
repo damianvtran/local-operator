@@ -15,6 +15,7 @@ from local_operator.harness.types import (
     Message,
     MessageEndEvent,
     MessageUpdateEvent,
+    ReasoningDeltaEvent,
     StreamEndEvent,
     StreamTextDelta,
 )
@@ -234,6 +235,47 @@ async def test_asides_are_durable_when_drain_returns(tmp_path):
     reopened = Transcript(session._transcript.directory)
     assert any(row.id == message.id for row in reopened.entries())
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reasoning_fragments_coalesce_and_never_merge_with_the_text():
+    """The reasoning channel is the chattiest one, and folds on its own key.
+
+    Reasoning arrives once per token, so thousands of fragments pass through one
+    thinking phase: an observer that got one queue item per fragment would hit
+    its 256-deep bound and be disconnected mid-think -- the one stream this
+    subscription exists to carry. Folding must not, however, be family-blind: a
+    text delta and a reasoning fragment for the same message are ADJACENT in the
+    stream, and splicing them would paint the model's private thinking inside its
+    answer.
+    """
+    events = []
+
+    async def observe(event):
+        events.append(event)
+
+    observer = PresentationSubscription(observe)
+    message = Message(role="assistant", id="m1")
+    for fragment in ("weigh", "ing", " the", " options"):
+        observer.enqueue(ReasoningDeltaEvent(message_id="m1", delta=fragment))
+    observer.enqueue(MessageUpdateEvent(message=message, delta="Done"))
+    observer.enqueue(ReasoningDeltaEvent(message_id="m1", delta=" later"))
+    await asyncio.wait_for(observer.flush(), 10)
+    await observer.aclose()
+
+    assert [event.type for event in events] == [
+        "reasoning_delta",
+        "message_update",
+        "reasoning_delta",
+    ]
+    assert events[0].delta == "weighing the options"
+    assert events[0].message_id == "m1"
+    assert events[1].message.id == "m1"
+    assert events[1].delta == "Done"
+    # A reasoning phase that resumes after text is a NEW queue item -- adjacent
+    # or not, the text between them is what closed the previous run -- so the
+    # fragment must not be appended to the folded sentence above.
+    assert events[2].delta == " later"
 
 
 @pytest.mark.asyncio

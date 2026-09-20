@@ -150,6 +150,35 @@ ICON_MCP = "⊙"
 #: above: this one is an ALARM, not a reading, and it reuses the app-wide
 #: warning glyph so it reads the same as a warning notice in the transcript.
 ICON_APPROVALS = "!"
+#: Parked-connector alarm. The same mark as the approvals alarm, for the same
+#: reason and by the same rule — it is a warning about the state of this machine,
+#: not a reading, and the transcript spends `!` on warnings too. Aliased rather
+#: than re-spelled so the two cannot drift apart; the brand glyph, the spinner
+#: and this band's segment icons stay the only other marks on the row.
+ICON_TUNNEL = ICON_APPROVALS
+
+#: What the parked-connector rung says.
+#:
+#: The CONSEQUENCE, not the mechanism, and one word for all three park reasons.
+#: This rung exists for exactly the situation the toast cannot cover — the
+#: operator is away from the machine, which is the whole point of a tunnel — and
+#: they are not reading `lop tunnel status` to find out which of a dead login, a
+#: missing prerequisite or a console re-enrolment it was. What they need from the
+#: band is "my remote access is off", and the card, the CLI and `--json` carry
+#: the reason, which none of them has to fit in a fixed one-row band beside eight
+#: other segments.
+#:
+#: ONE CONDITION, TWO LABELS ON ONE SCREEN, and the pairing is deliberate (review
+#: round 2, D13): this rung says the CONSEQUENCE, and the card eight rows below it
+#: says the REASON (`! /login radient — Radient sign-in expired` for
+#: `login_required` — `app.TUNNEL_CARD_REASONS`). The rung cannot take the card's
+#: wording: it has ONE word for all three park causes, because the fact it exists
+#: for is the one an operator reads from a machine they are not sitting at, where
+#: which of a dead login, a missing prerequisite or a console re-enrolment it was
+#: is not what they can act on from there. The card is clamped to the terminal and
+#: has the room to name the cause. A reader who meets both without this note sees
+#: two names for one fact; with it, one is the lamp and the other the diagnosis.
+TUNNEL_PARKED_TEXT = "remote access off"
 
 #: Fork tag for the WINDOW/TAB title of a fork that has not named itself yet.
 #: The same word, brackets and case the /resume picker's row marker uses
@@ -291,8 +320,13 @@ _MIN_GROUP_GAP = 4
 #:   :func:`drop_ladder`.
 #: * ``approvals`` is last in every variant: one cell, and an alarm. See the rung.
 #:
-#: The brand glyph, the streaming spinner and the model label are NEVER dropped.
-#: When even the irreducible row overflows, ``_render`` emits spinner, glyph and a
+#: The brand glyph, the streaming spinner and the model label are NEVER dropped,
+#: and neither is the park rung WHILE A PARK STANDS: the label takes the rung the
+#: alarm vacates, so a standing alarm can never be shed before a non-alarm — the
+#: inversion of `◆ model` outliving `! remote access off` that review round 2
+#: filed as D10. See :func:`_model_for_park`.
+#: When even the
+#: irreducible row overflows, ``_render`` emits spinner, glyph and a
 #: TRUNCATED label rather than shedding any of them: `deepse…` still answers which
 #: model is replying, a band reduced to a bare glyph on an empty tinted strip
 #: reads as broken rather than as compressed, and a streaming band that renders
@@ -380,6 +414,28 @@ _DROP_LADDER: tuple[str, ...] = (
     # these the other way round, which contradicted this very ladder's rationale.
     "cwd",
     "context",
+    # A PARKED CONNECTOR — remote access is off and only a person can restore it
+    # (review round 1, D4). Authored as the FIRST of the alarm group, so it sheds
+    # before `fork`, `mcp` and `approvals` and after every reading above them:
+    # later here means kept longer, and the three that outlive it are all things
+    # the user can still act on from this very screen (`esc` withdraws a fork, a
+    # failed-MCP lamp and a disarmed gate are standing session warnings),
+    # while — counter-intuitively — the case this rung exists for is the one
+    # where the user is NOT here, so it has to be the LAST thing that goes. A
+    # toast cannot do that job: it is 10 seconds against a condition that lasts
+    # hours (measured: the post-toast frame is byte-identical to one from a
+    # machine with no tunnel at all), which is why the MCP alarm is a toast AND
+    # a rung and why this one is too. `format_tunnel` decides the word.
+    #
+    # IT IS NOT THE ONLY THING THAT OUTLIVES IT, and that was the defect. `◆ model`
+    # is not in this ladder at all, so a walk that shed everything above still kept
+    # the label and lost the alarm — the inversion review round 2 filed as D10
+    # (measured: at a 27-cell band the parked row read `◆ model` and said nothing
+    # about remote access). The fix is :func:`_model_for_park`: while a park stands
+    # THIS rung leaves the ladder entirely — the alarm is then shed at no width —
+    # and the model label takes the slot it vacates, so the alarm outranks the
+    # identity segment and nothing else in the order changes.
+    "tunnel",
     # A PENDING fork, and it outlives every reading above for the reason the
     # approval alarm does: it is a transient STATE the user can still act on
     # (esc withdraws it), not a figure they can re-derive. It exists at all only
@@ -495,8 +551,54 @@ _DROP_LADDER_ESTIMATE: tuple[str, ...] = _context_before_cwd(_DROP_LADDER)
 _DROP_LADDER_QUIET_ESTIMATE: tuple[str, ...] = _context_before_cwd(_DROP_LADDER_QUIET)
 
 
-def drop_ladder(status: McpStatus, *, context_estimated: bool = False) -> tuple[str, ...]:
-    """Which reduction order this band uses, given its MCP state.
+def _model_for_park(ladder: tuple[str, ...]) -> tuple[str, ...]:
+    """``ladder`` with the PARK RUNG made irreducible and the model label in its slot.
+
+    THE FIX FOR A STANDING ALARM SHED BEFORE A NON-ALARM (review round 2, D10).
+    Two segments on this row are never shed by the walk: the model label, because
+    a band reduced to a bare glyph on an empty strip reads as broken, and — this
+    one only while the park stands — the park alarm. Left alone, the only order
+    those two could resolve in was the wrong one: the label is outside every
+    ladder and the alarm is inside one, so the walk always spent the ALARM first
+    and kept `◆ model` (measured on the round-2 head: at a 27-cell band the parked
+    row rendered `◆ model` and said nothing at all about remote access).
+
+    So while a park stands the alarm leaves the ladder — it is not shed at ANY
+    width — and the model label takes the rung it vacated, which is the LAST rung
+    before the alarm group. That placement is the whole decision: dropping the
+    label ahead of a duration or a cost would trade identity for a figure the
+    operator can re-derive, which is the opposite of the trade this ladder exists
+    to make; ahead of the alarm group it is the only concession left that is not
+    an alarm. At the width where the two cannot both fit — 29 cells for the
+    shortest spelling of each — the row becomes `! remote access off` alone,
+    which is the sentence the operator needs, and below even that the alarm is
+    truncated by the irreducible tail rather than swapped for a label. `/model`
+    and the panel still answer which model is replying, which is the half the
+    never-dropped rule was protecting.
+
+    Derived rather than written out, so the order of the readings keeps one
+    source of truth, and CONDITIONAL rather than folded into the four ladders,
+    because a park is a fact about this machine rather than about the band's
+    contents (`drop_ladder` passes it in).
+    """
+    rungs = [step for step in ladder if step not in ("model", "tunnel")]
+    rungs.insert(ladder.index("tunnel"), "model")
+    return tuple(rungs)
+
+
+#: The parked variants, derived from the four above so the order has one source
+#: of truth. Precomputed for the same reason as the rest: `_render` walks a ladder
+#: on every repaint, and the spinner repaints it eight times a second.
+_DROP_LADDER_PARKED: tuple[str, ...] = _model_for_park(_DROP_LADDER)
+_DROP_LADDER_QUIET_PARKED: tuple[str, ...] = _model_for_park(_DROP_LADDER_QUIET)
+_DROP_LADDER_ESTIMATE_PARKED: tuple[str, ...] = _model_for_park(_DROP_LADDER_ESTIMATE)
+_DROP_LADDER_QUIET_ESTIMATE_PARKED: tuple[str, ...] = _model_for_park(_DROP_LADDER_QUIET_ESTIMATE)
+
+
+def drop_ladder(
+    status: McpStatus, *, context_estimated: bool = False, parked: bool = False
+) -> tuple[str, ...]:
+    """Which reduction order this band uses, given its MCP state and its park.
 
     The mcp rung's place is earned by the ALARM, not by the segment. Unconditional
     last place meant a healthy `⊙ 2 MCP` outranked both the working directory and
@@ -508,10 +610,22 @@ def drop_ladder(status: McpStatus, *, context_estimated: bool = False) -> tuple[
 
     ``context_estimated`` demotes the context rung for the same kind of reason —
     see :func:`_context_before_cwd`.
+
+    ``parked`` swaps in the variant that takes the park rung OUT of the ladder and
+    gives the model label the slot it vacated — see :func:`_model_for_park`. It is
+    a PARAMETER rather than a fifth set of rungs in every variant because a park
+    is a fact about this machine rather than about the band's contents, and
+    because the four above stay the order every other caller (and the tests)
+    already pins.
     """
-    if mcp_semantic(status) == "danger":
-        return _DROP_LADDER_ESTIMATE if context_estimated else _DROP_LADDER
-    return _DROP_LADDER_QUIET_ESTIMATE if context_estimated else _DROP_LADDER_QUIET
+    quiet = mcp_semantic(status) != "danger"
+    if parked:
+        if context_estimated:
+            return _DROP_LADDER_QUIET_ESTIMATE_PARKED if quiet else _DROP_LADDER_ESTIMATE_PARKED
+        return _DROP_LADDER_QUIET_PARKED if quiet else _DROP_LADDER_PARKED
+    if context_estimated:
+        return _DROP_LADDER_QUIET_ESTIMATE if quiet else _DROP_LADDER_ESTIMATE
+    return _DROP_LADDER_QUIET if quiet else _DROP_LADDER
 
 
 # Re-exported from `session.frontend_state`, which is import-light: a
@@ -712,6 +826,19 @@ def format_jobs(count: int) -> str:
     if count <= 0:
         return ""
     return f"{count} job" if count == 1 else f"{count} jobs"
+
+
+def format_tunnel(parked: bool) -> str:
+    """``remote access off`` while this machine's connector is parked, else ``""``.
+
+    A state, not a count, so it has no zero form to render: the rung is inert
+    until a park exists and then it is the same words for every reason (see
+    :data:`TUNNEL_PARKED_TEXT`). A boolean rather than a reason string because
+    the band does not render the reason — and because the one caller already
+    knows the park from the state file, so passing a code here would invite a
+    second reader of it.
+    """
+    return TUNNEL_PARKED_TEXT if parked else ""
 
 
 @dataclass(frozen=True)
@@ -1012,6 +1139,12 @@ class StatusLine:
         # a window opening minutes later with no visible cause.
         self._fork_pending: bool = False
         self._mcp: McpStatus = McpStatus()
+        #: True while this machine's tunnel connector is parked: remote access is
+        #: off and a person is the only thing that can restore it. Pushed by the
+        #: app from the same local read the notice uses (`_poll_tunnel_park`), for
+        #: the same reason every other segment is pushed rather than read off the
+        #: session: the band never reaches into the world.
+        self._tunnel_parked: bool = False
         # Which segments the drop ladder shed on the LAST render. Every segment
         # is dropped until something has been rendered, which is the honest
         # starting state: nothing has been shown yet.
@@ -1328,6 +1461,7 @@ class StatusLine:
         forked: bool | None = None,
         fork_pending: bool | None = None,
         mcp: McpStatus | None = None,
+        tunnel_parked: bool | None = None,
         approvals_auto: bool | None = None,
         approvals_always: bool | None = None,
     ) -> None:
@@ -1364,6 +1498,8 @@ class StatusLine:
             self._jobs = jobs
         if mcp is not None:
             self._mcp = mcp
+        if tunnel_parked is not None:
+            self._tunnel_parked = tunnel_parked
         if approvals_auto is not None:
             self._approvals_auto = approvals_auto
         if approvals_always is not None:
@@ -1726,6 +1862,15 @@ class StatusLine:
         # one — the exact confusion the band's colour budget exists to prevent,
         # reintroduced at the narrow end. One cell of the label is a cheaper loss
         # than the liveness signal.
+        #
+        # The PARK ALARM is this row's second tenant, and it is here because while
+        # a park stands it is not in the ladder at all (review round 2, D10 — see
+        # :func:`_model_for_park`): it is the band's one segment that cannot be
+        # re-derived from anything else on the screen, so it is shed at no width,
+        # and this is where it goes once no ladder row can hold it whole. What the
+        # width takes off it, the ellipsis at the end of this method takes off the
+        # TAIL of it, the same way the model label is truncated here. It yields
+        # only to the spinner, which is one cell of "a turn is live".
         tail = Text()
         if self._streaming:
             from local_operator.tui.shimmer import shimmer_enabled
@@ -1735,6 +1880,16 @@ class StatusLine:
             if shimmer_enabled():
                 tail.append(_SPINNER_FRAMES[self._spinner_index], style=accent)
                 tail.append(" ", style=dim)
+        if getattr(self, "_tunnel_parked", False):
+            # Styled exactly as the wide path's rung is, or the same fact would
+            # change colour on its way down the widths: the glyph carries the
+            # alarm, the words stay this band's ordinary foreground.
+            tail.append(
+                f"{ICON_TUNNEL} ",
+                style=Style(color=theme_mod.semantic_color("danger"), bold=True),
+            )
+            tail.append(TUNNEL_PARKED_TEXT, style=Style(color=theme_mod.semantic_color("fg")))
+            tail.append(" ", style=dim)
         if self._subagent is not None and self._subagent.label:
             # The name goes on the IRREDUCIBLE row too. Without it this path
             # emitted `⣾ ◆ Gemini 2.5 Pro Preview` while the session's own
@@ -1790,7 +1945,14 @@ class StatusLine:
         compared rather than assumed so the rule stays true if a future rung
         changes what a concession costs.
         """
-        ladder = drop_ladder(self._mcp, context_estimated=self._shown_context_is_estimate())
+        ladder = drop_ladder(
+            self._mcp,
+            context_estimated=self._shown_context_is_estimate(),
+            # The park is the one fact on this row that no other surface of the
+            # app is showing the operator while it stands, so while it does the
+            # ladder gives the model label a rung just ahead of the alarm (D10).
+            parked=getattr(self, "_tunnel_parked", False),
+        )
         fitted = self._walk(ladder, width, dim, muted, seam, accent)
         if fitted is None or "name" not in fitted[0]:
             return fitted
@@ -1893,7 +2055,7 @@ class StatusLine:
         seam: Style,
         accent: Style,
     ) -> Text:
-        """model › effort › team › agent › cwd › mcp (+ the working indicator).
+        """model › effort › team › agent › cwd › mcp › tunnel (+ the working indicator).
 
         Each segment is ``icon value``, the icon a step dimmer than its value so
         it frames the number rather than competing with it. Separators point
@@ -1998,6 +2160,43 @@ class StatusLine:
                             color=theme_mod.semantic_color(semantic),
                             bold=semantic == "danger",
                         ),
+                    )
+                )
+        if "tunnel" not in dropped:
+            # `dropped` never contains `tunnel` while a park stands: the rung leaves
+            # the ladder for exactly that case (`_model_for_park`), which is what
+            # makes a standing alarm un-sheddable, and is why the only thing that
+            # can take this segment off the row is the fit itself.
+            #
+            # `getattr`, not `self._tunnel_parked`, for the reason the
+            # `_starting` read below spells out: `_render` is called UNBOUND
+            # against lightweight stub bands in the fork tests, which carry only
+            # the fields their case is about, and a renderer has to tolerate the
+            # reduced hosts its own suite builds. An unparked band renders the
+            # same either way, which is what makes the default the honest one.
+            parked = format_tunnel(getattr(self, "_tunnel_parked", False))
+            if parked:
+                # ALWAYS an alarm, never a reading, and styled by the same rule
+                # the failed-MCP lamp is: the GLYPH carries the semantic colour
+                # and the BOLD, the words stay `fg` (tinting the words would read
+                # as "the words are wrong"). Measured, both spans, so the claim is
+                # checkable rather than asserted — at 200 cells with a failed MCP
+                # and a park standing: `⊙ ` -> `bold #ef8078` / `1 MCP` ->
+                # `#e9e5db`, `! ` -> `bold #ef8078` / `remote access off` ->
+                # `#e9e5db`. Review round 2 filed D12 against the round-1
+                # sentence's "mirror not a match"; the segments ARE the same
+                # treatment (only the glyph differs, and that is the point of
+                # having two), so what the finding lands on is the sentence, and
+                # it now says which two spans a reader can compare.
+                #
+                # `danger` rather than `warning`: the user's remote access is off
+                # and nothing on this machine will bring it back without them.
+                parts.append(
+                    (
+                        ICON_TUNNEL,
+                        parked,
+                        Style(color=theme_mod.semantic_color("fg")),
+                        Style(color=theme_mod.semantic_color("danger"), bold=True),
                     )
                 )
 

@@ -59,6 +59,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from local_operator.helpers import retention_label
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.types import HOST_RUN_DIRNAME
@@ -86,7 +87,7 @@ BOOT_RECORD_KIND = "runtime-boot"
 #: sentence (``"leaving after SIGTERM"``). Matching the raw spellings would make
 #: the escalated-sweep rung hold only by WHICH writer happened to run last —
 #: and a mislabel there hands the operator ``runtime-killed``, whose sentence
-#: ends "and nothing recorded a stop", for a death where a signal was recorded.
+#: ends "and no stop was asked for", for a death where a signal was recorded.
 _SIGNAL_TOKEN = re.compile(
     r"\bSIG(?:HUP|INT|QUIT|ILL|TRAP|ABRT|BUS|FPE|KILL|USR1|SEGV|USR2|PIPE|ALRM|"
     r"TERM|CHLD|CONT|STOP|TSTP|TTIN|TTOU|URG|XCPU|XFSZ|VTALRM|PROF|WINCH|IO|PWR|SYS)\b"
@@ -374,6 +375,40 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     kept one cycle longer. That costs a file, not an answer — a zombie's record
     is still a true statement about a pid that booted on a build, and the next
     boot after its parent reaps it prunes it.
+
+    A RECORD THAT CANNOT BE PARSED IS AGED OUT LIKE A DEAD ONE, on the file's own
+    mtime, and this is what keeps the namespace from wedging the prune (review
+    round 2, MAJOR 1). This is the only reaper ``run/host`` has, and the reader
+    that decides what a prune must keep reports its answer INCOMPLETE while any
+    entry in the namespace is unreadable (``update._boot_records_under``) — so a
+    single non-record ``*.json`` here used to stop generation reclamation on every
+    later ``lop update``, permanently and silently. The previous shape could not
+    clear it in either direction: a payload the parser could not use raised OUT of
+    this function (a wrong-typed field is a ``TypeError``, and the probe that
+    found this measured the exception escaping ``_bind_boot_instrumentation`` into
+    the BOOT of every session — the pre-existing #1175 defect this closes), and a
+    payload that parses to ``None`` (``{}``, a JSON array) was ``continue``d and
+    never aged out. Both are ``None`` here now, and both carry their mtime as the
+    age the policy below is applied to, which is exactly what
+    ``registry._prune_reaped`` does for the sidecar that has no readable pid
+    either: evidence is worth one look soon after it lands, not indefinite
+    storage. A torn record younger than the retention window is KEPT and logged —
+    the age is what makes ageing a decision rather than a deletion of fresh
+    evidence, and the log line is what keeps the condition from being silent.
+
+    AND THE TWO BOUNDS AGREE, so no entry can be IMMORTAL BY MTIME (review round 3,
+    MINOR 1). The age rule alone is ``age > REAPED_MAX_AGE_S``, which a future-dated
+    mtime makes NEGATIVE — never expired — while the count rule below keeps the
+    NEWEST entries, which is exactly where a future-dated file sorts. Measured with
+    the two together: 250 dead records were pruned and the future-dated one
+    survived both. A negative age is therefore STALE. The producers are restore,
+    ``os.utime`` and clock skew rather than anything written here, which is why the
+    line for that shape says the stamp is in the future instead of promising a
+    retention window that will not apply to it.
+
+    THE WARNING NAMES THE EXCEPTION TYPE, so a bug inside ``BootRecord.from_json``
+    does not read exactly like a torn file (review round 3, MINOR 5);
+    ``update._entries_in_directory`` has named it that way all along.
     """
     directory = (root or config_dir()) / HOST_RUN_DIRNAME
     try:
@@ -385,11 +420,46 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     moment = _now() if now is None else now
     dead: list[tuple[float, Path]] = []
     for path in paths:
+        failure = ""
         try:
             record = BootRecord.from_json(json.loads(path.read_text()))
-        except (OSError, ValueError):
-            continue
+        except Exception as exc:  # noqa: BLE001 — see the docstring: an entry costs itself
+            record = None
+            # THE TYPE IS KEPT AS A NAME, not the exception: ``exc`` is unbound once
+            # its handler ends, and the warning below is outside it. This is the
+            # half of review round 3's MINOR 5 that makes a bug inside
+            # ``BootRecord.from_json`` stop reading exactly like a torn file.
+            failure = type(exc).__name__
         if record is None:
+            why = failure or "not a record of this kind"
+            try:
+                landed = path.stat().st_mtime
+            except OSError:  # pragma: no cover — vanished under us, nothing to age
+                continue
+            if landed > moment:
+                # A STAMP IN THE FUTURE IS NOT A KEEP (review round 3, MINOR 1): the
+                # age below is negative, so the window would never expire it and the
+                # count path keeps the NEWEST entries — a future-dated file sorts last
+                # and survives both bounds, immortal by mtime. ``os.utime``, a restore
+                # and clock skew are the plausible producers, and the writers here
+                # never make one; the line says which shape it is rather than
+                # promising a retention window that will not apply to it.
+                logger.warning(
+                    "boot record %s cannot be read (%s) and is stamped in the future: "
+                    "ageing it out now, because no mtime may make an entry immortal",
+                    path,
+                    why,
+                )
+            else:
+                logger.warning(
+                    "boot record %s cannot be read (%s): keeping it for %s, then ageing "
+                    "it out like a dead runtime's record (an unreadable entry keeps "
+                    "every generation until it goes)",
+                    path,
+                    why,
+                    retention_label(registry.REAPED_MAX_AGE_S),
+                )
+            dead.append((landed, path))
             continue
         if registry.pid_alive(record.pid):
             continue
@@ -404,7 +474,14 @@ def prune_boot_records(root: Path | None = None, *, now: float | None = None) ->
     dead.sort()
     removed = 0
     for started_at, path in dead:
-        aged_out = (moment - started_at) > registry.REAPED_MAX_AGE_S
+        # A NEGATIVE AGE IS STALE, NOT FRESH (review round 3, MINOR 1). It could not be:
+        # the count path keeps the NEWEST ``REAPED_MAX_FILES``, so an entry stamped ten
+        # years ahead sorts last and is never evicted either — measured: 250 dead records
+        # pruned and the future-dated one surviving. Together the two bounds therefore
+        # left one shape nothing could ever reclaim, which is the wedge this function
+        # exists to close for every other shape.
+        age = moment - started_at
+        aged_out = age > registry.REAPED_MAX_AGE_S or age < 0
         over_count = len(dead) - removed > registry.REAPED_MAX_FILES
         if not (aged_out or over_count):
             continue
@@ -643,7 +720,7 @@ class TurnJournal:
         # which of them runs last is an ordering accident: a later writer with
         # no signal to report must not unname a signal that was recorded, or an
         # escalated sweep would be reported as a crash whose sentence claims
-        # nothing recorded a stop.
+        # no stop was asked for.
         if row.get("exit_cause") and signal_exit_token(str(row["exit_cause"])):
             row["still_open_at_exit"] = True
             self._write("exit")
@@ -786,21 +863,49 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
        runtime was asked to leave, wrote the signal down, and was killed before
        its turn ended. First-hand evidence, so it outranks everything below.
     2. **the row's own recorded exit cause, when it is a token this taxonomy
-       knows** → that token. The runtime wrote it on its way out
-       (``Session.note_cut_off`` -> ``TurnJournal.note_exit``), which makes it
-       first-hand in the same way rung 1 is, and it is the ONLY rung that can
-       carry a bound: the bounded handover records ``runtime-overdue``
-       (:data:`types.BUILD_DRAIN_OVERDUE_CAUSE`) and the sentence that names its
-       bound, where the inferences below can only speak about the install or about
-       a death nobody recorded. It outranks rung 3 because "the install moved since
-       this build" is an inference from the DISK, while this is a statement about
-       itself — and for a drained runtime the install has usually moved, so the
-       inference used to win by default (QA round 1, Q-2).
+       knows AND IS NOT A VERDICT** → that token. The runtime wrote it on its
+       way out (``Session.note_cut_off`` -> ``TurnJournal.note_exit``), which
+       makes it first-hand in the same way rung 1 is, and it is the ONLY rung
+       that can carry a bound: the bounded handover records
+       ``runtime-overdue`` (:data:`types.BUILD_DRAIN_OVERDUE_CAUSE`) and the
+       sentence that names its bound, where the inferences below can only speak
+       about the install or about a death nobody recorded. It outranks rung 3
+       because "the install moved since this build" is an inference from the
+       DISK, while this is a statement about itself — and for a drained runtime
+       the install has usually moved, so the inference used to win by default
+       (QA round 1, Q-2).
+
+       ``KILL_CAUSE`` IS EXCLUDED BY THE PREDICATE, NOT BY A LEAD (review
+       round 4, MINOR 1). ``incidents.CUT_OFF_CAUSES`` holds the very token the
+       arm below answers with, because that table is the taxonomy's vocabulary
+       and rung 4 is one of its causes; matching on membership alone would let a
+       row that recorded ``runtime-killed`` be answered by itself, rendering a
+       harness-caused death with no actor — the thing this ordering exists to
+       forbid. No writer records it today (``note_exit`` is reached only from
+       ``process._clean_exit`` and the direct-dispose path, and neither passes
+       it), so this is an invariant held against a future writer rather than a
+       live defect; the alternative fix, passing ``KILL_UNATTRIBUTED`` as this
+       rung's lead, is wrong because the exclusion must not be reachable either
+       way. Rung 2 keeps no lead for the tokens it DOES answer:
+       ``runtime-overdue`` already names its own mechanism and bound, and that
+       sentence is pinned by ``test_a_recorded_bound_outranks_the_install_inference``.
     3. **an install that moved since the row's build** → ``install-mid-update``
        — the install-window tear.
     4. **nothing else** → ``runtime-killed``, now carried by positive evidence
        (this turn was in flight and never ended) instead of by the absence of a
        record.
+
+    RUNG 4 IS EXPLICITLY UNATTRIBUTED, and the word is part of the answer rather
+    than a decoration. Nothing that reads this arm has seen a marker — a marker
+    covering this run is consumed by ``attention._classify_orphaned_run`` before
+    the row is ever consulted — so "this turn died and no act was recorded" is
+    exactly what the evidence supports, and saying so is what turns a fleet-wide
+    event from "we cannot tell you why" into "none of these deaths had a recorded
+    actor". ``incidents.KILL_UNATTRIBUTED`` is the same word the classifier's
+    marker arms use when a marker names no actor, so a reader comparing a
+    marked death with an unmarked one sees one vocabulary rather than two. It is
+    also the arm a row that recorded ``KILL_CAUSE`` lands on, which is why rung 2
+    refuses that token (review round 4, MINOR 1).
 
     ``CUT_OFF_UNKNOWN`` is unreachable from this function and that is the point:
     it is the taxonomy's statement that nothing on disk could say what happened,
@@ -808,7 +913,12 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
     left no row at all, which is what "keep the legacy path working when the
     evidence is absent" means.
     """
-    from local_operator.incidents import CUT_OFF_CAUSES, render_cut_off_reason
+    from local_operator.incidents import (
+        CUT_OFF_CAUSES,
+        KILL_CAUSE,
+        KILL_UNATTRIBUTED,
+        render_cut_off_reason,
+    )
 
     signal = signal_exit_token(row.exit_cause)
     if signal:
@@ -820,11 +930,15 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
             ),
         )
     recorded = str(row.exit_cause or "")
-    if recorded in CUT_OFF_CAUSES:
+    if recorded in CUT_OFF_CAUSES and recorded != KILL_CAUSE:
         # The runtime's own last word, and a token only if it is one: every other
         # caller of ``note_exit`` passes a sentence ("retiring for 0.59.9"), and a
         # sentence is not a rung of this taxonomy — it would render as itself, which
-        # is how the bound used to be invisible to a successor.
+        # is how the bound used to be invisible to a successor. ``KILL_CAUSE`` is
+        # held out of the match rather than given a lead: it is this function's own
+        # verdict for a death with no recorded act, so a row carrying it belongs on
+        # the unattributed arm below, which is the one that names its actor (review
+        # round 4, MINOR 1).
         return (
             "error",
             recorded,
@@ -839,8 +953,8 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         )
     return (
         "error",
-        "runtime-killed",
-        render_cut_off_reason("runtime-killed", detail=row_detail(row)),
+        KILL_CAUSE,
+        render_cut_off_reason(KILL_CAUSE, detail=row_detail(row, lead=KILL_UNATTRIBUTED)),
     )
 
 

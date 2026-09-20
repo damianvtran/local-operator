@@ -68,6 +68,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     NoticeEvent,
+    ReasoningDeltaEvent,
     RetryEndEvent,
     RetryStartEvent,
     SteeringDeliveredEvent,
@@ -350,6 +351,28 @@ def _summarize_args(tool_name: str, args: dict[str, Any]) -> str:
         text = value if isinstance(value, str) else repr(value)
         return _compact(f"{first_key}={text}", 80)
     return tool_name
+
+
+#: Characters of reasoning a phone transcript row holds. Bounded because the
+#: row is part of the projection the phone re-renders on every repaint, and
+#: reasoning is chatty (one fragment per token). Generous enough to read a
+#: sentence of thinking on a phone screen, far short of a whole phase.
+REASONING_PREVIEW_CHARS = 600
+
+
+def _reasoning_tail(text: str, limit: int = REASONING_PREVIEW_CHARS) -> str:
+    """Length-bound reasoning text, keeping the NEWEST end.
+
+    ``_compact`` keeps the HEAD, which is right for a prompt preview and wrong
+    here: reasoning streams, so what a reader wants is what the model is
+    thinking NOW. The bound matters because this row rides the whole projection
+    on every repaint — a phone session that reasoned for a minute would
+    otherwise re-send its entire thought per frame.
+    """
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return "…" + collapsed[-(limit - 1) :]
 
 
 def _compact(text: str, limit: int) -> str:
@@ -1118,6 +1141,11 @@ class ProjectionFold:
         self._tool_args: dict[str, dict[str, Any]] = {}
         # The streaming assistant row, if one is open.
         self._open_message_id: str | None = None
+        #: The open REASONING row's id, tracked explicitly for the same reason
+        #: ``_open_compaction_id`` is: several model calls in one turn each
+        #: reason, and a reverse-scan fallback could finalize a later phase's row
+        #: once the tail cap starts dropping rows.
+        self._open_reasoning_id: str | None = None
         # The open compaction row's id, tracked explicitly the same way: a
         # reverse-scan fallback could finalize a LATER compaction's row with
         # an EARLIER end event once the tail cap starts dropping rows.
@@ -1278,6 +1306,11 @@ class ProjectionFold:
             # `stop_reason` value: the affordance is gated on `=== "aborted"`,
             # so a new token would strip it from every bundle not yet updated.
             p.cut_off = cut_off
+            # A turn cut off mid-think ends with a reasoning row still open and
+            # no ``message_end`` coming; sealing it here keeps the row from
+            # absorbing the NEXT call's fragments ("closes the row" is about
+            # which phase owns it, and this one is over).
+            self._close_reasoning_row()
             self._close_open_message()
             if event.error:
                 self._append(
@@ -1318,11 +1351,21 @@ class ProjectionFold:
                     # Append the delta; never re-read the whole message — the
                     # delta contract is what makes 30 Hz streaming cheap.
                     row.text += event.delta
+        elif isinstance(event, ReasoningDeltaEvent):
+            # The model's reasoning, streamed onto its own row. Display-only in
+            # the same sense the event is: the row is not the assistant message,
+            # never becomes one, and disappears at the next sync because the
+            # reasoning is not in the durable transcript the history path
+            # projects from — which is the honest rendering of a phase that has
+            # no durable form.
+            if event.delta:
+                self._reasoning_row(event.message_id, event.delta)
         elif isinstance(event, MessageEndEvent):
             row = self._find(event.message.id)
             if row is not None:
                 row.text = _message_text(event.message)
                 row.final = True
+            self._close_reasoning_row()
             self._open_message_id = None
         elif isinstance(event, ToolCallComposeEvent):
             # Same rekey the TUI does: the call's real id has arrived for a row
@@ -2385,6 +2428,50 @@ class ProjectionFold:
         self._bump()
 
     # -- internals ----------------------------------------------------------
+
+    def _reasoning_row(self, message_id: str, delta: str) -> None:
+        """Fold one reasoning fragment onto this call's reasoning row.
+
+        ONE row per model call, keyed by the message it belongs to, so a run of
+        thousands of fragments cannot become thousands of transcript rows: the
+        phone re-renders the whole projection on every repaint, and a row per
+        token would be an unbounded wire cost for content that scrolls past.
+
+        The row is inserted ABOVE the assistant row the same call already opened
+        at ``message_start``. Appending would leave the empty assistant row on
+        top and the thinking under it, so the answer would materialise above the
+        reasoning that produced it — the TUI retires its block before the
+        answer mounts for the same ordering reason (``app.py``).
+        """
+        entry_id = f"rz-{message_id}" if message_id else "rz"
+        row = self._find(entry_id)
+        if row is None:
+            # ``final=False`` while it streams, exactly as the assistant row
+            # does at ``message_start``: the phone's "is this row still moving"
+            # question reads this flag. ``text_complete`` is deliberately left at
+            # its default -- that flag means "this is a pageable PREFIX of a row
+            # that exists in full elsewhere" (frame-cap truncation), and
+            # reasoning is bounded here because there is nothing to page: it is
+            # never persisted anywhere.
+            row = TranscriptEntry(id=entry_id, kind="reasoning", final=False)
+            self._append(row)
+            self._open_reasoning_id = entry_id
+            rows = self.projection.transcript
+            anchor = next(
+                (index for index, item in enumerate(rows) if item.id == self._open_message_id),
+                None,
+            )
+            if anchor is not None:
+                rows.insert(anchor, rows.pop(rows.index(row)))
+        row.text = _reasoning_tail(row.text + delta)
+
+    def _close_reasoning_row(self) -> None:
+        """Seal the open reasoning row, so the next call's phase opens its own."""
+        if self._open_reasoning_id:
+            row = self._find(self._open_reasoning_id)
+            if row is not None:
+                row.final = True
+            self._open_reasoning_id = None
 
     def _tool_row(self, tool_call_id: str, tool_name: str) -> TranscriptEntry:
         entry_id = self._tool_rows.get(tool_call_id)

@@ -463,7 +463,12 @@ credits/usage, provision/application.create, agent catalogue/detail/CRUD,
 like/favourite/count controls, comments/CRUD and account.agents. Paths are assembled
 server-side from bounded identifiers. Query/payload keys are allowlisted per
 operation. Mutations require stable request_id; DELETE additionally requires
-confirmation. Redirects and oversized/upstream error bodies are refused.
+confirmation. Redirects and oversized/upstream error bodies are refused. The id is
+spent by the attempt that carried it — including an attempt ANSWERED WITH A REFUSAL —
+so a client retrying a mutation after `radient_credential_refused` or
+`radient_upstream_failed` must send a NEW request_id: replaying the old one answers
+`409 "Request outcome is indeterminate"` about the attempt already recorded, not
+about the retry. Reads carry no request_id and are free to repeat.
 
 The backend resolves and refreshes the Radient credential through AuthStore.
 Provisioned application keys are stored centrally and removed from the response.
@@ -471,6 +476,25 @@ There is no token getter, token exchange/refresh proxy, arbitrary URL or arbitra
 header operation. Reads of public prices do not require a Radient login. UI-owned
 OIDC/refresh/keytar effects must be removed by the frontend implementation, not run
 alongside this path.
+
+Every refusal of that proxy answers `{"code", "message", "details"}` in `detail`,
+and `code` is what separates the remedies — classify on `code`, never on status.
+`radient_no_credential` (nothing is stored) and `radient_credential_refused`
+(Radient refused this account's sign-in — including a grant the store knows is dead,
+which carries `details.reason = "grant_invalid"`) both mean "sign in to Radient
+again", while `radient_upstream_failed` means "retry" (`details.reason` names the
+condition — `credential_unavailable` for a stored credential that cannot be produced
+right now, `refresh_did_not_land` for a peer runtime mid-refresh — and
+`details.upstream_status` carries Radient's own answer when there was one).
+**Status cannot tell these apart, and a client that keys on it will misroute the
+remedy**: the dead-grant class answers `401` where it used to answer `409`, and the
+desktop plane's OWN 401 — this app's bearer, whose remedy is "restart or re-pair the
+app" — is a bare sentence with no `radient_` code at all, so the two 401s on this
+plane differ by `detail`'s SHAPE and nothing else. A bearer the store already
+considers due for a refresh is never spent upstream: the proxy answers the classified
+refusal rather than relaying Radient's 401 for a token it knows is stale — and when a
+PEER runtime holds the refresh lease, the proxy waits for that peer's token, bounded,
+before refusing, so a legitimately refreshing peer does not turn a page into an error.
 
 The old Google integration UI writes GOOGLE_ACCESS_TOKEN, GOOGLE_REFRESH_TOKEN and
 GOOGLE_TOKEN_EXPIRY_TIMESTAMP via `use-oidc-auth.ts`; no builtin backend reader or
