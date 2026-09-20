@@ -137,6 +137,85 @@ export function sendCommand(
 	});
 }
 
+/** A command frame, plus the proof fields a paired phone adds to it.
+
+    `operator_sig`/`operator_key_id`/`operator_cert` are SIGNATURE material the
+    runtime checks against its pinned operator key, not the machine-held
+    `operator_cap` (which the relay drops from any HTTP body, always). The two are
+    different classes: a capability is proof material this machine can mint and a
+    body carrying one can only be a forgery, while a signature is unforgeable and
+    its challenge is single-use, so the relay carries it. */
+export type SignedCommand = CommandOp & {
+	operator_sig?: string;
+	operator_key_id?: string;
+	operator_cert?: string;
+};
+
+export function sendCommandWithProof(
+	sessionId: string,
+	op: SignedCommand,
+): Promise<{ ok: boolean; detail: string }> {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/command`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(op),
+	});
+}
+
+/** Ask the runtime to mint a per-action challenge for THIS session's connection.
+
+    The relay forwards one ordinary frame and hands back the challenge; the phone
+    signs it. A challenge is worth exactly one signature, so holding one lets
+    nobody sign — and the signature is the only thing that ever carries authority
+    here. `action` chooses what the signature will be accepted FOR, and the runtime
+    derives the same field from the frame it is deciding, so a signature minted for
+    one action cannot be presented as the other. */
+export function requestOperatorChallenge(
+	sessionId: string,
+	input: { action: "loosen" | "approve"; request_id?: string },
+): Promise<{
+	challenge: string;
+	expires_s: number;
+	session_id: string;
+	action: string;
+	request_id: string;
+}> {
+	return request(`/api/sessions/${encodeURIComponent(sessionId)}/operator/challenge`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ request_id: "", ...input }),
+	});
+}
+
+/** Claim a pairing code with this device's PUBLIC key. The private half never
+    leaves the phone, so there is no field here for it. */
+export function claimPairingCode(input: {
+	code: string;
+	spki: string;
+	name: string;
+}): Promise<{ ok: boolean; device_id: string }> {
+	return request("/api/pair", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify(input),
+	});
+}
+
+/** Whether the operator has approved a claimed code yet, and the certificate they
+    signed. The certificate is minted on the MACHINE by the operator's gesture, so
+    this is the only way the phone ever learns the string it must present. */
+export function pairingStatus(deviceId: string): Promise<{
+	paired: boolean;
+	device_id: string;
+	certificate?: string;
+	operator_key_id?: string;
+	scope?: string[];
+	exp?: number;
+	name?: string;
+}> {
+	return request(`/api/pair/${encodeURIComponent(deviceId)}`);
+}
+
 /** URL for one image attachment on a user turn. The bytes are served lazily
     from the transcript (never carried in the projection), keyed by the entry
     id plus the image-only index the ref emitted. Same-origin, cacheable and

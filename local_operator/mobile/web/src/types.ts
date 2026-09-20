@@ -361,6 +361,14 @@ export type CommandOp =
 	| { op: "set_model"; provider: string; model_id: string }
 	| { op: "set_effort"; effort: string }
 	| { op: "slash"; command: string; args: string }
+	/* `slash_result` is the ROUTED slash op — the one the runtime's authority seam
+	   was built for, and the one the desktop backend and the TUI's attached pane
+	   already use. `slash` is the off-terminal SUBSET (`/goal`, `/compact`) and
+	   answers `/approvals` with "terminal-only here", which is the dead end this
+	   phone surface exists to remove: `/approvals auto` is authority-increasing and
+	   only reaches a sink through this op. Typed here so the refusal cannot come
+	   back through the client. */
+	| { op: "slash_result"; command: string; args: string; images?: PromptImage[] }
 	| { op: "new_conversation" }
 	| { op: "resume_session"; session_id: string }
 	| { op: "approval_answer"; request_id: string; approved: boolean; remember: boolean }
