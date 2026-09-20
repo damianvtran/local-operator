@@ -151,11 +151,16 @@ def _build_bundle() -> str | None:
         # identical refusal back. What the reader needs is the version check and
         # the routes that give them a current Node.
         return (
-            "node is not installed, and the portal bundle is built once with it "
-            "(Node >=22, and the archive package is usually older than that -- "
-            "Ubuntu 24.04 ships 18 -- so check `node --version`); install a current "
-            "Node from https://nodejs.org (or, if you use nvm, `nvm install 22`); "
-            "re-run `lop mobile install` afterwards"
+            # The remedy leads, because the reader's premise is that they have
+            # no node: telling them to run `node --version` first is telling
+            # them to run a command this arm exists because it is missing
+            # (design round 4, D18). The version requirement follows the
+            # instruction it constrains rather than preceding it.
+            "node is not installed, and the portal bundle is built once with "
+            "it: install a current Node from https://nodejs.org (or, if you "
+            "use nvm, `nvm install 22`), then re-run `lop mobile install`. "
+            "Node >=22 is required -- a distro package is often older, and "
+            "Ubuntu 24.04 ships 18"
         )
     try:
         runner = _shim_argv("pnpm")
