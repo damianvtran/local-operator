@@ -798,13 +798,26 @@ def _plant_branded_image(link: Path, real: Path, name: str | None) -> Path | Non
     supported outcomes), and when the link that is there is not executable by
     us. ``None`` is rung 2 for every caller, never an error to report.
     """
-    libpython = (link.parent.parent / "lib" / name) if name else None
+    # NO IDENTIFIABLE DYLIB MEANS NO IMAGE AT ALL — not "keep the one that is
+    # already there". The refusal has to come BEFORE the staleness early return,
+    # because with ``name is None`` trigger (c) cannot run at all: a link that
+    # is the interpreter's inode, executable and ``nlink >= 2`` would otherwise
+    # be handed out with its companion dylib missing or unidentifiable, and
+    # dyld aborts at load — the measured 100%-abort mode, and the one failure no
+    # ``os.access`` check can see (review round 1, R-4).
+    #
+    # THE COUNTER-ARGUMENT, recorded rather than left implicit: a STATIC build
+    # legitimately has no dylib, so a hardlink of one might execute with no
+    # companion pin at all. It is refused anyway, because "this interpreter needs
+    # no dylib" and "a dylib we could not identify" are indistinguishable from
+    # here, and a name is worth less than a launch: every interpreter this
+    # ships on is uv's dynamic Mach-O build whose only ``LC_RPATH`` is
+    # ``@executable_path/../lib`` (see the module docstring's abort measurement).
+    if name is None:
+        return None
+    libpython = link.parent.parent / "lib" / name
     if not _needs_replant(link, real, libpython):
         return _executable_image(link)
-    if name is None:
-        # No dylib to pin means the hardlink would abort at launch. Refuse
-        # rather than plant a landmine.
-        return None
     # BOTH plant directories. A killed plant can leak a temp in `bin/`
     # (named for the brand) or in `lib/` (named for the dylib), and sweeping
     # only the first left lib temps accumulating forever. Only on the replant

@@ -342,7 +342,7 @@ def job_domain() -> str:
         ) from exc
 
 
-def job_running(*, label: str, run: Callable[..., object]) -> bool:
+def job_running(*, label: str, path: Path, run: Callable[..., object]) -> bool:
     """Whether launchd holds a LIVE PID for ``label`` right now.
 
     The question a compare-then-skip has to answer before it declines to
@@ -358,9 +358,23 @@ def job_running(*, label: str, run: Callable[..., object]) -> bool:
     not registered at all answers non-zero, which is also "not running" — and
     the caller then reloads, which is what registers it.
 
-    Never raises: an unanswerable supervisor returns False, and False means the
-    caller does the work it did before.
+    TAKES THE PLIST PATH AND APPLIES :func:`is_own_plist`, exactly as
+    :func:`reload_job` does and for the same reason: the LABEL is a fixed
+    module constant in two of the three installers while the plist path moves
+    with ``$HOME``, so asking about ``gui/<uid>/<label>`` from a redirected home
+    is a question about the OPERATOR's job, not this run's. Round 1 (R-1)
+    reproduced the inverse of the incident ``AGENTS.md`` records: a sandboxed
+    install that found a loaded-but-stopped job issued
+    ``kickstart -k gui/501/<label>`` against the operator's live daemon. A
+    caller that forgot the guard cannot reach launchd through this function.
+
+    False on a refusal, which sends the caller to :func:`reload_job` — which
+    refuses too, and says so with its own sentence, so a sandboxed run declines
+    loudly rather than silently. Never raises: an unanswerable supervisor
+    returns False, and False means the caller does the work it did before.
     """
+    if not is_own_plist(path, label):
+        return False
     result, _ = _call(run, "print", f"{job_domain()}/{label}")
     if result is None:
         return False
@@ -444,7 +458,7 @@ def _await_registration(
         backoff = min(backoff * 2, _BOOTSTRAP_BACKOFF_CAP_S)
 
 
-def kickstart(*, label: str, run: Callable[..., object]) -> bool:
+def kickstart(*, label: str, path: Path, run: Callable[..., object]) -> bool:
     """Restart a job launchd already has LOADED, from its in-memory definition.
 
     THE NARROW REPAIR for a stopped-but-loaded job: the plist is correct and the
@@ -454,10 +468,16 @@ def kickstart(*, label: str, run: Callable[..., object]) -> bool:
     ``kickstart -k`` does not briefly unregister the label, and it is what
     ``wakes.install`` already chose for this exact case.
 
-    False means the caller must fall through to :func:`reload_job`, which is
-    right for the other reason a job is not running: launchd has forgotten the
-    label entirely, and only a bootstrap registers it.
+    TAKES THE PLIST PATH AND APPLIES :func:`is_own_plist` — see
+    :func:`job_running` for the reproduction (round 1, R-1): a ``kickstart`` by
+    label ALONE is the destructive half of that finding, because it acts on the
+    operator's daemon from a sandbox. False means the caller must fall through
+    to :func:`reload_job`, which is right for the other reason a job is not
+    running: launchd has forgotten the label entirely, and only a bootstrap
+    registers it — and which refuses a foreign path in its own words.
     """
+    if not is_own_plist(path, label):
+        return False
     result, _ = _call(run, "kickstart", "-k", f"{job_domain()}/{label}")
     return result is not None and getattr(result, "returncode", 1) == 0
 

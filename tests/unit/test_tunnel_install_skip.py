@@ -25,6 +25,12 @@ import pytest
 from local_operator import launchd, supervisors
 from local_operator.tunnels import install
 
+#: The REAL identity guard and reload, kept because the rig replaces both (its
+#: plist lives under ``tmp_path``) and the sandbox cell below has to put the
+#: real ones back to prove the refusal still exists.
+_REAL_IS_OWN_PLIST = launchd.is_own_plist
+_REAL_RELOAD_JOB = launchd.reload_job
+
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin",
     reason="the plist lifecycle is macOS-only; Linux/Windows have their own arms",
@@ -39,9 +45,19 @@ class FakeProc:
 
 
 class _Rig:
-    """``install()`` with the file system pointed at ``tmp_path`` and calls recorded."""
+    """``install()`` with the file system pointed at ``tmp_path`` and calls recorded.
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    ``own`` says whether the plist the rig writes is "the one the real passwd
+    home owns". It is not — it lives under ``tmp_path`` — so the rig states the
+    seam explicitly, because the identity guard on the repair helpers (round 1,
+    R-1) would otherwise refuse every kickstart and these cells would be
+    testing the refusal instead of the repair. ``own=False`` leaves the REAL
+    guard in place, which is what the sandbox cell below needs.
+    """
+
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, own: bool = True
+    ) -> None:
         self.path = tmp_path / "com.local-operator.tunnel.plist"
         self.calls: list[list[str]] = []
         self.loaded = True
@@ -53,6 +69,11 @@ class _Rig:
         monkeypatch.setattr(install.config, "directory", lambda base=None: tmp_path)
         monkeypatch.setattr(install, "_launchctl", self._launchctl)
         monkeypatch.setattr(install.launchd, "reload_job", self._reload_job)
+        monkeypatch.setattr(
+            install.launchd,
+            "is_own_plist",
+            (lambda path, label: True) if own else _REAL_IS_OWN_PLIST,
+        )
 
     def _launchctl(self, *cmd: str) -> FakeProc:
         self.calls.append(list(cmd))
@@ -75,6 +96,30 @@ class _Rig:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_bytes(payload)
         self.path.chmod(0o600)
+
+
+def test_a_sandboxed_repair_never_reaches_the_real_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-1 for the tunnel arm, whose LABEL is a fixed constant.
+
+    The reviewer's reproduction: a re-install under a redirected HOME that finds
+    the job loaded-but-stopped used to issue `kickstart -k
+    gui/<uid>/com.local-operator.tunnel` — the operator's real connector. The
+    identity guard refuses both helpers now, and the reload that follows
+    refuses in its own words, so no launchctl call is issued at all and the
+    decline is reported rather than silent.
+    """
+    rig = _Rig(monkeypatch, tmp_path, own=False)
+    monkeypatch.setattr(install.launchd, "reload_job", _REAL_RELOAD_JOB)
+    rig.write_current_plist()
+    rig.loaded = False  # launchd knows the label but is running nothing
+
+    with pytest.raises(ValueError) as raised:
+        install.install()
+
+    assert rig.calls == [], f"a sandboxed install reached launchctl: {rig.calls}"
+    assert "not the LaunchAgent the real home owns" in str(raised.value)
 
 
 def test_a_reinstall_that_changes_nothing_does_not_write_or_reload(

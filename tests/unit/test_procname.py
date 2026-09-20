@@ -57,26 +57,36 @@ def _fake_venv(tmp_path: Path) -> Path:
 def _generation_venv(root: Path) -> Path:
     """A SECOND venv-shaped tree, as a ``lop`` generation looks to a spawn.
 
-    Returns its ``bin/python3``. Three choices in here are deliberate:
+    Returns its ``bin/python3``. Four choices in here are deliberate:
 
-    * ``bin/python3`` is a SYMLINK to the versioned binary beside it — which is
-      what every generation venv has, and the whole bug: the kernel resolves a
-      symlink, takes ``p_comm`` from the target, and the process is
-      ``python3.x``.
-    * the interpreter is a COPY of the real one rather than another hardlink to
-      it, so the inode this test plants against — and any branded child it
-      executes — belongs to a throwaway tree. Measured reason: a remediation an
-      EDR applies to a flagged branded file reaches the SHARED interpreter
-      through a hardlink, and on 2026-09-19 that took out uv's 3.12.13 and
-      3.13.12 on the operator's machine (see ``docs/ENDPOINT_PROTECTION.md``). A
-      test run must not be able to do that to the fleet's interpreters.
-    * the ``libpython`` symlink is planted up front, because here the plant's
-      source and target coincide (the copy's own ``../lib``) and dyld needs it
-      beside whatever image is executed — the same mandatory pin the module
-      docstring measures as "0 successes, 40/40 aborts" without.
+    * ``bin/python3`` is a SYMLINK to the versioned binary — which is what every
+      generation venv has, and the whole bug: the kernel resolves a symlink,
+      takes ``p_comm`` from the target, and the process is ``python3.x``.
+    * the interpreter it points at is a COPY, in a SEPARATE base tree, rather
+      than another hardlink to the real one — so the inode this test plants
+      against, and any branded child it executes, belongs to a throwaway tree.
+      Measured reason: a remediation an EDR applies to a flagged branded file
+      reaches the SHARED interpreter through a hardlink, and on 2026-09-19 that
+      took out uv's 3.12.13 and 3.13.12 on the operator's machine (see
+      ``docs/ENDPOINT_PROTECTION.md``). A test run must not be able to do that to
+      the fleet's interpreters.
+    * the base tree is SEPARATE from the venv because that is production's shape
+      (a generation venv's ``python3`` points into a shared interpreter tree),
+      and it is what makes the companion-dylib claim testable at all (review
+      round 1, R-2): the plant's SOURCE is the base tree's ``lib`` and its
+      TARGET is the venv's, so a missing or wrong venv-side pin is a state the
+      plant has to repair. With source and target in one directory they coincide
+      and no assertion can tell the plant from the fixture — mutation
+      ``_plant_libpython -> True`` passed every cell then.
+    * ``<venv>/lib`` starts EMPTY: nothing is pre-planted, so the symlink the
+      cells assert on is the plant's own work.
     """
+    root.mkdir(parents=True, exist_ok=True)
+    base = _generation_base(root)
     (root / "bin").mkdir(parents=True, exist_ok=True)
     (root / "lib").mkdir(parents=True, exist_ok=True)
+    (base / "bin").mkdir(parents=True, exist_ok=True)
+    (base / "lib").mkdir(parents=True, exist_ok=True)
     real = Path(os.path.realpath(sys.executable))
     reason = _unbrandable_reason(root)
     if reason is not None:
@@ -85,13 +95,24 @@ def _generation_venv(root: Path) -> Path:
     if not dylib.is_file():
         pytest.skip(f"no {dylib.name} beside {real}: the copy could not be executed")
     (root / "pyvenv.cfg").write_text(
-        f"home = {real.parent}\ninclude-system-site-packages = false\n", encoding="utf-8"
+        f"home = {base / 'bin'}\ninclude-system-site-packages = false\n", encoding="utf-8"
     )
-    shutil.copy(real, root / "bin" / real.name)
-    os.symlink(dylib, root / "lib" / dylib.name)
+    shutil.copy(real, base / "bin" / real.name)
+    # The BASE tree's pin is the plant's source; the venv's is the plant's job.
+    os.symlink(dylib, base / "lib" / dylib.name)
     target = root / "bin" / "python3"
-    os.symlink(real.name, target)
+    os.symlink(Path("..") / ".." / base.name / "bin" / real.name, target)
     return target
+
+
+def _generation_base(root: Path) -> Path:
+    """The shared interpreter tree a generation venv's ``bin/python3`` points into.
+
+    Spelled once because the fixture creates it and the companion-dylib
+    assertion names it as the plant's SOURCE; two spellings would let the test
+    prove a different directory from the one the fixture built.
+    """
+    return root.parent / f"{root.name}-base"
 
 
 def _unbrandable_reason(root: Path) -> str | None:
@@ -503,6 +524,27 @@ class TestStaleness:
         ), "the repair must plant the interpreter, not something else"
         assert argv0 == "Local Operator [eval] session=deadbeef"
 
+    def test_a_link_with_no_identifiable_dylib_is_never_handed_out(self, branded, monkeypatch):
+        """The no-dylib refusal must cover "link present, companion unverifiable".
+
+        With no dylib name, trigger (c) cannot run at all — so a link that is the
+        interpreter's inode, executable and ``nlink >= 2`` would otherwise be
+        handed out as ``executable=`` with its companion missing or
+        unidentifiable, and dyld aborts at load, which is the one failure no
+        ``os.access`` check can see (review round 1, R-4). The refusal therefore
+        comes BEFORE the staleness early return.
+
+        ``branded`` has just planted a healthy shape, which is what makes this
+        discriminate: with the check below the early return, the healthy link was
+        returned here and this cell would fail.
+        """
+        monkeypatch.setattr(procname, "_libpython_name", lambda: None)
+
+        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+
+        assert executable is None
+        assert argv0 == sys.executable
+
     def test_an_unrepairable_neutered_link_withholds_the_label_too(self, branded, monkeypatch):
         """The EDR-RACE case: the plant reports success and the file is still dead.
 
@@ -615,10 +657,13 @@ class TestFallbackLadder:
             (["python"], False),
             (["python", "/x/bin/some-other-tool"], False),
             # LEADING INTERPRETER OPTIONS ARE NOT THE PROGRAM. The first row is
-            # the live shape an EDR row had (pid 1343: a `lop serve` reload
-            # successor, exec'd by `server/reload.py` with this exact argv) and
-            # the second is the desktop app's backend shape; both answered
-            # False on the old test, so neither process ever branded itself.
+            # OUR OWN reload successor — the argv `server/reload.py` execs when
+            # it replaces a serving daemon (live pid 1343: `python3.14`, ppid 1,
+            # `--listener-fd`) — and the second is a spawn of ours that answered
+            # False before this change. The desktop app is NOT in this list and
+            # must not be added: it launches its backend as `-c …` and probes
+            # with the same string, which is the row two lines below that has to
+            # stay False (review round 1, R-6).
             (["python", "-P", "-m", "local_operator.cli", "serve"], True),
             (["python", "-P", "-m", "local_operator.cli", "serve", "--port", "1"], True),
             (["python", "-u", "-m", "local_operator.tools.eval_worker"], True),
@@ -1015,9 +1060,16 @@ class TestCrossTreeSpawnIdentity:
         assert executable == str(link)
         assert link.stat().st_ino == os.stat(os.path.realpath(target)).st_ino
         assert os.access(link, os.X_OK), "an image a spawn will exec must be executable"
-        # The companion dylib pin is mandatory (the 100%-abort mode), and it
-        # must be planted in the TARGET's venv, not in ours.
-        assert [p.name for p in (target.parent.parent / "lib").glob("libpython*.dylib")]
+        # The companion dylib pin is mandatory (the 100%-abort mode) and it must
+        # be planted INTO THE TARGET'S venv, pointing at the TARGET's own dylib
+        # rather than at ours. The fixture leaves `<venv>/lib` empty and puts the
+        # source in a separate base tree precisely so this asserts the PLANT's
+        # work: before that, the fixture pre-created the symlink and mutation
+        # `_plant_libpython -> True` (a no-op plant) passed every cell here
+        # (review round 1, R-2).
+        pin = target.parent.parent / "lib" / f"lib{Path(os.path.realpath(target)).name}.dylib"
+        assert pin.is_symlink(), f"the plant must create {pin}"
+        assert pin.resolve() == (_generation_base(tmp_path / "gen") / "lib" / pin.name).resolve()
 
     def test_the_pair_runs_the_target_tree(self, tmp_path):
         """Executed, not merely returned — and the child is the TARGET's build.
@@ -1066,7 +1118,7 @@ class TestCrossTreeSpawnIdentity:
         assert not (root / procname.BRAND).exists()
 
     def test_a_target_with_no_dylib_is_rung_2(self, tmp_path):
-        """No libpython to pin means the hardlink would abort: refuse, never plant.
+        """No dylib to pin means the hardlink would abort: refuse, never plant.
 
         A copy of the interpreter in a tree with an empty ``lib/`` is the
         cleanest real stand-in for the static-build case ``_libpython_name``
@@ -1147,6 +1199,25 @@ class TestCrossTreeSpawnIdentity:
 
         assert (argv0, executable) == (str(target), None)
         assert procname.BRAND not in argv0
+
+    def test_an_unidentifiable_dylib_withholds_the_label_beside_a_target(self, tmp_path):
+        """R-4 on the cross-tree axis, and the case the old order missed.
+
+        The base tree's dylib is removed BEFORE any plant, so the interpreter
+        stays executable and the PATH SHAPE is unchanged — only the companion
+        becomes unidentifiable. The refusal must still be total, because a link
+        handed out here would abort at load with nothing to see it.
+        """
+        target = _generation_venv(tmp_path / "gen")
+        base = _generation_base(tmp_path / "gen")
+        (base / "lib" / next(iter((base / "lib").iterdir())).name).unlink()
+
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(target)
+        )
+
+        assert (argv0, executable) == (str(target), None)
+        assert not (target.parent / procname.BRAND).exists()
 
     def test_a_framework_target_is_refused(self, tmp_path):
         """A framework interpreter discards our name at its own stub re-exec.

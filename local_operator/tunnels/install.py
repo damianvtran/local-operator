@@ -380,12 +380,14 @@ def install() -> None:
     if kind == supervisors.LAUNCHCTL:
         log = config.directory() / "service.log"
         config.private_write(log, "")
-        # WRITE AND RELOAD ONLY WHEN SOMETHING WOULD CHANGE, for the reason
-        # recorded on the other two installers: this plist is what an EDR reads
-        # as "Persistence: launchd job / plist file modification" (MITRE
-        # T1543.001), and re-writing identical bytes followed by a
-        # bootout/bootstrap is that signal with no functional change behind it.
-        # `wakes.install` has skipped on equal content since it shipped.
+        # WRITE AND RELOAD ONLY WHEN SOMETHING WOULD CHANGE. What that claim is
+        # and is not (review round 1, R-3): an install that would change nothing
+        # no longer emits the two signals an EDR reads as "Persistence: launchd
+        # job / plist file modification" (MITRE T1543.001) — an identical-bytes
+        # rewrite followed by a bootout/bootstrap. It does NOT explain the
+        # 2026-09-19 incident's plist modification, which came from the
+        # `[daemons] refresh` child and a genuinely stale plist rather than from
+        # this path; see the longer note in `mobile/install.py`.
         wanted = plistlib.dumps(render_plist())
         # The MODE is part of "current": this installer is the one that sets
         # 0600, so a file whose bytes match but whose mode drifted is still
@@ -399,10 +401,19 @@ def install() -> None:
         # repair, which does not briefly unregister the label), and fall through
         # to the shared reload for anything else — including a label launchd has
         # forgotten, which is what registers it.
+        #
+        # LIVENESS ONLY, unlike its mobile and bridge twins, and the difference is
+        # deliberate rather than an oversight (round 1, R-5/Q-1): the connector
+        # has no local surface to probe — it is an outbound tunnel, with no port
+        # and no health endpoint — so launchd's own pid is the only signal this
+        # installer honestly has. A wedged connector that launchd still holds a
+        # pid for is left as it is; restarting it is `lop tunnel action restart`,
+        # which is a verb the operator asks for rather than one an install
+        # performs behind them.
         reload_needed = True
-        if current and launchd.job_running(label=LABEL, run=_launchctl):
+        if current and launchd.job_running(label=LABEL, path=path, run=_launchctl):
             reload_needed = False
-        elif current and launchd.kickstart(label=LABEL, run=_launchctl):
+        elif current and launchd.kickstart(label=LABEL, path=path, run=_launchctl):
             reload_needed = False
         if reload_needed:
             # Reload through the shared helper, and REPORT what launchd said. This

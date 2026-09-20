@@ -848,15 +848,20 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     if kind == supervisors.LAUNCHCTL:
         plist_path().parent.mkdir(parents=True, exist_ok=True)
         # WRITE ONLY WHEN IT WOULD SAY SOMETHING NEW, and reload only when the
-        # file changed or the daemon is not serving. THE REASON IS AN EDR, not
-        # tidiness: this daemon is a LaunchAgent, and "Persistence: launchd job
-        # / plist file modification" (MITRE T1543.001) is dominated by exactly
-        # the two signals an unconditional rewrite emits — a plist whose bytes
-        # did not change, written again, followed by a bootout/bootstrap churn.
-        # With the generation shim the plist path is stable, so in the common
-        # case the bytes are IDENTICAL and there is nothing to fix.
-        # `wakes.install` has compared-then-skipped for this reason since it
-        # shipped; this is the same shape.
+        # file changed or the daemon is not serving. `wakes.install` has
+        # compared-then-skipped since it shipped; this is the same shape.
+        #
+        # WHAT THIS DOES AND DOES NOT CLAIM (review round 1, R-3 — an earlier
+        # revision of this comment overclaimed): an install that would change
+        # nothing no longer writes the plist or bounces the job, so the two
+        # signals an EDR reads as "Persistence: launchd job / plist file
+        # modification" (MITRE T1543.001) no longer come from THIS path. It is
+        # NOT an explanation of the 2026-09-19 incident's plist modification:
+        # that child was `[daemons] refresh`, whose repair goes through
+        # `launchd.rewrite_if_stale` — which already returned "current" without
+        # writing, pre-existing and not in this diff — and the plist it did
+        # rewrite was genuinely stale (the pre-branding shape). A real repair,
+        # not an identical-bytes rewrite.
         current = _plist_is_current(plist_path(), render_plist(port))
         if not dry_run and not current:
             plist_path().write_bytes(plistlib.dumps(render_plist(port)))
@@ -882,7 +887,7 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
             if current and _serving(port):
                 reload_needed = False
                 steps.append("LaunchAgent already current and serving; left it loaded")
-            elif current and launchd.kickstart(label=LABEL, run=_launchctl):
+            elif current and launchd.kickstart(label=LABEL, path=plist_path(), run=_launchctl):
                 reload_needed = False
                 steps.append("restarted the loaded LaunchAgent (its file was already current)")
             if reload_needed:

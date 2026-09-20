@@ -14,6 +14,11 @@ import pytest
 
 from local_operator.mobile import install
 
+#: The REAL identity guard, kept because the rigs below replace it with a
+#: constant (their plist lives under ``tmp_path``) and the sandbox-refusal cell
+#: has to put the real one back to prove the refusal still exists.
+_REAL_IS_OWN_PLIST = install.launchd.is_own_plist
+
 
 def _steps(result: dict[str, object]) -> list[str]:
     """A result's ``steps`` as text — the declared shape, asserted here.
@@ -853,7 +858,7 @@ class _InstallRig:
     result depend on the host.
     """
 
-    def __init__(self, monkeypatch, plist) -> None:  # noqa: ANN001
+    def __init__(self, monkeypatch, plist, *, own: bool = True) -> None:  # noqa: ANN001
         self.plist = plist
         self.calls: list[list[str]] = []
         self.serving = True
@@ -865,6 +870,17 @@ class _InstallRig:
         monkeypatch.setattr(install, "_our_daemon_listening", lambda _port: self.serving)
         monkeypatch.setattr(install, "health", lambda port=4098, timeout=3.0: {"ok": True})
         monkeypatch.setattr(install, "gate_closed", lambda port=4098, timeout=3.0: True)
+        # THE PLIST THESE TESTS WRITE IS NOT THE REAL HOME'S, so the identity
+        # guard on the repair helpers (round 1, R-1) would refuse every
+        # kickstart and the rig would silently test the refusal instead of the
+        # repair. `own=True` therefore says "this is the real home's plist", and
+        # `own=False` leaves the REAL test in place — which is what
+        # `test_a_sandboxed_repair_never_reaches_the_real_job` pins.
+        monkeypatch.setattr(
+            install.launchd,
+            "is_own_plist",
+            (lambda path, label: True) if own else _REAL_IS_OWN_PLIST,
+        )
 
     def _launchctl(self, *cmd: str) -> FakeProc:
         self.calls.append(list(cmd))
@@ -875,6 +891,29 @@ class _InstallRig:
     def write_current_plist(self, port: int = install.DEFAULT_PORT) -> None:
         self.plist.parent.mkdir(parents=True, exist_ok=True)
         self.plist.write_bytes(plistlib.dumps(install.render_plist(port)))
+
+
+def test_a_sandboxed_repair_never_reaches_the_real_job(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """R-1, the reviewer's reproduction: a redirected HOME must reach nothing.
+
+    The label is a fixed module constant while the plist path moves with
+    ``$HOME``, so a loaded-but-stopped job found at a SANDBOX path used to send
+    `kickstart -k gui/<uid>/com.local-operator.mobile` at the operator's live
+    daemon. The identity guard now refuses both helpers, and the reload that
+    follows refuses in its own words — so the decline is REPORTED, not silent,
+    and no launchctl call is issued at all.
+    """
+    rig = _InstallRig(monkeypatch, tmp_path / "com.local-operator.mobile.plist", own=False)
+    rig.write_current_plist()
+    rig.serving = False
+
+    result = install.install()
+
+    assert rig.calls == [], f"a sandboxed install reached launchctl: {rig.calls}"
+    assert result["ok"] is False, result
+    assert "not the LaunchAgent the real home owns" in _error(result), _error(result)
 
 
 def test_an_install_that_changes_nothing_does_not_write_or_reload(
