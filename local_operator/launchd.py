@@ -743,6 +743,46 @@ def not_our_job_error(path: Path, label: str) -> str:
     )
 
 
+def unknown_identity_error(path: Path, label: str) -> str:
+    """Why a verb cannot tell WHETHER ``path`` is this run's own LaunchAgent.
+
+    The public spelling of :func:`_no_real_home_detail`, for the sites that report
+    a message instead of raising. It has to say "cannot read the passwd entry",
+    not "this is a redirected home": an operator on a broken host would otherwise
+    go looking for a sandbox that does not exist (the doctrine
+    ``_no_real_home_detail`` already states).
+    """
+    return _no_real_home_detail(path, label)
+
+
+class IdentityUnverifiable(ValueError):
+    """A verb refused because it cannot TELL whether the job is this run's.
+
+    The third answer, and not the same case as :class:`JobNotOurs`: there the
+    answer is known and is "not ours", while here the host cannot answer at all —
+    :func:`is_own_plist` degrades to False when the passwd entry is unreadable.
+    A caller that reads "not ours" as "nothing of the operator's is at stake"
+    would unlink the REAL plist on such a host without booting its job out
+    (review round 4). The conservative direction for a destructive verb is to
+    decline and say which of the two cases it hit.
+    """
+
+
+def require_own_plist(path: Path, label: str) -> None:
+    """Raise unless ``path`` is the plist the real passwd home owns for ``label``.
+
+    ONE ENTRY POINT for the raising sites (``tunnels``' verbs), so the three-way
+    answer — ours, not ours, cannot tell — cannot be collapsed by a site that
+    remembers only two of them. The arms that return a message instead of raising
+    (``mobile``, ``browser_bridge``) read :func:`not_our_job_error` and
+    :func:`unknown_identity_error` themselves.
+    """
+    if real_home() is None:
+        raise IdentityUnverifiable(unknown_identity_error(path, label))
+    if not is_own_plist(path, label):
+        raise JobNotOurs(not_our_job_error(path, label))
+
+
 def config_lives_in_real_home(config_dir: Path) -> bool:
     """Whether a unit supervising ``config_dir`` would outlive this process.
 

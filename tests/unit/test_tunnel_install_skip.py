@@ -323,7 +323,7 @@ def test_the_stop_verb_refuses_a_redirected_home_and_acts_for_the_owned_one(
     sandbox = _Rig(monkeypatch, tmp_path / "sandbox", own=False)
     sandbox.write_current_plist()
 
-    with pytest.raises(ValueError) as raised:
+    with pytest.raises(launchd.JobNotOurs) as raised:
         install.action("stop")
 
     assert sandbox.calls == [], f"a redirected home reached launchd: {sandbox.calls}"
@@ -429,3 +429,59 @@ def test_a_stop_with_no_supervisor_still_reports_the_foreground_case(
     captured = capsys.readouterr()
     assert code == 0, captured
     assert "Stop requested" in captured.out
+
+
+def test_a_host_that_cannot_name_its_home_declines_both_destructive_verbs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Round 4: an unreadable passwd entry is NOT "this plist is not ours".
+
+    `is_own_plist` degrades to False when `real_home()` is None, so with one
+    `except ValueError` a sandbox-shaped refusal and a host that cannot answer at
+    all were the same thing — and `uninstall()` then unlinked a plist that may be
+    the operator's, without booting its job out. The unknown case has its own type
+    now, and only the KNOWN "not ours" case is non-fatal for uninstall: the
+    conservative direction for a destructive verb is to leave the file and say
+    which case was hit.
+    """
+    rig = _Rig(monkeypatch, tmp_path / "sandbox", own=False)
+    rig.write_current_plist()
+    monkeypatch.setattr(install.launchd, "real_home", lambda: None)
+
+    with pytest.raises(launchd.IdentityUnverifiable) as raised:
+        install.action("stop")
+    assert "cannot read the passwd entry" in str(raised.value)
+    assert rig.calls == [], f"a degraded host reached launchd: {rig.calls}"
+
+    with pytest.raises(launchd.IdentityUnverifiable):
+        install.uninstall()
+
+    assert rig.path.exists(), "a plist this host cannot vet must be left alone"
+    assert rig.calls == [], f"a degraded host reached launchd: {rig.calls}"
+
+
+def test_a_degraded_host_gets_the_refusal_from_the_stop_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The same case through the CLI: the operator reads why, and the exit is non-zero.
+
+    This is the path that would otherwise have printed a cheerful success: the
+    refusal has to survive `dispatch`'s ValueError handling, which is the handler
+    that reports — not the one that swallowed it.
+    """
+    from local_operator.tunnels import cli as tunnel_cli
+
+    rig = _Rig(monkeypatch, tmp_path / "sandbox", own=False)
+    rig.write_current_plist()
+    (tmp_path / "sandbox" / "config.json").write_text(
+        json.dumps({"stopped": False, "gateway_port": 4100})
+    )
+    monkeypatch.setattr(install.launchd, "real_home", lambda: None)
+
+    code = tunnel_cli.main(argparse.Namespace(tunnel_command="stop"))
+
+    captured = capsys.readouterr()
+    assert code == 1, captured
+    assert "cannot read the passwd entry" in captured.err
+    assert "Stop requested" not in captured.out
+    assert rig.calls == [], f"a degraded host reached launchd: {rig.calls}"

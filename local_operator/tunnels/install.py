@@ -549,11 +549,12 @@ def action(name: str) -> None:
         # gui/<uid>/<label>` and a `bootstrap <domain> <path>` that launchd
         # resolves to the Label INSIDE the file. Every call below addresses the
         # label, so the refusal is here, ahead of all of them.
-        if not launchd.is_own_plist(path, LABEL):
-            # `JobNotOurs` rather than a bare ValueError so `lop tunnel stop` can
-            # tell a refusal from "the connector runs in the foreground" — the
-            # other reason this installer raises here (review round 3, QA Q-2).
-            raise launchd.JobNotOurs(launchd.not_our_job_error(path, LABEL))
+        #
+        # `require_own_plist` rather than `is_own_plist`, so the three-way answer
+        # is not collapsed here (review round 4): a host that cannot read its
+        # passwd entry gets its own refusal instead of being reported as a
+        # redirected home.
+        launchd.require_own_plist(path, LABEL)
         if name == "stop":
             # A bare bootout, deliberately: stopping is not a reload, and there
             # is nothing to bootstrap afterwards.
@@ -597,7 +598,7 @@ def uninstall() -> None:
         return
     try:
         action("stop")
-    except ValueError:
+    except launchd.JobNotOurs:
         # THE SUPERVISOR HALF MAY REFUSE; THE FILE HALF MUST STILL WORK (review
         # round 3, N3). `action("stop")` applies the identity guard, so from a
         # redirected home it declines rather than booting out the operator's
@@ -606,6 +607,12 @@ def uninstall() -> None:
         # owns is the file, and being refused the launchd half is not a reason to
         # keep it; nothing is reported that did not happen, because this returns
         # no step list at all.
+        #
+        # `IdentityUnverifiable` is deliberately NOT caught (review round 4): a
+        # host that cannot read its passwd entry has not said "this plist is not
+        # ours", only that it cannot tell, and the conservative direction for a
+        # destructive verb is to leave the file and let the refusal reach the
+        # operator with the sentence that names which case they hit.
         pass
     if kind == supervisors.SYSTEMCTL:
         _run(["systemctl", "--user", "disable", path.name])
