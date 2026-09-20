@@ -11481,6 +11481,78 @@ def _download_audit(
     )
 
 
+#: The prefix every refusal in this feature's copy is composed with.
+#:
+#: It is NOT decoration and it is not only this layer's spelling. Three writers
+#: compose it: the app host composes its own download refusals with it
+#: (`downloads.ts`'s `refuse`/`refuseLive`: "refused: `x` is an executable/script
+#: type; nothing was saved"), the extension composes its upload refusals with it,
+#: and `browser_files` composes its name refusals with it. On the wire it is the
+#: ONE mark that separates a HOST'S REFUSAL from a host's own account of a call
+#: that found nothing, and there is no flag beside it — none may be added here,
+#: since `PROTO_VERSION` and both hosts are untouched by this change.
+#:
+#: WHICH HOST CAN REACH THE MARK TODAY. The app host only. Its `download` action
+#: always arms and reports `armed: true`, so a refusal it makes arrives as a
+#: `reason` (§6.2). The extension's `download` command sends NO `reason` at all —
+#: its two returns are `{armed: true, url, files}` (`extension/src/commands/
+#: download.ts`), and the cancellation account beside them is a top-level `note`
+#: this harness does not read — so an extension download refusal cannot reach the
+#: mark and state (b) is app-host-only. The extension's *upload* refusals are the
+#: ones that carry it, and those arrive on a different result payload.
+#:
+#: WHAT KEEPS THIS WORKING. Rewording the app host's `refuse`/`refuseLive`
+#: clauses away from the mark turns every one of its refusals into the
+#: unrecognised branch below: the model is told the host's own words (never the
+#: click-remedy copy) and the row reads `armed_reason`, so the loss is visible to
+#: a reader instead of silent. See `_reason_is_refusal` and §6.2 of
+#: `docs/design/browser-file-transfer.md`.
+REFUSAL_PREFIX = "refused:"
+
+
+def _refusal_clause(reason: str) -> str:
+    """The BARE clause(s) of a refusal, EVERY prefix removed.
+
+    Copy and the audit row both compose from this, so a host that already wrote
+    the prefix into its own sentence cannot make the harness print it twice
+    ("refused: refused: …") or make the row and the sentence disagree about what
+    was said. Every occurrence goes, not only the head's: the app host joins the
+    refusals of one armed call with `"; "` (`downloads.ts::resultOf`), so two
+    refused downloads in one call is a sentence whose SECOND clause also carries
+    the mark — and §10.5 calls this field the clause, not the sentence.
+    """
+    parts = []
+    for part in reason.split("; "):
+        part = part.strip()
+        if part.startswith(REFUSAL_PREFIX):
+            part = part[len(REFUSAL_PREFIX) :].strip()
+        parts.append(part)
+    return "; ".join(parts)
+
+
+def _reason_is_refusal(reason: str) -> bool:
+    """Whether a host's ARMED-path ``reason`` is a refusal, not an account.
+
+    Both arrive as `armed: true` with no files (§6.2), so on this path the words
+    are the only signal there is, and the design gave them a stable one: a
+    refusal is composed with ``REFUSAL_PREFIX`` at its head, and a host
+    describing a call that merely found nothing is not. Reading it that way is
+    what keeps the record's three states apart — an armed host refusal must not
+    be reported as a no-op (the defect this exists for), and a no-op must not be
+    reported as a refusal.
+
+    The test is deliberately the HEAD of the string, which is where the design's
+    own join puts a refusal's mark (`reasons.join("; ")` of clauses that each
+    start with it), and deliberately not a search for the mark anywhere: a
+    sentence that merely mentions a refusal is not one. That leaves a false
+    negative — a host that rewords its refusals — and the answer to it is not a
+    wider parse but the relay in `_browser_download`: an unrecognised non-empty
+    reason is handed to the model in the host's own words and recorded as
+    `armed_reason`, so no reader is ever told the call was a no-op.
+    """
+    return reason.strip().startswith(REFUSAL_PREFIX)
+
+
 async def _browser_download(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -11541,11 +11613,21 @@ async def _browser_download(
     assert result is not None
     call_id = files.new_call_id()
     origin = str(result.get("url", ""))
+    # The host's own account of the call, read once here so both arms below see
+    # the same string — the armed-`true` case is exactly the one that used to
+    # discard it (see `_reason_is_refusal`).
+    reason = str(result.get("reason") or "").strip()
     if not bool(result.get("armed", True)):
         # The host refused to arm. That is a policy answer carried as a result
         # (§6.2 — an extension may not emit an ErrorCode an old daemon would
         # drop), and it is rendered here as the model-facing refusal.
-        reason = str(result.get("reason") or "the host refused to arm a download")
+        #
+        # The fallback covers three host answers, not one: a `reason` that is
+        # ABSENT, one that is whitespace-only (nothing was said, however many
+        # spaces it was said in), and one that is a bare ``refused:`` with no
+        # clause — which would otherwise print "refused: " and record an empty
+        # reason. The armed arm guards its clause the same way, one arm down.
+        clause = _refusal_clause(reason) or "the host refused to arm a download"
         _download_audit(
             call_id=call_id,
             session_id=session_id,
@@ -11554,9 +11636,9 @@ async def _browser_download(
             origin=origin,
             name="",
             verdict="armed_false",
-            reason=reason,
+            reason=clause,
         )
-        return _error(tool_call_id, "browser", f"refused: {reason}")
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {clause}")
 
     reported = {
         str(item.get("name")): item
@@ -11601,6 +11683,74 @@ async def _browser_download(
             "browser",
             "nothing was saved: " + "; ".join(refused_intake) + ".",
         )
+    # The host's words with every copy mark removed. Empty means the host said
+    # nothing the model needs — an absent `reason`, a whitespace-only one, or a
+    # bare ``refused:`` with no clause — and both branches below require one:
+    # there is nothing to render or relay otherwise, and an empty sentence is
+    # exactly what the clause guards exist to prevent.
+    host_clause = _refusal_clause(reason) if reason else ""
+    # A refusal, rather than a host's account of a call that found nothing, is the
+    # reason whose HEAD carries the mark the design composes it with.
+    host_refusal = host_clause if _reason_is_refusal(reason) else ""
+    if not candidates and host_refusal:
+        # The host ARMED the capture and then refused the transfer, and reported
+        # neither files nor an error: its `reason` IS the answer, and the app
+        # host — the one that always arms — answers every refusal this way. The
+        # sentence below is the SAME refusal the pre-arm path renders, from the
+        # same composer, so a refusal reads the same wherever the host stopped.
+        #
+        # Why a verdict of its own rather than `armed_false` or `deny`:
+        # `armed_false` means the host declined to ARM (state (a)); `deny` means a
+        # candidate LANDED and the harness refused it, and its rows always name
+        # the entry they deleted. Neither is this: the host armed, decided, and
+        # nothing was written. `no_download` is the third state — a call where
+        # nothing started and the host said nothing — and folding a refusal into
+        # it is the defect this branch exists to fix.
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_refused",
+            reason=host_refusal,
+        )
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {host_refusal}")
+    if not candidates and host_clause:
+        # The host ARMED, nothing landed, and its `reason` is not the refusal
+        # shape: RELAY it rather than replace it. This is the false-negative half
+        # of keying a decision on words (§6.2), and the only safe answer to it:
+        # the host's own sentence is model-facing copy by construction (§7.4 — the
+        # app host writes its refusals and its no-op sentence for the model), and
+        # replacing it with the harness's canned "no download started … click its
+        # Download control" is exactly the misleading answer this whole change
+        # exists to remove — the same sentence for a reworded refusal as for a
+        # call nobody explained.
+        #
+        # `armed_reason` is its own verdict for the same reason: the audit's
+        # question is "what did the host say, and did we classify it?", and a row
+        # that says `no_download` / "nothing started" about a reason we were
+        # handed would answer it wrongly — the defect, one layer down. With this
+        # value a reworded refusal is VISIBLE to the trail reader (a row carrying
+        # the host's sentence under a verdict that claims nothing) instead of
+        # being swallowed.
+        #
+        # The model gets the sentence UNTOUCHED — an unclassified answer is not
+        # the harness's to rewrite — while the row carries the same words with the
+        # copy's mark removed, which is what every row in this trail records: the
+        # mark belongs to the sentence, the clause to the record (§10.5).
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_reason",
+            reason=host_clause,
+        )
+        return _error(tool_call_id, "browser", reason)
     if not candidates:
         wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
         _download_audit(
