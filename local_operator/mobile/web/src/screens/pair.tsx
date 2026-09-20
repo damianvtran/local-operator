@@ -211,11 +211,9 @@ function humanizePairingError(error: unknown): string {
 export function PairPromptSheet({
 	open,
 	onClose,
-	onPaired,
 }: {
 	open: boolean;
 	onClose: () => void;
-	onPaired?: () => void;
 }) {
 	return (
 		<Sheet open={open} onClose={onClose} title="Pair this phone">
@@ -228,7 +226,6 @@ export function PairPromptSheet({
 				<Button
 					onClick={() => {
 						onClose();
-						onPaired?.();
 						navigate("/pair");
 					}}
 				>
