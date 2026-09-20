@@ -157,7 +157,13 @@ contains an API key, access token, refresh token, or complete stored grant.
   storage provider. The mock test transport is not an end-user provider.
   `configured` means credential presence, **not** a successful connection test.
 - `GET /v1/auth/status`: redacted stored account identities and credential types.
-  Environment credentials are not removable stored accounts.
+  Environment credentials are not removable stored accounts. The result also
+  carries `radient_login` (the tunnel-owning login's state: `ok`,
+  `login_required`, `unknown`) and `tunnel_remedy` (the command that clears it,
+  or `null`), because a row can be `configured` with an unexpired access token
+  and still be refused by the identity provider. Both are `null`/`unknown`-safe
+  and neither performs a network call: this route is polled beside an
+  interactive login form.
 - `POST /v1/auth/login` with `{provider: <method id>}` starts a login operation.
 - `GET /v1/auth/operations/{id}` returns `id`, `provider`, `state`, `message`,
   `auth_url`, `instructions`, `input_required`, `prompt_id`, and `expires_in`.
@@ -184,6 +190,27 @@ provider destinations and HTTP loopback URLs are accepted. Device instructions
 are display/copy content; input-required prompts are paste controls. The
 QwenCloud usage-OAuth method also requires its inference API key; a device grant
 alone is not an inference credential.
+
+## Tunnel state
+
+- `GET /v1/desktop/tunnel`: this machine's remote-access state, read-only, as
+  `lop tunnel status --json` reports it. `result.configured` is false when no
+  tunnel is enrolled on this machine (every other field is then a null/empty
+  placeholder, and the connector state is the literal `not configured`).
+  `result.cloud.source` is always `cached` here: the route answers about THIS
+  machine and never waits on an upstream call, which is also the only kind of
+  answer available when the login or the network is what is broken.
+  `result.connector.state` is one of `parked`, `connected`, `connecting`,
+  `not serving`, `stopped`, `not configured`, `unknown` (`unknown` only when a
+  caller asked not to probe the loopback gateway); `result.login.state` is one
+  of `ok`, `login_required`, `unknown`, where `unknown` means the check could not
+  run and never means "the login is dead". `result.remedy` is the command that
+  clears the condition, or `null` — the remedy is a terminal command, so the UI
+  shows it rather than running it, and this route has no write half.
+
+There is no SSE frame for this. It changes when a person signs in or edits the
+console, so the app polls it on open and refetches when a sign-in it started
+settles; a new frame kind would carry minutes-old news.
 
 ## Settings
 
@@ -1457,6 +1484,7 @@ absent.
 |---|---|---|---|
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+| `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already
