@@ -422,18 +422,31 @@ reads. Named barriers:
   a tree the graph could not parse — and any `.pyi`;
 * **any changed file inside the app BOOT CLOSURE**: `local_operator/cli.py`,
   `local_operator/tui/app.py`, `local_operator/session_factory.py` and everything
-  they transitively import — 443 of the 503 `local_operator/**` modules here. Every
+  they transitively import — 452 of the 512 `local_operator/**` modules here. Every
   test that imports the app reaches those files, which is not a reference-graph
   question at all, so that job runs whole-tree whatever the selection would have
   been;
 * **any unresolved reference the graph is carrying** (see below) — one is enough,
   and it stops the `test`/`tui-e2e` jobs for the whole diff;
 * anything else that is neither such a `.py` nor a `.md` outside those two trees.
+* the trees the GRAPH parses are wider than the trees the suite imports: a gate reads
+  `benchmarks/osworld_v2_adapter/**`, so those files are parsed too (they are
+  `ANALYZED_TREES`, and a change inside the covered trees can break them). Leaving
+  them out made "complete for what this change can break" false for 20 files, 8 of
+  them importers of `local_operator.*` (#1322 QA round 1, Q-1).
 * a selection over **25% of the suite's measured weight** or **50% of its test
   files** (`tests/durations.json` supplies the weights; an unreadable manifest
   holds the file arm to the weight fraction rather than loosening it), or a
   `type-check` file list whose import closure would reach **more than 50% of the
   program** — naming most of the tree is the whole-tree command with extra steps.
+
+**The figures in this section are a measurement, not a property of the tool:** they
+move as the tree moves, so they carry the date they were taken (2026-09-20) and the
+command that takes them again. Every round of this PR re-derived them, and every round
+found the previous round's numbers stale by a few files: 503 `local_operator` modules
+and 576 unresolved sites, then 508 and 597, then **512 and 607** here. Re-derive with
+`python -c "import sys; sys.path.insert(0, 'scripts'); import ci_scope; g = ci_scope.build_import_graph(__import__('pathlib').Path('.')); print(len(g.files), len(g.boot), len(g.unresolved_sites()))"`
+rather than quoting them forward.
 
 **Where it pays, and what the fail-closed rule costs — measured, not assumed.**
 This suite's tests import the assembled app, so **88% of `local_operator/**` is
@@ -444,7 +457,7 @@ by construction. What is left, and what survives the unresolved-reference rule:
 |---|---|---|
 | `lint` | any diff: the three tools over the changed files (per-file by construction, so no selection can be incomplete) | a barrier path stopped the plan, or the diff has no lint input |
 | `type-check` | the changed `.py` files plus every file that transitively depends on them, when the change is outside the boot closure and its import closure stays under 50% of the program | the change is inside the boot closure, the closure arm fires, or the diff touches a path the graph does not cover |
-| `test`, `tui-e2e` | **nothing on this tree today.** The classes are implemented — changed test files, `scripts/**`, modules outside the boot closure — and they narrow the moment nothing is unresolved; measured, the graph carries **576 unresolved references** (447 directory scans + 129 names), **411 of them in files inside the test universe**, so the rule fires for every diff |
+| `test`, `tui-e2e` | **nothing on this tree today.** The classes are implemented — changed test files, `scripts/**`, modules outside the boot closure — and they narrow the moment nothing is unresolved; measured, the graph carries **607 unresolved references** (475 directory scans + 132 names), **423 of them in files inside the test universe**, so the rule fires for every diff |
 
 Two measurements, because the distinction is the whole design:
 
@@ -452,6 +465,23 @@ Two measurements, because the distinction is the whole design:
 |---|---|---|---|
 | `scripts/shard_tests.py` | 1 file | 4 files | whole tree — the tree's own readers scan for it |
 | `local_operator/agents.py` (inside the boot closure) | 1 file | whole tree | whole tree (boot closure) |
+
+**What this buys TODAY, stated plainly: the barrier and per-file lint/format
+scoping — not a narrower pytest run.** `test` and `tui-e2e` are whole-tree for every
+diff on this tree (607 unresolved sites arm them out), so the file-level pytest
+selection is a mechanism that is INERT until that count drops; the review round could
+not construct a diff that narrows either job. What is live is: the barrier itself
+(measured load-bearing — neutralising `unresolved_sites` lets a real green-while-red
+through, `test: commands=[]`, rc 0, while the probes are `1 failed, 1 error`), the
+`type-check` closure narrowing, and `lint` over the changed files, where the win is
+the whole gate's file count (measured on this fleet: flake8 49 s + black 137 s +
+isort 25 s whole-tree against 1 s + 14 s + 1 s over a two-file change). The realised
+`type-check` win is the large one and it is measured end to end: **838.5 s whole-tree
+against 16.0 s scoped** on a change whose file list is 14 files (QA round 1's
+measurement, on this fleet). The graph build is the price of admission for any
+non-barrier diff — **55-93 s** here for ~1600 files, which is why `lint` is decided
+before the graph is built at all and why the report prints the graph's own timing. Do
+not read the class table below as a claim that pytest narrows here.
 
 **The unresolved-reference rule is unconditional, and that is deliberate.** A
 reference the parser can see and cannot place — a computed name
@@ -491,10 +521,13 @@ subtree is selected instead, which is the scope pytest itself gives it.
 **A glob is a reader, and reads have the same edge.**
 `tests/unit/tui/test_visual_gallery.py` iterates `(ROOT / "scripts").glob("*.py")`
 and `tests/unit/tui/test_visual_capture.py` the same directory through a
-variable, so a one-token change to any of the 197 covered `scripts/*.py` has to
-select both — before the scan edge it selected NOTHING and the local run printed
-`all selected gates passed` while CI's `test` job failed (QA round 2, Q-1; the
-variable-held reader was round 3's blocker, printed but not armed).
+variable, so in the REFERENCE MODEL a one-token change to any of the 197 covered
+`scripts/*.py` selects both — before the scan edge it selected NOTHING and the
+local run printed `all selected gates passed` while CI's `test` job failed (QA
+round 2, Q-1; the variable-held reader was round 3's blocker, printed but not
+armed). That is what the model does; the shipped plan runs the pytest jobs
+whole-tree here (the barrier row above), so today it is the model's completeness
+that this paragraph is about, not the command you get.
 `glob`/`rglob`/`iterdir`/`listdir`/`scandir`/`walk` are therefore read edges.
 The scanned directory is the one the receiver's expression denotes — path
 literals, `__file__`, `.parent`, `.parents[N]`, `.resolve()`, and up to four
