@@ -1270,8 +1270,10 @@ def _plan_shape(node: Any) -> tuple[bool, int] | None:
 
     ``todos`` is stamped onto the row by :func:`_with_lineage` out of
     ``TODO_STORE``, not read off the node, so no node field covers it. The phase
-    count is what changes when the plan moves; the contents are left to the row,
-    because dumping every phase per tick is the cost the memo exists to remove.
+    count is what THIS keys; the contents are left to the row, because dumping
+    every phase per tick is the cost the memo exists to remove — and the
+    consequence is that a same-count edit to a plan does not move the mark
+    (review round 3, T1).
     """
     if node is None:
         return None
@@ -1725,8 +1727,6 @@ _RELEASED_ROW_FIELDS = (
     "status",
     "queued",
     "label",
-    "agent",
-    "intent",
     "error_text",
     "result_text",
     "latest_details",
@@ -1846,7 +1846,12 @@ class _ReleasedRows:
 
     @staticmethod
     def _fingerprint(job: Any, comms: Any) -> tuple[Any, ...]:
-        """Everything a released row is built FROM, so a change cannot be missed.
+        """Every mutable input of a released row, so a change cannot be missed.
+
+        THE CLAIM IS "EVERY WRITER-REACHABLE INPUT", NOT "EVERY FIELD", and the
+        three boundaries below are the difference (review round 3, T1 and T2 —
+        earlier revisions of this docstring said "everything" in three separate
+        sentences while the body said otherwise two paragraphs down).
 
         The job half is the terminal facts :data:`_RELEASED_ROW_FIELDS` projects
         that HAVE A WRITER, plus a cheap change discriminator for each
@@ -1883,8 +1888,20 @@ class _ReleasedRows:
           is O(items) per tick. A same-count edit to a plan therefore does not
           move the mark.
 
-        Both are content-blind boundaries on cost grounds, taken deliberately.
-        Everything else a writer can reach is keyed.
+        * the CONTENTS of three containers the row projects by value while the
+          key covers only their COUNT — ``descendant_usage`` components,
+          ``usage``'s sub-fields beyond the six counters above, and
+          ``launch_prompts`` text. A same-count replacement of a descendant list
+          (which is what ``detach_child_manager`` installs — a fresh deep copy,
+          so the count is not guaranteed to move) or a mutation of an unkeyed
+          ``Usage`` sub-field therefore does not move the mark. Keying them is
+          O(items) or O(fields) per released job per tick, which is the cost this
+          class exists to remove; the writers all run inside the child's own
+          run, so none lands after the window.
+
+        All three boundaries are content-blind on cost grounds, taken
+        deliberately AND STATED. Everything else a writer can reach after the
+        runner returns is keyed.
         """
         node = None
         try:
