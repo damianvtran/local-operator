@@ -202,6 +202,8 @@ from local_operator.tui.events import (
     HistoryRowsSettled,
     NoticePosted,
     PeerMessageDelivered,
+    ReasoningDelta,
+    ReasoningEnd,
     RetryEnded,
     RetryStarted,
     SessionEvent,
@@ -306,6 +308,7 @@ from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
 )
+from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
@@ -3792,6 +3795,11 @@ class OperatorApp(App[None]):
         #: site that resets ``_turn_open`` resets this too.
         self._turn_notified = False
         self._streaming_block: AssistantBlock | None = None
+        #: The live reasoning phase's block, mounted on the first reasoning
+        #: fragment and retired when the answer starts (see
+        #: ``widgets/reasoning.py``). One per model call: a tool-loop turn can
+        #: reason before each of its calls, and each phase is its own block.
+        self._reasoning_block: ReasoningBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
         # `_tool_cards`, which holds calls that are RUNNING: a composing row has
@@ -41215,14 +41223,79 @@ class OperatorApp(App[None]):
             self._refresh_working_activity()
         return block
 
+    def _ensure_reasoning_block(self) -> ReasoningBlock:
+        """The block for the reasoning being streamed, mounted on first use.
+
+        Mounted on the FIRST fragment rather than at ``message_start``, and for
+        the reason :meth:`on_assistant_message_start` records: a call that never
+        reasons must not open a row it will never fill. Most turns do reason
+        (86.5% of deepseek-flash turns in the operator's ledger), so this is the
+        common path rather than the exception -- the deferral costs nothing and
+        the alternative spends a header row on every non-reasoning model.
+        """
+        block = self._reasoning_block
+        if block is None:
+            block = ReasoningBlock()
+            self._reasoning_block = block
+            self._append_block(block)
+            self._refresh_working_activity()
+        return block
+
+    def _retire_reasoning_block(self) -> None:
+        """Close the live reasoning phase, if any, and let go of it.
+
+        Called when the answer starts and on every terminal path. The block is
+        COLLAPSED rather than removed or left expanded: removing it would delete
+        rows from under the reader's cursor, and leaving it was one ~7-row block
+        per model call with no way to dismiss them (UX review round 1, U1). It
+        keeps its header row, which says this call reasoned. Letting go of the
+        reference is what lets the NEXT model call of the same turn open a fresh
+        phase -- ``SPACING_TRANSIENT`` means the retired one takes no gap.
+        """
+        block = self._reasoning_block
+        if block is None:
+            return
+        self._reasoning_block = None
+        block.retire()
+        self._refresh_working_activity()
+
+    def on_reasoning_delta(self, message: ReasoningDelta) -> None:
+        """The model's private reasoning, streamed dim above the answer it will write."""
+        # Whitespace-only text is not reasoning either: mounting on it paints a
+        # labelled header with nothing under it, which design round 1 caught as
+        # a frame (D5). `on_assistant_delta`'s guard is the same shape.
+        if not message.text.strip():
+            return
+        # `display.reasoning` is this channel's escape hatch (UX review round 1,
+        # U1). Read at MOUNT, not cached on the app, so a write from `/settings`
+        # applies to the next phase; a mid-session flip is forward-only, like
+        # `display.narration`, because re-projecting mounted blocks in one
+        # synchronous pass is what paints a blank frame.
+        if not settings_get("display.reasoning", DEFAULT_REASONING):
+            return
+        self._ensure_reasoning_block().update_text(message.text)
+
+    def on_reasoning_end(self, message: ReasoningEnd) -> None:
+        """The phase is over -- the model stopped thinking for this call."""
+        self._retire_reasoning_block()
+
     def on_assistant_delta(self, message: AssistantDelta) -> None:
         # Empty deltas are not text: flushing one would mount a block that then
         # sits blank until real content lands, which is the hole this avoids.
         if not message.text:
             return
+        # The answer has started, so the thinking is over: retire the reasoning
+        # phase before the assistant block mounts, so the two rows are ordered
+        # thinking-then-answer in the transcript even when both updates land in
+        # the same frame.
+        self._retire_reasoning_block()
         self._ensure_streaming_block().update_text(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
+        # A tool-only call ends its message with no prose at all, so this is the
+        # path that retires a reasoning phase for a turn that reasoned and then
+        # called a tool. Idempotent: a `reasoning_end` already retired it.
+        self._retire_reasoning_block()
         # An empty authoritative text is not an instruction to erase what
         # streamed. Adopting it unconditionally destroyed the prose the deltas
         # had already painted and left an empty block mounted in its place; the

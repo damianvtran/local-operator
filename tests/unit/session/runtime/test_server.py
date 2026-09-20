@@ -3215,6 +3215,20 @@ def _compose_frame(call_id: str, argument_bytes: int, intent: str | None = None)
     }
 
 
+def _reasoning_frame(message_id: str, delta: str) -> dict[str, Any]:
+    return {
+        "op": "event",
+        "data": {"type": "reasoning_delta", "message_id": message_id, "delta": delta},
+    }
+
+
+def _text_frame(message_id: str, delta: str) -> dict[str, Any]:
+    return {
+        "op": "event",
+        "data": {"type": "message_update", "message": {"id": message_id}, "delta": delta},
+    }
+
+
 def _stalled_conn() -> Any:
     """A connection whose reader never drains, i.e. the case the bound is for."""
     from local_operator.session.runtime.server import _EVENT_QUEUE_MAX, _ClientConn
@@ -3294,6 +3308,94 @@ async def test_a_stalled_viewer_survives_a_long_multi_call_dictation() -> None:
     # against a fold that kept the OLDEST frame and discarded every update.
     newest = {f"call_{call}": max(i * 10 for i in range(300) if i % 3 == call) for call in range(3)}
     assert {k: v[0] for k, v in per_call.items()} == newest
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_viewer_survives_a_long_reasoning_stream() -> None:
+    """Reasoning fragments must fold, and fold LOSSLESSLY, or the viewer drops.
+
+    Reasoning arrives once per token, so it is the largest single frame family a
+    long-thinking turn produces: without the fold, a viewer that stalls for the
+    ~4 s the 64-frame bound allows is dropped mid-think and its re-attach shows a
+    thinking block that starts in the middle of a sentence. The property asserted
+    is the one a fold must not trade away: the retained frame carries EVERY
+    fragment, in arrival order, so the viewer paints the same text a live one
+    would have painted.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    fragments = [f"thought-{index} " for index in range(300)]
+    for fragment in fragments:
+        server._enqueue_client_frame(conn, _reasoning_frame("m1", fragment))
+
+    assert server.dropped == [], f"stalled viewer was dropped: {server.dropped}"
+    server._compact_event_queue(cast(Any, conn))
+
+    queued = [
+        frame
+        for frame in conn.event_queue._queue
+        if (frame.get("data") or {}).get("type") == "reasoning_delta"
+    ]
+    assert len(queued) == 1, f"kept {len(queued)} reasoning frames, expected 1"
+    assert queued[0]["data"]["delta"] == "".join(fragments)
+    assert queued[0]["data"]["message_id"] == "m1"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_never_folds_into_the_answer_text() -> None:
+    """The two delta families are adjacent and must still not merge.
+
+    A reasoning fragment and an answer fragment for the SAME message arrive
+    interleaved, so a key that named only the stream would fold them together and
+    the viewer would paint the model's private thinking inside its answer -- the
+    transcript corruption ``ReasoningDeltaEvent`` exists to prevent, and
+    invisible to every other test because both frames pass the size guard.
+    """
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    server._enqueue_client_frame(conn, _text_frame("m1", "the answer"))
+    server._enqueue_client_frame(conn, _reasoning_frame("m1", "the reasoning"))
+    server._enqueue_client_frame(conn, _reasoning_frame("m1", " continues"))
+    server._enqueue_client_frame(conn, _text_frame("m1", " in full"))
+
+    assert server.dropped == []
+    server._compact_event_queue(cast(Any, conn))
+
+    kinds = [(f["data"]["type"], f["data"]["delta"]) for f in conn.event_queue._queue]
+    assert kinds == [
+        ("message_update", "the answer"),
+        ("reasoning_delta", "the reasoning continues"),
+        ("message_update", " in full"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_long_reasoning_stream_still_emits_a_readable_frame() -> None:
+    """Delta-sized byte accounting has to hold for the reasoning family too.
+
+    The merge measures the DELTA and adds it to the prior frame's own size rather
+    than re-serializing the merged frame. A reasoning frame has no accumulated
+    ``message`` to re-dump, so the arithmetic is the same and the output must
+    still be a line the reader can accept -- asserted against a stream that would
+    exceed the limit if the accounting were per-frame rather than per-delta.
+    """
+    from local_operator.session.runtime.server import _MAX_LINE_BYTES
+
+    server = _NeverDrains()
+    conn = _stalled_conn()
+    server._clients[id(conn.writer)] = conn
+
+    for _ in range(400):
+        server._enqueue_client_frame(conn, _reasoning_frame("m1", "x" * 4096))
+
+    assert server.dropped == []
+    for frame in conn.event_queue._queue:
+        size = len(json.dumps(frame).encode()) + 1
+        assert size <= _MAX_LINE_BYTES, f"fold emitted an unreadable {size}-byte frame"
 
 
 @pytest.mark.asyncio

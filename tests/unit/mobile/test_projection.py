@@ -24,6 +24,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     NoticeEvent,
+    ReasoningDeltaEvent,
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
@@ -93,6 +94,84 @@ def test_streaming_assistant_row_updates_in_place() -> None:
     assert rows[0].text == "Hello"
     assert rows[0].final is True
     assert fold.projection.streaming is False
+
+
+def test_reasoning_streams_onto_one_row_above_the_answer() -> None:
+    """Reasoning gets ONE row per model call, ordered above the answer.
+
+    Three properties, each of which a simpler fold would break: the fragments
+    accumulate onto a single row rather than one row per token (the phone
+    re-renders the whole projection on every repaint); the row sits ABOVE the
+    assistant row the same call opened at ``message_start`` (so the answer does
+    not materialise above the thinking that produced it); and the row is sealed
+    at message end so the NEXT call's phase opens its own.
+    """
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    message = Message.assistant()
+    fold.fold_event(MessageStartEvent(message=message))
+    fold.fold_event(ReasoningDeltaEvent(message_id=message.id, delta="weigh"))
+    fold.fold_event(ReasoningDeltaEvent(message_id=message.id, delta="ing"))
+    fold.fold_event(MessageUpdateEvent(message=message, delta="the answer"))
+
+    reasoning_rows = [e for e in fold.projection.transcript if e.kind == "reasoning"]
+    assert len(reasoning_rows) == 1
+    assert reasoning_rows[0].text == "weighing"
+    assert reasoning_rows[0].final is False
+    kinds = [e.kind for e in fold.projection.transcript]
+    assert kinds.index("reasoning") < kinds.index("assistant")
+
+    fold.fold_event(
+        MessageEndEvent(
+            message=message.model_copy(update={"content": [TextContent(text="the answer")]})
+        )
+    )
+    assert reasoning_rows[0].final is True
+
+    # A second model call in the same turn reasons on a row of its own.
+    second = Message.assistant()
+    fold.fold_event(MessageStartEvent(message=second))
+    fold.fold_event(ReasoningDeltaEvent(message_id=second.id, delta="again"))
+    assert [e.text for e in fold.projection.transcript if e.kind == "reasoning"] == [
+        "weighing",
+        "again",
+    ]
+
+
+def test_reasoning_row_keeps_the_newest_words_and_never_becomes_the_answer() -> None:
+    """Bounded to the TAIL, and it never touches the assistant row's text.
+
+    The bound is a wire cost, not taste: this row rides the whole projection on
+    every repaint, so an unbounded thinking phase would re-send its entire
+    thought per frame. The tail rather than the head because reasoning streams --
+    what a reader wants is what the model is thinking NOW. And the assistant row
+    must stay exactly the answer: folding the private reasoning into it is the
+    transcript corruption ``ReasoningDeltaEvent`` forbids.
+    """
+    from local_operator.mobile.projection import REASONING_PREVIEW_CHARS
+
+    fold = make_fold()
+    fold.fold_event(AgentStartEvent(generation=1))
+    message = Message.assistant()
+    fold.fold_event(MessageStartEvent(message=message))
+    fold.fold_event(ReasoningDeltaEvent(message_id=message.id, delta="HEAD" + "x" * 2000))
+    fold.fold_event(MessageUpdateEvent(message=message, delta="the answer"))
+    fold.fold_event(
+        MessageEndEvent(
+            message=message.model_copy(update={"content": [TextContent(text="the answer")]})
+        )
+    )
+
+    reasoning = next(e for e in fold.projection.transcript if e.kind == "reasoning")
+    assert len(reasoning.text) == REASONING_PREVIEW_CHARS
+    assert reasoning.text.startswith("…")
+    assert "HEAD" not in reasoning.text
+    # Not a transport truncation: the bound is this row's own, and there is no
+    # fuller row to page. ``text_complete`` keeps its documented meaning (a
+    # pageable PREFIX), so it stays true.
+    assert reasoning.text_complete is True
+    assistant = next(e for e in fold.projection.transcript if e.kind == "assistant")
+    assert assistant.text == "the answer"
 
 
 def test_tool_row_lifecycle_one_line_with_diff_counts() -> None:
