@@ -1,5 +1,20 @@
 # Time to first token, September 2026
 
+> **This report describes the single-process benchmark that measured it, and that
+> script no longer exists in that shape.** `scripts/bench_ttft.py` was replaced by a
+> per-channel harness (submitted as a PR on the TTFT ticket): five channels driven
+> through their real surfaces, warm and cold, at 1/4/8 concurrent turns, p50/p95/p99
+> over >=7 runs, with a first-PAINT metric split into first-reasoning and
+> first-text, and a budget gate scoped to the cells whose latency this repository
+> owns end to end. Run it with
+> `.venv/bin/python scripts/bench_ttft.py --channels tui,desktop,exec,mobile,sse-jobs`
+> (see the module docstring for `--provider`, `--runs` and `--concurrency`).
+>
+> The numbers below are still the honest record of what was measured in September
+> and what the change was worth; they are NOT reproducible from this checkout,
+> because the instrument that produced them has been replaced. Read them as
+> history, and take new numbers with the harness.
+
 The report was "the first message takes a while to start streaming, and it is
 much worse in the desktop app than in the TUI". This is what was measured, what
 was changed, and what the change is worth.

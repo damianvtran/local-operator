@@ -153,6 +153,26 @@ class IsolatedRun:
             }
         self.config_dir.mkdir(parents=True, exist_ok=True)
         ConfigManager(config_dir=self.config_dir).update_config(values)
+        self.prime_auth_store()
+
+    def prime_auth_store(self) -> None:
+        """Create ``auth.db`` once, serially, before anything runs concurrently.
+
+        THIS IS THE HARNESS WORKING AROUND ITS OWN SHAPE, not a product change (QA
+        round 1, Q1). ``AuthStore.__init__`` opens the file and runs
+        ``PRAGMA journal_mode=WAL``, and that pragma is a WRITE: N sessions born at
+        the same moment on a brand-new ``auth.db`` each try to switch the journal
+        mode, and the losers raise ``sqlite3.OperationalError: database is locked``
+        (``auth_store.py:405``, reached from ``providers/local.py:150``). In the app
+        there is one store, created long before any turn; in a bench the sessions
+        are born together, which is why this is the bench's problem to avoid rather
+        than the product's to fix. Constructing it once here — while nothing else is
+        running, in the parent, before any child exists — leaves every later
+        construction with a pragma that is already satisfied.
+        """
+        from local_operator.providers.auth_store import AuthStore
+
+        AuthStore()
 
     def activate(self) -> None:
         """Point this process at the root; remember what to restore."""
