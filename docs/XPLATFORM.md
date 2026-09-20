@@ -144,21 +144,42 @@ enabled and active.
   daemon serves and a frame renders; it does not prove a UI reads well on that
   OS, and it does not exercise the flows that need a provider, a network or a
   logged-in desktop.
-* **The probe's guard classifier is POLARITY-BLIND, and that is a limit of the
-  instrument rather than a fact about the code it reports on.** `xplat_probe`'s
-  POSIX-attribute audit (`_posix_attribute_audit`) asks whether any enclosing node
-  is a `try:`, an `if` whose test mentions the platform, or a ternary -- and
-  answers WITHOUT reading the polarity of that test. So `if not is_windows():
-  use(fcntl)` reads as guarded, and so does `if is_windows(): use(fcntl)`, which
-  guards nothing of the kind. It over-reports rather than under-reports, which is
-  the safe direction for a gap detector, but it means an entry this probe lists as
-  *guarded* is not evidence that the guard holds.
+* **The probe's POSIX-attribute audit credits guards it has not understood, and
+  the direction it gets that wrong in is the UNSAFE one.** `_scan_posix_uses`
+  (behind the `static.posix_attributes` row) marks an attribute guarded when an
+  enclosing node is a `try:`, an `if` whose test merely MENTIONS the platform
+  (`sys.platform`, `os.name`, `platform.system`, a `_PLATFORM`-style constant) or
+  a capability probe (`hasattr`), and when a platform question that TERMINATES a
+  block guards what follows it in that block. Two things follow from that being
+  syntactic:
 
-  There is no live instance today: a reviewer reproduced the blindness
-  deliberately and found no call site it currently mislabels. Fixing it honestly
-  means reading the constant's own polarity rather than treating every negation
-  as a guard, which is a change to the instrument with probes of its own -- so it
-  is recorded here rather than half-fixed in a hurry.
+  - **Polarity is not read at all.** `if is_windows(): os.getuid()` and
+    `if not is_windows(): os.getuid()` are credited identically, and only one of
+    them guards anything.
+  - **Nor is reach.** The terminating-block rule credits a guard to statements
+    it does not actually cover whenever the platform question is CONJUNCTIVE.
+    There IS a live instance, and finding it took enumerating all 67 guarded hits
+    and filtering for guards that are neither capability probes nor
+    POSIX-proving: `local_operator/tools/builtin.py`'s `os.getpgid` -- a
+    fatal-on-Windows target -- is reported guarded because its block opens with
+    `if is_windows() and shell == BASH_SHELL_FALLBACK: raise ...`, which leaves
+    the block only when Windows ALSO lacks a real bash, so with Git for Windows'
+    bash installed the line runs. It is harmless in practice for a reason the
+    audit cannot see: it sits inside `contextlib.suppress(Exception)`. The
+    shipped battery therefore prints `0 fatal` with that hit inside the 67
+    guarded.
+
+  **The error runs the wrong way, which is why this is recorded and not left to
+  the code's docstring.** That docstring says anything unclassified counts as
+  unguarded and so "over-reports rather than under-reports -- the right direction
+  for a battery whose job is to find these". That is true of the DEFAULT. It is
+  the opposite of what this limit does: a guard falsely credited REMOVES a hit
+  from `fatal` and from `warn_leads`, so the blindness under-reports -- the one
+  direction a gap detector must never fail in.
+
+  No honest small fix: reading the constant's own polarity AND the real reach of
+  the guard is a change to the instrument with probes of its own.
+
 * **The unmeasured Windows corners are named, not implied.** Task Scheduler
   placement, DPAPI placement, the process-group reaper and the terminal driver
   are all "contract" or "gap" rows above for the same reason: there is no
