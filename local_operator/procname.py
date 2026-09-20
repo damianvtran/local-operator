@@ -145,6 +145,8 @@ import os
 import sys
 from pathlib import Path
 
+from local_operator import procstate
+
 logger = logging.getLogger(__name__)
 
 #: The display name users see in Activity Monitor and ``ps -o ucomm``.
@@ -465,19 +467,29 @@ def _sweep_orphan_temps(directory: Path, prefix: str) -> None:
 
     Only entries whose embedded pid is no longer alive are removed, so a plant
     running concurrently in another worktree is never disturbed.
+
+    The liveness question goes through :func:`procstate.pid_alive` and NEVER
+    through ``os.kill(pid, 0)``. That call is a liveness PROBE on POSIX and
+    TERMINATE on Windows — CPython's ``os_kill_impl`` ends in
+    ``TerminateProcess`` for any signal that is not ``CTRL_C_EVENT`` /
+    ``CTRL_BREAK_EVENT`` — so the sweep would kill whichever live process
+    happened to match a stale entry's embedded pid and then read the
+    successful kill as "still running", keeping the entry. Housekeeping must
+    not be able to do that, and this is the same shared probe the rest of the
+    package was moved onto.
     """
     try:
         for entry in directory.glob(f".{prefix}.*.tmp"):
             pid_text = entry.name[len(prefix) + 2 : -4]
             if not pid_text.isdigit():
                 continue
-            try:
-                os.kill(int(pid_text), 0)
-                continue  # still running: not ours to clean
-            except ProcessLookupError:
-                pass
-            except OSError:
-                continue  # EPERM: alive but another user's — leave it
+            # POSIX semantics preserved exactly: a gone pid is False and is
+            # swept, while EPERM (alive, another user's) and an unanswerable
+            # probe both fail CLOSED to "alive" — ``pid_alive`` is
+            # ``pid_liveness(pid) is not False`` — which leaves the entry
+            # alone rather than racing somebody else's plant.
+            if procstate.pid_alive(int(pid_text)):
+                continue  # still running, or unprovable: not ours to clean
             try:
                 entry.unlink()
             except OSError:

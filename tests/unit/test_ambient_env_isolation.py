@@ -54,6 +54,30 @@ _HARMLESS: dict[str, str] = {
     "XDG_STATE_HOME": "log dir root; tests redirect HOME and the log dir under it",
     "LOG_LEVEL": "verbosity only",
     "ANONYMIZED_TELEMETRY": "set to 0 for chromadb; never read back",
+    # -- the current user's identity and Windows path plumbing --------------
+    # Read by `supervisors.real_home()` to answer "what is this machine's real
+    # home?" on Windows. NOT deleted by the suite, and that is deliberate:
+    # `isolate_environment` REDIRECTS it to a per-test scratch home beside HOME
+    # (tests/conftest.py), which is stronger than scrubbing — the profile
+    # `real_home()` compares against IS the sandbox one, which is what makes
+    # `unit_is_addressable`/`config_lives_in_real_home` answer about the sandbox
+    # rather than the operator. Listing it in `_AMBIENT_VARS` would instead
+    # DELETE that redirected value and make `real_home()` answer None on
+    # Windows, turning every installer guard into "not addressable" and refusing
+    # the very paths a Windows test means to exercise.
+    "USERPROFILE": "Windows profile root; redirected to a scratch home, never deleted",
+    # `supervisors.current_user_id()` (the Task Scheduler logon trigger) and
+    # `mobile.auth._account()` (the portal's account key) both name the PERSON,
+    # not a resource a test can damage. The trigger is best-effort by design: an
+    # unqualified id already falls back to the creating user, so an inherited
+    # value changes which principal a task NAMES, and the task arm refuses a
+    # store outside the real profile long before it can register one.
+    "USERNAME": "current-user identity for the task logon trigger / portal account key",
+    "USERDOMAIN": "current-user domain, same as USERNAME; best-effort, falls back to the creator",
+    # `settings_io._looks_executable` on Windows: does a bare path resolve to a
+    # program? Binary lookup, exactly like PATH above, with the standard list as
+    # its fallback when unset.
+    "PATHEXT": "Windows executable-extension list for a path probe; binary lookup, like PATH",
     # -- terminal capability probes (read-only, cosmetic) --------------------
     "TERM": "colour/capability probe; tests pin it themselves",
     "COLORTERM": "colour-capability probe; reported by /info, names no machine resource",

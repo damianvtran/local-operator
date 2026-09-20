@@ -2120,6 +2120,117 @@ def test_the_windows_input_set_covers_what_that_job_loads() -> None:
     assert scope.classify(["tests/unit/test_ci_hygiene.py"])["windows"] is False
 
 
+def test_the_xplat_input_set_covers_what_the_battery_reads() -> None:
+    """R4. The two probe legs read more than the battery script itself.
+
+    `scripts/xplat_probe.py` is only half of the job's input: the `tui.boot`
+    probe's `--driver tui` child imports `scripts.probe_isolation`,
+    `scripts.visual_capture` and — this is the one a path-shaped guess gets
+    wrong — `tests.unit.tui.test_app_pilot`, the fake session the TUI's own
+    tests are written against. So a change to any of the three changes what the
+    probe measures, and a predicate that names only `scripts/xplat*.py` would
+    skip both legs on exactly the PR that changed the probe's own machinery.
+
+    Both directions are pinned, because the failure modes are opposite: the
+    package and the app double must SET the flag (a flag narrower than the
+    job's real inputs), and an unrelated script or test file must NOT (a flag
+    widened to `scripts/**` or `tests/**` would put a Windows runner and a full
+    battery on every one of those diffs).
+
+    Mutations that must fail this: drop `scripts/visual_capture.py` or
+    `tests/unit/tui/test_app_pilot.py` from the input sets; add `scripts/**` or
+    `tests/**` to the predicate.
+    """
+    scope = _scope()
+
+    # The premise, read from the probe rather than assumed: if the driver stops
+    # importing either script or the app double, this set can shrink.
+    probe = (REPO / "scripts" / "xplat_probe.py").read_text()
+    for imported in ("scripts.probe_isolation", "scripts.visual_capture"):
+        assert imported in probe, (
+            f"scripts/xplat_probe.py no longer imports {imported}; that name can "
+            "leave XPLAT_SCRIPT_INPUTS, and this assertion is why it must be revisited"
+        )
+    loaded = (
+        "local_operator/tui/app.py",
+        "scripts/xplat_probe.py",
+        "scripts/xplat_report.py",
+        "scripts/xplat/Dockerfile.probe",
+        "scripts/probe_isolation.py",
+        "scripts/visual_capture.py",
+        "pyproject.toml",
+        "tests/unit/tui/test_app_pilot.py",
+        "tests/unit/tui/__init__.py",
+    )
+    for path in loaded:
+        assert (REPO / path).is_file(), f"{path} is gone; this case is stale"
+        assert scope.classify([path])["xplat"] is True, (
+            f"a {path} change would skip the xplat probe legs, which read it "
+            "(the battery walks and imports the package, and its TUI driver "
+            "imports the test suite's app double)"
+        )
+
+    plan = scope.job_plan(scope.classify(["scripts/xplat_probe.py"]))
+    assert plan["xplat-probe-linux"] == "run" and plan["xplat-probe-windows"] == "run", (
+        "a change to the battery itself did not select both probe legs: " f"{plan!r}"
+    )
+
+    # …and the deliberate non-widening, in both directions.
+    other_script = scope.classify(["scripts/shard_tests.py"])
+    assert other_script["xplat"] is False, (
+        "the `xplat` predicate was widened to all of scripts/**; a script no "
+        "probe reads now pays for a Windows runner and a full battery"
+    )
+    assert scope.classify(["tests/unit/test_ci_hygiene.py"])["xplat"] is False, (
+        "the `xplat` predicate was widened to all of tests/**; the apps double "
+        "is a curated input, not the whole suite"
+    )
+    assert scope.classify(["docs/store/release-record.md"])["xplat"] is False
+
+
+def test_a_local_run_does_not_run_a_shared_command_twice(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The two probe legs share ONE local spelling, so it runs once.
+
+    Both legs run the battery against whatever host they are handed, and a
+    developer's machine is a single host — so the pair's local command is
+    identical, and the battery takes minutes. Running it once per leg would
+    double the slowest gate in a local run to produce the same reading twice.
+
+    Printing nothing for the second job would be the worse fix: a selected job
+    with no output reads as a job that ran nothing, which is exactly the
+    "a skipped job is a claim" failure this module exists to prevent. So the
+    suppression line is part of the contract, not an implementation detail.
+
+    Mutation that must fail this: drop the dedup (two calls), or drop the line
+    that names the job whose command was reused (only one banner printed).
+    """
+    scope = _scope()
+    assert scope.JOB_COMMANDS["xplat-probe-linux"] == scope.JOB_COMMANDS["xplat-probe-windows"], (
+        "the two probe legs no longer share a local spelling, which is the fact "
+        "the dedup below is pinned to"
+    )
+    calls: list[str] = []
+
+    class _Done:
+        returncode = 0
+
+    def fake_run(command: str, **kwargs: object) -> _Done:
+        calls.append(command)
+        return _Done()
+
+    monkeypatch.setattr(scope.subprocess, "run", fake_run)
+    assert scope.run_jobs(["xplat-probe-linux", "xplat-probe-windows"], REPO) == 0
+    assert calls == [
+        scope.JOB_COMMANDS["xplat-probe-linux"][0]
+    ], f"a shared local command ran {len(calls)} times: {calls!r}"
+    printed = capsys.readouterr().out
+    for job in ("xplat-probe-linux", "xplat-probe-windows"):
+        assert f"=== {job}:" in printed, f"{job} was selected but never mentioned: {printed!r}"
+    assert "not re-run" in printed, printed
+
+
 def test_an_explicit_root_is_authoritative_for_base_resolution(tmp_path: Path) -> None:
     """F2. `--root` must decide the repository for BASE resolution too.
 
