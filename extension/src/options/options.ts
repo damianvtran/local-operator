@@ -186,18 +186,74 @@ const consentState = document.getElementById("consent-state") as HTMLParagraphEl
  * for the notices that need an ACTION (a grant refused, a grant taken away, a
  * dialog still unanswered): same place, same sentence structure, visibly the one to
  * read first.
+ *
+ * Painting also repaints the STATE LINE, because the two would otherwise say the
+ * same thing in the same breath (round-2 D8): the missing-permission notice ends
+ * "so downloads are off" and the state line under it opened "Downloads and uploads
+ * are both off…", eight pixels apart. The state line now defers to whichever notice
+ * is already explaining a capability, and speaks only to what is left.
  */
 function notice(
   target: HTMLParagraphElement,
   message: string,
   kind: "info" | "attention" = "info",
+  reveal = false,
 ): void {
   target.textContent = message;
   target.classList.toggle("hidden", message === "");
   target.classList.toggle("consent-note--attention", kind === "attention" && message !== "");
+  paintState();
+  // BRING IT INTO VIEW (round-2 U1). Measured before this: at 760x520 the sentence
+  // sat at viewport y=530-587 in a 520 px viewport and at 420x700 at y=592-688, so a
+  // user who had scrolled far enough to press the switch saw the knob flick back
+  // with nothing readable saying why. `scrollIntoView` changes the SCROLL OFFSET
+  // only — the two switch rows keep their document positions, which is the property
+  // D4 measured and which every reflowing fix (a reserved-height slot above the
+  // rows, a notice between them) would have destroyed. A CSS `sticky` block was tried
+  // first and rejected on measurement: it pinned the block at 900x620 and 420x700 but
+  // left it at y=530 in a 520 px viewport, i.e. it did not fix the case that matters.
+  //
+  // `reveal` is false for the load-time repair: a page that scrolls itself as it
+  // opens is a page that moves under the user's hands, and that paint happens on
+  // load rather than on an action.
+  if (message && reveal) {
+    target.scrollIntoView({ block: "nearest" });
+  }
 }
 
-/** Paint both switches (and their notices) from live state. */
+/** The state of both switches, in words, once each.
+ *
+ * Reads the two CHECKBOXES rather than re-reading storage: they are the authority
+ * `renderConsent` last painted, and repainting a notice must not become a storage
+ * round trip. */
+function paintState(): void {
+  const downloadsOn = allowDownloads.checked;
+  const uploadsOn = allowUploads.checked;
+  // "Explained" means a notice for that capability is on screen right now, so its
+  // own sentence already says it is off and why.
+  const downloadsExplained = downloadsNotice.textContent !== "";
+  const uploadsExplained = uploadsNotice.textContent !== "";
+  if (downloadsOn && uploadsOn) {
+    consentState.textContent = "Downloads and uploads are both on for this browser.";
+  } else if (downloadsOn && !uploadsExplained) {
+    consentState.textContent = "Downloads are on. Uploads are off.";
+  } else if (uploadsOn && !downloadsExplained) {
+    consentState.textContent = "Uploads are on. Downloads are off.";
+  } else if (downloadsExplained && uploadsExplained) {
+    consentState.textContent = "Neither the agent's saving nor its attaching is available on this browser.";
+  } else if (downloadsExplained) {
+    consentState.textContent = uploadsOn
+      ? "Uploads are on."
+      : "Uploads are off as well.";
+  } else if (uploadsExplained) {
+    consentState.textContent = "Downloads are off as well.";
+  } else {
+    consentState.textContent =
+      "Downloads and uploads are both off, so the agent can neither save nor attach files on this browser.";
+  }
+}
+
+/** Paint both switches from live state, then the state line. */
 async function renderConsent(): Promise<void> {
   const [downloadsOn, uploadsOn] = await Promise.all([
     capabilityEnabled("download"),
@@ -208,16 +264,7 @@ async function renderConsent(): Promise<void> {
   // The state in WORDS as well as in pixels, beside the other cards' own state
   // lines (round-1 D3: the only thing carrying the off switch was a 14×14 knob at
   // 1.13:1 against the card, and no sentence said which way either switch points).
-  if (downloadsOn && uploadsOn) {
-    consentState.textContent = "Downloads and uploads are both on for this browser.";
-  } else if (downloadsOn) {
-    consentState.textContent = "Downloads are on. Uploads are off.";
-  } else if (uploadsOn) {
-    consentState.textContent = "Uploads are on. Downloads are off.";
-  } else {
-    consentState.textContent =
-      "Downloads and uploads are both off, so the agent can neither save nor attach files on this browser.";
-  }
+  paintState();
   // A notice is only ever painted by an ACTION (a denial, a revocation, a
   // refusal to drop the grant), so painting clears nothing on a plain render:
   // the state the user has to read must survive a repaint, but a stale notice
@@ -233,7 +280,14 @@ async function renderConsent(): Promise<void> {
   // with the same sentence the revocation path owns.
   if ((await storedSwitch("download")) && !downloadsOn) {
     await writeSwitch("download", false);
-    notice(downloadsNotice, PERMISSION_MISSING_MESSAGE, "attention");
+    // Revealed too, and deliberately: measured at 760x520, a user who scrolls just
+    // far enough to reach the switch (y=549) still has this notice at y=829 off the
+    // screen, so the repaired state read as the untouched default at the moment it
+    // mattered — U1's defect in the one state that exists on LOAD. The reveal scrolls
+    // only when the notice is actually outside the viewport, and this paint fires
+    // ONCE per page (the stored flag is cleared in the same branch), so it cannot
+    // fight the user's own scrolling on an ordinary render.
+    notice(downloadsNotice, PERMISSION_MISSING_MESSAGE, "attention", true);
   }
 }
 
@@ -256,14 +310,22 @@ async function enableDownloads(): Promise<void> {
   // opened behind another window that the capability is on when nothing has been
   // granted, and leaves them no way to undo it from this page.
   await renderConsent();
-  notice(downloadsNotice, PERMISSION_REQUEST_PENDING);
+  // ATTENTION, not the quiet weight (round-2 U2/D6, one defect from two streams).
+  // This is the one note that sends the user hunting for a dialog that may have
+  // opened behind another window, and the lozenge's ring was measured identical to
+  // the success note's (`rgb(59,53,39)`, against `rgb(181,175,162)` for denial and
+  // revocation) although this file's own rule classes an unanswered dialog as
+  // attention-worthy.
+  notice(downloadsNotice, PERMISSION_REQUEST_PENDING, "attention", true);
+  const generation = ++pendingDownloadRequest;
+  downloadRequestPending = true;
   let granted = false;
   if (permission && api?.request) {
     try {
       // BOUNDED, and VERIFIED (round-1 R5). Measured on Chrome 153.0.8013.53 on
       // this host: the call can fail to SETTLE at all — the promise stayed pending
       // past 25 s, and past a 120 s `Runtime.evaluate` wait — so an unbounded await
-      // leaves the switch disabled with no note forever. And the resolved value is
+      // leaves the switch waiting with no note forever. And the resolved value is
       // not evidence of a grant: the user can answer the dialog and have it
       // refused, so the only proof is asking Chrome whether it holds the
       // permission. Truthiness of the request alone stored the flag `true` and
@@ -273,6 +335,20 @@ async function enableDownloads(): Promise<void> {
         PERMISSION_REQUEST_DEADLINE_MS,
         `chrome.permissions.request(${permission})`,
       ).catch(() => false);
+      // A CANCELLED wait must not go on to store anything (round-2 U3): the user
+      // pressed the switch again to stop waiting, so this stale answer belongs to a
+      // question they have withdrawn. Chrome may still grant (or refuse) later, and
+      // the `onAdded`/`onRemoved` listeners repaint when it does — the grant is
+      // never inferred from a superseded answer.
+      if (generation !== pendingDownloadRequest) {
+        downloadRequestPending = false;
+        return;
+      }
+      // `deadline` resolving without a truthy answer, or resolving truthy while
+      // Chrome holds nothing, are ONE outcome as far as this page is concerned:
+      // there is no grant behind the switch (M5 — the earlier copy reported "did not
+      // grant" for that second case, which is a claim about Chrome's answer we
+      // cannot make when the honest reading is "we could not confirm it").
       granted = answer === true && (await permissionHeld(permission));
     } catch {
       // A thrown request is not a grant. Same direction as a denial, because the
@@ -280,6 +356,10 @@ async function enableDownloads(): Promise<void> {
       granted = false;
     }
   }
+  // Whatever happens next, no request is in flight any more — including on the
+  // superseded path, which returned above without clearing it.
+  downloadRequestPending = false;
+  if (generation !== pendingDownloadRequest) return;
   if (!granted) {
     // The switch must not stay where the user put it: Chrome refused, or never
     // answered, so the capability is not available and a switch reading ON would be
@@ -288,8 +368,13 @@ async function enableDownloads(): Promise<void> {
     await renderConsent();
     notice(
       downloadsNotice,
-      `Chrome did not grant the '${permission}' permission, so downloads stay off. You can turn this on again — Chrome will ask once more.`,
+      // Says what the page can SEE, not what Chrome decided (M5), and does not
+      // promise a dialog it cannot show (U4: the old copy ended "Chrome will ask
+      // once more", which is a promise about a prompt this build cannot put on the
+      // screen).
+      `Downloads are still off: Chrome holds no '${permission}' permission for this extension, so the request was not granted or did not finish. Turn the switch on again to ask Chrome once more.`,
       "attention",
+      true,
     );
     return;
   }
@@ -328,6 +413,7 @@ async function disableDownloads(): Promise<void> {
       ? "Downloads are off, and the downloads permission has been handed back to Chrome."
       : `Downloads are off. Chrome still lists the '${permission}' permission for this extension — remove it in chrome://extensions if you want it gone as well.`,
     removed ? "info" : "attention",
+    true,
   );
   flash("Downloads are no longer allowed.");
 }
@@ -340,17 +426,50 @@ async function applyUploads(checked: boolean): Promise<void> {
     checked
       ? "Uploads are on. Turn this off to stop the agent attaching your files."
       : "Uploads are off, so the agent cannot attach any local file to a page.",
+    "info",
+    true,
   );
   flash(checked ? "Uploads are now allowed." : "Uploads are no longer allowed.");
 }
 
+/* The downloads switch, and how a keyboard user gets OUT of a pending request.
+ *
+ * The earlier shape set `disabled = true` for the whole (bounded, but up to 120 s)
+ * wait and nothing else. Round-2 U3 measured what that costs the user this copy is
+ * written for: pressing Space dumped focus to `BODY`, an 8-step Tab walk never
+ * reached the switch again, and there was no cancel anywhere on the page.
+ *
+ * So the switch is NEVER disabled: it keeps focus, keeps its place in the tab
+ * order, and a second press is the CANCEL. A press that lands while a request is
+ * pending supersedes it (`pendingDownloadRequest`), which stops this page waiting
+ * and stores nothing — the answer to a withdrawn question is not consent. A grant
+ * that arrives after the cancel is still honoured, because it is Chrome's state
+ * and `onAdded` repaints from it; it is simply never *inferred* from a superseded
+ * promise.
+ */
+let pendingDownloadRequest = 0;
+let downloadRequestPending = false;
 allowDownloads.addEventListener("change", () => {
-  // While the request is in flight, and again if it is refused, the switch shows
-  // the state the capability is REALLY in rather than the click's optimism.
-  allowDownloads.disabled = true;
+  if (downloadRequestPending && !allowDownloads.checked) {
+    // Cancelling: invalidate the in-flight wait and put the switch back to the
+    // state the capability is really in.
+    pendingDownloadRequest += 1;
+    downloadRequestPending = false;
+    void renderConsent().then(() =>
+      notice(
+        downloadsNotice,
+        "Stopped waiting for Chrome's answer, so downloads stay off. Turn the switch on again to ask once more — if Chrome did grant the permission in the meantime, the switch will follow it.",
+        "info",
+        true,
+      ),
+    );
+    return;
+  }
   const action = allowDownloads.checked ? enableDownloads() : disableDownloads();
   void action.finally(() => {
-    allowDownloads.disabled = false;
+    // Nothing to restore: the switch was never disabled, and `renderConsent` has
+    // already painted whatever the outcome was.
+    paintState();
   });
 });
 allowUploads.addEventListener("change", () => void applyUploads(allowUploads.checked));
@@ -368,8 +487,10 @@ chrome.permissions?.onRemoved?.addListener((removed) => {
       // The SAME sentence the load-time repair paints (`PERMISSION_MISSING_MESSAGE`):
       // a grant taken away while this page was open, a grant taken away while it was
       // closed and a grant that was never made are one state, and one spelling of it
-      // is what lets a user recognise the state they are in.
-      notice(downloadsNotice, PERMISSION_MISSING_MESSAGE, "attention");
+      // is what lets a user recognise the state they are in. Revealed, because the
+      // grant can be taken away while this page is open and the user may not be
+      // looking at the card when it happens.
+      notice(downloadsNotice, PERMISSION_MISSING_MESSAGE, "attention", true);
     }
   })();
 });

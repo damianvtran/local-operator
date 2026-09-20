@@ -976,7 +976,7 @@ def is_within(path: Path, root: Path) -> bool:
 #: What happened to a refused ENTRY, as a value rather than a sentence.
 #:
 #: These are the four distinguishable outcomes, and the words for them live in
-#: ``builtin.py`` beside ``_delete_outcome`` so the report has ONE vocabulary. They
+#: ``builtin.py`` beside ``_disposition_outcome`` so the report has ONE vocabulary. They
 #: are separate values rather than a boolean because "we left it on purpose" and
 #: "we could not remove it" are different facts, and a boolean can only spell the
 #: first as the second — which is how round-1 Q2's report came to say "still on
@@ -1022,19 +1022,46 @@ def _entry_stat(path: Path) -> os.stat_result | None:
         return None
 
 
+#: Ports a URL's canonical form omits, matching what `URL.origin` drops.
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
 def _origin_of(url: str) -> str:
-    """``scheme://host:port`` for a URL, or ``""`` when it is not one.
+    """``scheme://host[:port]`` for a URL, or ``""`` when there is no origin.
 
     Origin granularity, not the whole URL: the referrer Chrome reports is the page
     the download was started from, and comparing full URLs would refuse a download
     whose page moved between two paths of the same site — the comparison exists to
     tell two DIFFERENT pages apart, and the origin is what does that here.
+
+    ALIGNED WITH THE EXTENSION'S PREDICATE, and only as far as the two can be:
+    `download.ts::originOf` computes `new URL(url).origin`, this side does string
+    arithmetic on `urlsplit` (this module has no URL parser and must not grow one
+    for a comparison it can do without). The contract they share is therefore
+    written down rather than assumed — **scheme and host lowercased, userinfo
+    dropped, a default port dropped, and `""` for anything with no origin at all**
+    (`data:`, `blob:`, a relative path). Round 2 (M3) found the earlier shapes
+    disagreed exactly there: `netloc` kept the userinfo and the case, so a referrer
+    whose only difference was `User@host` refused as a different page. Outside the
+    contract both sides yield `""`, and `""` refuses rather than matching — the safe
+    direction, and the one the caller documents.
     """
     try:
         parts = urlsplit(url)
     except ValueError:
         return ""
-    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+    host = parts.hostname
+    scheme = parts.scheme.lower()
+    if not scheme or not host:
+        return ""
+    try:
+        port = parts.port
+    except ValueError:
+        # An unparsable port is a URL we cannot attribute, not one to guess at.
+        return ""
+    if port is None or port == _DEFAULT_PORTS.get(scheme):
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
 
 
 def _unlink_entry(path: Path) -> bool:
@@ -1103,11 +1130,36 @@ def intake_landed(
     number is a policy decision (a slow disk and a fast one disagree about
     "just now") rather than an implementation detail.
     """
-    directory.mkdir(parents=True, exist_ok=True)
+    # 0700 on the directory as well as on the files: a 0755 parent would let any
+    # local user LIST what a session saved, which is the rule the audit trail's own
+    # directory follows (`DOWNLOAD_AUDIT`'s writer chmods `browser/downloads` the
+    # same way). Round 2 (N2) caught this mkdir creating it 0755 when `session_dir`
+    # had not already done it.
+    #
+    # ONLY when this call creates it, and that condition is load-bearing rather than
+    # tidy: an unconditional chmod also REPAIRED a directory that was deliberately
+    # read-only, which silently turned the "the entry could NOT be removed" path into
+    # a success — two tests caught it, and the same shape would hide a real refusal
+    # from a user whose session directory is locked down. `mkdir(mode=...)` is masked
+    # by umask, so the chmod is what actually pins 0700.
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            # A directory we cannot chmod still has to be usable, and the caller's
+            # report does not claim a mode it did not set.
+            pass
     current = time.time() if now is None else now
     moved: list[str] = []
     refused: list[IntakeRefusal] = []
     root = config_dir()
+    # TWO spellings of the root, because on this platform they are the same
+    # directory: macOS makes `/var/...` a symlink to `/private/var/...`, so a path
+    # written through either one is the file the other names, and a comparison that
+    # knew only one spelling would pass a path inside the other (round-2 M2 is the
+    # measurement that turned this from theory into a test).
+    roots = (root, Path(os.path.realpath(root)))
     session_origin = _origin_of(page_origin)
     for raw in items:
         if not isinstance(raw, Mapping):
@@ -1138,11 +1190,30 @@ def intake_landed(
             # snapshot will pick it up.
             moved.append(source.name)
             continue
-        if is_within(source, root):
+        if any(is_within(source, candidate) for candidate in roots):
             refused.append(
                 IntakeRefusal(
                     name,
                     "the host named a path inside Local Operator's own config directory",
+                    KEPT,
+                )
+            )
+            continue
+        # The same question again, RESOLVED. The check above is lexical, and round 2
+        # (M2) measured what that misses: a download directory holding a symlinked
+        # PARENT (`<downloads>/link -> <config>/sessions/<id>`) passes it, and the
+        # file the host named is then OUR session record — `shutil.move` relocated
+        # `session.json` into the quarantine directory and `os.unlink` deleted it.
+        # Nothing follows the link now: a source that resolves inside the config root
+        # is refused and LEFT ALONE (it is our own store, so deleting it would be the
+        # destructive half of the same mistake).
+        resolved = Path(os.path.realpath(source))
+        if any(is_within(resolved, candidate) for candidate in roots):
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the host named a path that resolves inside Local Operator's own "
+                    "config directory",
                     KEPT,
                 )
             )
@@ -1229,6 +1300,24 @@ def intake_landed(
                     # cancelled it has to survive — it is the only thing that
                     # distinguishes this from a transfer that simply broke.
                     f"the transfer was cancelled — {_stop_clause(cancelled, state)}",
+                    DELETED if _unlink_entry(source) else FAILED,
+                )
+            )
+            continue
+        if not state:
+            # A transfer whose state the host did not report cannot be shown to have
+            # COMPLETED: the file on disk may be its partial. Refused and deleted,
+            # because it is ours (the referrer matched) and nothing later in the
+            # pipeline ever looks outside the quarantine root. Round 2 (M1): accepting
+            # it was a widening of the shipped behaviour, not a fix — the base commit
+            # refused and removed this shape, and the absent-STATE sentence round 1
+            # fixed is about a file that is NOT there, which the branch above still
+            # answers.
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the host did not report the transfer's state, so it cannot be "
+                    "treated as complete",
                     DELETED if _unlink_entry(source) else FAILED,
                 )
             )

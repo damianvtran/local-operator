@@ -105,10 +105,23 @@
              uploads row 45.5 px down when downloads was toggled (round-1 D4), and
              a note about one capability is not a reason for the other row to move.
              The state line is what says, in words, which way the switches point
-             (round-1 D3) — the off state used to be carried by the knob alone. -->
+             (round-1 D3) — the off state used to be carried by the knob alone.
+
+             The notices are STICKY TO THE BOTTOM OF THE VIEWPORT (round-2 U1). At
+             760x520 and 420x700 the explaining sentence sat at y=849 and y=988 —
+             below the fold entirely — so a user saw the knob flick back off with
+             nothing readable saying why, which is round 1's U1 re-entering through
+             layout rather than state. Sticky is the fix that does NOT reflow: the
+             element keeps its place in the flow (so the two rows above it never
+             move between states, which is what D4 measured) and additionally stays
+             pinned near the bottom of the viewport while this card is on screen. A
+             user who has scrolled far enough to reach the switch can therefore
+             always read the answer. -->
         <p class="consent-state" id="consent-state"></p>
-        <p class="consent-note hidden" id="downloads-notice" role="status" aria-live="polite"></p>
-        <p class="consent-note hidden" id="uploads-notice" role="status" aria-live="polite"></p>
+        <div class="consent-notices">
+          <p class="consent-note hidden" id="downloads-notice" role="status" aria-live="polite"></p>
+          <p class="consent-note hidden" id="uploads-notice" role="status" aria-live="polite"></p>
+        </div>
       </section>
 
       <section class="card">
