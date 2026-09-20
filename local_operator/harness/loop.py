@@ -44,6 +44,7 @@ from local_operator.harness.intent import (
     scan_streaming_intent,
 )
 from local_operator.harness.redaction import tool_source
+from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
@@ -2154,6 +2155,17 @@ class AgentLoop:
             converted = config.convert_to_llm(shaped)
             if inspect.isawaitable(converted):
                 converted = await converted
+            # Bound what one turn RE-SENDS, here rather than in the renderer, for
+            # two reasons that are both correctness rather than taste. The
+            # renderer hands out the transcript's own Message objects, so
+            # eliding there would edit the durable record (see
+            # ``harness/replay_bound.py``); and this is the ONE site that builds
+            # the conversation request for every channel — TUI, desktop, exec,
+            # mobile, SSE — so a bound placed here cannot be forgotten by a new
+            # front end. It deliberately does not touch compaction's own render
+            # or the token estimators, which must keep seeing the transcript as
+            # it is: the bound is a property of the request, not of the session.
+            converted = bound_replay_payloads(converted)
             if effort_ceiling is not None:
                 # A retreat is in force -- an empty-truncation step-down, or the
                 # reasoning-echo recovery's switch to thinking off. The host's
