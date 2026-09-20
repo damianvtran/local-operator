@@ -80,6 +80,11 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "member_admitted",
         "member_removed",
         "member_left",
+        # Learning a membership change from a peer is a MEMBERSHIP event: it is how
+        # a member admitted after this device joined becomes visible here at all
+        # (Q-R2-1), so an incident review that could not see it would read a
+        # newcomer as having always been a member.
+        "membership_learned",
         "device_rotated",
         "epoch_rotated",
         "epoch_conflict",
@@ -149,6 +154,11 @@ DETAIL_KEYS: dict[str, frozenset[str]] = {
     "pairing_confirmed": frozenset({"subject", "role", "answered_by"}),
     "invite_minted": frozenset({"role", "expires_at", "bound_device"}),
     "member_admitted": frozenset({"role", "member_kind", "epoch"}),
+    # A device learns about a member it did not know about, from a peer that does.
+    # This is a MEMBERSHIP change and it is how a newcomer becomes visible to the
+    # devices that were already in the network (Q-R2-1), so it is recorded with the
+    # rows it added and the table it produced.
+    "membership_learned": frozenset({"source", "added", "members", "members_digest"}),
     "member_removed": frozenset({"initiated_by", "rekeyed", "epoch_after"}),
     "member_left": frozenset({"epoch"}),
     "device_rotated": frozenset({"old_device", "new_device"}),
@@ -220,6 +230,11 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "trust_changed",
         "member_removed",
         "member_admitted",
+        # Learning a membership change is the same class as being told one: an
+        # operator investigating who could reach this device needs the moment a
+        # newcomer became visible here, and a lost record would leave the mesh
+        # looking as though that device had always been a member.
+        "membership_learned",
         "epoch_rotated",
         "epoch_rejected",
         "handshake_refused",

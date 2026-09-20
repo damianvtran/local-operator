@@ -194,6 +194,45 @@ def test_frame_reader_pipelines_without_losing_bytes(socketpair: object) -> None
     assert reader.read_line(wire.deadline_in(2.0))["n"] == 2
 
 
+def test_the_handshake_reader_hands_its_buffer_to_the_record_reader(socketpair: object) -> None:
+    """THE HANDOVER BETWEEN A SOCKET'S TWO PHASES, which is where a frame is lost.
+
+    A socket carries JSON-line handshake frames and then sealed records. A reader
+    reads in 64 KiB chunks, so the reader that finishes the handshake may already
+    be holding the first record — and the code that abandons it (a fresh reader is
+    created for the record phase) drops those bytes. The record is then decrypted
+    out of sequence, which surfaces as ``LinkCryptoError`` on a link whose
+    handshake was perfect, seconds after it was established.
+
+    That is not hypothetical: it is what a peer that speaks IMMEDIATELY after its
+    handshake hits — the membership pull this build makes at every link
+    establishment — and it is why the reader carries its buffer across instead of a
+    new one starting empty.
+    """
+    client, server = socketpair  # type: ignore[misc]
+    record = (4).to_bytes(wire.LOCAL_PREFIX_LEN, "big") + b"wxyz"
+    # One write: the last handshake frame and the first record in the same segment,
+    # which is exactly what the receiving socket sees when a peer pipelines.
+    server.sendall(wire.encode_line({"op": "welcome"}) + record)
+    handshake_reader = wire.FrameReader(client)
+    assert handshake_reader.read_line(wire.deadline_in(2.0))["op"] == "welcome"
+    carried = wire.FrameReader(client, buffered=handshake_reader.pending())
+    assert carried.read_record_payload(wire.deadline_in(2.0)) == b"wxyz"
+
+
+def test_a_reader_that_started_empty_does_not_invent_bytes(socketpair: object) -> None:
+    """The other half of the handover contract: an empty handover is an empty
+    buffer, not a licence to read whatever is next on the socket."""
+    client, server = socketpair  # type: ignore[misc]
+    server.sendall(wire.encode_line({"op": "welcome"}))
+    handshake_reader = wire.FrameReader(client)
+    assert handshake_reader.read_line(wire.deadline_in(2.0))["op"] == "welcome"
+    assert handshake_reader.pending() == b""
+    carried = wire.FrameReader(client, buffered=handshake_reader.pending())
+    with pytest.raises((TimeoutError, OSError)):
+        carried.read_record_payload(wire.deadline_in(0.2))
+
+
 def test_oversized_handshake_line_is_refused(socketpair: object) -> None:
     client, server = socketpair  # type: ignore[misc]
     server.sendall(b"{" + b"x" * (wire.MAX_HANDSHAKE_LINE + 10))

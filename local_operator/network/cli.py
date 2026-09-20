@@ -551,7 +551,11 @@ def _unwrap_list_answer(live: Any) -> Any:
 def _cmd_ls(args: argparse.Namespace) -> int:
     from local_operator.network import store
 
-    live = _unwrap_list_answer(_relay_call("net_ls"))
+    # A LISTING THAT CONTACTS ITS PEERS, so it needs the relay's own budget plus
+    # slack rather than the 5 s default: the table it reports is refreshed from the
+    # members (Q-R2-1), and a short client timeout would fall back to the local
+    # snapshot the refresh is there to replace.
+    live = _unwrap_list_answer(_relay_call("net_ls", timeout=_listing_timeout()))
     records = store.list_networks()
     rows = live if live else [_summarise(record) for record in records]
     if not rows:
@@ -569,7 +573,10 @@ def _cmd_ls(args: argparse.Namespace) -> int:
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
-    live = _relay_call("net_show", network=args.network)
+    # Same budget as `peers`/`ls`: `net_show` contacts every member before it
+    # reports the table, so a 5 s client timeout would time out on the relay's own
+    # work and answer from the stale local record.
+    live = _relay_call("net_show", network=args.network, timeout=_listing_timeout())
     if live is not None:
         return _emit(args, {"ok": True, **live}, _show_lines(live))
     from local_operator.network.relay import members_digest_of
@@ -1842,8 +1849,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     read a failing mesh as a passing one — and ``ok`` is exactly the key an agent
     path checks first (QA round 1). The failing rows are also named in ``code`` /
     ``message``, so the refusal family keeps one shape.
+
+    The relay is given the LISTING budget, not the 5 s default, because this op
+    DIALS every endpoint it reports on: with the default it timed out on its own
+    work, the fallback below answered instead, and the operator read a relay
+    state from the one path that could not check it (QA round 2, Q-R2-6).
     """
-    live = _relay_call("net_doctor", peer=args.peer)
+    live = _relay_call("net_doctor", peer=args.peer, timeout=_listing_timeout())
     payload = live if live is not None else _doctor_locally(args)
     checks = list(payload.get("checks") or [])
     lines = []
@@ -1874,16 +1886,67 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return _emit(args, answer, lines)
 
 
+def _unprobed_detail(has_endpoint: bool, relay_up: bool) -> str:
+    """Why a row in the LOCAL doctor fallback carries no reachability answer.
+
+    Three cases, and the sentence names which one it is: a member that declared
+    nothing, a relay that is up but did not answer the dialling op (a wedged relay
+    and a stopped one are different incidents), and no relay at all.
+    """
+    if not has_endpoint:
+        return "no_endpoint"
+    if relay_up:
+        return (
+            "not probed: the relay is running but did not answer the doctor op, so no "
+            "address was dialled"
+        )
+    return "not probed: no relay is running on this device, so nothing here can dial"
+
+
+def _relay_state() -> tuple[str, bool]:
+    """What THIS MACHINE says the relay is doing: ``(the line, is it up)``.
+
+    A diagnostic that asserts a state it never checked is the dead-instrument
+    failure in its purest form, and it is what shipped: the fallback returned the
+    constant ``"not running"``, so `doctor --json` reported an absent relay beside
+    a `status --json` in the same capture reporting it running with a pid (QA
+    round 2, Q-R2-6).
+
+    Three answers, in the order they can be established: a relay that ANSWERS over
+    its own control socket is running; a live relay RECORD whose socket did not
+    answer is running but not answering — worth telling apart, because "it crashed"
+    and "it is wedged" want different remedies — and no record is not running.
+    """
+    from local_operator.network import relay as relay_mod
+    from local_operator.network import store
+
+    live = relay_mod.health()
+    if live is not None:
+        return f"running, pid {live.get('pid')}", True
+    record = store.find_own_relay()
+    if record is not None:
+        return (
+            f"running (pid {record.pid}), and its control socket did not answer this probe",
+            True,
+        )
+    return "not running", False
+
+
 def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
     """The checks that need no relay: identity, records, epochs, endpoints.
 
-    Deliberately NOT a claim about reachability: with no relay running there is
+    Deliberately NOT a claim about reachability: with no relay answering there is
     nothing here that can dial, and reporting "unreachable" from a process that
-    never tried would be the dead-instrument failure the repo warns about.
+    never tried would be the dead-instrument failure the repo warns about. So an
+    endpoint row is ``ok: false`` with the reason it was not dialled — a check
+    that was never RUN did not PASS, and the old ``ok: true`` beside
+    ``not probed (the relay is not running)`` is how this command came to certify
+    a mesh it had not looked at (Q-R2-6).
     """
     from local_operator.network import store
     from local_operator.network.identity import identity_path
 
+    relay_line, relay_up = _relay_state()
     checks: list[dict[str, Any]] = []
     identity_file = identity_path()
     checks.append(
@@ -1910,19 +1973,16 @@ def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:
                     "check": "endpoint",
                     "device_id": member.device_id,
                     "endpoint": (member.endpoints or [""])[0],
-                    "ok": bool(member.endpoints),
-                    "detail": (
-                        "not probed (the relay is not running)"
-                        if member.endpoints
-                        else "no_endpoint"
-                    ),
+                    "ok": False,
+                    "probed": False,
+                    "detail": _unprobed_detail(bool(member.endpoints), relay_up),
                 }
             )
     return {
         "checks": checks,
         "identity_present": identity_file.exists(),
         "identity_dir": str(identity_file.parent),
-        "relay": "not running",
+        "relay": relay_line,
     }
 
 
