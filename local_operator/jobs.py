@@ -330,7 +330,17 @@ class JobManager:
         if job.task and not job.task.done():
             job.task.cancel()
 
-        # Terminate the process if it exists
+        # Terminate the process if it exists.
+        #
+        # WINDOWS CAVEAT, recorded rather than worked around (cross-platform
+        # work, 2026-09-18): ``Process.terminate()`` there is ``TerminateProcess``
+        # — no signal, no handler, no chance to flush — so a cancelled job's
+        # child gets no cooperative stop on the one platform whose SIGTERM
+        # semantics do not exist. A graceful rung would need a stop channel the
+        # child listens on (the shape ``session/runtime`` uses for its control
+        # socket), which is a design decision for this job API rather than a
+        # one-line platform branch, so the escalation below stays as-is and the
+        # difference is named here for whoever picks it up.
         if job_id in self._processes:
             process = self._processes[job_id]
             if process.is_alive():

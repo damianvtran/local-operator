@@ -35,8 +35,6 @@ import contextlib
 import json
 import os
 import signal as process_signal
-import subprocess
-import sys
 import time
 import uuid
 from collections import OrderedDict
@@ -44,6 +42,7 @@ from typing import Any, Awaitable, Callable, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from local_operator import procstate
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -540,10 +539,17 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
         # path for arbitrary fd-1 noise that exceeds the protocol budget.
         "limit": _PROTOCOL_FRAME_LIMIT,
     }
-    if sys.platform == "win32":
-        spawn_options["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    else:
-        spawn_options["start_new_session"] = True
+    # Detachment is platform-spelled and lives in ONE place. The branch that
+    # used to sit here — `start_new_session=True` on POSIX, `CREATE_NO_WINDOW`
+    # on Windows — was the tree's odd one out: `start_new_session` is SILENTLY
+    # IGNORED by Windows' ``Popen`` (documented "(POSIX only)"; the parameter
+    # there is named ``unused_start_new_session``), so the console detachment
+    # this spawn asks for was the one thing the flag did not deliver.
+    # ``procstate.detached_popen_kwargs()`` answers for the host: exactly
+    # ``start_new_session=True`` on POSIX (so this spawn's setsid, and the
+    # group kill in ``_close_kernel`` that depends on it, are unchanged), and
+    # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP on Windows.
+    spawn_options.update(procstate.detached_popen_kwargs())
     # Brand the worker on BOTH axes, together or not at all: the label is
     # `argv[0]` (what `ps`/`top` show) exactly when `executable=` names the
     # planted branded link, and where no link can be planted the pair is the
@@ -620,7 +626,7 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
         **spawn_options,
     )
     windows_job: int | None = None
-    if sys.platform == "win32":
+    if procstate.is_windows():
         try:
             windows_job = _create_windows_kill_job(process.pid)
         except OSError:

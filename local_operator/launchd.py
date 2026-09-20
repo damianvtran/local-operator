@@ -214,6 +214,23 @@ class PlistRefresh:
         return ""
 
 
+def _no_real_home_detail(path: Path, label: str) -> str:
+    """Why a reload could not be addressed, WITHOUT reading the uid again.
+
+    ``os.getuid`` is exactly what is unavailable on the platform this branch
+    exists for — Windows — so it is best-effort in the sentence. A message that
+    raised ``AttributeError`` while explaining why launchd could not be
+    addressed would be the very failure this guard exists to prevent, and it
+    did: the uid was interpolated here unconditionally.
+    """
+    uid = getattr(os, "getuid", None)
+    who = f"uid {uid()}" if uid is not None else "this user"
+    return (
+        f"cannot read the passwd entry for {who}, so there is no way to tell "
+        f"whether {path} is the real LaunchAgent for {label}"
+    )
+
+
 def reload_failure(name: str, path: Path, recovery: str, error: str) -> PlistRefresh:
     """Outcome for a repair that rewrote the plist but could not reload the job.
 
@@ -295,6 +312,18 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+class JobDomainUnavailable(RuntimeError):
+    """This host has no ``gui/<uid>`` launchd domain — it has no launchd at all.
+
+    Raised by :func:`job_domain` on a platform without ``os.getuid``. It exists
+    so that failure is a NAMED refusal rather than ``AttributeError: module 'os'
+    has no attribute 'getuid'``, which is what a caller saw before. Nothing in
+    this module's documented path can reach it: ``reload_job`` refuses on
+    :func:`real_home` first, and every installer branches on
+    :func:`local_operator.supervisors.supervisor` before touching launchd.
+    """
+
+
 def job_domain() -> str:
     """The per-user launchd domain every LaunchAgent in this module lives in.
 
@@ -304,7 +333,12 @@ def job_domain() -> str:
     home. Supplying this domain explicitly is also what keeps the reload's
     probes addressable — ``launchctl print <plist path>`` is not a thing.
     """
-    return f"gui/{os.getuid()}"
+    try:
+        return f"gui/{os.getuid()}"
+    except AttributeError as exc:  # pragma: no cover - no launchd off POSIX
+        raise JobDomainUnavailable(
+            "launchd has no domain on this platform (no os.getuid); macOS-only"
+        ) from exc
 
 
 def _registration(target: str, run: Callable[..., object]) -> tuple[bool, str]:
@@ -454,10 +488,7 @@ def reload_job(
         return JobReload(
             label=label,
             outcome="not-addressable",
-            detail=(
-                f"cannot read the passwd entry for uid {os.getuid()}, so there is no way to tell "
-                f"whether {path} is the real LaunchAgent for {label}"
-            ),
+            detail=_no_real_home_detail(path, label),
         )
     if not is_own_plist(path, label):
         return JobReload(
@@ -465,7 +496,15 @@ def reload_job(
             outcome="not-addressable",
             detail=f"{path} is not the LaunchAgent the real home owns for {label}",
         )
-    domain = job_domain()
+    try:
+        domain = job_domain()
+    except JobDomainUnavailable as exc:
+        # Belt, because this function's contract is "nothing in this sequence
+        # raises" and the bootout has not happened yet only by accident of
+        # ordering: the real_home() guard above already refuses on a platform
+        # without os.getuid, and a future reorder must not turn that into a
+        # traceback out of an installer.
+        return JobReload(label=label, outcome="not-addressable", detail=str(exc))
     target = f"{domain}/{label}"
 
     # 1. Tolerate an absent job: `launchctl bootout` on one exits non-zero, and
@@ -559,12 +598,21 @@ def real_home() -> Path | None:
     NOT ``Path.home()``, and that difference is the whole guard: ``Path.home()``
     reads ``$HOME``, so an isolated run would compare its own redirected home
     against itself and conclude it is the real one.
-    """
-    import pwd
 
+    ``None`` is also the answer on a platform with no ``pwd`` at all. That is
+    not hypothetical bookkeeping: the ``import pwd`` used to sit OUTSIDE the
+    ``try``, so on Windows this raised ``ModuleNotFoundError`` — out of the one
+    function whose answer decides whether launchd is addressed at all — and
+    ``os.getuid`` would have raised ``AttributeError`` immediately after.
+    """
     try:
+        import pwd
+
         return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
-    except (KeyError, OSError):
+    except (ImportError, KeyError, OSError, AttributeError):
+        # ImportError: no pwd module.                            (Windows)
+        # AttributeError: a pwd module without os.getuid.        (theoretical)
+        # KeyError/OSError: no passwd entry for this uid.        (broken host)
         return None
 
 

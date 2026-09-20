@@ -148,10 +148,28 @@ class CredentialManager:
         return manager.list_credential_keys(non_empty=non_empty)
 
     def load_from_file(self) -> Dict[str, SecretStr]:
-        """Load credentials from the config file."""
+        """Load credentials from the config file.
+
+        **UTF-8 explicitly, with ``surrogateescape``.** Text mode without an
+        ``encoding`` uses the platform default, which on Windows is the ANSI
+        code page (cp1252 on an en-US install) — so a file this project's own
+        POSIX builds write as UTF-8 was decoded as cp1252 there, silently
+        turning a non-ASCII credential into mojibake. Silently wrong is the
+        worst outcome for a credential store, so the encoding is named rather
+        than inherited. ``surrogateescape`` keeps the read lossless for bytes
+        that are not valid UTF-8 (a file written by an older build, or
+        hand-edited), which the matching writer below round-trips unchanged
+        instead of failing the save.
+        """
         self.credentials = {}
 
-        with open(self.config_file, "r", opener=_open_regular_store) as f:
+        with open(
+            self.config_file,
+            "r",
+            encoding="utf-8",
+            errors="surrogateescape",
+            opener=_open_regular_store,
+        ) as f:
             for line in f:
                 line = line.strip()
                 if line and "=" in line and not line.startswith("#"):
@@ -190,7 +208,12 @@ class CredentialManager:
             # Windows has no POSIX mode bits to set anyway.
             if hasattr(os, "fchmod"):
                 os.fchmod(fd, _CREDENTIALS_MODE)
-            with os.fdopen(fd, "w") as f:
+            # Same encoding contract as `load_from_file`, and `newline=""` so a
+            # value is never rewritten by newline translation on the way out:
+            # without the explicit UTF-8 a single emoji or CJK character in a
+            # credential raised UnicodeEncodeError on the platform's ANSI code
+            # page and the credential could not be saved at all (audit D10).
+            with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as f:
                 f.write(body)
             os.replace(tmp_path, self.config_file)
         except BaseException:

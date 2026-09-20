@@ -104,3 +104,88 @@ def test_logs_with_no_log_files_at_all_does_not_read_stdin(tmp_path, monkeypatch
 
     call.assert_not_called()
     assert "no log files yet" in capsys.readouterr().out
+
+
+def _no_tail(argv, *args, **kwargs):
+    """Stand in for a host with no ``tail``: the exact errno CPython raises."""
+    raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+
+def test_logs_reads_the_tail_in_process_when_the_host_has_no_tail(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Windows ships no ``tail``, and there is no ``/bin/sh`` there to borrow one.
+
+    ``subprocess.call`` raised ``FileNotFoundError`` straight out of this command
+    — a traceback where the user asked for a log. The fallback reads the same
+    two files and prints the same shape (a header per file, then the last N
+    lines), so the operator's muscle memory survives the platform.
+    """
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    daemon_log = log_dir() / "mobile.log"
+    runtime_log = runtime_log_path()
+    daemon_log.parent.mkdir(parents=True, exist_ok=True)
+    daemon_log.write_text("old\nb\nc\n", encoding="utf-8")
+    runtime_log.write_text("old\nY\nZ\n", encoding="utf-8")
+
+    with patch("subprocess.call", side_effect=_no_tail):
+        assert mobile_command(_args("--lines", "2")) == 0
+
+    out = capsys.readouterr().out
+    assert out.index(str(daemon_log)) < out.index(str(runtime_log))
+    assert "b\nc\n" in out and "Y\nZ\n" in out
+    assert "old\n" not in out, "the count is the reader's, not the whole file"
+
+
+def test_the_in_process_follow_picks_up_a_file_created_after_it_started(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """``-F`` follows by NAME, and the fallback has to keep that property.
+
+    It is the same reason the argv uses ``-F`` (see the module docstring): on a
+    machine whose daemon is up and whose runtimes have all exited, the runtime
+    log does not exist yet, and a reader that opened it once would never see a
+    line. The polling loop is driven here by the sleep it calls between passes —
+    one append, then a stop — so this exercises the real loop rather than a
+    re-implementation of it.
+    """
+    from local_operator import cli
+
+    monkeypatch.setenv(CONFIG_DIR_ENV, str(tmp_path))
+    daemon_log = log_dir() / "mobile.log"
+    runtime_log = runtime_log_path()
+    daemon_log.parent.mkdir(parents=True, exist_ok=True)
+    daemon_log.write_text("first\n", encoding="utf-8")
+
+    passes = {"n": 0}
+
+    def sleeping(_seconds: float) -> None:
+        passes["n"] += 1
+        if passes["n"] == 1:
+            assert not runtime_log.exists(), "the runtime log is created BETWEEN passes"
+            runtime_log.write_text("created\nlater\n", encoding="utf-8")
+            return
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.time, "sleep", sleeping)
+    with patch("subprocess.call", side_effect=_no_tail):
+        assert mobile_command(_args("--lines", "1", "--follow")) == 0
+
+    out = capsys.readouterr().out
+    assert "first\n" in out
+    assert "later\n" in out, "a file created after the follow started must still be read"
+
+
+def test_the_line_splitter_matches_tail_and_not_str_splitlines() -> None:
+    """``str.splitlines`` breaks on ``\\v``, ``\\f`` and the Unicode separators.
+
+    ``tail -n 1`` on a record carrying a form feed prints one line; a
+    ``splitlines`` reader would print the two halves of it as separate lines and
+    report a line number the file does not have.
+    """
+    from local_operator.cli import _tail_last_lines
+
+    assert _tail_last_lines("a\nb\nc\n", 2) == ["b\n", "c\n"]
+    assert _tail_last_lines("a\nb", 2) == ["a\n", "b\n"], "a final line with no newline prints"
+    assert _tail_last_lines("a\x0cb\n", 1) == ["a\x0cb\n"]
+    assert _tail_last_lines("a\nb\n", 0) == [], "a zero count prints nothing rather than the file"

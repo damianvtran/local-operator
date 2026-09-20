@@ -63,6 +63,35 @@ class ProtocolError(Exception):
     """A frame could not be read or was not well-formed."""
 
 
+#: Whether this platform numbers accounts at all. Named rather than tested
+#: inline in each caller, matching the other platform constants in this tree
+#: (``teams._DIR_FD_READS``, ``group_reaper._REAPING_IS_SUPPORTED``): two
+#: functions below make the same decision, and a second copy of it is how one
+#: of them ends up comparing a field the platform does not populate.
+_UID_IS_MEANINGFUL = os.name == "posix"
+
+
+def _uid_token() -> int:
+    """The uid to put in a rendezvous directory name, or 0 where there is none.
+
+    ``os.getuid`` is documented *Availability: Unix* — on Windows the attribute
+    does not exist at all, and this value is built on the socket path, so a long
+    config directory there raised a bare ``AttributeError`` out of the middle of
+    a rendezvous lookup. 0 is the honest answer on a platform that does not
+    number accounts: the digest beside it already separates two stores, and the
+    ownership question that matters is asked of the directory itself
+    (:func:`ensure_runtime_dir`), which does not ask it there at all.
+    """
+    # ``hasattr`` and not bare ``os.getuid``: the capability is what would be
+    # dereferenced, and spelling it as a capability keeps the function safe to
+    # call on any platform on its own merits — the constant above is a proxy for
+    # the attribute existing, and a reader (or the branch's static scanner) has
+    # to be able to see the guard rather than infer it.
+    if not _UID_IS_MEANINGFUL or not hasattr(os, "getuid"):
+        return 0
+    return os.getuid()
+
+
 def _runtime_fallback_dir(secrets_directory: Path) -> Path:
     """A short, private directory to hold the socket when the real one is too deep.
 
@@ -79,7 +108,7 @@ def _runtime_fallback_dir(secrets_directory: Path) -> Path:
     prevents is silent.
     """
     digest = hashlib.sha256(str(secrets_directory).encode("utf-8")).hexdigest()[:12]
-    return Path(tempfile.gettempdir()) / f"lop-secrets-{os.getuid()}-{digest}"
+    return Path(tempfile.gettempdir()) / f"lop-secrets-{_uid_token()}-{digest}"
 
 
 def ensure_runtime_dir(directory: Path) -> Path:
@@ -94,11 +123,23 @@ def ensure_runtime_dir(directory: Path) -> Path:
     info = directory.lstat()
     if not stat.S_ISDIR(info.st_mode):
         raise ProtocolError(f"{directory} is not a directory")
-    if info.st_uid != os.getuid():
-        raise ProtocolError(
-            f"{directory} is owned by uid {info.st_uid}, not {os.getuid()}; refusing to "
-            "put a secret-broker socket inside a directory another account controls"
-        )
+    # **The ownership check is asked only where the answer means something, and
+    # skipping it on Windows is not the same as dropping it.** ``st_uid`` is
+    # always 0 there (the field exists but is not populated), so comparing it
+    # against a fabricated 0 would pass every time — a check that cannot fail
+    # while reading like one that does. Windows has no uid to compare: a file's
+    # privacy there is its ACL, inherited from ``%USERPROFILE%``, which this
+    # function neither creates nor verifies, so there is nothing truthful to
+    # assert. The mode re-assertion below is likewise inert there (chmod only
+    # toggles the read-only flag) — the D9 gap, reported by
+    # ``keys.at_rest_protection_note`` rather than papered over.
+    if _UID_IS_MEANINGFUL:
+        owner = _uid_token()
+        if info.st_uid != owner:
+            raise ProtocolError(
+                f"{directory} is owned by uid {info.st_uid}, not {owner}; refusing to "
+                "put a secret-broker socket inside a directory another account controls"
+            )
     # Re-assert the mode: exist_ok=True does not apply the mode to a directory
     # that already existed, and the umask masks it on creation.
     os.chmod(directory, 0o700)

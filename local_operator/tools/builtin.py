@@ -52,7 +52,6 @@ import mimetypes
 import os
 import re
 import shutil
-import signal as signal_module
 import threading
 import time
 import traceback
@@ -120,6 +119,11 @@ from local_operator.imaging import (
 )
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
+from local_operator.procstate import (
+    detached_popen_kwargs,
+    is_windows,
+    terminate_process_tree,
+)
 from local_operator.redaction_shapes import (
     PEM_BODY_LINE_RE,
     PEM_END_LINE_RE,
@@ -192,7 +196,51 @@ BASH_SHELL_PATH: tuple[str, ...] = ("bash", "shell")
 BASH_SHELL_DEFAULT = ""
 #: Last-resort interpreter when the host has no ``bash`` on PATH at all. The
 #: tool keeps working (POSIX syntax only) instead of failing every call.
+#: POSIX-ONLY by construction: Windows has no ``/bin/sh``, so this is not an
+#: interpreter there but a path that cannot exist — see
+#: :func:`resolve_bash_shell` and :data:`WINDOWS_NO_BASH_MESSAGE` for how the
+#: win32 branch refuses instead of spawning it.
 BASH_SHELL_FALLBACK = "/bin/sh"
+#: Where Git for Windows actually puts ``bash.exe``, as (environment root,
+#: path components) so the join is done by ``os.path.join`` on the host.
+#: Its default "Git from the command line and also from 3rd-party software"
+#: option adds ``...\Git\cmd`` to PATH, and ``cmd`` contains no ``bash.exe`` —
+#: so a Windows host that DOES have bash still misses ``shutil.which("bash")``.
+#: The two roots are the machine-wide and per-user install locations.
+_WINDOWS_GIT_BASH_RELPATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ProgramFiles", ("Git", "bin", "bash.exe")),
+    ("ProgramFiles(x86)", ("Git", "bin", "bash.exe")),
+    ("LOCALAPPDATA", ("Programs", "Git", "bin", "bash.exe")),
+)
+#: The refusal shown when the bash tool resolves to the POSIX last resort on
+#: Windows. It is a REFUSAL rather than a fallback to ``cmd.exe`` or PowerShell
+#: on purpose: this tool promises bash (its name, its schema, every skill
+#: written against it), and silently running a command in a different language
+#: is a wrong answer the model cannot see, which is worse than a message that
+#: names the install step. The lines stay short because the tool card truncates
+#: per line, and the path is spelled out because the operator has to paste it.
+#:
+#: The LONGEST line is 69 cells against the 74-cell lane budget, and the two
+#: that overran it are design round 1's D2/D3. The card is 76 cells wide at
+#: 80x24 and truncates per line, so the explanation of why ``cmd.exe`` is not
+#: silently used was cut at `…must be…` — the one sentence that answers "why
+#: not just run it anyway" — and it is now wrapped rather than shortened. The
+#: remedy is DOUBLE-quoted because ``cmd.exe`` — the default Windows shell, and
+#: the shell whose missing bash this message is about — does not treat ``'`` as
+#: a quote character at all: pasting the single-quoted form there splits the
+#: path at its space, and the user is answered with
+#: `unrecognized arguments: Files\Git\bin\bash.exe'` instead of a stored setting.
+#: The double quote is the one form both cmd.exe and PowerShell honour.
+WINDOWS_NO_BASH_MESSAGE = (
+    "no bash on this Windows host, and Windows has no /bin/sh.\n"
+    "Install Git for Windows (it ships bash.exe),\n"
+    "or point this tool at one you have:\n"
+    r'lop config edit bash.shell "C:\Program Files\Git\bin\bash.exe"'
+    "\nThis tool runs `<interpreter> -c <command>`,\n"
+    "so the interpreter must be a real bash;\n"
+    "cmd.exe and PowerShell take different flags and a different language,\n"
+    "and this tool will not silently run your command in one of them."
+)
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
 
@@ -1878,13 +1926,49 @@ async def _run_with_abort(
 # ---------------------------------------------------------------------------
 
 
+def _windows_bash_on_disk() -> str | None:
+    """A real ``bash.exe`` from a Git for Windows install, or ``None``.
+
+    Only reached on win32 after ``shutil.which("bash")`` missed (see
+    :data:`_WINDOWS_GIT_BASH_RELPATHS` for why a machine with bash still
+    misses it). ``os.path.isfile`` rather than ``os.access(..., X_OK)``:
+    ``X_OK`` is satisfied for any existing file on Windows, so it would not
+    discriminate here and its POSIX meaning would mislead a reader.
+    """
+    for env_var, parts in _WINDOWS_GIT_BASH_RELPATHS:
+        root = os.environ.get(env_var)
+        if not root:
+            continue
+        candidate = os.path.join(root, *parts)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _last_resort_shell() -> str:
+    """The interpreter to spawn when no ``bash`` is on PATH.
+
+    POSIX: ``/bin/sh``, which exists and runs POSIX syntax. WINDOWS: ``/bin/sh``
+    does not exist there, so the search continues in Git for Windows' own
+    directories; returning the POSIX constant when even that finds nothing is
+    deliberate — the caller turns it into :data:`WINDOWS_NO_BASH_MESSAGE`.
+    A resolver that instead guessed ``cmd.exe`` would make the tool execute
+    every command in a language it does not advertise.
+    """
+    if is_windows():  # pragma: no cover - exercised on Windows hosts
+        return _windows_bash_on_disk() or BASH_SHELL_FALLBACK
+    return BASH_SHELL_FALLBACK
+
+
 def resolve_bash_shell(configured: str | None) -> str:
     """Pick the interpreter the ``bash`` tool spawns (#629).
 
     Order: the ``bash.shell`` config value when set and non-blank; else the
     first ``bash`` on PATH (Homebrew's bash 5 when installed, else
-    ``/bin/bash`` on macOS or ``/usr/bin/bash`` on Linux); else ``/bin/sh`` so a
-    host with no bash still runs POSIX commands rather than nothing.
+    ``/bin/bash`` on macOS or ``/usr/bin/bash`` on Linux); else
+    :func:`_last_resort_shell` — ``/bin/sh`` on POSIX, and on Windows a Git for
+    Windows ``bash.exe`` that ``which`` could not see, falling back to
+    ``/bin/sh`` as a SENTINEL the caller refuses on with an install hint.
 
     Deliberately NOT ``$SHELL``: the login shell is zsh on macOS, and zsh's
     word-splitting and globbing differ from what a tool named ``bash``
@@ -1899,7 +1983,7 @@ def resolve_bash_shell(configured: str | None) -> str:
     """
     stripped = (configured or "").strip()
     chosen = (
-        os.path.expanduser(stripped) if stripped else shutil.which("bash") or BASH_SHELL_FALLBACK
+        os.path.expanduser(stripped) if stripped else shutil.which("bash") or _last_resort_shell()
     )
     logger.debug("bash tool interpreter: %s", chosen)
     return chosen
@@ -2604,9 +2688,17 @@ async def execute_bash(
     # time — and because this tool is NAMED bash, models write bash: 37 of 43
     # `<(...)` commands in a week of transcripts died on `syntax error near
     # unexpected token '('`. Resolution order: the configured `bash.shell`,
-    # then `bash` on PATH, then /bin/sh as the no-bash last resort. Never
-    # $SHELL — see resolve_bash_shell for why zsh is the wrong answer.
+    # then `bash` on PATH, then the platform's last resort (POSIX /bin/sh; on
+    # Windows, Git for Windows' own bash.exe). Never $SHELL — see
+    # resolve_bash_shell for why zsh is the wrong answer.
     shell = resolve_bash_shell(_configured_bash_shell())
+    if is_windows() and shell == BASH_SHELL_FALLBACK:
+        # Windows has no /bin/sh, so the POSIX last resort is not a fallback
+        # there — it is a path that cannot exist. Refusing HERE, before the
+        # spawn, is the difference between the operator reading the install
+        # step and reading `FileNotFoundError: [WinError 2]` naming a Unix
+        # path they never asked for. See WINDOWS_NO_BASH_MESSAGE.
+        return _error(tool_call_id, "bash", WINDOWS_NO_BASH_MESSAGE)
     cwd = _safe_cwd(context)
     try:
         process = await asyncio.create_subprocess_exec(
@@ -2617,7 +2709,15 @@ async def execute_bash(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
-            start_new_session=True,
+            # Detachment is platform-specific and `start_new_session=True`,
+            # which this used to pass unconditionally, is SILENTLY IGNORED on
+            # Windows (subprocess documents it "(POSIX only)" and names the
+            # Windows parameter `unused_start_new_session`) — so a Ctrl-C in
+            # the operator's console reached the command and a console close
+            # could take it down. procstate.detached_popen_kwargs() returns the
+            # kwargs that really detach on the host, and is exactly
+            # `start_new_session=True` on POSIX.
+            **detached_popen_kwargs(),
         )
     except OSError as exc:
         # A `bash.shell` pointing at a missing or non-executable file made the
@@ -2670,7 +2770,12 @@ async def execute_bash(
             "bash",
             f"bash.shell: cannot execute {shell!r} ({exc.strerror or exc}).\n"
             "Point it at a real interpreter: lop config edit bash.shell <path>\n"
-            "Or clear it to auto-resolve bash on PATH: lop config edit bash.shell ''",
+            # DOUBLE quotes, for the same reason the Windows refusal uses them
+            # (design round 1, D3): `""` is an empty argument in cmd.exe,
+            # PowerShell and every POSIX shell, while `''` reaches a Windows
+            # process as the two-character value `''` — which this row's own
+            # validator would store as a path instead of clearing the key.
+            'Or clear it to auto-resolve bash on PATH: lop config edit bash.shell ""',
         )
 
     # Record this group in the owner's process-group ledger so a HARD death of
@@ -2795,8 +2900,15 @@ async def execute_bash(
 
     def _kill() -> None:
         # Kill the whole session group so children (sh -c spawns) die too.
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(process.pid), signal_module.SIGKILL)
+        #
+        # PLATFORM-SPECIFIC, and this used to be the crash path on Windows:
+        # `os.killpg`/`os.getpgid` do not exist there ("Availability: Unix") and
+        # neither does `signal.SIGKILL`, so the first attribute lookup raised
+        # AttributeError out of the tool — on the timeout and abort paths that
+        # call this, leaving the spawned tree alive with its pipes abandoned.
+        # `contextlib.suppress(ProcessLookupError)` could not catch it. On
+        # POSIX the call is exactly `killpg(getpgid(pid), SIGKILL)` as before.
+        terminate_process_tree(process.pid, force=True)
 
     def _emit_update() -> None:
         if on_update is None:
