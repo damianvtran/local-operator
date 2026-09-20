@@ -1977,6 +1977,7 @@ async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
     """
     from local_operator.harness.approval import (
         OPERATOR_AUTHORITY_REQUIRED_NOTICE,
+        OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE,
         reset_operator_caps_for_tests,
     )
     from local_operator.session.errors import OperatorAuthorityRequired
@@ -2034,7 +2035,15 @@ async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
                 await daemon.request(
                     record.pid, "slash_result", command="approvals", args="auto", images=[]
                 )
-            assert str(refusal.value) == OPERATOR_AUTHORITY_REQUIRED_NOTICE
+            # WHICH OF THE TWO REFUSALS, from the host: a runtime with no anchor to
+            # verify against names the install step instead of offering two remedies
+            # that cannot run (UX round 6, U1/U2). Both are the same refusal to a
+            # caller keying on the base code — which is why the assertion is against
+            # the pair rather than one string.
+            assert str(refusal.value) in (
+                OPERATOR_AUTHORITY_REQUIRED_NOTICE,
+                OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE,
+            ), str(refusal.value)
             # ...AND A REFUSED CARD IS REBUILT AS THE CARD'S SENTENCE (UX review
             # round 3, U11). The runtime sends the op as a token; this writer
             # dropped it, so the phone — the surface the card copy was written

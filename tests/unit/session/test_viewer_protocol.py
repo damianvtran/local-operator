@@ -1200,6 +1200,14 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # surface either way, and its home is recorded here so the next reader does
     # not have to re-derive why.
     #
+    # 62 → 63 is the operator-prompt notice (issue #1310, round 6, UX U3). Also
+    # viewer-only, and for the strongest version of the same reason: the sentence
+    # describes a presence prompt THIS machine's key is about to raise, so the
+    # surface it belongs on is an attached pane with a human standing at it. An
+    # owner ``Session`` runs the loop where the prompt is raised and has no host
+    # above it to paint on. Declared in ``ViewerSessionProtocol`` in the same
+    # commit, which is what this file's first assertion required.
+    #
     # 59 → 61 is the read-without-an-owner rung, and it moves by TWO because the
     # pair answers two different questions a cold read now reports separately:
     # ``cold_reason`` is WHY (no pid holds the lease, one does and stayed silent,
@@ -1207,9 +1215,9 @@ def test_app_py_dominates_the_derivation_so_a_global_floor_cannot_work() -> None
     # authenticated dial is retained and its state has not arrived. Both are on
     # the wire, both are read off a duck-typed bound facade by the bridge, and
     # neither exists for an owner ``Session`` — it has no dial to be silent on.
-    assert len(viewer_only) == 62, (
+    assert len(viewer_only) == 63, (
         f"there are {len(viewer_only)} viewer-only members; _SCANNED's comment "
-        "says 62, and the aggregate floor is set at 40 against that number. A "
+        "says 63, and the aggregate floor is set at 40 against that number. A "
         "drop here is the decay that floor exists to catch, so check it is "
         "genuinely a removal before editing this figure."
     )
