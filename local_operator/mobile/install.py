@@ -172,6 +172,20 @@ def _dist_dir(web_dir: Path) -> Path:
     return web_dir / "dist"
 
 
+def _discard_bundle(web_dir: Path) -> None:
+    """Drop a ``dist/`` the bundle guard refused.
+
+    ``_bundle_state`` reads ANY ``index.html`` as "built" and vite writes
+    ``dist/`` before npm's ``postbuild`` judges it, so a refused build leaves a
+    directory that reports as servable and would be served — unstyled, with no
+    error — on every later install. One owner for that removal, so the three
+    callers cannot drift in how they do it and the session-deletion guard has
+    one call site to argue for. The path is always this tree's ``dist``: this
+    install's ``_WEB_DIR`` or the snapshot the updater is about to install.
+    """
+    shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
+
+
 def _package_runner(web_dir: Path) -> tuple[list[str] | None, str | None]:
     """pnpm (or corepack's pnpm) for this tree, or the tool that is missing.
 
@@ -196,9 +210,7 @@ def _package_runner(web_dir: Path) -> tuple[list[str] | None, str | None]:
     return [*corepack, "pnpm"], None
 
 
-def _build_bundle(
-    web_dir: Path | None = None, runner: list[str] | None = None
-) -> str | None:
+def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) -> str | None:
     """Build the SPA in place. Returns an error string, or None on success.
 
     pnpm only — the lockfile and packageManager pin are pnpm's, and mixing
@@ -287,7 +299,7 @@ def _build_bundle(
                 # in `tsc -b` happens before vite writes anything, and the
                 # previous dist is still a good bundle.
                 if _dist_index(web_dir).exists() and _verify_bundle(web_dir) is not None:
-                    shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
+                    _discard_bundle(web_dir)
                 return f"pnpm {' '.join(args)} failed: {_failure_detail(result)}"
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"bundle build failed: {exc}"
@@ -296,12 +308,7 @@ def _build_bundle(
     # Exit 0 is not proof the bundle is servable — see ``_verify_bundle``.
     error = _verify_bundle(web_dir)
     if error is not None:
-        # vite writes dist/ BEFORE `postbuild` judges it, so a rejected build
-        # still leaves a directory behind — and `_bundle_state` reads any
-        # index.html as "built", which would keep serving the very bundle the
-        # guard just refused, silently, on every later install. Take it out of
-        # play; the next build regenerates it.
-        shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
+        _discard_bundle(web_dir)
         return error
     return None
 
@@ -353,10 +360,20 @@ def snapshot_bundle(web_dir: Path) -> str:
     Never raises and never fails the update. No Node is a documented skip:
     the daemon self-heals at ``lop mobile install`` on a host that has it, and
     the wording matches the host script's so the two paths read as one log.
+
+    A snapshot that ARRIVES with a ``dist/`` is not thereby a snapshot with a
+    usable one: the present bundle is put through the same guard
+    ``ensure_bundle`` applies, and a refused one is dropped and rebuilt. The
+    alternative — trusting the file's existence — installs a tree packed with
+    a pre-fix (utility-less) stylesheet and reports success, which is the
+    silent half of the defect this whole path exists to close.
     """
     state = _bundle_state(web_dir)
     if state == "built":
-        return "already built"
+        rejected = _verify_bundle(web_dir)
+        if rejected is None:
+            return "already built"
+        _discard_bundle(web_dir)
     if state == "missing-sources":
         return "skipped (no web sources in snapshot)"
     try:
@@ -398,7 +415,7 @@ def ensure_bundle(*, build: bool = True, web_dir: Path | None = None) -> tuple[b
             return True, "bundle present"
         if not build:
             return False, rejected
-        shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
+        _discard_bundle(web_dir)
         state = "buildable"
     if state == "missing-sources":
         return False, "bundle and web sources both missing from the install"
