@@ -3400,9 +3400,11 @@ class McpManager:
                         # The reason is the remedy ALONE, with no "MCP
                         # authorization failed;" in front of it. That prefix
                         # restated what the row's own head already says and
-                        # pushed the command off the front of the line, where at
-                        # 64 columns ``/mcp reauth`` and its server name wrapped
-                        # apart (design review round 1, D3); the live toast for
+                        # pushed the command off the front of the line, where
+                        # between 56 and 60 columns ``/mcp reauth`` and its
+                        # server name wrapped apart — at 64 it orphaned only the
+                        # sentence's tail (measured; design review rounds 1-2,
+                        # D3/Q-F2); the live toast for
                         # this same command is command-first for that reason.
                         # Nothing here parses the string — `_auth_failure_text`
                         # is still the one dispatcher, and the auth classifier

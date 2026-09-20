@@ -4683,8 +4683,9 @@ class TestRefreshRefusalCopy:
         assert manager.get_connection_status("dd") == "auth-required"
         # Command-FIRST, with no "MCP authorization failed;" in front of it: the
         # prefix restated the row's own head and pushed the remedy off the front
-        # of the line, where it wrapped apart from its server name at 64 columns
-        # (design review round 1, D3). The sink payload is what
+        # of the line, where it wrapped apart from its server name between 56 and
+        # 60 columns, orphaning only the tail at 64 (design review rounds 1-2,
+        # D3/Q-F2). The sink payload is what
         # ``journal_mcp_unavailable`` renders verbatim into ``Reason:``.
         assert incidents[-1][1] == "/mcp reauth dd — refresh unconfirmed", incidents
 

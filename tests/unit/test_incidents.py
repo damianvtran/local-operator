@@ -330,9 +330,9 @@ def test_recovery_text_names_server_count_and_supersedes() -> None:
     real (and is the REGISTERED count, so it agrees with what the model can
     actually call). The supersede clause is the reason the message exists: the
     model is simultaneously holding a ``session_mcp_unavailable`` row that says
-    "its tools are gone ... tell the user which server is down rather than
-    retrying", and a bare "reconnected" leaves both claims live for it to
-    choose between.
+    "Its tools are not callable until the user restores it, and the agent should
+    not retry them in a loop.", and a bare "reconnected" leaves both claims live
+    for it to choose between.
     """
     text = format_mcp_recovery_message("minerva-qa", 41)
     assert "minerva-qa" in text
