@@ -7,12 +7,14 @@ import pytest
 from local_operator.harness.message_types import (
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+    SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
 )
 from local_operator.incidents import (
     classify_incident,
     format_incident_message,
     format_mcp_recovery_message,
+    format_mcp_unavailable_message,
     format_model_switch_message,
 )
 
@@ -37,7 +39,10 @@ from local_operator.incidents import (
         ("transient provider error: ConnectError: All connection attempts failed", "network"),
         ("maximum context length is 200000 tokens", "context-length"),
         ("the request was too large", "context-length"),
-        ("MCP server 'linear' unavailable", "mcp"),
+        # The MCP-unavailability text is deliberately ABSENT from this table:
+        # nothing about it is a classified failure any more, and the rule that
+        # used to claim it is deleted (see
+        # ``test_an_mcp_mention_no_longer_earns_an_incident_category``).
         # The DeepSeek thinking-mode validator's refusal, in the rendered form
         # the operator's own incidents carry (and as an aggregator relays it,
         # which is why it is named before the generic ``provider`` rule).
@@ -318,23 +323,25 @@ def test_a_throttle_that_mentions_tokens_is_not_an_overflow(raw: str) -> None:
 
 
 def test_recovery_text_names_server_count_and_supersedes() -> None:
-    """The recovery must name the server, the count, and CANCEL the incident.
+    """The recovery must name the server, the count, and CANCEL the warning.
 
     All three are load-bearing. The server name is what ties it to the specific
-    incident it supersedes. The count is concrete evidence the connection is
+    warning it supersedes. The count is concrete evidence the connection is
     real (and is the REGISTERED count, so it agrees with what the model can
     actually call). The supersede clause is the reason the message exists: the
-    model is simultaneously holding an ``mcp`` incident whose hint says "its
-    tools are gone ... Do not call its tools", and a bare "reconnected" leaves
-    both claims live for it to choose between.
+    model is simultaneously holding a ``session_mcp_unavailable`` row that says
+    "its tools are gone ... tell the user which server is down rather than
+    retrying", and a bare "reconnected" leaves both claims live for it to
+    choose between.
     """
     text = format_mcp_recovery_message("minerva-qa", 41)
     assert "minerva-qa" in text
     assert "41 tools are available again" in text
-    assert "supersedes the earlier session incident" in text
+    assert "supersedes the earlier warning about this server" in text
     assert text.startswith("[mcp recovery]")
-    # Tag is server-scoped, not session-scoped: [session incident] already owns
-    # the session register, and the subject here is one server.
+    # Tag is server-scoped, not session-scoped: [session warning] and [session
+    # incident] already own the session register, and the subject here is one
+    # server.
     assert "[session recovery]" not in text
 
 
@@ -359,14 +366,14 @@ def test_recovery_text_promises_no_tools_when_none_are_enabled() -> None:
     inventory, and false in the expensive direction: the model spends a turn
     looking for tools that do not exist (review round 1, R2).
 
-    What must survive is the SUPERSEDE clause. The model is still holding an
-    incident saying this server is unreachable, and that part is genuinely no
+    What must survive is the SUPERSEDE clause. The model is still holding a
+    warning saying this server is unreachable, and that part is genuinely no
     longer true, so the notice must still cancel it.
     """
     zero = format_mcp_recovery_message("files", 0)
     assert "is connected again" in zero
     assert "no enabled tools" in zero
-    assert "supersedes the earlier session incident" in zero
+    assert "supersedes the earlier warning about this server" in zero
     # The three over-claims the old zero branch made, none of which are true
     # with an empty inventory.
     assert "available again" not in zero
@@ -377,17 +384,18 @@ def test_recovery_text_promises_no_tools_when_none_are_enabled() -> None:
 def test_recovery_is_not_an_incident_type() -> None:
     """The distinct type is what keeps the classifier off this message.
 
-    ``journal_incident`` classifies its input, and ``classify_incident``
-    matches the substring "mcp" — so routing a recovery through the incident
-    type would append "its tools are gone until it reconnects" and "This is why
-    the previous turn ended" to a message announcing the opposite. This asserts
-    both halves: the type is separate, and the classifier really would do that.
+    ``journal_incident`` classifies its input, and an MCP mention is exactly
+    what the deleted ``mcp`` rule used to claim — a rule matching the bare
+    substring "mcp", which gave this text a failure category plus "This is why
+    the previous turn ended" while announcing that nothing had failed. Both
+    halves are asserted: the type is separate, and the classifier no longer
+    arms that trap for either half of the pair.
     """
     assert SESSION_MCP_RECOVERY_MESSAGE_TYPE != SESSION_INCIDENT_MESSAGE_TYPE
     assert SESSION_MCP_RECOVERY_MESSAGE_TYPE != SESSION_MODEL_SWITCH_MESSAGE_TYPE
+    assert SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE != SESSION_INCIDENT_MESSAGE_TYPE
     contradiction = classify_incident(format_mcp_recovery_message("files", 3))
-    assert contradiction.category == "mcp"
-    assert "tools are gone" in contradiction.render()
+    assert contradiction.category == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -561,3 +569,114 @@ def test_a_detail_is_separated_from_the_sentence_it_rides_with() -> None:
     assert wrapped == f"{sentence} (0.56.2 → 0.56.6)"
     assert render_cut_off_reason("runtime-retired") == sentence
     assert render_cut_off_reason("runtime-retired", detail="   ") == sentence
+
+
+#: The head is FROZEN as a literal: the desktop renderer strips a leading
+#: ``^\[[^\]]{1,32}\]\s*`` from a harness row, so this bracket has to stay a
+#: single tag of at most 32 characters and keep its one trailing space. Two
+#: independent PRs write this wire value (harness and renderer), and a
+#: comparison against the constant would pass whatever the constant became.
+_MCP_UNAVAILABLE_HEAD = "[session warning] "
+
+
+def test_mcp_unavailable_warning_reads_as_a_capability_not_a_failure() -> None:
+    """The row the operator complained about, asserted line by line.
+
+    Measured live on 2026-09-20 in the operator's own session: an expired grant
+    for ``minerva-qa`` produced ``[session incident (deepseek/deepseek-flash)]
+    mcp: …`` followed by ``suggested action:`` and then "This is why the
+    previous turn ended." — on an event that ended no turn and failed nothing.
+    The three assertions below are the three things that were wrong: the head,
+    the incident scaffolding, and the false claim about the turn.
+    """
+    text = format_mcp_unavailable_message(
+        "minerva-qa", "MCP authorization failed; /mcp reauth minerva-qa — sign-in expired"
+    )
+    lines = text.split("\n")
+    assert text.startswith(_MCP_UNAVAILABLE_HEAD), text
+    assert "MCP server 'minerva-qa' is unavailable" in lines[0]
+    assert "its tools are gone until it reconnects" in lines[0]
+    assert lines[1] == (
+        "Reason: MCP authorization failed; /mcp reauth minerva-qa — sign-in expired"
+    )
+    # The instruction line is the model's own action: name the server, do not
+    # hammer its tools.
+    assert "Do not call that server's tools in a tight loop" in lines[2]
+    assert "tell the user which server is down rather than retrying" in lines[2]
+    assert len(lines) == 3
+    # Nothing may claim a turn ended, and no incident scaffolding may appear —
+    # the whole reason this has its own formatter instead of classify_incident.
+    # The reason line is the MANAGER's own wording and legitimately says
+    # "authorization failed", so the forbidden list names the incident
+    # scaffolding and the turn claim, never the bare word "failed".
+    for forbidden in (
+        "session incident",
+        "suggested action:",
+        "previous turn ended",
+        "the previous turn",
+    ):
+        assert forbidden not in text, f"{forbidden!r} leaked into the warning: {text!r}"
+    assert not text.endswith("\n")
+
+
+def test_mcp_unavailable_warning_omits_an_empty_reason() -> None:
+    """A blank reason is OMITTED, not printed empty.
+
+    The reason line is what carries the operator's remedy (``/mcp reauth``,
+    a suspended breaker), and it is the one part of the row that can be
+    genuinely absent — the manager has no text for some paths. A dangling
+    ``Reason:`` reads as a truncation, which is worse than saying nothing.
+    """
+    for blank in ("", "   ", "\n\t "):
+        lines = format_mcp_unavailable_message("files", blank).split("\n")
+        assert len(lines) == 2, lines
+        assert lines[0].startswith(_MCP_UNAVAILABLE_HEAD)
+        assert not any(line.startswith("Reason:") for line in lines)
+
+
+def test_mcp_unavailable_warning_bounds_a_long_reason() -> None:
+    """Bounded at 200 characters, the same bound ``format_model_switch_message``
+    applies: the reason is provider text that can be an entire error envelope,
+    and a row that is a page long stops being a notice. Asserted on the
+    RENDERED line so the bound cannot be moved to the wrong slice."""
+    reason = "x" * 500
+    line = format_mcp_unavailable_message("files", reason).split("\n")[1]
+    assert line == f"Reason: {'x' * 200}"
+    assert "y" * 10 not in line
+    padded = format_mcp_unavailable_message("files", f"  {'y' * 500}  ").split("\n")[1]
+    assert padded == f"Reason: {'y' * 200}", "the strip must happen before the bound"
+
+
+def test_an_mcp_mention_no_longer_earns_an_incident_category() -> None:
+    """The deleted rule, asserted as an ABSENCE — the trap must not come back.
+
+    The ``("mcp", …)`` rule matched the bare substring "mcp", so it claimed
+    every MCP-mentioning failure and gave it ``_HINTS["mcp"]`` plus the false
+    "previous turn ended" tail. Four of the five phrasings below now land
+    ``unknown``, which is the honest answer for text no remaining rule covers
+    and carries no hint at all — the MCP unavailability row is written by its
+    own formatter and is never classified, so a hint here would be advice for a
+    path that no longer exists.
+
+    The exception is recorded rather than tuned away: "model context protocol
+    connection lost" still lands ``network``, and that is the RIGHT answer —
+    the wording names a transport failure, which the ``network`` rule legitimately
+    claims and whose own hint ("if the far end refused or reset it, it did
+    answer") is about a connection rather than about an MCP server. Pin it so a
+    future edit to either rule has to look at this case.
+    """
+    now_unknown = (
+        "MCP server 'linear' unavailable",
+        "MCP authorization failed; /mcp reauth minerva-qa",
+        "tool bridge unavailable",
+        "circuit breaker opened for server 'files'",
+    )
+    for text in now_unknown:
+        incident = classify_incident(text)
+        assert incident.category == "unknown", f"{text!r} -> {incident.category}"
+        assert incident.hint == "", "an unclassified failure must not advise"
+        # The incident SHAPE is still right for a genuine failure — including
+        # the tail this record must never wear. What must not come back is MCP
+        # text REACHING it, which is exactly what the deleted rule did.
+        assert "previous turn ended" in incident.render()
+    assert classify_incident("model context protocol connection lost").category == "network"
