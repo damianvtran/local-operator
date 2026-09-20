@@ -261,6 +261,20 @@ def rearm_if_parked(*, provider: str, credential_id: int) -> str:
       worktree) would otherwise reach out and restart the operator's live
       connector. `LaunchAgent repair` carries the same guard for the same reason.
 
+    TO REHEARSE THIS END TO END FROM A SANDBOX, PIN THE LABEL (QA round 1, Q2).
+    The last two guards together mean a rig that leaves both alone cannot reach
+    the happy path at all: it declines, correctly, because its config root is not
+    the real home — and relaxing the real-home guard without the pin is worse,
+    since the fixed `LABEL` above resolves to whatever plist already holds it,
+    i.e. the operator's live connector. The shape that works, and the one QA's
+    own rehearsal used: rebuild this module's `LABEL` to the RIG's own label
+    (monkeypatch/`importlib.reload` the constant, never the plist on disk) and
+    force ONLY `supervisors.config_lives_in_real_home`, leaving every other guard
+    — provider, credential id, `stopped`, park reason, plist presence — the
+    production one, so a broken guard shows up as a `launchctl` call the rig
+    recorded rather than as an incident. Put a record-only `launchctl` shim on
+    PATH for the containment case, which is run UNPINNED.
+
     Never raises: a re-arm that fails must not fail the login that triggered it.
     Returns a sentence for the caller to show, or "" when it did nothing.
     """

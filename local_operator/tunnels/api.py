@@ -22,8 +22,12 @@ def credential_id(selected: int | None = None) -> int:
         if selected is not None:
             rows = [row for row in rows if row.id == selected]
         if len(rows) != 1:
+            # The shell spelling: this travels out of `lop tunnel status`/`install`
+            # through the `except ValueError → return str(exc)` path, so `/login
+            # radient` here was a TUI command handed to a shell (review round 2,
+            # m5 — the same rule as `config.load`'s message one module over).
             raise ValueError(
-                "Log in with /login radient first. If multiple accounts are signed in, "
+                "Log in with lop login radient first. If multiple accounts are signed in, "
                 "select one with --credential-id from lop login-status."
             )
         return rows[0].id
