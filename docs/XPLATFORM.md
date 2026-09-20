@@ -145,40 +145,47 @@ enabled and active.
   OS, and it does not exercise the flows that need a provider, a network or a
   logged-in desktop.
 * **The probe's POSIX-attribute audit credits guards it has not understood, and
-  the direction it gets that wrong in is the UNSAFE one.** `_scan_posix_uses`
-  (behind the `static.posix_attributes` row) marks an attribute guarded when an
-  enclosing node is a `try:`, an `if` whose test merely MENTIONS the platform
-  (`sys.platform`, `os.name`, `platform.system`, a `_PLATFORM`-style constant) or
-  a capability probe (`hasattr`), and when a platform question that TERMINATES a
-  block guards what follows it in that block. Two things follow from that being
-  syntactic:
+  a `guarded` verdict from it is NOT evidence that a guard holds.** The audit
+  (`_scan_posix_uses`, behind the `static.posix_attributes` row) decides
+  reachability syntactically. Its docstring names three precision rules -- a
+  `try:` (with one deliberate exception, `os.kill(pid, 0)`, whose whole Windows
+  defect is that it raises nothing for a handler to catch), an `if` whose test
+  mentions the platform or a capability probe (`hasattr`), and a platform
+  question that TERMINATES its block and so guards the rest of it -- plus a
+  fourth it states separately: a branch on a NAME the module itself computed from
+  the platform is a platform branch (`_platform_guards`).
 
-  - **Polarity is not read at all.** `if is_windows(): os.getuid()` and
+  Three ways that over-credits, each reproduced rather than reasoned:
+
+  - **Polarity is not read.** `if is_windows(): os.getuid()` and
     `if not is_windows(): os.getuid()` are credited identically, and only one of
     them guards anything.
-  - **Nor is reach.** The terminating-block rule credits a guard to statements
-    it does not actually cover whenever the platform question is CONJUNCTIVE.
-    There IS a live instance, and finding it took enumerating all 67 guarded hits
-    and filtering for guards that are neither capability probes nor
-    POSIX-proving: `local_operator/tools/builtin.py`'s `os.getpgid` -- a
-    fatal-on-Windows target -- is reported guarded because its block opens with
-    `if is_windows() and shell == BASH_SHELL_FALLBACK: raise ...`, which leaves
-    the block only when Windows ALSO lacks a real bash, so with Git for Windows'
-    bash installed the line runs. It is harmless in practice for a reason the
-    audit cannot see: it sits inside `contextlib.suppress(Exception)`. The
-    shipped battery therefore prints `0 fatal` with that hit inside the 67
-    guarded.
+  - **The terminating-block rule does not check that the guard reaches.** It
+    credits the rest of a block to a platform question that only SOMETIMES
+    leaves it -- and `_terminates` walks the whole `if` subtree, so a nested
+    `def` or a `break` inside a loop also counts as leaving the block.
+  - **A credit can carry no platform text at all**, because of the name rule
+    above.
 
-  **The error runs the wrong way, which is why this is recorded and not left to
-  the code's docstring.** That docstring says anything unclassified counts as
-  unguarded and so "over-reports rather than under-reports -- the right direction
-  for a battery whose job is to find these". That is true of the DEFAULT. It is
-  the opposite of what this limit does: a guard falsely credited REMOVES a hit
-  from `fatal` and from `warn_leads`, so the blindness under-reports -- the one
-  direction a gap detector must never fail in.
+  **The live instance shows all three at once, and it is why this bullet no
+  longer prescribes a fix.** `local_operator/tools/builtin.py`'s `os.getpgid` --
+  a fatal-on-Windows target -- is reported `guarded=True`, credited by three
+  separate guards on two different axes; removing any ONE of them, including the
+  conjunctive `if is_windows() and shell == BASH_SHELL_FALLBACK:` that reads like
+  the obvious culprit, does not change the verdict. It is harmless in practice
+  for a reason no syntax tree can see: the call sits inside
+  `contextlib.suppress(Exception)`. The shipped battery prints
+  `0 fatal, 18 lead, 67 guarded, 1 in POSIX-gated modules` with that hit inside
+  the 67.
 
-  No honest small fix: reading the constant's own polarity AND the real reach of
-  the guard is a change to the instrument with probes of its own.
+  **The error runs the wrong way.** The audit's docstring says its DEFAULT
+  ("anything else counts as unguarded") over-reports rather than under-reports.
+  That is true of the default and the opposite of what this limit does: a guard
+  falsely credited REMOVES a hit from `fatal` and `warn_leads`, so the blindness
+  under-reports -- the one direction a gap detector must never fail in.
+
+  No honest small fix: reading polarity, the guard's real reach AND the name
+  axis is a change to the instrument with probes of its own.
 
 * **The unmeasured Windows corners are named, not implied.** Task Scheduler
   placement, DPAPI placement, the process-group reaper and the terminal driver
