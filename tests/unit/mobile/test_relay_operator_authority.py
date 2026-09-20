@@ -548,8 +548,9 @@ def test_a_refused_command_carries_the_TYPED_code_to_the_phone(tmp_path: Path, m
     raise and the route's rendering in one production path, which is the whole
     point of asserting the field rather than the sentence.
     """
-    import local_operator.mobile.daemon as daemon_module
-    from local_operator.harness.approval import OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE
+    from local_operator.harness.approval import (
+        OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE,
+    )
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     daemon = MobileDaemon(port=0, password="pw123")

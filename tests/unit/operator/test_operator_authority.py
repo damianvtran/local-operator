@@ -469,7 +469,6 @@ def test_the_signing_verb_shows_the_copy_to_the_person_signing(
     # The verb resolves the key the way the product does — through the config root
     # — so the fixture's root has to BE the config root for this call.
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(keyed.root))
-    challenge = keyed.sign(challenge="ab" * 32, purpose="loosen", session_id="")["sig"]
     # A REAL challenge, not a placeholder: the verb signs whatever it is handed,
     # and this cell is about the human-facing line rather than about validation.
     code = _sign(Namespace(challenge="cd" * 32, purpose="loosen", session="sess-9", request_id=""))
