@@ -536,6 +536,15 @@ class SessionTable:
                     # that does not know it renders exactly as before (UX
                     # round 2, U8).
                     "leaving": (str(getattr(entry.record, "leaving", "") or "") if entry else ""),
+                    # THE UPDATE WINDOW, carried the same way and for the same reason as
+                    # the phrase one line up: an idle runtime moving to the build on disk
+                    # is alive, accepting messages and about to run them, and the phone's
+                    # row would otherwise describe it exactly as it describes an idle
+                    # session — the one state the operator most needs to be told about,
+                    # because it is the one where their message is queued rather than
+                    # refused (``types.UPDATING``). The value is the build pair; a client
+                    # that does not know the field renders exactly as before.
+                    "updating": (str(getattr(entry.record, "updating", "") or "") if entry else ""),
                     "needs_attention": bool(p and p.pending),
                     "pending_kind": p.pending.kind if p and p.pending else "",
                     "subagents_running": sum(

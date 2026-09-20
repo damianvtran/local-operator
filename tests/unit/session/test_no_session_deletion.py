@@ -961,6 +961,34 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         ".session.pid marker FILE",
     ),
+    # The update window's handover marker (2026-09-19): the outgoing runtime drops a
+    # FILE beside the inbox so its successor can report the move as applied
+    # (``types.UPDATING``). Both calls are built from ``update_window_path``, i.e.
+    # ``<the passed session dir>/update-window.json`` — one fixed basename, no caller
+    # input, no session id, and neither can name a DIRECTORY, so a session directory
+    # is not reachable from either: the unlink removes only the marker itself.
+    #
+    # THE TEMPORARY IS A UNIQUE ``mkstemp`` NAME, not ``update-window.json.tmp``
+    # (agent review round 1, MINOR 4): that one shared name measured 59 absent-or-
+    # corrupt reads and 2374 failed writes when two runtimes served one session
+    # directory, so the temp is now created by ``mkstemp`` with this fixed PREFIX
+    # inside the same directory — still a fixed basename plus a random suffix from
+    # the kernel, and still unable to name a directory.
+    (
+        "local_operator/session/runtime/inbox.py::write_update_window",
+        "os.replace",
+        "temp FILE -> update-window.json, both fixed names inside the session dir",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::write_update_window",
+        "os.unlink",
+        "removes only this call's own mkstemp sidecar temp file",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::clear_update_window",
+        "<path>.unlink",
+        "update-window.json marker FILE",
+    ),
     (
         "local_operator/session/runtime/registry.py::scan",
         "<path>.unlink",
@@ -1518,6 +1546,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> update-window.json (the update window's handover marker)
+        "local_operator/session/runtime/inbox.py::write_update_window",
         "local_operator/session/frontend_state.py::SnapshotJobs.__init__",  # str.replace
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",

@@ -3799,6 +3799,17 @@ def sessions_command(args: argparse.Namespace) -> int:
     # the turn the drain is finishing (U1/U2, PR #1141).
     leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
     show_leaving = any(leaving.values())
+    # The same rule as LEAVING and WHY above, and the same reason it must be a
+    # SEPARATE column rather than part of that one: a session mid-update is alive,
+    # accepting messages, and about to run them (``types.UPDATING``) — the operator
+    # reading that row must not be told to re-send what is already queued.
+    updating = {row["session_id"]: (row.get("updating") or "") for row in rows}
+    failed = {row["session_id"]: (row.get("update_failed") or "") for row in rows}
+    # THE COLUMN PRINTS WHENEVER ANY ROW HAS SOMETHING TO SAY ABOUT A MOVE, and a
+    # FAILED one counts. A fleet whose only news is an abandoned update used to drop
+    # the column entirely and list that session exactly as an ordinary idle one — the
+    # defect design review round 1 (D1) measured against this renderer.
+    show_updating = any(updating.values()) or any(failed.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3811,6 +3822,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
+    if show_updating:
+        header += f" {'UPDATING':<{UPDATING_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3855,11 +3868,47 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
+        if show_updating:
+            # The cell is RENDERED from the row's pair through the ONE phase reader
+            # (``types.update_phase``/``update_short``), so the copy here, the info
+            # panel and the phone cannot drift into three vocabularies for one state —
+            # and so the FAILED phase reaches this surface at all (design review round
+            # 1, D1, where the row rendered blank).
+            cell = _updating_cell(
+                updating.get(row["session_id"]) or "", failed.get(row["session_id"]) or ""
+            )
+            # MARKED, unlike the cells above: the value here is a BUILD LABEL, so a
+            # silent cut hands the reader a plausible version for a session that is on
+            # a different one (design review round 1, D3 — ``updating →
+            # 0.59.11.dev3+g1`` cut to a real-looking ``0.59.11``). ``_clamp_reason_cell``
+            # already carries that argument for WHY; this is the same mark applied to
+            # the one column whose text is an identifier rather than prose.
+            said = _clamp_reason_cell(cell, UPDATING_COLUMN_WIDTH)
+            line += f" {_pad_cell(said, UPDATING_COLUMN_WIDTH)}"
         print(line)
     return 0
 
 
-def _clamp_reason_cell(summary: str) -> str:
+def _updating_cell(updating: str, failed: str = "") -> str:
+    """The fleet cell for a row's update fields. ``""`` when it carries no move.
+
+    The IMPORT IS FUNCTION-LOCAL on purpose, for the reason the column widths are
+    not imported at all: this module keeps session internals out of its module
+    scope so ``lop``'s CLI can start without paying for the runtime (see the
+    header). One string formatter reached only on the arm that has a moving session
+    is the whole cost of that here.
+
+    THE PHASE IS READ, NOT ASSUMED. Both fields go through ``types.update_phase``, so
+    a FAILED window renders its own cell instead of a blank one and the precedence
+    between an open window, a failed one and an applied one lives in one place.
+    """
+    from local_operator.session.runtime.types import update_phase, update_short
+
+    phase, pair = update_phase(updating, "", failed)
+    return update_short(phase, pair) if phase else ""
+
+
+def _clamp_reason_cell(summary: str, width: int | None = None) -> str:
     """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
 
     A silent slice is indistinguishable from a complete sentence, and this
@@ -3907,13 +3956,23 @@ def _clamp_reason_cell(summary: str) -> str:
     and a value nothing had to cut is not edited at all (review round 2, N2 —
     recorded as the rule, not changed, because trimming it would be a second,
     invisible edit on a cell that is already correct).
+
+    ``width`` IS A PARAMETER because a second column needs the same mark (design
+    review round 1, D3): the UPDATING cell is a BUILD LABEL, and a silent cut of
+    ``updating → 0.59.11.dev3+g1`` hands the reader a real-looking ``0.59.11`` for a
+    session that is on a different build. Everything above is about the WHY column,
+    which is where the mark was first argued; the arithmetic is the same one, which
+    is why this is a parameter rather than a second function. It defaults to
+    ``WHY_COLUMN_WIDTH`` at CALL time rather than in the signature, because this
+    function is defined above that constant.
     """
-    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
+    if _cell_len(summary) <= (WHY_COLUMN_WIDTH if width is None else width):
         return summary
     # The marker's OWN measured width, not a hard-coded 1: the budget is
     # arithmetic, so a future marker must not be able to push the cell over.
     marker = "…"
-    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+    budget = WHY_COLUMN_WIDTH if width is None else width
+    return _cut_to_cells(summary, budget - _cell_len(marker)) + marker
 
 
 def _cut_to_cells(text: str, budget: int) -> str:
@@ -5214,6 +5273,31 @@ WHY_COLUMN_WIDTH = 48
 #: header) — so a reword of the phrase fails loudly there instead of silently
 #: cutting the new clause off the row.
 LEAVING_COLUMN_WIDTH = 51
+
+#: Width of `lop sessions`' trailing UPDATING column, in display CELLS.
+#:
+#: A SECOND COLUMN RATHER THAN A WORD IN ``LEAVING``, and that is the feature rather
+#: than a layout choice: the two fields are opposite promises. A ``leaving`` row says
+#: this runtime will not take a message ("send it again once the new build is up");
+#: an ``updating`` row says it ALREADY HAS it and runs it when the successor
+#: boots. Folding them into one cell would make the operator re-send a message that
+#: is queued — the exact harm the window exists to prevent (``types.UPDATING``).
+#:
+#: Sized from ``types.update_short``, whose pair is the wide part and which is why
+#: the cell names only the NEW build: 26 is ``"updating → "`` (11 cells) plus the
+#: longest label ``BuildStamp.label()`` can produce — ``0.59.11`` and ``@`` and the
+#: 7-character ref git itself abbreviates to, so 15. The failed phase's cell is
+#: shorter and carries no pair on purpose (see that function): its move did not
+#: happen, so naming a build there would read as one that did.
+#:
+#: Like ``LEAVING_COLUMN_WIDTH`` the number is written out rather than imported
+#: (this module keeps session internals out of its module scope on purpose, see the
+#: header) and is pinned against the vocabulary by
+#: ``tests/unit/session/runtime/test_updating_vocabulary.py``.
+#:
+#: Appears only when some row carries one, exactly like LEAVING and WHY: a listing
+#: with no runtime mid-update is byte-for-byte what it was before.
+UPDATING_COLUMN_WIDTH = 26
 
 
 #: Widths of `lop sessions`' three TEXT columns, in display CELLS.

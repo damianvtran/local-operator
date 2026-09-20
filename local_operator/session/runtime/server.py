@@ -1240,6 +1240,13 @@ class RuntimeServer:
         #: handle: this is the runtime's own decision to leave, which no handle
         #: predicate knows.
         self._leaving = ""
+        #: The update window this runtime has opened (``SessionRecord.updating``),
+        #: kept here so :meth:`note_updating` can dedupe like :meth:`note_leaving`.
+        #: The HANDLE owns the window's admission behaviour and its lock; this is
+        #: only the record's copy, written from the one place that owns the record.
+        self._updating = ""
+        #: The pair a window FAILED to move to, for :attr:`SessionRecord.update_failed`.
+        self._update_failed = ""
         #: Subagent trajectory counts, ``None`` until the handle answers the
         #: probe at least once. Starting at ``None`` rather than 0 is what
         #: makes a runtime whose handle cannot report indistinguishable from
@@ -1322,6 +1329,13 @@ class RuntimeServer:
             conversation_name=seed.conversation_name,
             cwd=seed.cwd,
             model_label=seed.model_label,
+            # THE ONE-SHOT "an update applied" FACT, and this is the only writer
+            # that can publish it: the marker the outgoing runtime left was
+            # consumed at boot (``process._consume_update_marker``) BEFORE this
+            # server existed, so it waits on the handle and is seeded onto the
+            # record here. ``""`` for every ordinary boot, which is also what a
+            # runtime too old to carry the attribute reads as.
+            updated=getattr(handle, "applied_update", "") or "",
             control_port=0,  # stamped when the listener binds
             control_key=secrets.token_hex(32),
             # Independent capabilities, each gated by its own condition. The
@@ -1951,6 +1965,24 @@ class RuntimeServer:
             # signalled runtime with the build sentence (agent review round 4,
             # MAJOR-1).
             "leaving": leaving,
+            # THE UPDATE WINDOW, additive like ``draining`` and ``leaving`` above,
+            # and it is the key that makes an IDLE handover speakable at all: that
+            # rung sends ``draining=False``, so before this key a viewer had
+            # nothing to paint while the one handover that QUEUES messages was in
+            # flight. ``""`` for every departure that is not a window, and for
+            # every runtime older than this key.
+            #
+            # READ OFF THE RECORD rather than taken as an argument, and that is a
+            # correction rather than a shortcut. A parameter here would be a second
+            # copy of a field the server already holds, and — worse — a caller whose
+            # ``announce_retiring`` predates the parameter would take a TypeError
+            # inside the ``except Exception`` that guards a viewer's writer, so the
+            # whole announcement would be swallowed by the failure path meant for
+            # something else (measured: ``test_process_refresh``'s fake registrant
+            # lost its only frame that way). The window is published on the record
+            # BEFORE the announce — that ordering is the window's own contract — so
+            # the record is the one place both ends can read it from.
+            "updating": self._record.updating,
         }
         viewers = [conn for conn in list(self._clients.values()) if conn.kind == "attach"]
         await asyncio.gather(*(self._send_to(conn, frame) for conn in viewers))
@@ -3464,6 +3496,85 @@ class RuntimeServer:
         self._leaving = phrase
         self._record.leaving = phrase
         self._republish()
+
+    def note_updating(self, pair: str) -> None:
+        """Publish that an UPDATE WINDOW is open for ``pair`` (``""`` clears it).
+
+        THE ONE WRITER of ``SessionRecord.updating``, so the record and the handle's
+        admission state cannot drift: ``serving.ServingSessionHandle.begin_update``
+        and ``end_update`` both reach it through the server they hold, and a runtime
+        whose handle is not this server's (a reduced host) simply never publishes.
+
+        Written THROUGH to the record in the same synchronous step as the
+        assignment, like :meth:`note_leaving` and for a sharper version of its
+        reason: the window is about a second long, so a field that waited for the
+        15 s heartbeat would be published only AFTER the handover it describes had
+        ended — and the surfaces that read a record would never once see a session
+        mid-update, which is the whole feature.
+
+        Deduped like :meth:`set_busy`. Idempotent on the clear, because both
+        ``end_update`` and :meth:`note_update_failed` close a window and neither can
+        tell whether the other already has.
+        """
+        if self._updating == pair:
+            return
+        self._updating = pair
+        self._record.updating = pair
+        if pair:
+            # A NEW WINDOW SUPERSEDES THE LAST FAILURE (agent review round 1, NIT 4).
+            # Without this the record keeps describing an abandoned move for the rest
+            # of the process's life — a fleet row that says "update failed" about a
+            # session which has since moved on, or is moving right now — because
+            # nothing else clears the field: the success arm's exit takes the whole
+            # record away, and the abandon arm is what writes it. The field is
+            # re-published by ``note_update_failed`` if THIS attempt fails too.
+            self._record.update_failed = ""
+        self._republish()
+
+    async def note_update_failed(self, pair: str, bound: float = 0.0) -> None:
+        """Publish that the window for ``pair`` ran out of its bound.
+
+        THE FAILURE HAS TO BE REPORTABLE, which is the operator's own requirement
+        ("indicate that the update failed so that it can be reported as an issue and
+        addressed"), and it is stated twice on purpose, because the two surfaces
+        answer different questions and either alone is a hole:
+
+        * the RECORD (``update_failed``) is what a front end that was not watching
+          at the time can still read — the TUI's fleet row, ``lop sessions``, the
+          phone's projection, the desktop feed. It is also what says the runtime is
+          still SERVING, which is the part a person acts on;
+        * the INCIDENT ROW is the durable account in the conversation, carrying
+          ``types.UPDATE_FAILED_CAUSE`` so every surface that repeats a cause can
+          render it as a sentence (``incidents.CUT_OFF_CAUSES``). Without it the
+          bounded window would be exactly the silent failure the bound was written
+          to prevent — the shape of QA round 1, Q-2, where the overdue handover
+          shipped with a token nothing could render.
+
+        NEVER RAISES. The caller is the rung that has just decided to KEEP this
+        runtime serving, and a runtime that stayed is a successful outcome even if
+        its own bookkeeping could not be written.
+        """
+        self._updating = ""
+        self._record.updating = ""
+        self._update_failed = pair
+        self._record.update_failed = pair
+        self._republish()
+
+        session = getattr(self._handle, "_session", None)
+        journal = getattr(session, "journal_incident", None)
+        if not callable(journal):
+            return
+        write_incident = cast(Callable[..., Awaitable[None]], journal)
+        from local_operator import incidents
+        from local_operator.session.runtime.types import UPDATE_FAILED_CAUSE
+
+        rendered = incidents.render_cut_off_reason(
+            UPDATE_FAILED_CAUSE, detail=f"({pair})" if pair else ""
+        )
+        try:
+            await write_incident(UPDATE_FAILED_CAUSE, token=UPDATE_FAILED_CAUSE, rendered=rendered)
+        except Exception:  # noqa: BLE001 — a failure notice never breaks the runtime
+            logger.warning("could not journal the failed update", exc_info=True)
 
     def set_record_started(self, started: bool) -> None:
         """Record that this session has run at least one real turn.
