@@ -144,6 +144,53 @@ enabled and active.
   daemon serves and a frame renders; it does not prove a UI reads well on that
   OS, and it does not exercise the flows that need a provider, a network or a
   logged-in desktop.
+* **The probe's POSIX-attribute audit credits guards it has not understood, and
+  a `guarded` verdict from it is NOT evidence that a guard holds.** The audit
+  (`probe_static_posix_attributes`, whose scan is `_scan_posix_uses`) decides
+  reachability syntactically. Its rules are: a `try:` (with one deliberate
+  exception, `os.kill(pid, 0)`, whose whole Windows defect is that it raises
+  nothing for a handler to catch); an `if` whose test mentions the platform or a
+  capability probe (`hasattr`); a platform question that TERMINATES its block and
+  so guards the rest of it; and a branch on a NAME the module itself computed
+  from the platform is a platform branch (`_platform_guards`). Those rules are
+  spread across several docstrings and code comments rather than gathered in one
+  place -- and this sentence deliberately no longer says HOW MANY, because an
+  earlier revision asserted a count of them and got it wrong, which is the same
+  failure as the rest of this bullet's history.
+
+  Three ways that over-credits, each reproduced rather than reasoned:
+
+  - **Polarity is not read.** `if is_windows(): os.getuid()` and
+    `if not is_windows(): os.getuid()` are credited identically, and only one of
+    them guards anything.
+  - **The terminating-block rule does not check that the guard reaches.** It
+    credits the rest of a block to a platform question that only SOMETIMES
+    leaves it -- and `_terminates` walks the whole `if` subtree, so a nested
+    `def` or a `break` inside a loop also counts as leaving the block.
+  - **A credit can carry no platform text at all**, because of the name rule
+    above.
+
+  **The live instance shows the reach and name axes at once, and it is why this
+  bullet no longer prescribes a fix.** `local_operator/tools/builtin.py`'s
+  `os.getpgid` -- a fatal-on-Windows target -- is reported `guarded=True`,
+  credited by three separate guards on those two axes; replacing any ONE of them,
+  including the conjunctive `if is_windows() and shell == BASH_SHELL_FALLBACK:`
+  that reads like the obvious culprit, does not change the verdict. Inverting
+  that guard's polarity does not either. It is harmless in practice
+  for a reason the audit cannot see: the call sits inside
+  `contextlib.suppress(Exception)`. The shipped battery prints
+  `0 fatal, 18 lead, 67 guarded, 1 in POSIX-gated modules` with that hit inside
+  the 67.
+
+  **The error runs the wrong way.** The audit's docstring says its DEFAULT
+  ("anything else counts as unguarded") over-reports rather than under-reports.
+  That is true of the default and the opposite of what this limit does: a guard
+  falsely credited REMOVES a hit from `fatal` and `warn_leads`, so the blindness
+  under-reports -- the one direction a gap detector must never fail in.
+
+  No honest small fix: reading polarity, the guard's real reach AND the name
+  axis is a change to the instrument with probes of its own.
+
 * **The unmeasured Windows corners are named, not implied.** Task Scheduler
   placement, DPAPI placement, the process-group reaper and the terminal driver
   are all "contract" or "gap" rows above for the same reason: there is no
