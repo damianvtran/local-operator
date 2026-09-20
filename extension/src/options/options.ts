@@ -224,7 +224,27 @@ function notice(
   }
 }
 
-/** Scroll so the sentence AND the control it explains are both readable.
+/** The switch row a notice belongs to, so the reveal corrects the row the user
+ *  actually pressed.
+ *
+ * Hard-coding the downloads row was round-4 R1: the correction ran for EVERY revealed
+ * notice, and for the uploads notice it scrolled back UP to a row nobody had touched
+ * — measured in real Chrome at 380x300, pressing "Allow uploads" left the uploads row
+ * at y=194 and the uploads notice at 410–467 in a 300 px viewport, entirely below the
+ * fold, where the same reveal without that step put it at 231–288, fully visible. The
+ * downloads notice was hidden by the same step (409–505 against a counterfactual
+ * 192–288), which is why §17.16's threshold read low as well.
+ */
+function rowFor(target: HTMLParagraphElement): HTMLElement | null {
+  const rows: Array<[HTMLParagraphElement, string]> = [
+    [downloadsNotice, "allow-downloads"],
+    [uploadsNotice, "allow-uploads"],
+  ];
+  const entry = rows.find(([notice]) => notice === target);
+  return entry ? document.querySelector(`label[for="${entry[1]}"]`) : null;
+}
+
+/** Scroll so the sentence AND the control it belongs to are both readable.
  *
  * Three measured requirements, none of them cosmetic:
  *
@@ -233,28 +253,35 @@ function notice(
  *      gesture, so a scroll computed at paint time is ~31 px stale by the time it
  *      settles — measured leaving the notice 7 px of 38 visible for about four
  *      seconds (round-3 D2). So the scroll is applied, then RE-APPLIED on the next
- *      frame, when the geometry is final.
+ *      frame, when the geometry is final, and both passes read live geometry.
  *   2. THE NOTICE MUST NOT SIT FLUSH ON THE EDGE. `scroll-margin-bottom` on the
  *      notice supplies the gap the CSS pins; without it the bottom border landed on
  *      the window edge at every size (round-3 U3).
- *   3. THE CONTROL STAYS ON SCREEN. At 380x440 the notice is brought in while the
- *      pressed row goes to viewport y=-53 — the user can read the answer but can no
- *      longer see the knob or its state line, the pair round-1 D3 exists to keep
- *      together (round-3 U4). If the reveal would push the row off the top, the row
- *      wins: the notice's first lines stay visible and its tail clips, which is the
- *      right way round.
+ *   3. THE ROW IN VIEW IS THE ONE THAT WAS PRESSED (round-4 R1), and the notice
+ *      still has to be readable after that correction — the two constraints are
+ *      solved TOGETHER, in one offset, rather than by two scrolls that fight.
  *
- * Both re-checks read live geometry rather than assuming, so a viewport that cannot
- * fit both (the sub-500 px heights) degrades to "control visible, answer mostly
- * visible" instead of "answer visible, control gone".
+ * Priority when both cannot be satisfied (the short viewports): the row wins. The
+ * knob and its state line stay visible and the notice's tail clips, which is the
+ * right way round — the user can see what they pressed and read the answer's opening
+ * lines, and the threshold where that starts is recorded in §17.16 rather than
+ * discovered by a user.
  */
 function revealNotice(target: HTMLParagraphElement): void {
   const apply = (): void => {
-    target.scrollIntoView({ block: "nearest" });
-    const row = document.querySelector('label[for="allow-downloads"]');
-    if (row && row.getBoundingClientRect().top < 8) {
-      row.scrollIntoView({ block: "start" });
+    const FLOOR = 12;
+    const row = rowFor(target);
+    const targetBottom = target.getBoundingClientRect().bottom;
+    // Positive when the notice's bottom (plus the CSS's own scroll margin, which
+    // `scrollIntoView` would have honoured) sits below the fold: scroll down by it.
+    let delta = Math.max(0, targetBottom + FLOOR - window.innerHeight);
+    if (row) {
+      // …unless that would carry the pressed row off the top, in which case the row
+      // is brought back to its floor and the notice is allowed to clip.
+      const rowTop = row.getBoundingClientRect().top - delta;
+      if (rowTop < FLOOR) delta -= FLOOR - rowTop;
     }
+    if (delta !== 0) window.scrollBy({ top: delta, behavior: "auto" });
   };
   requestAnimationFrame(() => {
     apply();
@@ -271,37 +298,48 @@ function revealNotice(target: HTMLParagraphElement): void {
 function paintState(): void {
   const downloadsOn = allowDownloads.checked;
   const uploadsOn = allowUploads.checked;
-  // "Explained" means an ATTENTION notice for that capability is on screen right
-  // now, so its own sentence already says the capability is off and why.
+  // A VISIBLE notice is the words for the capability it is about — whichever weight
+  // it carries. The state line therefore speaks only for the capability no notice
+  // covers, and hides when both are covered, so the two never say the same thing
+  // twice (round-2 D8 fixed the attention case; round-4 U3 closes the `info` one,
+  // where the notice's "Uploads are on." and the line's "Uploads are on." sat eight
+  // pixels apart).
   //
-  // The ATTENTION test is load-bearing, not a style choice (round-3 D1): a quiet
-  // notice reports an ACTION ("Uploads are on. Turn this off…"), so treating any
-  // visible notice as "this capability is off" made the two-notice state — uploads
-  // ON with a downloads notice showing — land in the both-explained branch and print
-  // "Neither the agent's saving nor its attaching is available on this browser"
-  // while the uploads switch sat ON 400 px above it. Reachable in one pass: turn
-  // uploads on, then press downloads.
-  const explaining = (element: HTMLParagraphElement): boolean =>
-    element.textContent !== "" && element.classList.contains("consent-note--attention");
-  const downloadsExplained = explaining(downloadsNotice);
-  const uploadsExplained = explaining(uploadsNotice);
-  if (downloadsOn && uploadsOn) {
-    consentState.textContent = "Downloads and uploads are both on for this browser.";
-  } else if (downloadsOn && !uploadsExplained) {
-    consentState.textContent = "Downloads are on. Uploads are off.";
-  } else if (uploadsOn && !downloadsExplained) {
-    consentState.textContent = "Uploads are on. Downloads are off.";
-  } else if (downloadsExplained && uploadsExplained) {
-    consentState.textContent = "Neither the agent's saving nor its attaching is available on this browser.";
-  } else if (downloadsExplained) {
-    consentState.textContent = uploadsOn
-      ? "Uploads are on."
-      : "Uploads are off as well.";
-  } else if (uploadsExplained) {
-    consentState.textContent = "Downloads are off as well.";
+  // Deriving the branches from the SWITCHES rather than from the notices also removes
+  // the latent defect round-4 R2 found: the old both-explained branch printed "Neither
+  // the agent's saving nor its attaching is available on this browser" from a state
+  // that could hold with an ON switch 400 px above it, unreachable only because
+  // `uploadsNotice` happens to be painted `info` at its single call site. There is no
+  // such branch to reach now — a covered capability is simply not restated.
+  const covered = (element: HTMLParagraphElement): boolean => element.textContent !== "";
+  const downloadsCovered = covered(downloadsNotice);
+  const uploadsCovered = covered(uploadsNotice);
+
+  if (downloadsCovered && uploadsCovered) {
+    consentState.textContent = "";
+    consentState.classList.add("hidden");
+    return;
+  }
+  consentState.classList.remove("hidden");
+  if (!downloadsCovered && !uploadsCovered) {
+    if (downloadsOn && uploadsOn) {
+      consentState.textContent = "Downloads and uploads are both on for this browser.";
+    } else if (downloadsOn) {
+      consentState.textContent = "Downloads are on. Uploads are off.";
+    } else if (uploadsOn) {
+      consentState.textContent = "Uploads are on. Downloads are off.";
+    } else {
+      consentState.textContent =
+        "Downloads and uploads are both off, so the agent can neither save nor attach files on this browser.";
+    }
+    return;
+  }
+  // Exactly one capability has its own sentence on screen: say the other one, and
+  // only the other one.
+  if (downloadsCovered) {
+    consentState.textContent = uploadsOn ? "Uploads are on." : "Uploads are off as well.";
   } else {
-    consentState.textContent =
-      "Downloads and uploads are both off, so the agent can neither save nor attach files on this browser.";
+    consentState.textContent = downloadsOn ? "Downloads are on." : "Downloads are off as well.";
   }
 }
 
@@ -547,12 +585,12 @@ allowDownloads.addEventListener("click", (event) => {
 });
 
 allowDownloads.addEventListener("change", () => {
-  if (downloadRequestPending && !allowDownloads.checked) {
-    // Cancelling: invalidate the in-flight wait and put the switch back to the
-    // state the capability is really in.
-    cancelPendingDownload();
-    return;
-  }
+  // NO pending-state branch here (round-4 N2): the click listener above
+  // `preventDefault()`s the toggle while a request is in flight, so the `change`
+  // event never fires in that state and a second guard would be dead code that
+  // reads like a live one. A synthetic `change` carrying `checked=false` could still
+  // reach it — that is the rig shape round-3 U1 measured, not a human gesture, and it
+  // must not be what keeps the cancel honest.
   const action = allowDownloads.checked ? enableDownloads() : disableDownloads();
   void action.finally(() => {
     // Nothing to restore: the switch was never disabled, and `renderConsent` has
