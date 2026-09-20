@@ -518,9 +518,10 @@ async def test_an_unknown_or_foreign_token_claims_nothing(tmp_path: Path) -> Non
     # The uppercase entry is written out rather than derived from ``mine``, and
     # that is a fix rather than a style choice: ``mine.upper()`` is only a
     # FOREIGN id when ``mine`` contains a letter. Session ids are 12 lowercase
-    # hex characters, so an all-digit one upper-cases to itself (MEASURED: 4 of
-    # 400 draws, ~1%), and the assertion below then demands a ``KeyError`` for a
-    # perfectly valid session and fails. It reads as a flake because 1% is rare
+    # hex characters, so an all-digit one upper-cases to itself (4 of 400 draws
+    # here; the exact rate is (10/16)**12 = 0.36%), and the assertion below then
+    # demands a ``KeyError`` for a perfectly valid session and fails. It reads as
+    # a flake because that rate is rare
     # enough to pass review and recur in CI, and it bites the shard whose
     # composition happens to place this test under ``-n auto``. A literal
     # uppercase id is foreign for every draw and still the same shape.

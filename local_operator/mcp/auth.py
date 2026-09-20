@@ -60,6 +60,7 @@ from pydantic import AnyUrl
 
 from local_operator.ansi import strip_control_sequences
 from local_operator.callback_page import callback_response
+from local_operator.procstate import O_BINARY
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -3000,7 +3001,7 @@ def _acquire_locked_fd(path: str, cancelled: threading.Event) -> int | None:
     tick instead of holding a thread for the full bound.
     """
     deadline = time.monotonic() + LOCK_ACQUIRE_TIMEOUT_S
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | O_BINARY, 0o600)
     sleep_s = _LOCK_RETRY_SLEEP_S
     try:
         while True:

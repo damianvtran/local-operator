@@ -148,24 +148,33 @@ enabled and active.
   placement, DPAPI placement, the process-group reaper and the terminal driver
   are all "contract" or "gap" rows above for the same reason: there is no
   reading for them yet.
-* **The sites left unpatched by the `O_BINARY` fix are named, and the first
-  version of this bullet named the WRONG ones (design round 3, D16).** The
-  `master.key is 33 bytes` failure had a cause -- on Windows `os.open` is the
-  CRT's *text* mode unless `O_BINARY` is given, so a `0x0A` handed to `os.write`
-  lands as `0x0D 0x0A` -- and it is fixed at every site whose payload must be
-  byte-exact. What remains is one site, not three: `clipboard.py`'s scratch
-  probe writes `b'blat'`, an ASCII constant that cannot contain the byte text
-  mode rewrites, so it is safe by construction rather than by reading.
-  The two `evaluation/adapters/` sites this bullet first named are **not**
-  instances at all: `supervisor.py`'s `verify_artifact` and
-  `load_pending_rescue` open `O_RDONLY`, and `rpc.py` has no `os.open` whatever --
-  it writes a pipe descriptor handed to it by `supervisor.py`. The tempfile-backed
-  members of that family are already binary through `tempfile`'s own
-  `_bin_openflags`, so they never carried the bug either. A follow-on claim in
-  that version, that `os.pipe()` passes `_O_BINARY`, is simply wrong: CPython's
-  `os_pipe_impl` does not set it (checked on 3.12, 3.13, 3.14 and main), so no
-  pipe in the tree is exempt by anything other than the payloads that happen to
-  travel it.
+* **The unpatched-site claims in this document were wrong twice, and the second
+  correction is the one that stands.** The `master.key is 33 bytes` failure had a
+  cause -- on Windows `os.open` is the CRT's *text* mode unless `O_BINARY` is
+  given, so a `0x0A` handed to `os.write` lands as `0x0D 0x0A`. Every site whose
+  fd receives an `os.write` now ORs the flag in, and that was CHECKED rather
+  than asserted: an AST pass over `local_operator/**.py` pairing each `os.open`
+  with the `os.write` calls in its file leaves only `O_RDONLY`/`O_DIRECTORY`
+  opens, read-only paths, and opens whose flags arrive through `_WRITE_FLAGS` --
+  which itself carries the flag, so the constant is what makes those correct
+  rather than an omission. Round 3 of design and review each caught a version of
+  this bullet that named the wrong set (first three "frame writers" that are
+  read-only, then "one site" when three more writes were still unpatched, one of
+  them `withdraw_inbox`), which is the argument for the AST pass over prose.
+* **One byte-writing channel is genuinely unmeasured, and it is a pipe.** The
+  evaluation scrub channel (`tools/eval.py` framing, written in
+  `tools/eval_worker.py`) writes a length-prefixed record to a pipe descriptor,
+  and its parser drops the rest of the stream on a length mismatch. `os.pipe()`
+  does NOT open `_O_BINARY` -- an earlier version of this bullet claimed it does,
+  which is false in CPython 3.12/3.13/3.14 and on main -- so whether a payload
+  containing `0x0A` survives that channel on Windows is unmeasured, and
+  `scripts/xplat_probe.py` has no pipe-byte probe to measure it. It is recorded
+  as a gap, not repaired here: the payloads that travel it today are
+  length-framed and the framing itself carries no newline.
+* **`clipboard.py`'s scratch probe is safe by construction, not by reading.** It
+  writes `b'blat'`, an ASCII constant that cannot contain the byte text mode
+  rewrites. It is the one `os.write` site left without the flag, and leaving it
+  is a decision with a reason rather than an oversight.
 
 
 ## Re-measuring

@@ -135,7 +135,7 @@ if hasattr(os, "register_at_fork"):
 # `| O_BINARY`: this fd carries length- or newline-framed BYTES the reader
 # counts, and on Windows `os.open` is the CRT's TEXT mode unless the flag
 # is given — a `0x0A` in the payload lands as `0x0D 0x0A` and every later
-# record is misparsed. See `paths.O_BINARY` for the measured case.
+# record is misparsed. See `procstate.O_BINARY` for the measured case.
 _WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | O_BINARY
 _READ_FLAGS = (
     os.O_RDONLY
