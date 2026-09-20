@@ -16,8 +16,10 @@ neither is re-created the same way.
 
 from __future__ import annotations
 
+import http.server
 import plistlib
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -25,10 +27,9 @@ import pytest
 from local_operator import launchd, supervisors
 from local_operator.tunnels import install
 
-#: The REAL identity guard and reload, kept because the rig replaces both (its
-#: plist lives under ``tmp_path``) and the sandbox cell below has to put the
-#: real ones back to prove the refusal still exists.
-_REAL_IS_OWN_PLIST = launchd.is_own_plist
+#: The REAL reload, kept because the rig replaces it (its plist lives under
+#: ``tmp_path``) and the sandbox cell has to put the real one back to prove the
+#: refusal still happens — the identity test it uses is already the real one.
 _REAL_RELOAD_JOB = launchd.reload_job
 
 pytestmark = pytest.mark.skipif(
@@ -47,20 +48,26 @@ class FakeProc:
 class _Rig:
     """``install()`` with the file system pointed at ``tmp_path`` and calls recorded.
 
-    ``own`` says whether the plist the rig writes is "the one the real passwd
-    home owns". It is not — it lives under ``tmp_path`` — so the rig states the
-    seam explicitly, because the identity guard on the repair helpers (round 1,
-    R-1) would otherwise refuse every kickstart and these cells would be
-    testing the refusal instead of the repair. ``own=False`` leaves the REAL
-    guard in place, which is what the sandbox cell below needs.
+    ``own`` says whether this tmpdir is the home launchd would have taken the
+    plist from, and it is spelled by pointing ``real_home`` at it rather than by
+    stubbing ``is_own_plist``: a stubbed guard restored the original over a
+    runtime mutation and hid it, which is what made these cells
+    un-mutation-verifiable (review round 2, R-10). ``own=False`` pins nothing, so
+    the real operator home is compared against and the refusal is genuine.
+
+    ``answering`` is the connector's own gateway, faked because the real probe
+    is exercised against a real loopback listener by its own cell below.
     """
 
     def __init__(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, own: bool = True
     ) -> None:
-        self.path = tmp_path / "com.local-operator.tunnel.plist"
+        home = tmp_path
+        home.joinpath("Library", "LaunchAgents").mkdir(parents=True, exist_ok=True)
+        self.path = home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
         self.calls: list[list[str]] = []
         self.loaded = True
+        self.answering = True
         self.reloads: list[Path] = []
         # Stated rather than inherited from the runner's OS, like the mobile
         # installer's own fixture does.
@@ -69,11 +76,9 @@ class _Rig:
         monkeypatch.setattr(install.config, "directory", lambda base=None: tmp_path)
         monkeypatch.setattr(install, "_launchctl", self._launchctl)
         monkeypatch.setattr(install.launchd, "reload_job", self._reload_job)
-        monkeypatch.setattr(
-            install.launchd,
-            "is_own_plist",
-            (lambda path, label: True) if own else _REAL_IS_OWN_PLIST,
-        )
+        monkeypatch.setattr(install, "gateway_answers", lambda *a, **k: self.answering)
+        if own:
+            monkeypatch.setattr(install.launchd, "real_home", lambda: home)
 
     def _launchctl(self, *cmd: str) -> FakeProc:
         self.calls.append(list(cmd))
@@ -227,3 +232,101 @@ def test_the_log_file_is_still_prepared(monkeypatch: pytest.MonkeyPatch, tmp_pat
     install.install()
 
     assert (tmp_path / "service.log").exists()
+
+
+def test_a_loaded_but_unanswering_connector_is_repaired_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-7: the connector's own gateway is the local surface the skip must ask.
+
+    The old gate skipped on liveness alone, so `lop tunnel install` reported
+    success over a connector that launchd was holding a live pid for and that
+    could not relay — and `lop tunnel install` is the very command
+    `tunnels/cli.py` names as the repair for that state. The plist is already
+    correct here, so the repair is the narrow one.
+    """
+    rig = _Rig(monkeypatch, tmp_path)
+    rig.write_current_plist()
+    rig.loaded = True
+    rig.answering = False
+    before = rig.path.stat().st_mtime_ns
+
+    install.install()
+
+    assert rig.path.stat().st_mtime_ns == before, "the file was already correct"
+    assert ["kickstart", "-k", f"{launchd.job_domain()}/{install.LABEL}"] in rig.calls, rig.calls
+    assert rig.reloads == [], "kickstart is the narrower repair and it succeeded"
+
+
+def test_the_gateway_probe_answers_only_for_a_serving_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe against a REAL loopback listener, in both directions.
+
+    A fake would prove nothing about this finding: the whole point of R-7 is that
+    the surface exists and is worth asking. The record is pointed at a port this
+    test binds, so the answer comes from a real socket.
+    """
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 — the stdlib's spelling
+            if self.path != "/_lop_tunnel/health":
+                self.send_response(404)
+                self.end_headers()
+                return
+            payload = b'{"ok": false, "connected": false}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args: object) -> None:
+            return  # an access log per probe would be noise in the pytest output
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setattr(install.config, "load", lambda: {"gateway_port": server.server_port})
+        # `ok: false` is the deliberate part: that is a LIVE connector whose
+        # relay authorization lapsed, and this gate's question is only "did my
+        # own gateway answer on my port" — the same statement the twins'
+        # `health(port) is not None` makes. `lop tunnel status` owns the other
+        # question.
+        assert install.gateway_answers() is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # A port nothing listens on: refused, closed or hung all mean repair.
+    monkeypatch.setattr(install.config, "load", lambda: {"gateway_port": 1})
+    assert install.gateway_answers(timeout=0.5) is False
+
+
+def test_the_stop_verb_refuses_a_redirected_home_and_acts_for_the_owned_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-8: `stop` was a bare `bootout gui/<uid>/<label>` from anywhere.
+
+    The label is a fixed module constant here while `service_path()` moves with
+    `$HOME`, so a redirected home's stop took the OPERATOR's connector down. The
+    mirrored half keeps the real-home verb working — through `_run`, which is
+    where this arm's bootout goes rather than through `_launchctl`.
+    """
+    sandbox = _Rig(monkeypatch, tmp_path / "sandbox", own=False)
+    sandbox.write_current_plist()
+
+    with pytest.raises(ValueError) as raised:
+        install.action("stop")
+
+    assert sandbox.calls == [], f"a redirected home reached launchd: {sandbox.calls}"
+    assert "not the LaunchAgent the real home owns" in str(raised.value)
+
+    owned = _Rig(monkeypatch, tmp_path / "home")
+    owned.write_current_plist()
+    runs: list[list[str]] = []
+    monkeypatch.setattr(install, "_run", lambda args, **kwargs: runs.append(list(args)))
+
+    install.action("stop")
+
+    assert runs == [["launchctl", "bootout", f"{launchd.job_domain()}/{install.LABEL}"]], runs

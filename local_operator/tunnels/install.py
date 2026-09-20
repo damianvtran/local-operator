@@ -8,11 +8,13 @@ task on Windows. All three record the store the connector serves
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 from local_operator import launchd, procname, procstate, supervisors
@@ -144,6 +146,59 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 — fixed argv, no shell
         ["launchctl", *args], capture_output=True, text=True, timeout=20
     )
+
+
+def gateway_answers(timeout: float = 2.0) -> bool:
+    """Whether this connector's OWN gateway is serving on its loopback port.
+
+    The liveness half of the install's skip decision, and the counterpart of its
+    ``mobile``/``browser`` twins' ``health()`` — which is what review round 2
+    (R-7) caught the previous revision denying: this daemon does have a local
+    surface, and ``tunnels/cli.py`` already probes exactly it to tell a stopped
+    connector from a gateway that is not there.
+
+    WHAT IT DELIBERATELY DOES NOT ASK: ``ok``/``connected`` in that payload are
+    RELAY state (``not revoked and now < authorized_until``, plus the edge
+    connection), so a connector whose authorization lapsed answers ``ok: false``
+    while being perfectly alive. ``lop tunnel status`` owns that question; here
+    the only question is "did my own gateway answer on my port", which is what
+    the twins' ``health(port) is not None`` means too. A stray listener on the
+    port cannot pass for it: the gateway checks the ``Host`` header against its
+    own port before serving the path (``gateway.py``), so a foreign server
+    answers another status or another body, and both count as not-answering
+    here — the direction that repairs.
+
+    Never raises: an unreadable record, a closed port and a hung listener all
+    answer ``False``, which is the direction that reloads.
+    """
+    port = _configured_gateway_port()
+    if port is None:
+        return False
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/_lop_tunnel/health", timeout=timeout
+        ) as response:
+            served = response.status == 200
+            payload = json.loads(response.read().decode())
+    except Exception:  # noqa: BLE001 — a probe answers absent rather than raising
+        return False
+    return served and isinstance(payload, dict)
+
+
+def _configured_gateway_port() -> int | None:
+    """The gateway port this machine's tunnel record names, or ``None``.
+
+    Read from the same record the daemon binds and `lop tunnel status` probes
+    (``service.py`` binds ``127.0.0.1:<gateway_port>`` from that value), so the
+    probe above asks about the port THIS connector would answer on rather than
+    the default. ``None`` covers both an unconfigured machine (``load`` raises)
+    and a record whose port fails validation — neither is a reason to skip a
+    repair.
+    """
+    try:
+        return config.port(config.load().get("gateway_port", config.DEFAULT_GATEWAY_PORT))
+    except ValueError:
+        return None
 
 
 def _plist_is_current(path: Path, wanted: bytes) -> bool:
@@ -396,22 +451,24 @@ def install() -> None:
         if not current:
             path.write_bytes(wanted)
             path.chmod(0o600)
-        # A DEAD JOB IS STILL REPAIRED: skip only while launchd holds a live pid
-        # for the label, `kickstart` the loaded-but-stopped case (the narrower
-        # repair, which does not briefly unregister the label), and fall through
-        # to the shared reload for anything else — including a label launchd has
-        # forgotten, which is what registers it.
+        # LIVENESS AND ANSWERING, the same shape its ``mobile`` and ``bridge``
+        # twins use, and a correction of what this comment used to claim (review
+        # round 2, R-7): the connector DOES have a local surface — its own
+        # gateway serves ``/_lop_tunnel/health`` on its loopback port — and
+        # liveness alone left an alive-but-unanswering connector in place while
+        # `lop tunnel install` reported success, which is the very command the
+        # CLI's own sentence names as the repair for that state.
         #
-        # LIVENESS ONLY, unlike its mobile and bridge twins, and the difference is
-        # deliberate rather than an oversight (round 1, R-5/Q-1): the connector
-        # has no local surface to probe — it is an outbound tunnel, with no port
-        # and no health endpoint — so launchd's own pid is the only signal this
-        # installer honestly has. A wedged connector that launchd still holds a
-        # pid for is left as it is; restarting it is `lop tunnel action restart`,
-        # which is a verb the operator asks for rather than one an install
-        # performs behind them.
+        # A DEAD JOB IS STILL REPAIRED: `kickstart` for the loaded-but-stopped
+        # case (the narrower repair, which does not briefly unregister the
+        # label), and the shared reload for anything else — including a label
+        # launchd has forgotten, which is what registers it.
         reload_needed = True
-        if current and launchd.job_running(label=LABEL, path=path, run=_launchctl):
+        if (
+            current
+            and launchd.job_running(label=LABEL, path=path, run=_launchctl)
+            and gateway_answers()
+        ):
             reload_needed = False
         elif current and launchd.kickstart(label=LABEL, path=path, run=_launchctl):
             reload_needed = False
@@ -470,6 +527,15 @@ def action(name: str) -> None:
         # file may exist from a machine backup, but nothing here can run it.
         raise ValueError(NO_SUPERVISOR_ERROR)
     if kind == supervisors.LAUNCHCTL:
+        # THE SAME HAZARD R-1 CLOSED ON THE INSTALL PATH (review round 2, R-8).
+        # `LABEL` is a fixed constant here while `service_path()` moves with
+        # $HOME, so a redirected home's `start|restart` would reload, and its
+        # `stop` would boot out, the OPERATOR's connector: a bare `bootout
+        # gui/<uid>/<label>` and a `bootstrap <domain> <path>` that launchd
+        # resolves to the Label INSIDE the file. Every call below addresses the
+        # label, so the refusal is here, ahead of all of them.
+        if not launchd.is_own_plist(path, LABEL):
+            raise ValueError(launchd.not_our_job_error(path, LABEL))
         if name == "stop":
             # A bare bootout, deliberately: stopping is not a reload, and there
             # is nothing to bootstrap afterwards.
