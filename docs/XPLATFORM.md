@@ -146,14 +146,16 @@ enabled and active.
   logged-in desktop.
 * **The probe's POSIX-attribute audit credits guards it has not understood, and
   a `guarded` verdict from it is NOT evidence that a guard holds.** The audit
-  (`_scan_posix_uses`, behind the `static.posix_attributes` row) decides
-  reachability syntactically. Its docstring names three precision rules -- a
-  `try:` (with one deliberate exception, `os.kill(pid, 0)`, whose whole Windows
-  defect is that it raises nothing for a handler to catch), an `if` whose test
-  mentions the platform or a capability probe (`hasattr`), and a platform
-  question that TERMINATES its block and so guards the rest of it -- plus a
-  fourth it states separately: a branch on a NAME the module itself computed from
-  the platform is a platform branch (`_platform_guards`).
+  (`probe_static_posix_attributes`, whose scan is `_scan_posix_uses`) decides
+  reachability syntactically. Its rules are: a `try:` (with one deliberate
+  exception, `os.kill(pid, 0)`, whose whole Windows defect is that it raises
+  nothing for a handler to catch); an `if` whose test mentions the platform or a
+  capability probe (`hasattr`); a platform question that TERMINATES its block and
+  so guards the rest of it; and a branch on a NAME the module itself computed
+  from the platform is a platform branch (`_platform_guards`). Those rules are
+  spread across two docstrings and one code comment rather than gathered in one
+  place, which is part of why the reasoning below was wrong twice before this
+  revision.
 
   Three ways that over-credits, each reproduced rather than reasoned:
 
@@ -167,13 +169,14 @@ enabled and active.
   - **A credit can carry no platform text at all**, because of the name rule
     above.
 
-  **The live instance shows all three at once, and it is why this bullet no
-  longer prescribes a fix.** `local_operator/tools/builtin.py`'s `os.getpgid` --
-  a fatal-on-Windows target -- is reported `guarded=True`, credited by three
-  separate guards on two different axes; removing any ONE of them, including the
-  conjunctive `if is_windows() and shell == BASH_SHELL_FALLBACK:` that reads like
-  the obvious culprit, does not change the verdict. It is harmless in practice
-  for a reason no syntax tree can see: the call sits inside
+  **The live instance shows the reach and name axes at once, and it is why this
+  bullet no longer prescribes a fix.** `local_operator/tools/builtin.py`'s
+  `os.getpgid` -- a fatal-on-Windows target -- is reported `guarded=True`,
+  credited by three separate guards on those two axes; replacing any ONE of them,
+  including the conjunctive `if is_windows() and shell == BASH_SHELL_FALLBACK:`
+  that reads like the obvious culprit, does not change the verdict. Inverting
+  that guard's polarity does not either. It is harmless in practice
+  for a reason the audit cannot see: the call sits inside
   `contextlib.suppress(Exception)`. The shipped battery prints
   `0 fatal, 18 lead, 67 guarded, 1 in POSIX-gated modules` with that hit inside
   the 67.
