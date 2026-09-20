@@ -175,9 +175,6 @@ DEFAULT_AUTO = True
 #: ``values.classification.timeoutMs`` — per-call deadline, in milliseconds.
 DEFAULT_TIMEOUT_MS = 1500
 
-#: ``values.classification.notice`` — whether the host emits its one-line notice.
-DEFAULT_NOTICE = True
-
 #: Consecutive failures after which the breaker opens for the session (§4).
 CIRCUIT_FAILURE_THRESHOLD = 3
 
@@ -322,11 +319,6 @@ class ClassificationService:
         return setting_int(self._settings, "timeoutMs", DEFAULT_TIMEOUT_MS) / 1000.0
 
     @property
-    def notice_enabled(self) -> bool:
-        """``values.classification.notice``."""
-        return strict_bool(classification_section(self._settings).get("notice"), DEFAULT_NOTICE)
-
-    @property
     def vendor_name(self) -> str | None:
         """The leg this session will use — lazily resolved, cached for the session.
 
@@ -334,8 +326,8 @@ class ClassificationService:
         first leg whose credential is visible without I/O
         (:func:`~local_operator.classification.cascade.vendor_status`), which
         cannot see a Radient OAuth session. After the first call the property
-        reports the leg that actually answered or was resolved, so a notice or a
-        diagnostics line is precise from the second message onwards. Making this
+        reports the leg that actually answered or was resolved, so a diagnostics
+        line is precise from the second message onwards. Making this
         a plain property rather than a coroutine is §4's choice, and the price of
         it is exactly this documented estimation window.
         """
@@ -367,70 +359,23 @@ class ClassificationService:
             self._record_failure("error")
             return Recommendation(skipped="error")
 
-    def notice(self, recommendation: Recommendation) -> str | None:
-        """The one-line host notice, or ``None`` when there is nothing to announce.
-
-        Silent on every empty outcome — disabled, no vendor, timeout, error,
-        circuit open, or a vendor that chose nothing. Those are the states where
-        the feature is working as designed (the prompt is unchanged), and a line
-        of chrome per user message telling the operator that an advisory feature
-        had no opinion is noise; the failures are logged instead.
-
-        The line names the RESOURCES and which message they were asked for. The
-        vendor, the duration and the cost were on it and came off in the design
-        round (D2/D3), each for its own reason:
-
-        - ``$0.000157`` bypassed the repo's one money formatter (``format_usd``,
-          ``tui/costs.py``, whose docstring claims every money surface reads it).
-          This package cannot import that module — it would drag the terminal UI
-          into the server and phone planes — and hand-rolling a second ladder is
-          the failure that docstring warns about. The 18-character tail is also
-          what pushed a 103-character line onto a second row at 100 columns;
-        - a cache hit rendered ``(0.00s)``, a duration for a call that never
-          happened;
-        - ``via <vendor>`` named an implementation leg at a user, and printed
-          ``via unknown vendor`` when no leg answered at all.
-
-        The spend is not lost: the caller records it at INFO
-        (``session_factory._log_classification_cost``), which is the operator's
-        surface for it, and a user's money belongs in ``/usage``.
-
-        ATTRIBUTION is the other half of the design round. ``Recommendation.late_urls``
-        names the resources that were asked for by an EARLIER message — against a real
-        vendor (~250 ms) and a 50 ms wait that is the ORDINARY case, delivered by the
-        next message — so the sentence says which message each resource belongs to.
-        Without that it reads as advice about the question it happens to sit under,
-        which is actively wrong rather than merely unhelpful (D2). A prompt that gained
-        BOTH sets is the one case that tags each resource separately: one label over a
-        union would have to be false of half of it (QA round 4, Q1).
-        """
-        if not self.notice_enabled or not recommendation.resources:
-            return None
-        resources = tuple(recommendation.resources)
-        # ``getattr``: the seam contract is these two methods, and a host's own
-        # recommendation type is whatever it says it is — the harness only guarantees
-        # the field set it was compiled against. Without the attribute the line falls
-        # back to the uniform "for this message", which is the pre-attribution sentence:
-        # worse than the truth, and much better than the AttributeError that made the
-        # whole notice disappear.
-        late = set(getattr(recommendation, "late_urls", ()) or ())
-        if not late:
-            urls = ", ".join(candidate.resource_url for candidate in resources)
-            return f"Suggestion added for this message: {urls}"
-        if len(late) == len(resources):
-            urls = ", ".join(candidate.resource_url for candidate in resources)
-            return f"Suggestion added for your previous message: {urls}"
-        # MIXED, and this is the only shape that tags per resource: the union cannot
-        # carry one attribution without lying about half of it (QA round 4, Q1 — the
-        # late-first branch used to print "for your previous message" over a set whose
-        # other half was chosen for the message the line sits under). Longer by design,
-        # and only when the two sets really did arrive together.
-        tagged = ", ".join(
-            f"{candidate.resource_url} "
-            f"({'your previous message' if candidate.resource_url in late else 'this message'})"
-            for candidate in resources
-        )
-        return f"Suggestion added: {tagged}"
+    # NO ``notice()`` METHOD, and its absence is the point rather than an omission.
+    #
+    # The seam used to render a one-line sentence per message ("Suggestion added for
+    # this message: <urls>") and the harness painted it through the session's notice
+    # event, held by ``queue_notice`` until the answer landed — which put a line about
+    # an internal resource-selection step underneath the reply the operator was
+    # reading. That is harness plumbing, not something the user asked to see, and it
+    # is now DELETED rather than gated: a ``values.classification.notice`` switch that
+    # gates a surface which no longer exists is a lie in the settings page, and a dead
+    # branch behind it is the second way of doing things this package's own
+    # conventions call a defect (the key itself is a retired row in ``settings_io``).
+    #
+    # What it did is not lost. The spend, the leg and the token counts were only ever
+    # duplicated here for the user's benefit and are recorded at INFO
+    # (``session_factory._log_classification_cost``), which is the surface the guide
+    # points at; a user's money belongs in ``/usage``. Nothing else read the line, so
+    # removing it removes no signal an operator or a support engineer relied on.
 
     # -- internals ---------------------------------------------------------
 
@@ -639,8 +584,8 @@ class ClassificationService:
         """Whether any leg has a usable credential, without calling anything.
 
         The wiring asks this inside its budgeted task, before it builds a request, so an
-        install with no recommender provider places no decision call, appends no block and
-        emits no notice — and the turn waits only as long as this probe takes, bounded
+        install with no recommender provider places no decision call and appends no
+        block — and the turn waits only as long as this probe takes, bounded
         by ``waitMs``.
 
         What it costs: the credential resolution the cascade would perform anyway,
@@ -855,7 +800,6 @@ __all__ = [
     "CIRCUIT_FAILURE_THRESHOLD",
     "DEFAULT_AUTO",
     "DEFAULT_MAX_RECOMMENDATIONS",
-    "DEFAULT_NOTICE",
     "DEFAULT_TIMEOUT_MS",
     "ClassificationService",
 ]

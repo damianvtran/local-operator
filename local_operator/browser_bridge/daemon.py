@@ -30,13 +30,17 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from local_operator import browser_files
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
+    CAPABILITY_GATED_METHODS,
     COMMAND_TIMEOUTS,
     EXPECTED_EXTENSION_VERSION,
     MIN_SUPPORTED_PROTO,
     ORIGIN_PROMPT_WINDOW_S,
     PROTO_VERSION,
+    Capabilities,
+    CapabilitySwitches,
     ErrorCode,
     ErrorDetail,
     Hello,
@@ -212,6 +216,23 @@ SERVER_GOING_DOWN_CLOSE_CODE = 1012
 PAIRING_FILENAME = "browser/pairing.json"
 PENDING_FILENAME = "run/browser/pairing-pending.json"
 
+#: Whether the mode bits :func:`_private_write` sets MEAN confidentiality here.
+#:
+#: On POSIX they are the whole argument: 0700 on the directory and 0600 on the
+#: record are what stop another local account reading the token hashes. On
+#: WINDOWS THEY ARE INERT — ``os.chmod`` there can only toggle the read-only
+#: flag (CPython's docs: "All other bits are ignored"), so the same call grants
+#: and restricts nothing (audit C8). Reading the platform ONCE into a named
+#: constant is deliberate rather than inline ``os.name``: it is the one name a
+#: test can flip, where patching ``os.name`` process-wide makes ``pathlib``
+#: build a ``WindowsPath`` and refuse on the host running the test.
+_MODE_BITS_ARE_CONFIDENTIALITY = os.name != "nt"
+
+#: Latched so the platform notice is emitted at most once per process:
+#: ``_private_write`` runs on every pairing, every revocation and every driver
+#: promotion, and a warning per write would be noise the reader learns to skip.
+_mode_notice_logged = False
+
 #: How many links with NO pairing may hold a socket at once before the oldest is
 #: retired. Every token-less dial is admitted, because that is how a second
 #: install asks to pair, and each one holds a socket, a label, a link entry and a
@@ -255,12 +276,63 @@ SUPERVISOR_BACKOFF_CAP_S = 30.0
 _WAIT_TICK_S = 0.5
 
 
+def _note_unrestricted_mode_once(path: Path) -> None:
+    """Say once that this platform's mode bits do not restrict the record.
+
+    WHY A LOG LINE AT ALL: every other protection on this file is real — the
+    write is temporary-then-``os.replace``, the token is stored hashed — so the
+    ONE inert step is exactly the one an operator would assume was doing the
+    work. The daemon's stderr is its log file, which ``lop browser logs``
+    reads, and that is the surface where this becomes visible rather than
+    silent. Said once, on the first write, because the sentence is about the
+    platform rather than about the write.
+    """
+    global _mode_notice_logged
+    if _mode_notice_logged:
+        return
+    _mode_notice_logged = True
+    logger.warning(
+        "browser bridge: %s holds a pairing token, and on this platform the "
+        "mode lop sets does not restrict it — Windows chmod() only toggles the "
+        "read-only flag, so 0600 is inert. What protects the file instead is "
+        "the access control list its directory inherited from your profile, "
+        "which lop neither creates nor verifies; keep that directory on a "
+        "local disk owned by your account.",
+        path,
+    )
+
+
 def _private_write(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    """Publish a JSON record as privately as this platform can.
+
+    The pairing record is the file that holds token hashes and the driver's
+    identity, so its protection is part of the gate rather than a nicety. The
+    write is temporary-then-``os.replace`` so a concurrent reader never sees a
+    half-written record (a full disk making a read fail as a write is the
+    defect class ``state.py`` documents).
+
+    ON WINDOWS THE MODES BELOW ARE INERT (:data:`_MODE_BITS_ARE_CONFIDENTIALITY`)
+    and are skipped rather than run for the look of it: ``os.chmod`` there only
+    toggles the read-only flag, so 0600 grants and restricts nothing, and a
+    reader of this function must not conclude the record is protected by it.
+    The ACL the config directory inherited from the profile is what protects
+    the file instead, ``mkdir(mode=...)`` is the one call that can create one
+    on Windows, and the limit is REPORTED rather than left to be discovered —
+    see :func:`_note_unrestricted_mode_once`.
+    """
+    # ``mode=`` as well as the chmod, and the two are not redundant: on POSIX
+    # the argument is masked by the umask and the chmod is what makes the mode
+    # exact, while on Windows it is the only thing that can create a directory
+    # ACL (the same reason ``secrets.keys.ensure_secrets_dir`` passes one).
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if _MODE_BITS_ARE_CONFIDENTIALITY:
+        os.chmod(path.parent, 0o700)
+    else:
+        _note_unrestricted_mode_once(path)
     temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
     temporary.write_text(json.dumps(payload), encoding="utf-8")
-    os.chmod(temporary, 0o600)
+    if _MODE_BITS_ARE_CONFIDENTIALITY:
+        os.chmod(temporary, 0o600)
     os.replace(temporary, path)
 
 
@@ -839,6 +911,25 @@ class ExtensionLink:
         # stale stamp from a dead socket must not drive a decision.
         self.peer_proto: int = PROTO_VERSION
         self.extension_version: str = ""
+        # What this peer ADVERTISED it serves, learned from its `capabilities`
+        # event and kept per-socket like every other stamp here: a stale list
+        # would authorise a method the peer that replaced it does not have. An
+        # older extension never sends the event, so this stays empty and the
+        # daemon refuses `download`/`upload` for it with a typed
+        # `capability_unsupported` rather than burning a 120 s budget on a
+        # method the worker answers with a bare `internal`.
+        self.capabilities: list[str] = []
+        # The servable methods the OPERATOR has switched off in the extension's own
+        # options, learned from its `capability_switches` event and kept per-socket
+        # for the same reason `capabilities` is: a consent reported by a peer that
+        # has gone must not keep answering for its replacement.
+        #
+        # A separate list rather than an absence from `capabilities`, because the
+        # two absences have opposite remedies — a build that cannot serve a method
+        # needs an update, and a build whose switch is off needs the operator — and
+        # conflating them sends the user to a fix that cannot work
+        # (protocol.CapabilitySwitches states the same rule from the other side).
+        self.disabled_capabilities: list[str] = []
         self.paired = False
         self.pending: dict[str, asyncio.Future[Response]] = {}
         # Request ids the extension has told us are blocked on a human origin
@@ -1152,6 +1243,15 @@ class ExtensionLink:
         # and the field's own contract is "the proto the peer would speak".
         self.peer_proto = PROTO_VERSION
         self.extension_version = ""
+        # Capabilities are per-socket too, for the same reason the version is:
+        # a list outliving its socket would let a method be sent to a peer that
+        # never advertised it.
+        self.capabilities = []
+        # …and so is the operator's own answer. Kept with the advertisement it
+        # qualifies: a stale "switch off" would name a consent the peer that
+        # replaced this one never gave, which is a lie about the USER rather than
+        # about a build.
+        self.disabled_capabilities = []
         for future in self.pending.values():
             if not future.done():
                 future.set_exception(RuntimeError("extension disconnected"))
@@ -1190,6 +1290,20 @@ class BridgeService:
             port=port,
             session_key=secrets.token_urlsafe(32),
             proto=PROTO_VERSION,
+            # This daemon's own stamp that it knows the `capabilities` field: a
+            # session that reads an EMPTY `capabilities` list has to tell "the
+            # extension advertised nothing" (toggle it) from "the daemon that
+            # wrote this file predates the advertisement" (restart it), and only
+            # the writer can say which (state.BridgeState.capabilities_known).
+            # Set here rather than in `publish` because it describes the PROCESS,
+            # not the link: it stays true while no peer is attached, which is
+            # exactly when the refusal copy is most likely to be read.
+            capabilities_known=True,
+            # …and the same stamp for the switch answer: without it an empty
+            # `disabled_capabilities` cannot be told from a daemon that predates the
+            # field, and the refusal copy would offer a switch to a user whose
+            # extension build has none.
+            switches_known=True,
             started_at=self.started_at,
         )
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -1625,6 +1739,15 @@ class BridgeService:
         if self.link.proven:
             self.state.extension_version = self.link.extension_version
             self.state.extension_proto = self.link.peer_proto
+            # Sorted, because the consumer compares membership and the file is
+            # read by a human in `lop browser status`; blanked with the version
+            # above so a proven-only fact stays proven.
+            self.state.capabilities = sorted(self.link.capabilities)
+            # The operator's answer, published with the advertisement it
+            # qualifies and blanked with it for the same reason: `disabled`
+            # outliving its socket would name a consent given by a peer that is no
+            # longer talking.
+            self.state.disabled_capabilities = sorted(self.link.disabled_capabilities)
             # The ONE advisory predicate, shared with `/health`: a KNOWN version
             # strictly below the one this runtime ships with. Unparseable is not
             # "older" and an extension AHEAD is not behind, so neither nags.
@@ -1634,6 +1757,11 @@ class BridgeService:
         else:
             self.state.extension_version = ""
             self.state.extension_proto = 0
+            # Nothing is served by a link that is not talking: the empty list is
+            # what makes the session-side capability check refuse rather than
+            # send into a socket nobody is reading.
+            self.state.capabilities = []
+            self.state.disabled_capabilities = []
             self.state.extension_update_available = False
         state_store.publish(self.state, self.root)
 
@@ -2772,6 +2900,50 @@ class BridgeService:
                             timeout=LINK_SEND_TIMEOUT_S,
                         )
                     continue
+                if frame.get("event") == "capabilities":
+                    # Which methods this build serves (design §6.3). Validated
+                    # rather than trusted: a malformed frame is dropped, not
+                    # allowed to blank a working advertisement — the same
+                    # discipline the pairing and response branches use.
+                    #
+                    # ADDITIVE by construction: an already-released daemon
+                    # reaches the Response.model_validate below, fails, and
+                    # drops the frame (protocol.py's rule for what keeps
+                    # PROTO_VERSION where it is).
+                    try:
+                        advertised = Capabilities.model_validate(frame)
+                    except ValidationError:
+                        continue
+                    link.capabilities = [str(name) for name in advertised.methods]
+                    # Published straight away rather than waiting for the next
+                    # heartbeat: the session-side check reads the FILE, so a
+                    # capability that only reached it 30 s later would show the
+                    # new action as unavailable on a host that serves it.
+                    self.publish_safely()
+                    continue
+                if frame.get("event") == "capability_switches":
+                    # Which servable methods the operator has switched OFF
+                    # (protocol.CapabilitySwitches). A SECOND event rather than a
+                    # field on `capabilities` because every envelope here is
+                    # extra="forbid": a new key on an existing event is closed by
+                    # an already-released daemon, while an unknown event is dropped
+                    # — which is why the extension sends both and this branch
+                    # tolerates an old peer that sends only the first.
+                    #
+                    # Validated rather than trusted, and dropped on failure rather
+                    # than blanking a working answer: a malformed frame must not be
+                    # able to claim the operator enabled a capability.
+                    try:
+                        switches = CapabilitySwitches.model_validate(frame)
+                    except ValidationError:
+                        continue
+                    link.disabled_capabilities = [str(name) for name in switches.disabled]
+                    # Published immediately, for the same reason the advertisement
+                    # is: the harness decides from the FILE, and a switch the user
+                    # has just flipped must not keep reading as off — or as on —
+                    # for the next 30 s of heartbeats.
+                    self.publish_safely()
+                    continue
                 if frame.get("event") == "awaiting_origin":
                     # The extension paused this request on a human origin
                     # decision. Record it so the RPC wait extends its deadline
@@ -3138,6 +3310,61 @@ class BridgeService:
             return self._error_response(
                 request.id, ErrorCode.INTERNAL, f"unknown method: {request.method}"
             )
+        # REFUSE TO SEND what the attached host did not advertise, and do it here
+        # rather than letting the peer fail it: the worker answers an unknown
+        # method with a bare `internal`, so an ungated `download` sent to a
+        # pre-feature extension would spend the whole command budget and then
+        # report nothing the caller can act on (design §6.3). The refusal names
+        # the method, the host and the host's own reported version — the two
+        # remedies it separates ("this build predates the feature" versus "this
+        # build is current and stopped answering") are otherwise
+        # indistinguishable, and sending the reader to the wrong one is the
+        # misdiagnosis `OWNERSHIP_MIN_EXTENSION_VERSION` exists to prevent.
+        #
+        # Only methods that ARE capability-gated are checked: every other method
+        # predates the advertisement, and refusing them on a pre-feature peer
+        # would break the whole tool for a host that works today.
+        # The operator's switch, refused at the SAME place the advertisement is
+        # enforced — so a session that somehow got past the file check (a record
+        # read a moment too early) still cannot reach a switched-off capability, and
+        # the wire refusal carries the same three-state payload the file path does.
+        if (
+            request.method in CAPABILITY_GATED_METHODS
+            and request.method in self.link.disabled_capabilities
+        ):
+            # The operator's switch, refused at the SAME place the advertisement is
+            # enforced — so a session that somehow got past the file check (a record
+            # read a moment too early) still cannot reach a switched-off capability,
+            # and the refusal carries the same three-state payload the file path
+            # carries.
+            return self._error_response(
+                request.id,
+                ErrorCode.CAPABILITY_UNSUPPORTED,
+                f"the operator has switched off {request.method} in the extension's options",
+                {
+                    "method": request.method,
+                    "advertised": sorted(self.link.capabilities),
+                    "extension_version": self.link.extension_version,
+                    "disabled": sorted(self.link.disabled_capabilities),
+                    "switches_known": True,
+                },
+            )
+        if (
+            request.method in CAPABILITY_GATED_METHODS
+            and request.method not in self.link.capabilities
+        ):
+            return self._error_response(
+                request.id,
+                ErrorCode.CAPABILITY_UNSUPPORTED,
+                f"the attached host does not serve {request.method}",
+                {
+                    "method": request.method,
+                    "advertised": sorted(self.link.capabilities),
+                    "extension_version": self.link.extension_version,
+                    "disabled": sorted(self.link.disabled_capabilities),
+                    "switches_known": True,
+                },
+            )
         if request.id in self.link.pending:
             return self._error_response(request.id, ErrorCode.BUSY, "request id already in flight")
         # Serialize per tab so concurrent sessions cannot interleave commands on
@@ -3459,9 +3686,7 @@ class BridgeService:
         finds no future) together with that fence.
         """
         try:
-            response = await self._await_response(
-                request.id, future, COMMAND_TIMEOUTS[request.method]
-            )
+            response = await self._await_response(request.id, future, self._command_budget(request))
             return JSONResponse(response.model_dump(mode="json", exclude_none=True))
         except asyncio.TimeoutError:
             silent = self.link.silent_for()
@@ -3565,7 +3790,7 @@ class BridgeService:
                 request.id,
                 code,
                 f"{request.method} timed out",
-                {"timeout_s": COMMAND_TIMEOUTS[request.method]},
+                {"timeout_s": self._command_budget(request)},
             )
         except Exception as exc:  # noqa: BLE001 - transport failure becomes typed wire error
             # Same sibling case as the send arm: a severed link makes this a
@@ -3684,6 +3909,25 @@ class BridgeService:
         ):
             self._tab_locks.pop(tab_key, None)
 
+    def _command_budget(self, request: Request) -> float:
+        """The wall-clock budget for one admitted command (design 6.1).
+
+        Only `download` may ask for more than its table value: it waits on a PAGE
+        (a 200 MB file on a slow link legitimately takes minutes), and the caller's
+        `timeout_s` is clamped to the shared ceiling by the TOOL before it reaches
+        the wire. Every other method takes its table value, so no method can
+        extend its own budget by inventing a parameter. The session-side client
+        reads the same wire key (`client_timeout`), which is what keeps the two
+        ends of the timeout chain from disagreeing.
+        """
+        base = COMMAND_TIMEOUTS[request.method]
+        if request.method != "download":
+            return base
+        raw = request.params.get("timeout_s")
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw <= 0:
+            return base
+        return max(base, min(float(raw), browser_files.DOWNLOAD_TIMEOUT_MAX_S))
+
     async def _await_response(
         self, request_id: str, future: asyncio.Future[Response], base_timeout: float
     ) -> Response:
@@ -3758,6 +4002,12 @@ class BridgeService:
                 "extension_connected": connected,
                 "paired": self.link.paired,
                 "browser": self.link.browser,
+                # ADDITIVE, and a STRING only: the quarantine root a `download`
+                # writes into (design §4.4). The daemon does not stat it — this
+                # payload is polled by the popup, and a directory walk on a polled
+                # path is I/O for a number nobody reads there. The CLI, which runs
+                # on this machine already, prints the size.
+                "downloads_dir": str(browser_files.downloads_root()),
                 "current_url": self.link.current_url,
                 "current_title": self.link.current_title,
                 # Additive OPTIONAL fields (HTTP, not the WS protocol, so an old

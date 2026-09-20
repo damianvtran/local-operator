@@ -66,7 +66,14 @@ def save(value: dict[str, Any]) -> None:
 def load() -> dict[str, Any]:
     path = directory() / "config.json"
     if not path.exists():
-        raise ValueError("No tunnel configured. Run lop tunnel create after /login radient.")
+        # `lop login radient`, not `/login radient`: this sentence is printed by a
+        # SHELL surface (`lop tunnel status`, and every command that reads the
+        # store through here), where `/login` is not a program — the shell answers
+        # it with `no such file or directory`. Review round 2's m5 is this string
+        # (and the two beside it in `api.py`/`cli.py`); the rule it follows is the
+        # one the park's own sentence states at `gateway.TERMINAL_DETAIL`: a
+        # surface may only name a command ITS reader can run.
+        raise ValueError("No tunnel configured. Run lop tunnel create after lop login radient.")
     value = json.loads(path.read_text())
     if not isinstance(value, dict):
         raise ValueError("Tunnel configuration must be an object.")

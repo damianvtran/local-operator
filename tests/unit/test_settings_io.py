@@ -242,7 +242,6 @@ def _classification_consumer_defaults() -> dict[str, object]:
         DEFAULT_MAX_RECOMMENDATIONS,
         DEFAULT_MAX_STATE_CHARS,
         DEFAULT_MODEL,
-        DEFAULT_NOTICE,
         DEFAULT_TIMEOUT_MS,
         DEFAULT_VENDOR,
     )
@@ -257,7 +256,6 @@ def _classification_consumer_defaults() -> dict[str, object]:
         "classification.maxStateChars": DEFAULT_MAX_STATE_CHARS,
         "classification.maxCandidates": DEFAULT_MAX_CANDIDATES,
         "classification.maxRecommendations": DEFAULT_MAX_RECOMMENDATIONS,
-        "classification.notice": DEFAULT_NOTICE,
     }
 
 
@@ -276,6 +274,7 @@ def _classification_consumer_defaults() -> dict[str, object]:
 _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "display.shimmer": "tui/settings.py derives its defaults from this registry",
     "display.narration": "tui/settings.py derives its defaults from this registry",
+    "display.reasoning": "tui/settings.py derives its defaults from this registry",
     "display.rail": "tui/settings.py derives its defaults from this registry",
     "display.comfortable_rows": "tui/settings.py derives its defaults from this registry",
     "display.nerd_icons": "derived; tri-state None means auto-detect, not a value",
@@ -290,6 +289,10 @@ _NO_SINGLE_VALUE_CONSUMER: dict[str, str] = {
     "subagents.models.lo": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.med": "free text; empty means 'keep the parent's model', no constant",
     "subagents.models.hi": "free text; empty means 'keep the parent's model', no constant",
+    "classification.notice": (
+        "retired: the row gates a render path that was deleted outright, so it has no "
+        "reader to compare a default against"
+    ),
 }
 
 
@@ -1832,3 +1835,232 @@ def test_the_real_validator_is_what_marks_the_shape(tmp_path, monkeypatch) -> No
     assert value == quoted.split('"')[1], value
     assert " " in value
     assert advice == settings_io.ADVICE_NOT_FOUND, advice
+
+
+class TestTheApprovalsCopyIsTrueOnBothSurfaces:
+    """The one approvals string the TUI paints, and the one the desktop paints.
+
+    ``Section.description`` has exactly ONE consumer in this repository — the
+    desktop settings header (``server/routes/settings.py``) — while the TUI page
+    paints the section TITLE and its scope tag, then the row and the row HELP.
+    The caveat #1282 adds therefore cannot live in the description alone: in the
+    production topology (``lop`` always attaches, so the gate is a runtime
+    process) the row the operator edits would go on promising that a config write
+    reaches every running session, which the runtime refuses on the next poll
+    (design round 1, D1; agent review round 1, m1).
+    """
+
+    def test_the_help_fits_the_detail_ladder_beside_its_default_clause(self) -> None:
+        """74 cells is the detail line at 80x24, and the ladder sheds WHOLE rungs.
+
+        So the budget that decides whether this sentence is on the frame at all is
+        74 minus the ``· default: ask`` suffix — the off-default state is exactly
+        the one the user is in after writing this key. Measured on the head with
+        the real page: the first cut (72 cells) painted nothing off-default at
+        80x24, and the ladder fell through to ``default: ask  tool_approval_mode``.
+        """
+        setting = settings_io.resolve_key("tool_approval_mode")
+        assert setting is not None
+        assert cell_len(f"{setting.help} · default: {setting.default}") <= 74, setting.help
+
+    def test_the_help_drops_the_promise_that_made_it_false(self) -> None:
+        """The old help promised ``every running session … from its next call``,
+        which no longer holds in the loosening direction, and it names the route
+        that does loosen one."""
+        setting = settings_io.resolve_key("tool_approval_mode")
+        assert setting is not None
+        assert "every running session" not in setting.help, setting.help
+        assert "/approvals auto" in setting.help, setting.help
+
+    def test_the_section_description_does_not_over_claim_the_command(self) -> None:
+        """It must not say a loosening ALWAYS needs the command.
+
+        In the embedded pane the page's own write IS the gate-holding process's
+        write, so it is authorised and does loosen the session — pinned by
+        ``tests/unit/tui/test_config_change_notice.py::
+        test_the_page_says_nothing_when_its_own_write_is_authorised``. The first
+        wording said "loosening a running one needs /approvals auto in it", which
+        that test falsifies (agent review round 1, m1).
+        """
+        section = next(entry for entry in settings_io.SECTIONS if entry.name == "approvals")
+        assert "tightens every running session" in section.description, section.description
+        assert "that session's own process" in section.description, section.description
+
+
+class TestConfigEditQualifiesALoosening:
+    """``lop config edit tool_approval_mode auto`` must not read as "ungated now".
+
+    Since #1282 a ``config.yml`` write can only TIGHTEN a session that is already
+    running, and this command's process holds no gate at all, so the unqualified
+    "Successfully updated …" line was the only account of a change that reaches
+    no live agent (UX round 1, U4).
+    """
+
+    def test_the_loosening_receipt_names_the_route(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="auto"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated tool_approval_mode to auto" in out, out
+        assert "Running sessions are unchanged" in out, out
+        assert "/approvals auto in each session" in out, out
+
+    def test_a_tightening_receipt_carries_no_such_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A tightening really does reach every running session — the safe
+        direction — so the same warning there would be a false alarm."""
+        import argparse
+
+        from local_operator.cli import config_edit_command
+
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+        ConfigManager(tmp_path).set_config_value("tool_approval_mode", "auto")
+        code = config_edit_command(argparse.Namespace(key="tool_approval_mode", value="ask"))
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert "Successfully updated tool_approval_mode to ask" in out, out
+        assert "Running sessions are unchanged" not in out, out
+
+
+def test_the_exclusion_row_round_trips_and_treats_empty_as_none(manager: ConfigManager) -> None:
+    """`web_search.excluded_providers` is the opt-out list, and [] is its DEFAULT.
+
+    The opposite of `web_search.providers`, where an empty list is refused: there
+    an empty priority list would be an empty chain, here `[]` means "nothing
+    excluded" -- the resting state of every existing config, which is why this
+    key needs no migration.
+    """
+    excluded = settings_io.BY_KEY["web_search.excluded_providers"]
+
+    assert settings_io.validate(excluded, ["exa"]) is None
+    assert settings_io.validate(excluded, []) is None
+    assert settings_io.validate(excluded, ["parallel", "duckduckgo"]) is None
+    # An id the catalogue does not own is still a typo, not an opt-out.
+    assert settings_io.validate(excluded, ["bing"]) is not None
+
+    assert settings_io.coerce(excluded, "exa, parallel") == ["exa", "parallel"]
+    assert settings_io.coerce(excluded, "exa,exa") == ["exa"]
+
+    settings_io.write_setting(manager, excluded, ["exa", "parallel"])
+    assert settings_io.read_setting(manager, excluded) == ["exa", "parallel"]
+
+    # An ABSENT key and an empty list are the same thing to the consumer, which is
+    # why this key needs no migration. `empty_unsets` is what lets a user clear the
+    # row (the settings view and the server route both reset the key on an empty
+    # edit) instead of being refused for choosing "none excluded".
+    assert settings_io.read_setting(manager, excluded) == ["exa", "parallel"]
+    settings_io.reset_setting(manager, excluded)
+    assert manager.get_config_value("web_search").get("excluded_providers") is None
+    assert settings_io.read_setting(manager, excluded) == []
+
+
+def test_parallel_is_a_providers_member(manager: ConfigManager) -> None:
+    providers = settings_io.BY_KEY["web_search.providers"]
+
+    assert settings_io.validate(providers, ["parallel"]) is None
+    assert settings_io.coerce(providers, "exa, parallel") == ["exa", "parallel"]
+
+
+# ---------------------------------------------------------------------------
+# Two rows whose answer is a PLATFORM question (B26 and D23).
+# ---------------------------------------------------------------------------
+
+
+def test_the_bash_shell_help_names_the_shell_this_os_falls_back_to() -> None:
+    """``/bin/sh`` cannot exist on Windows, so that row must not promise it (B26).
+
+    The row names a PATH, and the resolver behind it (``tools.builtin``, pinned
+    to this row by ``test_bash_shell_row_shares_the_consumer_path``) ends
+    somewhere different on each platform: ``/bin/sh`` on POSIX, a Git for Windows
+    ``bash.exe`` on Windows, and — with neither — a refusal with an install hint
+    rather than an execution in a dialect the tool does not advertise.
+
+    THE WINDOWS SPELLING IS ALSO A WIDTH (design round 1, D1). The first cut was
+    163 cells against a 74-cell detail field with no wrapping and a shed ladder
+    that DROPS the sentence rather than trimming it, so it rendered as
+    `…else the bash.exe` at 80 columns and `…with neit` at 120 — unreadable on
+    the platform it was written for at every width the page supports. The
+    clause it drops is not lost information; the test below is what pins it to
+    the message that still carries it.
+    """
+    posix = settings_io._bash_shell_help(windows=False)
+    windows = settings_io._bash_shell_help(windows=True)
+
+    assert posix == "Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh."
+    assert "/bin/sh" not in windows, "Windows has no /bin/sh to fall back to"
+    assert "bash.exe" in windows
+
+    # The row itself carries this host's spelling, and only one of them.
+    assert settings_io._BASH_SHELL_HELP == settings_io._bash_shell_help(settings_io._IS_WINDOWS)
+    assert settings_io.BY_KEY["bash.shell"].help == settings_io._BASH_SHELL_HELP
+
+
+def test_the_bash_shell_help_fits_the_80_column_footer() -> None:
+    """A cell budget, not a style preference: the field does not wrap (D1).
+
+    ``.settings-view-detail`` is ``height: 2`` with no wrap, its shed ladder has
+    no rung below "help alone", and its floor cuts the sentence mid-clause with
+    a visible ``…``. So a help string that overruns is not merely ugly — the
+    half that says what a blank field does is what disappears, and it disappears
+    silently on a frame a reviewer of the string cannot see.
+
+    Pinned at the hard budget the POSIX sibling is already written against, and
+    the failure this would have caught is the one that shipped: the Windows
+    spelling measured 163 cells.
+    """
+    for windows in (False, True):
+        help_text = settings_io._bash_shell_help(windows)
+        assert cell_len(help_text) <= 74, f"{cell_len(help_text)} cells: {help_text!r}"
+
+
+def test_the_dropped_refusal_clause_lives_in_the_tools_own_message() -> None:
+    """D1's fix shortens the row; it must not DELETE what it shortened away.
+
+    "with neither, the tool refuses and says how to install one" was the half of
+    the 163-cell sentence that told a Windows user what a blank field means.
+    It moved into ``WINDOWS_NO_BASH_MESSAGE`` — where the tool card gives it a
+    whole row — and the two surfaces are checked together here, because a
+    later edit could otherwise shorten one by dropping the claim entirely.
+    """
+    from local_operator.tools.builtin import WINDOWS_NO_BASH_MESSAGE
+
+    assert "Install Git for Windows" in WINDOWS_NO_BASH_MESSAGE
+    assert "no /bin/sh" in WINDOWS_NO_BASH_MESSAGE
+    # And the row still names the same interpreter that message refuses over.
+    assert "bash.exe" in settings_io._bash_shell_help(windows=True)
+
+
+def test_a_windows_launcher_is_judged_by_what_windows_can_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.access(path, X_OK)`` is vacuous on Windows, so PATHEXT answers (D23).
+
+    The check it replaced was satisfied by ANY existing file, so a ``.txt`` or a
+    ``.ps1`` was accepted as a click launcher and the failure arrived later as an
+    unexplained refusal to launch. What Windows itself uses is the extension
+    list, plus the ``.exe`` ``CreateProcess`` appends to a name with none.
+    """
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+    assert settings_io._windows_command_is_runnable(r"C:\tools\app.exe")
+    assert settings_io._windows_command_is_runnable(r"C:\tools\app.CMD")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\notes.txt")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\script.ps1")
+
+    # A name with no extension runs ``<name>.exe``, and only when that exists.
+    naked = tmp_path / "app"
+    assert not settings_io._windows_command_is_runnable(str(naked))
+    (tmp_path / "app.exe").write_text("", encoding="utf-8")
+    assert settings_io._windows_command_is_runnable(str(naked))
+
+    # PATHEXT is the user's own list, read rather than hardcoded.
+    monkeypatch.setenv("PATHEXT", ".PY")
+    assert settings_io._windows_command_is_runnable(r"C:\tools\tool.py")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\app.exe")

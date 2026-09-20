@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from local_operator import browser_files
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.protocol import (
     COMMAND_TIMEOUTS,
@@ -20,6 +21,7 @@ from local_operator.browser_bridge.protocol import (
     ErrorDetail,
     Request,
     Response,
+    extension_older,
 )
 
 #: Slack on top of the daemon's worst-case budget so scheduling jitter and the
@@ -421,6 +423,11 @@ def format_error(
                 f"{peer}; this Local Operator speaks {PROTO_VERSION}. Update the "
                 "desktop app or Local Operator, then retry."
             )
+    if error.code == ErrorCode.CAPABILITY_UNSUPPORTED:
+        # Same reason as the two branches above: the sentence depends on the
+        # payload (which method, which build, whether any build could serve it),
+        # so a static table entry cannot carry it.
+        return _capability_message(error, host=host)
     if error.code in messages:
         return messages[error.code]
     if error.code == ErrorCode.TAB_CLOSED:
@@ -528,7 +535,242 @@ def format_error(
     return f"{label} error ({error.code.value}): {error.message}"
 
 
-def client_timeout(method: str) -> float:
+@dataclass(frozen=True)
+class HostCapabilities:
+    """What a host's discovery record says it serves, and which build said so.
+
+    Read from the FILE and never over a socket, deliberately: the whole point of
+    the advertisement is that the decision costs no round trip and works between
+    dials (design §6.3). The tool needs the answer BEFORE it dispatches, because
+    the alternative — sending the method and reading the peer's refusal — spends
+    the command budget on a method the worker answers with a bare `internal`.
+
+    An empty ``methods`` is the honest answer for a host that told us nothing,
+    and it is exactly what the refusal is for: a pre-feature extension never sent
+    the event, and a pre-feature app record has no key at all. ``version`` is
+    whichever stamp that host's record carries (``extension_version`` on the
+    bridge, ``app_version`` on the app host), so the copy can tell "predates the
+    feature" from "current but not advertising".
+    """
+
+    methods: tuple[str, ...] = ()
+    version: str = ""
+    #: Whether the record's WRITER knows the advertisement at all — the bridge
+    #: daemon's own stamp, not the peer's. An empty ``methods`` has two causes
+    #: with opposite remedies (a peer that advertised nothing vs a daemon that
+    #: predates the field), and this is the only thing that separates them
+    #: (design §6.4; review round 1, R4).
+    capabilities_known: bool = False
+    #: The methods this build CAN serve but whose OPERATOR switch is off.
+    #:
+    #: Read from the same record as `methods`, and the reason the three states are
+    #: distinguishable at all: `methods` alone says a method is unavailable, and
+    #: this says WHY when the reason is a consent the user can change (design
+    #: §17.13). Empty when the peer never reported switches, so a pre-switch build
+    #: reads exactly as it did before.
+    #:
+    #: Declared AFTER ``capabilities_known`` on purpose: the three fields above are
+    #: positional at their call sites, and a field inserted in the middle would
+    #: silently reassign a test's third argument to "disabled".
+    disabled: tuple[str, ...] = ()
+    #: Whether that peer's record carries a switch answer at all — the daemon's own
+    #: stamp (state.BridgeState.switches_known). Without it an empty `disabled`
+    #: would be indistinguishable from "this build has no switches", and the copy
+    #: would offer a switch to a user who has no such switch to turn on.
+    switches_known: bool = False
+
+    def serves(self, method: str) -> bool:
+        return method in self.methods
+
+    def switched_off(self, method: str) -> bool:
+        """Whether the peer REPORTED this method as switched off by its operator.
+
+        Separate from ``serves`` on purpose: a caller that only asked "is it
+        available" would lose the difference between a build that cannot and a
+        consent that is absent, which is the whole distinction the record carries.
+        """
+        return method in self.disabled
+
+
+#: The remedy sentence for a capability refusal, per host. Two hosts, two
+#: processes, and the reader is sent to a different one — the same reason
+#: `_WEDGE_REMEDY` is a table rather than a branch.
+_CAPABILITY_HOST_REMEDY = {
+    HOST_EXTENSION: (
+        "update the browser extension in Chrome when a newer version is offered, then retry"
+    ),
+    HOST_UI: "update the desktop app, then retry",
+}
+
+
+def capability_refusal(
+    method: str,
+    *,
+    host: str = HOST_EXTENSION,
+    capabilities: HostCapabilities | None = None,
+) -> BridgeError:
+    """The typed refusal for a method this host did not advertise.
+
+    Built in ONE place so the two producers cannot word it differently: the tool
+    raises it when the discovery record already settles the question (no socket
+    call at all), and the daemon raises the same code over the wire when the
+    record was premature. :func:`format_error` renders both from the payload.
+    """
+    current = capabilities or HostCapabilities()
+    return BridgeError(
+        ErrorCode.CAPABILITY_UNSUPPORTED,
+        f"{method} is not served by this host",
+        {
+            "method": method,
+            "advertised": sorted(current.methods),
+            "extension_version": current.version,
+            "capabilities_known": current.capabilities_known,
+            "disabled": sorted(current.disabled),
+            "switches_known": current.switches_known,
+            "host": host,
+        },
+    )
+
+
+def _switch_refusal_sentence(method: str) -> str:
+    """The consent refusal, with the permission mechanics the user is about to meet.
+
+    ONE function, because two arrivals must read identically: the harness refusing
+    on the RECORD (the switch was off when the extension last dialled) and the
+    extension's own last gate refusing at execution. They used to differ — the
+    record's sentence was the full one, and the peer's was a bare
+    `capability_unsupported` with empty data that rendered as "no browser is
+    attached" and named no method (round-1 R4/R5) — so the model's remedy depended
+    on which of two paths had produced the same fact.
+
+    The grant clause is load-bearing and came from the extension's own copy
+    (round-1 D5): turning the switch on asks Chrome for a permission, and an agent
+    that tells the user "turn it on" without saying a browser prompt will appear
+    has sent them into a dialog nothing warned them about. "has not enabled" rather
+    than "has not turned on" for the same reason the sentence carries a location:
+    the state it describes holds whether the user never turned it on or turned it
+    on and had the grant refused, and the switch ends up OFF in both.
+    """
+    from local_operator.browser_bridge.protocol import (
+        CAPABILITY_SWITCH_LABEL,
+        CAPABILITY_SWITCH_LOCATION,
+        CAPABILITY_SWITCH_PERMISSION,
+    )
+
+    label = CAPABILITY_SWITCH_LABEL.get(method)
+    if not label:
+        return ""
+    permission = CAPABILITY_SWITCH_PERMISSION.get(method)
+    grant = (
+        f" Turning it on asks Chrome for the '{permission}' permission; if the user refuses "
+        "that, the switch stays off."
+        if permission
+        else ""
+    )
+    return (
+        f"'{method}' is switched off in the browser extension: the operator has not enabled "
+        f'"{label}" in {CAPABILITY_SWITCH_LOCATION}.{grant} Ask the user to turn it on there, '
+        "then retry — nothing else about this tab is affected. (No update is involved: this "
+        "build can already serve it.)"
+    )
+
+
+def _capability_message(error: BridgeError, *, host: str) -> str:
+    """The model-facing sentence for a `capability_unsupported`.
+
+    Five cases, and they must not be merged. The extension host's two
+    unavailability answers are the ones this function exists to keep apart, because
+    only one of them is about VERSION: a build that cannot serve the method at all
+    (update it — `CAPABILITY_MIN_EXTENSION_VERSION`), and a build that can serve it
+    while its OPERATOR has not turned the capability's switch on (send the user to
+    the switch; no update can help). The rest are a BRIDGE that predates the
+    advertisement (so the extension was never asked what it can do — restart the
+    bridge), a host that is not attached at all, and a current host that did not
+    advertise it and did not report a switch (which is a wedge, not a version).
+    Getting this wrong sends the user to a remedy that cannot help, which is the
+    defect `OWNERSHIP_MIN_EXTENSION_VERSION` exists to stop repeating.
+    """
+    from local_operator.browser_bridge.protocol import (
+        CAPABILITY_MIN_EXTENSION_VERSION,
+        CAPABILITY_SWITCH_LABEL,
+        CAPABILITY_SWITCH_LOCATION,
+    )
+
+    method = str(error.data.get("method") or "that action")
+    peer = str(error.data.get("extension_version") or "")
+    remedy = _CAPABILITY_HOST_REMEDY.get(host, _CAPABILITY_HOST_REMEDY[HOST_EXTENSION])
+    if host == HOST_UI:
+        return (
+            f"the Local Operator desktop app's browser host does not provide '{method}' — "
+            f"the app that answered was built before this action existed. Please {remedy}; "
+            "every other browser action still works."
+        )
+    if str(error.data.get("method") or "") in (error.data.get("disabled") or []):
+        # The OPERATOR'S consent, not a version: this build serves the method and
+        # the switch is off. Named by its own label and located, because a refusal
+        # that says "not enabled" without saying WHERE leaves the user hunting
+        # through a popup, an options page and Chrome's own extension page. The
+        # switch label comes from `CAPABILITY_SWITCH_LABEL` and the same generated
+        # table backs the extension's copy, so the user reads the same words in
+        # both places.
+        sentence = _switch_refusal_sentence(method)
+        if sentence:
+            return sentence
+    if error.data.get("disabled_by_operator"):
+        # The PEER's own last gate refused it (`consent.ts::requireConsent`), so
+        # this is consent and never a version — and the payload carries no record,
+        # because the refusal never reached the advertisement: `advertised`,
+        # `capabilities_known` and `extension_version` are all absent. Which is
+        # exactly why this branch sits BEFORE the "no browser is attached"
+        # fallback an empty payload used to fall through to, rendering a consent
+        # refusal as a connection problem with no method named (round-1 R4).
+        sentence = _switch_refusal_sentence(method)
+        if sentence:
+            return sentence
+    if not peer:
+        return (
+            f"no browser is attached, so '{method}' cannot run. Ask the user to open their "
+            "browser (the extension reconnects automatically) and retry; 'lop browser status' "
+            "shows the connection."
+        )
+    if not bool(error.data.get("capabilities_known", True)):
+        # The record was written by a bridge that predates the advertisement, so
+        # an empty list says nothing about the EXTENSION at all. Naming a version
+        # or an extension toggle here would send the user to a remedy that cannot
+        # help — the misdiagnosis class this function's own docstring exists for
+        # (review round 1, R4; design §6.4 row "new harness + old daemon").
+        return (
+            f"the running browser bridge predates '{method}', so it never learned what this "
+            "extension can do and the command was not sent. Restart it with 'lop browser "
+            "restart' (pairing is preserved and the extension reconnects automatically), then "
+            "retry; nothing else about this tab is affected."
+        )
+    minimum = CAPABILITY_MIN_EXTENSION_VERSION.get(method)
+    if minimum and extension_older(peer, minimum):
+        # The update remedy, plus the switch hint when the first build that serves
+        # this method ALSO gates it: without the hint the user updates, retries, and
+        # meets the same refusal for a different reason — the second misdiagnosis in
+        # a row, which is the thing this function is written to avoid.
+        label = CAPABILITY_SWITCH_LABEL.get(method)
+        hint = (
+            f' After updating, turn on "{label}" in {CAPABILITY_SWITCH_LOCATION}; the '
+            "capability is off until the operator enables it there."
+            if label
+            else ""
+        )
+        return (
+            f"the attached browser extension (version {peer}) does not provide '{method}': the "
+            f"first version that does is {minimum}. Please {remedy}; nothing else about this "
+            f"tab is affected.{hint}"
+        )
+    return (
+        f"the attached browser extension reports version {peer} but did not advertise "
+        f"'{method}', so the command was not sent. Ask the user to toggle the Local Operator "
+        "extension OFF then ON in chrome://extensions (pairing is preserved), then retry."
+    )
+
+
+def client_timeout(method: str, requested_s: Any = None) -> float:
     """HTTP budget for one RPC: the daemon's worst case, plus margin.
 
     The timeout chain (finding A3) is extension deny 60 s < daemon prompt
@@ -550,6 +792,20 @@ def client_timeout(method: str) -> float:
     advice in exactly that overrun.
     """
     base = COMMAND_TIMEOUTS.get(method, max(COMMAND_TIMEOUTS.values()))
+    # A caller may ask for longer on the ONE method that waits on a page rather
+    # than on us (`download`: a 200 MB file on a slow link), and the DAEMON honours
+    # the same wire parameter — so the client has to outlive it or it fabricates an
+    # "unreachable" failure while the daemon is healthy and about to deliver the
+    # files (the same class of mismatch the origin-prompt window below exists for).
+    # Clamped to the shared ceiling and refused for a non-number, so no caller can
+    # extend its own budget by inventing a value.
+    if (
+        method == "download"
+        and isinstance(requested_s, (int, float))
+        and not isinstance(requested_s, bool)
+        and requested_s > 0
+    ):
+        base = max(base, min(float(requested_s), browser_files.DOWNLOAD_TIMEOUT_MAX_S))
     return base + ORIGIN_PROMPT_WINDOW_S + _CLIENT_TIMEOUT_MARGIN_S
 
 
@@ -573,6 +829,18 @@ class HostClient:
     #: test's fake store must not be able to change the copy silently.
     host: str = HOST_EXTENSION
 
+    #: Optional override of the failure copy, for a client whose PROCESS is the
+    #: same as another's but whose CAPABILITY is not. `host` selects a table
+    #: entry, and the table is keyed by process because that is what each
+    #: sentence tells the reader to go and look at; the console rides the app
+    #: host (design ui-console-tab §10.1) and yet "the app's browser host is not
+    #: running" is the wrong sentence to hand a session that asked the console to
+    #: read a surface — the remedy differs (open a browser tab vs open the
+    #: console), and a reader told to go and look in the wrong place is worse off
+    #: than one told nothing. Declared here rather than as a second `host` key in
+    #: the table so the console's own sentences live in the console's module.
+    failure_copy: HostCopy | None = None
+
     def __init__(self, store: Any = state_store, root: Path | None = None) -> None:
         # The namespace is the STORE's business, never a client parameter: every
         # host's state module fixes its own directory and filename, so a client
@@ -580,17 +848,89 @@ class HostClient:
         self.store = store
         self.root = root
 
+    def copy_for(self) -> HostCopy:
+        """The sentences a transport failure is reported in."""
+        return self.failure_copy or HOST_COPY.get(self.host, HOST_COPY[HOST_EXTENSION])
+
+    def timeout_for(self, method: str, params: dict[str, Any]) -> float:
+        """The HTTP budget for ONE call.
+
+        A method rather than a direct :func:`client_timeout` call for the same
+        reason as :meth:`copy_for`: the browser's budget is `base +
+        ORIGIN_PROMPT_WINDOW_S + margin` because its host may sit on a HUMAN's
+        site-approval popup, and every console method is refused or answered by
+        the app within a second or two — inheriting the browser's 190 s ceiling
+        for an unknown name would turn a wedged app into a tool call that hangs
+        for three minutes, which is exactly the failure the console's absence
+        copy exists to avoid. A subclass therefore supplies its own table; the
+        default keeps every existing host's arithmetic byte-identical.
+        """
+        return client_timeout(method, params.get("timeout_s"))
+
+    def unreadable_response(self, http_response: httpx.Response) -> str:
+        """The sentence for a body this version cannot read as a ``Response``.
+
+        A hook rather than a direct ``copy.invalid_response`` call, for the same
+        reason as :meth:`copy_for` and :meth:`timeout_for`: two different events
+        land here and their remedies are opposite. A torn or non-JSON body is a
+        fault; a WELL-FORMED refusal whose ``ErrorDetail.code`` this version does
+        not model is version skew, and it fails validation at exactly the same
+        line because ``code`` is typed on the shared enum. Only a client that knows
+        its own vocabulary can tell them apart, so the client is what decides.
+
+        The default is byte-identical to what every host reported before this hook
+        existed; a subclass that can name the case overrides it (see
+        ``ui_console.backend.ConsoleHostClient``, which reads the raw body for the
+        one field that separates a newer app from a broken one).
+        """
+        return self.copy_for().invalid_response.format(status=http_response.status_code)
+
     def _read(self) -> Any:
         return self.store.read(self.root)
 
+    def capabilities(self) -> HostCapabilities:
+        """What this host's discovery record says it serves (design §6.3).
+
+        File-only, and never raising: this decides whether a command is sent at
+        all, and it must work between dials — the refusal is at stake, not the
+        transport. A record with no ``capabilities`` key reads as "this host told
+        us nothing", which is the refusal case rather than an error, and an
+        absent or unreadable record is the same answer for the same reason.
+        """
+        try:
+            current = self._read()
+        except Exception:  # noqa: BLE001 - discovery may never raise at a call site
+            return HostCapabilities()
+        if current is None:
+            return HostCapabilities()
+        methods = getattr(current, "capabilities", None) or []
+        version = str(
+            getattr(current, "extension_version", "") or getattr(current, "app_version", "")
+        )
+        return HostCapabilities(
+            methods=tuple(str(name) for name in methods),
+            version=version,
+            # Only the bridge writes this, and only a bridge at or after the
+            # advertisement sets it true (state.BridgeState.capabilities_known).
+            # The app host has no equivalent and needs none: its remedy
+            # ("update the app") is correct whether or not it knew the field.
+            capabilities_known=bool(getattr(current, "capabilities_known", False)),
+            # The switch answer, read the same way and blank-safe: an absent key is
+            # the empty tuple, which is what a pre-switch record must read as.
+            disabled=tuple(
+                str(name) for name in (getattr(current, "disabled_capabilities", None) or [])
+            ),
+            switches_known=bool(getattr(current, "switches_known", False)),
+        )
+
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        copy = HOST_COPY.get(self.host, HOST_COPY[HOST_EXTENSION])
+        copy = self.copy_for()
         current = self._read()
         if current is None:
             raise BridgeUnreachable(copy.no_state)
         request_id = f"r-{secrets.token_hex(6)}"
         request = Request(id=request_id, method=method, params=params)
-        timeout = client_timeout(method)
+        timeout = self.timeout_for(method, params)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 http_response = await client.post(
@@ -624,9 +964,7 @@ class HostClient:
         try:
             response = Response.model_validate(http_response.json())
         except (ValueError, json.JSONDecodeError) as exc:
-            raise BridgeUnreachable(
-                copy.invalid_response.format(status=http_response.status_code)
-            ) from exc
+            raise BridgeUnreachable(self.unreadable_response(http_response)) from exc
         if not response.ok:
             detail = response.error or ErrorDetail(
                 code=ErrorCode.INTERNAL, message="unknown failure"

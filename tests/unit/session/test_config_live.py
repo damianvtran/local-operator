@@ -493,6 +493,12 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
     "fork.cmux_placement": ("surface", lambda s, w: fork_cmux_placement(w.values)),
     "web_search.strategy": ("ordered", lambda s, w: _search_settings(w).strategy),
     "web_search.providers": (["brave"], lambda s, w: list(_search_settings(w).providers)),
+    # The opt-out list, read through the same per-call loader: an exclusion must
+    # apply on the NEXT search with no reload, exactly like the priority list.
+    "web_search.excluded_providers": (
+        ["exa"],
+        lambda s, w: list(_search_settings(w).excluded_providers),
+    ),
     "web_search.timeout_seconds": (5.0, lambda s, w: _search_settings(w).timeout_seconds),
     "web_search.searxng_endpoint": (
         "http://searx.local",
@@ -537,6 +543,13 @@ LIVE_KEY_PROBES: dict[str, tuple[Any, Any]] = {
 #: (``tests/unit/session/runtime/test_serving_approvals_live.py``) and the
 #: TUI's ``_approve_all`` (``tests/unit/tui/test_config_change_notice.py``).
 #: The session only holds whatever gate closure the host installed.
+#:
+#: A file write reaches a running gate in the directions the HOST authorises,
+#: which since #1282 is not symmetric: a tightening always propagates, a
+#: loosening only when the write is the host's own through the settings facade
+#: (``harness.approval.loosening_is_authorised``). A probe in THIS file could
+#: only assert a transition the host refused, so the two hosts each pin their
+#: half where the gate lives, including the refusal.
 #:
 #: ``runtime`` is here for the same reason and a sharper one: its keys are
 #: read at COMMAND time by the surface that acts on them, so there is no

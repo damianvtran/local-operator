@@ -52,7 +52,6 @@ import mimetypes
 import os
 import re
 import shutil
-import signal as signal_module
 import threading
 import time
 import traceback
@@ -76,9 +75,10 @@ from pydantic import (
 )
 from rich.cells import cell_len
 
-from local_operator.agent_shell import AGENT_SHELL_ENV
+from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import ask_approval
+from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.subagent import (
     configured_effort_tiers,
     describe_effort_tiers,
@@ -119,6 +119,21 @@ from local_operator.imaging import (
 )
 from local_operator.media import ImageInfo, sniff_image_file
 from local_operator.paths import config_dir
+from local_operator.procstate import (
+    detached_popen_kwargs,
+    is_windows,
+    terminate_process_tree,
+)
+from local_operator.redaction_shapes import (
+    PEM_BODY_LINE_RE,
+    PEM_END_LINE_RE,
+    PEM_HEADER_LINE_RE,
+    REDACTION_MARKER,
+    ShapeReport,
+    credential_dump_notice,
+    scrub_secrets_with_hits,
+    shape_report,
+)
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_SCHEME,
@@ -183,7 +198,51 @@ BASH_SHELL_PATH: tuple[str, ...] = ("bash", "shell")
 BASH_SHELL_DEFAULT = ""
 #: Last-resort interpreter when the host has no ``bash`` on PATH at all. The
 #: tool keeps working (POSIX syntax only) instead of failing every call.
+#: POSIX-ONLY by construction: Windows has no ``/bin/sh``, so this is not an
+#: interpreter there but a path that cannot exist — see
+#: :func:`resolve_bash_shell` and :data:`WINDOWS_NO_BASH_MESSAGE` for how the
+#: win32 branch refuses instead of spawning it.
 BASH_SHELL_FALLBACK = "/bin/sh"
+#: Where Git for Windows actually puts ``bash.exe``, as (environment root,
+#: path components) so the join is done by ``os.path.join`` on the host.
+#: Its default "Git from the command line and also from 3rd-party software"
+#: option adds ``...\Git\cmd`` to PATH, and ``cmd`` contains no ``bash.exe`` —
+#: so a Windows host that DOES have bash still misses ``shutil.which("bash")``.
+#: The two roots are the machine-wide and per-user install locations.
+_WINDOWS_GIT_BASH_RELPATHS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ProgramFiles", ("Git", "bin", "bash.exe")),
+    ("ProgramFiles(x86)", ("Git", "bin", "bash.exe")),
+    ("LOCALAPPDATA", ("Programs", "Git", "bin", "bash.exe")),
+)
+#: The refusal shown when the bash tool resolves to the POSIX last resort on
+#: Windows. It is a REFUSAL rather than a fallback to ``cmd.exe`` or PowerShell
+#: on purpose: this tool promises bash (its name, its schema, every skill
+#: written against it), and silently running a command in a different language
+#: is a wrong answer the model cannot see, which is worse than a message that
+#: names the install step. The lines stay short because the tool card truncates
+#: per line, and the path is spelled out because the operator has to paste it.
+#:
+#: The LONGEST line is 69 cells against the 74-cell lane budget, and the two
+#: that overran it are design round 1's D2/D3. The card is 76 cells wide at
+#: 80x24 and truncates per line, so the explanation of why ``cmd.exe`` is not
+#: silently used was cut at `…must be…` — the one sentence that answers "why
+#: not just run it anyway" — and it is now wrapped rather than shortened. The
+#: remedy is DOUBLE-quoted because ``cmd.exe`` — the default Windows shell, and
+#: the shell whose missing bash this message is about — does not treat ``'`` as
+#: a quote character at all: pasting the single-quoted form there splits the
+#: path at its space, and the user is answered with
+#: `unrecognized arguments: Files\Git\bin\bash.exe'` instead of a stored setting.
+#: The double quote is the one form both cmd.exe and PowerShell honour.
+WINDOWS_NO_BASH_MESSAGE = (
+    "no bash on this Windows host, and Windows has no /bin/sh.\n"
+    "Install Git for Windows (it ships bash.exe),\n"
+    "or point this tool at one you have:\n"
+    r'lop config edit bash.shell "C:\Program Files\Git\bin\bash.exe"'
+    "\nThis tool runs `<interpreter> -c <command>`,\n"
+    "so the interpreter must be a real bash;\n"
+    "cmd.exe and PowerShell take different flags and a different language,\n"
+    "and this tool will not silently run your command in one of them."
+)
 #: Number of trailing traceback characters kept in an error result.
 TRACEBACK_TAIL_CHARS = 2000
 
@@ -1293,6 +1352,43 @@ def _describe_browser_approval(args: dict[str, Any], cwd: str) -> str:
         except (OSError, ValueError):
             return f"screenshot: {_display_target(raw_path)}"
         return _approval_description(path, inside, "screenshot", resolvable)
+    if action == "download":
+        # The consent question is "may this page write files to your disk", and the
+        # DIRECTORY is the answer — the file names are the page's to choose, and a
+        # prompt that showed one of them would describe the wrong thing. Folded to
+        # `~` like every other row: the path is on every row of a session, so the
+        # home prefix is noise in a 40-cell budget.
+        from local_operator import browser_files as _files
+
+        root = str(_files.downloads_root())
+        home = str(Path.home())
+        shown = root.replace(home, "~", 1) if root.startswith(home) else root
+        return f"download \u2192 {_display_target(shown)}/"
+    if action == "upload":
+        # Both halves are mandatory (design §7.3): the FILE, because that is what
+        # leaves the machine, and the ORIGIN, because that is where it goes. The
+        # file goes through the same resolver and marker as `screenshot`, so an
+        # outside-workspace path is named as one and the row shows the resolved
+        # target rather than the string the model typed. A multi-file call shows
+        # the first and the count, because a prompt that truncates a list of
+        # secrets is worse than one that admits the count.
+        raw_paths = args.get("paths")
+        named = [str(entry) for entry in raw_paths] if isinstance(raw_paths, list) else []
+        if not named:
+            return "upload: no files named"
+        first = named[0]
+        if _SCHEME_SHAPED_RE.match(first.strip()):
+            row = f"upload: {_display_target(first.strip())}"
+        else:
+            try:
+                path, inside, resolvable = _resolve_workspace_path(first, cwd or ".")
+            except (OSError, ValueError):
+                row = f"upload: {_display_target(first)}"
+            else:
+                row = _approval_description(path, inside, "upload", resolvable)
+        if len(named) > 1:
+            row = f"{row} +{len(named) - 1} more"
+        return f"{row} \u2192 the page in the tab this session is driving"
     if url and action in NAVIGATING_BROWSER_ACTIONS:
         if url_unparsed:
             return f"{UNRESOLVABLE_MARKER} {UNPARSED_URL_PREFIX} {url}"
@@ -1832,13 +1928,49 @@ async def _run_with_abort(
 # ---------------------------------------------------------------------------
 
 
+def _windows_bash_on_disk() -> str | None:
+    """A real ``bash.exe`` from a Git for Windows install, or ``None``.
+
+    Only reached on win32 after ``shutil.which("bash")`` missed (see
+    :data:`_WINDOWS_GIT_BASH_RELPATHS` for why a machine with bash still
+    misses it). ``os.path.isfile`` rather than ``os.access(..., X_OK)``:
+    ``X_OK`` is satisfied for any existing file on Windows, so it would not
+    discriminate here and its POSIX meaning would mislead a reader.
+    """
+    for env_var, parts in _WINDOWS_GIT_BASH_RELPATHS:
+        root = os.environ.get(env_var)
+        if not root:
+            continue
+        candidate = os.path.join(root, *parts)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _last_resort_shell() -> str:
+    """The interpreter to spawn when no ``bash`` is on PATH.
+
+    POSIX: ``/bin/sh``, which exists and runs POSIX syntax. WINDOWS: ``/bin/sh``
+    does not exist there, so the search continues in Git for Windows' own
+    directories; returning the POSIX constant when even that finds nothing is
+    deliberate — the caller turns it into :data:`WINDOWS_NO_BASH_MESSAGE`.
+    A resolver that instead guessed ``cmd.exe`` would make the tool execute
+    every command in a language it does not advertise.
+    """
+    if is_windows():  # pragma: no cover - exercised on Windows hosts
+        return _windows_bash_on_disk() or BASH_SHELL_FALLBACK
+    return BASH_SHELL_FALLBACK
+
+
 def resolve_bash_shell(configured: str | None) -> str:
     """Pick the interpreter the ``bash`` tool spawns (#629).
 
     Order: the ``bash.shell`` config value when set and non-blank; else the
     first ``bash`` on PATH (Homebrew's bash 5 when installed, else
-    ``/bin/bash`` on macOS or ``/usr/bin/bash`` on Linux); else ``/bin/sh`` so a
-    host with no bash still runs POSIX commands rather than nothing.
+    ``/bin/bash`` on macOS or ``/usr/bin/bash`` on Linux); else
+    :func:`_last_resort_shell` — ``/bin/sh`` on POSIX, and on Windows a Git for
+    Windows ``bash.exe`` that ``which`` could not see, falling back to
+    ``/bin/sh`` as a SENTINEL the caller refuses on with an install hint.
 
     Deliberately NOT ``$SHELL``: the login shell is zsh on macOS, and zsh's
     word-splitting and globbing differ from what a tool named ``bash``
@@ -1853,7 +1985,7 @@ def resolve_bash_shell(configured: str | None) -> str:
     """
     stripped = (configured or "").strip()
     chosen = (
-        os.path.expanduser(stripped) if stripped else shutil.which("bash") or BASH_SHELL_FALLBACK
+        os.path.expanduser(stripped) if stripped else shutil.which("bash") or _last_resort_shell()
     )
     logger.debug("bash tool interpreter: %s", chosen)
     return chosen
@@ -1905,6 +2037,41 @@ class BashParams(BaseModel):
     )
 
 
+#: What the live card shows while the pipe is holding an unterminated line.
+#:
+#: ``(empty)`` is the SETTLED answer — "there never will be output" — and the live
+#: card asserted it at every 500 ms emit while bytes were actively arriving and
+#: being withheld. The card's own word for the open case is
+#: :data:`local_operator.tui.widgets.tool_card.LIVE_HEADER_PENDING`, which this
+#: mirrors rather than imports (the tool layer must not depend on the TUI layer);
+#: ``test_the_live_pending_text_matches_the_card`` keeps the two in step.
+_LIVE_PENDING_TEXT = "no output yet"
+
+#: What the live view carries once the pipe filter has faulted. The text is
+#: withheld rather than guessed at: a filter that cannot vouch for the bytes must
+#: not paint them.
+_WITHHELD_LIVE_OUTPUT = (
+    "[live output withheld: this session's credential filter could not read its sink]"
+)
+
+#: A PEM armour header, and a base64 body line. Only a header opens the streaming
+#: mask, and only body lines are masked inside it — see
+#: ``_PipeRedactor._mask_open_key_block``.
+# The prefix grammar and the body-line test are the SHAPE TABLE's (`redaction_shapes`),
+# imported rather than restated: this layer masks BEFORE the table runs, so a divergence
+# between the two classifiers is a silent leak — which is exactly what happened when the
+# table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
+# published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
+_PEM_HEADER_LINE = PEM_HEADER_LINE_RE
+_PEM_BODY_LINE = PEM_BODY_LINE_RE
+_PEM_END_LINE = PEM_END_LINE_RE
+
+#: How many lines a streamed PEM block may mask before the state resets. A real
+#: 8192-bit key is ~100 lines at 64 columns; this is generous for one and far
+#: short of "the rest of the command's output".
+_PEM_STREAM_LINE_LIMIT = 512
+
+
 class _BashOutput:
     """Bound retention while the pipe is drained, keeping both diagnostic ends.
 
@@ -1922,6 +2089,11 @@ class _BashOutput:
         self.head = bytearray()
         self.tail: deque[bytes] = deque()
         self.tail_bytes = 0
+        #: Bytes the pipe filter is holding back right now — an unterminated
+        #: line, or an open key block. Reported so the live card can say "no
+        #: output yet" instead of the settled "``(empty)``" while a command is
+        #: demonstrably producing output (see ``_LIVE_PENDING_TEXT``).
+        self.withheld = 0
 
     @property
     def retained_bytes(self) -> int:
@@ -1962,21 +2134,71 @@ class _BashOutput:
         )
 
 
+#: How much undecided text the pipe filter holds before it releases its oldest
+#: bytes anyway (``_PipeRedactor._release_point``).
+#:
+#: A CONSTANT rather than a function of the pattern table, deliberately: a bound
+#: derived from the longest possible match would silently change (or grow
+#: unbounded) the next time a rule is added, and this one has to hold whatever
+#: the table says. 8 KiB is chosen to be comfortably larger than any credential
+#: shape the table spans — the widest is a PEM block, whose 2048-bit body is
+#: under 2 KiB — while staying small enough that a command printing one enormous
+#: line still publishes most of it promptly.
+_PIPE_DEFERRAL_LIMIT = 8192
+
+
 class _PipeRedactor:
     """Delay only a possible credential suffix before publishing pipe bytes.
 
     Redacting each read independently leaks a secret split across reads. Keep
-    enough undecided text for the longest injected credential, and never cut
-    through a complete match. UTF-8 decoding is incremental for the same
-    reason. Retained output and live job tails receive the same safe bytes.
+    enough undecided text that a known credential VALUE cannot be split across
+    two reads, and never cut through a complete match. UTF-8 decoding is
+    incremental for the same reason. Retained output and live job tails receive
+    the same safe bytes.
 
     Accepts a credential MAP (the historic caller) or a plain sequence of
     values. The sequence form is what carries §6 registrations — values a child
     fetched through ``lop secret get``, which have a name nowhere in this
     process, so there is no map to put them in.
+
+    **Why the release point moved, and what it costs.** Holding back a fixed
+    window sized from the longest KNOWN value is enough to keep that value whole
+    across a chunk boundary, and it is nothing at all against a SHAPE: a DSN or
+    an ``AWS_SECRET_ACCESS_KEY=`` line that a child prints in two reads was
+    painted live and then never re-read, because the live stream is the one
+    surface no later pass rewrites. So the release point is now the last line
+    terminator in hand, and every complete line goes out with
+    :func:`~local_operator.redaction_shapes.scrub_secrets` over it — values and
+    shapes both. Shapes are line-anchored, so a partial SENTENCE cannot carry a
+    shape across the boundary; a partial LINE can, and no longer does.
+
+    **Bounded, and stated rather than implied.** ``pending`` is capped at
+    :data:`_PIPE_DEFERRAL_LIMIT` bytes: a child that prints 10 MB with no
+    newline (one enormous JSON blob, a progress bar with no terminator) is
+    released in cap-sized pieces rather than accumulating, so memory does not
+    grow with the command's output. The cap is a CONSTANT, not a function of the
+    longest possible match — a bound derived from the pattern table would be
+    wrong the moment a rule was added. The residual is the obvious one: a shape
+    straddling a cap-forced cut, or one whose whole block (a PEM body) exceeds
+    the cap, is split across two releases and not matched here. Both are
+    contained by the result path, which scrubs the finished text in one piece.
+
+    Trailing partial lines are therefore withheld until they complete. That is
+    a real trade for a line-oriented surface, taken deliberately: a credential
+    painted live is unrecoverable, while a partial line's bytes arrive as soon
+    as its newline does — or at the cap, or at end-of-stream, whichever comes
+    first.
     """
 
     def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
+        #: An open PEM block, whether its marker is already out, and how many
+        #: lines it has covered (the bound that keeps a stream from holding the
+        #: state forever).
+        self._in_key_block = False
+        self._key_block_marker_sent = False
+        self._key_block_lines = 0
+        #: Whether this filter has withheld its output after a fault.
+        self._withheld = False
         values = credentials.values() if isinstance(credentials, dict) else list(credentials)
         self._set(values)
         self.pending = ""
@@ -2001,8 +2223,135 @@ class _PipeRedactor:
         self._set(values)
 
     def feed(self, chunk: bytes, *, final: bool = False) -> bytes:
+        """Release what is safe to paint; never raise, and never lose the stream.
+
+        FAIL CLOSED BY DRAINING, and that is the contract rather than an
+        implementation detail: a raise here used to kill the reader, which lost the
+        command's output silently AND — once the child filled its pipe — wedged the
+        command itself. The withheld marker goes out once, a sticky flag records it,
+        and the reader keeps draining so the child is never blocked on a full pipe.
+        """
+        try:
+            return self._feed_scrubbed(chunk, final=final)
+        except Exception:  # noqa: BLE001 — see the docstring: draining IS the guard
+            if not self._withheld:
+                self._withheld = True
+                return _WITHHELD_LIVE_OUTPUT.encode("utf-8")
+            return b""
+
+    def _feed_scrubbed(self, chunk: bytes, *, final: bool = False) -> bytes:
         text = self.pending + self.decoder.decode(chunk, final=final)
-        cut = len(text) if final else max(len(text) - self.lookbehind, 0)
+        cut = self._release_point(text, final=final)
+        ready, self.pending = text[:cut], text[cut:]
+        ready = self._mask_open_key_block(ready)
+        scrubbed, hits = scrub_secrets_with_hits(ready, self.secrets)
+        # REPORT FROM HERE. This filter is the only layer that sees a credential
+        # that exists only in a command's OUTPUT — the production case this
+        # feature was written for — and it masks the bytes before the result
+        # exists, so the loop's hook later finds nothing to match and files
+        # nothing. Without this call the size of the incident that motivated the
+        # whole change is: zero notices, zero rotation tickets.
+        report = shape_report(hits)
+        report_shape_hits(list(report.labels), reached_model=report.reached_model)
+        return scrubbed.encode("utf-8")
+
+    def _mask_open_key_block(self, ready: str) -> str:
+        """Mask the BODY of an open ``-----BEGIN … KEY-----`` block, line by line.
+
+        Why it exists: the release point defers a whole key block until its
+        terminator or the cap, which is the right unit for the table but leaves
+        the live view publishing key material when the block is larger than the
+        cap — an 8192-bit RSA body is ~6.4 KiB against an 8 KiB cap.
+
+        Why it is written this way — three constraints, each paid for:
+
+        * only a PEM HEADER opens the state (``-----BEGIN [A-Z0-9 ]+-----``). A
+          bare ``-----BEGIN`` in prose (``head -n 5 key.pem``, a doc quoting an
+          armour header, ``grep BEGIN``) used to open it and then swallow
+          everything after it — in the live view AND in the settled result, which
+          is built from the same sink. Round 2 measured both.
+        * a line is masked only when it is base64 BODY. Prose after a stray
+          header is released verbatim and CLOSES the state, so no ordinary line
+          can be eaten by it.
+        * the state is bounded by lines, so a stream that never terminates a
+          block cannot hold it open for the rest of the command's output.
+        """
+        if self._in_key_block:
+            out: list[str] = []
+            for line in ready.splitlines(keepends=True):
+                if self._key_block_lines > _PEM_STREAM_LINE_LIMIT:
+                    # Bound reached: stop masking, release, and reset.
+                    self._in_key_block = False
+                    out.append(line)
+                    continue
+                self._key_block_lines += 1
+                if _PEM_END_LINE.match(line.rstrip("\r\n")):
+                    self._in_key_block = False
+                    self._key_block_marker_sent = False
+                    out.append(line)
+                    continue
+                if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
+                    if not self._key_block_marker_sent:
+                        self._key_block_marker_sent = True
+                        out.append(REDACTION_MARKER + "\n")
+                    continue
+                # Not body: prose. Release it and close the state.
+                self._in_key_block = False
+                self._key_block_marker_sent = False
+                out.append(line)
+            return "".join(out)
+        begin = _PEM_HEADER_LINE.search(ready)
+        if begin is None:
+            return ready
+        self._in_key_block = True
+        self._key_block_lines = 0
+        self._key_block_marker_sent = False
+        # Keep the rest of this chunk: it is the block's first lines, and they go
+        # through the same line loop as everything else. Replacing it with a
+        # marker here DROPPED whatever followed the header in the same read.
+        # NO INJECTED SEPARATOR. This used to splice a real newline in after the
+        # header, which rewrote the ESCAPED spelling a JSON service-account value
+        # uses (`\\n`) and left the table unable to match the body — the marker was
+        # masked and the key published, silently, because a withheld claim means no
+        # notice either (QA's Q4-F1). The text after the header is passed through
+        # unchanged; a real newline there is stripped by ``lstrip`` only when it is
+        # really a newline.
+        # NO SEPARATOR REWRITING: stripping the leading newline here (or splicing one in,
+        # as an earlier round did) changes the bytes the shape table is about to read, and
+        # a rewritten separator is a shape the table cannot match. The remainder is
+        # passed through exactly as read.
+        return ready[: begin.end()] + self._mask_open_key_block(ready[begin.end() :])
+
+    def _release_point(self, text: str, *, final: bool) -> int:
+        """Where the decidable prefix ends: after the last newline, capped."""
+        if final:
+            return len(text)
+        # BOTH terminators: a progress bar rewrites its line with ``\r`` and may
+        # not emit ``\n`` until it is done, and a shape cannot straddle either
+        # one, so releasing at ``\r`` is free and keeps a long build's output
+        # visible while it runs.
+        cut = max(text.rfind("\n"), text.rfind("\r")) + 1
+        # An UNTERMINATED private-key block defers the WHOLE block, not just to
+        # the last newline: a PEM body is the credential and it spans lines, so
+        # releasing up to the last newline would publish the key material and
+        # hold back only the ``-----END`` line. The block is held until its END
+        # arrives (or the cap below forces it through, which is the documented
+        # residual for a block larger than the cap).
+        begin = text.rfind("-----BEGIN", 0, cut)
+        if begin >= 0:
+            end = text.find("-----END", begin)
+            if end < 0 or end >= cut:
+                cut = begin
+        # The cap is applied LAST and wins over every hold above: bounded memory
+        # is the property that must not depend on what the child prints, so a
+        # command that opens a PEM block and never closes it cannot pin the
+        # buffer forever.
+        if len(text) - cut > _PIPE_DEFERRAL_LIMIT:
+            cut = len(text) - _PIPE_DEFERRAL_LIMIT
+        # Never cut through a KNOWN value. The newline rule above already
+        # prevents that for any value without a newline in it, which is every
+        # credential in practice; this keeps the guarantee for the ones with
+        # one, and for the cap-forced cut above.
         while True:
             previous_cut = cut
             for secret in self.secrets:
@@ -2011,10 +2360,7 @@ class _PipeRedactor:
                     cut = start
             if cut == previous_cut:
                 break
-        ready, self.pending = text[:cut], text[cut:]
-        for secret in self.secrets:
-            ready = ready.replace(secret, "[redacted]")
-        return ready.encode("utf-8")
+        return cut
 
 
 def _bash_progress_line(
@@ -2111,6 +2457,45 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     redact = getattr(store, "redact", None)
     if not callable(redact):
         return text
+    # ``redact_with_report`` when the store has it: it carries the shape LABELS
+    # and the CLASSIFICATION (contained, or readable material left in the text),
+    # which the live stream, the peek buffer and the abort receipt need because
+    # they file the incident themselves — there is no later hook that will see
+    # the pre-mask text. ``redact_with_hits`` is the older, labels-only view, and
+    # a store that offers only that one keeps the escalated reading below: a
+    # caller that cannot prove containment must not claim it.
+    # Cast rather than probed: ``getattr`` yields ``object``, and the names this
+    # looks for are the store's own public surface (``VariableStore.redact_with_report``,
+    # ``VariableStore.redact_with_hits`` and its ``redact``), so a Callable annotation
+    # is the honest description.
+    report_aware = cast(
+        Callable[[str], tuple[str, ShapeReport]] | None,
+        getattr(store, "redact_with_report", None),
+    )
+    if callable(report_aware):
+        try:
+            scrubbed, report = report_aware(text)
+            report_shape_hits(list(report.labels), reached_model=report.reached_model)
+            return scrubbed
+        except Exception:  # noqa: BLE001 — fall through to the plain path below
+            logger.warning("report-aware redaction failed on a live surface", exc_info=True)
+    hits_aware = cast(
+        Callable[[str], tuple[str, list[str]]] | None,
+        getattr(store, "redact_with_hits", None),
+    )
+    if callable(hits_aware):
+        try:
+            scrubbed, labels = hits_aware(text)
+            if labels:
+                # No classification from this store: the labels-only view names the
+                # hits whose mask was whole, so the only reading it supports is the
+                # ESCALATED one — which is exactly what this path filed before the
+                # classification existed. Silent when nothing matched, which is why
+                # this is inside the guard rather than relying on a default.
+                report_shape_hits(labels, reached_model=True)
+            return scrubbed
+        except Exception:  # noqa: BLE001 — fall through to the plain path below
+            logger.warning("hit-aware redaction failed on a live surface", exc_info=True)
     try:
         redacted = redact(text)
     except Exception:
@@ -2245,6 +2630,70 @@ async def execute_bash(
     credential_env = getattr(store, "credential_env", None)
     extra = credential_env() if callable(credential_env) else None
     injections: dict[str, str] = dict(NON_INTERACTIVE_ENV)
+    # The DELEGATION ALLOWANCE rides the child environment for the same reason
+    # the marker in ``NON_INTERACTIVE_ENV`` does: a `lop exec` run by a session
+    # that holds ``task`` is a legitimate way to open separate top-level sessions
+    # when the user asked for them, and the session guard
+    # (``local_operator/agent_shell.py``) runs in the CHILD process, so the only
+    # way it can tell that shell from one with no ``task`` to delegate with is
+    # for the answer to travel with the command. The name lives in
+    # ``agent_shell`` and this is the one writer — one name, two consumers, the
+    # same rule the marker above follows.
+    #
+    # THREE ARMS, and the third is not an oversight. ``1`` when the session
+    # holds ``task``; the EMPTY string only when the name is actually present in
+    # this process's environment and must not be inherited; otherwise the name is
+    # NOT WRITTEN AT ALL.
+    #
+    # Why the CLEAR exists: `shell_env.child_environment` starts from a copy of
+    # THIS process's environment in the default `inherit` mode, so a marker the
+    # child inherited from its own ancestors would survive a `may_delegate=False`
+    # context untouched and the session would be admitted on an allowance nobody
+    # granted it. That is not hypothetical — the allowed route creates exactly
+    # that state: an allowed `lop exec` runs `lop` (and, for `--background`, a
+    # detached worker spawned with no `env=`) as a child of the delegating shell,
+    # so the session it opens starts life with the marker set whatever its own
+    # role says. Injections are applied LAST, so this beats the inherited copy,
+    # and the guard reads the empty string as "no" (`_on("")` is False). The
+    # presence test is over ``os.environ`` rather than over the built child env on
+    # purpose: in `allowlist` mode the inherited copy is dropped by construction
+    # UNLESS the policy names the marker back in `inherit`, and when it does the
+    # name is in this process's environment too — so the test covers both modes,
+    # and a policy that re-grants an inherited value is still beaten by an
+    # injection applied last.
+    #
+    # Why the OMIT is deliberate: the marker's NAME is the whole mechanism. The
+    # guard reads its own process environment, so a shell that knows the spelling
+    # needs only `LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop exec …` and the `lop` it
+    # starts is admitted — which is exactly why `agent_shell.refusal_message`
+    # does not name it ("a reader told how the second route is spelled could go
+    # looking for a shell that carries it"). Writing the empty value
+    # unconditionally would export the name into every ``bash`` child, including
+    # a session that may not delegate, and turn "go looking for a shell that
+    # carries it" into "read your own environment" — a self-grant one inference
+    # away from an `env` an agent runs routinely. A reader who was never told the
+    # name cannot be refused anything by an empty value that names it. This is the
+    # least-resistance check and NOT a security boundary — a model-authored
+    # command can assert the variable inline, as `docs/EXEC.md` says — so what the
+    # omit restores is the block against the accident and the path of least
+    # resistance, which is what the guard is for. Nothing is
+    # lost by omitting: an ABSENT marker and an empty one are the same verdict to
+    # `may_delegate_from_shell` (`_on(get(k, ""))`), which is the contract the
+    # name is documented with, and the arms are pinned in
+    # `tests/unit/test_agent_shell_guard.py`.
+    #
+    # FAIL CLOSED on both shapes of "no answer": `context is None` (the loop with
+    # no host) and a duck-typed context that simply lacks the field (the
+    # `tests/e2e` doubles — reading it with `getattr` rather than a bare access
+    # is what keeps a double working here at all, matching the
+    # `getattr(store, "credential_env", None)` two lines above). The refusal a
+    # missing answer produces is the cheap failure; the expensive one is a
+    # session in the operator's list that they never opened.
+    if context is not None and getattr(context, "may_delegate", False):
+        injections[MAY_DELEGATE_ENV] = "1"
+    elif MAY_DELEGATE_ENV in os.environ:
+        # Clear what this child would otherwise inherit — and only that.
+        injections[MAY_DELEGATE_ENV] = ""
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
 
@@ -2263,9 +2712,17 @@ async def execute_bash(
     # time — and because this tool is NAMED bash, models write bash: 37 of 43
     # `<(...)` commands in a week of transcripts died on `syntax error near
     # unexpected token '('`. Resolution order: the configured `bash.shell`,
-    # then `bash` on PATH, then /bin/sh as the no-bash last resort. Never
-    # $SHELL — see resolve_bash_shell for why zsh is the wrong answer.
+    # then `bash` on PATH, then the platform's last resort (POSIX /bin/sh; on
+    # Windows, Git for Windows' own bash.exe). Never $SHELL — see
+    # resolve_bash_shell for why zsh is the wrong answer.
     shell = resolve_bash_shell(_configured_bash_shell())
+    if is_windows() and shell == BASH_SHELL_FALLBACK:
+        # Windows has no /bin/sh, so the POSIX last resort is not a fallback
+        # there — it is a path that cannot exist. Refusing HERE, before the
+        # spawn, is the difference between the operator reading the install
+        # step and reading `FileNotFoundError: [WinError 2]` naming a Unix
+        # path they never asked for. See WINDOWS_NO_BASH_MESSAGE.
+        return _error(tool_call_id, "bash", WINDOWS_NO_BASH_MESSAGE)
     cwd = _safe_cwd(context)
     try:
         process = await asyncio.create_subprocess_exec(
@@ -2276,7 +2733,15 @@ async def execute_bash(
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
-            start_new_session=True,
+            # Detachment is platform-specific and `start_new_session=True`,
+            # which this used to pass unconditionally, is SILENTLY IGNORED on
+            # Windows (subprocess documents it "(POSIX only)" and names the
+            # Windows parameter `unused_start_new_session`) — so a Ctrl-C in
+            # the operator's console reached the command and a console close
+            # could take it down. procstate.detached_popen_kwargs() returns the
+            # kwargs that really detach on the host, and is exactly
+            # `start_new_session=True` on POSIX.
+            **detached_popen_kwargs(),
         )
     except OSError as exc:
         # A `bash.shell` pointing at a missing or non-executable file made the
@@ -2329,7 +2794,12 @@ async def execute_bash(
             "bash",
             f"bash.shell: cannot execute {shell!r} ({exc.strerror or exc}).\n"
             "Point it at a real interpreter: lop config edit bash.shell <path>\n"
-            "Or clear it to auto-resolve bash on PATH: lop config edit bash.shell ''",
+            # DOUBLE quotes, for the same reason the Windows refusal uses them
+            # (design round 1, D3): `""` is an empty argument in cmd.exe,
+            # PowerShell and every POSIX shell, while `''` reaches a Windows
+            # process as the two-character value `''` — which this row's own
+            # validator would store as a path instead of clearing the key.
+            'Or clear it to auto-resolve bash on PATH: lop config edit bash.shell ""',
         )
 
     # Record this group in the owner's process-group ledger so a HARD death of
@@ -2391,7 +2861,11 @@ async def execute_bash(
         # the guard keeps the reader honest instead of asserting.
         if stream is None:
             return
-        redactor = _PipeRedactor(_stream_redaction_values(store, injected))
+        # The sentinel means "this session's own redaction sink could not be
+        # read" and must never be treated as an ordinary list of secrets; the
+        # loop checks it before every feed, and so must the construction site.
+        initial = _stream_redaction_values(store, injected)
+        redactor = _PipeRedactor([] if initial is _REDACTION_SEAM_BROKEN else initial)
         withheld = False
         try:
             while True:
@@ -2429,6 +2903,7 @@ async def execute_bash(
                     continue
                 redactor.refresh(values)
                 safe = redactor.feed(chunk)
+                sink.withheld = len(redactor.pending)
                 sink.append(safe)
                 _mirror(safe)
         except (ConnectionResetError, BrokenPipeError):
@@ -2449,8 +2924,15 @@ async def execute_bash(
 
     def _kill() -> None:
         # Kill the whole session group so children (sh -c spawns) die too.
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(os.getpgid(process.pid), signal_module.SIGKILL)
+        #
+        # PLATFORM-SPECIFIC, and this used to be the crash path on Windows:
+        # `os.killpg`/`os.getpgid` do not exist there ("Availability: Unix") and
+        # neither does `signal.SIGKILL`, so the first attribute lookup raised
+        # AttributeError out of the tool — on the timeout and abort paths that
+        # call this, leaving the spawned tree alive with its pipes abandoned.
+        # `contextlib.suppress(ProcessLookupError)` could not catch it. On
+        # POSIX the call is exactly `killpg(getpgid(pid), SIGKILL)` as before.
+        terminate_process_tree(process.pid, force=True)
 
     def _emit_update() -> None:
         if on_update is None:
@@ -2475,6 +2957,10 @@ async def execute_bash(
             ),
             context,
         )
+        if not stdout and not stderr and (stdout_chunks.withheld or stderr_chunks.withheld):
+            # Bytes are arriving and being held; ``(empty)`` would tell the
+            # operator the opposite of what is happening.
+            stdout = _LIVE_PENDING_TEXT
         on_update(
             AgentToolUpdate(
                 content=[TextContent(text=_bash_output_summary(stdout, stderr))],
@@ -2791,7 +3277,13 @@ async def execute_bash(
             tool_call_id,
             "bash",
             f"aborted ({(signal.reason or 'aborted') if signal else 'aborted'}): "
-            f"{params.command}\n{_redact_tool_text(partial, context)}",
+            # The COMMAND line is scrubbed as well as the output. A command can
+            # carry a credential (`curl -u svc:pw`, `-ppw`, a DSN in an argument)
+            # and this receipt is a tool result like any other; the loop's
+            # ``redact_tool_result`` covers the product path, and a direct caller
+            # of ``execute_bash`` had this one unredacted.
+            f"{_redact_tool_text(params.command, context)}\n"
+            f"{_redact_tool_text(partial, context)}",
         )
 
     # Decoding and, for oversized output, spilling/eliding run in a thread:
@@ -2825,6 +3317,24 @@ async def execute_bash(
     parts = [f"exit code: {return_code}", _bash_output_summary(stdout, stderr)]
     if timed_out:
         parts.insert(0, f"TIMEOUT after {params.timeout}s (process killed)")
+    # ONE advisory line when the command is shaped like a credential dump, so the
+    # model learns the safer form at the moment it needs it rather than after the
+    # secret is already in the transcript. It rides the RESULT, not the stream:
+    # the stream is bytes from the child, and this is the harness talking.
+    #
+    # The notice carries no value from the command (see ``credential_dump_notice``)
+    # and is appended here, before the footer, so a spilled transcript's
+    # expansion hints stay at the end where the model looks for them.
+    # The advisory goes SECOND, immediately under the exit code — not last,
+    # which is where it was. The operator reads a result through the tool card,
+    # which keeps the HEAD of at most 40 lines, so a notice at the end of a long
+    # result was the first thing dropped: measured, a 200-line command whose last
+    # line held the credential settled with "… 169 more lines" and no advisory
+    # anywhere. Short (see ``_BRIEF_ADVICE``) and near the top is what makes it
+    # survive both truncations.
+    notice = credential_dump_notice(params.command)
+    if notice:
+        parts.insert(1, notice)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
@@ -8426,6 +8936,23 @@ BROWSER_ACTIONS = (
     # handle to close. Non-cmux only, like scroll/logs: cmux keeps no
     # multi-surface registry, so it degrades with the same typed error.
     "tabs",
+    # File transfer. `upload` is served by BOTH non-cmux hosts (it needs only the
+    # tab-scoped CDP session they already hold); `download` is served by the
+    # desktop app's host and, from extension 0.1.19, by the extension itself
+    # through `chrome.downloads` — Chrome refuses a tab-scoped debugger session
+    # the CDP primitives that would let an extension choose a destination
+    # (design §17.1), so the extension's file lands in the user's own download
+    # directory and the harness moves it into quarantine afterwards (§11.5 R7).
+    # On an extension host BOTH methods additionally need the operator's own
+    # switch (protocol.CAPABILITY_SWITCH_LABEL): `download` also needs the
+    # optional `downloads` permission, and `upload` has no permission at all, so
+    # its switch is the only control that direction has. A switched-off
+    # capability is refused with copy that names the switch, a build that cannot
+    # serve it with copy that names the update.
+    # Both are ACTIONS so they ride the same schema, approval tier and dispatch as
+    # everything else, and both are in CMUX_UNSUPPORTED_BROWSER_ACTIONS below.
+    "download",
+    "upload",
     # The async site-approval flow, non-cmux only like scroll/logs. open/goto
     # to a not-yet-allowed origin fails EARLY with a typed error naming these
     # two actions, because the old behaviour — blocking the navigation RPC on
@@ -8455,7 +8982,16 @@ BROWSER_ACTIONS = (
 #: BROWSER_ACTIONS so the degrade check and the advertised action list can never
 #: drift apart.
 CMUX_UNSUPPORTED_BROWSER_ACTIONS = frozenset(
-    {"scroll", "logs", "tabs", "request_access", "await_access", "cancel_access"}
+    {
+        "scroll",
+        "logs",
+        "tabs",
+        "request_access",
+        "await_access",
+        "cancel_access",
+        "download",
+        "upload",
+    }
 )
 
 #: The actions whose whole handler lives in the ownership lane (see
@@ -8552,9 +9088,8 @@ class BrowserParams(BaseModel):
         "| goto | read (page text) | snapshot (accessibility tree with click "
         "refs) | screenshot | click | type | scroll (move the viewport) | logs "
         "(console + errors) | tabs (list agent-driven tabs) | request_access "
-        "(raise the site-approval prompt for a not-yet-allowed origin; returns "
-        "pending/allowed/denied immediately) | "
-        "await_access (wait for the user's decision on that prompt) | "
+        "(raise the site-approval prompt for a not-yet-allowed origin) | "
+        "await_access (wait for the user's decision) | "
         "cancel_access (cancel YOUR pending exact-origin request) | "
         "recover (recover YOUR tab) | "
         "retain (hold it) | release (end that hold) | close (end "
@@ -8574,14 +9109,28 @@ class BrowserParams(BaseModel):
             "new tab; a redacted handle is not yours to drive."
         ),
     )
-    path: str = Field(default="", description="Destination file for 'screenshot'.")
+    path: str = Field(default="", description="'screenshot' only: the destination file.")
     selector: str = Field(
         default="",
         description="CSS selector or a snapshot ref (e5) for 'click'/'type'; "
         "scopes the text for 'read' (default: body); for 'scroll', the element "
-        "to bring into view.",
+        "to bring into view; for 'download', the control that starts it; for "
+        "'upload', the file input to fill.",
     )
     text: str = Field(default="", description="Text to enter for 'type'; the reason for 'retain'.")
+    # One new field for the whole feature (the tool-surface ladder's rung 1):
+    # `download` needs no destination (the harness chooses it), so a comma-split
+    # of the existing `path` was the alternative — rejected because a filename may
+    # legally contain a comma, which would make the failure a silently wrong
+    # attachment.
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "'upload' only: the local files to attach, one or more. Credential "
+            "files and the harness's own config directory are refused; relative "
+            "paths resolve against the session's working directory."
+        ),
+    )
     # scroll params. All optional: with none set, 'scroll' pages one viewport
     # down. Precedence is selector > x/y > direction > default (mirrors
     # extension/src/commands/scroll.ts).
@@ -8612,8 +9161,8 @@ class BrowserParams(BaseModel):
     timeout_s: float | None = Field(
         default=None,
         description="'await_access' max seconds to wait for the user's decision "
-        "(default 120, max 240). Still pending after that? Tell the user, then "
-        "call await_access again.",
+        "(default 120, max 240); 'download' max seconds to wait for one to start "
+        "(default 120, max 600).",
     )
 
 
@@ -9010,6 +9559,26 @@ def _validate_browser_args(action: str, params: BrowserParams) -> str:
                 f"unknown scroll direction: {params.direction!r} "
                 f"(expected one of {', '.join(sorted(_SCROLL_DIRECTIONS))})"
             )
+        return ""
+    if action == "download":
+        # Only the selector is optional: a page that starts its own download needs
+        # none, and one that needs a click names the control. The wait is bounded
+        # by `timeout_s` and by the host, so there is nothing else to validate —
+        # the DESTINATION is composed by the harness and is not a parameter at all
+        # (design §6.1).
+        return _validate_selector(params.selector, "download") if params.selector.strip() else ""
+    if action == "upload":
+        problem = _validate_selector(params.selector, "upload")
+        if problem:
+            return problem
+        if not params.paths:
+            return "'upload' needs paths: name at least one local file to attach"
+        # Entries that are not strings are refused by the model's own validator
+        # (`list[str]`), which reports the offending value; only emptiness has to
+        # be caught here, because "" is a well-formed string.
+        for entry in params.paths:
+            if not entry.strip():
+                return "every entry in 'paths' must be a non-empty path"
         return ""
     if action == "logs":
         level = params.level.strip().lower()
@@ -9609,6 +10178,60 @@ def _ui_liveness() -> tuple[Any, Any]:
     from local_operator.ui_browser.backend import ui_liveness
 
     return ui_liveness()
+
+
+# ---------------------------------------------------------------------------
+# The desktop app's console: the same discovery answers again, because the
+# console rides the SAME process and the SAME record as the browser host above.
+# What is NOT shared is the gate's capability clause — the console requires the
+# record's ``console`` bit as well as a live heartbeat — so the wrappers live
+# here rather than being borrowed from the browser's, where a call would answer
+# the wrong question (a host whose console is off still has a browser).
+# ---------------------------------------------------------------------------
+
+
+def ui_console_available() -> bool:
+    """Cheap file-only discovery of the desktop app's console capability."""
+    from local_operator.ui_console.backend import ui_console_available as available
+
+    return available()
+
+
+def ui_console_advertisable() -> bool:
+    """Tool-GATING discovery: cheap, file-only, and honest about a stale host.
+
+    The console's ONE `createIf` predicate. Accepts a STALE-but-alive heartbeat
+    (advertising only promises the agent can ASK) and requires the record's
+    console capability (a host that says its console is off must not put a tool
+    in the inventory whose every action would refuse).
+    """
+    from local_operator.ui_console.backend import (
+        ui_console_advertisable as advertisable,
+    )
+
+    return advertisable()
+
+
+async def ui_console_reachable(classified: tuple[Any, Any] | None = None) -> bool:
+    """Console-path availability for the desktop app's console.
+
+    Mirrors :func:`ui_browser_reachable` step for step, including the
+    short-circuit: the file probe answers `True` for free and only a
+    STALE-but-alive record spends the one bounded `/health` dial that can acquit
+    it.
+    """
+    if ui_console_available():
+        return True
+    from local_operator.ui_console.backend import ui_console_reachable as reachable
+
+    return await reachable(classified=classified)
+
+
+def _ui_console_liveness() -> tuple[Any, Any]:
+    """Classify the console capability from the file, never raising."""
+    from local_operator.ui_console.backend import ui_console_liveness
+
+    return ui_console_liveness()
 
 
 def _bridge_absent_result(tool_call_id: str, current: Any) -> ToolResult:
@@ -10757,6 +11380,922 @@ async def _bridge_tabs(
     )
 
 
+def _audit_host(client: Any) -> str:
+    """The audit row's host column: ``extension`` | ``app`` | ``cmux``.
+
+    The design's vocabulary (design §10.5), which is NOT the handle spelling
+    `_host_of_client` returns ("bridge"/"ui") and not the copy spelling
+    ("extension"/"ui"): a log read months later should name the product surface,
+    not the handle grammar.
+    """
+    return "app" if _host_of_client(client) == HOST_UI_PREFIX else "extension"
+
+
+def _capability_problem(
+    tool_call_id: str, method: str, client: Any, *, surface: str = ""
+) -> ToolResult | None:
+    """Refuse a capability-gated method from the host's own record, no socket call.
+
+    The FIRST line of the capability check (design §6.3): the daemon refuses to
+    send an unadvertised method too, but by then a socket round trip has been paid
+    and the refusal arrives as a wire error rather than as the local, immediate
+    answer the model can act on. `None` means the host advertises the method and
+    the call may proceed.
+
+    The decision reads the discovery FILE, which is what makes it work between
+    dials and costs nothing; a record written by a pre-feature daemon or app has no
+    `capabilities` key at all, and that reads as "told us nothing" — the refusal.
+    """
+    from local_operator.browser_bridge.backend import (
+        HOST_EXTENSION,
+        HostCapabilities,
+        capability_refusal,
+        format_error,
+    )
+
+    # The COPY's host (``extension``/``ui``), read off the client exactly as
+    # `_bridge_call` reads it, so the reference and the refusal cannot name
+    # different processes. `_host_of_client` is the HANDLE spelling and is used
+    # below, not here.
+    host = str(getattr(client, "host", HOST_EXTENSION) or HOST_EXTENSION)
+    # `client` defaults to None at every call site and the production path always
+    # passes a real one — but this function's whole purpose is to answer BEFORE
+    # touching a socket, so an unknown host gets the refusal (an empty
+    # capability set is "told us nothing") rather than an AttributeError from the
+    # one place that must never raise before deciding (review round 1, N3).
+    capabilities = client.capabilities() if client is not None else HostCapabilities()
+    if capabilities.serves(method):
+        return None
+    error = capability_refusal(method, host=host, capabilities=capabilities)
+    problem = _error(
+        tool_call_id,
+        "browser",
+        format_error(error, action=method, surface=surface, host=host),
+    )
+    problem.details = {**(problem.details or {}), "error_code": error.code.value}
+    return problem
+
+
+def _download_audit(
+    *,
+    call_id: str,
+    session_id: str,
+    host: str,
+    action: str,
+    origin: str,
+    name: str,
+    path: str = "",
+    size: int = 0,
+    verdict: str = "",
+    reason: str = "",
+    declared_mime: str = "",
+    sniffed: str = "",
+    sha256: str = "",
+    redact: bool = False,
+) -> None:
+    """One audit row (design §10.5), best-effort and never raising.
+
+    A REFUSED file's name field is redacted to its first character: the log is
+    not allowed to become a map of where the secrets are, and the model (whose
+    context is the user's own transcript) is told the real name elsewhere.
+    """
+    from local_operator import browser_files as files
+
+    files.audit(
+        {
+            "session_id": session_id,
+            "call_id": call_id,
+            "tool": "browser",
+            "action": action,
+            "origin": origin,
+            "host": host,
+            "name": files.redact_name(name) if redact else name,
+            "path": path,
+            "bytes": size,
+            "sha256": sha256,
+            "declared_mime": declared_mime,
+            "sniffed": sniffed,
+            "verdict": verdict,
+            "reason": reason,
+        }
+    )
+
+
+#: The prefix every refusal in this feature's copy is composed with.
+#:
+#: It is NOT decoration and it is not only this layer's spelling. Three writers
+#: compose it: the app host composes its own download refusals with it
+#: (`downloads.ts`'s `refuse`/`refuseLive`: "refused: `x` is an executable/script
+#: type; nothing was saved"), the extension composes its upload refusals with it,
+#: and `browser_files` composes its name refusals with it. On the wire it is the
+#: ONE mark that separates a HOST'S REFUSAL from a host's own account of a call
+#: that found nothing, and there is no flag beside it — none may be added here,
+#: since `PROTO_VERSION` and both hosts are untouched by this change.
+#:
+#: WHICH HOST CAN REACH THE MARK TODAY. The app host only. Its `download` action
+#: always arms and reports `armed: true`, so a refusal it makes arrives as a
+#: `reason` (§6.2). The extension's `download` command sends NO `reason` at all —
+#: its two returns are `{armed: true, url, files}` (`extension/src/commands/
+#: download.ts`), and the cancellation account beside them is a top-level `note`
+#: this harness does not read — so an extension download refusal cannot reach the
+#: mark and state (b) is app-host-only. The extension's *upload* refusals are the
+#: ones that carry it, and those arrive on a different result payload.
+#:
+#: WHAT KEEPS THIS WORKING. Rewording the app host's `refuse`/`refuseLive`
+#: clauses away from the mark turns every one of its refusals into the
+#: unrecognised branch below: the model is told the host's own words (never the
+#: click-remedy copy) and the row reads `armed_reason`, so the loss is visible to
+#: a reader instead of silent. See `_reason_is_refusal` and §6.2 of
+#: `docs/design/browser-file-transfer.md`.
+REFUSAL_PREFIX = "refused:"
+
+
+def _refusal_clause(reason: str) -> str:
+    """The BARE clause(s) of a refusal, EVERY prefix removed.
+
+    Copy and the audit row both compose from this, so a host that already wrote
+    the prefix into its own sentence cannot make the harness print it twice
+    ("refused: refused: …") or make the row and the sentence disagree about what
+    was said. Every occurrence goes, not only the head's: the app host joins the
+    refusals of one armed call with `"; "` (`downloads.ts::resultOf`), so two
+    refused downloads in one call is a sentence whose SECOND clause also carries
+    the mark — and §10.5 calls this field the clause, not the sentence.
+    """
+    parts = []
+    for part in reason.split("; "):
+        part = part.strip()
+        if part.startswith(REFUSAL_PREFIX):
+            part = part[len(REFUSAL_PREFIX) :].strip()
+        parts.append(part)
+    return "; ".join(parts)
+
+
+def _reason_is_refusal(reason: str) -> bool:
+    """Whether a host's ARMED-path ``reason`` is a refusal, not an account.
+
+    Both arrive as `armed: true` with no files (§6.2), so on this path the words
+    are the only signal there is, and the design gave them a stable one: a
+    refusal is composed with ``REFUSAL_PREFIX`` at its head, and a host
+    describing a call that merely found nothing is not. Reading it that way is
+    what keeps the record's three states apart — an armed host refusal must not
+    be reported as a no-op (the defect this exists for), and a no-op must not be
+    reported as a refusal.
+
+    The test is deliberately the HEAD of the string, which is where the design's
+    own join puts a refusal's mark (`reasons.join("; ")` of clauses that each
+    start with it), and deliberately not a search for the mark anywhere: a
+    sentence that merely mentions a refusal is not one. That leaves a false
+    negative — a host that rewords its refusals — and the answer to it is not a
+    wider parse but the relay in `_browser_download`: an unrecognised non-empty
+    reason is handed to the model in the host's own words and recorded as
+    `armed_reason`, so no reader is ever told the call was a no-op.
+    """
+    return reason.strip().startswith(REFUSAL_PREFIX)
+
+
+async def _browser_download(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+    policy: Any = None,
+) -> ToolResult:
+    """`download`: arm the host, then judge what LANDED, from disk.
+
+    The whole shape follows the screenshot precedent: the host's exit code is not
+    evidence, so the answer is assembled from Python's own inspection of the
+    quarantine directory it composed itself (§5.3). A host that reports a file
+    which is not there — or a PDF that is an ELF — is CAUGHT rather than believed.
+    """
+    from local_operator import browser_files as files
+
+    # `policy` is the caps as data, injectable so a test can shrink a ceiling
+    # instead of writing a 256 MB file. The tool always leaves it at the default.
+    limits = policy or files.DEFAULT
+    host = _audit_host(client)
+    problem = _capability_problem(tool_call_id, "download", client, surface=state.surface_id)
+    if problem is not None:
+        return problem
+
+    session_id = str(getattr(context, "session_id", "") or "")
+    # Over-quota sessions are refused BEFORE anything is armed: the ceiling exists
+    # so a page cannot fill the disk through an agent loop, and a check that runs
+    # after the bytes land is a check that already lost.
+    if files.session_bytes(session_id) > limits.download_max_session_bytes:
+        return _error(
+            tool_call_id,
+            "browser",
+            "refused: this session has already downloaded more than "
+            f"{limits.download_max_session_bytes} bytes. Move or delete some of "
+            "what is in the browser download directory, then retry.",
+        )
+    directory = files.session_dir(session_id)
+    before = files.snapshot(directory)
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        # Composed by the harness from the config root and never from page input:
+        # this parameter is the one whose value the Project Zero report used to
+        # write into ~/.ssh, so it is the last thing a page is allowed to reach.
+        "dir": str(directory),
+        **_browser_identity_params(context, tool_call_id),
+    }
+    if params.selector.strip():
+        wire["selector"] = params.selector.strip()
+    if params.timeout_s is not None and params.timeout_s > 0:
+        wire["timeout_s"] = min(float(params.timeout_s), files.DOWNLOAD_TIMEOUT_MAX_S)
+    result, problem = await _bridge_call(
+        tool_call_id, "download", wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    assert result is not None
+    call_id = files.new_call_id()
+    origin = str(result.get("url", ""))
+    # The host's own account of the call, read once here so both arms below see
+    # the same string — the armed-`true` case is exactly the one that used to
+    # discard it (see `_reason_is_refusal`).
+    reason = str(result.get("reason") or "").strip()
+    if not bool(result.get("armed", True)):
+        # The host refused to arm. That is a policy answer carried as a result
+        # (§6.2 — an extension may not emit an ErrorCode an old daemon would
+        # drop), and it is rendered here as the model-facing refusal.
+        #
+        # The fallback covers three host answers, not one: a `reason` that is
+        # ABSENT, one that is whitespace-only (nothing was said, however many
+        # spaces it was said in), and one that is a bare ``refused:`` with no
+        # clause — which would otherwise print "refused: " and record an empty
+        # reason. The armed arm guards its clause the same way, one arm down.
+        clause = _refusal_clause(reason) or "the host refused to arm a download"
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_false",
+            reason=clause,
+        )
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {clause}")
+
+    reported = {
+        str(item.get("name")): item
+        for item in (result.get("files") or [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    # The extension host cannot write into `directory` (Chrome refuses it a
+    # download path outside the user's own download directory — §17.5), so what it
+    # landed is relocated HERE, before the before/after diff below runs: every
+    # later step (classification, the content-earned rename, the 0600 mode, the
+    # audit rows) then treats an extension download exactly like an app-host one,
+    # which is the point — the harness is the judge on both hosts.
+    intake = files.intake_landed(result.get("files") or [], directory, page_origin=origin)
+    refused_intake: list[str] = []
+    for entry in intake.refused:
+        # The same two words every other refusal uses, from the same function: a
+        # cancelled transfer, an uncorroborated path and a name already in the
+        # session all have to say what happened to the entry (review round 2, N7).
+        word, trail = _disposition_outcome(entry.disposition)
+        refused_intake.append(f"{entry.name}: {word} — {entry.reason}")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=entry.name,
+            path="",
+            verdict="deny",
+            reason=f"{entry.reason}; {trail}",
+            redact=True,
+        )
+    landed = files.snapshot(directory)
+    candidates = sorted(name for name in landed if name not in before)
+    if not candidates and refused_intake:
+        # Nothing is in the quarantine directory and the reason is known, so the
+        # generic "nothing started" sentence would be a lie about a call that
+        # watched a transfer fail. The refusals are the answer, and they are what
+        # the audit rows above already recorded.
+        return _error(
+            tool_call_id,
+            "browser",
+            "nothing was saved: " + "; ".join(refused_intake) + ".",
+        )
+    # The host's words with every copy mark removed. Empty means the host said
+    # nothing the model needs — an absent `reason`, a whitespace-only one, or a
+    # bare ``refused:`` with no clause — and both branches below require one:
+    # there is nothing to render or relay otherwise, and an empty sentence is
+    # exactly what the clause guards exist to prevent.
+    host_clause = _refusal_clause(reason) if reason else ""
+    # A refusal, rather than a host's account of a call that found nothing, is the
+    # reason whose HEAD carries the mark the design composes it with.
+    host_refusal = host_clause if _reason_is_refusal(reason) else ""
+    if not candidates and host_refusal:
+        # The host ARMED the capture and then refused the transfer, and reported
+        # neither files nor an error: its `reason` IS the answer, and the app
+        # host — the one that always arms — answers every refusal this way. The
+        # sentence below is the SAME refusal the pre-arm path renders, from the
+        # same composer, so a refusal reads the same wherever the host stopped.
+        #
+        # Why a verdict of its own rather than `armed_false` or `deny`:
+        # `armed_false` means the host declined to ARM (state (a)); `deny` means a
+        # candidate LANDED and the harness refused it, and its rows always name
+        # the entry they deleted. Neither is this: the host armed, decided, and
+        # nothing was written. `no_download` is the third state — a call where
+        # nothing started and the host said nothing — and folding a refusal into
+        # it is the defect this branch exists to fix.
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_refused",
+            reason=host_refusal,
+        )
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {host_refusal}")
+    if not candidates and host_clause:
+        # The host ARMED, nothing landed, and its `reason` is not the refusal
+        # shape: RELAY it rather than replace it. This is the false-negative half
+        # of keying a decision on words (§6.2), and the only safe answer to it:
+        # the host's own sentence is model-facing copy by construction (§7.4 — the
+        # app host writes its refusals and its no-op sentence for the model), and
+        # replacing it with the harness's canned "no download started … click its
+        # Download control" is exactly the misleading answer this whole change
+        # exists to remove — the same sentence for a reworded refusal as for a
+        # call nobody explained.
+        #
+        # `armed_reason` is its own verdict for the same reason: the audit's
+        # question is "what did the host say, and did we classify it?", and a row
+        # that says `no_download` / "nothing started" about a reason we were
+        # handed would answer it wrongly — the defect, one layer down. With this
+        # value a reworded refusal is VISIBLE to the trail reader (a row carrying
+        # the host's sentence under a verdict that claims nothing) instead of
+        # being swallowed.
+        #
+        # The model gets the sentence UNTOUCHED — an unclassified answer is not
+        # the harness's to rewrite — while the row carries the same words with the
+        # copy's mark removed, which is what every row in this trail records: the
+        # mark belongs to the sentence, the clause to the record (§10.5).
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_reason",
+            reason=host_clause,
+        )
+        return _error(tool_call_id, "browser", reason)
+    if not candidates:
+        wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="no_download",
+            reason="nothing started",
+        )
+        return _error(
+            tool_call_id,
+            "browser",
+            f"no download started within {wait:g} s. If the page needs a click first, "
+            "call 'click' on its Download control and retry with selector=..., or the "
+            "file may be behind a login — ask the user to sign in, then retry.",
+        )
+
+    kept: list[dict[str, Any]] = []
+    refused: list[str] = list(refused_intake)
+    # Artifacts whose 0600 mode could not be set (Linux has no `lchmod`, so a
+    # symlink ENTRY is never settable there). Reported rather than implied.
+    unhardened: list[str] = []
+    # The per-CALL cap is applied to the CANDIDATE list, BEFORE anything is
+    # classified, renamed or audited (review round 1, R2). Truncating the kept
+    # list after the loop deleted the extra files but left their `verdict=allow`
+    # rows behind naming paths that no longer existed, and no row named the cap —
+    # so the trail over-reported what the session kept and never said why the rest
+    # went. Every dropped candidate gets its own `deny` row here instead.
+    over_cap = candidates[limits.download_max_files :]
+    for name in over_cap:
+        removed = _unlink_quietly(directory / name)
+        # The sentence and the audit row both come from `_delete_outcome`, so the
+        # over-cap refusal says what happened to the entry in the same words as
+        # the containment rule and the content refusals (review round 2, N7 — the
+        # row used to carry the cap and not the outcome, so a reader could not
+        # tell an entry that was removed from one still in the session
+        # directory, and this path can FAIL to delete when the directory is not
+        # writable).
+        word, trail = _delete_outcome(removed)
+        rule = f"over the {limits.download_max_files} files per call limit"
+        refused.append(f"{name}: {word} — {rule}")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=name,
+            path="",
+            size=landed.get(name, 0),
+            verdict="deny",
+            reason=f"{rule}; {trail}",
+            redact=True,
+        )
+    for name in candidates[: limits.download_max_files]:
+        path = directory / name
+        declared = files.declared_mime_label(str((reported.get(name) or {}).get("mime") or ""))
+        try:
+            # `resolve()` is what the CONTAINMENT check reads: the destination is
+            # ours, but a hostile host could still have written a symlink, and it
+            # is the target that decides whether the entry escapes (§5.3 step 4).
+            # Everything after the check works on the ENTRY, never on the
+            # resolved path — see the refusal branch below.
+            resolved = path.resolve()
+        except OSError:
+            refused.append(f"{name}: could not be read")
+            continue
+        if not files.is_within(resolved, directory.resolve()):
+            # The ENTRY is deleted, never what it points at (review round 1, R1).
+            # `resolved` here is by definition a path OUTSIDE the quarantine
+            # root, so unlinking it deleted the user's own file — the data loss
+            # the containment rule exists to prevent — while leaving the
+            # escaping entry sitting in the session directory. Unlinking the
+            # entry removes the escape and touches nothing outside the root: a
+            # symlink dies, its target does not. The message and the audit row
+            # say what actually happened, including a delete that failed.
+            removed = _unlink_quietly(path)
+            word, trail = _delete_outcome(removed)
+            refused.append(f"{name}: {word} — it resolved outside the download directory")
+            _download_audit(
+                call_id=call_id,
+                session_id=session_id,
+                host=host,
+                action="download",
+                origin=origin,
+                name=name,
+                path="",
+                verdict="deny",
+                reason=f"outside the quarantine root; {trail}",
+                redact=True,
+            )
+            continue
+        verdict = files.classify_download(path, declared_mime=declared, policy=limits)
+        if verdict.kind == "deny":
+            # The entry, for the same reason as above: a symlink that stays
+            # inside the root must not be able to make Python delete the file it
+            # points at and leave the link behind.
+            removed = _unlink_quietly(path)
+            # One construction for every deny reason (review round 2, N7): the
+            # verdict and the entry's fate come from what actually happened, and
+            # `verdict.reason` is the rule alone — no reason can claim a delete it
+            # did not do, and none can delete the artifact silently.
+            word, trail = _delete_outcome(removed)
+            refused.append(f"{name}: {word} — {verdict.reason}")
+            _download_audit(
+                call_id=call_id,
+                session_id=session_id,
+                host=host,
+                action="download",
+                origin=origin,
+                name=name,
+                path="",
+                size=landed.get(name, 0),
+                verdict="deny",
+                reason=f"{verdict.reason}; {trail}",
+                declared_mime=declared,
+                sniffed=verdict.sniffed,
+                redact=True,
+            )
+            continue
+        final = path
+        if verdict.safe_name and verdict.safe_name != path.name:
+            # ALLOW-WITH-RENAME: the content disagreed with the name, so the file
+            # takes the name the content earns and the change is reported.
+            final = path.with_name(_unique_name(directory, verdict.safe_name))
+            try:
+                path.rename(final)
+            except OSError:
+                final = path
+        # The host wrote the bytes, so the host owned the mode they landed with
+        # (an Electron/Chromium write lands 0644 by umask). §4.1 promises files
+        # 0600, so the harness tightens the artifact it is about to report
+        # (review round 1, Q-2). Best-effort and never fatal: the 0700 session
+        # directory is the real bound, and a failed chmod must not cost the file
+        # it was protecting.
+        if not files.chmod_private(final):
+            # NOT silent (review round 4): on Linux a symlink entry's own mode is
+            # not settable at all, and a tightened mode that did not happen is a
+            # claim the result must not imply. The 0700 session directory is
+            # still the bound, so this is a caveat rather than a failure.
+            logger.warning("could not tighten the mode of the kept browser download %s", final)
+            unhardened.append(final.name)
+        fact = files.stat_fact(final.name, final, declared_mime=declared)
+        fact["sniffed"] = verdict.sniffed
+        kept.append(fact)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=final.name,
+            path=str(final),
+            size=int(fact["bytes"]),
+            verdict=verdict.kind,
+            reason=verdict.reason,
+            declared_mime=declared,
+            sniffed=verdict.sniffed,
+            sha256=str(fact["sha256"]),
+        )
+        if verdict.reason:
+            kept[-1]["note"] = verdict.reason
+
+    if not kept:
+        return _error(
+            tool_call_id,
+            "browser",
+            "nothing was saved. " + " ".join(refused),
+        )
+    lines = [f"downloaded {len(kept)} file(s) into {directory}:"]
+    for fact in kept:
+        kind = str(fact.get("sniffed") or fact.get("mime") or "unknown type")
+        line = f"- {fact['path']} — {fact['bytes']} bytes, {kind}"
+        if fact.get("sniffed") == "":
+            line += " (unverified: not opened)"
+        if fact.get("note"):
+            line += f" [{fact['note']}]"
+        lines.append(line)
+    if refused:
+        lines.append("refused:")
+        lines.extend(f"- {item}" for item in refused)
+    if unhardened:
+        lines.append(
+            "note: could not tighten the mode of "
+            + ", ".join(unhardened)
+            + " to 0600 (a symlink's own mode is not settable on this platform); the "
+            "0700 session directory is still the bound, but the file's own mode is "
+            "not private."
+        )
+    text = "\n".join(lines)
+    return _text(
+        tool_call_id, "browser", text, details={"files": kept, "directory": str(directory)}
+    )
+
+
+async def _browser_upload(
+    tool_call_id: str,
+    state: BrowserSurfaceProtocol,
+    params: BrowserParams,
+    context: ToolContext | None,
+    *,
+    client: Any = None,
+    policy: Any = None,
+) -> ToolResult:
+    """`upload`: the unconditional gate, then the attach, then the read-back.
+
+    The gate runs BEFORE anything reaches a browser (§9.2) and it consults no
+    approval policy, because the adversary it exists for is a confused-deputy
+    agent whose call may be auto-approved. All-or-nothing on a multi-file call: a
+    partial attach would send the page a set of files the model never asked for.
+    """
+    from local_operator import browser_files as files
+
+    limits = policy or files.DEFAULT
+    host = _audit_host(client)
+    problem = _capability_problem(tool_call_id, "upload", client, surface=state.surface_id)
+    if problem is not None:
+        return problem
+    if len(params.paths) > limits.upload_max_files:
+        return _error(
+            tool_call_id,
+            "browser",
+            f"refused: {len(params.paths)} files named, over the {limits.upload_max_files} "
+            "files per call limit. Attach them in batches.",
+        )
+    session_id = str(getattr(context, "session_id", "") or "")
+    resolved: list[Path] = []
+    for raw in params.paths:
+        path, reason = files.check_upload(raw, cwd=_safe_cwd(context), policy=limits)
+        if path is None:
+            # Refused as a whole call: attaching the rest would send a set the
+            # caller did not name, and the refusal names the one rule that fired.
+            return _error(tool_call_id, "browser", f"refused: nothing was attached — {reason}")
+        resolved.append(path)
+    wire: dict[str, Any] = {
+        "tab": state.surface_id,
+        "selector": params.selector.strip(),
+        # The RESOLVED paths, so the host is handed targets that were checked,
+        # never the strings the model typed (design §9.2's step 2).
+        "paths": [str(path) for path in resolved],
+        **_browser_identity_params(context, tool_call_id),
+    }
+    result, problem = await _bridge_call(
+        tool_call_id, "upload", wire, surface=state.surface_id, client=client
+    )
+    if problem is not None:
+        return problem
+    assert result is not None
+    call_id = files.new_call_id()
+    origin = str(result.get("url", ""))
+    host_refused = result.get("refused") or []
+    if host_refused:
+        reasons = "; ".join(
+            str(item.get("reason") or item) if isinstance(item, dict) else str(item)
+            for item in host_refused
+        )
+        return _error(tool_call_id, "browser", f"refused: nothing was attached — {reasons}")
+    accepted = [item for item in (result.get("accepted") or []) if isinstance(item, dict)]
+    by_path = {str(item.get("path") or ""): item for item in accepted}
+    # The host's read-back can be LOST to the page's own success: a form that
+    # submits itself from the change handler navigates in the same tick as the
+    # attach, so the DOM can no longer be asked what it holds — while the bytes
+    # have already gone. The marker therefore means "the attach happened, the
+    # read-back did not": the facts come from Python's own re-stat + digest, and
+    # the call is reported as an UNVERIFIED attach rather than as a failure,
+    # because a failure here reads as "nothing was sent" and invites the
+    # double-send it is trying to prevent (review round 1, Q-1). The host
+    # reports it for ANY failed read, not only a navigation (a stall on the read
+    # is the same situation, and the read is what failed either way).
+    #
+    # It is a HOST-supplied string, so it is sanitised and capped like the declared
+    # type is before it reaches the transcript or the audit row (review round 2,
+    # R7): a marker containing a newline used to grow the tool result by a line
+    # the host chose. Its PRESENCE and its TEXT are kept apart, because sanitising
+    # can empty a marker that was really sent — and a marker that sanitises down
+    # to nothing must still mark the attach unverified rather than read as a
+    # verified one.
+    readback_reported = bool(result.get("readback"))
+    readback = files.readback_label(str(result.get("readback") or ""))
+    # One spelling for "the host said its read failed but left nothing printable",
+    # which is also the fallback the extension uses for an empty error detail.
+    readback_note = readback or "no detail"
+    facts: list[dict[str, Any]] = []
+    # What a contract-violating host sent in place of a count, one entry per file,
+    # carried into the note AND the audit row below so the two cannot disagree
+    # (review round 3's MINOR-2 / QA's Q-1).
+    malformed_counts: list[str] = []
+    for path in resolved:
+        fact = files.stat_fact(files.safe_name(path.name), path)
+        seen = by_path.get(str(path))
+        if seen is None:
+            # Not even a path came back for a file the host was told to set.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: nothing came back for "
+                f"{path}, and the file on disk is {fact['bytes']} bytes. Nothing was sent.",
+            )
+        # Never a bare `int()`: a count the host typed wrong must not raise out of
+        # the tool (review round 3's MINOR-2).
+        count, malformed = _host_byte_count(seen.get("bytes", -1))
+        # Gated on the SENTINEL, never on the marker (review round 2, R6). The
+        # marker is the host's word about its own read and means "I could not read
+        # it back"; treating it as "do not check" let one field that the host
+        # controls suppress the only check a real mismatch is caught by — a host
+        # reporting both a count and a marker lost the comparison entirely.
+        if count >= 0:
+            # The byte count is what Python compares (the extension compares the
+            # NAMES, in the read-back it does itself), so the check is
+            # name-plus-size rather than contents: a same-name, same-size
+            # replacement between the read and this stat would pass. That is the
+            # residual limit of the read-back, stated rather than implied
+            # (review round 1, N5) — which is why the digest is Python's own and
+            # the bytes are re-statted from disk rather than taken from the host.
+            if count != int(fact["bytes"]):
+                # The DOM holds something else. Reported as an error naming both
+                # sides rather than as a success: a file input that ignored the
+                # attach is exactly the failure a page would like us to call filled.
+                return _error(
+                    tool_call_id,
+                    "browser",
+                    "the file input did not take the attach: it holds "
+                    f"{count} bytes for {path}, and the file "
+                    f"on disk is {fact['bytes']} bytes. Nothing was sent.",
+                )
+        elif malformed and not readback_reported:
+            # A count the host typed wrong, with nothing to explain it: refused
+            # with the value NAMED, because "no byte count" would be a lie about a
+            # field the host did send — and the sentence is what tells a reader
+            # which writer is broken.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: the host reported a malformed "
+                f"byte count ({malformed}) for {path}, and the file on disk is "
+                f"{fact['bytes']} bytes. Nothing was sent.",
+            )
+        elif not readback_reported:
+            # No count AND no marker: the host claims a read that reported nothing
+            # it measured, and there is no unverified note to carry either, so the
+            # call is refused rather than reported as a verified attach. The marker
+            # is what makes the unreported case legitimate — not the absence of a
+            # comparison.
+            return _error(
+                tool_call_id,
+                "browser",
+                "the file input did not take the attach: the host reported no byte "
+                f"count for {path}, and the file on disk is {fact['bytes']} bytes. "
+                "Nothing was sent.",
+            )
+        elif malformed:
+            # A marker says the read failed, so the count is unusable either way —
+            # that is the unverified attach this branch already reports, NOT a
+            # refusal: the host listed the file as accepted, so "the file input did
+            # not take the attach" would be false over bytes that went, which is
+            # the double-send harm Q-1 exists to prevent (round 1). The bad value
+            # is recorded rather than swallowed.
+            malformed_counts.append(malformed)
+        # A fact is VERIFIED only when the host's own read completed and agreed
+        # with Python's stat: an unverified attach must be discriminable by a
+        # consumer reading `details` and not only by one reading the prose
+        # (review round 2, N6) — the caveat below is what the key mirrors.
+        verified = count >= 0 and not readback_reported
+        facts.append({**fact, "verified": verified})
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="upload",
+            origin=origin,
+            name=str(fact["name"]),
+            path=str(path),
+            size=int(fact["bytes"]),
+            verdict="allow",
+            # Empty in the ordinary case; the unverified marker otherwise, so the
+            # trail carries the same caveat the model was given.
+            reason=_readback_reason(readback_note if readback_reported else "", malformed),
+            sha256=str(fact["sha256"]),
+        )
+    accept = str(result.get("accept") or "")
+    # The same construction as each row above, so the note and the trail cannot
+    # drift apart (review round 2, N7's rule).
+    readback_reason = _readback_reason(
+        readback_note if readback_reported else "", ", ".join(malformed_counts)
+    )
+    where = f" to {origin}" if origin else " to the page in this tab"
+    lines = [f"attached {len(facts)} file(s){where}:"]
+    lines.extend(
+        f"- {fact['path']} — {fact['bytes']} bytes, sha256 {str(fact['sha256'])[:12]}"
+        for fact in facts
+    )
+    if accept:
+        # REPORTED, never obeyed: a site's `accept` filter protects nothing and
+        # honouring it would let the page steer which local files we try.
+        lines.append(f"the input declares accept='{accept}'; it was not applied to the attach")
+    if readback_reason:
+        # Never silent: an unverified attach that reads like a confirmed one is
+        # how a model ends up re-sending files that already left.
+        lines.append(
+            f"note: the attach could not be read back ({readback_reason}). The bytes above are "
+            "what is on disk and were handed to the page; whether the page kept or sent them "
+            "is not something this call can confirm — check before re-sending."
+        )
+    return _text(tool_call_id, "browser", "\n".join(lines), details={"files": facts})
+
+
+def _host_byte_count(raw: Any) -> tuple[int, str]:
+    """The host's reported byte count, or the sentinel plus what was wrong with it.
+
+    `bytes` is a field the HOST chooses the type of, and this is the boundary
+    that must not take that on trust: `null`, `{}`, a non-numeric string or a
+    float-shaped one used to reach a bare `int()`, which raised straight out of
+    `_browser_upload` and surfaced as `Tool raised: ...` — an internal-error card
+    and a warning traceback where the design says the call is refused with a
+    sentence (review round 3's MINOR-2 / QA's Q-1).
+
+    Returns `(count, "")` for an integer count, and `(-1, label)` for everything
+    else — including a JSON float, which `int()` would silently TRUNCATE into a
+    count nobody sent. `-1` is the documented "unknown here" sentinel, so the
+    CALLER decides the shape: with a marker it is the unverified attach the
+    sentinel already means, and with no marker it is a refusal that names what the
+    host sent instead.
+    """
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw, ""
+    if isinstance(raw, str):
+        text = raw.strip()
+        body = text[1:] if text[:1] in ("+", "-") else text
+        # `str.isdigit()` alone is not enough, and round 4 measured why: it is
+        # TRUE for Unicode digits `int()` rejects ("\u00b2"), and it says nothing
+        # about CPython's ~4300-digit limit on `int()` from a string ("9"*4301
+        # raises `ValueError`). `isascii()` plus the try/except closes both, so a
+        # value the host typed can never raise out of the tool.
+        if body.isascii() and body.isdigit():
+            try:
+                return int(text), ""
+            except ValueError:
+                pass
+    from local_operator import browser_files as files
+
+    # The offending value lands in the transcript and the audit row, so it goes
+    # through the same sanitiser as every other host-supplied string.
+    return -1, files.readback_label(repr(raw)) or "empty value"
+
+
+def _readback_reason(note: str, malformed: str) -> str:
+    """One string for the unverified note and the audit row: they cannot disagree.
+
+    `note` is the sanitised marker (empty when the host sent none) and `malformed`
+    is the count it sent instead of a number, if any — both are host-supplied, so
+    both are already sanitised by the time they arrive here. Round 2's N7 is the
+    rule: a reader of the trail and a reader of the transcript are looking at the
+    same fact, so they get the same sentence.
+    """
+    parts = [note] if note else []
+    if malformed:
+        parts.append(f"the host's byte count was malformed ({malformed})")
+    return "; ".join(parts)
+
+
+def _delete_outcome(removed: bool) -> tuple[str, str]:
+    """What happened to a refused ENTRY: the verdict word and the row's clause.
+
+    Both halves are built from the RETURN of the delete rather than from the
+    assumption that it worked (review round 1, R1) and from ONE function rather
+    than one spelling per branch (review round 2, N7): the containment rule, the
+    per-call cap and the content refusals all delete the entry, and a reader of
+    the trail reconstructs what a session kept from these rows — two vocabularies
+    for one fact is a row that cannot be compared with its neighbour.
+    """
+    if removed:
+        return "refused and deleted", "the entry was removed"
+    return "refused, NOT deleted", "the entry could NOT be removed — it is still on disk"
+
+
+def _disposition_outcome(disposition: str) -> tuple[str, str]:
+    """What happened to a refused ENTRY, for every outcome intake can report.
+
+    FOUR outcomes, not two (round-1 Q2). "We could not remove it" and "we chose
+    to leave it" are different facts, and a third is that there was nothing to
+    remove — which the two-word vocabulary spelled as "could NOT be removed — it is
+    still on disk", in the same sentence as "already gone", about an entry that had
+    never been there. A deliberate decision read as a failure, too: the file was
+    left because it was never ours to delete.
+
+    Keyed on the VALUE `browser_files` reports rather than on a boolean, so a later
+    outcome cannot be silently collapsed into one of these four.
+    """
+    # Imported here rather than at module scope, matching every other
+    # `browser_files` use in this module: the alias is what keeps this file's import
+    # graph from dragging the browser layer into a process that only wants tools.
+    from local_operator import browser_files as files
+
+    return {
+        files.DELETED: ("refused and deleted", "the entry was removed"),
+        files.KEPT: ("refused, left in place", "the entry was left where it is, on purpose"),
+        files.FAILED: (
+            "refused, NOT deleted",
+            "the entry could NOT be removed — it is still on disk",
+        ),
+        files.ABSENT: ("refused, nothing to remove", "there was no entry to remove"),
+    }.get(disposition, ("refused", "the outcome of that entry is unknown"))
+
+
+def _unlink_quietly(path: Path) -> bool:
+    """Delete a refused artifact, absorbing the failure. ``True`` when it went.
+
+    Best-effort on purpose: the verdict is the deliverable here, and a file we
+    could not delete must not turn a policy refusal into a traceback in the
+    model's context. The audit row already records what was refused.
+
+    The RETURN VALUE is what the model-facing sentence is built from, and it is
+    not decoration: this is called on the candidate ENTRY (never on a resolved
+    path — see the containment branch), and a refusal that claims "deleted" over
+    an entry still sitting on disk is the same class of false report the whole
+    post-hoc verification exists to remove (review round 1, R1).
+    """
+    try:
+        path.unlink()
+    except OSError:
+        logger.warning("could not delete the refused browser download %s", path)
+        return False
+    return True
+
+
+def _unique_name(directory: Path, name: str) -> str:
+    """``name``, or ``name-2``, ``name-3``... when something already holds it.
+
+    The rename a content-corrected file needs must never overwrite: two receipts
+    downloaded from one page can both be called `invoice.pdf` after correction.
+    """
+    candidate = name
+    stem, dot, ext = name.rpartition(".")
+    stem = stem if dot else name
+    ext = ext if dot else ""
+    index = 2
+    while (directory / candidate).exists():
+        candidate = f"{stem}-{index}.{ext}" if ext else f"{stem}-{index}"
+        index += 1
+    return candidate
+
+
 async def _bridge_action(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -10775,6 +12314,10 @@ async def _bridge_action(
     """
     host = _host_of_client(client)
     surface = state.surface_id
+    if action == "download":
+        return await _browser_download(tool_call_id, state, params, context, client=client)
+    if action == "upload":
+        return await _browser_upload(tool_call_id, state, params, context, client=client)
     wire: dict[str, Any] = {
         "tab": surface,
         # Identity and display label are trusted host metadata. Keeping both on
@@ -11475,8 +13018,10 @@ async def _execute_browser(
             tool_call_id,
             "browser",
             f"'{action}' is not supported on the cmux backend — cmux has no console-log tap, "
-            "background-tab scroll primitive, multi-surface registry or site-permission "
-            "model. " + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available) + demotion,
+            "background-tab scroll primitive, multi-surface registry, site-permission "
+            "model, or file-transfer primitive. "
+            + _non_cmux_host_hint(ui=ui_available, bridge=bridge_available)
+            + demotion,
         )
     # ONE liveness probe here rather than one per action body, and never inside
     # a poll loop: cmux answers a dead handle by silently retargeting the
@@ -11693,45 +13238,1105 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         label="Browser",
         describe_approval=_describe_browser_approval,
         description=(
+            # Footprint: this description rides in EVERY session's cache prefix, so
+            # the per-action detail lives in `guide://browser` (the playbook the
+            # model is pointed at below) and in the parameter descriptions, and
+            # this string carries only what a model needs to CHOOSE the tool and
+            # call it correctly. The context-budget guard measures the whole
+            # surface and it is why the download/upload sentence is one clause
+            # rather than the four the design first drafted (AGENTS.md,
+            # "tool-surface footprint ladder"; see the round-4 remediation).
             "Drive the user's REAL browser (the Local Operator desktop app's browser "
             "tab, their paired browser extension, or a cmux browser "
-            "panel): open/goto a URL, read page text, snapshot the "
-            "accessibility tree for click refs, click, type, scroll, read console "
-            "logs, screenshot, close. Cookies and logins persist across calls and "
+            "panel): open/goto a URL, read text, snapshot for click refs, click, type, "
+            "scroll, logs, screenshot, close. Cookies and logins persist across calls and "
             "across sessions, and the user can sign in by hand when you ask them "
-            "to, so this reaches authenticated pages a throwaway headless browser "
-            "cannot. 'scroll' pages the view (default: one screen down) and "
-            "reports whether more content remains; 'logs' returns the page's "
-            "console output and uncaught exceptions for debugging web apps. "
+            "to, so this reaches authenticated pages a throwaway browser cannot. "
             "Parallel "
             "sessions each drive their own tab: a fresh 'open' creates one NEW "
             "tab owned by this session; reuse it because later opens navigate it. "
-            "Before your final response, call 'close' unless the user explicitly "
-            "needs it left open for a pending or immediately continuing interaction. "
+            "Before your final response, call 'close' unless the user needs it left "
+            "open for a pending interaction. "
             "'tabs' lists every agent-driven tab including other sessions' "
-            "(handles are redacted: awareness-only, it cannot "
-            "drive or close anything — except a tab the user handed over, listed in "
-            "full for 'open'), and 'close' ends only your own tab. "
-            "After an interrupted operation, 'recover' recovers YOUR tab only. Keep a tab past "
-            "your turn with 'retain' and end that hold with 'release'. "
+            "(handles are redacted: awareness-only), and 'close' ends only your own tab. "
             "'scroll', 'logs' and "
             "'tabs' need a non-cmux host (cmux says so). On a non-cmux host, "
+            "'download' saves what the page offers into this session's private "
+            "download directory, and 'upload' attaches local files to a page's file "
+            "input. "
             "'open'/'goto' to a site the user has not approved fails with "
-            "origin_not_allowed: then call 'request_access' with the url, NOTIFY the "
-            "user (ask tool or message) to approve the prompt in the extension popup "
-            "or the app's browser tab, "
-            "and 'await_access' before navigating again. "
-            "Use it for every "
-            "screenshot and page interaction; never install or script a browser "
-            "engine instead."
+            "origin_not_allowed: call 'request_access', NOTIFY the user to approve "
+            "it, and 'await_access' before navigating again. "
+            "Never install or script a browser engine instead."
         ),
         parameters=BrowserParams.model_json_schema(),
         # Navigates and can write a screenshot file, so it rides the write
-        # approval gate rather than auto-approved read.
+        # approval gate rather than auto-approved read. `upload` escalates PER
+        # CALL to `exec`, because it transmits local bytes to a remote origin — a
+        # side effect whose consequence is not visible from the arguments.
+        #
+        # The honest caveat, which must not be lost: today the gate is ONE callback
+        # for both tiers and `tool_approval_mode: auto` / `--yolo` installs no gate
+        # at all, so the tier records intent and future-proofs a tier-sensitive
+        # host — it is NOT the protection. The protection is the policy in
+        # `local_operator/browser_files.py`, which runs unconditionally, plus this
+        # describer naming what the call will do.
         approval_tier="write",
+        call_approval_tier=lambda args: (
+            "exec" if str(args.get("action") or "").strip().lower() == "upload" else "write"
+        ),
         concurrency="shared",
         interruptible=False,
         execute=execute_browser,
+    )
+
+
+# ---------------------------------------------------------------------------
+# console — the desktop app's REAL terminal, driven by an agent
+# ---------------------------------------------------------------------------
+# The tool's own section of the design authority is `docs/design/ui-console-tab.md`
+# (§10 the vocabulary, §11 approval/sudo/secrets, §13 capture, §14 this tool,
+# §15 the refusals). The playbook the model reads on demand is `guide://console`;
+# the operator-facing doc is `docs/CONSOLE.md`.
+#
+# Why a tool at all, given `bash` exists: `bash` cannot host a full-screen TUI, a
+# REPL, an installer or an interactive prompt, and it cannot leave a process
+# running behind the turn. Every one of those needs a pty with a real grid and a
+# lifetime longer than a tool call, which is what the app's console surfaces are.
+# The description therefore differentiates on CONSEQUENCES rather than preference,
+# and the discouragement is prose plus the role seeds' allowlists — never the
+# approval tier, which records intent and is explicitly not the protection
+# (§14.6, and the same caveat the browser tool carries).
+
+#: Surface handles name their host, like the browser's `ui:`/`bridge:` prefixes:
+#: `con:<n>:<nonce>` (§6.5). Checked locally only to refuse a handle that is
+#: plainly some OTHER terminal's, which is the one fact an agent asked about "the
+#: terminal" (R18) gets wrong; everything else about a handle's validity is the
+#: app's answer, not ours.
+CONSOLE_SURFACE_PREFIX = "con:"
+
+#: The methods the tool exposes, i.e. the wire's `console_*` names minus the
+#: prefix. The short spelling is what a caller types, and `§14.3`'s description
+#: and parameter docs use it.
+CONSOLE_ACTIONS: tuple[str, ...] = (
+    "list",
+    "create",
+    "status",
+    "read",
+    "screenshot",
+    "input",
+    "keys",
+    "resize",
+    "secure",
+    "close",
+)
+
+#: The methods whose approval tier is `read`; every other console method is
+#: `exec` (§11.1). A frozenset rather than a list because the question asked of it
+#: is membership only, and the tier hook runs per call.
+CONSOLE_READ_ACTIONS = frozenset({"list", "status", "read", "screenshot"})
+
+#: Guard on a scrollback window. The app clamps further; this bounds what ONE
+#: tool result can carry, because a paged read that returns 5,000 lines costs more
+#: context than the answer it was looking for (`§13.1`'s own reason for windowing
+#: rather than returning the whole buffer).
+CONSOLE_SCROLLBACK_MAX_ROWS = 2000
+
+#: How much of a text payload the approval prompt shows. Long enough to recognise
+#: what is being typed, short enough that the prompt names the decision rather than
+#: reproducing the payload — the same job `bash`'s describer does for a command.
+CONSOLE_APPROVAL_PREVIEW_CHARS = 160
+
+#: A leading modifier word and the separator a caller wrote after it, so it can be
+#: folded to the `+` the encoder spells its names with (`ctrl-c`, `CTRL_C` and
+#: `control c` all become `ctrl+c`). `page-up` is deliberately NOT matched: `page`
+#: is not a modifier, so that spelling falls through to the whole-name aliases
+#: below rather than being rebuilt as `page+up`.
+_CONSOLE_MODIFIER = re.compile(
+    r"^(ctrl|control|shift|alt|meta|cmd|command|opt|option|super)[-+_]",
+    re.IGNORECASE,
+)
+
+#: The canonical word for each modifier a caller might write. Only `ctrl` and
+#: `shift` combinations exist in the encoder's vocabulary today; the others are
+#: folded to the same shape so an unsupported `meta-c` is refused by the app under
+#: a spelling the caller recognizes, and this side never asserts they exist.
+_CONSOLE_MODIFIER_WORDS: dict[str, str] = {
+    "ctrl": "ctrl",
+    "control": "ctrl",
+    "shift": "shift",
+    "alt": "alt",
+    "meta": "meta",
+    "cmd": "cmd",
+    "command": "cmd",
+    "opt": "opt",
+    "option": "opt",
+    "super": "super",
+}
+
+#: Names whose separators a caller may insert (`page-up`, `page_up`, `back-space`).
+#: The folded spelling IS the encoder's name for these, and the list is written out
+#: rather than derived from the vocabulary: deriving it would mean carrying the
+#: encoder's whole name list on this side, which is the second source of truth the
+#: aliases exist to avoid. Every entry is a name the guide already documents, and
+#: an entry can only ADD a spelling to it — never a name the encoder does not have.
+#: `page` is not a modifier word, so the modifier branch above cannot fold these.
+_CONSOLE_FOLDABLE_NAMES = frozenset({"pageup", "pagedown", "backspace"})
+
+
+#: Whole-name spellings a model writes, mapped to the name the encoder has. Keyed
+#: on the name with its separators removed, so `pg-up` and `pg_up` are one entry.
+#: Nothing here carries a BYTE: the encoder is the app's (design §10.5 keeps one
+#: table, pinned against the mirror's DOM handler), and a byte table on this side
+#: would be the second encoder that invariant exists to prevent.
+_CONSOLE_KEY_ALIASES: dict[str, str] = {
+    "esc": "escape",
+    "cr": "enter",
+    "return": "enter",
+    "pgup": "pageup",
+    "pgdn": "pagedown",
+    "ins": "insert",
+    "del": "delete",
+}
+
+
+def _console_key_name(key: str) -> str:
+    """One `keys` entry, in the spelling the app's encoder accepts.
+
+    WHY THIS EXISTS AT ALL (QA round 2, Q-2): the encoder's names use `+`
+    (`ctrl+c`, `shift+tab`) because that is also this repository's own notation
+    everywhere else (`ASIDE_SCROLL_BACK_KEY = "ctrl+pageup"` in `tui/app.py`), while
+    the shipped guide documented the `-` form — so every control key a model read
+    about was refused by the only real host, with `Unknown key name: ctrl-c`. A
+    model that has to guess a spelling fails a TUI test for the wrong reason, and
+    the fix belongs on this side: the app's vocabulary is frozen by the UI half of
+    the split, and its encoder is the one table.
+
+    An unrecognised name is returned UNCHANGED rather than refused here: the app's
+    `unknown_key` refusal carries the accepted set as `data["accepted"]`, so a
+    local grammar that guessed would replace the authoritative answer with a
+    second, staler one.
+    """
+    raw = re.sub(r"\s+", "", key).lower()
+    if not raw:
+        return ""
+    match = _CONSOLE_MODIFIER.match(raw)
+    if match:
+        head = _CONSOLE_MODIFIER_WORDS[match.group(1)]
+        return f"{head}+{raw[match.end() :]}"
+    # Caret notation, which is a spelling models write for control keys in prose
+    # (`^C`, `^[`) and which maps exactly onto the encoder's `ctrl+` names — the
+    # bracket and underscore controls included.
+    if len(raw) == 2 and raw.startswith("^") and (raw[1].isalpha() or raw[1] in "[\\]^_ "):
+        return f"ctrl+{raw[1]}"
+    folded = raw.replace("-", "").replace("_", "")
+    if folded in _CONSOLE_FOLDABLE_NAMES:
+        return folded
+    return _CONSOLE_KEY_ALIASES.get(folded, raw)
+
+
+#: One tool with a `method` parameter is ONE schema in the prompt-cache prefix,
+#: where ten tools would be ten — the same shape `BrowserParams` uses for the same
+#: reason. The per-method detail lives in the parameter descriptions below (where a
+#: model reads it while choosing arguments) and in `guide://console`; the class
+#: deliberately carries no docstring: pydantic copies a class docstring into the
+#: emitted schema's ``description``, and that schema ships on every request, so a
+#: rationale paragraph here would be a permanent per-call tax on the sentence a
+#: model reads once.
+class ConsoleParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: str = Field(
+        description="list | create | status | read | screenshot | input | keys | resize "
+        "| secure | close. `list` includes surfaces the USER opened; `read` returns text; "
+        "`screenshot` writes a PNG file; `input` types text or a stored secret; `keys` "
+        "sends named keys; `secure` is the user's own do-not-capture switch."
+    )
+    surface: str = Field(
+        default="",
+        description="The handle from 'list'/'create', e.g. 'con:1:9f2a'. Required for every "
+        "method but 'list'/'create'. A console handle starts with 'con:': a terminal in "
+        "another window has none and is not readable by this tool.",
+    )
+    cwd: str = Field(
+        default="", description="'create': the working directory (default: the user's home)."
+    )
+    command: str = Field(
+        default="", description="'create': the program to run (default: the user's shell)."
+    )
+    args: list[str] = Field(
+        default_factory=list,
+        description="'create': the argument vector after 'command', one element each.",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="'create': extra environment variables. TERM, COLORTERM and the console "
+        "markers are set by the app.",
+    )
+    cols: int | None = Field(
+        default=None, description="'create'/'resize': grid columns (default 100)."
+    )
+    rows: int | None = Field(default=None, description="'create'/'resize': grid rows (default 30).")
+    reveal: str = Field(
+        default="",
+        description="'create': none (default, pane untouched) | session (open the pane only "
+        "if the app is showing THIS session) | open (claim and focus the pane, only when "
+        "the app's window is already focused). No value raises the OS window; a downgrade "
+        "comes back as revealed=false.",
+    )
+    retain: bool | None = Field(
+        default=None,
+        description="'create'/'close': keep the output in the app's history (default true); "
+        "false discards it on close.",
+    )
+    input: str = Field(
+        default="",
+        description="'create': bytes to write to the new surface's stdin once it starts.",
+    )
+    mode: str = Field(
+        default="",
+        description="'read': viewport (default; the visible rows, i.e. what a person looking "
+        "at the pane sees) | scrollback (a history window, positioned by start/count).",
+    )
+    start: int | None = Field(
+        default=None, description="'read' scrollback: the first history row to return."
+    )
+    count: int | None = Field(
+        default=None,
+        description=f"'read' scrollback: how many rows (max {CONSOLE_SCROLLBACK_MAX_ROWS}).",
+    )
+    text: str = Field(
+        default="",
+        description="'input': the text to type. NEVER a credential: use 'secret_ref' so the "
+        "value stays out of the transcript.",
+    )
+    secret_ref: str = Field(
+        default="",
+        description="'input': the NAME of a stored secret to type instead of 'text' (e.g. "
+        "'SUDO_PASSWORD'). Resolved from the encrypted store; never shown in the result, a "
+        "trace or a log, and registered for redaction.",
+    )
+    paste: bool = Field(
+        default=False,
+        description="'input': wrap the payload in the bracketed-paste sequence when the "
+        "surface has that mode on.",
+    )
+    keys: list[str] = Field(
+        default_factory=list,
+        description="'keys': named keys in the encoder's spelling — ['ctrl+c'], ['up'], "
+        "['shift+tab'] — with synonyms ('ctrl-c', 'CTRL+C', 'shift-tab', 'esc', "
+        "'pgup') normalised first. The names are in guide://console; an unknown one "
+        "is refused with the accepted set.",
+    )
+    on: bool | None = Field(
+        default=None,
+        description="'secure': true turns the surface's do-not-capture span on (the app then "
+        "refuses reads and screenshots of it), false turns it off. The user can toggle the "
+        "same switch from the pane.",
+    )
+    kill: bool | None = Field(
+        default=None,
+        description="'close': true kills the surface's process instead of asking it to exit.",
+    )
+
+
+def _console_wire_params(params: ConsoleParams, session_id: str) -> tuple[dict[str, Any], str]:
+    """The wire params for one call, or ``({}, message)`` when the args are short.
+
+    Assembly is per method rather than a dump of the whole model: the wire takes
+    only what the method defines (`§10.2`), a pass-through would put every unrelated
+    argument on the wire, and this is also the place the mutually-exclusive
+    arguments are refused with a sentence a caller can act on instead of a schema
+    error naming a field it did not know about.
+    """
+    method = params.method
+
+    def optional(target: dict[str, Any]) -> None:
+        """Copy the arguments that are meaningful for more than one method."""
+        if params.cols is not None:
+            target["cols"] = params.cols
+        if params.rows is not None:
+            target["rows"] = params.rows
+
+    if method == "list":
+        # The session filter is the CALLER's own session, always. It is not a
+        # parameter: a surface belongs to the session that created it, another
+        # session's surfaces are refused with `surface_not_owned`, and offering the
+        # filter would only invite a caller to look for a way round that.
+        return {"session_id": session_id}, ""
+    if method == "create":
+        wire: dict[str, Any] = {"session_id": session_id}
+        optional(wire)
+        for key, value in (
+            ("cwd", params.cwd.strip()),
+            ("command", params.command.strip()),
+            ("input", params.input),
+            ("reveal", params.reveal.strip()),
+        ):
+            if value:
+                wire[key] = value
+        if params.args:
+            wire["args"] = list(params.args)
+        if params.env:
+            wire["env"] = dict(params.env)
+        if params.retain is not None:
+            wire["retain"] = params.retain
+        return wire, ""
+    if method == "status":
+        return {"surface": params.surface}, ""
+    if method == "read":
+        mode = params.mode.strip().lower() or "viewport"
+        if mode not in ("viewport", "scrollback"):
+            return {}, f"'read' mode must be 'viewport' or 'scrollback', not {params.mode!r}."
+        wire = {"surface": params.surface, "mode": mode}
+        if mode == "viewport" and (params.start is not None or params.count is not None):
+            # Refused rather than ignored: silently dropping a window would answer a
+            # question about history with the current screen, which reads as a
+            # truncated buffer rather than as a wrong call.
+            return {}, "'read' takes start/count only with mode='scrollback'."
+        if params.start is not None:
+            wire["start"] = params.start
+        if params.count is not None:
+            wire["count"] = params.count
+        return wire, ""
+    if method == "screenshot":
+        # No destination parameter: the app returns pixels and the harness owns
+        # where they are written, exactly as the browser tool does. `format` is
+        # omitted for the same reason a one-value argument earns no schema slot.
+        return {"surface": params.surface}, ""
+    if method == "input":
+        if params.text and params.secret_ref.strip():
+            return {}, "'input' takes 'text' or 'secret_ref', not both."
+        if not params.text and not params.secret_ref.strip():
+            return {}, "'input' needs 'text' or a 'secret_ref' naming a stored secret."
+        wire = {"surface": params.surface}
+        if params.paste:
+            wire["paste"] = True
+        return wire, ""
+    if method == "keys":
+        # Normalised HERE, before the wire, so the spelling a model wrote never
+        # decides whether the call works — see `_console_key_name` for why this
+        # side owns the aliases and not the bytes.
+        keys = [name for name in (_console_key_name(key) for key in params.keys) if name]
+        if not keys:
+            return {}, "'keys' needs at least one named key (e.g. ['ctrl+c'])."
+        return {"surface": params.surface, "keys": keys}, ""
+    if method == "resize":
+        if params.cols is None or params.rows is None:
+            return {}, "'resize' needs both 'cols' and 'rows'."
+        return {"surface": params.surface, "cols": params.cols, "rows": params.rows}, ""
+    if method == "secure":
+        if params.on is None:
+            return {}, "'secure' needs 'on' (true to turn the do-not-capture span on)."
+        return {"surface": params.surface, "on": params.on}, ""
+    if method == "close":
+        wire = {"surface": params.surface}
+        if params.kill is not None:
+            wire["kill"] = params.kill
+        if params.retain is not None:
+            wire["retain"] = params.retain
+        return wire, ""
+    return {}, f"unknown console method: {method} (expected one of {', '.join(CONSOLE_ACTIONS)})"
+
+
+def _console_handle_refusal(surface: str) -> str:
+    """The sentence for a handle that is not this console's — or ``""`` when it is.
+
+    Deliberately a PREFIX check, not a grammar: the handle's nonce is the app's to
+    mint and to validate, and a local grammar that drifted from it would refuse a
+    surface that exists — the worst possible failure for a tool whose whole R18
+    job is to be able to say "no, that window is not the one you mean".
+    """
+    if surface.startswith(CONSOLE_SURFACE_PREFIX):
+        return ""
+    return (
+        f"{surface!r} is not a Local Operator console surface: a console handle starts "
+        f"with {CONSOLE_SURFACE_PREFIX!r}, and the ones this session can read are those "
+        "`method='list'` reports. A terminal in another window (Terminal.app, iTerm, "
+        "cmux, an ssh session) is NOT readable by this tool — say that rather than "
+        "guessing at its contents."
+    )
+
+
+def _console_resource_keys(args: dict[str, Any], cwd: str) -> tuple[str, ...]:
+    """Declare which calls conflict, so two surfaces can run in one batch.
+
+    A surface is the unit of ordering: `input` then `read` on ONE surface must not
+    race (the read would answer a question about a screen the write has not
+    reached yet), while a read of surface A and a read of surface B have nothing
+    to do with each other and should run together. The loop's rule is that tools
+    declaring disjoint resources may batch, so this is the whole mechanism.
+
+    `list`/`create` declare NOTHING — an empty tuple — because they name no
+    surface: `list` observes whatever the set is at the moment it runs, and a
+    `create` racing another `create` is bounded by the app's own per-session cap,
+    which answers the loser with a typed refusal rather than by corrupting
+    anything. Raising is not reachable here (a missing handle is a schema error
+    before this runs) and would in any case only fall back to the global barrier.
+    """
+    del cwd
+    surface = args.get("surface")
+    if not isinstance(surface, str) or not surface.strip():
+        return ()
+    return (f"console:surface:{surface.strip()}",)
+
+
+def _console_tier_for(args: dict[str, Any]) -> Literal["read", "write", "exec"]:
+    """The per-CALL approval tier (§11.1).
+
+    Reads are `read`; every other console method is `exec`, because each one writes
+    into a pty, changes a grid, or ends a process the user may be watching. This is
+    bookkeeping and NOT the protection — the browser tool's own comment spells out
+    why (one gate callback for both tiers today, and `tool_approval_mode: auto`
+    installs no gate at all), and §14.6 forbids claiming otherwise.
+    """
+    method = str(args.get("method") or "").strip().lower()
+    return "read" if method in CONSOLE_READ_ACTIONS else "exec"
+
+
+def _console_approval_preview(text: str) -> str:
+    """A bounded, single-line preview of what is about to be written to a pty."""
+    flat = " ".join(text.split())
+    if len(flat) <= CONSOLE_APPROVAL_PREVIEW_CHARS:
+        return repr(flat)
+    return repr(flat[:CONSOLE_APPROVAL_PREVIEW_CHARS]) + "…"
+
+
+def _describe_console_approval(
+    args: dict[str, Any], cwd: str, *, context: ToolContext | None = None
+) -> str:
+    """The sentence the approval prompt shows for one console call.
+
+    It names the SURFACE, the SESSION and the exact bytes or keys about to be
+    written (§11.1), because those are the three things a person is being asked to
+    authorise and the JSON fallback buries all three. A `secret_ref` is named by
+    its NAME only — the value is not in the arguments and never enters this
+    sentence; the whole point of the ref is that the prompt can say what will
+    happen without holding the credential.
+    """
+    method = str(args.get("method") or "").strip().lower() or "?"
+    surface = str(args.get("surface") or "").strip() or "(a new surface)"
+    session = getattr(context, "session_id", "") or "this session"
+    where = f"{surface} in session {session}"
+    if method == "input":
+        ref = str(args.get("secret_ref") or "").strip()
+        if ref:
+            return f"console: type the stored secret '{ref}' into {where}"
+        return (
+            f"console: type {_console_approval_preview(str(args.get('text') or ''))} into {where}"
+        )
+    if method == "keys":
+        keys = [str(key) for key in (args.get("keys") or [])]
+        return f"console: send keys {', '.join(keys)} to {where}"
+    if method == "create":
+        argv = [str(args.get("command") or "").strip(), *[str(a) for a in (args.get("args") or [])]]
+        program = " ".join(part for part in argv if part) or "the user's shell"
+        directory = str(args.get("cwd") or "").strip() or cwd or "the user's home"
+        return f"console: start `{program}` in {where}, working directory {directory}"
+    if method == "secure":
+        state = "on" if args.get("on") else "off"
+        return (
+            f"console: turn secure input {state} for {where} — while it is on the app "
+            "refuses to read or capture that surface"
+        )
+    if method == "close":
+        how = "kill its process" if args.get("kill") else "close it"
+        return f"console: {how} for {where}"
+    if method == "resize":
+        return f"console: resize {where} to {args.get('cols')}x{args.get('rows')}"
+    return f"console: {method} on {where}"
+
+
+def build_console_tool(context: ToolContext | None) -> AgentTool | None:
+    """Advertise the console tool when the desktop app publishes a console host.
+
+    One `createIf` entry and one file-only predicate, the same shape as
+    :func:`build_browser_tool` — no second gating convention beside it
+    (`AGENTS.md`'s tool-surface ladder). Two consequences of that shape, both
+    deliberate:
+
+    * **It is NOT hidden.** A concealed tool cannot be discouraged, it can only be
+      absent, and R7 needs an agent asked to test a TUI to know the capability
+      exists (§14.2). The one shipped use of `hidden` is a transport tool nobody
+      invokes.
+    * **File-only and synchronous**, because this runs while constructing every
+      session on the machine, and it never raises: an unreadable record degrades to
+      "no console", which is the honest answer and the one `createIf` exists for.
+
+    The description is deliberately SHORT and its per-method detail lives in the
+    parameter descriptions and in ``guide://console``, for the reason the browser
+    tool's `Footprint:` comment gives: this string rides in every session's
+    prompt-cache prefix, and `scripts/bench_context_budget.py` measures it.
+    """
+    del context  # gating is on the machine's app, not on session state
+    if not ui_console_advertisable():
+        return None
+    return AgentTool(
+        name="console",
+        label="Console",
+        describe_approval=_describe_console_approval,
+        description=(
+            "Drive a real interactive terminal inside the Local Operator desktop app: a pty "
+            "running a command, with a real terminal grid, that keeps running and keeps its "
+            "output while its tab is closed. Use it for things `bash` cannot host — a "
+            "full-screen TUI, a REPL, an installer, an interactive prompt — and NOT for "
+            "ordinary commands: `bash` returns output directly, cannot wedge on a prompt, and "
+            "cannot leave a process running behind your turn. The surface handle names this "
+            "host (`con:`). `list` shows surfaces the USER opened too; read those rather than "
+            "asking them to repeat their output. Playbook: `guide://console`."
+        ),
+        parameters=ConsoleParams.model_json_schema(),
+        # The tool's tier is the HIGHEST of its ops (create/input/keys/resize/
+        # secure/close are `exec`), with the per-call hook taking the four read
+        # methods back down to `read` (§11.1). Not a differentiation mechanism from
+        # `bash` — that is `exec` unconditionally — and not the protection either:
+        # the gate is one callback for both tiers and `auto` mode installs none.
+        approval_tier="exec",
+        call_approval_tier=_console_tier_for,
+        # Shared with declared resources rather than exclusively: two calls on
+        # DIFFERENT surfaces have nothing to do with each other, and serialising
+        # them behind one barrier would make a fleet of consoles take turns.
+        concurrency="shared",
+        resource_keys=_console_resource_keys,
+        # A call that is abandoned mid-flight may have already created a surface or
+        # written to one, and the model would then be reasoning about a terminal it
+        # does not know exists. `bash` can be interrupted because its process group
+        # is reaped; a surface deliberately outlives the call, so this one is not.
+        interruptible=False,
+        execute=execute_console,
+    )
+
+
+def _console_list_text(result: dict[str, Any]) -> str:
+    """Render `console_list` for a model that needs to CHOOSE a surface by name.
+
+    One line per surface, the load-bearing fields first, and the provenance in the
+    second column because §6.5 puts it there for a reason: a surface a person opened
+    is the ordinary case an agent is asked to look at, and a listing that made the
+    agent infer it from a command name would be guessing.
+    """
+    # The list arrives under `surfaces`: the design's §10.2 shows a bare array, but
+    # the shared `Response` envelope types `result` as a dict, so what actually
+    # crosses the wire is the wrapped spelling — and a host that answered with an
+    # empty or unexpected payload must render as "no surfaces" rather than raising
+    # inside a tool that is only trying to tell the model what it can read.
+    entries = result.get("surfaces")
+    if not isinstance(entries, list):
+        entries = []
+    if not entries:
+        return (
+            "No console surfaces in this session. `create` starts one; a surface the user "
+            "opened in the app appears here too."
+        )
+    lines = [f"{len(entries)} console surface(s) in this session:"]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        surface = str(entry.get("surface") or "?")
+        origin = str(entry.get("origin") or ("agent" if entry.get("agent_owned") else "user"))
+        session = str(entry.get("session_id") or "").strip()
+        command = " ".join(
+            str(part).strip()
+            for part in [entry.get("command") or "zsh", *(entry.get("argv_tail") or [])]
+            if str(part).strip()
+        )
+        bits = [
+            surface,
+            origin,
+            # §6.5 and §13.4 put the owning session IN THE LISTING, and it is not
+            # decorative: a surface the user opened is the ordinary case an agent is
+            # asked to read, and "is this one mine to read" is a question the listing
+            # is what answers — the app filters by session, and the agent can only
+            # verify the answer if the row carries it.
+            f"session {session}" if session else "",
+            command or "?",
+            str(entry.get("cwd") or ""),
+            f"{entry.get('cols')}x{entry.get('rows')}",
+        ]
+        if entry.get("running") is False or entry.get("exit_code") is not None:
+            bits.append(
+                f"exited({entry.get('exit_code')})"
+                if entry.get("exit_code") is not None
+                else "exited"
+            )
+        else:
+            bits.append("running" if entry.get("running", True) else "ended")
+        if entry.get("live") is False:
+            bits.append("not live (from history)")
+        last = entry.get("last_activity") or entry.get("last_output_at")
+        if last:
+            bits.append(f"last output {last}")
+        lines.append("  " + "  ".join(str(bit) for bit in bits if str(bit)))
+    return "\n".join(lines)
+
+
+def _console_cursor_text(cursor: Any) -> str:
+    """Describe the app's cursor without asserting a shape the contract does not fix.
+
+    The FROZEN wire shape is the emulator's own, `{x, y}` — `x` is the COLUMN and
+    `y` the ROW, because that is what `@xterm/headless`'s `cursorX`/`cursorY` mean
+    and §10.2's rows carry the emulator's grid state unchanged (§5.4, and the
+    spelling published in `docs/CONSOLE.md` and the PR body for the app half).
+
+    The legacy `{row, col}` spelling is still ACCEPTED, defensively: a renderer
+    that required one spelling printed "row None, column None" for a healthy host
+    that used the other, and that is a FALSE statement about the surface in a
+    model-facing result, on the field §13.1 uses to decide where a TUI is.
+
+    Nothing is ever printed as `None`, for the same reason. A shape with no axis
+    names to read is printed AS IT ARRIVED — "the app sent this and this renderer
+    does not know its shape" is true where `None` is not — and a bare two-element
+    pair is read positionally in the frozen shape's own field order (`x`, then
+    `y`), which is the only order this namespace declares.
+    """
+    if isinstance(cursor, dict):
+        column = next(
+            (cursor[key] for key in ("x", "col", "column") if cursor.get(key) is not None),
+            None,
+        )
+        row = next(
+            (cursor[key] for key in ("y", "row") if cursor.get(key) is not None),
+            None,
+        )
+        parts = [
+            f"{name} {value}"
+            for name, value in (("row", row), ("column", column))
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        return ", ".join(parts) if parts else str(cursor)
+    if isinstance(cursor, (list, tuple)) and len(cursor) == 2:
+        first, second = cursor
+        if all(isinstance(value, int) and not isinstance(value, bool) for value in (first, second)):
+            return f"row {second}, column {first}"
+    return str(cursor)
+
+
+def _console_mode_is_on(value: Any) -> bool:
+    """Whether one `modes` entry is on, where §5.4 types the map with TWO kinds.
+
+    The cursor-key/paste flags are booleans, but `mouseTracking` is `IModes`' own
+    STRING (`"none"`, `"vt200"`, …), and a truthiness test read the real app's
+    `"none"` as an on-mode — `modes on: mouseTracking` for a surface with mouse
+    tracking OFF (QA round 2, Q-4: the same class of false statement about the
+    surface as the legacy `{row, col}` cursor). So the booleans are `is True`
+    exactly (anything else a host sends is not a claim this side can render as
+    "on"), and a string is off when it names no mode.
+    """
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "none", "off", "false")
+    return False
+
+
+def _console_status_text(result: dict[str, Any]) -> str:
+    """Render `console_status` without asserting anything the app did not say.
+
+    Every field is read with `.get`, and a field the app did not send is simply not
+    printed. The `last_activity`/`last_output_at` tolerance is DEFENSIVE, not a
+    contract gap: §0.4's revision-4 paragraph settles the spelling (§10.2's table
+    is the vocabulary the app implements and the only one any prose may use, so
+    §11.1's `last_output_at` is that row's `last_activity`, and the idle interval is
+    the agent's own derivation rather than a returned field), and this renderer
+    accepts the legacy pair anyway so a host written before the settlement still
+    renders instead of reading as console-less. What is NOT here is any
+    "waiting for input" verdict — there is no reliable in-band signal for it, the
+    heuristic was explicitly rejected (§11.1), and inventing one would give the
+    model a confident wrong answer about whether a prompt is waiting.
+    """
+    lines: list[str] = []
+    if "running" in result:
+        lines.append(f"running: {bool(result.get('running'))}")
+    if result.get("exit_code") is not None:
+        lines.append(f"exit code: {result.get('exit_code')}")
+    if result.get("cols") is not None and result.get("rows") is not None:
+        lines.append(f"grid: {result.get('cols')}x{result.get('rows')}")
+    for key in ("live", "truncated", "retain", "secure"):
+        if key in result:
+            lines.append(f"{key}: {bool(result.get(key))}")
+    idle = result.get("idle_ms")
+    if idle is not None:
+        lines.append(f"idle: {float(idle) / 1000:.1f}s since the last output")
+    elif result.get("last_output_at") or result.get("last_activity"):
+        lines.append(f"last output: {result.get('last_output_at') or result.get('last_activity')}")
+    if result.get("cursor") is not None:
+        lines.append(f"cursor: {_console_cursor_text(result.get('cursor'))}")
+    modes = result.get("modes")
+    if isinstance(modes, dict):
+        # A string-valued axis prints its actual value (`mouseTracking=vt200`)
+        # rather than the axis name: §5.4's type is the emulator's own, and the
+        # value is what tells a reader whether the program has asked for mouse
+        # reports at all.
+        active = sorted(
+            f"{name}={value}" if isinstance(value, str) else name
+            for name, value in modes.items()
+            if _console_mode_is_on(value)
+        )
+        lines.append("modes on: " + (", ".join(active) if active else "none"))
+    if lines:
+        lines.append("An idle surface can equally be a program waiting for input: read it to see.")
+    return "\n".join(lines) if lines else "The app returned no status fields."
+
+
+def _console_read_text(result: dict[str, Any]) -> str:
+    """Render `console_read`: the text, then what an agent needs to page it.
+
+    stdout and stderr are ONE stream and the footer says so — that is what a pty is,
+    and the description says it too, so the model does not go looking for a way to
+    separate them (§13.1).
+    """
+    text = result.get("text")
+    body = text if isinstance(text, str) else ""
+    footer: list[str] = []
+    if result.get("cols") is not None and result.get("rows") is not None:
+        footer.append(f"{result.get('cols')}x{result.get('rows')}")
+    if result.get("mode"):
+        footer.append(f"mode {result.get('mode')}")
+    cursor = result.get("cursor")
+    if cursor is not None:
+        footer.append(f"cursor {_console_cursor_text(cursor)}")
+    if result.get("truncated"):
+        footer.append("truncated by the app")
+    if result.get("live") is False:
+        footer.append("not live: this is the retained history of a surface whose app has gone")
+    tail = " [stdout and stderr are one pty stream]"
+    if footer:
+        tail = " [" + "; ".join(str(part) for part in footer) + "]" + tail
+    return body + ("\n" + tail if body else tail.strip())
+
+
+def _console_screenshot_result(
+    tool_call_id: str, surface: str, result: dict[str, Any]
+) -> ToolResult:
+    """Write the PNG the app captured and report where it went (§13.2).
+
+    The path is chosen here, not by the caller: the wire's screenshot method takes
+    a surface and returns pixels, and the browser tool's precedent is the same
+    split (the host returns bytes, the Python side owns path resolution, PNG
+    validation and the write). The magic is re-verified before the file is
+    reported — a "screenshot" that is HTML, a JSON error, or blank is a capture
+    failure that must not be handed on as an image.
+    """
+    import tempfile
+
+    try:
+        payload = base64.b64decode(str(result.get("image_base64") or ""), validate=True)
+    except ValueError:
+        return _error(tool_call_id, "console", "the app returned invalid screenshot data")
+    if not payload.startswith(PNG_MAGIC):
+        return _error(
+            tool_call_id,
+            "console",
+            f"the app's capture of {surface} is not a PNG ({len(payload)} bytes), so no "
+            "file was written; read the surface as text instead.",
+        )
+    safe_surface = re.sub(r"[^A-Za-z0-9_-]", "-", surface) or "surface"
+    target = os.path.join(tempfile.gettempdir(), f"lo-console-{safe_surface}.png")
+    try:
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_bytes(payload)
+    except OSError as exc:
+        return _error(tool_call_id, "console", f"could not write the screenshot to {target}: {exc}")
+    # `rendered` is the honest part of the answer and rides in the text, not only in
+    # `details`: a frame reconstructed from the record is not a photograph of a live
+    # screen, and a consumer that cares has to be able to see which it got.
+    rendered = str(result.get("rendered") or "displayed")
+    how = (
+        "the pane as displayed"
+        if rendered == "displayed"
+        else "an offscreen reconstruction from the surface's record"
+    )
+    extras = (
+        [f"rendered: {rendered}", f"theme: {result.get('theme')}"] if result.get("theme") else []
+    )
+    if result.get("live") is False:
+        extras.append("not live (replayed history)")
+    suffix = f" ({'; '.join(str(part) for part in extras)})" if extras else ""
+    return _text(
+        tool_call_id,
+        "console",
+        f"Screenshot of {surface} — {how} — saved to {target} ({len(payload)} bytes){suffix}.",
+        details={
+            "path": target,
+            "bytes": len(payload),
+            "surface": surface,
+            "rendered": rendered,
+        },
+    )
+
+
+def _console_input_params(
+    tool_call_id: str,
+    params: ConsoleParams,
+    wire: dict[str, Any],
+    context: ToolContext | None,
+) -> ToolResult | None:
+    """Resolve a `secret_ref` into the wire payload, or explain why it could not be.
+
+    The value is resolved HERE, in the session, from the same encrypted store the
+    `secret` tool writes (`§11.3`), and it is put on the wire in this one call's
+    params — the app is the only process that can write to a pty. Two things happen
+    around it, and both are the reason the ref exists at all:
+
+    * **The model's argument is the ref, not the value**, so the tool call in the
+      transcript says `secret_ref: "SUDO_PASSWORD"`;
+    * **the value is registered with the session's redaction sink**
+      (:meth:`VariableStore.register_redaction`) BEFORE the call is made, so any
+      later appearance of it — in a rendered trace, a tool result, or a transcript
+      write — comes back as `[redacted]` (`§11.3`, `redaction_shapes.py`).
+
+    Returns `None` when the wire payload is ready, and the error result to hand back
+    when it is not. The error path names the secret and the failure, never a byte of
+    the value — there is no value to name when resolution fails, and there is a
+    registered value to protect when it succeeds.
+
+    **What containment of a READ is, stated because it is easy to claim more:** this
+    function returns nothing, and :func:`execute_console` hands the app's output
+    back VERBATIM. A value that a program echoes (or that the shell prints with
+    `set -x`) therefore reaches the transcript only as far as the session loop lets
+    it: the masking is `redact_tool_result`, at the loop's model-visible choke
+    point, which is where §19.3's "never appears in the tool result" is actually
+    enforced for a read-after-echo. What this function guarantees is the other half
+    — the sink is registered BEFORE the bytes leave, and a session with no sink
+    refuses to type the value at all — so the value is contained at both ends of the
+    round trip rather than by the tool alone.
+
+    **A store that cannot register is a REFUSAL, not a downgrade.** The registration
+    is what contains the value after this call, and a program that echoes its input
+    (a `set -x` shell, an installer that logs its arguments) would otherwise put the
+    plaintext into a tool result with nothing to mask it. So the missing sink fails
+    closed and names a path that does contain the value, rather than typing it in and
+    hoping. `register_redaction` is read with `getattr` because
+    `ToolContext.variables` is typed as
+    :class:`~local_operator.harness.types.VariableStoreProtocol` — the slice the
+    *variable tools* read — and that protocol does not declare it; every store this
+    repo constructs is a real :class:`~local_operator.variables.VariableStore`, which
+    has it.
+    """
+    ref = params.secret_ref.strip()
+    if not ref:
+        wire["text"] = params.text
+        return None
+    store = getattr(context, "variables", None) if context is not None else None
+    register = getattr(store, "register_redaction", None)
+    if not callable(register):
+        return _error(
+            tool_call_id,
+            "console",
+            "this session has no redaction sink, so a value sent through secret_ref "
+            "could not be contained after the call — and the app may echo it back as "
+            "output. Ask the user to type the secret into the surface themselves (the "
+            "app records no keystrokes), or use `bash` with $(lop secret get "
+            f"{ref}) which announces the value to the session before it is used.",
+        )
+    try:
+        from local_operator.secrets.access import retrieve_secret
+
+        value = retrieve_secret(ref).decode("utf-8", errors="surrogateescape")
+    except Exception as exc:  # noqa: BLE001 - every failure here is reportable, none fatal
+        return _error(
+            tool_call_id,
+            "console",
+            f"could not resolve secret_ref {ref!r}: {exc}. Store the value with the `secret` "
+            "tool (or have the user type it into the surface) and retry — do not put the "
+            "value itself in `text`.",
+        )
+    register(value)
+    wire["text"] = value
+    return None
+
+
+async def execute_console(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Dispatch one console method against the app's loopback host.
+
+    The shape of the failure handling is the design's §15 rather than a try/except
+    around a transport: absence is reported as ABSENCE (the file-only record says
+    there is no app, so the model is told the surfaces ended rather than being sent
+    at a socket that will refuse), and every mid-flight refusal is a TYPED code
+    whose sentence comes from `console_error_text`, so a caller never
+    substring-matches a message. Nothing here can hang: the client's per-method
+    budget bounds every call.
+    """
+    del signal, on_update
+    try:
+        params = ConsoleParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "console", exc)
+    method = params.method.strip().lower()
+    if method not in CONSOLE_ACTIONS:
+        return _error(
+            tool_call_id,
+            "console",
+            f"unknown console method: {params.method!r} (expected one of "
+            f"{', '.join(CONSOLE_ACTIONS)})",
+        )
+    surface = params.surface.strip()
+    if method not in ("list", "create"):
+        if not surface:
+            return _error(
+                tool_call_id,
+                "console",
+                f"'{method}' needs the surface handle ('list' shows the live ones).",
+            )
+        refusal = _console_handle_refusal(surface)
+        if refusal:
+            return _error(tool_call_id, "console", refusal)
+    session_id = str(getattr(context, "session_id", "") or "").strip()
+    if method in ("list", "create") and not session_id:
+        # A surface is keyed by the session that owns it, so a create with no
+        # session would make a surface nobody can list or read. Names the reason
+        # rather than sending an empty id the app would have to guess about.
+        return _error(
+            tool_call_id,
+            "console",
+            "this session has no id, so the app cannot own a console surface for it; "
+            "run the call from a session rather than from a bare tool context.",
+        )
+    wire, problem = _console_wire_params(params, session_id)
+    if problem:
+        return _error(tool_call_id, "console", problem)
+    if method == "input":
+        failed = _console_input_params(tool_call_id, params, wire, context)
+        if failed is not None:
+            return failed
+
+    from local_operator.browser_bridge.backend import BridgeError, BridgeUnreachable
+    from local_operator.ui_console.backend import (
+        CONSOLE_ABSENT_COPY,
+        CONSOLE_FEATURE_OFF_COPY,
+        ConsoleHostClient,
+        console_error_text,
+    )
+    from local_operator.ui_console.state import Liveness
+
+    # The file-only refusal, BEFORE any socket. Two states are worth answering
+    # without a dial: no app at all (its surfaces are gone with it — that is the
+    # fact the model needs, and it arrives in milliseconds instead of after a
+    # connect timeout) and an app whose console feature is off.
+    status, current = _ui_console_liveness()
+    if current is None or status is Liveness.ABSENT:
+        return _error(tool_call_id, "console", CONSOLE_ABSENT_COPY)
+    if not current.console:
+        return _error(tool_call_id, "console", CONSOLE_FEATURE_OFF_COPY)
+
+    client = ConsoleHostClient()
+    try:
+        result = await client.call(f"console_{method}", wire)
+    except BridgeUnreachable as exc:
+        return _error(tool_call_id, "console", str(exc))
+    except BridgeError as exc:
+        return _error(tool_call_id, "console", console_error_text(exc))
+
+    if method == "list":
+        surfaces = result.get("surfaces") if isinstance(result, dict) else None
+        return _text(
+            tool_call_id,
+            "console",
+            _console_list_text(result if isinstance(result, dict) else {}),
+            details={"surfaces": surfaces or []},
+        )
+    if method == "create":
+        handle = str(result.get("surface") or "").strip()
+        grid = (
+            f"{result.get('cols')}x{result.get('rows')}"
+            if result.get("cols") is not None and result.get("rows") is not None
+            else "the default grid"
+        )
+        revealed = (
+            "the pane was opened"
+            if result.get("revealed")
+            else "the pane was left alone (a reveal that would have had to raise the app's "
+            "window is downgraded to none)"
+        )
+        return _text(
+            tool_call_id,
+            "console",
+            f"Started console surface {handle} at {grid} (pid {result.get('pid', '?')}); "
+            f"{revealed}. Read it with method='read'.",
+            details={"surface": handle, "cols": result.get("cols"), "rows": result.get("rows")},
+        )
+    if method == "status":
+        return _text(tool_call_id, "console", f"{surface}: " + _console_status_text(result))
+    if method == "read":
+        return _text(
+            tool_call_id,
+            "console",
+            _console_read_text(result),
+            details={"surface": surface, "mode": result.get("mode")},
+        )
+    if method == "screenshot":
+        return _console_screenshot_result(tool_call_id, surface, result)
+    if method == "input":
+        if params.secret_ref.strip():
+            # Naming the ref and the byte count, never the value. The count is what a
+            # caller needs to tell "the secret was written" from "the app swallowed
+            # nothing", and it cannot be inverted into the value.
+            body = (
+                f"Wrote the secret stored as {params.secret_ref.strip()!r} "
+                f"({result.get('bytes', '?')} bytes) into {surface}. The value is not shown "
+                "here and is registered for redaction for the rest of this session."
+            )
+        else:
+            body = f"Wrote {result.get('bytes', '?')} bytes into {surface}."
+        return _text(tool_call_id, "console", body, details={"surface": surface})
+    if method == "keys":
+        encoded = result.get("encoded") or []
+        return _text(
+            tool_call_id,
+            "console",
+            f"Sent {', '.join(str(key) for key in params.keys)} to {surface}"
+            + (f" (encoded as {', '.join(str(item) for item in encoded)})" if encoded else ""),
+            details={"surface": surface},
+        )
+    if method == "resize":
+        return _text(
+            tool_call_id,
+            "console",
+            f"{surface} is now {result.get('cols')}x{result.get('rows')}.",
+            details={"surface": surface},
+        )
+    if method == "secure":
+        # The ANSWER, not the request. §10.2 makes `console_secure` return
+        # `{secure}`, and the app is the authority on whether the lock is now on: a
+        # host that declined the toggle, or applied a different state, is invisible
+        # if this echoes `params.on` back. An app that sent no boolean falls back to
+        # what was asked for, which is all a caller can claim in that case.
+        reported = result.get("secure")
+        secure = reported if isinstance(reported, bool) else bool(params.on)
+        state = "on — reads and screenshots of this surface will be refused" if secure else "off"
+        return _text(
+            tool_call_id,
+            "console",
+            f"Secure input for {surface} is {state}.",
+            details={"surface": surface, "secure": secure},
+        )
+    # close
+    if result.get("closed") is False:
+        return _text(
+            tool_call_id,
+            "console",
+            f"The app did not close {surface}: the program is still running"
+            + (
+                f" (exit code {result.get('exit_code')})"
+                if result.get("exit_code") is not None
+                else ""
+            )
+            + ".",
+            details={"surface": surface, "closed": False},
+        )
+    return _text(
+        tool_call_id,
+        "console",
+        f"Closed {surface}"
+        + (f" (exit code {result.get('exit_code')})" if result.get("exit_code") is not None else "")
+        + ".",
+        details={"surface": surface, "closed": True, "exit_code": result.get("exit_code")},
     )
 
 

@@ -1610,6 +1610,7 @@ def test_every_builtin_tool_has_a_glyph_in_both_sets() -> None:
         "list_variables",
         "read_variable",
         "browser",
+        "console",
         "send",
     }
     assert builtins <= set(NERD_TOOL_ICONS)
@@ -1648,6 +1649,10 @@ _NERD_CAPABLE_ENVS = {
     "wezterm_pane": {"WEZTERM_PANE": "0"},
     "wezterm_executable": {"WEZTERM_EXECUTABLE": "/usr/bin/wezterm"},
     "wezterm_term_program": {"TERM_PROGRAM": "WezTerm"},
+    # The Local Operator console: not an emulator marker at all, but the app IS
+    # the emulator and it bundles a Nerd-patched face, so the same conclusion
+    # follows from the surface marker it injects (design ui-console-tab §6.6).
+    "local_operator_console": {"LOCAL_OPERATOR_CONSOLE_SURFACE": "con:1:9f2a"},
 }
 
 #: Env marker sets with NO bundled Nerd fallback — these must degrade to plain
@@ -1673,6 +1678,42 @@ def test_autodetect_falls_back_to_plain_for_unknown_terminals(env) -> None:
     """Apple_Terminal and every unrecognised terminal ship no Nerd fallback,
     so autodetect must say plain: a tofu box is worse than an ASCII icon."""
     assert glyph_mod._nerd_capable_terminal(env) is False
+
+
+def test_the_console_icon_is_a_different_noun_from_the_shell() -> None:
+    """`console` and `bash` must not share a glyph in either table.
+
+    This is the one distinction the icon table exists to keep: `bash` is the
+    shell this process runs, the console is a terminal running inside the app.
+    `write`/`edit` share a pencil because they share a meaning; these two do
+    not, and a reader scanning a ledger of both would otherwise have to read
+    the names to tell which row was which.
+    """
+    assert NERD_TOOL_ICONS["console"] != NERD_TOOL_ICONS["bash"]
+    assert PLAIN_TOOL_ICONS["console"] != PLAIN_TOOL_ICONS["bash"]
+
+
+def test_the_console_marker_is_a_fact_about_the_process_not_a_forgery() -> None:
+    """The console marker must not be reachable by impersonating ghostty.
+
+    A design that had set `GHOSTTY_RESOURCES_DIR` in the surface to win this
+    predicate would be lying about what is running AND would flip the
+    notification protocol for every process in the surface, which is a second
+    behaviour bought with the same forgery. The marker is therefore checked by
+    its own name, and a `TERM=dumb` console surface still gets glyphs (the app
+    renders them, exactly as cmux/ghostty does).
+    """
+    from local_operator.terminals import CONSOLE_SESSION_ENV, CONSOLE_SURFACE_ENV
+
+    assert glyph_mod._nerd_capable_terminal({CONSOLE_SURFACE_ENV: "con:1:9f2a"}) is True
+    assert (
+        glyph_mod._nerd_capable_terminal({CONSOLE_SURFACE_ENV: "con:1:9f2a", "TERM": "dumb"})
+        is True
+    )
+    # The session variable alone is not the marker: the surface is the handle
+    # both actors name, and it is what the app sets on every surface.
+    assert glyph_mod._nerd_capable_terminal({CONSOLE_SESSION_ENV: "s-1"}) is False
+    assert glyph_mod._nerd_capable_terminal({}) is False
 
 
 def test_gate_autodetects_when_config_is_unset(monkeypatch) -> None:

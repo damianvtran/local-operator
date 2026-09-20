@@ -959,6 +959,14 @@ test("every wire method has a worker handler", async () => {
   );
 
   const missing = methods.filter((method) => !handlers.has(method));
+  // No exceptions, and the removal of the old one is the point: the escape hatch
+  // that used to sit here read Python's `EXTENSION_CANNOT_SERVE` because no
+  // build could serve `download` at all (Chrome refuses a tab-scoped
+  // `chrome.debugger` session the browser-level download commands — design
+  // §17.1). That constant is retired: the extension serves the method through
+  // `chrome.downloads`, gated by the operator's own switch. So every wire method
+  // must have a handler, and a method added to `METHODS` without one reads as the
+  // gap it is (review round 1, R4 — the check keeps its teeth either way).
   assert.deepEqual(missing, [], `wire methods with no handler: ${missing}`);
 });
 

@@ -380,10 +380,18 @@ _AGGREGATOR_UPSTREAM_STREAM_FAILURE_MARKERS = (
 #:   chain. It would also misreport a pre-content transport death as a
 #:   MID-STREAM loss, which is what :func:`is_mid_stream_connectivity_loss`
 #:   infers from this very flag.
-#: * ``StreamReasoningDelta`` carries the model's private reasoning, which
-#:   NOTHING renders: the loop appends text only for its visible channel, no
-#:   frontend handler exists, and the transcript never sees it. Counting it
-#:   re-breaks the case above for the reasoning families this harness runs.
+#: * ``StreamReasoningDelta`` carries the model's private reasoning, which is
+#:   DISPLAY-ONLY all the way down: the loop republishes it as
+#:   ``ReasoningDeltaEvent``, no front end writes it into a message, the
+#:   transcript never holds it, and it is never echoed back to the provider as
+#:   ``reasoning_content``. Counting it would re-break the case above for the
+#:   reasoning families this harness runs -- and for a long-thinking model the
+#:   reasoning phase IS most of the pre-content window -- in exchange for
+#:   nothing durable. The one cost is accepted knowingly: a retry re-emits the
+#:   thinking stream, so a viewer sees a second burst of reasoning for the same
+#:   turn. That is cosmetic and self-correcting (the fragment stream is not
+#:   accumulated anywhere), while a dead turn that credential rotation would
+#:   have recovered is not.
 #: * ``StreamUsageEvent`` carries the provider's token accounting for the call
 #:   so far, which is METADATA and not content: it renders nothing, joins no
 #:   transcript, and its consumers document it as one report per provider call

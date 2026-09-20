@@ -90,7 +90,15 @@ _HARNESS_NOTICE_HEADS: tuple[str, ...] = (
     "[model switch] ",  # incidents.format_model_switch_message
     "[session incident",  # incidents.Incident.render
     "[session credential] ",  # incidents.format_credential_message
+    "[credential redaction] ",  # incidents.format_shape_incident_message
     "[mcp recovery] ",  # incidents.format_mcp_recovery_message
+    # The MCP-unavailable WARNING, and the one head here that is not an
+    # incident: a server whose tools are gone is a missing capability, not a
+    # failed turn. It is listed for the reason every head is — a transcript
+    # written before the ``harness_injected`` stamp existed can only prove its
+    # own provenance by its opening words, and this row must never paint as the
+    # operator's own sentence.
+    "[session warning] ",  # incidents.format_mcp_unavailable_message
     "[session-state]\n",  # Session._system_state_message
     # The unattended-gate timeouts, in _default_convert_to_llm. Two heads rather
     # than the shared ``[system] `` prefix: that prefix is also minted by

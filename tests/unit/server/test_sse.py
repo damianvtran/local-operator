@@ -8,8 +8,8 @@ because the property was violated during development:
 * an early close that would have swallowed a resume backlog.
 
 Live end-to-end coverage (a real agent turn, resume across a disconnect, and
-websocket/SSE record parity) lives in ``docs/VERIFICATION.md``; these are the
-deterministic invariants.
+record-frame parity between the removed WebSocket transport and SSE) lives in
+``docs/VERIFICATION.md``; these are the deterministic invariants.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import json
 import pytest
 
 from local_operator.jobs import JobStatus
+from local_operator.server.models.schemas import WebsocketConnectionType
 from local_operator.server.routes.sse import (
     job_channel,
     message_channel,
@@ -43,7 +44,6 @@ from local_operator.server.utils.sse_publisher import (
     publish_job_status,
     publish_record,
 )
-from local_operator.server.utils.websocket_manager import WebsocketConnectionType
 from local_operator.types import (
     CodeExecutionResult,
     ConversationRole,
@@ -321,11 +321,12 @@ def test_publish_with_lets_the_body_carry_its_own_sequence() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_record_frame_matches_the_websocket_wire_shape() -> None:
-    """SSE must be a transport swap, so the record keys cannot drift.
+def test_legacy_record_frame_matches_the_removed_websocket_wire_shape() -> None:
+    """SSE must stay a transport swap, so the record keys cannot drift.
 
-    ``WebSocketManager.broadcast()`` dumps the record then injects
-    ``message_id`` and ``connection_type``; this reproduces both.
+    ``WebSocketManager.broadcast()`` used to dump the record then inject
+    ``message_id`` and ``connection_type``; this reproduces both, because an
+    installed client's reducer still reads them.
     """
     record = _record()
     sse_frame = legacy_record_frame(record, record.id)
@@ -400,14 +401,23 @@ def test_snapshot_ignores_non_record_events() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capabilities_advertises_sse_first_and_names_its_events(test_app_client) -> None:
-    """A client negotiates from this; a 404 here means fall back to websockets."""
+async def test_capabilities_advertises_sse_only(test_app_client) -> None:
+    """A client negotiates from this; SSE is now the only transport offered.
+
+    The removed websocket key must be ABSENT rather than null or false: a
+    client that reads ``transports`` still finds ``"sse"``, and one that reads
+    the old ``websocket`` key reads absent data instead of a half-shaped block
+    it might try to open.
+    """
     response = await test_app_client.get("/v1/sse/capabilities")
     assert response.status_code == 200
     body = response.json()
     assert body["preferred"] == "sse"
-    assert body["transports"] == ["sse", "websocket"]
-    assert body["websocket"]["deprecated"] is True
+    assert body["transports"] == ["sse"]
+    assert "websocket" not in body
+    # An older client's transport check is a membership test, so this is the
+    # assertion that matters for compatibility rather than the equality above.
+    assert "sse" in body["transports"]
     # The event vocabulary is data, so a newer client can detect an older
     # backend instead of waiting forever for a frame it will never receive.
     for required in (
@@ -507,6 +517,33 @@ def test_resume_into_recreated_channel_reports_a_gap() -> None:
     sub = broker.subscribe("job:gone", after_seq=5)
     assert sub.resumed_with_gap is True
     sub.close()
+
+
+def test_reasoning_delta_never_rides_the_record_channel() -> None:
+    """A display-only frame stays off the channel installed clients append to.
+
+    ``message_channel(<assistant id>)`` is the compatibility surface a client
+    follows one record's ``message.delta``/``record.update`` frames on, and a
+    reducer that appends ``data.delta`` from every frame there -- the shape this
+    transport was built to preserve -- would splice the model's private thinking
+    into the answer being painted (review round 1, MINOR-3). The job channel still
+    carries it, which is where a client that knows the name reads it.
+    """
+    broker = EventBroker()
+    publish_agent_event(
+        broker,
+        "job-1",
+        {"type": "reasoning_delta", "message_id": "rec-1", "delta": "a thought"},
+    )
+    assert broker.retained(message_channel("rec-1")) == []
+    assert [e.name for e in broker.retained(job_channel("job-1"))] == [EventName.REASONING_DELTA]
+    # And the text family keeps the record channel it has always had.
+    publish_agent_event(
+        broker,
+        "job-1",
+        {"type": "message_update", "message": {"id": "rec-2"}, "delta": "x"},
+    )
+    assert [e.name for e in broker.retained(message_channel("rec-2"))] == [EventName.MESSAGE_DELTA]
 
 
 def test_message_delta_routes_to_the_record_channel_via_nested_id() -> None:

@@ -818,7 +818,11 @@ def project_settled_rows(
         COMPACTION_REFUSED_TYPE,
     )
     from local_operator.harness.approval import GATE_TIMEOUT_CUSTOM_TYPE
-    from local_operator.harness.message_types import PEER_MESSAGE_MESSAGE_TYPE
+    from local_operator.harness.message_types import (
+        PEER_MESSAGE_MESSAGE_TYPE,
+        SESSION_INCIDENT_MESSAGE_TYPE,
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+    )
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
     # hosts so neither owns them: every divergence the convergence review
@@ -1034,6 +1038,52 @@ def project_settled_rows(
                 text, kind = compaction_refused_notice(details)
                 self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
                 appended = True
+                continue
+            # A credential-shape incident — the operator's ticket for a credential
+            # that reached a tool. It has its own branch for the reason every row
+            # above does: a custom message with no branch falls through all of them
+            # and past the role-based handling below, so the row rendered NOWHERE.
+            # Measured on the live run before this branch: the persisted row folded
+            # to a blank frame, and the model was the only reader that ever saw it.
+            #
+            # `warning` ink for BOTH classifications — the operator asked to be shown
+            # the event either way, and the severity difference is carried by the
+            # text ("rotate it" only when the value reached this context). A quieter
+            # ink for the contained case is a design decision on this row, not
+            # something the redaction change should make by the back door.
+            if getattr(message, "custom_type", None) == SESSION_INCIDENT_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                text = str(details.get("text", "")).strip()
+                if text:
+                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    appended = True
+                continue
+            # An MCP server's tools going away (its grant expired, its
+            # reconnect breaker suspended). Its own branch because the RECORD
+            # is its own type — nothing FAILED, the session's inventory shrank,
+            # and the incident branch's three-line shape (a failure category,
+            # a ``suggested action:`` line, and the false "this is why the
+            # previous turn ended" tail) was wrong for it. Measured live on
+            # 2026-09-20, where an expired grant painted all three.
+            #
+            # `warning`, by the role table in ``tui/widgets/transcript.py``
+            # (``NoticeBlock._KIND_TOKENS``): "a state they must act on or know
+            # about". This row is that state, and the action is the
+            # operator's — ``/mcp reauth <server>`` is theirs to run, and the
+            # Reason line names it. An earlier revision painted it `note` (the
+            # answer to something the user just did), which shares its ink with
+            # the receipts a reader is trained to skim and left the one
+            # actionable row in the frame looking like bookkeeping (design
+            # review round 1, D1). `note` is the tier for a receipt; a lost
+            # capability whose fix only the operator can run is the tier above
+            # it. Do not move this back down without taking D1's argument apart
+            # first.
+            if getattr(message, "custom_type", None) == SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                text = str(details.get("text", "")).strip()
+                if text:
+                    self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    appended = True
                 continue
             # The compaction boundary itself. The replay layer has always
             # emitted this row, and it rendered as NOTHING: it is a custom

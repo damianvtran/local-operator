@@ -22,6 +22,8 @@ machine-wide presence read, and the "is a TUI running" probe.
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,26 @@ from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.presence import desktop_delivery_present
 from local_operator.session.runtime.serving import ServingSessionHandle
 from tests.e2e.harness import ScriptedStream, build_session
+
+
+@pytest.fixture(autouse=True)
+def _notification_gate_off() -> Iterator[None]:
+    """Opt this module IN to the notification path, deliberately and visibly.
+
+    ``tests/conftest.py`` arms ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` for every test
+    (and at import time, so spawned children inherit it), and the runtime's
+    rung-4 arm now returns SETTLED before it claims anything while that switch is
+    on — which is the whole subject here: these tests parametrise the LADDER, so
+    the ladder must be reachable.
+
+    Set and restored by hand rather than through ``monkeypatch``: that fixture
+    is function-scoped and SHARED with the tests, so a test calling
+    ``monkeypatch.undo()`` would re-arm the gate mid-test.
+    """
+    prior = os.environ.pop("LOCAL_OPERATOR_NO_NOTIFICATIONS", None)
+    yield
+    if prior is not None:
+        os.environ["LOCAL_OPERATOR_NO_NOTIFICATIONS"] = prior
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-"""One rule: a command an agent ran may not open a session of its own.
+"""One rule, two entry points: what a command an agent ran may open.
 
 WHY THIS EXISTS. On 2026-09-18 the operator's desktop sidebar listed two chats
 they never opened — ``lo-1281-review`` (role ``reviewer``) and ``lo-1281-qa``
@@ -29,15 +29,50 @@ question rather than a guard question (operator, 2026-09-18): a subagent that
 holds ``task`` delegates with it, and one that does not hold it may not create
 subagents at all — it does the work itself. So the fix for a team brief that owes
 a review round to a slice is to give that slice a role that may delegate, or to
-keep the round with the session that delegates; reaching for the CLI was never
-the answer, and using the CLI a second time to get around this guard is not one
-either.
+keep the round with the session that delegates. What the 2026-09-19 relaxation
+below changes is the pair of words "at all": a session that HOLDS ``task`` may
+now also open sessions with ``exec`` when that is what the user asked for, while
+a session that does not hold it is still refused — for that session the CLI is a
+way around a missing tool rather than a way to delegate.
 
-So the rule is enforced where the act happens: a ``lop`` invocation that
-descends from an agent's shell may not open a session, and is told what to do
-instead — ``task`` when this session holds it, ``hub`` back to the session that
-delegated when it does not, and, for work that belongs later, ``wake`` when the
-reader holds it and the session that delegated when it does not.
+So the rule is enforced where the act happens, and the refusal tells the reader
+what to do instead — ``task`` when this session holds it, ``hub`` back to the
+session that delegated when it does not, and, for work that belongs later,
+``wake`` when the reader holds it and the session that delegated when it does
+not.
+
+THE RULE AFTER THE 2026-09-19 RELAXATION, AND WHY IT IS ASYMMETRIC. The
+incident's root cause was never ``lop exec`` — it was a session reaching for the
+CLI because it held no ``task`` tool, which is a ROLE's answer
+(``agent_profiles``' ``delegate``). So the hard block became an allowance that
+follows the session's OWN live inventory, and the two entry points part company
+because they are not the same act:
+
+* ``lop exec`` is the supported way to open separate TOP-LEVEL sessions, and it
+  is available to an agent whose session holds ``task``. That is the case the
+  operator asked for: a delegating agent told to fully delegate work, or to fan
+  out a large number of independent long-lived workstreams, may open real
+  sessions — the shape a ``task`` child cannot give it, since a child is one
+  prompt and ends. A session that does NOT hold ``task`` is refused exactly as
+  before, because for that session the CLI is a way AROUND a missing tool rather
+  than a way to delegate.
+* the interactive path (``lop``, ``lop --resume ID``, ``--tui``) stays refused
+  for ANY agent shell, delegating or not. An agent has no terminal, so what that
+  path opens is a front end on the OPERATOR's screen — not the delegation shape
+  above, and not something a command should be able to put in front of a person.
+  The relaxation answers "may this agent open sessions", and only ``exec`` is a
+  session.
+
+The allowance is carried by :data:`MAY_DELEGATE_ENV`, from the LIVE TOOL
+INVENTORY rather than from a role name or a declared field: a role that may not
+delegate has ``task`` pruned from its inventory (``harness.subagent``), and a
+declared inventory narrows the same list (``Session._filter_declared``), so
+"holds ``task``" and "may delegate" are one fact wherever the inventory is
+trusted. Its writer is the ``bash`` tool, and that writer SIGNS IT IN BOTH
+DIRECTIONS: an absent marker and an empty one both mean "may not delegate",
+and the empty write is what stops a value INHERITED from the parent's
+environment — the allowed route's own `lop` child is exactly that — from
+outliving the session it described.
 
 WHAT THE MARKER IS, AND WHAT IT IS NOT. ``LOCAL_OPERATOR_AGENT_SHELL`` is set by
 the ``bash`` tool on every command it runs (see
@@ -55,7 +90,7 @@ exists for this harness's own tests and for the QA runs that must drive the real
 CLI (a standing rule of the operator's: testing evidence comes from exercising
 the real path). Both entry points honour it, and
 :func:`harness_child_env` is how a harness declares itself to its children. It
-is deliberately NOT named in :func:`nested_session_refusal` — that text is
+is deliberately NOT named in :func:`refusal_message` — that text is
 model-facing, and its job is to route the model to ``task``/``hub``/``wake`` —
 but it is documented for the human in ``docs/EXEC.md``, and (obscurity, not
 secrecy) named for agents in this repository's own ``AGENTS.md`` section on the
@@ -64,14 +99,17 @@ it, and the source is readable either way. It is not an equivalent path: a
 session opened under it is stamped :data:`local_operator.resume.ORIGIN_AGENT_SHELL`,
 so even then the run stays out of the picker, the sidebar and the phone's list
 rather than appearing as a chat the operator opened
-(:func:`stamp_escaped_session`).
+(:func:`stamp_agent_shell_session`). Neither is the delegating route silent — it
+gets the SAME stamp, which is why :func:`agent_shell_opened_run` covers both.
 
-The pytest suite never sees either variable. ``LOCAL_OPERATOR_AGENT_SHELL`` and
-``LOCAL_OPERATOR_ALLOW_NESTED_SESSION`` are both scrubbed by
-``tests/conftest.py``'s ambient-environment fixture, so a suite run by an agent
-does not refuse the sessions it builds on purpose, and a guard test that wants
-the marker sets it for itself instead of inheriting it from whichever harness
-happened to launch pytest.
+The pytest suite never sees any of these variables. ``LOCAL_OPERATOR_AGENT_SHELL``,
+``LOCAL_OPERATOR_ALLOW_NESTED_SESSION`` and ``LOCAL_OPERATOR_AGENT_MAY_DELEGATE``
+are all scrubbed by ``tests/conftest.py``'s ambient-environment fixture, so a
+suite run by an agent does not refuse the sessions it builds on purpose, and a
+guard test that wants a marker sets it for itself instead of inheriting it from
+whichever harness happened to launch pytest. The scrub of the allowance matters
+for a reason of its own: an inherited ``=1`` would make every guard test assert
+the ALLOW path while looking like it tested the refusal.
 """
 
 from __future__ import annotations
@@ -80,13 +118,35 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-#: Set by the ``bash`` tool on every command it runs. Names the one fact this
-#: module acts on: the process descended from an agent's tool call.
+#: Set by the ``bash`` tool on every command it runs. Names the first of the two
+#: facts this module acts on: the process descended from an agent's tool call.
 AGENT_SHELL_ENV = "LOCAL_OPERATOR_AGENT_SHELL"
 
 #: The documented escape for harness tests and QA runs that must drive the real
 #: CLI. Named in ``docs/EXEC.md``, never in the refusal the model reads.
 ALLOW_NESTED_SESSION_ENV = "LOCAL_OPERATOR_ALLOW_NESTED_SESSION"
+
+#: Signed by the ``bash`` tool on every command it runs, from
+#: :attr:`local_operator.harness.types.ToolContext.may_delegate`, in THREE arms:
+#: "1" when the session may delegate, the empty string when the name is
+#: inherited from the launcher and must be cleared, and NOT WRITTEN AT ALL
+#: otherwise — the name is the mechanism (a shell that knows the spelling can
+#: self-grant), and a session that never had the allowance is not handed it.
+#: Names the second fact this module acts on: this shell's session may delegate,
+#: so ``exec`` is a delegation route for it rather than a way around one.
+#: Deliberately NOT named in :func:`refusal_message` — a reader told how the
+#: allowance is spelled learns how to look for it — but documented for the human
+#: in ``docs/EXEC.md``.
+#:
+#: WHY THE CLEAR MATTERS AS MUCH AS THE SET, and why the OMIT is not a gap: a
+#: ``bash`` child's environment starts as a copy of the harness process's own
+#: (``shell_env``'s default ``inherit`` mode), so a session that inherited the
+#: marker from an ancestor would otherwise carry it for life however its own role
+#: is configured — and the allowed route is what puts it there, since an allowed
+#: `lop exec` runs `lop` as a child of the delegating shell. ``_on("")`` is False,
+#: so the empty string is the "no"; an absent name reads the same way, which is
+#: why a session that never had the allowance is not told how it is spelled.
+MAY_DELEGATE_ENV = "LOCAL_OPERATOR_AGENT_MAY_DELEGATE"
 
 #: Values that read as "on". Matches the convention the rest of the package
 #: uses for boolean-ish environment flags (``agent_profiles`` reads ``delegate``
@@ -109,14 +169,43 @@ def nested_session_allowed() -> bool:
     return _on(os.environ.get(ALLOW_NESTED_SESSION_ENV, ""))
 
 
-def escaped_agent_shell_run() -> bool:
-    """True for a session opened under the escape: in an agent shell, allowed.
+def may_delegate_from_shell() -> bool:
+    """True when the session that ran this command holds ``task``.
 
-    Both halves matter to the caller in :func:`stamp_escaped_session`: the
-    marker says who is asking, the escape says the refusal was waived, and only
-    the pair describes a session that must be marked as machine-started.
+    Read from :data:`MAY_DELEGATE_ENV`, which the ``bash`` tool signs from
+    :attr:`local_operator.harness.types.ToolContext.may_delegate` — itself
+    derived by the session from its live tool inventory. ABSENT MEANS NO, and so
+    does EMPTY, and both directions are load-bearing: a shell that did not export
+    the marker (a child built by an older runtime, a command that scrubbed its
+    own environment, a tool double with no context) is treated as a session that
+    may not delegate and is refused, while the empty value is how the writer
+    CLEARS a marker the child inherited from an ancestor — without it the
+    allowance would outlive the session it described and the block the operator
+    asked to keep would not hold one hop down.
     """
-    return in_agent_shell() and nested_session_allowed()
+    return _on(os.environ.get(MAY_DELEGATE_ENV, ""))
+
+
+def agent_shell_opened_run() -> bool:
+    """True when an AGENT'S SHELL opened the session about to be created.
+
+    Two routes reach a created session from inside a marker-carrying shell, and
+    both describe a session the operator did not open:
+
+    * the documented escape (:data:`ALLOW_NESTED_SESSION_ENV`) waived the
+      refusal for a harness or a QA run;
+    * a DELEGATING session took the ``exec`` route the rule now allows it
+      (:data:`MAY_DELEGATE_ENV`).
+
+    Both halves matter to :func:`stamp_agent_shell_session`: the marker says who
+    is asking, the second says the refusal was waived or never applied, and only
+    the pair describes a machine-started session. That second half is why this
+    is no longer named for the escape hatch alone — since the 2026-09-19
+    relaxation an allowed agent-shell ``exec`` is an ORDINARY run, and an
+    unstamped one would list in the operator's sidebar as a chat they opened,
+    which is the exact bug the original incident produced.
+    """
+    return in_agent_shell() and (nested_session_allowed() or may_delegate_from_shell())
 
 
 def without_agent_shell_marker(env: Mapping[str, str]) -> dict[str, str]:
@@ -140,6 +229,14 @@ def without_agent_shell_marker(env: Mapping[str, str]) -> dict[str, str]:
     """
     merged = dict(env)
     merged.pop(AGENT_SHELL_ENV, None)
+    # BOTH markers, because the contract above is one sentence: this child is a
+    # SESSION opening a conversation. Leaving the delegation allowance behind
+    # would hand it an answer about its PARENT's role — and a child that then ran
+    # `lop exec` would be admitted on an allowance it does not hold, which is the
+    # one thing this rule exists to stop. The escape variable is deliberately NOT
+    # stripped: without the marker it decides nothing, and dropping it would
+    # rewrite a caller's environment beyond the question being answered.
+    merged.pop(MAY_DELEGATE_ENV, None)
     return merged
 
 
@@ -155,11 +252,27 @@ def harness_child_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     They declare themselves harnesses instead, which is what
     :data:`ALLOW_NESTED_SESSION_ENV` is for.
 
+    IT ALSO SILENCES THE CHILD'S NOTIFICATIONS, and that is the same rule rather
+    than a second one: a harness is a throwaway driver, its child is a session
+    nobody is watching, and the benches seed ``hosting: test`` — whose only
+    reply is ``Hello from the mock provider!``, a notification body being a
+    snippet of the session's own last assistant line. Without this the child
+    finishes its turn and puts that sentence on the operator's lock screen: 17
+    recorded banner attempts across scratch stores in two days, every one of them
+    a drive-by rig. The pair comes from
+    :data:`local_operator.tui.notify.ENV_DISABLE` so the switch has ONE
+    definition, and hence is a function-local import: ``tui.notify`` pulls the
+    terminal and settings modules in with it, and this module is imported from
+    the CLI's own startup path.
+
     A NEW script that drives the real CLI belongs here too, and an existing one
     that stops using it is the drift this helper exists to make visible.
     """
+    from local_operator.tui.notify import ENV_DISABLE, ENV_DISABLE_VALUE
+
     merged = dict(os.environ if env is None else env)
     merged[ALLOW_NESTED_SESSION_ENV] = "1"
+    merged[ENV_DISABLE] = ENV_DISABLE_VALUE
     return merged
 
 
@@ -180,8 +293,8 @@ def refusal_message() -> str:
     needs the real CLI) looks for it.
     """
     return (
-        "a `lop` invocation from inside an agent session cannot open one — the "
-        "session it would start is a top-level conversation the operator never "
+        "this `lop` invocation from inside an agent session cannot open one — "
+        "the session it would start is a top-level conversation the operator never "
         "opened, listed in their session list and desktop sidebar as if they "
         "had, and running outside the job manager that lets this session see, "
         "steer, cancel and account for delegated work.\n"
@@ -196,27 +309,60 @@ def refusal_message() -> str:
     )
 
 
-def nested_session_refusal() -> str | None:
-    """The refusal to print, or ``None`` when starting a session is allowed.
+def _session_refusal(*, exec_may_be_opened_by_a_delegating_shell: bool) -> str | None:
+    """The one evaluation both entry points share.
 
-    The single predicate both entry points call (``cli``'s ``exec`` branch and
-    its interactive path), so the rule cannot come to mean one thing for a
-    scripted run and another for a terminal.
+    The parameter is the ONLY thing that differs between them, and it is a
+    parameter rather than two copies of the condition for the reason the module
+    has always given: the rule must not come to mean one thing for a scripted
+    run and another for a terminal. Read it as: is this entry point a SESSION,
+    such that a delegating shell may reach it?
     """
     if not in_agent_shell() or nested_session_allowed():
+        return None
+    if exec_may_be_opened_by_a_delegating_shell and may_delegate_from_shell():
         return None
     return refusal_message()
 
 
-def stamp_escaped_session(directory: Path, *, created_here: bool) -> bool:
-    """Mark an escaped run's session as machine-started. Returns whether it did.
+def exec_session_refusal() -> str | None:
+    """The refusal for ``lop exec``: ``None`` when this run may open a session.
 
-    The seatbelt under the escape hatch, and the reason the hatch is not silent:
-    an opted-in run that lands in the operator's own store (rather than the
-    isolated one the rules ask for) must not become a chat they appear to have
-    opened. ``origin.json`` is the marker every listing already filters on —
-    ``is_user_session`` hides anything that is not the user's — and the value
-    ``agent-shell`` distinguishes it from a ``task`` child.
+    Allowed when there is no agent-shell marker at all (the operator's own
+    terminal), when the documented escape is set, or when this shell's session
+    HOLDS ``task`` — the delegation case the rule allows. See the module
+    docstring for why the relaxation stops here, and note the direction of the
+    last test: it is the marker the ``bash`` tool exports from the session's own
+    inventory, so a shell that did not export it is refused.
+    """
+    return _session_refusal(exec_may_be_opened_by_a_delegating_shell=True)
+
+
+def interactive_session_refusal() -> str | None:
+    """The refusal for ``lop``/``lop --resume ID``/``--tui``.
+
+    Refused for EVERY agent shell, delegating or not: an agent has no terminal,
+    so this path puts a front end on the operator's screen rather than opening
+    the separate top-level session the relaxation is about (module docstring).
+    The escape still waives it — a pty harness drives this front end exactly as
+    a bench drives ``exec``.
+    """
+    return _session_refusal(exec_may_be_opened_by_a_delegating_shell=False)
+
+
+def stamp_agent_shell_session(directory: Path, *, created_here: bool) -> bool:
+    """Mark a session an agent's shell opened as machine-started.
+
+    Returns whether it did. The seatbelt under BOTH routes in
+    :func:`agent_shell_opened_run`, and the reason neither is silent: a run that
+    lands in the operator's own store (rather than the isolated one the rules
+    ask for) must not become a chat they appear to have opened — and since the
+    relaxation the DELEGATING route is an ordinary, unremarkable one, so this is
+    now the only thing standing between an allowed `lop exec` and the sidebar
+    listing it as the operator's own conversation. ``origin.json`` is the marker
+    every listing already filters on — ``is_user_session`` hides anything that
+    is not the user's — and the value ``agent-shell`` distinguishes it from a
+    ``task`` child.
 
     ``created_here`` is the caller's answer to "did this call make the
     directory", and it is not decoration: `--resume` adopts a directory that
@@ -235,7 +381,7 @@ def stamp_escaped_session(directory: Path, *, created_here: bool) -> bool:
     about to do real work, and failing to write bookkeeping about it must not
     take that work down.
     """
-    if not created_here or not escaped_agent_shell_run():
+    if not created_here or not agent_shell_opened_run():
         return False
     from local_operator.resume import ORIGIN_AGENT_SHELL, mark_session_origin
 

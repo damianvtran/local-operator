@@ -228,9 +228,90 @@ input:focus-visible {
   line-height: 1.5;
   color: var(--ink);
 }
+/* The file-transfer consent notes. NEUTRAL, not the danger tint above: that
+ * vocabulary is reserved for the all-sites bypass — a state the user should want
+ * to leave — while these lines report an outcome (a denied permission, a grant
+ * Chrome took back) on controls that are OFF by default and are not dangerous to
+ * leave alone. Spending danger here would make the one true danger state harder
+ * to find. */
+/* The two consent notices, as ONE block, with a gap between them.
+ *
+ * The 8 px above the block matches the gap INSIDE it, so the state line to notice
+ * spacing and notice to notice spacing are the same rhythm — the previous shape had
+ * a per-notice top margin AND a flex gap, which rendered 16 px between two notices
+ * against 8 px under the state line (round-3 D3). */
+.consent-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.consent-note {
+  /* The gap between two notices comes from the container's `gap`, so the first one
+   * carries no top margin of its own: with both, the rhythm rendered 16 px against
+   * the 8 px between the state line and the notice above it (round-3 D3). */
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: 6px;
+  background: var(--sunken);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+  /* The reveal scrolls this box into view, and without a gap it lands flush on the
+   * window edge — measured `notice.bottom − innerHeight = 0 px` at 900x620, 760x520
+   * and 420x700, which reads as a clipped line rather than a placed one (round-3
+   * U3). That gap is now supplied by the reveal's own FLOOR constant, because the
+   * reveal measures and scrolls by an offset instead of calling `scrollIntoView`:
+   * `scroll-margin` is only honoured by the latter, so keeping it here would be a
+   * second, inert source of truth for the same 12 px (round-5 R5-4). */
+}
+/* The note that needs an ACTION, told apart from the one that reports success.
+ *
+ * Both used to be the same box (round-1 D2), which made "Downloaded are on" and
+ * "Chrome did not grant the permission" differ only in their words on the one part
+ * of this page that asks the user to go and change something. The attention weight
+ * spends BORDER AND INK rather than the danger tint: this is not an error state (the
+ * page is working exactly as designed), it is the note to read first, and the danger
+ * colour on this page is reserved for the persistent all-sites banner. */
+.consent-note--attention {
+  border-color: var(--ink-muted);
+  color: var(--ink);
+}
+/* The state line: the switches' own state IN WORDS, beside the other cards' state
+ * lines (round-1 D3 — the off switch was carried entirely by a 14×14 knob at
+ * 1.13:1 against the card, and no sentence said which way either switch points).
+ *
+ * `--ink-muted`, and NOT the quieter token it looks like it should be: this is a
+ * statement about what the product is currently allowed to do, which a user has to
+ * be able to read to know what they are consenting to, and the hint text around it
+ * explains controls rather than state. Round 2 (D7) measured the two against the
+ * card — 7.93:1 here against 5.11:1 for the hints — and asked for the COMMENT to
+ * match the code rather than the other way round, which is what this is: the state
+ * line is deliberately easier to read than the teaching text, and "quieter than a
+ * hint" was the wrong description of it. */
+.consent-state {
+  margin: 14px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
+/* Two switches share one card, so the second needs the vertical room the first
+ * one's hint already provides: without it the two rows read as a single block. */
+.switch--stacked {
+  margin-top: 18px;
+}
+/* The credential examples in the uploads hint are file names, and a file name in
+ * a sentence reads better in the platform's monospace face than in prose type. */
+.card code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95em;
+}
+
 .linkish {
-  appearance: none;
-  padding: 0;
+  appearance: none;  padding: 0;
   border: none;
   background: none;
   color: var(--danger);
@@ -286,6 +367,9 @@ li .btn {
   font-size: 15px;
   line-height: 1.4;
   color: var(--ink);
+  /* No `scroll-margin-top` here: the reveal's own FLOOR holds the pressed row off
+   * the top edge (round-3 U4's measurement, round-5 R5-4's cleanup), and a
+   * `scroll-margin` would be inert without a `scrollIntoView` call to honour it. */
 }
 .switch input {
   position: absolute;
@@ -302,7 +386,14 @@ li .btn {
   width: 36px;
   height: 20px;
   border-radius: 10px;
-  border: 1px solid var(--hairline-strong);
+  /* `--ink-dim`, not `--hairline-strong`: WCAG 1.4.11 asks 3:1 for the boundary of
+   * a UI component, and the off state's outline measured 1.50:1 (light ramp) /
+   * 1.42:1 (dark ramp) against the card — so an OFF switch was carried by its
+   * 14×14 knob alone, and a user who cannot resolve that knob cannot see the
+   * control at all (round-1 D3). `--ink-dim` measures 5.43:1 / 5.11:1 on the same
+   * two ramps, so both the off state's outline and the on state's filled track are
+   * now clearly a control. */
+  border: 1px solid var(--ink-dim);
   background: var(--sunken);
   transition: background 120ms ease;
 }

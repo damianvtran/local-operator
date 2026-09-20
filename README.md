@@ -44,6 +44,7 @@ pooled, load-balanced, and used with the prompt cache in mind.
 
 - [✨ Why Local Operator](#-why-local-operator)
 - [🚀 Quickstart](#-quickstart)
+- [🪟 Desktop App (local-operator-ui)](#-desktop-app-local-operator-ui)
 - [🏢 Agent Organizations](#-agent-organizations)
 - [🔁 Cross-Agent Communication](#-cross-agent-communication)
 - [🌙 Always On](#-always-on)
@@ -108,7 +109,10 @@ pooled, load-balanced, and used with the prompt cache in mind.
   `--yolo`. Every tool call leaves a visible receipt in the transcript.
 - **Reach beyond the terminal.** Watch and steer sessions from your phone,
   and drive the Chromium browser you already use, with your real logins,
-  through the published browser extension.
+  through the published browser extension. The
+  [desktop app](#-desktop-app-local-operator-ui) puts the same sessions in a
+  desktop window, with a browser pane, a file canvas, and — coming soon — a
+  terminal agents can use.
 
 ## 🚀 Quickstart
 
@@ -148,6 +152,55 @@ a model installed in [Ollama](https://ollama.com/download):
 ```bash
 lop --hosting ollama --model qwen2.5:14b
 ```
+
+## 🪟 Desktop App (local-operator-ui)
+
+The terminal stays the core surface, and the rest of this page describes it.
+The desktop app is the second way in: **Local Operator UI** is a desktop
+application for macOS, Windows, and Linux that drives the same sessions, teams,
+schedules, and configuration, and adds the surfaces a terminal cannot draw.
+
+<p align="center">
+  <img src="./static/ui-desktop-app.png" alt="The desktop app: the chats, agents and teams sidebar; tool receipts with durations; two subagents running; open to-dos; composer." width="720">
+</p>
+
+<p align="center"><i>The desktop app on a real session: the sidebar, the transcript's tool receipts, two subagents running, and the composer's working directory, model, effort, context, and cost readouts.</i></p>
+
+What the app adds:
+
+- **A browser the agent can drive.** A Chromium pane with its own tabs and
+  address bar lives inside the session window, with an approval prompt before
+  the agent acts on a page, so a task can browse where you can watch it.
+- **A file canvas and viewer.** Documents a session works on open beside the
+  chat — markdown (with a WYSIWYG editor), code, HTML, images, PDFs,
+  spreadsheets, audio, and video — instead of being printed into the
+  transcript.
+- **The same surfaces, as pages.** Agents, schedules, and settings are pages;
+  teams are panels on the agents page — all reachable from a command palette,
+  over the same configuration the TUI reads, with a built-in theme gallery.
+- **A terminal agents can use — coming soon.** A per-session Console tab with
+  real terminal emulation, which agents can open, read (stdout and stderr),
+  capture visually, and type into. That is what makes end-to-end testing of
+  interactive TUIs, and of other commands that need a live terminal, possible
+  for an agent where `bash` alone cannot.
+
+**Easiest install — the desktop build.** Download the installer for your
+platform from the [downloads page](https://local-operator.com/download)
+(macOS, Windows, and Linux, with the system requirements listed there). The app
+bundles its own backend and installs it on first run, and uses an existing
+Local Operator install when it finds one, so a separate `lop` install is
+optional.
+
+**Or install from a terminal** (Node.js 22.13.1 or newer):
+
+```bash
+npx local-operator-ui              # download and run in one command
+npm install -g local-operator-ui   # or install it globally
+local-operator-ui                  # ...then start it by name
+```
+
+Source, issues, and release notes live at
+[damianvtran/local-operator-ui](https://github.com/damianvtran/local-operator-ui).
 
 ## 🏢 Agent Organizations
 
@@ -551,7 +604,7 @@ The agent's built-in tools, each with its own card in the transcript:
   kernel: variables survive across calls).
 - **Work with files**: `read`, `write`, `edit` (surgical search/replace),
   `glob`, `grep`, plus `lsp` for Jedi-backed Python code intelligence.
-- **Reach the web**: load-balanced `web_search` across seven providers,
+- **Reach the web**: load-balanced `web_search` across eight providers,
   `web_fetch` for reading pages headlessly, and a `browser` tool for pages
   that need rendering, a login, or interaction.
 - **Stay organized**: a visible `todo` list for multi-step work, `ask` to
@@ -567,28 +620,58 @@ The agent's built-in tools, each with its own card in the transcript:
 
 ### 🔎 Web search
 
-Search works out of the box. DuckDuckGo and Tavily's keyless endpoint are
-enabled by default, and requests rotate across providers with automatic
-fallback when one is rate-limited or down:
+Search works out of the box. The chain walks **free legs first and metered legs
+last**: the free providers you list, then the credential-free providers this
+install can reach, then the best-effort ones, then anything that would spend money
+or a model turn — including a paid provider you listed, which is tried first among
+the paid legs and never before a free one.
 
 ```bash
 lop search list
 lop search test "Python 3.13 release notes"
-lop search enable perplexity
+lop search enable perplexity          # clears an exclusion
+lop search disable brave             # excludes it from every search
+lop search order duckduckgo tavily   # the priority prefix: free legs first, paid ids run after them
 lop search setup brave --api-key
 lop search setup tavily --oauth      # official Tavily MCP server
 lop search setup searxng --endpoint https://search.example.com
 ```
 
+`web_search.providers` is a **priority prefix, not an allowlist**, and its
+authority is over order **within a band**: a named free provider joins the free
+pool where you put it — and with the default `round_robin` that pool is rotated, so
+"where you put it" is its position in the pool rather than a promise it is tried
+first on every call (`search balance ordered` is the strict version). Every other
+usable provider joins automatically behind the ones you named.
+`web_search.excluded_providers` is the only way to say never — an id there is
+skipped in the prefix *and* in the automatic bands. A provider that becomes
+usable mid-session (a DeepSeek login, an Exa key) joins its band on the next
+search with no further configuration; `lop search list` states each provider's
+state, so the chain is never a guess.
+
+Listing a provider whose transport would **spend** — a key, or a model turn —
+does not put it first. It moves it to the head of the **paid** band, so every
+free leg is still tried before it: a paid provider listed ahead of a free one is
+tried first *among the paid legs*, and `lop search list` names it as `paid` rather
+than as a plain `enabled`. That keeps the free-before-paid rule absolute, and
+`search list`'s `chain:` line shows the resulting order.
+
+`round_robin` spreads the first attempt across the whole **free pool** — the
+listed free providers in their listed order, then the credential-free providers
+that joined automatically — and never across a band boundary, so nothing that
+spends can be rotated (or listed) ahead of a free leg.
+
 | Provider | Access | Default |
 | --- | --- | --- |
-| DuckDuckGo | Credential-free | Enabled |
-| Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Enabled |
-| Perplexity | Anonymous or `PERPLEXITY_API_KEY` | Disabled |
-| Brave | `BRAVE_API_KEY` | Disabled |
-| Exa | `EXA_API_KEY` | Disabled |
-| SerpApi | `SERPAPI_API_KEY` | Disabled |
-| SearXNG | Self-hosted endpoint URL | Disabled |
+| DuckDuckGo | Credential-free | Priority prefix |
+| Tavily | Keyless, `TAVILY_API_KEY`, or OAuth MCP | Priority prefix (keyed: paid band) |
+| Exa | Keyless MCP (no key needed), or `EXA_API_KEY` | Automatic (free; keyed: paid band) |
+| Parallel | Keyless MCP (no key needed), or `PARALLEL_API_KEY` | Automatic (free; keyed: paid band) |
+| Perplexity | Anonymous or `PERPLEXITY_API_KEY` | Automatic (best-effort; keyed: paid band) |
+| DeepSeek | Model login or `DEEPSEEK_API_KEY` | Automatic (paid) |
+| Brave | `BRAVE_API_KEY` | Automatic (paid) |
+| SerpApi | `SERPAPI_API_KEY` | Automatic (paid) |
+| SearXNG | Self-hosted endpoint URL | Automatic (free, with an endpoint) |
 
 The same controls are available in-app via `/search`.
 

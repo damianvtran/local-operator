@@ -58,6 +58,8 @@ import struct
 import sys
 from dataclasses import dataclass
 
+from local_operator.procstate import PLATFORM_LABEL
+
 #: Ceiling on the ancestry walk. Deep enough for any real chain here (session →
 #: shell → wrapper → interpreter is 4) and bounded so a pathological or
 #: adversarially-constructed parent chain cannot spin the broker.
@@ -91,6 +93,59 @@ _PROC_PIDUNIQIDENTIFIERINFO = 17
 
 _IS_DARWIN = sys.platform == "darwin"
 _IS_LINUX = sys.platform.startswith("linux")
+
+#: Whether :func:`peer_identity` can establish a peer's identity here at all.
+#:
+#: Windows has no ``LOCAL_PEERTOKEN``, no ``SO_PEERCRED`` and no ``/proc``, so
+#: the kernel there hands a server nothing trustworthy about whoever connected
+#: to an AF_UNIX socket. The broker AUTHORS on nothing else (this module's
+#: docstring is the whole argument), so a broker started on such a platform
+#: could only ever deny every request it received: starting one is a spawned
+#: daemon that can serve nobody, and the honest answer is to refuse BEFORE the
+#: work rather than to fail a caller afterwards.
+#:
+#: Kept beside the two platform constants it is derived from, and public,
+#: because three callers that each do irreversible work consult it first —
+#: ``client.ensure_broker`` (don't spawn), ``broker.Broker.start`` (don't bind)
+#: and ``handlers._harden`` (don't delete the only plaintext key). A second
+#: copy of this test is how they would drift apart.
+PEER_AUTHENTICATION_SUPPORTED = _IS_DARWIN or _IS_LINUX
+
+#: How this platform is spelled in a message a USER reads.
+#:
+#: ``sys.platform`` is ``win32`` -- a CPython identifier that appears nowhere
+#: else an operator can see -- so the refusal below would tell them the broker
+#: "cannot run on win32". The mapping now has ONE home
+#: (:data:`local_operator.procstate.PLATFORM_LABEL`, which the upgrade summary
+#: reads too); this name is kept because tests patch it rather than
+#: ``os.name``, which cannot be patched -- ``pathlib`` reads it at call time, so
+#: setting it to ``nt`` makes the next ``Path(...)`` a ``WindowsPath``.
+_PLATFORM_LABEL = PLATFORM_LABEL
+
+
+def broker_unsupported_reason() -> str | None:
+    """Why no broker can serve here, or ``None`` where one can.
+
+    The wording lives beside the decision rather than in the CLI, because
+    three surfaces have to say the same thing: ``lop secret broker start|run``,
+    the daemon's own refusal to bind, and the passphrase tier's "there is
+    nowhere to hold the unlocked key". Drifting copies of a platform refusal is
+    how an operator ends up reading three different explanations for one OS.
+
+    The last clause is deliberately about the ALTERNATIVE rather than about the
+    failure: the default keyfile tier needs no broker on any platform, so on
+    such a platform ``lop secret`` is fully usable and only the passphrase tier
+    is out of reach. Naming the working path is what keeps this a refusal
+    rather than a report of breakage.
+    """
+    if PEER_AUTHENTICATION_SUPPORTED:
+        return None
+    return (
+        f"the secret broker cannot run on {_PLATFORM_LABEL}: peer authentication is not "
+        "implemented there, so the broker could not tell one caller from another and "
+        "would refuse every request. The default keyfile tier needs no broker — "
+        "`lop secret get` reads the key file directly."
+    )
 
 
 class _UniqIdentifierInfo(ctypes.Structure):

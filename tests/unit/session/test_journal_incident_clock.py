@@ -1,12 +1,19 @@
-"""``journal_incident`` must not restamp the session's activity clock.
+"""Journal notices must not restamp the session's activity clock.
 
 The regression test for the reported defect. A user resumed a session, an
-expired MCP OAuth grant journalled two boot-time ``session_incident`` entries,
-and the ``/resume`` picker then displayed the session as worked on hours more
-recently than it was. Session ``965426f4d60d`` showed ``3.06 h`` when work had
-actually stopped ``8.14 h`` earlier — a 5.1 h lie written by an incident append
-— and 19 of 509 rows in that store displayed an age wrong by more than a
-minute, worst case 13.0 h (``FINDING-resume-clock.md``).
+expired MCP OAuth grant journalled two boot-time notices, and the ``/resume``
+picker then displayed the session as worked on hours more recently than it was.
+Session ``965426f4d60d`` showed ``3.06 h`` when work had actually stopped
+``8.14 h`` earlier — a 5.1 h lie written by an incident append — and 19 of 509
+rows in that store displayed an age wrong by more than a minute, worst case
+13.0 h (``FINDING-resume-clock.md``).
+
+The MCP half of that pair is journalled by ``journal_mcp_unavailable`` now (its
+row is a ``session_mcp_unavailable`` warning rather than a ``session_incident``),
+and it passes ``preserve_mtime`` for the same reason — the exemption has to
+travel with the record. Both methods are driven below, because the clock rule
+is a property of the append rather than of one method: the writer honours the
+request only for a whole batch of ``BOOKKEEPING_CUSTOM_TYPES``.
 
 These tests drive the real ``retention.session_activity`` rather than a stat of
 the file, so they fail if the clock's own definition ever stops agreeing with
@@ -20,7 +27,10 @@ import os
 
 import pytest
 
-from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+)
 from local_operator.harness.types import StreamEndEvent
 from local_operator.session.retention import session_activity
 from local_operator.session.session import CustomMessage, _default_convert_to_llm
@@ -88,10 +98,16 @@ async def test_a_user_turn_after_an_incident_still_advances_the_clock(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_two_boot_incidents_in_a_row_do_not_move_the_clock(tmp_path):
-    """The reproduced case is TWO incidents — one expired ``linear`` grant and
+async def test_two_boot_notices_in_a_row_do_not_move_the_clock(tmp_path):
+    """The reproduced case is TWO MCP notices — one expired ``linear`` grant and
     one expired ``notion`` grant journalled at the same boot. This is the exact
     shape of ``965426f4d60d``.
+
+    Driven through ``journal_mcp_unavailable``, which is the method those grants
+    reach now: reaching them through ``journal_incident`` would exercise a path
+    the event no longer takes, and the two methods differ in exactly the way
+    this test cares about (a different custom type, and therefore a different
+    ``BOOKKEEPING_CUSTOM_TYPES`` membership).
     """
     session, session_dir = await _worked_in_session(tmp_path)
     before = session_activity(session_dir)
@@ -99,14 +115,15 @@ async def test_two_boot_incidents_in_a_row_do_not_move_the_clock(tmp_path):
     lines_before = len(transcript_path.read_text(encoding="utf-8").splitlines())
 
     try:
-        await session.journal_incident("MCP server 'linear': MCP authorization failed")
-        await session.journal_incident("MCP server 'notion': MCP authorization failed")
+        await session.journal_mcp_unavailable("linear", "MCP authorization failed")
+        await session.journal_mcp_unavailable("notion", "MCP authorization failed")
     finally:
         await session.dispose()
 
     assert session_activity(session_dir) == pytest.approx(before, abs=1e-6)
     lines_after = len(transcript_path.read_text(encoding="utf-8").splitlines())
     assert lines_after == lines_before + 2
+    assert _last_custom_type(session_dir) == SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE
 
 
 @pytest.mark.asyncio

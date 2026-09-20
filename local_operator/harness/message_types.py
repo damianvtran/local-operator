@@ -3,8 +3,8 @@
 WHY THIS MODULE EXISTS
 ----------------------
 Every renderer that turns a transcript into an LLM-visible message list has to
-recognise the same handful of ``CustomMessage.custom_type`` markers: the four
-session records (``session_incident`` and its three siblings), a peer
+recognise the same handful of ``CustomMessage.custom_type`` markers: the five
+session records (``session_incident`` and its four siblings), a peer
 delivery, a hub delivery, and a todo reminder. Each one used to be defined
 beside the subsystem that OWNS it — ``local_operator.incidents``,
 ``local_operator.session.peer``, ``local_operator.tools.builtin`` and
@@ -30,7 +30,7 @@ owns one of these markers or lives in the owning package: ``local_operator.sessi
 and ``local_operator.tools`` are barred for a runner by that same denylist, so a
 marker left in either keeps ``harness/render.py`` unimportable and the hoist
 pointless. The harness is the layer both sides already share — the deliberately
-shared one, and the one the denylist allows — so these seven markers live here:
+shared one, and the one the denylist allows — so these eight markers live here:
 one definition each, imported by its owner rather than defined next to it.
 
 WHEN A MARKER BELONGS HERE, AND WHEN IT DOES NOT
@@ -116,18 +116,21 @@ SESSION_CREDENTIAL_MESSAGE_TYPE = "session_credential"
 SESSION_MODEL_SWITCH_MESSAGE_TYPE = "session_model_switch"
 
 #: Custom-message type journaled by the session when an MCP server that was
-#: ANNOUNCED BROKEN to the model connects again. The failure half of that pair
-#: has always been model-visible (``McpManager.on_incident`` ->
-#: ``Session._on_mcp_incident`` -> a ``session_incident`` message); the recovery
-#: half was not, so an operator who ran ``/mcp login <server>`` mid-session left
-#: the model holding a death notice — and its ``mcp`` hint, "its tools are gone
-#: ... Do not call its tools" — for a server that had been usable for the rest
-#: of the session. Observed live against ``minerva-qa``.
+#: ANNOUNCED UNAVAILABLE to the model connects again. The failure half of that
+#: pair has always been model-visible (``McpManager.on_incident`` ->
+#: ``Session._on_mcp_incident``); the recovery half was not, so an operator who
+#: ran ``/mcp login <server>`` mid-session left the model holding a death notice
+#: — and its advice, "Its tools are not callable until the user restores it, and
+#: the agent should not retry them in a loop." — for a server that had been
+#: usable for the rest of the session. Observed live against ``minerva-qa``.
 #:
-#: It is a DEDICATED type rather than another ``session_incident`` because
-#: ``journal_incident`` runs :func:`classify_incident`, whose ``mcp`` rule
-#: matches the substring "mcp" and would append ``_HINTS["mcp"]`` — precisely
-#: the "its tools are gone" sentence — to a message saying the opposite.
+#: It is a DEDICATED type rather than a ``session_incident``, and since
+#: :data:`SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE` its pair is too. The reason
+#: both halves are dedicated is in that constant's note: a record that is not
+#: about a failed turn must not carry the classifier's failure category and
+#: ``Incident.render``'s "This is why the previous turn ended" tail, and an
+#: ``mcp`` rule matching the bare substring "mcp" is how the two halves ended up
+#: disagreeing about whether anything had failed at all.
 #:
 #: LIVE CONTEXT ONLY, deliberately not persisted: an MCP connection is
 #: process-scoped (``McpManager._connections`` is instance state and
@@ -136,6 +139,39 @@ SESSION_MODEL_SWITCH_MESSAGE_TYPE = "session_model_switch"
 #: not have — the same class as the credential record above, and the more
 #: likely case for exactly the servers this serves, whose grants expire.
 SESSION_MCP_RECOVERY_MESSAGE_TYPE = "session_mcp_recovery"
+
+#: Custom-message type journaled by the session when an MCP server becomes
+#: UNAVAILABLE mid-session: its OAuth grant expired, its reconnect breaker
+#: suspended, or a connect after the startup gate needs authorization. Written
+#: by ``Session.journal_mcp_unavailable`` from ``Session._on_mcp_incident`` (the
+#: ``McpManager.on_incident`` hook), and rendered to a user message by the
+#: shared renderer, so a live next-turn and a resumed replay read the same row.
+#:
+#: It is a WARNING — a missing CAPABILITY, not a failure — and that is why the
+#: type exists at all. The same event used to be journalled as a
+#: ``session_incident``: it went through :func:`classify_incident`, whose ``mcp``
+#: rule matched the substring "mcp", and came out wearing
+#: ``Incident.render``'s three-line incident shape, whose last line reads "This
+#: is why the previous turn ended." That is FALSE here. Nothing ended: an MCP
+#: server going away is the one caller of the incident path that is not
+#: narrating a turn that just died (the other two — the pending-incident flush
+#: and a cut-off — really are). The model was told a turn had failed when only
+#: its inventory had shrunk, and every surface painted the row with the
+#: error/incident indicator for the same reason: the type said "incident".
+#:
+#: So the failure is stated plainly instead
+#: (:func:`~local_operator.incidents.format_mcp_unavailable_message`), on the
+#: same dedicated-type argument as the recovery above, and the classifier's
+#: ``mcp`` rule is gone rather than narrowed: a bare "mcp" substring would have
+#: re-acquired ANY future MCP-mentioning failure and stamped it with the same
+#: false tail.
+#:
+#: Persisted, unlike the recovery: the row is a historical fact every surface
+#: already renders, and the failure direction of a stale claim is the safe one
+#: — a resumed session that reconnects has a tool inventory that contradicts
+#: "unavailable" (recoverable, and the recovery record clears it), where a
+#: stale "available" would send the model at tools that are not there.
+SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE = "session_mcp_unavailable"
 
 #: ``CustomMessage.custom_type`` of a peer (cross-session) message. It MUST be
 #: added to the LLM-visible custom-type allow-list in ``session.py`` (beside

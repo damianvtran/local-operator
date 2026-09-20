@@ -48,7 +48,9 @@ from local_operator.server.routes import (
     desktop_lifecycle,
     desktop_profiles,
     desktop_radient,
+    desktop_runtimes,
     desktop_sessions,
+    desktop_tunnel,
     desktop_wakes,
     health,
     jobs,
@@ -59,10 +61,8 @@ from local_operator.server.routes import (
     sse,
     static,
     transcription,
-    websockets,
 )
 from local_operator.server.utils.event_broker import EventBroker
-from local_operator.server.utils.websocket_manager import WebSocketManager
 
 # Annotating the lifespan's record publisher (`None` on a boot that was not
 # announced) needs the shared publisher's type. Zero runtime cost where it
@@ -159,10 +159,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # changes made by child processes are quickly reflected in the parent process
     app.state.agent_registry = AgentRegistry(config_dir=config_dir, refresh_interval=3.0)
     app.state.job_manager = JobManager()
-    app.state.websocket_manager = WebSocketManager()
-    # The SSE fan-out. One instance per process, mirroring the websocket
-    # manager: both are subscribers to the same pump, which is what keeps the
-    # legacy transport byte-identical while SSE carries the richer taxonomy.
+    # The SSE fan-out. One instance per process: it is the ONLY streaming
+    # transport the server offers (the deprecated /v1/ws socket surface was
+    # removed, so a subscriber count here is the whole live-stream picture -
+    # see `server/retire.py::in_flight`).
     app.state.event_broker = EventBroker()
     app.state.env_config = get_env_config()
 
@@ -174,7 +174,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         operator_type=OperatorType.SERVER,
         verbosity_level=VerbosityLevel.QUIET,
         job_manager=app.state.job_manager,
-        websocket_manager=app.state.websocket_manager,
         event_broker=app.state.event_broker,
     )
 
@@ -234,6 +233,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     reload_task: asyncio.Task[None] | None = None
     reload_stop: asyncio.Event | None = None
     if announced is not None:
+        # THE NAMESPACE'S OWN REAPER, ON THE ONE MOMENT A NEW WRITER JOINS IT.
+        # ``run/serve`` had no production reaper at all until this call, and
+        # ``update.referenced_install_roots`` reads an unreadable entry in it as an
+        # INCOMPLETE answer — which keeps every generation a prune would otherwise
+        # reclaim, for as long as the entry exists (review round 2, MAJOR 1). This
+        # is the same moment ``journal.prune_boot_records`` takes on the runtime's
+        # boot path, and for the same reason: the process joining the namespace is
+        # the only one that can safely decide which of its records are over. The
+        # failure is swallowed because a boot must not be lost to housekeeping —
+        # the prune reports the condition rather than depending on it being gone.
+        try:
+            serve_registry.prune_serve_records(root=config_dir)
+        except Exception:  # noqa: BLE001 — best-effort, exactly like the shared reaper
+            logger.warning("could not reap stale serve records", exc_info=True)
         # THE BUILD WATCH'S BASELINE IS SAMPLED HERE, BEFORE THE RECORD EXISTS —
         # and the ordering is load-bearing rather than incidental. The baseline
         # is "the build this process loaded", and the only reader that acts on
@@ -353,7 +366,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.config_manager = None
         app.state.agent_registry = None
         app.state.job_manager = None
-        app.state.websocket_manager = None
         app.state.event_broker.close()
         app.state.event_broker = None
         app.state.env_config = None
@@ -627,6 +639,10 @@ app.include_router(desktop_catalogues.router)
 app.include_router(desktop_profiles.router)
 app.include_router(desktop_lifecycle.router)
 app.include_router(desktop_radient.router)
+# `/v1/desktop/tunnel` is a literal path, so it collides with nothing above it
+# whatever the order: no sibling declares a single-segment `/v1/desktop/{...}`
+# template that could swallow it.
+app.include_router(desktop_tunnel.router)
 # The machine-wide wake surface. Registered AFTER `desktop_sessions` and after
 # the lifecycle routes for the reason the sessions module documents about its
 # own ordering: FastAPI matches in declaration order, so a `/v1/desktop/...`
@@ -634,6 +650,12 @@ app.include_router(desktop_radient.router)
 # templates (`/v1/desktop/wakes`, `/v1/desktop/wakes/{a}/{b}`) collide with
 # nothing registered above.
 app.include_router(desktop_wakes.router)
+# The machine-wide RUNTIME roster: which runtime PROCESSES are live, where each is
+# listening and whether it answered. Registered after the wake surface for the same
+# reason the wake surface is after the lifecycle routes — `/v1/desktop/runtimes`
+# collides with no template above it, and declaration order is what decides a
+# collision if one is ever introduced.
+app.include_router(desktop_runtimes.router)
 
 # Add CORS middleware
 app.add_middleware(
@@ -750,13 +772,10 @@ app.include_router(
     static.router,
 )
 
-# /v1/ws
-app.include_router(
-    websockets.router,
-)
-
-# /v1/sse - the preferred streaming transport; /v1/ws above is the fallback
-# kept for older clients.
+# /v1/sse - the only streaming transport the HTTP plane serves. The deprecated
+# /v1/ws socket mount that used to sit above this was removed rather than kept
+# as a fallback: it carried the same frames on a second, unversioned contract,
+# and every maintained client negotiates SSE from /v1/sse/capabilities.
 app.include_router(
     sse.router,
 )

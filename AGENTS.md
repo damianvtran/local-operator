@@ -12,8 +12,17 @@ cd ~/local-operator
 ISO=$(mktemp -d)   # every block in this file makes its own; see the note below
 env -i HOME="$ISO" LOCAL_OPERATOR_CONFIG_DIR="$ISO/.local-operator" \
   PATH="$PATH" TERM=xterm-256color \
-  .venv/bin/python -m pytest tests/unit -q      # 22865 tests collected; a full run is minutes
+  .venv/bin/python -m pytest tests/unit -q      # 22865 tests collected; a full run is 40-55 min under fleet load
 ```
+
+**That comment's range is the point: a full local unit run is 40-55 minutes here,
+not "minutes".** The suite is about 108 test-minutes of serial weight — **82.3% of
+it under `tests/unit/tui`** — and it runs beside ~25 concurrent agent sessions on
+this host, so the same command lands anywhere in that range (and it is the reason
+`tests/durations.json` exists as the sharder's input). Do not treat the whole suite
+as a routine inner-loop step: run the targeted command for what you changed (see
+"Scoping the inner loop" below, and note which jobs still narrow), and let CI's
+five shards be the whole-tree run.
 
 **Every pytest invocation in this file is isolated, and that is not decoration.**
 Each block also carries its own `ISO=$(mktemp -d)`, because the variable lives in
@@ -168,6 +177,19 @@ halve parallelism on every provider nobody remembered to add, which is the
 regression above. If you are adding a new non-interactive variable to
 `NON_INTERACTIVE_ENV`, check nothing else reads it as "dedicated machine".
 
+The sibling marker `LOCAL_OPERATOR_AGENT_MAY_DELEGATE` is deliberately NOT in
+that dict: it is written in three arms rather than on every command — `1` when
+`ToolContext.may_delegate` (the session holds `task`); the empty string only when
+the name really is inherited from the launcher and has to be cleared, so the
+allowance cannot outlive the session it described; and NOT WRITTEN AT ALL
+otherwise, so a session
+that never had the allowance is not handed the spelling — the name is the
+mechanism (`LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop exec` is a one-token
+self-grant). So `NON_INTERACTIVE_ENV` is the wrong home for it, and
+nothing reads it as a CI or "dedicated machine" signal — the guard in
+`agent_shell.py` is its only consumer. See the section on what an agent may
+start below.
+
 **A memory reserve is also held back**, scaled per host (`min(2048, total / 8)`
 MB), because the budget otherwise claims a fraction of what *remains* and
 sibling suites converge toward zero free memory instead of toward a floor. Know
@@ -295,8 +317,12 @@ jobs of `.github/workflows/ci.yml`, spelled as they are for a full-tree run:
 .venv/bin/python -m flake8 .
 uvx --from black==26.1.0 black --check .
 uvx isort==5.13.2 --check .
-.venv/bin/python -m pyright --pythonpath .venv/bin/python .
+.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright --pythonpath .venv/bin/python .
 ```
+
+The `pyright` line goes through a bounded, process-group-reaping wrapper: it is
+whole-tree, exactly as before, but it cannot leave an analyzer running. See
+"The local `pyright` gate is bounded and process-group-reaped" below.
 
 **CI no longer runs all four over the whole tree on every PR.** Each job is
 gated on a scope flag computed by `scripts/ci_scope.py`, which classifies the
@@ -351,6 +377,252 @@ edits are live. After a pull that changes dependencies:
 ```sh
 uv pip install -e ".[all,dev]" --python .venv/bin/python
 ```
+
+### Scoping the inner loop, and the whole-tree triggers that stop it
+
+`scripts/ci_scope.py --run` decides at JOB granularity; the fourth section of
+that module narrows the *local* commands of FOUR of those jobs — `lint`,
+`type-check`, `test`, `tui-e2e` — at FILE granularity. What each one becomes for a diff of one changed module:
+
+| job | whole tree | scoped |
+|---|---|---|
+| `lint` | `flake8 .`, `black --check .`, `isort --check .` | the same three tools over the changed files |
+| `type-check` | `pyright … .` | `pyright … <the changed files plus their transitive reverse dependents>` |
+| `test` | `pytest tests/unit -q` | `pytest <the test files that transitively import the change> -q` — **only when nothing below stops it**, which on this tree is never, today |
+| `tui-e2e` | `pytest tests/e2e -m e2e -n0 -q` | the same, over the e2e files that reach the change — and nothing at all when no e2e file does |
+
+`type-check` narrows because a file-list `pyright` reports diagnostics **only for
+the files it is given** (measured: an error in an imported but unlisted module is
+not reported, while a signature change in a listed file's *dependency* IS
+reported in the listed file). The list is therefore the changed files plus every
+file that transitively depends on them, which is complete for "what this change
+can break", and it is also what the run costs. Its protocol-sync step has no file
+list to narrow and runs unchanged, which the report says out loud.
+
+The selection comes from a STATIC import graph (the ASTs of `local_operator/`,
+`tests/` and `scripts/`; nothing is imported). It is an under-approximation of
+"what this change can break", so it is only allowed to run when the
+approximation is safe — **the rule is a whitelist, and everything it does not
+name runs the whole-tree command and prints the path that stopped it.** A path
+narrows a gate only if it is a `.py` the graph covers, or documentation no gate
+reads. Named barriers:
+
+* any `conftest.py`, at any level;
+* `pyproject.toml`, `uv.lock`, `Makefile`, `.flake8`, `setup.cfg`, `tox.ini`;
+* anything under `.github/`, `extension/` (the suite reads it by PATH — see
+  `tests/unit/browser_bridge/test_extension_version_skew.py` — so no import edge
+  exists), or the vendored
+  `benchmarks/osworld_v2_adapter/src/evaluation_examples/`;
+* any package `__init__.py` (module surface, and pytest's collection semantics);
+* `local_operator/cli.py` and `local_operator/__main__.py` — the entry points;
+* `tests/helpers/**` — a shared helper tree no import edge is a contract for;
+* package data and test data (a `.tcss`, a `.md`, a `.json` under
+  `local_operator/` or `tests/`): read at run time, importing nothing;
+* a `.py` the graph cannot place — deleted, outside those three trees, or inside
+  a tree the graph could not parse — and any `.pyi`;
+* **any changed file inside the app BOOT CLOSURE**: `local_operator/cli.py`,
+  `local_operator/tui/app.py`, `local_operator/session_factory.py` and everything
+  they transitively import — 452 of the 512 `local_operator/**` modules here. Every
+  test that imports the app reaches those files, which is not a reference-graph
+  question at all, so that job runs whole-tree whatever the selection would have
+  been;
+* **any unresolved reference the graph is carrying** (see below) — one is enough,
+  and it stops the `test`/`tui-e2e` jobs for the whole diff;
+* anything else that is neither such a `.py` nor a `.md` outside those two trees.
+* the trees the GRAPH parses are wider than the trees the suite imports: a gate reads
+  `benchmarks/osworld_v2_adapter/**`, so those files are parsed too (they are
+  `ANALYZED_TREES`, and a change inside the covered trees can break them). Leaving
+  them out made "complete for what this change can break" false for 20 files, 9 of
+  them importers of `local_operator.*` (9 files across 8 modules; #1322 QA round 1,
+  Q-1; re-derived here — the round-1 grep did not descend into `providers/`). The list is
+  literal, not derived from pyright's own file set, and one analyzer file is still
+  outside it (`extension/scripts/generate-icons.py`, which imports nothing of ours) —
+  a new top-level tree that imports `local_operator` reopens the class until it is
+  named in `ANALYZED_TREES`.
+* a selection over **25% of the suite's measured weight** or **50% of its test
+  files** (`tests/durations.json` supplies the weights; an unreadable manifest
+  holds the file arm to the weight fraction rather than loosening it), or a
+  `type-check` file list whose import closure would reach **more than 50% of the
+  program** — naming most of the tree is the whole-tree command with extra steps.
+
+**The figures in this section are a measurement, not a property of the tool:** they
+move as the tree moves, so they carry the date they were taken (2026-09-20) and the
+command that takes them again. Every round of this PR re-derived them, and every round
+found the previous round's numbers stale by a few files: 503 `local_operator` modules
+and 576 unresolved sites, then 508 and 597, then **512 and 607** here. Re-derive with
+`python -c "import sys; sys.path.insert(0, 'scripts'); import ci_scope; g = ci_scope.build_import_graph(__import__('pathlib').Path('.')); print(len(g.files), len(g.boot), len(g.unresolved_sites()))"`
+rather than quoting them forward.
+
+**Where it pays, and what the fail-closed rule costs — measured, not assumed.**
+This suite's tests import the assembled app, so **88% of `local_operator/**` is
+inside the boot closure** (452 of its 512 modules) and a change there is a barrier
+by construction. What is left, and what survives the unresolved-reference rule:
+
+| job | narrows for | whole-tree when |
+|---|---|---|
+| `lint` | any diff: the three tools over the changed files (per-file by construction, so no selection can be incomplete) | a barrier path stopped the plan, or the diff has no lint input |
+| `type-check` | the changed `.py` files plus every file that transitively depends on them, when the change is outside the boot closure and its import closure stays under 50% of the program | the change is inside the boot closure, the closure arm fires, or the diff touches a path the graph does not cover |
+| `test`, `tui-e2e` | **nothing on this tree today.** The classes are implemented — changed test files, `scripts/**`, modules outside the boot closure — and they narrow the moment nothing is unresolved; measured, the graph carries **607 unresolved references** (475 directory scans + 132 names), **423 of them in files inside the test universe**, so the rule fires for every diff |
+
+Two measurements, because the distinction is the whole design:
+
+| a change to | `lint` | `type-check` | `test` |
+|---|---|---|---|
+| `scripts/shard_tests.py` | 1 file | 4 files | whole tree — the tree's own readers scan for it |
+| `local_operator/agents.py` (inside the boot closure) | 1 file | whole tree | whole tree (boot closure) |
+
+**What this buys TODAY, stated plainly: the barrier and per-file lint/format
+scoping — not a narrower pytest run.** `test` and `tui-e2e` are whole-tree for every
+diff on this tree (607 unresolved sites arm them out), so the file-level pytest
+selection is a mechanism that is INERT until that count drops; the review round could
+not construct a diff that narrows either job. What is live is: the barrier itself
+(measured load-bearing — neutralising `unresolved_sites` lets a real green-while-red
+through, `test: commands=[]`, rc 0, while the probes are `1 failed, 1 error`), the
+`type-check` closure narrowing, and `lint` over the changed files, where the win is
+the whole gate's file count (measured on this fleet: flake8 49 s + black 137 s +
+isort 25 s whole-tree against 1 s + 14 s + 1 s over a two-file change). The realised
+`type-check` win is the large one and it is measured end to end: **838.5 s whole-tree
+against 16.0 s scoped** on a change whose file list is 14 files (QA round 1's
+measurement, on this fleet — load-affected, as every wall time here is: the host sat at
+200-373 during it, and the same round's whole-tree pyright read 269 s against the 508 s
+recorded elsewhere in this section). The graph build is the price of admission for any
+non-barrier diff — an envelope rather than a number, because the same tree reads
+**37.9 s** on one run and **52.7 s** on another here at load average 370, with earlier
+readings up to 93 s, which is why `lint` is decided
+before the graph is built at all and why the report prints the graph's own timing. Do
+not read the class table below as a claim that pytest narrows here.
+
+**The unresolved-reference rule is unconditional, and that is deliberate.** A
+reference the parser can see and cannot place — a computed name
+(`importlib.import_module(name)`), a scan whose directory the evaluator cannot
+resolve, whatever its pattern — could read the file you changed, and the tool has
+no sound way to decide that it could not. Trying to decide anyway is exactly what
+produced **four consecutive rounds of false greens on this feature**: a `.py`
+reached by path; the `/x.py`, `./x.py` and `../x.py` spellings; a variable-held
+scan receiver, then `iterdir()` and a multi-argument `Path()`; and the
+`.py`-only "arming" policy that each of those rounds came through. So the rule
+refuses to narrow rather than pricing the risk, and the barrier prints the sites
+that stopped it.
+
+**An edge is not always an import.** The suite also reaches files by NAME: a test
+runs `scripts/visual_gallery.py` through `sys.executable` + a path, and several
+modules are spawned as `-m local_operator.x`. No import statement records either,
+so an imports-only graph selected NOTHING for such a change and a local run
+printed `all selected gates passed` while CI's `test` job was red (the blocker on
+#1322). A string constant that resolves to a covered file — a path (`scripts/x.py`,
+`./x.py`, `../x.py`, `~/x.py`, an absolute path, or a bare basename, which is
+also what an f-string like `f"{ROOT}/scripts/x.py"` leaves behind) or a dotted
+module name — is therefore an edge in
+the REVERSE direction: when the named file changes, the file that NAMES it is
+selected, and so is anything that imports that namer. It is reverse-only on
+purpose — a name is not a static import, so it must not inflate the `type-check`
+cost estimate. Two tests guard the class rather than one instance of it:
+`test_a_repo_python_file_a_test_names_is_always_selected` walks the LITERALS the
+real tree's tests carry (not the resolver's output), and
+`test_every_spelling_of_a_repo_path_is_collected_and_resolved` asserts each
+spelling above — collection and resolution — so a narrower regex, a stricter
+resolver or a lost edge fails a test rather than a CI job.
+
+A conftest that NAMES a changed file is a namer pytest runs and nothing imports,
+so it is not in the test universe: seeding on it alone selected nothing. Its
+subtree is selected instead, which is the scope pytest itself gives it.
+
+**A glob is a reader, and reads have the same edge.**
+`tests/unit/tui/test_visual_gallery.py` iterates `(ROOT / "scripts").glob("*.py")`
+and `tests/unit/tui/test_visual_capture.py` the same directory through a
+variable, so in the REFERENCE MODEL a one-token change to any of the 201 covered
+`scripts/*.py` selects both — before the scan edge it selected NOTHING and the
+local run printed `all selected gates passed` while CI's `test` job failed (QA
+round 2, Q-1; the variable-held reader was round 3's blocker, printed but not
+armed). That is what the model does; the shipped plan runs the pytest jobs
+whole-tree here (the barrier row above), so today it is the model's completeness
+that this paragraph is about, not the command you get.
+`glob`/`rglob`/`iterdir`/`listdir`/`scandir`/`walk` are therefore read edges.
+The scanned directory is the one the receiver's expression denotes — path
+literals, `__file__`, `.parent`, `.parents[N]`, `.resolve()`, and up to four
+`name = <expr>` hops, so `SCRIPTS = ROOT / "scripts"` places — and the pattern is
+matched against the repo-relative path, so `*/*.py` is exactly one level and
+`**/*.py` any depth. Placement is all-or-nothing: a receiver whose WHOLE literal
+chain is not a directory (`scripts/diag`, never its `scripts` ancestor) is
+unplaced rather than resolved to the wrong directory, because a wrong edge is
+silent.
+**What a narrowed run is not.** The model reads imports, literal path and module
+names, directory scans and their arguments. It cannot see dynamic attribute access
+(`getattr`), `eval`/`exec`, or a path assembled from data at run time — a config
+value, an environment variable, a string built in a loop. The barrier above fires
+only on references the parser can *see*; the rest it cannot see at all. So a
+narrowed run is evidence about the files it ran and never about the tree: CI's full
+matrix is the authoritative run and is unchanged, and every narrowed plan prints
+that sentence on the run itself. A selected run also cannot see cross-test
+pollution outside the selection.
+
+Two guards hold the property rather than a list of shapes.
+`test_no_changed_file_can_be_narrowed_while_the_graph_has_unresolved_references`
+walks **every covered file in the real tree** and asserts the barrier refuses each
+one — the shape the previous guard got wrong, because it walked the resolver's own
+*output* and so was blind to a reference that never resolved.
+`test_the_barrier_is_a_barrier_and_not_a_constant` asserts the same helper returns
+*no* reason on a tree whose references all resolve, so "refuse everything" fails
+that too, and each unresolved class has its own row in
+`test_every_unresolved_reference_class_stops_the_test_selection`.
+
+### The local `pyright` gate is bounded and process-group-reaped
+
+The local `type-check` command is spelled
+`.venv/bin/python scripts/run_bounded.py --timeout 1800 -- .venv/bin/python -m pyright …`.
+The gate itself is **whole-tree**, exactly as `ci.yml` spells it: the wrapper
+bounds and reaps, it never narrows.
+
+**1800 s, deliberately NOT the 900 s that would mirror that job's
+`timeout-minutes: 15`.** A whole-tree `pyright` measures **508 s on a quiet host
+and 1170 s under load** on this fleet, and CI's 15 minutes also cover checkout,
+dependency install and that job's protocol-sync step — so a bound equal to CI's
+provision can fire on a merely loaded host and red a gate CI would pass. Timing
+out a legitimately slow host is the worse failure, so the local bound is twice
+CI's provision, and a bound that does fire says what it is **on either path**: the
+wrapper's own stderr prints *"that is the BOUND (1800s) firing, not the gate
+failing — re-run it, or raise it (`--timeout`, or `make type-check
+BOUND_TIMEOUT=<seconds>`)"* — which is the only line `make type-check` shows — and
+`make check-changed` adds *"rc=124 is the BOUND (--timeout 1800s) firing, not the
+gate failing … re-run it; if it fires again, raise the bound"* from
+`scripts/ci_scope.py`. `make type-check BOUND_TIMEOUT=<seconds>` raises it for one
+run; `BOUNDED_GATE_TIMEOUT` in `scripts/ci_scope.py` is the same number for
+`make check-changed`, and a test asserts the two agree.
+
+**Why a wrapper.** `pyright` is a Python wrapper around an npm/node analyzer, and
+node runs as a *separate* process. The fleet shows what goes wrong when the group
+is not reaped: orphans re-parented to `ppid 1` holding **2.28 GB and 1.50 GB**,
+one of them still alive **81 minutes** after its parent died, ten analyzers alive
+at once at ~5 GB while sessions queued more behind them.
+
+Be precise about what was measured and what was not: with `timeout 8|25` — and
+even with `timeout -s KILL` — over a whole-tree `pyright`, the analyzer died with
+its wrapper in every attempt here, and GNU `timeout(1)` signals the child's whole
+process group on this host, so the tidy causal story ("the bound fires, the
+wrapper dies, node survives") is **not** the mechanism, and the TRIGGER behind the
+fleet's own orphan cases was never captured. What IS measured, and what the unit
+tests drive with a real process tree, is the case `timeout(1)` cannot cover at
+all: a leader that exits while a descendant lives on. `run_bounded.py` runs the
+command in its own process group and signals the GROUP — on the bound, on a signal
+to the wrapper, and as a sweep once the leader exits — so all three paths end with
+nothing left running; the sweep is what removes a survivor the plain invocation
+leaves.
+
+It also escalates where a bare bound does not: over a SIGTERM-ignoring tree,
+`timeout 3` fires at 3 s and then **waits the tree out** (30 s for a 30 s tree,
+measured; 300 s in an earlier run for a 300 s one), where the wrapper SIGKILLs the
+group after `--grace` and clears the same tree in 5 s **with `--grace 2`** (the
+shipped `--grace` default of 10 takes ~13 s for it). It keeps
+`timeout(1)`'s statuses (124 on a fired bound, 125 when the command could not
+start), reports **128 + signum** when a signal ends the run — forwarded by this
+wrapper, or delivered to the child by someone else, where `sys.exit` used to
+render the raw `-9` as 247 — forwards **SIGHUP and SIGQUIT** as well as
+SIGINT/SIGTERM (SIGHUP used to kill the wrapper and leave the group alive), writes
+diagnostics to stderr only, and reports what it reaped.
+
+Its own limit, stated: a `SIGKILL` to the wrapper itself cannot be caught, so
+nothing runs a sweep in that case — what protects the group there is that the
+members were signalled as a group in the first place.
 
 ### Every feature worktree owns its own venv. Never symlink one.
 
@@ -1182,14 +1454,14 @@ the version is live on the public listing. Never claim a version is live from
 a merged PR or a workflow's success — only from the public listing or a
 successful publish call.
 
-## An agent may not start a session
+## What an agent may start: `exec` with the allowance, never a terminal
 
 `lop exec` opens a TOP-LEVEL conversation — an ordinary session directory that
 `is_user_session` reports as the operator's own. From inside an agent session
-that is never what you want: the operator's session list and desktop sidebar
-show it as a chat they opened, and it runs outside the job manager that would
-let you see, steer, cancel or account for it. A subagent does it out of the
-wrong belief that it is the only way to get a review run going:
+that is never what you want *by default*: the operator's session list and
+desktop sidebar show it as a chat they opened, and it runs outside the job
+manager that would let you see, steer, cancel or account for it. A subagent did
+it out of the wrong belief that it was the only way to get a review run going:
 
 ```sh
 lop exec --profile reviewer --background --name lo-1281-review < brief.md
@@ -1199,13 +1471,42 @@ That happened on 2026-09-18: two sessions (`lo-1281-review`, `lo-1281-qa`)
 appeared in the operator's sidebar for a PR they had never asked about, because
 the coder that owed the review round held no `task` tool (a role that does not
 delegate is never handed `task`/`wait`/`wake` — see `harness.subagent`'s prune).
-So the guard is in the product now: a `lop`
-invocation that descends from an agent's bash tool call may not open a session,
-and the refusal states the rule — a session that HOLDS `task` delegates with it,
-and one that does not may not create subagents at all, does the work itself, and
-reports a genuine blocker with `hub` to the session that delegated to it. Work
-that belongs later is not the child's to arm either — `wake` is pruned from
-EVERY child session — so it goes back to the session that delegated.
+
+**The rule after the 2026-09-19 relaxation, and it has two answers on purpose.**
+The guard in `local_operator/agent_shell.py` decides by the calling session's OWN
+live inventory — it holds `task`, or it does not:
+
+* `lop exec` **is allowed** to an agent session that holds `task`, because that
+  is the case an operator asks for when they ask for it: "spin up parallel
+  sessions and fully delegate this work", or a fan-out of independent long-lived
+  workstreams, is a shape a `task` child cannot be (one prompt, then gone). A
+  session that does NOT hold `task` is refused exactly as before — for it the CLI
+  is a way around a missing tool, not a way to delegate.
+* the **interactive** path (`lop`, `lop --resume ID`, `--tui`) stays refused for
+  EVERY agent shell, delegating or not. An agent has no terminal, so that path
+  opens a front end on the operator's SCREEN — not the delegation shape above.
+  When you touch this guard, check both halves: a change that relaxes one
+  predicate and not the other is the defect this paragraph exists to prevent.
+
+The allowance travels as `LOCAL_OPERATOR_AGENT_MAY_DELEGATE`, which the `bash`
+tool signs from the session's live tool inventory (`ToolContext.may_delegate`,
+set by `Session._build_tool_context` from `self._tools`) in three arms: `1` when
+the session holds `task`; the EMPTY string only where the name is inherited from
+the launcher and the session does NOT hold it, which is the clear that stops the
+allowance outliving the session it described; and NOTHING AT ALL otherwise, so a
+session that never had it is not handed the spelling — the name IS the mechanism
+(`LOCAL_OPERATOR_AGENT_MAY_DELEGATE=1 lop exec` is a one-token self-grant). Both
+an absent marker and an empty one read as "may not delegate", so a forgotten
+export is a refusal the model reads rather than a chat in the operator's sidebar.
+
+**Delegate with `task`, and reach for `exec` only when the user asked for
+sessions.** "Spin up parallel sessions to fully delegate this" is that ask: open
+them, and say what you opened. If you think you need a separate live session and
+were NOT asked, say so in your report instead of starting one. A session that
+holds no `task` does the work itself and reports a genuine blocker with `hub`;
+work that belongs later is not a child's to arm either — `wake` is pruned from
+EVERY child session — so it goes back to the session that delegated. `lop exec
+--status JOB_ID` still polls a job that is already running.
 
 WHO may delegate is the role's answer, never the depth's (operator, 2026-09-18).
 A subagent whose role allows delegation is expected to use `task` at any depth —
@@ -1214,10 +1515,16 @@ TUI re-scopes its roster to the page you have open and climbs with `p`/`Esc`, an
 the desktop UI walks the same edges with its breadcrumbs and back control. A role
 that does not delegate gets no `task` at any depth and must do the work itself.
 
-Delegate with `task`, always. If you think you need a separate live session —
-something a human must steer, or work that must outlive this turn — say so in
-your report instead of starting one. `lop exec --status JOB_ID` still polls a
-job that is already running.
+**A session either route opens is stamped `agent-shell`.** The QA escape hatch
+and an allowed delegating `exec` both write `origin.json` =
+`resume.ORIGIN_AGENT_SHELL` in `session_factory._prepare`, so the run stays out
+of the `/resume` picker, the desktop sidebar and the phone's list. It is not
+hidden and not a lock: `lop sessions` lists it, the id is in the run's own
+output, and YOUR route back to it is `lop exec --resume <id>` — the bare
+`lop --resume <id>` is the operator's, and the interactive path stays refused for
+every agent shell (which is why this paragraph names the `exec` form). A
+conversation a run merely RESUMES is never re-marked — that
+is the operator's own work.
 
 **Scripts that drive the real CLI must declare themselves.** A bench, an eval
 driver or a pty harness runs `exec` — or the TUI — as a child of YOUR shell, so
@@ -1228,8 +1535,31 @@ broken product instead of a guard. Call
 obscurity, not secrecy, and `docs/EXEC.md` documents the limits of the whole
 rule). Use it against an isolated `LOCAL_OPERATOR_CONFIG_DIR`; the session the
 child opens is stamped `agent-shell`, so it cannot be mistaken for one the
-operator started. The same applies to a manual QA run: that escape is for
+operator started. The helper also carries the notification gate
+(`tui.notify.ENV_DISABLE`), because a harness's child is a session nobody is
+watching: the benches seed the test hosting, whose only reply is the mock's own
+sentence, and a notification's body is a snippet of the session's last
+assistant line — so an un-gated child finishes a turn and puts that sentence on
+the operator's lock screen. A rig that runs a session in ITS OWN process
+instead calls `tui.notify.suppress_notifications_for_process()` before it
+starts one; the two capture sandboxes (`probe_isolation`, `visual_capture`)
+spell the switch literally, because they must act before any product import.
+The same applies to a manual QA run: that escape is for
 driving the real front end, never for opening a peer to hand work to.
+
+**The test-hosting rule is a SECOND gate, and a test whose subject is the
+notification path has to waive it.** `session_uses_test_hosting` suppresses any
+session whose journal records the mock wire, in every process that reads the
+store — the TUI observer, the machine-wide feed and the per-session bridge all
+ask it — so a suite that asserts a `notification` frame over a fixture-built
+store observes nothing until it sets
+`session.model_selection.ENV_ALLOW_TEST_HOSTING_NOTIFY`. That is a test/QA seam
+in the same shape as `ALLOW_NESTED_SESSION` above: it can only ever ENABLE (it
+answers "not a test session", so it cannot silence anyone), and the process kill
+switch still wins because every leg asks it first. Set it through
+`tests/notification_opt_in.notification_path_opt_in`, which clears both gates
+and restores them; the alternative — running those tests on a real provider —
+would make the reply non-deterministic and need network and credit.
 
 ## Who may merge: two tiers
 
@@ -1765,7 +2095,15 @@ support extensions". Verified here: with `--load-extension=extension/dist` the
 only `chrome-extension://` targets were Chrome's own built-ins and our manifest
 name was absent; `Extensions.loadUnpacked` over CDP returned our id and the
 popup drove normally. `docs/design/browser-extension-e2e.md` records the same
-finding on Chrome 151.
+finding on Chrome 151, and it was re-confirmed on **Chrome 153.0.8010.53**
+(2026-09-20, PR #1335's E2E): `--load-extension` loaded nothing, with or without
+`--disable-extensions-except`, while `Extensions.loadUnpacked` worked first try.
+The failure is worth recognising because of its SHAPE rather than its silence: the
+extension's own pages still resolve at `chrome-extension://<id>/…`, so the harness
+gets a real-looking options page whose `chrome.runtime` and `chrome.storage` are
+both `undefined` — which reads as a broken manifest, not as an unloaded extension,
+and cost one round of debugging. Check `chrome.runtime.id` on any extension page
+before believing a manifest defect.
 
 **Size the viewport with `Emulation.setDeviceMetricsOverride`, not
 `--window-size`.** Headless inherits no real window, so it defaults to whatever

@@ -30,7 +30,6 @@ from local_operator.server.dependencies import (
     get_event_broker,
     get_job_manager,
     get_scheduler_service,
-    get_websocket_manager,
 )
 from local_operator.server.models.schemas import (
     AgentChatRequest,
@@ -52,7 +51,7 @@ from local_operator.server.utils.job_processor_queue import (
     run_job_in_process_with_queue,
 )
 from local_operator.server.utils.operator import ExecutorInitError, create_operator
-from local_operator.server.utils.websocket_manager import WebSocketManager
+from local_operator.server.utils.sse_publisher import publish_job_status
 from local_operator.types import ConversationRecord, ConversationRole
 
 if TYPE_CHECKING:
@@ -343,7 +342,6 @@ async def chat_async_endpoint(
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
-    websocket_manager: WebSocketManager = Depends(get_websocket_manager),
     event_broker: EventBroker = Depends(get_event_broker),
     env_config: EnvConfig = Depends(get_env_config),
     scheduler_service: "SchedulerService" = Depends(
@@ -363,7 +361,6 @@ async def chat_async_endpoint(
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         job_manager: Dependency for managing asynchronous jobs
-        websocket_manager: Dependency for managing WebSocket connections
 
     Returns:
         A response containing the job ID and status
@@ -381,6 +378,35 @@ async def chat_async_endpoint(
             hosting=request.hosting,
             agent_id=None,
         )
+
+        # TELL THE JOB'S OWN STREAM THAT THE REQUEST WAS TAKEN, BEFORE THE WORK
+        # THAT MAKES THE CALLER WAIT. A caller attaches to ``/v1/sse/jobs/{id}``
+        # the moment this response hands it the id, and until this frame existed
+        # the channel said NOTHING about the job until the spawned child had
+        # booted its interpreter, imported the composition root and built a
+        # session — measured at p50 5.9 s (``scripts/bench_ttft.py``, scenario
+        # ``sse-jobs``) against a 202 that arrives in milliseconds. The channel
+        # was built for exactly this ordering (see ``routes/sse.py``: the job key
+        # exists so a client can attach before a record does), and the frame is
+        # the job's OWN status rather than a new event name because that is what
+        # a client already renders — the same ``pending`` ``GET /v1/jobs/{id}``
+        # reports at this instant, superseded by the child's own ``processing``
+        # when it starts. Nothing is claimed that is not yet true: the job is
+        # recorded and its runtime is not up.
+        #
+        # PUBLISHED BEFORE THE SPAWN, so the frame is ordered ahead of every
+        # frame the child can produce, and RETAINED BY THE BROKER — which is
+        # worth exactly what a cursor makes it worth, and no more, so the
+        # comment should not promise more than that: the channel's backlog is
+        # replayed to a subscriber that SUPPLIES a cursor (``after_seq=0`` is how
+        # a client asks for the channel from its beginning), while a cursor-less
+        # attach subscribes LIVE and therefore sees only what is published after
+        # it attaches — this frame, already in the buffer and already superseded,
+        # is not among them. Measured on the two shapes: 15.9 ms from attach to
+        # this frame with the cursor (QA's matrix; this benchmark's own
+        # ``response_to_job_event_ms`` agrees in the tens of milliseconds) against
+        # seconds for the cursor-less attach, which waits on the child instead.
+        publish_job_status(event_broker, job.id, job.status, None)
 
         # Create and start a process for the job using the utility function
         create_and_start_job_process_with_queue(
@@ -400,7 +426,6 @@ async def chat_async_endpoint(
                 request.options,
             ),
             job_manager=job_manager,
-            websocket_manager=websocket_manager,
             scheduler_service=scheduler_service,
             event_broker=event_broker,
         )
@@ -469,7 +494,6 @@ async def chat_with_agent_async(
     config_manager: ConfigManager = Depends(get_config_manager),
     agent_registry: AgentRegistry = Depends(get_agent_registry),
     job_manager: JobManager = Depends(get_job_manager),
-    websocket_manager: WebSocketManager = Depends(get_websocket_manager),
     event_broker: EventBroker = Depends(get_event_broker),
     env_config: EnvConfig = Depends(get_env_config),
     scheduler_service: "SchedulerService" = Depends(
@@ -493,7 +517,6 @@ async def chat_with_agent_async(
         config_manager: Dependency for managing configuration
         agent_registry: Dependency for accessing agent registry
         job_manager: Dependency for managing asynchronous jobs
-        websocket_manager: Dependency for managing WebSocket connections
         agent_id: ID of the agent to use for the chat
 
     Returns:
@@ -538,7 +561,6 @@ async def chat_with_agent_async(
                 request.user_message_id,
             ),
             job_manager=job_manager,
-            websocket_manager=websocket_manager,
             scheduler_service=scheduler_service,
             event_broker=event_broker,
         )

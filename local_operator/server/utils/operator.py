@@ -3,7 +3,7 @@
 Why this module exists
 ----------------------
 The HTTP surface (44 endpoints) and the shipped Electron UI are frozen: paths,
-verbs, envelopes, status codes and websocket message shapes must not move. The
+verbs, envelopes, status codes and the message shapes on the wire must not move. The
 engine underneath them was replaced wholesale — the classify/plan/act triple
 round-trip ``Operator`` + ``LocalCodeExecutor`` pair is gone, and the rewritten
 harness exposes a very different contract (``Session.prompt`` driving an
@@ -34,8 +34,9 @@ design points:
    to the registry when ``persist_conversation`` is set), which is exactly
    what the routes serialize into their response envelopes.
 3. **Events are translated, not re-invented.** ``AgentEventBridge`` maps the
-   engine's event stream onto the ``CodeExecutionResult`` payloads the
-   websocket manager already broadcasts, so the UI sees byte-identical frames.
+   engine's event stream onto the ``CodeExecutionResult`` payloads the UI
+   consumes - the shapes the removed websocket transport put on the wire - so
+   an installed UI sees byte-identical frames.
 """
 
 from __future__ import annotations
@@ -68,6 +69,7 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
 )
+from local_operator.harness.wire import bound_agent_end_for_wire
 from local_operator.model.configure import ModelConfiguration
 from local_operator.types import (
     ActionType,
@@ -208,15 +210,15 @@ def _cap_stream_payload(payload: dict[str, object], _depth: int = 0) -> None:
 
 
 class AgentEventBridge:
-    """Translate the engine's ``AgentEvent`` stream into the websocket frames
-    the UI expects.
+    """Translate the engine's ``AgentEvent`` stream into the record frames the
+    UI expects.
 
-    The UI consumes ``CodeExecutionResult`` dumps (see
-    ``WebSocketManager.broadcast_update``) pushed through the multiprocessing
-    ``status_queue`` as ``("message_update", <message id>, result)`` and
-    ``("execution_update", <job id>, result)``. Both tuple shapes and the
-    payload model are unchanged from the legacy executor; only their producer
-    moved.
+    The UI consumes ``CodeExecutionResult`` dumps - the shape the removed
+    ``WebSocketManager.broadcast_update`` produced - pushed through the
+    multiprocessing ``status_queue`` as ``("message_update", <message id>,
+    result)`` and ``("execution_update", <job id>, result)``. Both tuple shapes
+    and the payload model are unchanged from the legacy executor; only their
+    producer moved.
 
     Streaming semantics preserved from the legacy operator:
 
@@ -228,9 +230,20 @@ class AgentEventBridge:
       the legacy ACTION records (code in, stdout/stderr out).
     """
 
-    def __init__(self, status_queue: StatusQueue | None = None, job_id: str | None = None) -> None:
+    def __init__(
+        self,
+        status_queue: StatusQueue | None = None,
+        job_id: str | None = None,
+        session_id: str | None = None,
+    ) -> None:
         self._status_queue = status_queue
         self._job_id = job_id
+        #: The session this turn belongs to, used for ONE thing: naming the
+        #: transcript that holds the text an elided ``agent_end`` row gave up
+        #: (``harness/wire.py``). A bound that cannot say where the elided text
+        #: went is not retrievable, so this rides on the frame's marker.
+        #: Optional because a host may drive events without a durable session.
+        self._session_id = session_id
         self._streams: dict[str, CodeExecutionResult] = {}
         self._tools: dict[str, CodeExecutionResult] = {}
         # Creation-ordered record list: execution_records used to concatenate
@@ -280,6 +293,27 @@ class AgentEventBridge:
         except Exception:  # noqa: BLE001 — a serialisation quirk must not kill the turn
             logger.warning("failed to serialise agent event for stream", exc_info=True)
             return
+        # Bound BEFORE the per-string cap below, and deliberately before it: an
+        # ``agent_end`` carries the whole turn, and this transport caps STRINGS
+        # at 16 KiB, so a turn of ordinary rows (no single string over the
+        # limit) passes through it untouched — measured on the 104-message
+        # fixture, whose largest single string is well under the cap: an SSE
+        # frame of 373,214 bytes and an NDJSON line of 523,280 bytes, both far
+        # over the budget the bound below applies. The bound spends tool-row
+        # content through an honest marker instead of clipping five rows' worth
+        # of strings, so a reader sees ONE truncation story rather than two.
+        #
+        # The ordering is a preference, not a guarantee, and what actually
+        # happens at the seam is worth stating: a row's share can leave ONE
+        # string above ``STREAM_VALUE_LIMIT`` (a single 300,000-char tool result
+        # bounds to 258,128 chars against a 262,144-byte budget), and then
+        # ``_cap_stream_payload`` DOES clip it, with its own marker and no
+        # reference — measured: that frame reaches this reader as 16,450 chars
+        # / 17,645 bytes, while the socket relay and the NDJSON supervisor get
+        # the bound frame intact. Two stories are therefore still possible for
+        # that shape; the bound's ``elided_bytes`` counts only its own
+        # reduction and does not claim to cover this one.
+        payload = bound_agent_end_for_wire(payload, session_id=self._session_id)
         # Restore the running snapshot on delta frames.
         #
         # ``message.delta`` is documented (see ``sse.py``) to carry the
@@ -290,8 +324,8 @@ class AgentEventBridge:
         # rebuild was quadratic in response length), so the serialised message
         # is empty mid-stream and the guarantee would be silently lost.
         #
-        # The bridge already tracks the accumulated text for the websocket
-        # record, so publish it explicitly instead of depending on a field the
+        # The bridge already tracks the accumulated text for the record frame,
+        # so publish it explicitly instead of depending on a field the
         # harness no longer maintains per delta. ``_raw`` runs BEFORE the record
         # projection updates, so the stored value is the text as of the previous
         # delta; this frame's increment is appended to make the snapshot
@@ -310,7 +344,7 @@ class AgentEventBridge:
 
     def handle(self, event: AgentEvent) -> None:
         # Every event goes to the SSE path first, unconditionally. The record
-        # translation below is a lossy projection for the legacy websocket
+        # translation below is a lossy projection for the legacy record
         # contract; forwarding before it means a new event type reaches SSE
         # consumers whether or not anyone taught the projection about it.
         self._raw(event)
@@ -694,7 +728,6 @@ class ServerOperator:
         # ``job_processor_queue`` assigns the queue onto the executor AFTER
         # construction (legacy call shape), so the executor's value wins.
         status_queue = self.executor.status_queue or self.status_queue
-        bridge = AgentEventBridge(status_queue=status_queue, job_id=self.job_id)
         session = await initialize_operator(
             operator_type=OperatorType.SERVER,
             config_manager=self.config_manager,
@@ -716,6 +749,13 @@ class ServerOperator:
             job_id=self.job_id,
             status_queue=status_queue,
             verbosity_level=VerbosityLevel.QUIET,
+        )
+        # Constructed AFTER the session so the bridge can name it: an
+        # ``agent_end`` frame this turns onto the stream is bounded by
+        # ``harness.wire``, and its elision marker resolves only against the
+        # session whose transcript holds the elided text.
+        bridge = AgentEventBridge(
+            status_queue=status_queue, job_id=self.job_id, session_id=session.session_id
         )
         end_events: list[AgentEndEvent] = []
 

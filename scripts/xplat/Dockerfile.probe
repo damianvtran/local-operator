@@ -1,0 +1,71 @@
+# A Linux validation image for the cross-platform probe battery.
+#
+# Deliberately NOT the same image as the repository's `Dockerfile`. That one
+# builds a *server*; this one builds a *host*, and the difference matters:
+# a portability probe has to exercise the mechanisms a real Linux user's
+# machine has (a login session, systemd, a terminal, a package manager) rather
+# than the single-process, zero-init container the server image is designed to
+# be.
+#
+#   docker build -f scripts/xplat/Dockerfile.probe \
+#     --build-arg BASE=ubuntu:24.04 -t lop-xplat:ubuntu .
+#
+# Build context is the repository root so the image can install the package
+# from source. `scripts/xplat/Dockerfile.probe.dockerignore` replaces the
+# root `.dockerignore` (which excludes `tests/`, and the probe needs the test
+# suite's app double), and additionally keeps a local `.venv` -- a 200 MB
+# macOS virtualenv -- out of the context.
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+
+# The build must not stop on a tty-less apt prompt, and the probe must not be
+# fooled by a legacy console codepage.
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# `procps` is not decoration: lop identifies and reaps processes, and a
+# container without `ps` reports a different answer than a user's machine.
+# `lsof`, `systemd` and `sudo` are installed because the probes ask what a
+# mechanism does when those ARE present, which is the common case for a real
+# user and the case a minimal image cannot measure.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        lsof \
+        procps \
+        psmisc \
+        python3 \
+        python3-pip \
+        python3-venv \
+        rsync \
+        sudo \
+        systemd \
+        tar \
+        tzdata \
+        unzip \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Dependency layer first: a source edit must not re-resolve the whole tree.
+COPY pyproject.toml README.md ./
+RUN python3 -m venv /venv \
+    && /venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /venv/bin/pip install --no-cache-dir -e ".[all,dev]" || true
+
+# The rest of the checkout. `-e ".[all,dev]"` above installs the metadata and
+# every wheel exactly once; this layer supplies the source it is editable
+# against, and re-running the install afterwards is a no-op.
+COPY . .
+RUN /venv/bin/pip install --no-cache-dir -e ".[all,dev]"
+
+# A real terminal for the probes that need one, then the battery itself.
+ENV TERM=xterm-256color
+WORKDIR /src
+CMD ["/venv/bin/python", "scripts/xplat_probe.py"]

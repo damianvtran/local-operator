@@ -74,6 +74,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from local_operator.tui.notify import suppress_notifications_for_process  # noqa: E402
 from scripts import bench_tree  # noqa: E402
 
 _STRIPPED_PREFIXES = ("LOP_", "CMUX_")
@@ -326,6 +327,9 @@ def main() -> int:
 
     saved = {k: os.environ.get(k) for k in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR", "PYTHONPATH")}
     _strip_inherited()
+    # The daemon below (``lop serve``) is the process whose machine-wide feed
+    # raises desktop banners, and this rig drives a real send through it.
+    suppress_notifications_for_process("cold-send benchmark driving the real CLI")
     os.environ["HOME"] = str(root)
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"] = token

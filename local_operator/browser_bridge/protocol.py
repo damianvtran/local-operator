@@ -70,7 +70,76 @@ def proto_supported(
 #: being older, and nothing is forced by it. Its one use is the update advisory
 #: below, which says a newer version exists without claiming the build is
 #: unusable — the store decides when a newer version is actually offered.
-EXPECTED_EXTENSION_VERSION = "0.1.17"
+#:
+#: 0.1.19 is the first tree whose file-transfer capabilities are OPT-IN: it
+#: serves `upload` and `download`, each behind its own switch in the extension's
+#: options page, and `download` behind the optional `downloads` permission the
+#: operator grants when they turn that switch on (design §17.13). 0.1.18
+#: advertised capabilities and served `upload` unconditionally.
+EXPECTED_EXTENSION_VERSION = "0.1.19"
+
+#: The first extension version that serves each capability-gated method.
+#:
+#: Capability travels in the `Capabilities` event and the host records, never in
+#: version arithmetic (design §6.3) — this table exists only for the REFUSAL
+#: copy, where "this host predates the feature, update it" and "this host is
+#: current but stopped answering" need opposite remedies and only the version
+#: separates them. The same distinction `OWNERSHIP_MIN_EXTENSION_VERSION` draws.
+#:
+#: `download` has a floor of 0.1.19 rather than 0.1.18 because no earlier tree
+#: could serve it at all: E1x in `docs/design/browser-file-transfer.md` measured
+#: that Chrome refuses a tab-scoped `chrome.debugger` session the only two CDP
+#: primitives that could put a file where the harness chooses (Chrome 153.0.8010.53:
+#: `-32000 "Cannot not access browser-level commands"` and `-32601`). The tree
+#: that CAN serve it does so through `chrome.downloads`, which needs the optional
+#: permission — so an older build here is a build to UPDATE, and the copy says so
+#: instead of the retired "no extension build can" sentence.
+CAPABILITY_MIN_EXTENSION_VERSION: dict[str, str] = {"upload": "0.1.18", "download": "0.1.19"}
+
+#: The two switches the OPERATOR owns, and the ONE spelling of each label.
+#:
+#: These capabilities are OFF by default and only the operator may turn them on:
+#: the options page writes the flag on a human gesture, and no daemon frame, tool
+#: call or page can reach it (design §17.13). The label is here rather than in the
+#: refusal copy because it names a control the user has to find in a UI this
+#: process cannot see, and the same string has to appear in Python's refusal, the
+#: extension's refusal and the options page — three writers, one spelling, and
+#: the generated table is what keeps them equal (`gen_ts.py`).
+CAPABILITY_SWITCH_LABEL: dict[str, str] = {
+    "download": "Allow downloads",
+    "upload": "Allow uploads",
+}
+
+#: The Chrome permission a switch needs, when it needs one.
+#:
+#: Only `download` needs a permission, and it is REQUESTED at the moment the
+#: operator turns the switch on rather than declared at install time — an update
+#: must never widen what an installed extension can do without the user asking
+#: for it. `upload` needs none: it rides the `debugger` permission the extension
+#: already holds.
+CAPABILITY_SWITCH_PERMISSION: dict[str, str] = {"download": "downloads"}
+
+#: Where the switches live, in the ONE spelling every refusal uses.
+#:
+#: A refusal that names a switch but not where to find it leaves the user hunting;
+#: naming a URL we cannot know (the extension id differs between an unpacked and a
+#: store install) would be worse, so the copy names the route a user can follow for
+#: either. The toolbar route comes FIRST because the popup's footer already carries
+#: a one-click "Settings" link (round-1 UX, U2/U3): sending the user through
+#: chrome://extensions when one click reaches the same page is a worse instruction
+#: than the product already offers.
+CAPABILITY_SWITCH_LOCATION = (
+    "the Local Operator extension's options page (the Local Operator toolbar icon → "
+    "Settings, or chrome://extensions → Details → Extension options)"
+)
+
+#: The methods a host must ADVERTISE before the daemon will send them.
+#:
+#: Every method that predates the capability advertisement is deliberately absent:
+#: refusing those on a pre-feature peer would break a host that works today. This
+#: set is therefore exactly "the methods whose absence a peer cannot report as
+#: anything better than a bare `internal`" — which is what the refusal exists for.
+CAPABILITY_GATED_METHODS: frozenset[str] = frozenset({"download", "upload"})
 
 #: The first extension TREE that carried the ``owner_*`` ownership lifecycle
 #: (PR #798, ``ee146fb73``), whose manifest reads ``0.1.9`` — verify with
@@ -206,6 +275,27 @@ METHODS = (
     "owner_finish",
     "owner_retain",
     "owner_release",
+    # File transfer, and both halves are gated by the same mechanism — measured,
+    # not assumed (design §12.4's E1x, `docs/design/browser-file-transfer.md`):
+    #
+    # * `upload` is servable on both non-cmux hosts. The extension attaches files
+    #   with `DOM.setFileInputFiles` over the tab-scoped session it already holds
+    #   (the same primitive Puppeteer/Playwright use), which needs no new
+    #   permission.
+    # * `download` is served by the desktop app's host, and from extension 0.1.19
+    #   by the extension through `chrome.downloads`. The CDP primitives that would
+    #   let an extension choose a destination are refused to a tab-scoped session
+    #   (§17.1), so the extension's file lands in the user's own download
+    #   directory first and the harness relocates it (§17.13, §11.5 R7).
+    #
+    # Both are listed here regardless: this tuple is the protocol's vocabulary,
+    # and the per-host answer to "who serves this" is the `Capabilities` event
+    # plus the `CapabilitySwitches` event — never a fork of the vocabulary. On an
+    # extension host each method is additionally behind the operator's own switch
+    # (protocol.CAPABILITY_SWITCH_LABEL), so a host that CAN serve it may still be
+    # answering "not enabled" rather than "not capable".
+    "download",
+    "upload",
 )
 
 
@@ -267,6 +357,17 @@ COMMAND_TIMEOUTS = {
     # bound because the group queue it joins is shared and briefly serialises
     # behind an in-flight open's own reconcile.
     "retitle": 20.0,
+    # download waits on a PAGE, not on us: the click that starts it may be
+    # followed by a slow server, and the agent's own `timeout_s` may raise the
+    # wait (clamped to DOWNLOAD_TIMEOUT_MAX_S in browser_files). The daemon's
+    # budget is the ceiling, and it is the one method in this table whose bound
+    # is measured in minutes rather than seconds — a 200 MB file on a slow link
+    # legitimately takes longer than any other action here.
+    "download": 120.0,
+    # upload is local: the browser reads the bytes off disk, so the budget covers
+    # the attach plus the read-back that proves the DOM holds them. A 256 MB
+    # attach is the worst case (UPLOAD_MAX_BYTES), not the common one.
+    "upload": 60.0,
 }
 
 #: Extra budget granted to a command that is BLOCKED on a human origin
@@ -330,6 +431,77 @@ class ErrorCode(StrEnum):
     # an old daemon validates `ErrorDetail.code` against this enum, so a value
     # it does not know fails Response.model_validate and the frame is dropped.
     EXTENSION_UNRESPONSIVE = "extension_unresponsive"
+    # The attached host cannot serve the requested method, and said so by not
+    # advertising it. Daemon-to-session only, and for the SAME reason spelled out
+    # above `EXTENSION_UNRESPONSIVE`: an already-released daemon validates
+    # `ErrorDetail.code` against this enum, so a deliberate policy refusal must
+    # never travel as an error code from the extension — it travels as an
+    # `ok: true` result with a reason in the payload (design §6.2), and only the
+    # daemon, which is on the safe side of the direction, emits this one.
+    #
+    # It exists instead of a 120-second timeout: the extension answers an unknown
+    # method with a bare `internal` (worker.ts's dispatch), so sending `download`
+    # to a host that does not serve it would burn the whole budget and then
+    # report an internal error naming nothing actionable. The daemon checks first
+    # and answers immediately with this code and the host's own advertised list.
+    CAPABILITY_UNSUPPORTED = "capability_unsupported"
+    # --- The desktop app's console namespace (design ui-console-tab §10.6) ---
+    #
+    # The console rides THIS wire and THIS enum rather than a parallel taxonomy,
+    # because a second vocabulary for the same class of refusal is how copy
+    # drifts. These values are emitted by the APP's RPC host (`local-operator-ui`,
+    # PR A of the console split) and parsed by a `lop` session; the daemon never
+    # produces them and the extension has no handler for them. Additive in the
+    # sense `MIN_SUPPORTED_PROTO`'s rules mean: a peer that does not know a code
+    # never emits it, and an OLD session that receives one fails
+    # `Response.model_validate` and reports an unreadable answer — which is that
+    # peer's version-skew behaviour, not a wire break. No proto bump either way.
+    #
+    # Names are reused from the existing vocabulary wherever a value fits (the
+    # doc's rule); these ten are the ones a reuse would have made a lie:
+    #
+    # * `unsupported_method` — this app version has no console at all. A TYPED
+    #   refusal, so the caller can say "update the app" instead of
+    #   substring-matching a message (which is what keeps the floor at 1).
+    # * `surface_unavailable` — no such surface on this host, or a stale handle
+    #   after a relaunch.
+    # * `surface_not_owned` — the surface exists and belongs to ANOTHER session.
+    #   The browser's `owner_refused` precedent: typed so a caller does not have
+    #   to tell it apart from `surface_unavailable` by reading prose.
+    # * `process_exited` — the pty's program is gone; the log is retained and
+    #   `console_read` still works.
+    # * `input_queue_full` — the app refused more bytes for a surface that is not
+    #   draining them, and says how many it took.
+    # * `unknown_key` — a named key the encoder does not have; carries the set it
+    #   does accept.
+    # * `secure_input_active` — read/screenshot refused while the human holds the
+    #   secure-input span.
+    # * `console_unavailable` — the console feature is off in this app (settings,
+    #   env flag, or a pty load failure) and names which of the three it was.
+    # * `invalid_grid` — requested cols/rows outside what the app will honour;
+    #   carries the clamp it applied.
+    # * `console_capture_full` — the app's one-at-a-time offscreen capture view is
+    #   already in use (design §13.3). Answered by the app that HAS the capture
+    #   view (PR B, §17.1).
+    # * `capture_unavailable` — no pane is displaying the surface, so the app has
+    #   nothing to photograph. Answered by an app that has no offscreen capture
+    #   view yet (PR A, §13.2/§17.1) — the two are DIFFERENT conditions on
+    #   different hosts, and modelling only one of them made the ordinary state of
+    #   the shipped app read as "your app is newer than this session". The app half
+    #   documents this as its one deliberate addition to §10.6
+    #   (`local-operator-ui` src/main/console/protocol.ts); this is the session
+    #   half of the same contract.
+    UNSUPPORTED_METHOD = "unsupported_method"
+    SURFACE_UNAVAILABLE = "surface_unavailable"
+    SURFACE_NOT_OWNED = "surface_not_owned"
+    PROCESS_EXITED = "process_exited"
+    INPUT_QUEUE_FULL = "input_queue_full"
+    UNKNOWN_KEY = "unknown_key"
+    SECURE_INPUT_ACTIVE = "secure_input_active"
+    CONSOLE_UNAVAILABLE = "console_unavailable"
+    INVALID_GRID = "invalid_grid"
+    CONSOLE_CAPTURE_FULL = "console_capture_full"
+    CAPTURE_UNAVAILABLE = "capture_unavailable"
     INTERNAL = "internal"
 
 
@@ -427,6 +599,67 @@ class Ping(WireModel):
 
 class Pong(WireModel):
     event: Literal["pong"] = "pong"
+
+
+class Capabilities(WireModel):
+    """Extension -> daemon: which wire methods THIS BUILD serves.
+
+    Sent immediately after ``hello``, and it is how capability travels in this
+    protocol rather than through version arithmetic (design §6.3). Two reasons
+    it is an EVENT and not a field on ``Hello``: ``Hello`` is validated with
+    ``extra="forbid"``, so a new field there would be closed 4001 by every
+    already-released daemon — a store build's popup showing an unfixable
+    "update needed" card — while an unknown EVENT is harmlessly dropped by an
+    old daemon (``protocol.py``'s own rule for what keeps ``PROTO_VERSION``
+    where it is). The same shape as ``TabClosed``/``TabUpdate``/``Unpair``.
+
+    ``methods`` is the extension's OWN dispatch table, not a hand-written list,
+    so an advertised capability cannot drift from a served one. ``version`` is
+    repeated from ``hello`` because the two frames are independent: a daemon
+    that missed ``hello``'s version, or a test peer that sends only this frame,
+    must not have to infer it.
+
+    Why the daemon must refuse to SEND an unadvertised method rather than let the
+    peer fail it: an unknown method gets a bare ``internal`` from the worker
+    (``worker.ts``), which spends the whole command budget and then reports
+    nothing the caller can act on.
+    """
+
+    event: Literal["capabilities"] = "capabilities"
+    methods: list[str] = Field(default_factory=list)
+    version: str = ""
+
+
+class CapabilitySwitches(WireModel):
+    """Extension -> daemon: which SERVED-ABLE methods the OPERATOR has switched off.
+
+    A SECOND event rather than a field on :class:`Capabilities`, and that is not
+    a style choice: every envelope in this module is ``extra="forbid"``
+    (:class:`WireModel`), so a new key on an EXISTING event is closed by every
+    already-released daemon — the exact failure a new field on ``Hello`` would
+    cause, and the reason capability travels as an event at all. A new event is
+    dropped harmlessly by an old daemon and read by a new one, which is what lets
+    this ship with ``PROTO_VERSION`` still at 1.
+
+    Why the distinction has to reach the harness at all: an empty ``methods``
+    list has three causes with three different remedies, and telling them apart is
+    the whole point of ``capabilities_known`` and this event. (1) The build cannot
+    serve the method — update the extension. (2) The build CAN and the operator
+    has not turned its switch on — send them to the switch, because no update
+    will change it. (3) The build should serve it and did not — a wedge. Without
+    this event (2) is indistinguishable from (3), and the user is sent to toggle
+    an extension that is working perfectly.
+
+    ``disabled`` names only methods the ACTIVE BUILD supports; a switch this
+    build has no code for must not appear here, because the remedy for it is an
+    update, not a toggle. The extension computes it from its own switch table and
+    its live permission state, so a switch whose Chrome permission was revoked
+    reports as disabled rather than as on.
+    """
+
+    event: Literal["capability_switches"] = "capability_switches"
+    disabled: list[str] = Field(default_factory=list)
+    version: str = ""
 
 
 class TabClosed(WireModel):

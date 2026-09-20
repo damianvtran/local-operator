@@ -453,3 +453,39 @@ def test_a_plain_stored_notice_is_a_notice_row_whatever_its_provenance() -> None
     # A DELIVERY envelope is not a notice: it has its own parser, and a person
     # quoting one keeps their words (pinned in the fold tests).
     assert not is_harness_notice_row(Message.user("<parent-message>\nwhy does my log show this?"))
+
+
+def test_every_harness_notice_formatter_produces_a_recognised_head() -> None:
+    """``_HARNESS_NOTICE_HEADS`` must cover every notice the harness mints.
+
+    The list is the only evidence a row written before the ``harness_injected``
+    stamp existed can offer about its provenance, so a formatter whose head is
+    missing from it hands the audit fold a row it will paint as the operator's
+    own sentence. Asserted from the FORMATTERS' real output rather than from a
+    copy of the strings: a head changed in ``incidents.py`` and not in
+    ``rows.py`` (or the reverse) fails here instead of quietly de-recognising
+    every stored row of that kind.
+    """
+    from local_operator.harness.rows import is_harness_notice_text
+    from local_operator.incidents import (
+        format_credential_message,
+        format_mcp_recovery_message,
+        format_mcp_unavailable_message,
+        format_model_switch_message,
+        format_shape_incident_message,
+    )
+
+    samples = {
+        "model switch": format_model_switch_message("zai/glm-5.3", "anthropic/claude-opus-5"),
+        "credential": format_credential_message("FOO_KEY"),
+        "credential redaction": format_shape_incident_message("bash", ["dsn-password"], "cmd"),
+        "mcp recovery": format_mcp_recovery_message("files", 3),
+        "mcp unavailable": format_mcp_unavailable_message("files", "MCP authorization failed"),
+    }
+    for label, text in samples.items():
+        assert is_harness_notice_text(text), f"{label} head is not recognised: {text!r}"
+    # The MCP-unavailable head specifically: one bracketed tag, and short enough
+    # for the desktop renderer's ``^\[[^\]]{1,32}\]\s*`` strip.
+    unavailable = samples["mcp unavailable"]
+    assert unavailable.startswith("[session warning] "), unavailable
+    assert len("[session warning]") <= 32

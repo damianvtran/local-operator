@@ -9,24 +9,36 @@ from typing import List, Optional, Tuple
 
 from fastapi import HTTPException
 
-logger = logging.getLogger(__name__)
+from local_operator.paths import config_dir
 
-LOCAL_OPERATOR_HOME = Path.home() / ".local-operator"
-UPLOADS_DIR = LOCAL_OPERATOR_HOME / "uploads"
+logger = logging.getLogger(__name__)
 
 BASE64_DATA_URL_PATTERN = re.compile(r"^data:(?P<mime_type>[^;]+);base64,(?P<data>.+)$")
 
 
-def _ensure_uploads_dir_exists() -> None:
-    """Ensures the uploads directory exists."""
+def uploads_dir() -> Path:
+    """Where a decoded chat attachment is written: ``<config dir>/uploads``.
+
+    Resolved on every call from :func:`local_operator.paths.config_dir` rather
+    than frozen into a module constant. This module used to build its own
+    ``Path.home() / ".local-operator" / "uploads"`` — a second copy of the rule
+    ``paths`` exists to own — so an isolated run that relocated
+    ``LOCAL_OPERATOR_CONFIG_DIR`` still had this module create a directory in
+    the operator's REAL home, at import time, as a side effect of importing the
+    chat routes. Import-time filesystem work is the other half of that bug: a
+    reader of the routes should not need write access to the user's home.
+    """
+    return config_dir() / "uploads"
+
+
+def _ensure_uploads_dir_exists(directory: Path) -> Path:
+    """Create ``directory`` and return it, at the point of use. See :func:`uploads_dir`."""
     try:
-        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        directory.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        logger.error(f"Could not create uploads directory {UPLOADS_DIR}: {e}")
-        raise RuntimeError(f"Failed to create uploads directory: {UPLOADS_DIR}") from e
-
-
-_ensure_uploads_dir_exists()  # Call on module load
+        logger.error(f"Could not create uploads directory {directory}: {e}")
+        raise RuntimeError(f"Failed to create uploads directory: {directory}") from e
+    return directory
 
 
 def parse_base64_data_url(data_url: str) -> Tuple[str, bytes]:
@@ -92,7 +104,7 @@ def save_base64_attachment(data_url: str) -> str:
         extension = ".html"
 
     filename = f"{uuid.uuid4()}{extension}"
-    file_path = UPLOADS_DIR / filename
+    file_path = _ensure_uploads_dir_exists(uploads_dir()) / filename
 
     try:
         with open(file_path, "wb") as f:

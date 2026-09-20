@@ -125,7 +125,7 @@ Sensitive responses are `Cache-Control: no-store`; rejected input is not echoed
 by validation responses.
 
 Two surfaces are deliberately **outside both gate families**, so no bearer and no
-claim gates them: `/v1/chat`, `/v1/sse`, `/v1/ws`, `/v1/static`, and the
+claim gates them: `/v1/chat`, `/v1/sse`, `/v1/static`, and the
 `/v1/models/...` sub-paths (the gate matches the exact `/v1/models` template).
 This predates the claim handshake and is unchanged by it; on a daemon whose
 allowlist admits an origin, a claim still removes their CORS grant from every
@@ -134,6 +134,15 @@ allowlist-less daemon keeps the echo (see the `null`-origin residual above) and
 an unauthenticated local caller can still reach them either way. Widening the
 gate to cover them is a separate, larger decision and is recorded rather than
 made here.
+
+The deprecated `/v1/ws` socket surface was also in that ungated set and is now
+**gone** — route, mount and fan-out — so it is no longer listed. This is a
+wire-protocol change, not a widening of the gate: an installed desktop build
+that probes `/v1/sse/capabilities` and falls back to the socket when SSE is
+unavailable or goes silent now has no second transport against this backend and
+must be updated. The capabilities payload names `"sse"` alone; a client that
+reads `transports` still finds it, and a client that reads the removed
+`websocket` key finds no such key rather than a malformed one.
 
 ## Providers and accounts
 
@@ -148,7 +157,32 @@ contains an API key, access token, refresh token, or complete stored grant.
   storage provider. The mock test transport is not an end-user provider.
   `configured` means credential presence, **not** a successful connection test.
 - `GET /v1/auth/status`: redacted stored account identities and credential types.
-  Environment credentials are not removable stored accounts.
+  Environment credentials are not removable stored accounts. The result also
+  carries `radient_login` and `tunnel_remedy`, because a row can be `configured`
+  with an unexpired access token and still be refused by the identity provider.
+  **Both are objects, not strings.** `radient_login` is
+  `{"credential_id": int|null, "state": "ok"|"login_required"|"unknown"}` — the
+  same shape as the `login` object on `GET /v1/desktop/tunnel` — and
+  `tunnel_remedy` is `{"command": str, "url": str}` or `null`, the same shape as
+  `remedy` there. A renderer written from a sentence that called them a state and
+  a command reads a dict where it expects a string.
+  `unknown` means the check could not run and never means "the login is dead".
+  The verdict is decided from this machine's own credential store, but it is not
+  free of the network: a stored access token outside its refresh skew makes the
+  store attempt a refresh, which is a POST to a token endpoint. That one call is
+  bounded (`tunnels/report.py`'s `REFRESH_WAIT_S`, 2 s) and a non-`ok` verdict is
+  reused for the window the store's own cascade blocks a failed credential for
+  (`VERDICT_TTL_S`, 60 s), so a partitioned network costs this poll one bounded
+  wait per window and the answer on expiry is `unknown`. Both bounds exist
+  because this route is polled beside an interactive login form.
+  `login_required` here is the SAME condition `POST /v1/desktop/radient` types as
+  `grant_invalid` (401 `radient_credential_refused`): both key on the store's own
+  dead-grant verdict (`CredentialInvalidError`), which this branch also widened
+  to cover a token endpoint that answers in prose (Radient's
+  `{"error": "Token refresh failed: refresh token is expired or revoked"}`). A
+  renderer may treat the two as one state; the vocabulary differs because this
+  one is the tunnel's persisted reason (the park file, `lop tunnel status` and
+  the phone's 503 all use it) and that one is a per-request refusal code.
 - `POST /v1/auth/login` with `{provider: <method id>}` starts a login operation.
 - `GET /v1/auth/operations/{id}` returns `id`, `provider`, `state`, `message`,
   `auth_url`, `instructions`, `input_required`, `prompt_id`, and `expires_in`.
@@ -175,6 +209,38 @@ provider destinations and HTTP loopback URLs are accepted. Device instructions
 are display/copy content; input-required prompts are paste controls. The
 QwenCloud usage-OAuth method also requires its inference API key; a device grant
 alone is not an inference credential.
+
+## Tunnel state
+
+- `GET /v1/desktop/tunnel`: this machine's remote-access state, read-only, as
+  `lop tunnel status --json` reports it. `result.configured` is false when no
+  tunnel is enrolled on this machine (every other field is then a null/empty
+  placeholder, and the connector state is the literal `not configured`).
+  `result.cloud.source` is always `cached` here: the route answers about THIS
+  machine and never waits on an upstream call, which is also the only kind of
+  answer available when the login or the network is what is broken.
+  `result.connector.state` is one of `parked`, `connected`, `connecting`,
+  `not serving`, `stopped`, `not configured`, `unknown` (`unknown` only when a
+  caller asked not to probe the loopback gateway); `result.login.state` is one
+  of `ok`, `login_required`, `unknown`, where `unknown` means the check could not
+  run and never means "the login is dead". `result.remedy` is
+  `{"command": str, "url": str}` or `null`: the command that clears the
+  condition, with the console URL that belongs beside it. The remedy is a
+  terminal command, so the UI shows it rather than running it, and this route has
+  no write half. It is an OBJECT rather than a bare string for that reason — the
+  URL travels with the command.
+  **`connector.detail` names no command.** It is one surface-neutral sentence
+  that this route, `lop tunnel status` and the park file all print verbatim, and
+  the TUI renders it too, so a command baked into it would be a slash command
+  handed to a desktop callout (or a shell command handed to a composer). A
+  renderer that wants to offer the fix appends `remedy.command` in its own
+  surface's spelling: `lop login radient` in a shell, `/login radient` in the
+  app's composer. The same applies to `radient_login`/`tunnel_remedy` on
+  `GET /v1/auth/status`.
+
+There is no SSE frame for this. It changes when a person signs in or edits the
+console, so the app polls it on open and refetches when a sign-in it started
+settles; a new frame kind would carry minutes-old news.
 
 ## Settings
 
@@ -669,11 +735,48 @@ that. Retrying under the SAME id replays this receipt rather than re-delivering
 the text, in every disposition: `pending` and `failed` are honest answers for
 THIS id, and a re-issue therefore takes a NEW one.
 
-**A `pending` admission that fails LATER is announced, not logged.** The receipt
-has been sent by then, so the failure has no caller left to reach; the host
-publishes an `admission.failed` frame on the SESSION's stream
-(`{request_id,command,status,detail}`, the same vetted `detail`) where the
-mounted viewer reads it.
+**A submit is ACKNOWLEDGED on the stream before the runtime is engaged.** The
+receipt above is the authority on whether the owner took the text, and on a
+session with no runtime it is seconds away — the submit POST carries the cold
+engage (spawn, import, construct, bind), measured at p50 2.6-9.5 s — so until it
+lands the viewer has nothing to paint and the user is told nothing. The host
+therefore publishes an `admission.accepted` frame on the SESSION's stream
+(`{request_id,mode}`) BEFORE it acquires the bridge, i.e. before anything can be
+engaged, and the viewer treats it as "the host has this request and is starting
+the runtime for it" — never as the owner's acknowledgement, and never as the
+turn having run. It is not emitted at all by a daemon that has latched against
+new work, and a retry under the same id replays its receipt without a second
+frame.
+
+**And it is RESOLVED, on the same stream, by whatever follows it.** Because the
+acknowledgement precedes everything that can refuse the request, an
+`admission.failed` frame with the SAME `request_id` is published when the inline
+admission is refused — an unreachable runtime, an owner that leaves
+mid-admission, a daemon that latches after the acknowledgement. A viewer reads
+the pair as one submit; a caller that only reads HTTP sees the same outcome as
+the 5xx it was answered with. Without the outcome a mounted viewer — and every
+later viewer that replayed the acknowledgement — would hold a promise that never
+resolves, which is a defect rather than an omission (review round 1, R1).
+
+**"At most once" is per ATTACHMENT and bounded, not a global guarantee**, and the
+qualifier is the honest half of it: the dedupe memory lives on the bridge
+(`ANNOUNCED_ADMISSION_HISTORY`, 64 ids), it is cleared when the epoch rolls, and
+a session with no attached viewer has no bridge to publish on at all — so a
+client must treat both frames as notices about the connection it is reading, the
+same way it treats everything else on the session stream. What a client can rely
+on is the pair's ORDER and its correlation: same `request_id`, and the outcome
+never before the acknowledgement.
+
+**An admission that fails is ANNOUNCED, not logged.** Two paths reach the same
+frame. The DETACHED one (`/commands`) has already sent its receipt — `pending` —
+so the failure has no caller left to reach. The INLINE one (`/messages`) has
+already acknowledged the submit on the stream (see "A submit is ACKNOWLEDGED"
+above) even though its caller is still on the line. Either way the host publishes
+an `admission.failed` frame on the SESSION's stream — `{request_id,mode,status,`
+`detail}` where this host submitted the turn itself, `{request_id,command,status,`
+`detail}` for a dispatched `/commands` receipt, with the same vetted `detail` in
+both — where the mounted viewer reads it, and the log line stays for an operator
+looking at the process.
 
 The frame is LIVE AND RETAINED **for the life of the attachment**, and that
 qualifier is the whole of what it promises. A viewer already connected reads it,
@@ -842,9 +945,22 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    `focus_policy}`. It is NOT an `AgentEvent` and must not be painted into the
    transcript; a renderer that does not know the type ignores it and still
    advances its receipt cursor.
-6. `admission.failed` carries `{request_id,command,status,detail}` for a
-   `/commands` admission whose receipt answered `pending` and which then failed
-   (see "Every action receipt..." above). It is published LIVE AND RETAINED for
+6. `admission.accepted` carries `{request_id,mode}` and is published the instant
+the host takes a `/messages` submit — BEFORE the session's bridge is acquired and
+before any runtime is engaged (see "A submit is ACKNOWLEDGED on the stream"
+above). It is NOT an `AgentEvent` and must not be painted into the transcript: it
+is a notice about a request, not a turn, and a renderer that does not know the
+type ignores it and still advances its receipt cursor. Never emitted by a daemon
+that has latched against new work, and emitted at most once per `request_id` PER
+ATTACHMENT (bounded memory on the bridge, cleared when the epoch rolls) — see the
+qualifier under "A submit is ACKNOWLEDGED" for what that is worth.
+7. `admission.failed` carries `{request_id,mode,status,detail}` when the INLINE
+   `/messages` admission it acknowledged is refused, and
+   `{request_id,command,status,detail}` for a `/commands` admission whose receipt
+   answered `pending` and which then failed (see "Every action receipt..." and
+   "An admission that fails is ANNOUNCED" above). The `request_id` is the one the
+   acknowledgement carried, so a renderer resolves the pair rather than matching
+   prose. It is published LIVE AND RETAINED for
    the life of the ATTACHMENT: a viewer already connected reads it, but a cold
    session — the case where nothing else holds it — is detached by that same
    admission's release, so the next attach starts a new epoch with an empty
@@ -1398,6 +1514,7 @@ absent.
 |---|---|---|---|
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+| `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

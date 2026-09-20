@@ -31,7 +31,9 @@ from local_operator.info.model import (
     SubagentLine,
 )
 from local_operator.session.runtime.types import (
+    BUILD_DRAIN_PROGRESS_S,
     LEAVING_FOR_BUILD,
+    LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
     SIGNAL_DRAIN_S,
     bound_text,
@@ -1311,7 +1313,12 @@ def test_a_narrow_frame_keeps_the_qualifier_on_the_row_it_qualifies(width: int) 
     the ROW carries the same fact again. What must not happen is the row going
     quiet: a reader on a narrow terminal has to see that this session is not
     answering, ahead of the uptime and the memory figure they can do without.
+
+    This is the row the whole visual change is about: it used to draw the same
+    ``✗`` in the same ``danger`` ink as a session whose last turn failed.
     """
+    from local_operator.tui.widgets.session_picker import WEDGED_MARKER
+
     rows = [
         line
         for line in _lines(_snapshot(sessions=_quiet_owner_sessions()), width=width)
@@ -1320,7 +1327,10 @@ def test_a_narrow_frame_keeps_the_qualifier_on_the_row_it_qualifies(width: int) 
     assert len(rows) == 1, rows
     assert "not answering" in rows[0], rows[0]
     assert "last heartbeat 4m ago" in rows[0], rows[0]
-    assert "✗" in rows[0], rows[0]
+    # Symbolic, not a literal: this row's glyph is ``WEDGED_MARKER``, which moved
+    # off ``✗`` precisely because a stale beat is not a failed turn, so pinning
+    # the character here is what let the two states share one mark.
+    assert WEDGED_MARKER in rows[0], rows[0]
     # The jargon is gone from the row: the state token survives only where a
     # machine reads it (the export's brackets and the JSON), never as the word
     # a person is given for what they are looking at.
@@ -1335,7 +1345,8 @@ def test_below_the_note_floor_the_words_survive_even_though_the_age_does_not(
 
     56 cells is the body width a 70-column terminal leaves this card, and
     ``_NOTE_MIN`` sheds EVERY meta below 60 — so the row degraded to a bare
-    ``✗`` beside a truncated name, which is the unqualified state D1 rejected.
+    state glyph beside a truncated name, which is the unqualified state D1
+    rejected.
     The words are the irreducible fact and now have their own rung; the age and
     the memory figure are the optional details and are still shed.
     """
@@ -1389,6 +1400,48 @@ def test_below_the_note_floor_a_draining_row_keeps_its_own_words(width: int) -> 
     build = row(LEAVING_FOR_BUILD)
     assert "leaving for build" in build, build
     assert "min" not in build, build
+
+    # The BOUNDED handover names one, and it is the whole point of its shelf form:
+    # this row is the state whose consequence the reader has to act on at the
+    # narrowest width, where the fleet column and the wide rung have both shed the
+    # phrase (design round 1, D2).
+    overdue = row(LEAVING_FOR_BUILD_OVERDUE)
+    assert f"no movement {bound_text(BUILD_DRAIN_PROGRESS_S)}" in overdue, overdue
+
+
+def test_a_bounded_handover_keeps_its_words_at_eighty_columns() -> None:
+    """D2, as an assertion: this row used to lose EVERY word at 80 columns.
+
+    Above ``_NOTE_MIN`` the row is drawn from the meta ladder, widest rung first,
+    and the phrase has to fit the card on its own before any of the optional
+    figures are considered. The bounded handover's phrase was wider than the budget
+    at card 65 — the ordinary build drain's 48 cells fitted and its 54 did not — so
+    the ladder shed it ENTIRELY and the row rendered as ``● overdue…`` beside a
+    working session that still showed its own phrase. The phrase now measures the
+    same 51 cells the signal one does, which is exactly the budget at this width.
+    """
+    line = SessionLine(
+        pid=4245,
+        kind="daemon",
+        state="live",
+        session_id="a1b2c3d4e5f6",
+        conversation_name="overdue01",
+        model_label="test/mock",
+        uptime_s=2.0,
+        rss_bytes=125_000_000,
+        busy=True,
+        leaving=LEAVING_FOR_BUILD_OVERDUE,
+    )
+    snapshot = _snapshot(sessions=SessionsInfo(lines=(line,), total=1, live=1))
+    # Filtered on the PHRASE, not the name: at this width the label rung negotiates
+    # the name down to ``overdue…`` while the meta keeps its words, which is exactly
+    # the trade this test is about.
+    rows = [text for text in _lines(snapshot, width=65) if LEAVING_FOR_BUILD_OVERDUE in text]
+    assert len(rows) == 1, rows
+    assert bound_text(BUILD_DRAIN_PROGRESS_S) in rows[0], rows[0]
+    # And the words are not borrowed from another trigger: the row says which
+    # departure it is and why, in this trigger's own sentence.
+    assert "no movement" in rows[0], rows[0]
 
 
 def test_an_unreadable_roster_renders_unknown_not_a_denial() -> None:
