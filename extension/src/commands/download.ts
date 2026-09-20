@@ -5,6 +5,30 @@ import { safeName } from "../driver/file-transfer-policy";
 import { CAPS } from "../driver/file-transfer.tables.gen";
 import { click } from "./input";
 
+/** ``scheme://host:port`` for a URL, or ``""`` when it is not one.
+ *
+ * Origin granularity rather than the whole URL, and the SAME granularity Python
+ * applies (`browser_files._origin_of`) to the `referrer` it is given: comparing
+ * full URLs would drop the association whenever a page moved between two paths of
+ * the same site, and comparing nothing at all is how a browser-wide API turns into
+ * a browser-wide action. `URL.origin` is used rather than string surgery because
+ * Chrome canonicalises both inputs itself (lowercased host, default port omitted),
+ * which is exactly the form the Python side parses.
+ */
+function originOf(url: string): string {
+  if (!url) return "";
+  try {
+    const parsed = new URL(url);
+    // `file:`/`data:`/`about:` origins are the literal string "null", which is not
+    // an origin anything can be attributed to — reported as unknown instead, so an
+    // unattributable referrer can never equal an unattributable page and count as
+    // a match.
+    return parsed.origin === "null" ? "" : parsed.origin;
+  } catch {
+    return "";
+  }
+}
+
 /* Save a file the PAGE offers, by watching what Chrome actually writes.
  *
  * THE PRIMITIVE, and why it is `chrome.downloads` and not the debugger.
@@ -151,6 +175,28 @@ export async function download(
     url = "";
   }
 
+  /* WHICH DOWNLOADS THIS CALL MAY TOUCH (round-1 R2/R7).
+   *
+   * `chrome.downloads` is browser-wide and a `DownloadItem` carries no `tabId`
+   * (verified on Chrome 153.0.8013.53: the field is simply absent), so the ONLY
+   * association available is the item's `referrer` — the page that started it.
+   * Everything this handler does to a transfer (cancel it at the ceiling, cancel
+   * it at the per-call count, cancel it at the deadline) is destructive, and doing
+   * it to a download the user started by hand in another tab would delete their
+   * file: the previous shape cancelled on bytes alone, so a large manual download
+   * running during a call was stopped by a ceiling that was never about it.
+   *
+   * An UNKNOWN page origin (`url` empty, because the tab read failed) means nothing
+   * is owned: the conservative direction, and the same one `browser_files` takes on
+   * the harness side — a save that declines, never a user's file that disappears.
+   * An EMPTY referrer is not ownership either (a redirect chain or a user's
+   * "Save page as" report none), so such a transfer is reported and never
+   * cancelled; the harness still sees it and refuses it if its own checks fail.
+   */
+  const pageOrigin = originOf(url);
+  const owns = (item: chrome.downloads.DownloadItem): boolean =>
+    pageOrigin !== "" && originOf(String(item.referrer ?? "")) === pageOrigin;
+
   const selector = typeof params.selector === "string" ? params.selector.trim() : "";
   const requested = Number(params.timeout_s ?? 0);
   const timeoutS =
@@ -197,7 +243,11 @@ export async function download(
     void chrome.downloads
       .search({ id: delta.id })
       .then(([item]) => {
-        if (item && Number(item.bytesReceived ?? 0) > ceiling) cancel(delta.id, "over_cap");
+        // `owns` first: a ceiling this call set does not apply to a transfer this
+        // call did not cause (R2/R7).
+        if (item && owns(item) && Number(item.bytesReceived ?? 0) > ceiling) {
+          cancel(delta.id, "over_cap");
+        }
       })
       // A failed or late read is not a reason to throw out of a Chrome event
       // handler; the poll in the wait loop enforces the same ceiling.
@@ -236,14 +286,20 @@ export async function download(
       );
       for (const item of items) {
         if (before.has(item.id)) continue;
+        const ours = owns(item);
         if (!observed.has(item.id)) {
-          if (accepted.size >= maxFiles) {
+          // Only OUR transfers consume the per-call slots: a stranger's download
+          // taking one would push our own file over the count and cancel it
+          // (round-1 R7), and a stranger's transfer is never cancelled by this
+          // call either — it is reported so the harness can decide (and refuse it
+          // without touching it).
+          if (ours && accepted.size >= maxFiles) {
             // The per-call ceiling, applied to the TRANSFER rather than to the
             // report: letting the extra files finish and then ignoring them
             // would leave the user's disk holding the evidence of a download the
             // session never kept.
             cancel(item.id, "over_count");
-          } else {
+          } else if (ours) {
             accepted.add(item.id);
           }
           observed.set(item.id, item);
@@ -259,7 +315,11 @@ export async function download(
           observed.set(item.id, item);
           lastChangeAt = Date.now();
         }
-        if (item.state === "in_progress" && Number(item.bytesReceived ?? 0) > ceiling) {
+        if (
+          ours &&
+          item.state === "in_progress" &&
+          Number(item.bytesReceived ?? 0) > ceiling
+        ) {
           cancel(item.id, "over_cap");
         }
       }
@@ -267,12 +327,13 @@ export async function download(
       const settled = observed.size > 0 && allTerminal && Date.now() - lastChangeAt >= SETTLE_MS;
       if (settled) break;
       if (Date.now() >= deadlineAt) {
-        // Never finished: whatever is still moving is cancelled, and the partial
-        // file is reported so the harness can remove it. A transfer left running
-        // past the command's own deadline would be a write to the user's disk
-        // that nothing is watching and no report mentions.
+        // Never finished: whatever is still moving AND ours is cancelled, and the
+        // partial file is reported so the harness can remove it. A transfer left
+        // running past the command's own deadline would be a write to the user's
+        // disk that nothing is watching and no report mentions — but a stranger's
+        // transfer is not ours to stop (R2), so it is only reported.
         for (const item of observed.values()) {
-          if (item.state === "in_progress") cancel(item.id, "unfinished");
+          if (item.state === "in_progress" && owns(item)) cancel(item.id, "unfinished");
         }
         break;
       }

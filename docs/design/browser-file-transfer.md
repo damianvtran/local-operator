@@ -1142,6 +1142,28 @@ deliberately does NOT call `chrome.downloads.erase`: the history row is the only
   our own writes from the owner's history is a worse default than a row that says
   "this file is gone". Accepted, and named here so nobody "tidies" it later
   without deciding to.
+- **R9 (new with §17.14 — round 1's R3)** A save can DECLINE because the session
+  could not confirm which page started the transfer. `browser_files.intake_landed`
+  refuses (and leaves alone) every reported path when it has no driven origin to
+  compare against, which is the state the tool passes when the extension could not
+  read the driven tab's URL. The alternative was measured and is worse: with the
+  guard skipped, a completed download from ANOTHER origin was moved into the
+  session directory and removed from the user's folder, with a success result and
+  no refusal row. A refusal the model can explain ("this session could not confirm
+  which page started the download") is the exchange taken here.
+- **R10 (new with §17.14 — round 1's R2/R7)** The harness never cancels or deletes
+  a transfer it does not own, and THAT is not conditional: an item whose referrer
+  names another origin is refused and left where it is, a cancelled one included.
+  Two consequences are accepted rather than hidden: (a) the per-call ceiling and
+  the byte ceiling at the EXTENSION end now apply only to transfers the extension
+  can attribute to the driven page, so a transfer with NO referrer is neither
+  cancelled nor counted against the per-call limit — it is reported, and the
+  harness refuses it if its own checks fail; (b) for an own transfer the extension
+  cannot attribute, the byte ceiling is enforced where it always was for the
+  harness's purposes: after it lands, by removing the file. The ceilings are
+  defence in depth around a policy the harness applies to the landed bytes, so
+  what changes here is how much can land, not whether a refused file survives —
+  it does not.
 
 ---
 
@@ -1896,14 +1918,26 @@ the E2E above.
 
 * Whether Chrome's store review treats a new `optional_permissions` entry as a permission
   change for an already-published item (§12.4 E2x, answered as far as a local rig can).
-* **`chrome.permissions.request` in headless Chrome: MEASURED, and it does not grant.**
-  Called from the service worker with `userGesture: true`, the promise resolves to an
-  object rather than to a boolean and `chrome.permissions.contains({permissions:
-  ['downloads']})` stays `false`; headless has no UI to answer the prompt. That is why
-  the rig grants the permission install-time (a disclosed rig-only edit) instead of
-  pretending the switch path can be driven headlessly. **The options page's own request
-  flow — the real gesture, the real prompt, and the refusal branch — is therefore NOT
-  covered by this rig** and is QA's/design's to exercise in a real browser.
+* **`chrome.permissions.request` in headless Chrome: MEASURED, and it does not
+  grant.** Called from the service worker with `userGesture: true`, the promise did
+  not settle within the rig's wait at all (a 120 s CDP `awaitPromise` returned with
+  no value), and what it eventually handed back carried no grant:
+  `chrome.permissions.contains({permissions: ['downloads']})` stayed `false`. **The
+  first wording here said the promise "resolves to an object", and that was this
+  instrument's reading of an UNSETTLED promise — corrected in round 1 (R5)**, which
+  is why the page's own code now treats an unanswered request as a refusal, bounds
+  the wait, and verifies with `contains` instead of trusting the resolved value.
+  **The options page's own request flow — the real gesture, the real prompt, and the
+  refusal branch — is therefore NOT covered by this rig** and is QA's/design's to
+  exercise in a real browser.
+* **A rig hazard, recorded because it makes a MISSING extension look like a broken
+  one**: branded Chrome 137+ silently IGNORES `--load-extension`. The extension's
+  PAGES still resolve under their `chrome-extension://<id>/…` URL, so the failure
+  presents as a manifest problem — measured on Chrome 153.0.8010.53, an options page
+  whose `chrome.runtime` and `chrome.storage` were both `undefined`, with no load
+  error in Chrome's log. The supported path is CDP `Extensions.loadUnpacked` on the
+  browser-level endpoint (what this repo's own `extension/scripts/popup-states-shot.mjs`
+  already does, and what this round's frames used).
 * The app host's half is untouched by this amendment: `local-operator-ui` PR B keeps its
   gate, and the switches are the EXTENSION's configuration, as the brief says.
 * The `~/Downloads` window (R7) as a user sees it — the rig redirects the download
@@ -1914,3 +1948,115 @@ the E2E above.
   appears in `chrome.downloads.search`, so the harness never saw or moved it. Recorded
   because an unexplained file in a download directory is exactly the kind of thing this
   feature must not cause — and the evidence says it is not ours.
+
+---
+
+### 17.14 Round-1 remediation: what the review, QA and design rounds changed
+
+Written by the implementing agent on `feat/browser-extension-downloads`, in ONE
+remediation commit against the head the round-1 reports were written on
+(`cca88046`). Every item below is a change in that commit; the evidence is the
+output of the run that produced it, and anything NOT re-run is named as such at
+the end rather than implied.
+
+**Two blockers — both "the tree cannot be green as it stands":**
+
+1. **The absent-state regression (review B1).** The new "the transfer was stopped"
+   branch tested `state != "complete"`, so an item reporting NO state at all fell
+   into it: the sentence the existing assertion expects became unreachable, and the
+   copy emitted instead nested one parenthesis in another — *"the transfer was
+   stopped (the transfer did not complete (state unknown))"*. The gate is now
+   `bool(cancelled) or (bool(state) and state != "complete")`, and the shared
+   `_stop_clause` produces a clause that reads inside both sentences.
+   *Direct check, real output: an item with no `state` whose file is absent →
+   `the file the host named is not there`, disposition `absent`; a cancelled item whose
+   partial is gone → `the transfer was stopped — its time ran out — and the partial
+   file is already gone`, disposition `absent`.*
+2. **The session-deletion guard (CI red).** `_unlink_entry::os.unlink` and
+   `intake_landed::shutil.move` are allow-listed WITH their proof rather than
+   silenced: `intake_landed` refuses every source that is inside the config root
+   before any of them runs, and the destination is composed by `session_dir()` as
+   `<config>/browser/downloads/<stamp>-<session8>/` — a SIBLING of `sessions/`, never
+   a descendant. *`tests/unit/session/test_no_session_deletion.py`: 224 passed.*
+
+**Four majors, two of them destructive paths, fixed first:**
+
+3. **R2 — ownership now precedes every destructive branch.** The referrer test moved
+   above the cancelled/duplicate/content branches, so a transfer from another origin
+   is refused and LEFT WHERE IT IS, a cancelled one included, and the extension no
+   longer cancels a transfer it cannot attribute (`download.ts` gained the same
+   ownership test on all three cancel paths: the ceiling, the per-call count, and
+   the deadline). *Direct check: a cancelled foreign item → `kept`, file survives;
+   extension suite: a new test proves a foreign download is reported and never
+   cancelled — 295 pass / 0 fail.*
+4. **R3 — an unknown origin refuses instead of skipping the check.** A page origin
+   that cannot be determined (the tool passes `""` when the extension could not read
+   the driven tab's URL) refuses every reported path and removes nothing.
+   *Direct check: two items, one foreign and one plausible, with
+   `page_origin=""` → `moved: ()`, both files still on disk, both refusals `kept`.*
+5. **R4 — the peer's own refusal is no longer rendered as a connection problem.**
+   `requireConsent` throws with `{method, disabled_by_operator}`, and
+   `_capability_message` renders that as the consent sentence before its
+   "no browser is attached" fallback. *New test in
+   `tests/unit/browser_bridge/test_capability_gate.py` asserts the copy names the
+   method, the switch and its location, and does NOT say "no browser is attached".*
+6. **R5 — the page verifies the grant and bounds the wait.** `enableDownloads`
+   passes the request through the API deadline (a new
+   `PERMISSION_REQUEST_DEADLINE_MS = 120_000`), treats a non-settling or refused
+   request as a refusal, and confirms the grant with `chrome.permissions.contains`
+   before storing the flag — so an unanswered prompt can no longer record consent
+   for a permission that was never granted (see the corrected measurement above).
+
+**Design stream (frames re-taken on the new head, real built extension, real headless
+Chrome, `Extensions.loadUnpacked`):**
+
+7. **D1 — the permission now has a representation on the page.** With the flag set
+   AND no grant (the state a revocation while the page was closed leaves behind),
+   the page used to render an untouched default: both switches off, empty note,
+   byte-identical `innerText` to a fresh install. It now repairs the flag and paints
+   the reason. *Measured in the rendered page:*
+   `{"state":"Downloads and uploads are both off, …","notice":"Chrome does not hold
+   the downloads permission for this extension, so downloads are off. Turn the switch
+   on again to ask for it once more.","checked":false,"attention":true}` — against
+   the default state's `{"… ","notice":"","checked":false,"attention":false}`.
+8. **D2/D3/D4** — the attention note is now a different treatment from the quiet one
+   (border and ink, never the danger colour, which is reserved for the all-sites
+   banner); the off toggle's outline moved from `--hairline-strong` to `--ink-dim`
+   (**1.50:1 → 5.43:1** on the light ramp, **1.42:1 → 5.11:1** on the dark one,
+   against WCAG 1.4.11's 3:1), with a prose state line added beneath the switches;
+   and both notices moved BELOW the two rows so toggling one capability no longer
+   shifts the other row (45.5 px).
+9. **D5/U1/U2/U3** — the model-facing refusal now carries the permission clause
+   ("Turning it on asks Chrome for the 'downloads' permission; if the user refuses
+   that, the switch stays off") and names the toolbar → Settings route the popup's own
+   footer already offers; while a prompt is unanswered the switch paints the
+   EFFECTIVE state and says the page is waiting.
+
+**Minors, all in the same commit:** R6 (the worker re-announces on
+`chrome.permissions.onRemoved`/`onAdded`, so a revoked grant stops being advertised
+without waiting for the socket to drop); R7 (only attributed transfers consume the
+per-call slots); R8 (the extension's shape — a file outside the directory plus a
+reported path — is now driven through `_browser_download` at the tool level, with a
+second test proving a foreign one is left in place); Q2 (four dispositions rather
+than a boolean: `deleted`, `kept`, `failed`, `absent` — a path the host named that is
+not there is now `absent`, so "could NOT be removed — it is still on disk" can no
+longer describe an entry that never existed, and "left in place" is reserved for an
+entry that IS there and that we chose not to touch); Q3
+(`capabilities` is sent before `capability_switches`, so the ~15 ms window can no
+longer show a just-enabled method absent from both frames).
+
+**What was NOT re-run, and why — the honest half.** The assembly E2E
+(daemon + built extension + real Chrome, driven through the tool) was **re-attempted
+and did not complete this round**: the rig that produced §17.13's run was in `/tmp`
+and did not survive the host's reboots, and the re-authored rig now reaches the point
+of loading the built extension into branded Chrome over CDP and obtaining its worker,
+but the extension's dial to the isolated daemon does not complete (`paired: false`,
+`extension_id: ""` in the published record) — measured, not assumed. So this round's
+E2E-grade evidence is: the direct Python checks above, the extension suite (295
+pass / 0 fail), the guard test, `gen_ts --check` (clean after regenerating the
+vendored tables, whose input hash moved with these edits), `tsc --noEmit` (clean), and
+the three rendered frames. The rig, its two rig-only edits (install-time `downloads`
+grant, throwaway identity key) and its `--load-extension` finding are handed to the
+QA round at `~/workspace/lo-dl-e2e/rig.py` (`shots.py` beside it produced the frames);
+the round-1 review's own repro of the failing test is the second independent
+instrument this round leans on.

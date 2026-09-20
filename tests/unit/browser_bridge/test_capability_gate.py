@@ -344,6 +344,12 @@ async def test_download_with_the_switch_off_is_refused_before_any_socket_call(
     assert "Allow downloads" in copy
     assert "options page" in copy
     assert "No update is involved" in copy
+    # The permission mechanics travel with the refusal (round-1 D5): turning the
+    # switch on asks Chrome for a permission, and an agent that tells the user to
+    # turn it on without saying a browser prompt will appear has sent them into a
+    # dialog nothing warned them about.
+    assert "'downloads' permission" in copy
+    assert "Toolbar icon" in copy or "toolbar icon" in copy
 
 
 def test_the_extension_can_serve_download_and_only_when_switched_on() -> None:
@@ -384,3 +390,31 @@ def test_a_download_may_extend_its_own_budget_and_nothing_else_may() -> None:
     # No other method reads the key at all.
     upload = Request(id="r-4", method="upload", params={"timeout_s": 600})
     assert service._command_budget(upload) == COMMAND_TIMEOUTS["upload"]
+
+
+def test_a_consent_refusal_from_the_peer_names_the_switch_and_not_the_browser() -> None:
+    """The extension's OWN last gate, rendered where it belongs (round-1 R4).
+
+    `requireConsent` throws `capability_unsupported` at execution time, so the
+    payload carries no advertisement — no `extension_version`, no `capabilities`,
+    no `disabled` list, because the refusal never reached the record. An empty
+    payload used to fall through to the "no browser is attached" branch: the model
+    was told the browser was missing and no method was named at all, so the user was
+    sent to look at their connection instead of at the switch that was off.
+    """
+    from local_operator.browser_bridge.backend import BridgeError, format_error
+
+    copy = format_error(
+        BridgeError(
+            code=ErrorCode.CAPABILITY_UNSUPPORTED,
+            message="'download' is switched off in the browser extension",
+            data={"method": "download", "disabled_by_operator": True},
+        ),
+        action="download",
+        host="extension",
+    )
+    assert "no browser is attached" not in copy
+    assert "'download' is switched off" in copy
+    assert "Allow downloads" in copy
+    assert "options page" in copy
+    assert "'downloads' permission" in copy

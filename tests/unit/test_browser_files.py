@@ -503,6 +503,16 @@ def _downloaded(tmp_path: Path, name: str = "receipt.pdf", body: bytes = b"%PDF-
     return path
 
 
+#: The page this file's downloads are attributed to, matching the driven tab.
+#:
+#: It exists because ownership is now a GATE rather than a footnote: an item whose
+#: referrer names another origin is refused before anything is moved or removed, and
+#: an item reported while the session does not know which page it is driving is
+#: refused too (round-1 R2/R3). `_item` therefore carries a referrer by default —
+#: the shape the extension actually reports — and `_intake` supplies the origin.
+_PAGE_ORIGIN = "http://127.0.0.1:9/page"
+
+
 def _item(path: Path, **overrides: object) -> dict[str, object]:
     item: dict[str, object] = {
         "name": path.name,
@@ -510,9 +520,20 @@ def _item(path: Path, **overrides: object) -> dict[str, object]:
         "bytes": path.stat().st_size,
         "state": "complete",
         "cancelled": "",
+        "referrer": f"{_PAGE_ORIGIN}/index.html",
     }
     item.update(overrides)
     return item
+
+
+def _intake(items: object, directory: Path, **overrides: object) -> "bf.IntakeOutcome":
+    """`intake_landed` for a download this session's own page started.
+
+    The tests that are ABOUT the ownership gate call `bf.intake_landed` directly, so
+    the default here cannot hide the behaviour they assert.
+    """
+    overrides.setdefault("page_origin", _PAGE_ORIGIN)
+    return bf.intake_landed(items, directory, **overrides)  # type: ignore[arg-type]
 
 
 def test_intake_moves_the_landed_file_in_and_leaves_nothing_behind(tmp_path: Path) -> None:
@@ -520,7 +541,7 @@ def test_intake_moves_the_landed_file_in_and_leaves_nothing_behind(tmp_path: Pat
     directory = _quarantine(tmp_path)
     source = _downloaded(tmp_path)
 
-    outcome = bf.intake_landed([_item(source)], directory)
+    outcome = _intake([_item(source)], directory)
 
     assert outcome.refused == ()
     assert outcome.moved == ("receipt.pdf",)
@@ -538,7 +559,7 @@ def test_intake_skips_an_item_with_no_path_which_is_the_app_host(tmp_path: Path)
     directory = _quarantine(tmp_path)
     (directory / "receipt.pdf").write_bytes(b"%PDF-1.4\n")
 
-    outcome = bf.intake_landed([{"name": "receipt.pdf", "bytes": 9}], directory)
+    outcome = _intake([{"name": "receipt.pdf", "bytes": 9}], directory)
 
     assert outcome == bf.IntakeOutcome((), ())
     assert (directory / "receipt.pdf").exists()
@@ -554,14 +575,12 @@ def test_intake_deletes_a_cancelled_partial_and_says_which_cancel(tmp_path: Path
     directory = _quarantine(tmp_path)
     source = _downloaded(tmp_path, "big.bin", b"x" * 64)
 
-    outcome = bf.intake_landed(
-        [_item(source, state="interrupted", cancelled="over_cap")], directory
-    )
+    outcome = _intake([_item(source, state="interrupted", cancelled="over_cap")], directory)
 
     assert not source.exists()
     assert outcome.moved == ()
     (refusal,) = outcome.refused
-    assert refusal.deleted is True
+    assert refusal.disposition == bf.DELETED
     # The reason names the CEILING'S VALUE as the constant defines it, not a
     # rounded figure a second table could contradict: the cap is data
     # (`DOWNLOAD_MAX_BYTES`), and a message that said "256 MiB" would keep saying
@@ -579,11 +598,11 @@ def test_intake_never_deletes_a_file_it_cannot_corroborate(tmp_path: Path) -> No
     directory = _quarantine(tmp_path)
     source = _downloaded(tmp_path, "thesis.pdf", b"the user's own file")
 
-    outcome = bf.intake_landed([_item(source, bytes=999_999)], directory)
+    outcome = _intake([_item(source, bytes=999_999)], directory)
 
     assert source.exists(), "an uncorroborated file must survive"
     (refusal,) = outcome.refused
-    assert refusal.deleted is False
+    assert refusal.disposition == bf.KEPT
     assert "999999" in refusal.reason and "19 bytes" in refusal.reason
 
 
@@ -594,11 +613,11 @@ def test_intake_refuses_a_stale_file_but_leaves_it_alone(tmp_path: Path) -> None
     stale = source.stat().st_mtime - (bf.DOWNLOAD_TIMEOUT_MAX_S + 600)
     os.utime(source, (stale, stale))
 
-    outcome = bf.intake_landed([_item(source)], directory)
+    outcome = _intake([_item(source)], directory)
 
     assert source.exists()
     (refusal,) = outcome.refused
-    assert refusal.deleted is False
+    assert refusal.disposition == bf.KEPT
     assert "not written during this call" in refusal.reason
 
 
@@ -612,19 +631,19 @@ def test_intake_unlinks_a_symlink_entry_and_not_its_target(tmp_path: Path) -> No
     entry = link / "innocent.pdf"
     entry.symlink_to(secret)
 
-    outcome = bf.intake_landed([_item(entry)], directory)
+    outcome = _intake([_item(entry)], directory)
 
     assert not entry.exists()
     assert secret.read_text() == "private key material", "the target is untouched"
     (refusal,) = outcome.refused
-    assert refusal.deleted is True
+    assert refusal.disposition == bf.DELETED
     assert "not a regular file" in refusal.reason
 
 
 def test_intake_refuses_a_relative_path_and_a_missing_file(tmp_path: Path) -> None:
     directory = _quarantine(tmp_path)
 
-    outcome = bf.intake_landed(
+    outcome = _intake(
         [
             {"name": "a.pdf", "path": "Downloads/a.pdf", "state": "complete"},
             {"name": "b.pdf", "path": str(tmp_path / "Downloads" / "b.pdf"), "state": "complete"},
@@ -635,7 +654,8 @@ def test_intake_refuses_a_relative_path_and_a_missing_file(tmp_path: Path) -> No
     assert outcome.moved == ()
     assert "not absolute" in outcome.refused[0].reason
     assert "not there" in outcome.refused[1].reason
-    assert outcome.refused[0].deleted is False
+    assert outcome.refused[0].disposition == bf.KEPT
+    assert outcome.refused[1].disposition == bf.ABSENT, "nothing was there to remove"
 
 
 def test_intake_refuses_a_path_inside_our_own_config_root(tmp_path: Path) -> None:
@@ -645,9 +665,7 @@ def test_intake_refuses_a_path_inside_our_own_config_root(tmp_path: Path) -> Non
     ours.parent.mkdir(parents=True, exist_ok=True)
     ours.write_text("models: {}\n")
 
-    outcome = bf.intake_landed(
-        [{"name": "config.yml", "path": str(ours), "state": "complete"}], directory
-    )
+    outcome = _intake([{"name": "config.yml", "path": str(ours), "state": "complete"}], directory)
 
     assert outcome.moved == ()
     assert ours.exists()
@@ -660,13 +678,13 @@ def test_intake_refuses_a_name_the_session_already_holds(tmp_path: Path) -> None
     (directory / "receipt.pdf").write_bytes(b"%PDF-1.4\nthe first one")
     source = _downloaded(tmp_path)
 
-    outcome = bf.intake_landed([_item(source)], directory)
+    outcome = _intake([_item(source)], directory)
 
     assert outcome.moved == ()
     assert (directory / "receipt.pdf").read_bytes() == b"%PDF-1.4\nthe first one"
     (refusal,) = outcome.refused
     assert "already holds a file with that name" in refusal.reason
-    assert refusal.deleted is True, "the duplicate is removed rather than piled up"
+    assert refusal.disposition == bf.DELETED, "the duplicate is removed rather than piled up"
 
 
 def test_intake_accepts_a_file_already_in_the_session_directory(tmp_path: Path) -> None:
@@ -675,7 +693,7 @@ def test_intake_accepts_a_file_already_in_the_session_directory(tmp_path: Path) 
     landed = directory / "receipt.pdf"
     landed.write_bytes(b"%PDF-1.4\n")
 
-    outcome = bf.intake_landed([_item(landed)], directory)
+    outcome = _intake([_item(landed)], directory)
 
     assert outcome.moved == ("receipt.pdf",)
     assert outcome.refused == ()
@@ -694,7 +712,7 @@ def test_intake_refuses_a_download_another_page_started(tmp_path: Path) -> None:
     directory = _quarantine(tmp_path)
     source = _downloaded(tmp_path, "my-tax-return.pdf")
 
-    outcome = bf.intake_landed(
+    outcome = _intake(
         [_item(source, referrer="https://elsewhere.example/account")],
         directory,
         page_origin="https://example.test/export",
@@ -703,7 +721,7 @@ def test_intake_refuses_a_download_another_page_started(tmp_path: Path) -> None:
     assert outcome.moved == ()
     assert source.exists(), "the user's own download must survive"
     (refusal,) = outcome.refused
-    assert refusal.deleted is False
+    assert refusal.disposition == bf.KEPT
     assert "a page this session is not driving" in refusal.reason
 
 
@@ -719,7 +737,7 @@ def test_intake_accepts_an_absent_referrer_and_the_driven_pages_own(tmp_path: Pa
     blob = _downloaded(tmp_path, "export.csv")
     linked = _downloaded(tmp_path, "statement.pdf")
 
-    outcome = bf.intake_landed(
+    outcome = _intake(
         [
             _item(blob, referrer=""),
             _item(linked, referrer="http://127.0.0.1:9/form"),
@@ -739,7 +757,7 @@ def test_a_cancelled_transfer_whose_partial_is_already_gone_says_so(tmp_path: Pa
     is exactly the one the operator asked for."""
     directory = _quarantine(tmp_path)
 
-    outcome = bf.intake_landed(
+    outcome = _intake(
         [
             {
                 "name": "stall.bin",
@@ -752,7 +770,116 @@ def test_a_cancelled_transfer_whose_partial_is_already_gone_says_so(tmp_path: Pa
     )
 
     (refusal,) = outcome.refused
-    assert refusal.deleted is False
+    assert refusal.disposition == bf.ABSENT
     assert "the transfer was stopped" in refusal.reason
     assert "already gone" in refusal.reason
     assert "not there" not in refusal.reason
+
+
+def test_intake_refuses_a_cancelled_transfer_that_is_not_ours(tmp_path: Path) -> None:
+    """Ownership is decided BEFORE the destructive branches (round-1 R2).
+
+    The order used to be the other way round, so a cancelled transfer from ANOTHER
+    origin — a download the user started by hand, cancelled by the peer at the byte
+    ceiling — was DELETED by a refusal that was never about it, and the promised
+    "refused without deleting" held only for a transfer that had completed.
+    """
+    directory = _quarantine(tmp_path)
+    source = _downloaded(tmp_path, "the-users-own.iso", b"x" * 64)
+
+    outcome = _intake(
+        [
+            _item(
+                source,
+                state="interrupted",
+                cancelled="over_cap",
+                referrer="https://elsewhere.example/account",
+            )
+        ],
+        directory,
+    )
+
+    assert source.exists(), "a cancelled transfer we do not own must not be deleted"
+    assert outcome.moved == ()
+    (refusal,) = outcome.refused
+    assert refusal.disposition == bf.KEPT
+    assert "a page this session is not driving" in refusal.reason
+
+
+def test_intake_refuses_everything_when_it_cannot_name_the_driven_page(tmp_path: Path) -> None:
+    """An unknown origin must REFUSE, not skip the check (round-1 R3).
+
+    Repro before the fix: with `page_origin=""` — what the tool passes when it could
+    not read the driven tab's URL — a COMPLETED download from another origin was
+    moved into quarantine and removed from the user's Downloads, with no refusal row
+    and a success result. The safe direction is a save that declines.
+    """
+    directory = _quarantine(tmp_path)
+    foreign = _downloaded(tmp_path, "their-export.pdf")
+    ours = _downloaded(tmp_path, "our-export.pdf")
+
+    outcome = _intake(
+        [
+            _item(foreign, referrer="https://elsewhere.example/account"),
+            _item(ours),
+        ],
+        directory,
+        page_origin="",
+    )
+
+    assert outcome.moved == ()
+    assert foreign.exists() and ours.exists(), "nothing is moved or removed without ownership"
+    assert {refusal.disposition for refusal in outcome.refused} == {bf.KEPT}
+    assert all("could not confirm which page" in r.reason for r in outcome.refused)
+
+
+def test_intake_does_not_read_an_absent_state_as_a_stopped_transfer(tmp_path: Path) -> None:
+    """No `state` at all is not evidence that a transfer stopped (round-1 blocker).
+
+    The regression this pins: the cancelled branch tested `state != "complete"`, so
+    an item that reported no state at all fell into it — the sentence the assertion
+    expects became unreachable, and the copy it emitted instead nested one
+    parenthesis in another ("the transfer was stopped (the transfer did not complete
+    (state unknown))"). At the previous head this case fell through to the sentence
+    below.
+    """
+    directory = _quarantine(tmp_path)
+
+    outcome = _intake(
+        [
+            {
+                "name": "receipt.pdf",
+                "path": str(tmp_path / "Downloads" / "receipt.pdf"),
+                "bytes": 10,
+            }
+        ],
+        directory,
+    )
+
+    (refusal,) = outcome.refused
+    assert "the file the host named is not there" in refusal.reason
+    assert "was stopped" not in refusal.reason
+    # `absent`: nothing was removed because nothing was there, which is what stops
+    # the row saying "could NOT be removed — it is still on disk" (round-1 Q2).
+    assert refusal.disposition == bf.ABSENT
+
+
+def test_intake_reports_an_already_gone_partial_as_nothing_to_remove(tmp_path: Path) -> None:
+    """The disposition, not just the sentence: `ABSENT`, so no caller can spell it
+    as "could NOT be removed — it is still on disk" (round-1 Q2)."""
+    directory = _quarantine(tmp_path)
+
+    outcome = _intake(
+        [
+            {
+                "name": "stall.bin",
+                "path": str(tmp_path / "Downloads" / "stall.bin"),
+                "state": "interrupted",
+                "cancelled": "unfinished",
+            }
+        ],
+        directory,
+    )
+
+    (refusal,) = outcome.refused
+    assert refusal.disposition == bf.ABSENT

@@ -87,7 +87,6 @@
           appears briefly in your normal Downloads folder before Local Operator moves it, so
           expect to see it there and then not.
         </p>
-        <p class="consent-note hidden" id="downloads-notice" role="status" aria-live="polite"></p>
 
         <label class="switch switch--stacked" for="allow-uploads">
           <input id="allow-uploads" type="checkbox" role="switch" />
@@ -97,9 +96,18 @@
         <p class="hint">
           Lets the agent attach local files to a page's file input. Files that look like
           credentials (SSH keys, <code>.env</code> files) and Local Operator's own configuration
-          are refused whatever this switch says. This direction needs no new permission: it uses
-          the debugging access the extension already has.
+          are refused whatever this switch says. Uploads need no extra Chrome permission: the
+          extension already has the access they use.
         </p>
+
+        <!-- The state line and BOTH notices sit below the two rows, and the order is
+             a fix rather than a style: a notice between the switches pushed the
+             uploads row 45.5 px down when downloads was toggled (round-1 D4), and
+             a note about one capability is not a reason for the other row to move.
+             The state line is what says, in words, which way the switches point
+             (round-1 D3) — the off state used to be carried by the knob alone. -->
+        <p class="consent-state" id="consent-state"></p>
+        <p class="consent-note hidden" id="downloads-notice" role="status" aria-live="polite"></p>
         <p class="consent-note hidden" id="uploads-notice" role="status" aria-live="polite"></p>
       </section>
 

@@ -244,6 +244,31 @@ input:focus-visible {
   line-height: 1.5;
   color: var(--ink-dim);
 }
+/* The note that needs an ACTION, told apart from the one that reports success.
+ *
+ * Both used to be the same box (round-1 D2), which made "Downloaded are on" and
+ * "Chrome did not grant the permission" differ only in their words on the one part
+ * of this page that asks the user to go and change something. The attention weight
+ * spends BORDER AND INK rather than the danger tint: this is not an error state (the
+ * page is working exactly as designed), it is the note to read first, and the danger
+ * colour on this page is reserved for the persistent all-sites banner. */
+.consent-note--attention {
+  border-color: var(--ink-muted);
+  color: var(--ink);
+}
+/* The state line: the switches' own state IN WORDS, beside the other cards' state
+ * lines (round-1 D3 — the off switch was carried entirely by a 14×14 knob at
+ * 1.13:1 against the card, and no sentence said which way either switch points).
+ * Quieter than a hint, because it restates the controls above it rather than
+ * teaching anything new. */
+.consent-state {
+  margin: 14px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--hairline);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-muted);
+}
 /* Two switches share one card, so the second needs the vertical room the first
  * one's hint already provides: without it the two rows read as a single block. */
 .switch--stacked {
@@ -329,7 +354,14 @@ li .btn {
   width: 36px;
   height: 20px;
   border-radius: 10px;
-  border: 1px solid var(--hairline-strong);
+  /* `--ink-dim`, not `--hairline-strong`: WCAG 1.4.11 asks 3:1 for the boundary of
+   * a UI component, and the off state's outline measured 1.50:1 (light ramp) /
+   * 1.42:1 (dark ramp) against the card — so an OFF switch was carried by its
+   * 14×14 knob alone, and a user who cannot resolve that knob cannot see the
+   * control at all (round-1 D3). `--ink-dim` measures 5.43:1 / 5.11:1 on the same
+   * two ramps, so both the off state's outline and the on state's filled track are
+   * now clearly a control. */
+  border: 1px solid var(--ink-dim);
   background: var(--sunken);
   transition: background 120ms ease;
 }
