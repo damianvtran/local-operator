@@ -59,9 +59,11 @@ def _mcp_unavailable() -> CustomMessage:
         custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         attribution="system",
         details={
-            "text": "[session warning] MCP server 'files' is unavailable: its tools are gone",
+            "text": (
+                "[session warning] MCP server 'files' is unavailable: its tools are gone for now."
+            ),
             "server": "files",
-            "reason": "MCP authorization failed",
+            "reason": "/mcp reauth files — sign-in expired",
         },
     )
 

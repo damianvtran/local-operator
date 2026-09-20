@@ -158,19 +158,20 @@ async def test_a_harness_injected_row_mounts_no_user_bubble() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_mcp_unavailable_row_replays_as_a_note_not_a_warning() -> None:
-    """The replay tier the operator complained about, asserted as PIXELS.
+async def test_the_mcp_unavailable_row_replays_on_the_warning_tier() -> None:
+    """The replay row's tier, asserted as PIXELS, and what it does NOT say.
 
     ``session_mcp_unavailable`` is persisted, so a resumed session folds it
-    through ``project_settled_rows`` — and the tier is the whole change: the row
-    used to be a ``session_incident`` and so wore ``warning``, whose ``!`` glyph
-    and warning ink said a failure had happened when only the server's
-    inventory had shrunk. BOTH branches are folded in one app so the assertion
-    is a contrast rather than a value: the genuine incident keeps its alarm and
-    the capability warning does not.
+    through ``project_settled_rows``. The tier is deliberate: the row is a state
+    the operator must act on (``/mcp reauth <server>`` is theirs to run), which
+    is the role table's own definition of ``warning`` — an earlier revision
+    painted it ``note``, the receipt tier, and the design round rejected that
+    (D1) because the one actionable row in the frame read as bookkeeping.
 
-    Asserted on the token and glyph rather than on the class name, because those
-    two are what the reader sees.
+    Both rows are folded in one app on purpose: the difference between this row
+    and a genuine incident is now in the TEXT, not the tier, so the test asserts
+    the shared tier AND the absent false tail side by side. Asserted on token and
+    glyph rather than the class name, because those are what the reader sees.
     """
     from local_operator.harness.message_types import (
         SESSION_INCIDENT_MESSAGE_TYPE,
@@ -194,7 +195,7 @@ async def test_the_mcp_unavailable_row_replays_as_a_note_not_a_warning() -> None
             attribution="system",
             details={
                 "text": format_mcp_unavailable_message(
-                    "minerva-qa", "MCP authorization failed; /mcp reauth minerva-qa"
+                    "minerva-qa", "/mcp reauth minerva-qa — sign-in expired"
                 )
             },
         ),
@@ -220,10 +221,8 @@ async def test_the_mcp_unavailable_row_replays_as_a_note_not_a_warning() -> None
     assert len(notices) == 2, f"the fold dropped a notice row: {[b._text for b in notices]}"
     warning, incident = notices
     assert warning._text.startswith("[session warning] ")
-    assert (
-        warning._token == "muted" and warning._glyph == NOTICE_GLYPHS["note"]
-    ), "the MCP-unavailable row is not on the note tier"
-    assert warning._glyph == "·" and warning._glyph != NOTICE_GLYPHS["warning"]
+    assert warning._glyph == NOTICE_GLYPHS["warning"] == "!"
+    assert warning._token == "warning", "the MCP-unavailable row is not on the warning tier"
     assert incident._token == "warning" and incident._glyph == "!"
     assert "MCP server 'minerva-qa' is unavailable" in shown
     # The frame carries the incident's false tail — for the row that IS a failed
@@ -231,3 +230,4 @@ async def test_the_mcp_unavailable_row_replays_as_a_note_not_a_warning() -> None
     # rather than on the frame, because both rows are painted here on purpose.
     assert "previous turn ended" not in warning._text
     assert "previous turn ended" in incident._text
+    assert "until it reconnects" not in shown

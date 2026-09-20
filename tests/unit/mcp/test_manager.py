@@ -3111,7 +3111,10 @@ class TestMcpRecoveryNotice:
             if incidents:
                 break
         assert [server for server, _ in incidents] == ["slow"]
-        assert "authorization failed" in incidents[0][1]
+        # The sink payload is the REMEDY alone, command-first (D3): the row's own
+        # head already says the server is unavailable, so an "MCP authorization
+        # failed;" prefix only pushed the command off the front of the line.
+        assert incidents[0][1] == "/mcp login slow to authorize", incidents
         assert recoveries == []
 
         async def good_connect(name: str, cfg: Any, **_kw: Any) -> ServerConnection:
@@ -4678,9 +4681,12 @@ class TestRefreshRefusalCopy:
         assert scheduled["called"] is False, "a spent-possibly token must not be retried"
         assert manager.auth_blocked("dd") is True
         assert manager.get_connection_status("dd") == "auth-required"
-        assert incidents[-1][1] == (
-            "MCP authorization failed; /mcp reauth dd — refresh unconfirmed"
-        ), incidents
+        # Command-FIRST, with no "MCP authorization failed;" in front of it: the
+        # prefix restated the row's own head and pushed the remedy off the front
+        # of the line, where it wrapped apart from its server name at 64 columns
+        # (design review round 1, D3). The sink payload is what
+        # ``journal_mcp_unavailable`` renders verbatim into ``Reason:``.
+        assert incidents[-1][1] == "/mcp reauth dd — refresh unconfirmed", incidents
 
     def test_each_refusal_reason_is_carried_on_the_ledger(
         self, monkeypatch: pytest.MonkeyPatch
