@@ -53,9 +53,13 @@ class Failure(NamedTuple):
     ``reason`` and ``detail`` come from `gateway`'s vocabulary wherever it has
     an entry, because the same cause reaches a phone's 503, `lop tunnel
     status` and this service log, and one cause must not become three wordings.
+
+    Four kinds, not the five the design sketched: its ``crash`` and this
+    module's ``transient`` default are the same outcome (retry, exit 1), and a
+    literal member nothing can return is a claim the code does not make.
     """
 
-    kind: Literal["transient", "terminal_login", "terminal_remote", "terminal_config", "crash"]
+    kind: Literal["transient", "terminal_login", "terminal_remote", "terminal_config"]
     reason: str
     detail: str
 
@@ -298,9 +302,10 @@ def classify_failure(failure: BaseException) -> Failure:
     ``terminal_config`` — a local prerequisite is missing. Parked; installing it
     re-arms the connector.
 
-    ``crash`` — reserved for a failure raised outside this module's control;
-    `main` deliberately keeps propagating those (fail closed, with a traceback)
-    rather than parking on a shape it cannot describe.
+    Anything else — including a failure this module did not author — is
+    ``transient``: `main` deliberately keeps propagating exceptions outside the
+    two families it catches (fail closed, with a traceback) rather than parking
+    on a shape it cannot describe.
     """
     if _could_not_reach_control_plane(failure):
         return Failure("transient", UNREACHABLE, TERMINAL_DETAIL[UNREACHABLE])
