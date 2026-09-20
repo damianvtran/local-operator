@@ -1123,6 +1123,11 @@ async def _refresh_for(
             latched = await _await_live_window(handover, handle, bound)
         except asyncio.TimeoutError:
             handover.cancel()
+            # AWAITED, not merely cancelled (agent review round 2, NIT A). The old
+            # ``asyncio.wait_for`` both cancelled and consumed the task; ``cancel()``
+            # alone leaves anything raised on its way out — a collaborator's error
+            # rather than the ``CancelledError`` — as an unretrieved task exception.
+            await asyncio.gather(handover, return_exceptions=True)
             await _abandon_update_window(handle, runtime, pair, bound)
             return False
 
@@ -1212,7 +1217,19 @@ async def _await_live_window(
     method being there.
     """
     probed = getattr(handle, "update_lock_remaining", None)
-    remaining = cast(Callable[[], float], probed) if heartbeated and callable(probed) else None
+    # AND THE LOCK HAS TO BE HELD, not merely readable (agent review round 2, R2-2).
+    # The reader returns ``0.0`` when nothing is held, so gating on "the method is
+    # there" handed a half-wired host — one that exposes the reader but never acquired
+    # — a ZERO-second bound: immediate expiry, ``_abandon_update_window``, and an
+    # ``update failed`` row for a window that never opened. The window string is the
+    # second half of the question and the honest one: ``updating`` is non-empty exactly
+    # while a window is open (``serving.ServingSessionHandle``), so a handle that says
+    # nothing about a window gets the total-duration bound this function also
+    # implements rather than a bound of zero.
+    held = bool(getattr(handle, "updating", ""))
+    remaining = (
+        cast(Callable[[], float], probed) if heartbeated and held and callable(probed) else None
+    )
     deadline = None if remaining is not None else time.monotonic() + bound
     # A shortened bound in a test must still be noticed promptly, so the poll
     # follows it down; the shipped pair (5 s / 1 s) leaves this at its constant.
@@ -1335,6 +1352,17 @@ async def _retract_update_window(handle: object, pair: str, bound: float) -> Non
     The spool is left exactly where it is: a ``SOURCE_USER`` row the window queued
     is delivered by the next boot's drain, which is the same guarantee the success
     arm gives.
+
+    AND SO IS THE MARKER, WHICH IS THE ONE THING THIS ARM MUST NOT DO (agent review
+    round 2, R2-1). ``begin_retire`` latched and ``_clean_exit`` completed, so the move
+    genuinely happened: the successor boots the new build and the record owes the
+    ``updated`` fact — the operator's own requirement, that the update be indicated as
+    DONE. Clearing the marker here deleted that fact for exactly the case the incident
+    measured at minutes (a dispose that outran its bound), and it is what separates this
+    arm from the other two: on the STOP arm the move never happened (the next boot owes
+    the operator their message, not an ``updated`` fact) and on the ABANDON arm the
+    runtime kept the build it loaded. Both of those clear it, through ``end_update``'s
+    default; this arm passes ``keep_marker=True``.
     """
     logger.warning(
         "session runtime: the update window for %s held no heartbeat for %.1fs (bound %.1fs) "
@@ -1346,7 +1374,7 @@ async def _retract_update_window(handle: object, pair: str, bound: float) -> Non
     )
     end = getattr(handle, "end_update", None)
     if callable(end):
-        end()
+        end(keep_marker=True)
 
 
 def _loaded_build_label(runtime: object) -> str:
@@ -2537,6 +2565,16 @@ async def _drain_inbox_into(handle: object) -> int:
             # raises, and only an ERROR line in a log says so). Re-spooling is safe to
             # repeat because delivery is idempotent by the durable command index
             # (``_run_owner_prompt``) and ``inbox``'s contract is at-least-once.
+            #
+            # FOR A PEER ROW IT IS AT-LEAST-ONCE WITHOUT THAT SEAM (agent review round 2,
+            # NIT B). ``inbox.InboxLine.command_id`` only ever rides a ``SOURCE_USER`` row,
+            # and ``receive_peer_message`` has no equivalent dedupe: a peer row whose
+            # delivery PERSISTED and then raised is appended a second time, and what the
+            # peer sees is a duplicate ``peer_message`` card for one send. That is the
+            # direction this file already chooses deliberately (a duplicated note is
+            # visible and harmless, a dropped one is neither), and closing it properly
+            # means an identity on the peer path — a change of its own, with its own
+            # review, rather than a second half-seam here.
             if not append_inbox(directory, line):
                 logger.error(
                     "could not re-spool an undelivered inbox row (command_id=%s); it is lost",

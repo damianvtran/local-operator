@@ -618,6 +618,72 @@ async def test_the_exit_leg_is_bounded_without_cancelling_the_exit(
     assert host.lock_held is False, "and the lock is released with it"
 
 
+@pytest.mark.asyncio
+async def test_the_exit_leg_keeps_the_marker_so_the_successor_publishes_updated(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """R2-1: the move HAPPENED, so the ``updated`` fact must survive the slow exit.
+
+    The exit leg's expiry retracts the window — and it used to do that through
+    ``end_update``, which deletes the handover marker. So a handover that genuinely
+    landed, whose dispose merely outran the bound (the stage the incident measured at
+    MINUTES), left its successor unable to publish the one fact the operator asked for
+    by name: that the update was DONE. The marker is the successor's only source for
+    it, so this arm keeps it.
+
+    The other two arms are the opposite case and clear it, and both are pinned beside
+    this cell: on the stop arm the move never happened, and on the uncoverable abort
+    the runtime kept the build it loaded.
+    """
+    _patch_build(monkeypatch, bound=0.05)
+    host, session = _handover_host(tmp_path, dispose_delay=0.4)
+    runtime = _SpoolingRuntime()
+
+    exited = await child_mod._refresh_for(NEW, host, runtime, asyncio.Event())
+
+    assert exited is True, "premise: the handover committed and the exit completed"
+    assert host.updating == "", "the window is still retracted for admissions"
+    directory = session.transcript.directory
+    assert read_update_window(directory) == PAIR, (
+        "the marker must outlive a slow exit: the successor's boot is the only place "
+        "the 'update applied' fact can come from"
+    )
+
+    # AND THE SUCCESSOR PUBLISHES IT. Driven through the boot seam itself rather than
+    # read off the file twice, because the requirement is the published fact, not the
+    # file's contents.
+    boot = _BootHandle(directory)
+    assert child_mod._consume_update_marker(boot) == PAIR
+    assert boot.applied_update == PAIR, "the operator's 'indicate that the update was done'"
+
+
+@pytest.mark.asyncio
+async def test_the_two_arms_that_did_not_move_clear_the_marker(tmp_path: Path) -> None:
+    """The other half of R2-1's pair, so the disposition is pinned in both directions.
+
+    A STOP landed: the move never happened, the next boot owes the operator their
+    MESSAGE rather than an ``updated`` fact, and a marker left behind would make that
+    successor claim a move nobody made. The binding rule is the same on the abort arm,
+    where the runtime deliberately kept the build it loaded.
+    """
+    host, session = _handover_host(tmp_path)
+    directory = session.transcript.directory
+
+    assert host.begin_update(PAIR) is True
+    assert read_update_window(directory) == PAIR, "premise: opening the window wrote it"
+    assert host.end_update() is True
+    assert read_update_window(directory) == "", (
+        "the stop arm's closer must delete the marker: no successor may report a move "
+        "that a stop cancelled"
+    )
+
+    assert host.begin_update(PAIR) is True
+    await child_mod._abandon_update_window(host, _SpoolingRuntime(), PAIR, 0.05)
+    assert (
+        read_update_window(directory) == ""
+    ), "the abandon arm kept the build it loaded, so there is no applied update to report"
+
+
 # -- the bound is the HEARTBEAT's (agent review round 1, MINOR 2) --------------------
 
 
@@ -662,6 +728,64 @@ async def test_the_window_expires_when_the_beats_stop(tmp_path: Path, monkeypatc
     assert exited is False, "with no beats the window is DEAD at the bound"
     assert runtime.failures == [PAIR], "and the failure is published"
     assert host.lock_held is False
+
+
+@pytest.mark.asyncio
+async def test_a_half_wired_host_gets_a_bound_rather_than_a_zero_second_one() -> None:
+    """R2-2: "has the reader" is not "has a live lock".
+
+    ``update_lock_remaining`` returns ``0.0`` when no lock is HELD, so deriving the
+    heartbeat deadline from the method being present gave a host that exposed the
+    reader but never acquired a zero-second bound: immediate expiry, then
+    ``_abandon_update_window`` publishing ``update failed`` for a window that never
+    opened. The window string is the other half of the question, and it is the honest
+    one: ``updating`` is non-empty exactly while a window is open.
+    """
+    half_wired = SimpleNamespace(updating="", update_lock_remaining=lambda: 0.0)
+    task = asyncio.ensure_future(asyncio.sleep(0.05, result=True))
+
+    assert await child_mod._await_live_window(task, half_wired, 5.0) is True, (
+        "a host with no window open must fall back to the total-duration bound, not "
+        "expire at zero seconds"
+    )
+
+    # AND THE READER IS HONOURED WHEN A WINDOW IS OPEN, or the fix would have replaced
+    # one wrong answer with another: with the window published, a dead lock expires.
+    opened = SimpleNamespace(updating=PAIR, update_lock_remaining=lambda: 0.0)
+    stalled = asyncio.ensure_future(asyncio.sleep(5.0, result=True))
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await child_mod._await_live_window(stalled, opened, 5.0)
+    finally:
+        stalled.cancel()
+        await asyncio.gather(stalled, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_handover_is_awaited(monkeypatch: Any) -> None:
+    """NIT A: ``cancel()`` alone leaves the task's exception unretrieved.
+
+    The previous shape was ``asyncio.wait_for``, which both cancelled and consumed the
+    task. A cancelled handover that raises anything else on its way out (a
+    collaborator's error rather than ``CancelledError``) then surfaces through the
+    loop's exception handler instead of being read.
+    """
+    _patch_build(monkeypatch, bound=0.05)
+    handle = _WindowHandle()
+    runtime = _WindowRuntime(announce_delay=0.4, raise_on_unwind=True)
+
+    exited = await child_mod._refresh_for(NEW, handle, runtime, asyncio.Event())
+
+    assert exited is False
+    # THE CANCELLED HANDOVER IS NOT LEFT OUTSTANDING. ``cancel()`` only REQUESTS it; a
+    # task nobody awaits is still on the loop when the rung returns — which is exactly
+    # where its unwinding exception escapes the reading of it, and what the old
+    # ``asyncio.wait_for`` never did. Measured on both forms: fixed, the loop holds only
+    # the pump and this cell; mutated, the handover is still there.
+    outstanding = [task for task in asyncio.all_tasks() if "_announce_and_latch" in repr(task)]
+    assert (
+        outstanding == []
+    ), f"the cancelled handover was left unawaited on the loop: {outstanding}"
 
 
 # -- the marker (agent review round 1, MINOR 4) --------------------------------------
@@ -852,6 +976,8 @@ class _HandoverHost(WindowHost):
         self._retiring_cause = ""
         self._retiring_detail = ""
         self.dispose_delay = dispose_delay
+        #: The last marker disposition this stub was closed with (see ``end_update``).
+        self.marker_kept: bool | None = None
         self.dispose_calls = 0
 
     async def dispose(self) -> None:
@@ -968,7 +1094,14 @@ class _WindowHandle:
     def heartbeat_update(self) -> None:
         self.lock.heartbeat()
 
-    def end_update(self) -> bool:
+    def end_update(self, *, keep_marker: bool = False) -> bool:
+        """The production signature, because the rung passes the keyword.
+
+        The MARKER itself is not modelled here — this stub has no session directory —
+        so it records the disposition instead, and every cell that asserts what happens
+        to the file binds the production ``end_update`` (``_HandoverHost``).
+        """
+        self.marker_kept = keep_marker
         self.updating = ""
         return self.lock.release()
 
@@ -989,8 +1122,11 @@ class _WindowRuntime:
 
     _boot_build = OLD
 
-    def __init__(self, *, announce_delay: float) -> None:
+    def __init__(self, *, announce_delay: float, raise_on_unwind: bool = False) -> None:
         self.announce_delay = announce_delay
+        #: Whether the announce raises something that is NOT ``CancelledError`` when the
+        #: rung cancels it — the shape NIT A is about.
+        self.raise_on_unwind = raise_on_unwind
         self.retiring: list[tuple[str, str, bool, str]] = []
         #: Every announce that completed, in order — so a cell can assert the frame
         #: went out at all (the window's pair rides the RECORD, not this call).
@@ -1006,7 +1142,12 @@ class _WindowRuntime:
         leaving: str = "",
         updating: str = "",
     ) -> None:
-        await asyncio.sleep(self.announce_delay)
+        try:
+            await asyncio.sleep(self.announce_delay)
+        except asyncio.CancelledError:
+            if self.raise_on_unwind:
+                raise RuntimeError("the announce failed on its way out") from None
+            raise
         self.retiring.append((reason, to, draining, leaving))
         self.announced.append(reason)
 

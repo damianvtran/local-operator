@@ -1763,28 +1763,32 @@ class ServingSessionHandle(SessionHandle):
         """
         self._update_lock.heartbeat()
 
-    def end_update(self) -> bool:
-        """Close the window, on EITHER outcome. ``True`` if one was open.
+    def end_update(self, *, keep_marker: bool = False) -> bool:
+        """Close the window. ``True`` if one was open.
 
-        Deliberately one closer for both arms. The runtime cannot tell which arm it
-        is in from here — the handover is about to exit, the abort is about to keep
-        serving — and the publication follows the rung that owns the outcome
-        (``RuntimeServer.note_update_failed`` on the abort, nothing at all on the
-        exit, because that process is gone). What this guarantees is the part both
-        arms need: the lock is released, the record field is cleared, and no
-        admission is queued against a window that is over.
+        THE MARKER'S DISPOSITION IS THE CALLER'S, because the three arms disagree
+        about it and only the caller knows which one it is in (agent review round 2,
+        R2-1). Clearing it says "a move was announced and did not happen" — the stop
+        arm (a stop landed, this process is exiting, the next boot owes the operator
+        the message, not an `updated` fact) and the abandon arm (the bound expired and
+        the runtime KEPT the build it loaded). ``keep_marker=True`` says the opposite:
+        the handover COMMITTED and this process is on its way out, so the successor is
+        running the build on disk and owes the record the ``updated`` fact — deleting
+        the marker there loses "the update was done", which is the operator's own
+        requirement, in exactly the slow-exit case the incident measured at minutes.
 
-        The marker is cleared with the window, which is what makes a surviving
-        marker mean "a process died mid-move" rather than "a window is open".
+        What is common to all three: the lock is released, the record's window field is
+        cleared, and no admission is queued against a window that is over.
         """
         if not self._updating and not self._update_lock.held:
             return False
         self._updating = ""
-        directory = self._session_directory()
-        if directory is not None:
-            from local_operator.session.runtime.inbox import clear_update_window
+        if not keep_marker:
+            directory = self._session_directory()
+            if directory is not None:
+                from local_operator.session.runtime.inbox import clear_update_window
 
-            clear_update_window(directory)
+                clear_update_window(directory)
         server = getattr(self, "_server", None)
         note = getattr(server, "note_updating", None)
         if callable(note):
