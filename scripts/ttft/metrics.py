@@ -19,11 +19,27 @@ and the reasoning column below is the whole reason this harness exists — on th
 tree this was written against, every channel reports ``-1`` for it, and that is
 the measurement, not a gap.
 
-:data:`FIRST_EVENT` is the headline: submit -> the first event the FRONT END can
+:data:`FIRST_PAINT` is the headline: submit -> the first event the FRONT END can
 paint for this turn. It is the only metric with a budget, and the budget is 300 ms
 because that is the achievable contract the design doc settled on.
 
-:data:`FIRST_REASONING` and :data:`FIRST_TEXT` split :data:`FIRST_EVENT` by what
+IT IS A PAINT MOMENT, NOT A THINKING MOMENT, and the name says so on purpose
+(QA round 1, Q4). A front end can paint a frame before any assistant content
+arrives: on the phone arm a frame was painted at 26 ms while the first text reached
+the handset-facing path at 157 ms, a 5.6x gap, so a reader who takes the headline
+for "the operator saw thinking" is reading it wrong. The thinking moment is
+:data:`FIRST_REASONING` and the content moment is :data:`FIRST_TEXT`; the table
+prints all three side by side for exactly this reason. The metric was called
+``first_event_ms`` before round 1 and is ``first_paint_ms`` now.
+
+THE LARGEST CLAIM THIS HARNESS SUPPORTS, in one sentence: *with the provider's
+first byte stubbed out, the first frame of a warm single turn reaches the front end
+within 300 ms on this repository's own code, and it did so on every run of the
+final instrument taken in one comparable window* — everything else it prints (real
+wire, cold engage, 4 and 8 concurrent turns, the provider's own floor) is a
+measured number with its load, not a guarantee.
+
+:data:`FIRST_REASONING` and :data:`FIRST_TEXT` split :data:`FIRST_PAINT` by what
 the content IS, which is what makes the operator's complaint legible: the model
 reasoning for 0.45-1.75 s while the front end shows nothing, because the runtime
 drops ``StreamReasoningDelta`` (``harness/loop.py``) before any consumer sees it.
@@ -33,7 +49,7 @@ when the model put the token on the wire — and they are REPORTED, NEVER ASSERT
 See :data:`BUDGET_MS` for why.
 
 :data:`RUNTIME_EMIT` is the runtime-side (or daemon-side) emission of the event
-:data:`FIRST_EVENT` measured, so transport cost separates from runtime cost.
+:data:`FIRST_PAINT` measured, so transport cost separates from runtime cost.
 """
 
 from __future__ import annotations
@@ -46,7 +62,10 @@ from typing import Any, Iterable, Mapping, Sequence
 # ---------------------------------------------------------------------------
 
 #: Submit -> the first event the front end can PAINT for this turn. The headline.
-FIRST_EVENT = "first_event_ms"
+#: The name is the contract: this is the first FRAME, not the first thinking
+#: content — see the module docstring for why (QA Q4) and for the one-sentence
+#: claim this number supports.
+FIRST_PAINT = "first_paint_ms"
 #: Submit -> the first streaming event carrying model REASONING at the front end.
 #: ``-1`` on every channel until the runtime stops dropping reasoning deltas.
 FIRST_REASONING = "first_reasoning_ms"
@@ -76,7 +95,7 @@ TURN = "turn_ms"
 
 #: Every metric a driver may record, in the order the table prints them.
 METRICS: tuple[str, ...] = (
-    FIRST_EVENT,
+    FIRST_PAINT,
     FIRST_REASONING,
     FIRST_TEXT,
     RUNTIME_REASONING,
@@ -90,7 +109,7 @@ METRICS: tuple[str, ...] = (
 
 #: The three the summary table shows: what the operator waits for, split by what
 #: the content is.
-TABLE_METRICS: tuple[str, ...] = (FIRST_EVENT, FIRST_REASONING, FIRST_TEXT)
+TABLE_METRICS: tuple[str, ...] = (FIRST_PAINT, FIRST_REASONING, FIRST_TEXT)
 
 #: Sentinel for "not observable on this channel". NOT zero — see the module
 #: docstring.
@@ -145,6 +164,62 @@ ENFORCED_CELLS: frozenset[tuple[str, str]] = frozenset(
         ("desktop", "warm"),
     }
 )
+
+#: The provider arm an ENFORCED cell must have been measured on, and the reason the
+#: enforced population is scoped by provider rather than by channel (QA round 1, Q2).
+#:
+#: The reviewer's finding was that the enforced cells were red or green with the
+#: weather: ``desktop/warm@1`` PASSED at 143 ms on a load-86 box and FAILED at 624 ms
+#: on a load-111-131 box, and that single cell decided the exit code. The cause is
+#: which hop sits inside the measured window. On the ``test`` provider the turn is
+#: entirely local — the mock answers from a canned list, so what is left in
+#: submit -> first paint is local-operator's own work plus this process being
+#: scheduled, and that measured 26 ms (tui/warm@1, load 100-145) against a 300 ms
+#: budget: an order of magnitude of headroom, which is what makes it a REGRESSION
+#: gate rather than a reading of the box. On the real-wire arm the same cell measured
+#: 210-450 ms in the SAME windows, because a genuine TCP+HTTP+SSE round trip to the
+#: loopback server is inside the number and a loaded scheduler stretches it.
+#:
+#: So enforcement is scoped to the arm whose budget this repository OWNS end to end,
+#: and the real-wire cells stay BUDGETED AND PRINTED against the same 300 ms — their
+#: number is the evidence about the hop, and it is not deleted or loosened to make a
+#: gate pass. The threshold did not move for this: :data:`BUDGET_MS` is still 300.
+ENFORCED_PROVIDER = "test"
+
+#: The load-per-CPU band inside which an enforced cell may be read as PASS/FAIL.
+#:
+#: Outside the band the harness prints ``OUT-OF-BAND`` and exits 3 rather than
+#: claiming a result, because a p50 taken while the box is swamped is a measurement of
+#: the box. The band is CALIBRATED FROM THIS HARNESS'S OWN RUNS, and the calibration is
+#: recorded here because the first attempt got it wrong in a way worth remembering:
+#:
+#: * enforced cells observed at 11-52 ms (tui/warm@1 11.1, desktop/warm@1 52.2) in a
+#:   window at **12.2 load/CPU** — twenty-seven times inside the budget;
+#: * enforced cells observed at 26 ms in the mock arm's first window at 7.1-10.4/CPU;
+#: * the swamped windows of the same evening, where this box sat at 407-418 on 14 CPUs
+#:   = **29-30/CPU** and a Python process is descheduled for hundreds of ms.
+#:
+#: The first value shipped was 12.0, and the re-take immediately showed why that was
+#: wrong: a normal evening at 12.18/CPU was refused, so the gate answered `OUT-OF-BAND`
+#: with its cells at 11 ms — an instrument that refuses to answer on an ordinary night
+#: is as unusable as one that answers with the weather. 20.0 sits above every window in
+#: which an enforced cell has actually been measured (<=12.2/CPU) and below the
+#: swamped ones (29-30/CPU), which is the only boundary that matters here.
+BUDGET_LOAD_PER_CPU_MAX = 20.0
+
+#: Statuses that mean "this cell missed the budget, or lost every sample it had".
+#: One definition, read by both :meth:`Verdict.failed` and the harness's exit code,
+#: so the two cannot drift into a gate that fails in the table and exits 0.
+FAILURE_STATUSES: frozenset[str] = frozenset({"FAIL", "FAILED"})
+
+#: Verdicts that are neither a pass nor a failure, and the exit code they produce.
+#: ``OUT-OF-BAND`` is the box's fault and ``NO-DATA`` is the gate having nothing to
+#: judge (QA round 1, minor: an enforced cell with ``n=0`` used to read REPORTED,
+#: which ``_amain`` treated as success — a gate that passes on no data is worse than
+#: no gate). Both are non-zero on purpose: an instrument that cannot answer must not
+#: let a pipeline read "green" out of that.
+INDETERMINATE_STATUSES: frozenset[str] = frozenset({"OUT-OF-BAND", "NO-DATA"})
+INDETERMINATE_EXIT_CODE = 3
 
 #: Cells measured against the budget that the tree does NOT meet yet, each named
 #: with the change that closes it. Reported as ``UNMET`` and never silently
@@ -218,7 +293,21 @@ class Verdict:
 
     @property
     def failed(self) -> bool:
-        return self.status == "FAIL"
+        """A budget miss, or a cell whose every sample died instead of being measured.
+
+        ``FAILED`` is the second case and it is a failure on purpose (round 1, Q1):
+        the sweep continues past it, but a run that lost a cell must not exit 0.
+        """
+        return self.status in FAILURE_STATUSES
+
+    @property
+    def indeterminate(self) -> bool:
+        """Neither a pass nor a failure: the instrument could not answer.
+
+        Carried as its own exit code (see :data:`INDETERMINATE_EXIT_CODE`) so a
+        pipeline cannot read "green" out of a run that never judged anything.
+        """
+        return self.status in INDETERMINATE_STATUSES
 
 
 def judge(
@@ -226,8 +315,11 @@ def judge(
     stats: Mapping[str, Mapping[str, Any]],
     *,
     concurrency: int = 1,
+    provider_kind: str = "",
+    load_per_cpu: float | None = None,
+    errors: int = 0,
 ) -> Verdict:
-    """Decide the cell's budget verdict from its reduced :data:`FIRST_EVENT` stats.
+    """Decide the cell's budget verdict from its reduced :data:`FIRST_PAINT` stats.
 
     The assertion is on the **p50**, and that is a deliberate ceiling on what this
     gate claims. The operator's ask is "under 300 ms on every channel even under
@@ -239,31 +331,90 @@ def judge(
     assertion. For the same reason the assertion applies at
     :data:`ASSERTED_CONCURRENCY` only; see that constant for the measured numbers
     that fixed it.
+
+    FOUR THINGS DECIDE A VERDICT, and each of them answers a finding from round 1:
+
+    * the cell must be in :data:`ENFORCED_CELLS` at :data:`ASSERTED_CONCURRENCY`
+      (Q3: the enforced population is 2 of 30 cells and the output now says so);
+    * it must have been measured on :data:`ENFORCED_PROVIDER`, because the budget is
+      only this repository's to own where no real hop is inside the window (Q2);
+    * the host must be inside :data:`BUDGET_LOAD_PER_CPU_MAX`, or the verdict is
+      ``OUT-OF-BAND`` and the run exits 3 rather than reading the box (Q2);
+    * it must have samples at all — an enforced cell with ``n=0`` is ``NO-DATA`` and
+      also exits 3, because passing on no data is worse than not running (minor).
+
+    ``errors`` is the number of samples that died instead of being measured. A cell
+    where EVERY sample died is ``FAILED``: the sweep continues past it (that is the
+    point of a matrix) but the run must not come out green.
     """
     channel, warmth = cell
-    stats_for_metric = stats.get(FIRST_EVENT)
-    if not stats_for_metric or not stats_for_metric.get("n"):
-        return Verdict(cell, "REPORTED", f"no {FIRST_EVENT} samples (channel unavailable here)")
+    enforced = cell in ENFORCED_CELLS and concurrency in ASSERTED_CONCURRENCY
+    # ``or {}`` rather than a None check: the mapping is read below under a guard that
+    # already returned unless it exists and has samples, and this keeps that narrowing
+    # true for the type checker as well as for a reader.
+    stats_for_metric: Mapping[str, Any] = stats.get(FIRST_PAINT) or {}
+    sample_count = int(stats_for_metric.get("n") or 0)
+    if not sample_count:
+        if errors:
+            return Verdict(
+                cell,
+                "FAILED",
+                f"every one of {errors} sample(s) died instead of being measured — "
+                "the cell is a failure, not an absence (see the run's error lines)",
+            )
+        if enforced:
+            return Verdict(
+                cell,
+                "NO-DATA",
+                "enforced cell produced no samples; the gate has nothing to judge and "
+                "will not read that as a pass (exit 3) — see judge()",
+            )
+        return Verdict(cell, "REPORTED", f"no {FIRST_PAINT} samples (channel unavailable here)")
 
     median = float(stats_for_metric["p50"])
     p95 = float(stats_for_metric.get("p95", UNAVAILABLE))
-    if cell in ENFORCED_CELLS and concurrency in ASSERTED_CONCURRENCY:
+    errored = f" [{errors} sample(s) died]" if errors else ""
+    if enforced:
+        if provider_kind != ENFORCED_PROVIDER:
+            return Verdict(
+                cell,
+                "REPORTED",
+                f"p50 {median:.0f} ms on the {provider_kind} provider, printed against "
+                f"the {BUDGET_MS:.0f} ms budget but NOT asserted: a real network hop is "
+                f"inside this window and this repository does not own its timing "
+                f"(see ENFORCED_PROVIDER — {ENFORCED_PROVIDER} owns it end to "
+                f"end){errored}",
+            )
+        if load_per_cpu is not None and load_per_cpu > BUDGET_LOAD_PER_CPU_MAX:
+            return Verdict(
+                cell,
+                "OUT-OF-BAND",
+                f"p50 {median:.0f} ms measured at load {load_per_cpu:.1f}/CPU, outside "
+                f"the {BUDGET_LOAD_PER_CPU_MAX:.1f}/CPU band this bound was calibrated "
+                f"in: NOT judged (exit 3) — the number is the box's, re-run on a "
+                f"quieter host or read it as load context{errored}",
+            )
         if median >= BUDGET_MS:
+            band = f" at load {load_per_cpu:.1f}/CPU" if load_per_cpu is not None else ""
             return Verdict(
                 cell,
                 "FAIL",
                 f"p50 {median:.0f} ms >= budget {BUDGET_MS:.0f} ms over "
-                f"{stats_for_metric['n']} samples",
+                f"{sample_count} samples{band}{errored}",
             )
         if p95 != UNAVAILABLE and p95 >= BUDGET_MS:
             return Verdict(
                 cell,
                 "WARN",
                 f"p50 {median:.0f} ms inside budget; p95 {p95:.0f} ms is over it "
-                "(host contention; not asserted — see judge())",
+                f"(host contention; not asserted — see judge()){errored}",
             )
         return Verdict(
-            cell, "PASS", f"p50 {median:.0f} ms < {BUDGET_MS:.0f} ms over {stats_for_metric['n']}"
+            cell,
+            "PASS",
+            f"p50 {median:.0f} ms < {BUDGET_MS:.0f} ms over {sample_count}"
+            + (f" at load {load_per_cpu:.1f}/CPU" if load_per_cpu is not None else "")
+            + errored,
         )
     if cell in PENDING_CELLS and concurrency in ASSERTED_CONCURRENCY:
         if median < BUDGET_MS:

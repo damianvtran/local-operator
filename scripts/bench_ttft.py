@@ -38,8 +38,14 @@ point, real phone routes, real transcript.
 
 WHAT IS REPORTED AND WHAT IS ASSERTED
 =====================================
-Only :data:`scripts.ttft.metrics.FIRST_EVENT` against a 300 ms budget, only on the
-cells whose floor this repository owns end to end, and only on the p50. The
+Only :data:`scripts.ttft.metrics.FIRST_PAINT` against a 300 ms budget, only on the
+cells whose floor this repository owns end to end, only on the p50, and only on the
+``test`` provider — the arm whose measured window contains no real network hop (see
+``metrics.ENFORCED_PROVIDER``). The enforced population is 2 of the table's 30
+cells, the table marks them ``ENF`` and the banner says how many, because a title
+that reads like a whole-harness gate over two cells is the kind of claim this file
+exists to prevent (QA round 1, Q3). Outside the calibrated load band an enforced
+cell is ``OUT-OF-BAND`` and the run exits 3 rather than reading the box (Q2). The
 PROVIDER columns are reported and budgeted, never asserted — read
 ``metrics.BUDGET_MS`` before changing that; it explains, with the measured numbers,
 why asserting a sub-300 ms first provider token would be a lie.
@@ -197,20 +203,35 @@ async def _one_run(
 
 
 def _reduce_cells(
-    samples_by_cell: dict[tuple[str, str, int], list[dict[str, Any]]], runs: int
+    samples_by_cell: dict[tuple[str, str, int], list[dict[str, Any]]],
+    runs: int,
+    *,
+    provider_kind: str = "",
+    load_per_cpu: float | None = None,
 ) -> list[dict[str, Any]]:
     """Reduce every cell's pooled samples into percentiles and a budget verdict."""
     cells: list[dict[str, Any]] = []
     for (channel, arm, concurrency), samples in sorted(samples_by_cell.items()):
+        errored = [sample for sample in samples if sample.get("error")]
+        measured = [sample for sample in samples if not sample.get("error")]
         stats = {
             metric: M.reduce_samples(
-                [float(sample[metric]) for sample in samples if metric in sample]
+                [float(sample[metric]) for sample in measured if metric in sample]
             )
             for metric in M.METRICS
         }
-        verdict = M.judge((channel, arm), stats, concurrency=concurrency)
+        verdict = M.judge(
+            (channel, arm),
+            stats,
+            concurrency=concurrency,
+            provider_kind=provider_kind,
+            load_per_cpu=load_per_cpu,
+            errors=len(errored),
+        )
         warnings: list[str] = []
-        # INSTRUMENT SELF-CHECK: the provider must have put text on the wire
+        for sample in errored:
+            warnings.append(f"sample died instead of being measured: {sample['error']}")
+        # INSTRUMENT SELF-CHECK 1: the provider must have put text on the wire
         # BEFORE any front end could receive it. The reverse is physically
         # impossible, so it can only mean the provider column is paired to the
         # wrong request — a harness defect that would otherwise be read as a
@@ -225,6 +246,24 @@ def _reduce_cells(
             warnings.append(
                 f"provider_text p50 {provider_text['p50']} > first_text p50 "
                 f"{first_text['p50']} — provider stamps mis-paired, numbers not usable"
+            )
+        # INSTRUMENT SELF-CHECK 2, the other direction of the same physical rule, and
+        # the one round 1 found missing (QA Q5): the runtime cannot have EMITTED a
+        # frame before it ENTERED the stream function it emits from. A mutated seam
+        # that counts the echoing submit event as the first paint reads 3 ms against
+        # a stream_entered of 11 ms and would otherwise sail through every gate.
+        # Tolerance is 1 ms of clock skew between two monotonic reads on one process.
+        first_paint = stats.get(M.FIRST_PAINT) or {}
+        entered = stats.get(M.STREAM_ENTERED) or {}
+        if (
+            first_paint.get("n")
+            and entered.get("n")
+            and float(first_paint["p50"]) < float(entered["p50"]) - 1.0
+        ):
+            warnings.append(
+                f"first_paint p50 {first_paint['p50']} < stream_entered p50 "
+                f"{entered['p50']} — a frame cannot precede the stream it comes from; "
+                "the front-end seam is counting something that is not model output"
             )
         # THE FINDING, stated per cell: reasoning existed on the wire and no front
         # end received it.
@@ -241,13 +280,19 @@ def _reduce_cells(
                 "arm": arm,
                 "concurrency": concurrency,
                 "runs": runs,
-                "samples": len(samples),
+                "samples": len(measured),
+                "errors": len(errored),
                 "stats": stats,
                 "warnings": warnings,
                 "verdict": {
                     "status": verdict.status,
                     "reason": verdict.reason,
                     "budget_ms": M.BUDGET_MS,
+                    "enforced": (
+                        (channel, arm) in M.ENFORCED_CELLS
+                        and concurrency in M.ASSERTED_CONCURRENCY
+                        and provider_kind == M.ENFORCED_PROVIDER
+                    ),
                 },
             }
         )
@@ -345,26 +390,58 @@ async def _amain(args: argparse.Namespace) -> int:
 
     samples_by_cell: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
     printed_banner = False
+    report["errors"] = []
     try:
         for channel in channels:
             for concurrency in concurrencies:
                 for run_index in range(args.runs):
                     diagnostics: dict[str, Any] = {}
-                    samples = await _one_run(
-                        channel=channel,
-                        arms=arms,
-                        concurrency=concurrency,
-                        config=config,
-                        diagnostics=diagnostics,
-                        root_prefix=args.root_prefix,
-                    )
+                    # A CELL THAT DIES IS A FAILED CELL, NOT THE END OF THE SWEEP
+                    # (QA round 1, Q1). The reviewer hit a real one: a TUI child
+                    # aborting on ``sqlite3.OperationalError: database is locked``
+                    # (concurrent children racing the WAL switch on a fresh
+                    # ``auth.db``) propagated out of the driver and took EVERY
+                    # remaining cell with it — on 2 of ~29 invocations, rc=1, no
+                    # table. A matrix that abandons 28 cells because the 2nd died
+                    # is not an instrument. The run is recorded as an error sample
+                    # for each arm the cell asked for, the sweep continues, and the
+                    # cell carries the failure into its verdict (an all-died cell
+                    # is FAILED, so the run cannot come out green either).
+                    try:
+                        samples = await _one_run(
+                            channel=channel,
+                            arms=arms,
+                            concurrency=concurrency,
+                            config=config,
+                            diagnostics=diagnostics,
+                            root_prefix=args.root_prefix,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — the sweep outranks it
+                        detail = f"{type(exc).__name__}: {exc}"
+                        report["errors"].append(
+                            {"channel": channel, "concurrency": concurrency, "error": detail}
+                        )
+                        print(
+                            f"  {channel} {concurrency}x run {run_index + 1}/{args.runs}: "
+                            f"CELL DIED ({detail[:160]}) — recorded and the sweep continues",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        samples = [
+                            {"arm": arm, "error": detail, M.FIRST_PAINT: M.UNAVAILABLE}
+                            for arm in arms
+                        ]
                     for sample in samples:
                         key = (channel, str(sample.get("arm", "")), concurrency)
                         samples_by_cell.setdefault(key, []).append(sample)
-                    shown = " ".join(
-                        f"{metric.replace('_ms', '')}={_p50(samples, metric):.0f}"
-                        for metric in (M.FIRST_EVENT, M.FIRST_REASONING, M.FIRST_TEXT)
-                    )
+                    measured = [sample for sample in samples if not sample.get("error")]
+                    if measured:
+                        shown = " ".join(
+                            f"{metric.replace('_ms', '')}={_p50(measured, metric):.0f}"
+                            for metric in (M.FIRST_PAINT, M.FIRST_REASONING, M.FIRST_TEXT)
+                        )
+                    else:
+                        shown = "no samples this run"
                     print(
                         f"  {channel} {concurrency}x run {run_index + 1}/{args.runs}: {shown}",
                         flush=True,
@@ -375,10 +452,19 @@ async def _amain(args: argparse.Namespace) -> int:
                 # Persist after every cell, so a run that dies at cell 30 still
                 # hands over the 29 cells it measured (`ALREADY_WARM`-style honesty
                 # about what was and was not taken).
-                report["cells"] = _reduce_cells(samples_by_cell, args.runs)
+                report["cells"] = _reduce_cells(
+                    samples_by_cell,
+                    args.runs,
+                    provider_kind=args.provider,
+                    load_per_cpu=load_per_cpu(),
+                )
+                report["load_per_cpu"] = load_per_cpu()
                 report["finished_cells"] = len(report["cells"])
                 _write_json(args.json, report)
-        report["cells"] = _reduce_cells(samples_by_cell, args.runs)
+        report["cells"] = _reduce_cells(
+            samples_by_cell, args.runs, provider_kind=args.provider, load_per_cpu=load_per_cpu()
+        )
+        report["load_per_cpu"] = load_per_cpu()
         report["load_at_end"] = list(os.getloadavg()) if hasattr(os, "getloadavg") else []
         if provider is not None:
             # The provider's request log ships with the report: a mis-paired
@@ -386,6 +472,10 @@ async def _amain(args: argparse.Namespace) -> int:
             # only by re-running the cell.
             report["provider"]["request_log"] = provider.log[-200:]
             report["provider"]["requests"] = provider.requests
+            # The helper calls the exclusion dropped, named rather than implied: a
+            # reader seeing ``requests=182`` against 91 measured runs can tell they
+            # were counted and kept out of the level columns.
+            report["provider"]["helper_requests"] = provider.helper_requests
         text = render_report(report)
         print("\n" + text)
         if args.table:
@@ -398,8 +488,20 @@ async def _amain(args: argparse.Namespace) -> int:
             _remove_quietly(created)
         _write_json(args.json, report)
 
-    failures = [cell for cell in report["cells"] if cell["verdict"]["status"] == "FAIL"]
-    if failures and args.assert_budget:
+    failures = [cell for cell in report["cells"] if cell["verdict"]["status"] in M.FAILURE_STATUSES]
+    indeterminate = [
+        cell for cell in report["cells"] if cell["verdict"]["status"] in M.INDETERMINATE_STATUSES
+    ]
+    if not args.assert_budget:
+        if failures or indeterminate:
+            print(
+                "\n--no-assert-budget: verdicts printed, exit code forced to 0",
+                file=sys.stderr,
+            )
+        return 0
+    # FAIL OUTRANKS INDETERMINATE: a real measurement that missed the budget is a
+    # finding, and reporting exit 3 for it would hide it behind "the box was busy".
+    if failures:
         print("\nBUDGET FAILURES:", file=sys.stderr)
         for cell in failures:
             print(
@@ -408,6 +510,15 @@ async def _amain(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         return 2
+    if indeterminate:
+        print("\nNOT JUDGED (exit 3, neither pass nor fail):", file=sys.stderr)
+        for cell in indeterminate:
+            print(
+                f"  {cell['channel']}/{cell['arm']}@{cell['concurrency']}: "
+                f"{cell['verdict']['reason']}",
+                file=sys.stderr,
+            )
+        return M.INDETERMINATE_EXIT_CODE
     return 0
 
 
@@ -446,6 +557,24 @@ def _p50(samples: list[dict[str, Any]], metric: str) -> float:
     return statistics.median(values) if values else -1.0
 
 
+def load_per_cpu() -> float | None:
+    """The host's 1-minute load per CPU — the band an enforced verdict is read in.
+
+    Per CPU rather than raw, because the same load means different things on a
+    14-CPU laptop and a 64-core runner, and the band it feeds
+    (:data:`scripts.ttft.metrics.BUDGET_LOAD_PER_CPU_MAX`) has to travel with the
+    harness. ``None`` when the platform will not report it, which is treated as
+    "not out of band" — refusing to judge because a platform lacks ``getloadavg``
+    would fail the gate for the wrong reason, and the number is printed either way.
+    """
+    try:
+        one_minute = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return None
+    cpus = os.cpu_count() or 1
+    return one_minute / cpus
+
+
 def _remove_quietly(path: Path, attempts: int = 3) -> None:
     """Remove a directory, retrying the way a bytecode cache needs.
 
@@ -468,7 +597,15 @@ def _write_json(path: str, report: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(report, indent=2), encoding="utf-8")
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, in one place so a test can drive the REAL flags rather than guess them.
+
+    Extracted for the exit-code test (review round 1, F1): a scratch copy with the
+    gate's ``return`` mutated still passed all 42 tests, so the verdict's OBSERVABLE
+    had nothing pinning it. A test that hand-builds a Namespace would pin the
+    ``_amain`` contract but not the flags a user types, and ``--no-assert-budget``
+    is half of what that finding is about.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--channels",
@@ -574,6 +711,11 @@ def main() -> int:
         help="(internal) sessions the TUI child hosts concurrently",
     )
     parser.set_defaults(assert_budget=True)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
     args = parser.parse_args()
 
     # THE PROCESS HALF OF THE NOTIFICATION GATE, and it is here rather than only on

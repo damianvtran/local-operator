@@ -23,6 +23,7 @@ from scripts.ttft import metrics as M
 from scripts.ttft.channels import (
     REASONING_NAMES,
     TurnMarks,
+    classify_agent_event,
     desktop_paint,
     jobs_paint,
     names_reasoning,
@@ -91,18 +92,26 @@ def test_reduce_samples_of_nothing_is_not_a_zero_latency():
 
 
 def _stats(first_event: dict[str, object]) -> dict[str, dict[str, object]]:
-    return {M.FIRST_EVENT: first_event}
+    return {M.FIRST_PAINT: first_event}
 
 
 def test_an_enforced_cell_inside_the_budget_passes():
-    verdict = M.judge(("tui", "warm"), _stats({"n": 7, "p50": 40.0, "p95": 90.0}))
+    verdict = M.judge(
+        ("tui", "warm"),
+        _stats({"n": 7, "p50": 40.0, "p95": 90.0}),
+        provider_kind=M.ENFORCED_PROVIDER,
+    )
     assert verdict.status == "PASS"
     assert not verdict.failed
 
 
 def test_an_enforced_cell_over_the_budget_FAILS():
     """The gate can fail — otherwise it would be a report wearing a verdict's name."""
-    verdict = M.judge(("tui", "warm"), _stats({"n": 7, "p50": 400.0, "p95": 900.0}))
+    verdict = M.judge(
+        ("tui", "warm"),
+        _stats({"n": 7, "p50": 400.0, "p95": 900.0}),
+        provider_kind=M.ENFORCED_PROVIDER,
+    )
     assert verdict.status == "FAIL"
     assert verdict.failed
 
@@ -113,7 +122,11 @@ def test_a_p95_over_budget_warns_and_does_not_fail():
     With seven runs a p99 IS the max, so asserting either would be asserting the
     machine's queue. It is reported, and reported LOUDLY.
     """
-    verdict = M.judge(("desktop", "warm"), _stats({"n": 7, "p50": 120.0, "p95": 380.0}))
+    verdict = M.judge(
+        ("desktop", "warm"),
+        _stats({"n": 7, "p50": 120.0, "p95": 380.0}),
+        provider_kind=M.ENFORCED_PROVIDER,
+    )
     assert verdict.status == "WARN"
     assert not verdict.failed
 
@@ -146,9 +159,15 @@ def test_the_assertion_is_scoped_to_the_concurrency_the_code_owns():
     """
     fast = _stats({"n": 7, "p50": 40.0, "p95": 90.0})
     slow = _stats({"n": 7, "p50": 1200.0, "p95": 1900.0})
-    assert M.judge(("tui", "warm"), fast, concurrency=1).status == "PASS"
-    assert M.judge(("tui", "warm"), slow, concurrency=1).status == "FAIL"
-    eight = M.judge(("tui", "warm"), slow, concurrency=8)
+    assert (
+        M.judge(("tui", "warm"), fast, concurrency=1, provider_kind=M.ENFORCED_PROVIDER).status
+        == "PASS"
+    )
+    assert (
+        M.judge(("tui", "warm"), slow, concurrency=1, provider_kind=M.ENFORCED_PROVIDER).status
+        == "FAIL"
+    )
+    eight = M.judge(("tui", "warm"), slow, concurrency=8, provider_kind=M.ENFORCED_PROVIDER)
     assert eight.status == "REPORTED"
     assert "not asserted" in eight.reason
     assert not eight.failed
@@ -161,7 +180,13 @@ def test_a_cell_with_no_budget_is_only_reported():
 
 
 def test_a_cell_that_observed_nothing_is_reported_not_failed():
-    verdict = M.judge(("tui", "warm"), _stats({"n": 0, "p50": M.UNAVAILABLE}))
+    """For a cell the gate does not enforce, "no samples" is a fact about the channel.
+
+    The ENFORCED version of this case is ``NO-DATA`` and exits 3 — see
+    ``test_an_enforced_cell_that_observed_nothing_is_no_data_not_a_pass``: a gate with
+    nothing to judge must not read as a pass.
+    """
+    verdict = M.judge(("exec", "cold"), _stats({"n": 0, "p50": M.UNAVAILABLE}))
     assert verdict.status == "REPORTED"
     assert not verdict.failed
 
@@ -175,7 +200,7 @@ def test_the_provider_columns_carry_no_budget():
     assert M.BUDGET_MS == 300.0
     assert M.PROVIDER_REASONING not in M.TABLE_METRICS
     assert M.PROVIDER_TEXT not in M.TABLE_METRICS
-    assert M.FIRST_EVENT in M.TABLE_METRICS
+    assert M.FIRST_PAINT in M.TABLE_METRICS
     assert M.PROVIDER_REASONING not in {cell for cell in M.ENFORCED_CELLS}
 
 
@@ -263,7 +288,7 @@ def test_turn_marks_record_first_paint_but_not_a_later_one():
     marks.note_paint_at(100.5, paints=True, emit_monotonic=100.4)
     marks.note_paint_at(100.9, paints=True)
     marks.note_paint_at(101.2, paints=True, carries_text=True)
-    assert marks.marks[M.FIRST_EVENT] == pytest.approx(500.0)
+    assert marks.marks[M.FIRST_PAINT] == pytest.approx(500.0)
     assert marks.marks[M.RUNTIME_EMIT] == pytest.approx(400.0)
     assert marks.marks[M.FIRST_TEXT] == pytest.approx(1200.0)
 
@@ -277,7 +302,7 @@ def test_a_paint_that_is_not_text_does_not_become_first_text():
     marks = TurnMarks(token="t", submit_monotonic=0.0, submit_epoch=0.0)
     marks.note_paint_at(0.2, paints=True)
     sample = marks.sample(arm="cold", channel="mobile")
-    assert sample[M.FIRST_EVENT] == pytest.approx(200.0)
+    assert sample[M.FIRST_PAINT] == pytest.approx(200.0)
     assert sample[M.FIRST_TEXT] == M.UNAVAILABLE
 
 
@@ -381,7 +406,7 @@ def _cell(
 
 def test_report_renders_a_dash_for_an_unobserved_metric():
     """Never a zero: an unobserved column and a fast one are opposite findings."""
-    text = render_report({"cells": [_cell("tui", "warm", {M.FIRST_EVENT: 40.0})]})
+    text = render_report({"cells": [_cell("tui", "warm", {M.FIRST_PAINT: 40.0})]})
     assert "40/40/40" in text
     assert "first_reasoning" in text
     assert "0/0/0" not in text
@@ -390,7 +415,7 @@ def test_report_renders_a_dash_for_an_unobserved_metric():
 def test_report_carries_the_run_count_and_the_tree():
     text = render_report(
         {
-            "cells": [_cell("tui", "warm", {M.FIRST_EVENT: 40.0})],
+            "cells": [_cell("tui", "warm", {M.FIRST_PAINT: 40.0})],
             "tree": {"rev": "a7e6b9bdxxxx", "worktree_head": "aaaa", "subtree": "local_operator"},
             "runs": 7,
             "concurrency": [1, 4, 8],
@@ -403,15 +428,15 @@ def test_report_carries_the_run_count_and_the_tree():
 
 def test_report_orders_channels_cheapest_first():
     cells = [
-        _cell("exec", "warm", {M.FIRST_EVENT: 10.0}),
-        _cell("tui", "warm", {M.FIRST_EVENT: 20.0}),
+        _cell("exec", "warm", {M.FIRST_PAINT: 10.0}),
+        _cell("tui", "warm", {M.FIRST_PAINT: 20.0}),
     ]
     text = render_report({"cells": cells})
     assert text.index("tui") < text.index("exec")
 
 
 def test_report_shows_cell_warnings():
-    cell = _cell("desktop", "cold", {M.FIRST_EVENT: 2600.0})
+    cell = _cell("desktop", "cold", {M.FIRST_PAINT: 2600.0})
     cell["warnings"] = ["provider emitted reasoning at p50 900 ms and NO front end received it"]
     text = render_report({"cells": [cell]})
     assert "NO front end received it" in text
@@ -448,12 +473,14 @@ def test_reduce_cells_flags_a_mis_paired_provider_column():
             **{metric: M.UNAVAILABLE for metric in M.METRICS},
             "token": "t",
             "submit_epoch": 0.0,
-            M.FIRST_EVENT: 100.0,
+            M.FIRST_PAINT: 100.0,
             M.FIRST_TEXT: 100.0,
             M.PROVIDER_TEXT: 500.0,
         }
     ]
-    cells = bench_ttft._reduce_cells({("tui", "warm", 1): samples}, runs=1)
+    cells = bench_ttft._reduce_cells(
+        {("tui", "warm", 1): samples}, runs=1, provider_kind=M.ENFORCED_PROVIDER
+    )
     assert any("mis-paired" in warning for warning in cells[0]["warnings"])
 
 
@@ -464,13 +491,15 @@ def test_reduce_cells_flags_reasoning_no_front_end_received():
             **{metric: M.UNAVAILABLE for metric in M.METRICS},
             "token": "t",
             "submit_epoch": 0.0,
-            M.FIRST_EVENT: 300.0,
+            M.FIRST_PAINT: 300.0,
             M.FIRST_TEXT: 300.0,
             M.PROVIDER_TEXT: 200.0,
             M.PROVIDER_REASONING: 100.0,
         }
     ]
-    cells = bench_ttft._reduce_cells({("tui", "warm", 1): samples}, runs=1)
+    cells = bench_ttft._reduce_cells(
+        {("tui", "warm", 1): samples}, runs=1, provider_kind=M.ENFORCED_PROVIDER
+    )
     assert any("NO front end received it" in warning for warning in cells[0]["warnings"])
 
 
@@ -480,14 +509,16 @@ def test_reduce_cells_says_nothing_when_reasoning_did_reach_the_front_end():
             **{metric: M.UNAVAILABLE for metric in M.METRICS},
             "token": "t",
             "submit_epoch": 0.0,
-            M.FIRST_EVENT: 300.0,
+            M.FIRST_PAINT: 300.0,
             M.FIRST_TEXT: 300.0,
             M.FIRST_REASONING: 200.0,
             M.PROVIDER_TEXT: 250.0,
             M.PROVIDER_REASONING: 100.0,
         }
     ]
-    cells = bench_ttft._reduce_cells({("tui", "warm", 1): samples}, runs=1)
+    cells = bench_ttft._reduce_cells(
+        {("tui", "warm", 1): samples}, runs=1, provider_kind=M.ENFORCED_PROVIDER
+    )
     assert not any("NO front end received it" in warning for warning in cells[0]["warnings"])
 
 
@@ -497,7 +528,7 @@ def test_reduce_cells_verdict_matches_the_budget_rule():
             **{metric: M.UNAVAILABLE for metric in M.METRICS},
             "token": "t",
             "submit_epoch": 0.0,
-            M.FIRST_EVENT: 50.0,
+            M.FIRST_PAINT: 50.0,
         }
     ]
     slow = [
@@ -505,10 +536,316 @@ def test_reduce_cells_verdict_matches_the_budget_rule():
             **{metric: M.UNAVAILABLE for metric in M.METRICS},
             "token": "t",
             "submit_epoch": 0.0,
-            M.FIRST_EVENT: 5000.0,
+            M.FIRST_PAINT: 5000.0,
         }
     ]
-    fast_verdict = bench_ttft._reduce_cells({("tui", "warm", 1): fast}, runs=1)[0]
-    slow_verdict = bench_ttft._reduce_cells({("tui", "warm", 1): slow}, runs=1)[0]
+    fast_verdict = bench_ttft._reduce_cells(
+        {("tui", "warm", 1): fast}, runs=1, provider_kind=M.ENFORCED_PROVIDER
+    )[0]
+    slow_verdict = bench_ttft._reduce_cells(
+        {("tui", "warm", 1): slow}, runs=1, provider_kind=M.ENFORCED_PROVIDER
+    )[0]
     assert fast_verdict["verdict"]["status"] == "PASS"
     assert slow_verdict["verdict"]["status"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# What the gate is allowed to judge (review round 1, Q2 and Q3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_gate_never_enforces_the_real_wire_arm():
+    """A verdict on a cell with a real network hop inside it is a verdict on the box.
+
+    Measured evidence for the rule: the same cell, on the same host, PASSED at 143 ms
+    (load 86) and FAILED at 624 ms (load 111-131) on the real-wire arm, while the
+    stubbed arm sat at 26 ms. Scoping enforcement by provider is what stops the exit
+    code being decided by the weather, and it is a SCOPING change rather than a
+    loosened threshold: BUDGET_MS did not move, and the cell is still printed against
+    it.
+    """
+    stats = _stats({"n": 7, "p50": 900.0, "p95": 1200.0})
+    verdict = M.judge(("tui", "warm"), stats, provider_kind="loopback")
+    assert verdict.status == "REPORTED"
+    assert not verdict.failed
+    assert "NOT asserted" in verdict.reason
+    assert M.BUDGET_MS == 300.0
+
+
+def test_an_unknown_provider_arm_is_not_enforced_either():
+    """Fail closed: an un-named arm is never asserted, so a caller that forgets the
+    argument cannot claim a verdict it did not measure."""
+    assert M.judge(("tui", "warm"), _stats({"n": 7, "p50": 900.0})).status == "REPORTED"
+
+
+def test_an_out_of_band_enforced_cell_is_not_judged():
+    """Neither pass nor fail, and exit 3 — the box was not a fair reading."""
+    stats = _stats({"n": 7, "p50": 90.0, "p95": 120.0})
+    verdict = M.judge(
+        ("tui", "warm"),
+        stats,
+        provider_kind=M.ENFORCED_PROVIDER,
+        load_per_cpu=M.BUDGET_LOAD_PER_CPU_MAX + 1,
+    )
+    assert verdict.status == "OUT-OF-BAND"
+    assert verdict.indeterminate
+    assert not verdict.failed
+    assert M.INDETERMINATE_EXIT_CODE == 3
+
+
+def test_an_enforced_cell_that_observed_nothing_is_no_data_not_a_pass():
+    """A gate that passes on no data is worse than no gate (round 1, minor)."""
+    verdict = M.judge(
+        ("tui", "warm"),
+        _stats({"n": 0, "p50": M.UNAVAILABLE}),
+        provider_kind=M.ENFORCED_PROVIDER,
+    )
+    assert verdict.status == "NO-DATA"
+    assert verdict.indeterminate
+    assert not verdict.failed
+
+
+def test_a_cell_whose_every_sample_died_is_failed_not_absent():
+    """The sweep continues past a dead cell, but the run cannot come out green."""
+    verdict = M.judge(
+        ("tui", "warm"),
+        _stats({"n": 0, "p50": M.UNAVAILABLE}),
+        provider_kind=M.ENFORCED_PROVIDER,
+        errors=7,
+    )
+    assert verdict.status == "FAILED"
+    assert verdict.failed
+
+
+# ---------------------------------------------------------------------------
+# The exit code, pinned by the observable (review round 1, F1)
+# ---------------------------------------------------------------------------
+
+
+def _drive_amain(
+    monkeypatch,
+    tmp_path,
+    *,
+    argv,
+    paints,
+    dead_channels=(),
+):
+    """Run ``_amain`` with the drivers stubbed, and return its exit code.
+
+    Drives the REAL parser so the flags the finding is about (``--no-assert-budget``)
+    are the ones a user types, and stubs only the three things that need a box: the
+    per-cell driver, the provenance check, and the ambient-env strip.
+    """
+    import asyncio
+
+    async def fake_one_run(**kwargs):
+        if kwargs["channel"] in dead_channels:
+            raise RuntimeError("sqlite3.OperationalError: database is locked")
+        paint = paints.get(kwargs["channel"], 40.0)
+        return [
+            {"arm": arm, M.FIRST_PAINT: paint, M.FIRST_TEXT: paint + 10.0}
+            for arm in kwargs["arms"]
+            for _ in range(kwargs["concurrency"])
+        ]
+
+    monkeypatch.setattr(bench_ttft, "_one_run", fake_one_run)
+    monkeypatch.setattr(
+        "scripts.bench_tree.describe",
+        lambda rev: {
+            "rev": "deadbeef",
+            "worktree_head": "deadbeef",
+            "subtree": "local_operator",
+            "verified": True,
+        },
+    )
+    monkeypatch.setattr(bench_ttft, "strip_inherited_runtime_env", lambda: {})
+    monkeypatch.setattr(bench_ttft, "pin_shared_caches", lambda *a, **k: None)
+    args = bench_ttft.build_parser().parse_args(
+        [*argv, "--pycache-prefix", str(tmp_path / "pc"), "--tiktoken-cache", str(tmp_path / "tk")]
+    )
+    return asyncio.run(bench_ttft._amain(args))
+
+
+def test_the_gate_exit_code_is_pinned_by_the_observable(monkeypatch, tmp_path):
+    """The budget's OBSERVABLE, which nothing pinned before (round 1, F1).
+
+    The reviewer mutated a scratch copy — the gate's ``return 2`` changed to
+    ``return 0``, the call deleted — and every test still passed, because the rule
+    was pinned and the exit code was not. These three assertions are the missing
+    half: over budget exits 2, inside exits 0, and ``--no-assert-budget`` exits 0
+    over budget.
+    """
+    over = _drive_amain(
+        monkeypatch,
+        tmp_path,
+        argv=["--channels", "tui", "--arms", "warm", "--provider", M.ENFORCED_PROVIDER],
+        paints={"tui": 400.0},
+    )
+    assert over == 2, "an enforced cell over budget must exit 2"
+
+    under = _drive_amain(
+        monkeypatch,
+        tmp_path,
+        argv=["--channels", "tui", "--arms", "warm", "--provider", M.ENFORCED_PROVIDER],
+        paints={"tui": 40.0},
+    )
+    assert under == 0, "an enforced cell inside budget must exit 0"
+
+    suppressed = _drive_amain(
+        monkeypatch,
+        tmp_path,
+        argv=[
+            "--channels",
+            "tui",
+            "--arms",
+            "warm",
+            "--provider",
+            M.ENFORCED_PROVIDER,
+            "--no-assert-budget",
+        ],
+        paints={"tui": 400.0},
+    )
+    assert suppressed == 0, "--no-assert-budget must print the verdicts and exit 0"
+
+
+def test_the_gate_exit_code_is_three_when_it_cannot_judge(monkeypatch, tmp_path, capsys):
+    """Out of band is not a pass: the pipeline must not read green out of it."""
+    monkeypatch.setattr(bench_ttft, "load_per_cpu", lambda: M.BUDGET_LOAD_PER_CPU_MAX + 5)
+    code = _drive_amain(
+        monkeypatch,
+        tmp_path,
+        argv=["--channels", "tui", "--arms", "warm", "--provider", M.ENFORCED_PROVIDER],
+        paints={"tui": 40.0},
+    )
+    assert code == M.INDETERMINATE_EXIT_CODE
+    assert "NOT JUDGED" in capsys.readouterr().err
+
+
+def test_a_real_wire_run_never_exits_non_zero_on_the_budget(monkeypatch, tmp_path):
+    """The scoping is visible in the observable too, not just in the verdict text."""
+    code = _drive_amain(
+        monkeypatch,
+        tmp_path,
+        argv=["--channels", "tui", "--arms", "warm", "--provider", "loopback"],
+        paints={"tui": 4000.0},
+    )
+    assert code == 0
+
+
+def test_the_sweep_records_a_dead_cell_and_keeps_going(monkeypatch, tmp_path):
+    """A cell that dies is a FAILED cell, not the end of the sweep (round 1, Q1).
+
+    The reviewer's own repro: a TUI child aborting on the auth.db lock propagated out
+    of the driver, and every remaining cell was lost — 2 of ~29 invocations, rc=1, no
+    table. Here the first channel dies and the second must still be measured, with the
+    dead one carried into the verdicts.
+    """
+    import json
+
+    report = tmp_path / "report.json"
+    code = _drive_amain(
+        monkeypatch,
+        tmp_path,
+        argv=[
+            "--channels",
+            "tui,desktop",
+            "--arms",
+            "warm",
+            "--provider",
+            M.ENFORCED_PROVIDER,
+            "--json",
+            str(report),
+        ],
+        paints={"tui": 40.0, "desktop": 50.0},
+        dead_channels=("tui",),
+    )
+    assert code == 2, "the dead cell is a failure, not a silent omission"
+    written = json.loads(report.read_text())
+    # Keyed by concurrency as well: the default sweep runs 1/4/8 and only the single
+    # turn is asserted, so collapsing the key would read the 8-concurrent verdict.
+    cells = {(c["channel"], c["arm"], c["concurrency"]): c for c in written["cells"]}
+    assert ("desktop", "warm", 1) in cells, "the sweep must continue past a dead cell"
+    assert cells[("tui", "warm", 1)]["verdict"]["status"] == "FAILED"
+    assert cells[("desktop", "warm", 1)]["verdict"]["status"] == "PASS"
+    assert written["errors"]
+
+
+# ---------------------------------------------------------------------------
+# The echo exclusion and the reverse self-check (review round 1, Q5)
+# ---------------------------------------------------------------------------
+
+
+def test_the_echo_of_the_submitted_message_is_never_a_paint():
+    """The seam must not count the user's own row (round 1, Q5).
+
+    The mutation this test exists for: a seam that stamps every event reads ~3 ms —
+    the submit round trip — and would pass every gate in this harness for the wrong
+    reason. Both wire readers that can see a user row are covered.
+    """
+    from local_operator.harness.types import Message, MessageUpdateEvent, TextContent
+
+    echo = MessageUpdateEvent(
+        message=Message(role="user", content=[TextContent(text="what the operator typed")]),
+        delta="what the operator typed",
+    )
+    assert classify_agent_event(echo) == (False, False)
+
+    answer = MessageUpdateEvent(
+        message=Message(role="assistant", content=[TextContent(text="the model's answer")]),
+        delta="the model's answer",
+    )
+    assert classify_agent_event(answer) == (True, False)
+
+    desktop_echo = {
+        "type": "message_update",
+        "payload": {
+            "type": "message_update",
+            "delta": "what the operator typed",
+            "message": {"role": "user", "content": [{"text": "what the operator typed"}]},
+        },
+    }
+    assert desktop_paint(desktop_echo) == (False, False, False)
+    desktop_answer = {
+        "type": "message_update",
+        "payload": {
+            "type": "message_update",
+            "delta": "the model's answer",
+            "message": {"role": "assistant", "content": [{"text": "the model's answer"}]},
+        },
+    }
+    assert desktop_paint(desktop_answer) == (True, True, False)
+
+
+def test_a_frame_that_precedes_its_own_stream_is_flagged():
+    """The other direction of the physical rule, which round 1 found missing (Q5).
+
+    A front end cannot receive a frame before the runtime entered the stream it
+    comes from. A seam that counts the submit echo reads exactly this shape — 3 ms
+    against a stream entered at 11 ms — and nothing checked it.
+    """
+    cells = bench_ttft._reduce_cells(
+        {
+            ("tui", "warm", 1): [
+                {M.FIRST_PAINT: 3.0, M.STREAM_ENTERED: 11.0, M.FIRST_TEXT: 40.0},
+                {M.FIRST_PAINT: 4.0, M.STREAM_ENTERED: 12.0, M.FIRST_TEXT: 41.0},
+            ]
+        },
+        2,
+        provider_kind=M.ENFORCED_PROVIDER,
+    )
+    warnings = " ".join(cells[0]["warnings"])
+    assert "cannot precede the stream" in warnings
+
+
+def test_a_consistent_sample_is_not_flagged():
+    """Prove the check can tell the two apart, or it would just be noise."""
+    cells = bench_ttft._reduce_cells(
+        {
+            ("tui", "warm", 1): [
+                {M.FIRST_PAINT: 90.0, M.STREAM_ENTERED: 11.0, M.FIRST_TEXT: 120.0},
+            ]
+        },
+        1,
+        provider_kind=M.ENFORCED_PROVIDER,
+    )
+    assert cells[0]["warnings"] == []

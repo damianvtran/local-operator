@@ -183,6 +183,10 @@ class LoopbackProvider:
         self.reasoning_ms = reasoning_ms
         self.stamps = ProviderStamps()
         self.requests = 0
+        #: Requests that carried NO turn token: the product's helper calls (effort
+        #: classification, auto-naming). Counted and reported, never stamped — see
+        #: the note at the route, and the report's provider block.
+        self.helper_requests = 0
         #: Every request this endpoint served, so a mis-paired provider column is
         #: AUDITABLE rather than argued about: each entry says which token it
         #: carried, when it arrived, and whether it streamed. A turn that produces
@@ -248,6 +252,17 @@ class LoopbackProvider:
             body = await request.json()
             self.requests += 1
             token = request_token(body)
+            if not token:
+                # A REQUEST THAT CARRIES NO TURN TOKEN IS A HELPER, and it must never
+                # reach a level column (QA round 1, minor: two requests per run with
+                # the same ``last_user`` made the columns ambiguous). The product
+                # issues one of these per session — effort classification, an
+                # auto-name — and it can quote the same prompt, so the token is what
+                # separates them from the measured turn. Counting them here is what
+                # lets the report say the exclusion happened instead of leaving a
+                # reader to wonder what the extra request was. ``stamp_*`` already
+                # refuses a token-less request for the same reason.
+                self.helper_requests += 1
             if len(self.log) < 400:
                 self.log.append(
                     {

@@ -143,8 +143,8 @@ class TurnMarks:
         that let this method read its own clock would fold the caller's
         scheduling back into the measurement.
         """
-        if paints and M.FIRST_EVENT not in self.marks:
-            self.marks[M.FIRST_EVENT] = (at - self.submit_monotonic) * 1000
+        if paints and M.FIRST_PAINT not in self.marks:
+            self.marks[M.FIRST_PAINT] = (at - self.submit_monotonic) * 1000
             self.marks[M.RUNTIME_EMIT] = (
                 (emit_monotonic - self.submit_monotonic) * 1000
                 if emit_monotonic is not None
@@ -390,6 +390,15 @@ def desktop_paint(frame: Mapping[str, Any]) -> tuple[bool, bool, bool]:
 
     ``message_update`` with a non-empty ``delta`` is the frame the renderer
     appends, i.e. the one the user waits for.
+
+    THE ROLE CHECK IS THE SAME ECHO EXCLUSION AS THE TUI SEAM (QA round 1, Q5).
+    The runtime emits ``message_update`` for the user's own row too, and this
+    channel reads the wire rather than the object, so a frame carrying the echo of
+    what the operator just typed would stamp first paint at the submit round trip.
+    A frame whose ``message`` carries no role at all is still counted, deliberately:
+    refusing to count it would turn a shape change elsewhere into a silent zero in
+    this column, and the reverse self-check in ``_reduce_cells`` is what catches a
+    seam that then reads faster than the stream it comes from.
     """
     payload = frame.get("payload")
     if not isinstance(payload, Mapping):
@@ -398,8 +407,47 @@ def desktop_paint(frame: Mapping[str, Any]) -> tuple[bool, bool, bool]:
     if names_reasoning(kind):
         return True, False, True
     if kind == "message_update" and payload.get("delta"):
+        message = payload.get("message")
+        role = str(message.get("role") or "") if isinstance(message, Mapping) else ""
+        if role and role != "assistant":
+            return False, False, False
         return True, True, False
     return False, False, False
+
+
+def classify_agent_event(event: Any) -> tuple[bool, bool]:
+    """(carries_text, carries_reasoning) for one agent event at the front end.
+
+    THE ROLE CHECK IS THE ECHO EXCLUSION, and it is load-bearing. The TUI (and the
+    exec renderer, the desktop bridge and the phone projection) all echo the
+    submitted user message back as a message update, so a seam that counted any
+    delta would stamp first paint at the submit round trip — QA round 1, Q5 mutated
+    exactly this and read **3 ms**, which would have passed every gate in the
+    harness for the wrong reason. Only ASSISTANT deltas are model output; everything
+    else about a turn (the user's own row, a custom row, a tool result) is something
+    the front end already had, or something that is not thinking content either.
+
+    Module level rather than closed over by the TUI child so that the exclusion can
+    be tested: the finding was that nothing in this repository would notice the
+    check being deleted. The product import is function-local like every other one in
+    this file, so a bench that is not driving a channel pays nothing for it.
+    """
+    from local_operator.harness.types import MessageUpdateEvent
+
+    if isinstance(event, MessageUpdateEvent):
+        role = str(getattr(getattr(event, "message", None), "role", "") or "")
+        if role != "assistant":
+            return False, False
+        return bool(getattr(event, "delta", "")), False
+    name = ""
+    for attr in ("type", "event_type", "name"):
+        value = getattr(event, attr, None)
+        if isinstance(value, str) and value:
+            name = value
+            break
+    if names_reasoning(name) or names_reasoning(type(event).__name__):
+        return False, True
+    return False, False
 
 
 async def drive_desktop(
@@ -618,9 +666,39 @@ async def drive_tui(
     for line in out.decode().splitlines():
         if line.startswith("TTFT_JSON "):
             samples = json.loads(line[len("TTFT_JSON ") :])
+    # ONE RETRY FOR THE STORE-INITIALISATION RACE, and only for that (QA round 1,
+    # Q1). ``IsolatedRun.seed`` creates ``auth.db`` serially before this child
+    # exists, which is the fix; this is the belt for the case where something else
+    # reaches the file first — a single, named, retriable failure rather than a
+    # blanket retry that would hide a real child crash behind a second attempt.
+    attempts = 0
+    while not samples and "database is locked" in err.decode() and attempts < 1:
+        attempts += 1
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "bench_ttft.py"),
+            "--child-tui",
+            "--concurrency-child",
+            str(concurrency),
+            "--arms",
+            ",".join(arms),
+            "--hosting",
+            config.hosting,
+            "--model",
+            config.model,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        out, err = await proc.communicate()
+        for line in out.decode().splitlines():
+            if line.startswith("TTFT_JSON "):
+                samples = json.loads(line[len("TTFT_JSON ") :])
     if not samples:
         raise AssertionError(f"tui child reported no timing: {err.decode()[-2000:]}")
     diagnostics["tui_child_stderr"] = err.decode()[-800:]
+    if attempts:
+        diagnostics["tui_child_retried"] = attempts
     return samples
 
 
@@ -648,7 +726,7 @@ async def tui_child_main(
     from local_operator.agents import AgentRegistry
     from local_operator.config import ConfigManager
     from local_operator.credentials import CredentialManager
-    from local_operator.harness.types import MessageUpdateEvent, StreamReasoningDelta
+    from local_operator.harness.types import StreamReasoningDelta
     from local_operator.session_factory import create_session, warm_session_imports
 
     # EXACTLY WHAT THE TUI DOES FIRST: the real app runs this off-loop at boot, and
@@ -673,18 +751,7 @@ async def tui_child_main(
     samples: list[dict[str, Any]] = []
 
     def classify(event: Any) -> tuple[bool, bool]:
-        """(carries_text, carries_reasoning) for one agent event at the front end."""
-        if isinstance(event, MessageUpdateEvent):
-            return bool(getattr(event, "delta", "")), False
-        name = ""
-        for attr in ("type", "event_type", "name"):
-            value = getattr(event, attr, None)
-            if isinstance(value, str) and value:
-                name = value
-                break
-        if names_reasoning(name) or names_reasoning(type(event).__name__):
-            return False, True
-        return False, False
+        return classify_agent_event(event)
 
     async def one_session() -> list[dict[str, Any]]:
         session = await create_session(
@@ -849,6 +916,17 @@ async def drive_exec(
         return turn.sample(arm=arm, channel="exec", index=index)
 
     batches = []
+    if "warm" in arms and "cold" not in arms:
+        # A LONE ``--arms warm`` IS A LIE ABOUT A PROCESS ARM (QA round 1, minor).
+        # This channel spawns a real CLI process per sample, so "warm" means "a
+        # process has already run in this run group and paid the bytecode and import
+        # cost". With cold excluded nothing has, and every sample would be cold while
+        # the table said warm. Relabelling would silently change what the arm MEANS,
+        # so the harness pays that cost once, unmeasured, and says so.
+        await one(0, "prime-unmeasured")
+        diagnostics["exec_primed"] = (
+            "a lone --arms warm ran one unmeasured turn first, so the arm is warm"
+        )
     for arm in arms:
         batches.extend(await gather_or_raise([one(index, arm) for index in range(concurrency)]))
     return batches
@@ -1056,7 +1134,7 @@ async def drive_mobile(
                     turn.note_paint_at(at, paints=True, carries_reasoning=True, emit_monotonic=emit)
                 if text and text != baseline:
                     turn.note_paint_at(at, paints=True, carries_text=True, emit_monotonic=emit)
-                if activity and M.FIRST_EVENT not in turn.marks:
+                if activity and M.FIRST_PAINT not in turn.marks:
                     # The phone's working line. A real paint — the user sees motion
                     # — and deliberately NOT recorded as first TEXT; see
                     # TurnMarks.note_paint_at.
@@ -1065,7 +1143,7 @@ async def drive_mobile(
                     started["value"] = True
                 if started["value"] and frame.get("stop_reason") and not streaming:
                     return True
-                return M.FIRST_EVENT in turn.marks and M.FIRST_TEXT in turn.marks
+                return M.FIRST_PAINT in turn.marks and M.FIRST_TEXT in turn.marks
 
             async def read_turn() -> Mapping[str, Any]:
                 while True:
@@ -1135,7 +1213,15 @@ async def drive_mobile(
 
 
 def jobs_paint(frame: Mapping[str, Any]) -> tuple[bool, bool, bool]:
-    """(paints, carries_text, carries_reasoning) for one jobs-SSE frame."""
+    """(paints, carries_text, carries_reasoning) for one jobs-SSE frame.
+
+    No role check is needed here, and that is a property of the vocabulary rather
+    than an oversight: ``message.delta`` is documented on the server's own event
+    table as *incremental assistant text* (``server/utils/sse.py``), so a jobs frame
+    cannot be the user's echo. If that contract ever widens, the reverse self-check
+    in ``_reduce_cells`` (a frame cannot precede the stream it comes from) is the
+    tripwire.
+    """
     kind = str(frame.get("type") or "")
     if names_reasoning(kind):
         return True, False, True
@@ -1223,6 +1309,30 @@ async def drive_sse_jobs(
         return out
 
     try:
+        if "warm" in arms and "cold" not in arms:
+            # Same defect, same fix as the exec arm (QA round 1, minor): each request
+            # spawns a fresh job PROCESS, so warm means the shared bytecode cache has
+            # already been paid for. Nothing else pays for it when cold is excluded.
+            async with httpx.AsyncClient(base_url=base_url, timeout=300) as client:
+                priming = await client.post(
+                    "/v1/chat/async",
+                    json={
+                        "prompt": "prime the caches",
+                        "hosting": config.hosting,
+                        "model": config.model,
+                    },
+                )
+                priming.raise_for_status()
+                priming_id = priming.json()["result"]["id"]
+                async with client.stream("GET", f"/v1/sse/jobs/{priming_id}") as response:
+                    await read_until(
+                        response.aiter_lines(),
+                        lambda frame: str(frame.get("type")) in ("stream.terminal", "stream.gap"),
+                        timeout=TURN_TIMEOUT_S,
+                    )
+            diagnostics["sse_jobs_primed"] = (
+                "a lone --arms warm ran one unmeasured request first, so the arm is warm"
+            )
         for batch in await gather_or_raise([one() for _ in range(concurrency)]):
             samples.extend(batch)
         return samples
