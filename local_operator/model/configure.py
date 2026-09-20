@@ -5443,6 +5443,14 @@ class SessionStreamFn:
         started_at = time.monotonic()
         request_id = uuid.uuid4().hex
         first_token_at: float | None = None
+        # Stream start to the model's first REASONING fragment. Recorded
+        # alongside ``ttft_ms`` rather than folded into it: they are two
+        # different waits on the same call -- first thing the model SAID versus
+        # the first thing the user could SEE -- and before the harness rendered
+        # reasoning at all, the second one was invisible to the ledger as well as
+        # to the operator. Same clock and same origin as ``ttft_ms``, so the two
+        # are directly comparable and the reasoning gap is a subtraction.
+        first_reasoning_at: float | None = None
         outcome = "incomplete"
         # Snapshot char lengths BEFORE streaming: cheap (string length reads,
         # sub-millisecond even on a very large context) and safe to hand a
@@ -5463,6 +5471,13 @@ class SessionStreamFn:
                     "tool_call_delta",
                 ):
                     first_token_at = time.monotonic()
+                if first_reasoning_at is None and getattr(event, "type", "") == "reasoning_delta":
+                    # Matched on the event's own type string, exactly as
+                    # ``ttft_ms`` matches its two above: this wrapper is written
+                    # against the provider stream contract, and importing the
+                    # wire classes here to isinstance them is what the existing
+                    # line deliberately avoids.
+                    first_reasoning_at = time.monotonic()
                 usage = getattr(event, "usage", None)
                 if usage is not None:
                     final_usage = usage
@@ -5540,6 +5555,11 @@ class SessionStreamFn:
                 ttft_ms=(
                     (first_token_at - started_at) * 1000 if first_token_at is not None else -1
                 ),
+                first_reasoning_ms=(
+                    (first_reasoning_at - started_at) * 1000
+                    if first_reasoning_at is not None
+                    else -1
+                ),
                 outcome=outcome,
                 usage_reported=final_usage is not None,
             )
@@ -5554,6 +5574,7 @@ class SessionStreamFn:
         request_id: str = "",
         duration_ms: float = -1,
         ttft_ms: float = -1,
+        first_reasoning_ms: float = -1,
         outcome: str = "unknown",
         usage_reported: bool = True,
     ) -> None:
@@ -5620,6 +5641,7 @@ class SessionStreamFn:
                     purpose=request.purpose,
                     duration_ms=duration_ms,
                     ttft_ms=ttft_ms,
+                    first_reasoning_ms=first_reasoning_ms,
                     preparation_ms=request.preparation_ms,
                     outcome=outcome,
                     usage_reported=usage_reported,

@@ -18,7 +18,14 @@ export type EntryKind =
 	| "subagent_message"
 	// An inbound message from another local lop session (`lop send`). Rendered
 	// as a distinct cross-session card, never as the user's own turn.
-	| "peer_message";
+	| "peer_message"
+	// The model's own PRIVATE reasoning, streamed while it thinks. Transient by
+	// construction: it never joins the durable transcript, so the row is gone
+	// after the next sync, and it is never the assistant's answer. Listed here
+	// because this union mirrors `local_operator/mobile/types.py` field-for-field
+	// -- the client renders it through its unknown-kind path today, which is what
+	// it rendered before the runtime emitted reasoning at all.
+	| "reasoning";
 
 export type ToolState =
 	| "composing"

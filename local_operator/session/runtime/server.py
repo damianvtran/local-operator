@@ -51,7 +51,7 @@ import threading
 import time
 import weakref
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol, cast
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping, Protocol, cast
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -245,6 +245,36 @@ def _frame_size_without_delta(frame: dict[str, Any]) -> int:
     # ``- 2`` removes the two quotes of the blanked delta: the caller adds the
     # real value back including its own quotes.
     return _frame_line_bytes(probe) - 2
+
+
+def _mergeable_delta_key(payload: Mapping[str, Any]) -> str | None:
+    """The in-flight stream one queued frame carries a fragment of, or ``None``.
+
+    Compaction folds ADJACENT frames of the same stream into one, and the only
+    thing that decides "same stream" is this key. Two families are delta-grade
+    and mergeable:
+
+    * ``message_update`` — the assistant's visible text, keyed by the message it
+      accumulates into;
+    * ``reasoning_delta`` — the model's private reasoning, keyed by the message
+      it belongs to (the field is ``message_id``, not a whole ``message``: a
+      reasoning frame carries no message, which is also why it is cheap to
+      merge).
+
+    The FAMILY is part of the key, so a text fragment and a reasoning fragment
+    can never fold together — merging the model's thinking into the answer
+    being painted would corrupt the transcript on the viewer's screen, and the
+    two arrive interleaved.
+
+    Everything else returns ``None`` and is left alone: a frame that must not
+    merge is never compared to its neighbour at all.
+    """
+    kind = payload.get("type")
+    if kind == "message_update":
+        return f"message_update:{(payload.get('message') or {}).get('id') or ''}"
+    if kind == "reasoning_delta":
+        return f"reasoning_delta:{payload.get('message_id') or ''}"
+    return None
 
 
 #: Line bytes the shedding stage deliberately leaves UNSPENT.
@@ -5257,14 +5287,25 @@ class RuntimeServer:
             self._enqueue_client_frame(conn, frame)
 
     def _compact_event_queue(self, conn: _ClientConn) -> bool:
-        """Fold the two compactible frame families in place.
+        """Fold the delta-grade and compose frame families in place.
 
-        Merges runs of same-message ``message_update`` frames, and keeps only
-        the NEWEST ``tool_call_compose`` per ``tool_call_id``.
+        Merges runs of same-stream ``message_update`` and ``reasoning_delta``
+        frames, and keeps only the NEWEST ``tool_call_compose`` per
+        ``tool_call_id``. Which frames belong to one stream is
+        :func:`_mergeable_delta_key`'s rule, and it is the only family-specific
+        thing here: the size accounting below is delta-sized and therefore
+        family-agnostic.
 
         Both are lossless by construction. For ``message_update`` the later
         event's ``message`` already contains the earlier one's text, and
         concatenating ``delta`` preserves the append contract UIs rely on. For
+        ``reasoning_delta`` there is no accumulated payload at all — the frame
+        carries one fragment, a ``message_id`` both frames agree on, and the
+        same concatenation reproduces the two fragments in arrival order. This
+        matters as much as it does for text: reasoning arrives once per token,
+        and a long-thinking turn is thousands of frames, so without the fold a
+        stalled viewer's FIFO fills with incompressible reasoning frames and is
+        dropped — the same failure the compose fold below was written for. For
         ``tool_call_compose`` the argument is the one ``_fold_live_event``
         (``frontend_state.py``) already relies on for the reconnect seed: a
         compose frame is a SNAPSHOT of a call being dictated (``tool_name``,
@@ -5407,17 +5448,17 @@ class RuntimeServer:
             ):
                 data = frame.get("data") or {}
                 prior = previous.get("data") or {}
-                if (
-                    data.get("type") == "message_update"
-                    and prior.get("type") == "message_update"
-                    and (data.get("message") or {}).get("id")
-                    == (prior.get("message") or {}).get("id")
-                ):
+                merge_key = _mergeable_delta_key(data)
+                if merge_key is not None and merge_key == _mergeable_delta_key(prior):
                     # SIZE THE DELTA, NOT THE WHOLE FRAME. Re-dumping the
                     # merged frame re-serializes the unchanged accumulated
                     # ``message`` — hundreds of KB — on every merge, which is
                     # quadratic in queue depth: one 64-frame compaction
                     # serialized 67.4 MB and took 152 ms on the runtime loop.
+                    # A ``reasoning_delta`` frame has no ``message`` to re-dump,
+                    # so the same arithmetic is simply cheap there; it is the
+                    # SAME arithmetic, which is what keeps the reasoning family
+                    # from needing an accounting of its own.
                     # That loop also owns the ``_SEND_TIMEOUT_S`` sends, so the
                     # stall pushed a healthy peer's 0.90 s drain past 1.0 s and
                     # dropped it — manufacturing the very false disconnect this

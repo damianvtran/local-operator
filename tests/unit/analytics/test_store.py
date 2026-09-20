@@ -750,6 +750,42 @@ def test_wal_is_enabled_despite_a_busy_journal_transition(tmp_path, monkeypatch)
     assert busied["n"] == 2  # and the retry was genuinely exercised, not skipped
 
 
+def test_first_reasoning_ms_is_recorded_and_migrated(tmp_path):
+    """The reasoning wait gets a column of its own, and an older ledger gains it.
+
+    Two claims, and the second is the one a ``CREATE TABLE IF NOT EXISTS`` cannot
+    make: a database written before this column existed HAS a ``calls`` table, so
+    only ``_MIGRATION_COLUMNS`` can add the column. Dropping it here and
+    re-opening is that path exactly.
+
+    The sentinel is asserted as well as the value: ``-1`` means "this turn never
+    reasoned", which is a different fact from "reasoned instantly", and a
+    pre-column row must read as the former (0 ms would claim the latter).
+    """
+    db = tmp_path / "pre-reasoning.db"
+    store = AnalyticsStore(db)
+    before = _snap()
+    assert store.record_batch([before]) == 1
+    conn = store._connect()
+    assert conn is not None
+    conn.execute("ALTER TABLE calls DROP COLUMN first_reasoning_ms")
+    store.close()
+
+    # Re-open: the ALTER path (not the CREATE) is what must put it back.
+    store = AnalyticsStore(db)
+    conn = store._connect()
+    assert conn is not None
+    old = conn.execute("SELECT first_reasoning_ms FROM calls ORDER BY id").fetchall()
+    assert old == [(-1,)], "a pre-column row must read as never-reasoned, not 0 ms"
+
+    import dataclasses
+
+    assert store.record_batch([dataclasses.replace(_snap(), first_reasoning_ms=742.0)]) == 1
+    rows = conn.execute("SELECT first_reasoning_ms FROM calls ORDER BY id").fetchall()
+    assert rows == [(-1,), (742.0,)]
+    store.close()
+
+
 def test_cache_write_1h_tokens_is_recorded_and_migrated(tmp_path):
     """The 1h slice of a cache write lands in its own ledger column, and a
     database from before the column existed gains it on open (old rows read

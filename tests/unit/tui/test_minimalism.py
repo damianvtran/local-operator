@@ -80,7 +80,8 @@ def test_block_selectors_declare_no_margin_or_padding() -> None:
     text = TCSS.read_text()
     match = re.search(
         r"^TranscriptBlock,\s*UserBlock,\s*NoticeBlock,\s*RichBlock,\s*"
-        r"AssistantBlock,\s*ToolCard,\s*WakeBlock,\s*PeerMessageBlock\s*\{([^}]*)\}",
+        r"AssistantBlock,\s*ReasoningBlock,\s*ToolCard,\s*WakeBlock,\s*"
+        r"PeerMessageBlock\s*\{([^}]*)\}",
         text,
         re.MULTILINE,
     )
