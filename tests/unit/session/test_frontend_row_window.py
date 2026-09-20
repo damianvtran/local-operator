@@ -1254,6 +1254,93 @@ def test_a_released_row_is_rebuilt_when_its_derived_inputs_move() -> None:
     assert len(after_descendants.descendant_usage) == 1
 
 
+def test_the_release_key_covers_every_element_that_can_move_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4: each element added for S1 must be able to fail this file ON ITS OWN.
+
+    Round 2's per-element sweep found the first test pinned only the usage and
+    descendant elements: ``model_label``, ``context_window`` and the plan could
+    all be dropped from the key with the file still green, and the trajectory
+    pair is falsifiable only as a PAIR (either element catches the same append).
+
+    Driven through ``_ReleasedRows.row`` directly rather than through
+    ``refresh_jobs``, because one of these legs -- a rotation at constant
+    length -- is VALUE-EQUAL for everything a released row projects, so
+    ``_jobs_equal`` keeps the old row and discards the rebuild. A store-level
+    identity assertion cannot see that element work; the memo can.
+    """
+    from local_operator.tools.builtin import TODO_STORE
+
+    session_id = "abcdef123456"
+    memo = module._ReleasedRows("e1")
+    job = _settled(_job("child-done"))
+    comms = SimpleNamespace(
+        node=lambda _job_id: SimpleNamespace(
+            session_id=session_id,
+            live=False,
+            session_dir=None,
+            parent_job_id=None,
+            launch_message_id="",
+            launch_prompts=None,
+            attempt_aliases=(),
+        )
+    )
+
+    def row() -> JobState:
+        return memo.row("child-done", job, comms)
+
+    current = row()
+
+    # (d) the relay's ``ModelChangeEvent`` arm writes ``model_label`` and
+    # ``context_window`` on consecutive lines of the same block; round 2 (R1)
+    # caught the key carrying only the first while the row reads BOTH.
+    job.model_label = "other-provider/other-model"
+    after_label = row()
+    assert after_label is not current, "model_label moved and the row was reused"
+    assert after_label.model_label == "other-provider/other-model"
+    current = after_label
+
+    job.context_window = 200_000
+    after_context = row()
+    assert after_context is not current, "context_window moved and the row was reused"
+    assert after_context.context_window == 200_000
+    current = after_context
+
+    # (e) a rotation at CONSTANT length: an append that evicts the front, which
+    # is the shape a length-only key cannot see.
+    rows = _trajectory(job)
+    rows.pop(0)
+    rows.append(_row(ROWS))
+    assert len(rows) == ROWS, "the rotation must leave the length unchanged"
+    after_rotation = row()
+    assert after_rotation is not current, "a rotation at constant length was not noticed"
+    current = after_rotation
+
+    # (e2) a FRONT deletion on its own: the length moves while the newest stamp
+    # does NOT, which is the one shape the relay-stamp element cannot see. This
+    # leg is what makes the length element falsifiable without its pair -- a
+    # sweep with only (e) leaves it green, because both elements catch an
+    # append-plus-evict and only the length catches a bare front drop.
+    rows.pop(0)
+    assert len(rows) == ROWS - 1, "the front drop must shorten the window"
+    after_front_drop = row()
+    assert after_front_drop is not current, "a front deletion was not noticed"
+    assert after_front_drop.trajectory_length == ROWS - 1
+    current = after_front_drop
+
+    # (f) a plan APPEARING. ``todos`` rides onto the row from ``TODO_STORE`` via
+    # ``_with_lineage``, so no node-derived element can cover it.
+    monkeypatch.setitem(
+        TODO_STORE,
+        session_id,
+        [{"name": "Todos", "items": [{"text": "ship it", "status": "pending"}]}],
+    )
+    after_plan = row()
+    assert after_plan is not current, "a plan appearing did not move the key"
+    assert after_plan.todos, "the key moved but the row did not gain the plan"
+
+
 def test_a_released_row_keeps_the_lineage_its_transcript_page_needs() -> None:
     """A swept child's page is reachable ONLY through the lineage on its row.
 

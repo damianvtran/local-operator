@@ -79,6 +79,14 @@ from local_operator.session.spend import (
 
 logger = logging.getLogger(__name__)
 
+#: Whether the roster predicate has already reported an unreadable node list.
+#: One warning per FAILING STREAK, not per tick: ``_released_predicate`` is
+#: rebuilt on every roster refresh, so an intermittently unreadable graph would
+#: otherwise emit one warning per refresh (up to ~20/s on the 50 ms coalescer)
+#: for a single fault. Cleared on the next successful read, so a recovery
+#: re-arms it and the instrument stays live rather than firing once per process.
+_node_status_failure_reported = False
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     #: The duck-typed session members this store calls when a real session is
     #: present. Named so the ``getattr`` + ``callable`` guards can be cast to a
@@ -1238,10 +1246,18 @@ def _trajectory_row_seq(row: Any) -> int | None:
 def _last_trajectory_seq(rows: Any) -> int | None:
     """One retained window's newest relay stamp, or ``None`` when it has none.
 
-    THE APPEND DISCRIMINATOR THAT SURVIVES THE CAP. Once a window is full an
-    append evicts the oldest row, so ``len()`` alone does not move and a length
-    key would serve a stale released row — the same at-cap rotation
-    :func:`_capped_overlap_tail` exists for. O(1): a length and one index.
+    REDUNDANT WITH THE LENGTH FOR ANYTHING A RELEASED ROW PROJECTS, and kept
+    anyway as the defensive half of the pair (review round 2, R2). An earlier
+    revision of this docstring justified it with the at-cap rotation — an append
+    that evicts the front, leaving ``len()`` unmoved — which is :func:`_capped_overlap_tail`'s
+    problem, not this one: :func:`_released_row` sheds the window entirely and
+    keeps only ``trajectory_length``, a value that is invariant under
+    append-plus-evict by construction. So the element moves the mark on that
+    rotation, the memo rebuilds, and the rebuild is value-equal, so ``mutate``
+    discards it and installs the old row: no observable cost and no observable
+    benefit. It stays because a future projection of the window would need it
+    and because ``len()`` alone cannot, on its own, distinguish a rotation from
+    a no-op. O(1): a length and one index.
     """
     try:
         return _trajectory_row_seq(rows[-1]) if len(rows) else None
@@ -1582,6 +1598,12 @@ def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
         job.pop("roster_released", None)
 
 
+def _clear_node_status_failure() -> None:
+    """Re-arm the one-shot node-status warning after a successful read."""
+    global _node_status_failure_reported
+    _node_status_failure_reported = False
+
+
 def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
     """ "Has the roster window released this row?", bound to the live manager.
 
@@ -1637,6 +1659,7 @@ def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
             if str(getattr(node, "status", "")) == "paused":
                 paused_ids.add(str(getattr(node, "job_id", "") or ""))
     except Exception:  # noqa: BLE001 — see below; this arm must fail CLOSED
+        global _node_status_failure_reported
         # NOT ``paused_ids = set()``, which is the OPEN direction and the
         # opposite of what the docstring promises (review round 1, S5): an
         # empty paused set removes ``roster_expired``'s pause exemption, so a
@@ -1646,8 +1669,14 @@ def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
         # per-tick work and nothing else. Logged rather than silent: a
         # permanent failure that says nothing is undiagnosable (the dock's own
         # equivalent logs for the same reason).
-        logger.warning("subagent roster: node statuses unreadable; releasing nothing this tick")
+        if not _node_status_failure_reported:
+            _node_status_failure_reported = True
+            logger.warning("subagent roster: node statuses unreadable; releasing nothing this tick")
+        else:
+            logger.debug("subagent roster: node statuses still unreadable; releasing nothing")
         return lambda _job: False
+
+    _clear_node_status_failure()
 
     def released(job: Any) -> bool:
         try:
@@ -1839,11 +1868,23 @@ class _ReleasedRows:
         a monotone stamp), so closing the gap does not put the per-tick cost
         back.
 
-        ``latest_details`` is the one projection still outside the key, and that
-        is a stated boundary rather than an oversight: nothing in this repo
-        writes it after a row settles, and keying a progress payload means
-        hashing it on every tick, which is the cost this class exists to remove.
-        Everything a writer CAN reach is keyed.
+        WHAT IS STILL OUTSIDE THE KEY, named rather than implied, because an
+        earlier revision of this paragraph said "the one projection" and
+        "everything a writer can reach is keyed", and neither was true (review
+        round 2, R1 and R3):
+
+        * ``latest_details`` — its only writer is ``_progress_fn.report``, driven
+          by each runner's own ``report_progress``, which cannot fire once the
+          runner has returned. Keying a progress payload would mean hashing it
+          on every tick, the cost this class exists to remove.
+        * the plan's CONTENT — :func:`_plan_shape` keys its SHAPE (the phase
+          count, plus ``node.live``), because ``_with_lineage`` re-stamps
+          ``todos`` from ``TODO_STORE`` on every tick and a content fingerprint
+          is O(items) per tick. A same-count edit to a plan therefore does not
+          move the mark.
+
+        Both are content-blind boundaries on cost grounds, taken deliberately.
+        Everything else a writer can reach is keyed.
         """
         node = None
         try:
@@ -1861,7 +1902,14 @@ class _ReleasedRows:
             str(getattr(job, "error_text", "") or ""),
             str(getattr(job, "result_text", "") or ""),
             bool(getattr(job, "restored", False)),
+            # BOTH of the fields the relay's ``ModelChangeEvent`` arm writes,
+            # not just the one that prices the row (review round 2, R1):
+            # ``subagent.py`` sets ``model_label`` and ``context_window`` on
+            # consecutive lines of the same block, so keying one and projecting
+            # both is exactly the asymmetry this key exists to prevent. The row
+            # reads ``context_window`` straight off the job.
             getattr(job, "model_label", None),
+            getattr(job, "context_window", None),
             # The retained window: ``len`` catches an append or a truncation, and
             # the newest relay stamp catches the at-cap rotation where an append
             # evicts the front and the length does not move.
