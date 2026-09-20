@@ -2490,8 +2490,9 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
                 # No classification from this store: the labels-only view names the
                 # hits whose mask was whole, so the only reading it supports is the
                 # ESCALATED one — which is exactly what this path filed before the
-                # classification existed. Silent when nothing matched.
-                report_shape_hits(labels)
+                # classification existed. Silent when nothing matched, which is why
+                # this is inside the guard rather than relying on a default.
+                report_shape_hits(labels, reached_model=True)
             return scrubbed
         except Exception:  # noqa: BLE001 — fall through to the plain path below
             logger.warning("hit-aware redaction failed on a live surface", exc_info=True)

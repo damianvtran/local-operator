@@ -963,9 +963,16 @@ def format_shape_incident_message(
     operator who is never told cannot tidy up — but what the notice asks for is
     cleanup, not rotation: delete any plaintext copy, and do it WITHOUT reading
     it, because reading it is what would turn the contained case into the
-    escalated one. Whether a copy exists is not knowable from here (the value can
-    reach the notice from a command's own text, which the history-scrub path masks
-    through this same formatter), so the obligation is stated conditionally
+    escalated one. The wording is deliberately SURFACE-NEUTRAL about where the
+    masking happened: the same notice serves a credential in a tool's OUTPUT, one
+    TYPED INTO a call's arguments — where the tool did run with the real value and
+    the containment is in the copy this session stores and replays — and one found
+    by the history-scrub path, and a claim that named the wrong surface would be
+    false in two of the three (agent review R1, finding 2).
+
+    Whether a plaintext copy exists at all is not knowable from here — the value can
+    reach this notice from a command's own text, which the history-scrub path masks
+    through the same formatter — so the cleanup obligation is stated conditionally
     rather than dropped: it is the one action this path has.
 
     ``labels`` are shape NAMES, never values — a notice that carried the
@@ -995,10 +1002,10 @@ def format_shape_incident_message(
         )
     return (
         f"[credential redaction] a credential ({shapes}) reached {tool_name} and "
-        f"was masked before you saw it.{where} Nothing entered your context — it "
-        "was contained at the tool, so there is no exposure. If the call wrote it "
-        "to a file in plaintext, delete that file without reading it (rm -f): "
-        "reading it is not needed and is not to be done."
+        f"was masked before you saw it.{where} Nothing entered your context — the "
+        "value was masked before it reached you, so there is no exposure. If the "
+        "call wrote it to a file in plaintext, delete that file without reading it "
+        "(rm -f): reading it is not needed and is not to be done."
     )
 
 

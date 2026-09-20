@@ -146,16 +146,15 @@ def reset_shape_hit_reporter(token: Any) -> None:
     _HIT_REPORTER.reset(token)
 
 
-def report_shape_hits(labels: list[str], *, reached_model: bool = True) -> None:
+def report_shape_hits(labels: list[str], *, reached_model: bool) -> None:
     """Hand shape labels, and their classification, to the session's incident queue.
 
-    ``reached_model`` is the SEVERITY, and its default is the escalated reading
-    because the caller that cannot say is the caller that must not claim
-    containment: a value left readable in the text the model reads may be in
-    training data, while a mask that was whole is only an event to report. A
-    caller that has run the table and knows (``ShapeReport.reached_model``)
-    passes it; a caller holding a bare list of labels does not, and keeps the
-    rotation notice it filed before this distinction existed.
+    ``reached_model`` is the SEVERITY and it is REQUIRED, deliberately: a default
+    of True would invite a caller with nothing to report to file an escalated
+    notice about nothing, and a default of False would let a caller that cannot
+    classify claim containment it has not proven. Every in-tree caller can state
+    it — the two that have a ``ShapeReport`` pass it, and the labels-only path
+    passes True and says why in place (agent review R1, finding 5).
 
     An empty ``labels`` with ``reached_model`` true is a REAL case and is not
     filtered out here: it is the hit that left a fragment behind while nothing
