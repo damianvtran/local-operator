@@ -36,7 +36,7 @@ from types import ModuleType
 
 import pytest
 
-from local_operator import launchd, procname
+from local_operator import launchd, procname, supervisors
 from local_operator.browser_bridge import install as browser_install
 from local_operator.mobile import install as mobile_install
 from local_operator.paths import CONFIG_DIR_ENV
@@ -142,8 +142,11 @@ def _modules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Targe
     # own guard is pinned in `test_launchd.py`; here it is the repair under test.
     monkeypatch.setattr(launchd, "config_lives_in_real_home", lambda config: True)
     monkeypatch.setattr(wakes_install, "_config_lives_in_real_home", lambda config: True)
-    monkeypatch.setattr(mobile_install, "is_supported", lambda: True)
-    monkeypatch.setattr(wakes_install, "is_supported", lambda: True)
+    # The supervisor IDENTITY is what the four repairs branch on now (a repair is
+    # launchd's, and the other two platforms' units are handled elsewhere), so
+    # the seam is `supervisors.supervisor` — one patch covering mobile, wakes and
+    # the browser bridge, whose own `_supervisor()` delegates to it.
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "launchctl")
     monkeypatch.setattr(browser_install, "_supervisor", lambda: "launchctl")
 
     store = tmp_path / "config-root"

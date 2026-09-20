@@ -23,11 +23,22 @@ including the broker being wedged rather than absent, which a naive
 ``keyfile`` mode. What never happens is a stale or wrong value: there is no
 cache to serve from, so "broker down" degrades to "slower path" or to a clear
 error in ``passphrase`` mode, never to a plausible wrong answer (§13).
+
+**Where the broker cannot run at all, this module does not pretend otherwise.**
+Peer authentication is implemented for darwin and linux only
+(:data:`local_operator.secrets.peer.PEER_AUTHENTICATION_SUPPORTED`), so a broker
+started anywhere else could only deny every request it received.
+:func:`ensure_broker` therefore returns "no broker" there instead of spawning a
+daemon nobody can be served by, which is the same answer every caller already
+handles: the keyfile tier reads the key file directly and the passphrase tier
+raises its own actionable error. The alternative — a module that cannot even be
+imported, because ``fcntl`` was a module-scope import — is what this used to be
+on Windows, where the failure surfaced as a bare ``ModuleNotFoundError`` from a
+credential read (audit D1/B18/A11).
 """
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import socket
@@ -37,12 +48,14 @@ import time
 from pathlib import Path
 from typing import Any
 
+from local_operator.procstate import detached_popen_kwargs
 from local_operator.secrets.errors import (
     BrokerIncompatible,
     BrokerUnavailable,
     SecretStoreError,
     error_for_kind,
 )
+from local_operator.secrets.peer import PEER_AUTHENTICATION_SUPPORTED
 from local_operator.secrets.protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -75,8 +88,31 @@ STARTUP_TIMEOUT_S = 5.0
 #: winner's socket rather than block on the lock (#401).
 _LOCK_POLL_S = 0.05
 
+#: ``socket.AF_UNIX`` is POSIX-only, so the name does not resolve on Windows.
+#:
+#: Kept as a module constant, and consulted BEFORE the socket is constructed,
+#: because the failure it prevents is not a refusal but an ``AttributeError``
+#: escaping a call whose every caller expects a graded answer: on the real
+#: Windows runner the whole secret store was dead there — ``secret.roundtrip``
+#: reported ``module 'socket' has no attribute 'AF_UNIX'`` — and it took
+#: ``lop secret status``, ``get`` and ``set`` down with it. Behind this check
+#: the same situation arrives as :class:`BrokerUnavailable`, which is the
+#: answer the tree is already built around: ``is_running`` returns ``False``,
+#: ``broker_status`` returns ``None``, ``ensure_broker`` declines to spawn, and
+#: the keyfile tier serves the request with no broker involved at all.
+#:
+#: Capability, not ``os.name``: what matters is whether this interpreter's
+#: ``socket`` module has the address family, which is the thing that would be
+#: dereferenced.
+_AF_UNIX_AVAILABLE = hasattr(socket, "AF_UNIX")
+
 
 def _connect(path: Path, timeout: float = CONNECT_TIMEOUT_S) -> socket.socket:
+    if not _AF_UNIX_AVAILABLE:
+        raise BrokerUnavailable(
+            "this platform has no AF_UNIX sockets, so the secret broker cannot be "
+            "reached; the keyfile tier needs no broker"
+        )
     connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     connection.settimeout(timeout)
     try:
@@ -221,9 +257,39 @@ def ensure_broker(base: Path | None = None, *, timeout: float = STARTUP_TIMEOUT_
     that degrades to an unnotified local read. Propagating is both faster and
     the only answer that lets the seam tell the operator what is actually
     wrong.
+
+    **On a platform without peer authentication this returns False instead of
+    spawning, and that is the correct end state rather than a degradation.**
+    A broker is only worth starting where it can attribute a caller
+    (:data:`local_operator.secrets.peer.PEER_AUTHENTICATION_SUPPORTED`); where
+    it cannot, it would deny every request it ever received, so spawning one
+    buys a daemon nobody can be served by. Returning False is exactly what
+    every caller already reads as "no broker", so the keyfile tier falls back
+    to the documented local read (``access.master_key_for``/``retrieve_secret``)
+    and the passphrase tier raises its own actionable error. Refusing HERE
+    rather than deep inside a spawn is what keeps the failure early and free of
+    side effects.
     """
     if is_running(base):
         return True
+
+    if not PEER_AUTHENTICATION_SUPPORTED:
+        logger.debug(
+            "not starting the secret broker on %s: peer authentication is not "
+            "implemented there, so it could not serve any caller",
+            sys.platform,
+        )
+        return False
+
+    # ``fcntl`` is POSIX-only and is imported HERE rather than at module scope.
+    # The module-level import this replaces made the client — and through it
+    # every credential read — unimportable on Windows, where the failure
+    # surfaced as a bare ``ModuleNotFoundError`` from a property of the agent
+    # loop rather than as anything an operator could act on. It cannot simply
+    # be guarded with a ``None`` test: the early return above means this line is
+    # only ever reached on a platform that has ``fcntl``, so a fallback branch
+    # would be unreachable code pretending to be a fallback.
+    import fcntl
 
     from local_operator.secrets.keys import ensure_secrets_dir, secrets_dir
 
@@ -327,7 +393,13 @@ def _spawn_broker(base: Path | None) -> None:
             stdin=devnull_in,
             stdout=devnull_out,
             stderr=devnull_out,
-            start_new_session=True,
+            # REAL detachment, per platform (``procstate``), rather than the
+            # literal ``start_new_session=True`` this used to carry: that flag
+            # is POSIX-only and Windows IGNORES it silently, so the broker — a
+            # process whose whole purpose is to outlive its caller — would
+            # have kept this process's console on the one platform where a
+            # console close is the ordinary way a terminal goes away.
+            **detached_popen_kwargs(),
             env=environment,
             close_fds=True,
         )

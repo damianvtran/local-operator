@@ -401,9 +401,17 @@ class TestTheFlip:
         staged: list[Path] = []
         real_symlink = os.symlink
 
-        def _record(target: str | os.PathLike[str], link: str | os.PathLike[str]) -> None:
+        def _record(
+            target: str | os.PathLike[str],
+            link: str | os.PathLike[str],
+            **kwargs: object,
+        ) -> None:
+            # ``**kwargs`` and not a two-argument signature: the pointer's target
+            # is a DIRECTORY, so the call carries ``target_is_directory=True``
+            # (a no-op on POSIX, the link's type on Windows) and a recorder that
+            # could not see it would fail the flip it is observing.
             staged.append(Path(str(link)))
-            real_symlink(target, link)
+            real_symlink(target, link, **kwargs)  # type: ignore[arg-type]
 
         original = update_mod.os.symlink
         update_mod.os.symlink = _record  # type: ignore[assignment]
@@ -1766,3 +1774,205 @@ def test_referenced_roots_read_the_default_config_root_too(
         Path(root).resolve() == (generation / "tools" / "local-operator").resolve()
         for root in roots
     ), roots
+
+
+# -- the platform gate ---------------------------------------------------------
+
+
+class TestThePlatformGateOffPosix:
+    """What a platform that cannot make the layout's symlinks gets instead.
+
+    The layout is a SYMLINK CHAIN: ``current`` names a generation and each
+    ``~/.local/bin/<entry>`` resolves through it, so a command on PATH follows
+    whichever build is current at exec. Off POSIX a symlink needs Developer Mode
+    or elevation, which is a property of the MACHINE rather than of the platform
+    this test runs on — so these tests drive the gate itself
+    (``generation_layout_supported`` is monkeypatched, exactly as a Windows host
+    answers it) and pin the three things the refusal has to preserve: it comes
+    BEFORE any work is done, it is a sentence rather than an OSError out of
+    ``os.symlink``, and nothing is half-adopted.
+    """
+
+    def _refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(update_mod, "generation_layout_supported", lambda: False)
+
+    def test_the_install_refuses_before_the_installer_runs(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal is EARLY, and that is the whole point of the gate.
+
+        Measured shape before this: ``flip_pointer`` raised
+        ``[WinError 1314] A required privilege is not held by the client`` AFTER
+        a whole venv had been built and then deleted — an upgrade's expensive
+        half, spent on a layout that could never finish. FakeUv is the observer
+        here: it records every argv it was handed, so "uv never ran" is asserted
+        rather than assumed.
+        """
+        self._refused(monkeypatch)
+        uv = FakeUv()
+        with pytest.raises(UpdateError) as refusal:
+            update_mod.install_into_generation(runner=uv, version="0.52.0")
+        message = str(refusal.value)
+        assert "symlink" in message
+        assert sys.platform in message, "the refusal must name the OS"
+        assert "uv tool install --force local-operator" in message, "and the alternative"
+        assert uv.calls == [], "no installer may run for a layout this platform cannot finish"
+        assert not update_mod.generations_dir().exists() or not any(
+            update_mod.generations_dir().iterdir()
+        ), "no generation is reserved either"
+
+    def test_the_migration_refuses_before_copying_a_tree(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The copy is 136 MB and ~4.8k files, so it is the step the gate must
+        precede. ``sys.prefix`` is a real directory here (it is the test venv),
+        so nothing but the gate can refuse this call."""
+        self._refused(monkeypatch)
+        with pytest.raises(UpdateError, match="symlink"):
+            update_mod.clone_into_generation(sys.prefix)
+
+    def test_the_migration_command_refuses_on_stderr(
+        self,
+        home: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """``lop install migrate`` speaks the same way its siblings do: the
+        refusal goes to STDERR and the exit is non-zero, so `... | tee log` does
+        not file a refusal as output (design review round 2, D12)."""
+        self._refused(monkeypatch)
+        assert update_mod.install_migrate_command() == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "symlink" in captured.err
+        assert update_mod.current_generation() is None
+
+    def test_the_upgrade_falls_through_to_the_in_place_installer(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``lop update`` must still WORK here, loudly.
+
+        A refusal on this path would leave the update command unusable on a
+        machine where ``uv tool install --force`` works today, so the uv-tool
+        branch is skipped and the in-place installer runs instead — with a
+        warning naming the reason. That is the documented degradation; the
+        alternative (a launcher that needs no symlink) is a design decision, not
+        something this gate can improvise.
+        """
+        self._refused(monkeypatch)
+        ran: list[list[str]] = []
+
+        def fake_installer(argv: list[str], *, executable: str | None = None) -> int:
+            ran.append(argv)
+            return 0
+
+        monkeypatch.setattr(update_mod, "_run_installer", fake_installer)
+        records = caplogged(monkeypatch)
+        result = update_mod.perform_upgrade(
+            target="0.52.0",
+            kind=update_mod.InstallKind.UV_TOOL,
+            prefix=str(Path.home() / "tool"),
+            executable=sys.executable,
+        )
+        assert result == "0.52.0"
+        assert ran, "the in-place installer is what runs instead"
+        assert "uv" in ran[0][0] or ran[0][0].endswith("uv")
+        assert not any(update_mod.generations_dir().glob("0.52*")), "no generation was built"
+        assert any(
+            record.levelno == logging.WARNING and "generation layout" in record.getMessage()
+            for record in records
+        ), [record.getMessage() for record in records]
+
+    def test_the_daemon_shim_is_never_planted_without_a_supervisor(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The shim is ``#!/bin/sh``, and nothing off POSIX can execute that.
+
+        The generation was ALREADY built here (a real one, through the normal
+        path) so the only thing refusing is the platform: an explicitly passed
+        ``generation`` must not get a file written for it either, which is the
+        arm that used to bypass the gate.
+        """
+        generation = _install("0.52.0")
+        monkeypatch.setattr(update_mod, "generation_layout_supported", lambda: False)
+        shim = update_mod.daemon_image_path()
+        shim.unlink(missing_ok=True)
+        assert update_mod.daemon_image() is None
+        assert update_mod.ensure_daemon_image(generation) is None
+        assert not shim.exists()
+
+
+def caplogged(monkeypatch: pytest.MonkeyPatch) -> list[logging.LogRecord]:
+    """Capture this module's log records without pytest's ``caplog`` fixture.
+
+    ``caplog`` sets the level on the root logger, and ``update``'s logger is a
+    child of it — but the assertion here is about a WARNING ``perform_upgrade``
+    emits for a degraded path, so it is worth capturing the records themselves
+    and reading their level rather than relying on the global setting.
+    """
+    records: list[logging.LogRecord] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Grab()
+    logger = logging.getLogger("local_operator.update")
+    logger.addHandler(handler)
+    monkeypatch.setattr(logger, "level", logging.WARNING)
+    monkeypatch.setattr(logger, "propagate", False)
+    return records
+
+
+class TestThePointerLinkType:
+    def test_the_pointer_is_created_as_a_directory_link(self, home: Path) -> None:
+        """``target_is_directory`` decides the link's TYPE on Windows, and the
+        target here is a generation ROOT.
+
+        It is accepted and ignored on POSIX, so macOS/Linux behaviour is
+        unchanged — but the evidence for that claim is the flip below still
+        producing a resolver-visible link, not the absence of a signature change.
+        The kwarg is asserted directly because the flag's ABSENCE is invisible on
+        this host: a file link to a directory would pass every test here and fail
+        every read on Windows.
+        """
+        generation = update_mod.generations_dir() / "g1"
+        generation.mkdir(parents=True)
+        calls: list[dict[str, object]] = []
+        real_symlink = os.symlink
+
+        def recording_symlink(src: object, dst: object, **kwargs: object) -> None:
+            calls.append({"src": src, "dst": dst, **kwargs})
+            real_symlink(src, dst, **kwargs)  # type: ignore[arg-type]
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(update_mod.os, "symlink", recording_symlink)
+            update_mod.flip_pointer(generation)
+
+        assert calls and calls[0]["target_is_directory"] is True
+        # POSIX behaviour itself is unchanged: the pointer still resolves.
+        assert update_mod.current_generation() == generation.resolve()
+
+
+class TestTheGenerationBinDirectory:
+    def test_uv_is_aimed_at_the_platforms_script_directory(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``UV_TOOL_BIN_DIR`` is where uv writes the console scripts.
+
+        Its hardcoded ``bin`` was the only spelling in the module that disagreed
+        with the three helpers beside it, so a Windows generation would have had
+        its ``Scripts/<name>.exe`` launchers — and every reader of the layout
+        would have looked in ``Scripts`` and found nothing.
+        """
+        generation = update_mod.generations_dir() / "g1"
+        monkeypatch.setattr(update_mod, "_interpreter_dir", lambda: "Scripts")
+        env = update_mod._generation_env(generation)
+        assert env["UV_TOOL_BIN_DIR"] == str(generation / "Scripts")
+        assert env["UV_TOOL_DIR"] == str(generation / "tools")
+
+    def test_the_posix_spelling_is_unchanged(self, home: Path) -> None:
+        """The macOS/Linux half of the same change, pinned: this is the value
+        every existing generation on the operator's machine was built with."""
+        generation = update_mod.generations_dir() / "g1"
+        assert update_mod._generation_env(generation)["UV_TOOL_BIN_DIR"] == str(generation / "bin")

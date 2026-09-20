@@ -381,6 +381,13 @@ async def _one_run(variant: str, index: int) -> dict[str, Any]:
     _strip_inherited()
     os.environ["HOME"] = str(root)
     os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
+    # This rig's whole subject is a real session reaching its first turn on the
+    # test hosting; the child inherits this environment, so the gate is set
+    # before the spawn rather than only inside the child
+    # (``tui.notify.suppress_notifications_for_process``).
+    from local_operator.tui.notify import suppress_notifications_for_process
+
+    suppress_notifications_for_process("cold-engage benchmark driving the real CLI")
     # The child's instrument. PYTHONPATH survives `-P` (which strips only the
     # implicit cwd entry), so `sitecustomize` import time is the earliest point
     # we can mark inside the child.

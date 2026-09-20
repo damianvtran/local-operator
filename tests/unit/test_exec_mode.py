@@ -877,6 +877,36 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert len(lines) == 2
 
 
+def test_the_background_worker_detaches_through_the_shared_helper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A7: this spawn spelled its own ``os.name == \"posix\"`` branch.
+
+    ``start_new_session`` is documented "(POSIX only)" and Windows SILENTLY
+    ignores it, so the hand-rolled branch left a "detached" worker sharing this
+    console on the one platform where the flag is a no-op — a Ctrl-C and a
+    console close both reached it, which is the property the call exists to get.
+    What this pins is the ROUTING: with the platform seam flipped to Windows the
+    spawn carries Windows detachment and no ``start_new_session`` at all, which
+    can only have come from ``procstate.detached_popen_kwargs``.
+    """
+    from local_operator import procstate
+
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+    monkeypatch.setattr(procstate, "is_windows", lambda: True)
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 4321
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
+
+    exec_mode.run_exec("go", ExecArgs(background=True, json_mode=True, yolo=True, hosting="openai"))
+
+    kwargs = popen_mock.call_args[1]
+    assert "start_new_session" not in kwargs, "the POSIX flag is a documented no-op on Windows"
+    assert kwargs["creationflags"] == 0x00000200 | 0x00000008
+
+
 def test_spawn_background_unconfigured_hosting_returns_one(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

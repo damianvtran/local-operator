@@ -49,6 +49,7 @@ from local_operator.session.frontend_state import (
     FrontendUpdate,
     sync_wire_payload,
 )
+from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.page_cache import load_transcript_page
 from local_operator.session.restored_rows import record_field, roster_records
 from local_operator.session.retention import DESKTOP_MARKER_NAME
@@ -1363,16 +1364,38 @@ class DesktopSessionBridge:
         frame is an OFFER; the renderer claims through ``POST /notified``
         immediately before it shows the banner.
 
+        NO OFFER IS MADE FROM A SILENCED PROCESS EITHER, and the swap is
+        deliberate: a frame nobody may raise is worth neither the compose nor
+        the round trip, and the renderer's own banner is what the operator
+        complains about. Same two questions as the machine-wide feed (see
+        ``desktop_feed._emit_notifications``): the process switch settles
+        whether THIS backend may notify, the per-session read settles whether
+        the conversation was ever run on the mock — the case here being a
+        session a rig left in a store this backend serves.
+
         Guarded end to end: a notification is chrome, and this runs inside the
         1 s attention poll whose loop already treats a store error as costing
         one tick rather than the feature.
         """
+        from local_operator.tui.notify import notifications_enabled
+
+        if not notifications_enabled():
+            return
         token = state.get("completion_token")
         if (
             not token
             or token == previous.get("completion_token")
             or not state.get("unseen")
             or state.get("kind") not in BRIDGE_NOTIFIABLE_KINDS
+        ):
+            return
+        # OFF THE LOOP, like every neighbouring store read in this method's poll
+        # loop: the journal walk is 57-745 ms on this operator's largest
+        # sessions (`session_uses_test_hosting`'s docstring carries the
+        # measurements), and it is memoised on `(mtime_ns, size)` so only a miss
+        # pays it.
+        if await asyncio.to_thread(
+            session_uses_test_hosting, self.root / "sessions" / self.session_id
         ):
             return
         try:

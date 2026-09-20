@@ -63,6 +63,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from local_operator.procstate import O_BINARY
+
 logger = logging.getLogger("local_operator.model.catalogue")
 
 #: The HARD TTL: how old a document may be before a read blocks on a fetch.
@@ -327,7 +329,7 @@ class _ListingFetchLease:
         """Take the lease if free or expired. True means THIS process fetches."""
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            fd = os.open(self._path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | O_BINARY, 0o644)
         except FileExistsError:
             # Standing lease. Legitimate only while unexpired; a stale one
             # (holder crashed mid-fetch) is stolen by replacing it, where the

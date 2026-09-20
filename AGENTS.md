@@ -1338,8 +1338,31 @@ broken product instead of a guard. Call
 obscurity, not secrecy, and `docs/EXEC.md` documents the limits of the whole
 rule). Use it against an isolated `LOCAL_OPERATOR_CONFIG_DIR`; the session the
 child opens is stamped `agent-shell`, so it cannot be mistaken for one the
-operator started. The same applies to a manual QA run: that escape is for
+operator started. The helper also carries the notification gate
+(`tui.notify.ENV_DISABLE`), because a harness's child is a session nobody is
+watching: the benches seed the test hosting, whose only reply is the mock's own
+sentence, and a notification's body is a snippet of the session's last
+assistant line — so an un-gated child finishes a turn and puts that sentence on
+the operator's lock screen. A rig that runs a session in ITS OWN process
+instead calls `tui.notify.suppress_notifications_for_process()` before it
+starts one; the two capture sandboxes (`probe_isolation`, `visual_capture`)
+spell the switch literally, because they must act before any product import.
+The same applies to a manual QA run: that escape is for
 driving the real front end, never for opening a peer to hand work to.
+
+**The test-hosting rule is a SECOND gate, and a test whose subject is the
+notification path has to waive it.** `session_uses_test_hosting` suppresses any
+session whose journal records the mock wire, in every process that reads the
+store — the TUI observer, the machine-wide feed and the per-session bridge all
+ask it — so a suite that asserts a `notification` frame over a fixture-built
+store observes nothing until it sets
+`session.model_selection.ENV_ALLOW_TEST_HOSTING_NOTIFY`. That is a test/QA seam
+in the same shape as `ALLOW_NESTED_SESSION` above: it can only ever ENABLE (it
+answers "not a test session", so it cannot silence anyone), and the process kill
+switch still wins because every leg asks it first. Set it through
+`tests/notification_opt_in.notification_path_opt_in`, which clears both gates
+and restores them; the alternative — running those tests on a real provider —
+would make the reply non-deterministic and need network and credit.
 
 ## Who may merge: two tiers
 

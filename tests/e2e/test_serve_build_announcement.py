@@ -16,6 +16,8 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from tests.e2e.harness import NO_NOTIFY_ENV
+
 OLD = "1" * 40
 NEW = "2" * 40
 NEWER = "3" * 40
@@ -45,6 +47,10 @@ def test_build_drift_keeps_production_daemon_serving(tmp_path: Path, scheduler: 
         if not key.startswith(("CMUX_", "LOP_"))
         and key not in {"LOCAL_OPERATOR_DESKTOP_TOKEN", "LOCAL_OPERATOR_DESKTOP_ORIGINS"}
     }
+    # The daemon under test is the BACKEND whose machine-wide feed raises
+    # desktop banners for sessions nobody is looking at, so its environment is
+    # gated explicitly rather than only inherited.
+    env.update(NO_NOTIFY_ENV)
     token = secrets.token_hex(32)
     env.update(
         HOME=str(home),
