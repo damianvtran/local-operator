@@ -144,6 +144,21 @@ enabled and active.
   daemon serves and a frame renders; it does not prove a UI reads well on that
   OS, and it does not exercise the flows that need a provider, a network or a
   logged-in desktop.
+* **The probe's guard classifier is POLARITY-BLIND, and that is a limit of the
+  instrument rather than a fact about the code it reports on.** `xplat_probe`'s
+  POSIX-attribute audit (`_posix_attribute_audit`) asks whether any enclosing node
+  is a `try:`, an `if` whose test mentions the platform, or a ternary -- and
+  answers WITHOUT reading the polarity of that test. So `if not is_windows():
+  use(fcntl)` reads as guarded, and so does `if is_windows(): use(fcntl)`, which
+  guards nothing of the kind. It over-reports rather than under-reports, which is
+  the safe direction for a gap detector, but it means an entry this probe lists as
+  *guarded* is not evidence that the guard holds.
+
+  There is no live instance today: a reviewer reproduced the blindness
+  deliberately and found no call site it currently mislabels. Fixing it honestly
+  means reading the constant's own polarity rather than treating every negation
+  as a guard, which is a change to the instrument with probes of its own -- so it
+  is recorded here rather than half-fixed in a hurry.
 * **The unmeasured Windows corners are named, not implied.** Task Scheduler
   placement, DPAPI placement, the process-group reaper and the terminal driver
   are all "contract" or "gap" rows above for the same reason: there is no
