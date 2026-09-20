@@ -1760,6 +1760,20 @@ def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
     assert "cli-credential-flag" not in match_shape_names(quoted)
     assert scrub_shapes(quoted) == quoted
 
+    # DRIVEN END TO END, not merely inspected. The ticket was filed by the session's
+    # result hook over the whole watch-log entry, so the regression this test exists
+    # for — an ESCALATED row for this text — can only be caught by driving that hook.
+    # Asserting that the table is silent is a different assertion.
+    entry = (
+        "## INCIDENT — 2026-09-19 23:0x UTC — CREDENTIAL EXPOSURE TO BASH,"
+        " ROTATION REQUIRED\n" + quoted + "\n"
+    )
+    session = _session()
+    session._pending_shape_incidents.clear()
+    session._reported_shape_incidents.clear()
+    assert session._redact_tool_result_text(entry) == entry, "the entry was rewritten"
+    assert session._pending_shape_incidents == [], "the entry filed an incident"
+
     # ...and a value that could be a credential is still masked, which is what the
     # corpus's own flag cases pin (they run over every surface above).
     assert "cli-credential-flag" in match_shape_names("server --token=" + "Sup3rTokenValue91")

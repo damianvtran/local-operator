@@ -1038,15 +1038,18 @@ def project_settled_rows(
                 self._append_block(NoticeBlock(text, kind=kind, fold_width=fold_width))
                 appended = True
                 continue
-            # A credential-shape incident — the operator's rotation ticket for a
-            # credential that reached a tool result. It has its own branch for the
-            # reason every row above does: a custom message with no branch falls
-            # through all of them and past the role-based handling below, so the
-            # row rendered NOWHERE. Measured on the live run before this branch:
-            # the persisted row folded to a blank frame, and the model was the
-            # only reader that ever saw it.
+            # A credential-shape incident — the operator's ticket for a credential
+            # that reached a tool. It has its own branch for the reason every row
+            # above does: a custom message with no branch falls through all of them
+            # and past the role-based handling below, so the row rendered NOWHERE.
+            # Measured on the live run before this branch: the persisted row folded
+            # to a blank frame, and the model was the only reader that ever saw it.
             #
-            # `warning` ink: the text asks the operator to rotate a credential.
+            # `warning` ink for BOTH classifications — the operator asked to be shown
+            # the event either way, and the severity difference is carried by the
+            # text ("rotate it" only when the value reached this context). A quieter
+            # ink for the contained case is a design decision on this row, not
+            # something the redaction change should make by the back door.
             if getattr(message, "custom_type", None) == SESSION_INCIDENT_MESSAGE_TYPE:
                 details = getattr(message, "details", None) or {}
                 text = str(details.get("text", "")).strip()

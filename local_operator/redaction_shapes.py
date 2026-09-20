@@ -958,13 +958,28 @@ def _flag_value_guard(match: Match[str]) -> bool:
     the text at all (the second firing of this class). A value that is spelled as
     an environment variable AND ends in a credential word is a reference to a
     credential, never one: the same judgement the rule already makes for
-    ``--secret NAME[=VAR]``. A value that could BE a credential — mixed case, any
-    lower case, or any token without a credential-word tail — is still masked.
+    ``--secret NAME[=VAR]``.
+
+    **The SEPARATOR is required, and that is the whole of the narrowing.** Capitals
+    plus a credential-word tail is not enough on its own: it also describes exactly
+    the values this rule exists to catch — ``--password PASSWORD``, ``--token
+    TOKEN``, ``--api-key APIKEY``, ``--secret DBPASSWORD`` — and a first cut that
+    omitted the underscore stopped masking all four (agent review R1, reproduced
+    through the session hook: the values came back byte-identical with no mask and
+    no notice at all). Multi-segment capitals is what a NAME in a store or an
+    environment looks like; a single run of capitals is a credential someone chose,
+    and it stays masked. The residual is a real value spelled ``PROD_SECRET``-style,
+    and it is accepted deliberately — that spelling IS the shape of a stored
+    secret's name, which is the same judgement the rule already made for
+    ``--secret NAME[=VAR]``.
+
+    A value that could BE a credential — mixed case, any lower case, a single
+    unseparated token, or any token without a credential-word tail — is still masked.
     """
     value = match.group(2)
     if any(char in value for char in _EXPRESSION_CHARS):
         return False
-    if _ENV_NAME_SHAPED.fullmatch(value) and is_credential_name(value):
+    if "_" in value and _ENV_NAME_SHAPED.fullmatch(value) and is_credential_name(value):
         return False
     return True
 
@@ -1909,6 +1924,14 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
             # not read. The hit is kept for CONTAINMENT either way — the value is
             # registered for the rest of the session — and the honest thing to
             # withhold is the claim, not the protection.
+            #
+            # A hit graded this way therefore files NO notice at all, and that is a
+            # stated limit rather than an oversight: both notice texts make a
+            # containment claim ("nothing entered your context" / "it was contained
+            # at the tool"), and the reason the claim is withheld here is that the
+            # key's extent is unknown — so neither text would be true. Raising it
+            # needs a third, claim-free wording, which is a product decision rather
+            # than something to bolt onto this change (agent review R1, finding 3).
             marked.append(replace(hit, complete=False, exposed=exposed))
         else:
             marked.append(hit)

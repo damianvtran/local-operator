@@ -226,6 +226,19 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case("cli --client-secret abcdefghijklmnop", "a --client-secret flag"),
     Case("app --api-key=abcdefghijklmnop", "an --api-key= flag"),
     Case("tool --access-token abcd1234efgh5678", "an --access-token flag"),
+    # R1-1: capitals in a flag position are a CREDENTIAL, not a NAME. A first
+    # cut of the NAME guard (capitals plus a credential-word tail) stopped masking
+    # all five of these, silently: no mask and no notice, because no hit means no
+    # labels and no exposure. Multi-segment capitals
+    # (``OS_PROD2_ADMIN_PASSWORD``-style) is what a NAME looks like; a single run
+    # of capitals is a credential someone chose. Assembled so no literal here is a
+    # flag VALUE in this source, since a flag followed by a value is what a
+    # redaction pass rewrites.
+    Case("--" + "api-key" + " KEY", "caps in an --api-key value position"),
+    Case("--" + "password" + " PASSWORD", "caps in a --password value position"),
+    Case("--" + "token" + " TOKEN", "caps in a --token value position"),
+    Case("--" + "secret" + " DBPASSWORD", "a run-together caps name-ish value"),
+    Case("--" + "api-key" + " APIKEY", "a run-together caps value"),
     # --- bare issuer-prefixed tokens ----------------------------------------
     Case("sk_live_51H8xYzAbCdEf", "a Stripe live secret key"),
     Case("rk_live_51H8xYzAbCdEf", "a Stripe restricted key"),

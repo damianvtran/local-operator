@@ -9409,9 +9409,10 @@ class Session:
                 "tool": tool,
                 "shapes": list(labels),
                 "summary": summary,
-                # Recorded so a resumed session, a notification and the TUI can
-                # tell an informational containment from the compromise case
-                # without re-parsing the prose.
+                # Recorded, and NOTHING reads it today (agent review R1, nit): it
+                # is there so the classification is a field on the record rather
+                # than something a future reader has to re-derive by matching the
+                # prose, which is the fragile thing this change exists to remove.
                 "reached_model": reached_model,
             },
         )
