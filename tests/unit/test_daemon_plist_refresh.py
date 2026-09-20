@@ -222,13 +222,32 @@ def _module_for(name: str) -> str:
 
 #: The recovery command each daemon's repair must name when it leaves the job
 #: stopped. Spelled out here rather than imported so a change to one of the
-#: installer's strings has to be a decision in this file too.
+#: installer's strings has to be a decision in this file too. A SECOND surface now
+#: names the same command — the upgrade summary's killed-refresh report, which
+#: carries it in the refresh child's own announcement — and
+#: `test_the_killed_refresh_reports_the_vocabulary_this_file_pins` holds the two
+#: together, because a summary that sends the operator to a command that no longer
+#: exists is the same defect this file was written about.
 _RECOVERY = {
     "mobile": "lop mobile install",
     "browser bridge": "lop browser install",
     "tunnel": "lop tunnel install",
     "wakes supervisor": "lop wake install",
 }
+
+
+def test_the_killed_refresh_reports_the_vocabulary_this_file_pins() -> None:
+    """One recovery command per daemon, whichever surface is doing the naming.
+
+    ``update._refresh_steps`` is the refresh CHILD's table: the child announces the
+    daemon it is about to repair, and the parent reads that announcement out of a
+    child its bound has just killed, so the daemon's name and its installer are
+    printed by code that a second spelling could drift away from.
+    """
+    from local_operator import update as update_mod
+
+    pinned = {name: recovery for name, recovery, _repair in update_mod._refresh_steps()}
+    assert pinned == _RECOVERY
 
 
 @pytest.mark.parametrize("name", ["mobile", "browser bridge", "tunnel", "wakes supervisor"])
