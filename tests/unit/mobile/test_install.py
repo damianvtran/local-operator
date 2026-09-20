@@ -990,3 +990,56 @@ def test_a_loaded_but_dead_job_is_restarted_without_rewriting_the_plist(
     assert not any(
         "loaded the LaunchAgent" in step for step in _steps(result)
     ), "a kickstart is not a reload and must not be reported as one"
+
+
+def test_a_redirected_home_asks_launchd_nothing_about_the_operator(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """Q-1 (QA round 2): the read-only probe was the last unguarded call.
+
+    ``_supervised_pid`` asked ``launchctl print gui/<uid>/<label>`` by label
+    alone, so a redirected ``HOME`` read the operator's job — the read-only half
+    of the same mistake R-1 fixed on the acting half, on the path
+    ``_our_daemon_listening`` takes to decide whether to skip a reload. The
+    identity test now sits inside the probe, so this asserts NO call at all: a
+    refusal that merely ignored the answer would still be their job inspected.
+    """
+    calls: list[list[str]] = []
+
+    def fake_launchctl(*cmd: str) -> FakeProc:
+        calls.append(list(cmd))
+        return FakeProc(returncode=0, stdout="\tpid = 4242\n")
+
+    monkeypatch.setattr(install, "plist_path", lambda: tmp_path / f"{install.LABEL}.plist")
+    monkeypatch.setattr(install, "_launchctl", fake_launchctl)
+    monkeypatch.setattr(install.supervisors, "supervisor", lambda: install.supervisors.LAUNCHCTL)
+
+    assert install._supervised_pid() is None
+    assert calls == [], f"a redirected home asked launchd about the operator: {calls}"
+
+
+def test_the_probe_still_answers_for_the_job_this_run_owns(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """The other direction of the same guard, and it is the REAL one.
+
+    ``real_home`` is pinned to this tmpdir and the plist is written where that
+    home owns it, so ``is_own_plist`` genuinely answers True — a stubbed guard
+    here would prove nothing about the real-home path staying alive.
+    """
+    home = tmp_path
+    home.joinpath("Library", "LaunchAgents").mkdir(parents=True, exist_ok=True)
+    plist = home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
+    calls: list[list[str]] = []
+
+    def fake_launchctl(*cmd: str) -> FakeProc:
+        calls.append(list(cmd))
+        return FakeProc(returncode=0, stdout="\tpid = 4242\n")
+
+    monkeypatch.setattr(install.launchd, "real_home", lambda: home)
+    monkeypatch.setattr(install, "plist_path", lambda: plist)
+    monkeypatch.setattr(install, "_launchctl", fake_launchctl)
+    monkeypatch.setattr(install.supervisors, "supervisor", lambda: install.supervisors.LAUNCHCTL)
+
+    assert install._supervised_pid() == 4242
+    assert calls == [["print", f"{install._domain()}/{install.LABEL}"]], calls

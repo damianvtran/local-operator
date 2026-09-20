@@ -566,9 +566,20 @@ def _supervised_pid() -> int | None:
     systemd answers ``MainPID`` (``0`` when the unit is not running). Task
     Scheduler publishes no pid through ``schtasks`` at all, which is why the
     Windows answer below is "the task reports Running" rather than a pid.
+
+    ASKS NOTHING ABOUT A JOB THIS RUN DOES NOT OWN. The label is a fixed module
+    constant while the plist path moves with ``$HOME``, so
+    ``launchctl print gui/<uid>/<label>`` from a redirected home is a question
+    about the OPERATOR's daemon — read-only, but it is still their job being
+    inspected, and ``_our_daemon_listening`` is the path a sandboxed install
+    takes to decide whether to skip its reload (QA round 2, Q-1: the last
+    unguarded call left on this axis). The identity test lives HERE rather than
+    in the caller so no future caller of this probe can reintroduce the read.
     """
     kind = supervisors.supervisor()
     if kind == supervisors.LAUNCHCTL:
+        if not launchd.is_own_plist(plist_path(), LABEL):
+            return None
         printed = _launchctl("print", f"{_domain()}/{LABEL}")
         if printed.returncode != 0:
             return None
