@@ -283,8 +283,8 @@ constrained subject cannot mint, verified against a root-owned anchor.
 | pane / CLI / desktop that SPAWNED the runtime | yes, unchanged, **no prompt** | yes | the spawn capability |
 | pane ATTACHED to a runtime another process started | **yes — one presence prompt** | yes | `lop operator sign`, forwarded by `AttachClient` |
 | desktop app, **any** session | **yes — one presence prompt** | yes | operator signature via the backend |
-| phone / relay, **any** session (spawn-independent) | **yes** (stage D) | **yes** (stage D) | device signature under an operator-signed certificate |
-| `lop exec --control` supervisor | **yes** with `--supervisor-fd N` (stage E) | **yes** (stage E) | run-scoped supervisor credential |
+| phone / relay, **any** session (spawn-independent) | **yes** | **yes** | device signature under an operator-signed certificate (`lop pair`; the portal signs with a non-extractable WebCrypto key). The relay mints nothing: `POST /api/sessions/<id>/operator/challenge` forwards one ordinary frame and carries `operator_sig`/`operator_key_id`/`operator_cert` back |
+| `lop exec --control` supervisor | **yes** with `--supervisor-fd N` | **yes** | run-scoped supervisor credential: the run mints its own capability, writes it UP the inherited descriptor, and closes it |
 | `lop exec --background --control` (launcher gone) | from a human surface only | yes | operator/device signature |
 | CLI one-shot run by a script | yes, with a prompt or a paired device | yes | operator/device signature |
 | tightening / deny / report / read / status / stop / prompt / model / rename / peer_message / ask_answer | n/a — ordinary | n/a | the record key, unchanged, on every surface including the phone |
@@ -299,16 +299,31 @@ card is answerable. **No row regressed**: the owning pane and the spawning
 console are untouched (the latter deliberately prompt-free), and every ordinary,
 tightening and deny route is byte-identical to what it was.
 
-Two rows are narrower than the design document can honestly make them *today*,
-and the reason is a staging boundary rather than a mechanism limit: the phone row
-and the supervisor row are stages D and E. Until they land, a phone or an exec
-supervisor gets the refusal and the copy that names the levers that do work. The
-relay's HTTP boundary deliberately drops `operator_sig`/`operator_key_id`/
-`operator_cert` from request BODIES as it already drops `operator_cap` — a
-signature arriving over HTTP from a local process can only be a forgery — and
-admitting them is part of stage D, together with the device certificate it needs
-to be meaningful. That narrowing is what the operator's "restore all of it"
-means in sequence, and it is pinned per stage rather than claimed as done.
+Two rows were narrower than this document could honestly make them while stages D
+and E were unlanded, and both have since landed:
+
+* the **phone** row no longer depends on the spawn path at all. Its authority is a
+device signature under an operator-signed certificate, and the relay is a
+forwarder — it holds no operator key, so it cannot make anything a signer even
+when it is driven by a same-uid process holding the portal password. The body
+scrub was NARROWED to make this real: `operator_cap` stays dropped (machine-held
+proof material), and `operator_sig`/`operator_key_id`/`operator_cert` are now
+admitted, because a signature is unforgeable and its challenge is single-used.
+* the **exec supervisor** row is no longer a deny-only surface. The run mints its
+own capability and hands it UP a descriptor the supervisor opened
+(`--supervisor-fd N`), which is the mirror of the downward handoff
+(`OperatorCapHandoff.deliver`); the descriptor is closed before the run's first
+tool call, so no tool child of the run can find it. `--background --supervisor-fd`
+is refused outright: the launcher exits and takes the far end of the socketpair
+with it, so the combination could only produce a run that LOOKS supervised while
+nobody can approve its cards.
+
+One path deviation from §2.3, recorded because the design text says otherwise:
+this repository has no `/v1/mobile` namespace — every route it serves is under
+`/api` (`mobile/daemon.py`'s route table and the portal's `api.ts`), so the
+challenge endpoint is `POST /api/sessions/<session_id>/operator/challenge`. A
+second namespace invented to match the document would be the duplication this
+project's conventions forbid, and the served paths are pinned by a test.
 
 ### 4.1 The remedies, with their conditions
 
@@ -384,16 +399,29 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
 
 - **background-spawned runtimes have no console**, so nothing may loosen them
   until someone attaches one that does (a wake supervisor's runtime is exactly
-  case 3 in the table). `lop exec --control` is the surface where this is most
-  visible: its runtime is started by the `lop exec` process, so a supervisor in
-  another process keeps the safe direction (deny) and loses the other one
-  (approve). The spec that shaped this change asserted exec-control's gate is
-  born `auto` and therefore unaffected; measured on `1effded9`, it is not —
-  `tests/e2e/test_exec_startup_e2e.py::test_exec_supervisor_approval_ui` drives
-  a parked `--control` gate and now pins the new behaviour. Whether to accept
-  that, exempt `kind="exec"` (which would reopen the hole for the most
-  unattended surface), or hand a capability to a supervisor through the exec
-  ledger is the operator's call and is recorded as an open question on the PR;
+  case 3 in the table). The open question this change used to carry — could a
+  supervisor get a credential without reopening the hole for the most unattended
+  surface — is now answered for the SUPERVISED case by `--supervisor-fd` (stage
+  E): the credential is the run's own, handed up a descriptor the supervisor
+  holds, and closed before any tool child exists. It is deliberately NOT answered
+  for a DETACHED run (`--background --control`), where the launcher that would
+  own the far end has exited: unattended approval there stays `--yolo` /
+  `tool_approval_mode: auto`, because any credential that survives on disk is
+  readable by the attack this issue exists for. `tests/e2e/
+  test_exec_startup_e2e.py::test_exec_supervisor_approval_ui` drives a parked
+  `--control` gate and pins the behaviour;
+- **the device certificate store is writable by the subject it is meant to
+  constrain**, and that is by design rather than an oversight: it sits under the
+  operator's config root (`<config>/operator/devices/<device_id>.json`, 0644 under
+  0700) because the relay and every runtime have to read it. What defends it is
+  the SIGNATURE — a substituted or forged certificate fails verification against
+  the anchored operator key, pinned by a test — and the id is DERIVED from the
+  public point, so a revoked device cannot relabel itself. What is NOT defended is
+  AVAILABILITY: a same-uid subject can delete certificates and flood pairing
+  requests, which are denials rather than escalations. The revocation list is the
+  opposite case and lives in the ROOT-OWNED anchor (`lop operator devices
+  --revoke`, through the same privileged step the anchor install uses), so a
+  revoked device cannot be un-revoked by the device;
 - **a process that proxies the whole session** can relay a connection's proof
   and that connection's requests — which is what a proxy is — but it never
   learns the capability and cannot originate a request of its own: nothing that
@@ -484,19 +512,34 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   entry point, and `AttachClient` presenting a signature for an
   authority-increasing frame when it holds no spawn capability — which is the
   path the TUI's attached pane and the desktop backend both take.
-- **Revision 2, stage D (next)** — the phone: pairing, device certificates,
-  challenge pass-through on the relay (including narrowing the body scrub to
-  admit signature fields while still dropping machine-held ones), and the
-  portal's signing UI in `local_operator/mobile/web`. Clean extension points are
-  in place: `verify_device_cert` + `issue_device_cert` are the certificate
-  format, `signature_verdict` already resolves a device point, and the seam
-  already accepts `operator_cert`.
-- **Revision 2, stage E (next)** — the exec supervisor: `--supervisor-fd`, the
-  argv serialization, and the supervisor-side `remember_operator_cap`, which is
-  the fourth source the seam is written to accept.
-- **Revision 2, stage F (next)** — TPM+PIN sealing on Linux, prompt rate
-  limiting, the docs/copy/QA matrix, and the design/UX rounds the operator's
-  standing rules require for the user-visible copy change.
+- **Revision 2, stage D (this change, landed)** — the phone: `local_operator/
+  operator/devices.py` (the certificate store plus the pairing handshake), `lop
+  pair`, the relay's `POST /api/pair` + `GET /api/pair/<device_id>` +
+  `POST /api/sessions/<id>/operator/challenge`, the narrowed body scrub, the
+  relay declaring its paired certificate on its auth frame (which is what widens
+  `_connection_may_loosen` for a phone), and the portal's signing UI in
+  `local_operator/mobile/web` (`lib/operator-device.ts`, `screens/pair.tsx`,
+  `components/gate-sheet.tsx`, and the pending card's signed retry). The
+  fabricated relay-spawn cell was DELETED and replaced by a real one: the old
+  test called `remember_operator_cap` itself, so it proved a hand-built state
+  rather than the phone, and no production path ever registers a capability for a
+  relay-spawned runtime (now pinned as a source fact).
+- **Revision 2, stage E (this change, landed)** — the exec supervisor:
+  `--supervisor-fd N`, the argv serialization with its refusal for
+  `--background`, `deliver_operator_cap_to` + `SupervisorCapChannel` in
+  `harness/approval.py`, and the supervisor-side `remember_operator_cap` keyed by
+  the pid the endpoint line prints. The takeover route
+  (`--resume <own live session> --control --supervisor-fd`) was PROBED rather
+  than reasoned about: the run exits 1 on the session LEASE's refusal
+  (`session <id> is already open in another process`) and the supervisor receives
+  no capability, because the run never wrote.
+- **Revision 2, stage F (partly this change)** — the docs, the surface table, the
+  residual and the refusal copy, all updated here: the conservative branch of
+  `approvals_default_notice` stopped naming "the window that started it" (a
+  window a background-started runtime does not have — the user-visible regression
+  this redesign deletes) and names the three levers that work from anywhere.
+  STILL OUTSTANDING as its own round: TPM+PIN sealing on Linux, prompt rate
+  limiting, and the operator's design/UX review rounds for the portal screens.
 - **Stage 2 (unchanged)** — an OS boundary confining the model-code spawn sites,
   so the residuals above stop being reachable by construction: macOS
   `sandbox-exec`, Linux Landlock/`bwrap`, Windows restricted token plus a deny
