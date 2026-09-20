@@ -3545,14 +3545,18 @@ class RuntimeServer:
 
         True for every frame that is not in :data:`_AUTHORITY_OPS` — the
         overwhelming majority of traffic, and the set whose authorization really
-        is the record key alone. True for an increasing frame that presents THIS
-        CONNECTION's proof of the runtime's capability; False otherwise,
-        including when this runtime holds no capability at all.
+        is the record key alone. For an increasing frame, the answer comes from
+        :func:`local_operator.harness.approval.admit_increasing`, which consults
+        BOTH sources: THIS CONNECTION's proof of the runtime's spawn capability,
+        and a verified OPERATOR or DEVICE signature (issue #1310 revision 2; the
+        run-scoped supervisor credential joins them in stage E).
 
-        The connection is taken rather than reached for because the proof is
+        The connection is taken rather than reached for because both sources are
         bound to it: the client's nonce came in on the auth frame that created
-        ``conn`` and the salt was minted for it, so a proof is only ever valid
-        where it was produced.
+        ``conn`` and the salt was minted for it, so a capability proof is only
+        ever valid where it was produced — and a challenge is minted per
+        connection for the same reason, so a signature harvested on one socket
+        cannot be presented on another.
 
         The classification is by OP plus the fields that op carries, and it is
         deliberately NOT by the handle method or by the resulting value: a frame
