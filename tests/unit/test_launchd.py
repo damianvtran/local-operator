@@ -694,3 +694,87 @@ def test_reload_job_still_never_raises_without_getuid(
 
     assert reloaded.ok is False
     assert reloaded.outcome == "not-addressable"
+
+
+class TestRepairHelpers:
+    """``job_running``/``kickstart`` — the compare-then-skip's two launchd calls.
+
+    BOTH take the plist path and apply the same :func:`launchd.is_own_plist`
+    precondition :func:`launchd.reload_job` documents, because the label is a
+    fixed module constant in two of the three installers while the plist path
+    moves with ``$HOME``. Round 1 (R-1) reproduced the consequence: a sandboxed
+    install that found a loaded-but-stopped job issued ``kickstart -k
+    gui/501/<label>`` against the operator's live daemon — the inverse of the
+    incident ``AGENTS.md`` records for the browser bridge.
+    """
+
+    def _own_path(self, label: str = PLIST) -> Path:
+        """The path the REAL passwd home owns — what the guard is asked about.
+
+        Real, like the reload cells above; the RUNNER is the fake, so nothing
+        reaches launchd (``is_own_plist`` is asked first and answers True here).
+        """
+        home = launchd.real_home()
+        assert home is not None
+        return home / "Library" / "LaunchAgents" / f"{label}.plist"
+
+    def test_a_foreign_path_is_refused_without_asking_launchd(self, tmp_path: Path) -> None:
+        """THE REPRODUCTION: a sandboxed path must produce NO launchctl call.
+
+        The recording runner stands in for launchd, so a missing guard shows up
+        as the exact call that would have restarted the operator's real job.
+        """
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(0, stdout="\tpid = 4242\n")
+
+        foreign = tmp_path / "Library" / "LaunchAgents" / f"{PLIST}.plist"
+
+        assert launchd.job_running(label=PLIST, path=foreign, run=runner) is False
+        assert launchd.kickstart(label=PLIST, path=foreign, run=runner) is False
+        assert calls == [], f"a foreign path reached launchd: {calls}"
+
+    def test_a_live_pid_behind_the_label_reads_as_running(self) -> None:
+        def runner(*args: str) -> _Result:
+            return _Result(0, stdout="\tpid = 4242\n\tstate = running\n")
+
+        assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is True
+
+    def test_a_loaded_label_with_no_pid_is_not_running(self) -> None:
+        """`print` exits 0 for a loaded-but-exited job: the pid line is the signal."""
+
+        def runner(*args: str) -> _Result:
+            return _Result(0, stdout="\tstate = exited\n")
+
+        assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is False
+
+    def test_an_unregistered_label_is_not_running(self) -> None:
+        def runner(*args: str) -> _Result:
+            return _Result(113, stderr="Could not find service")
+
+        assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is False
+
+    def test_the_own_path_kickstarts_this_label(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(0)
+
+        assert launchd.kickstart(label=PLIST, path=self._own_path(), run=runner) is True
+        assert calls == [("kickstart", "-k", f"gui/{os.getuid()}/{PLIST}")], calls
+
+    def test_a_refused_kickstart_is_false_not_an_exception(self) -> None:
+        def runner(*args: str) -> _Result:
+            return _Result(113, stderr="Could not find service")
+
+        assert launchd.kickstart(label=PLIST, path=self._own_path(), run=runner) is False
+
+    def test_a_wedged_supervisor_never_raises(self) -> None:
+        def runner(*args: str) -> _Result:
+            raise subprocess.TimeoutExpired("launchctl", 15)
+
+        assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is False
+        assert launchd.kickstart(label=PLIST, path=self._own_path(), run=runner) is False

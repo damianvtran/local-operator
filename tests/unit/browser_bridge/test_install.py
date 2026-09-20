@@ -688,6 +688,12 @@ def inherited_darwin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_r
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
+    # THIS TMPDIR IS THE REAL HOME for this fixture, and the launchd-level view
+    # has to agree with the installer's own: the verbs now apply
+    # `launchd.is_own_plist` to the pair they address (round 2, R-8), and a
+    # fixture whose `HOME` is a tmpdir would otherwise be refused before any
+    # call — which would make adoption untestable rather than guarded.
+    monkeypatch.setattr(install.launchd, "real_home", lambda: home)
     legacy = home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
     legacy.write_bytes(
         plistlib.dumps({"Label": install.LABEL, "StandardOutPath": str(install.log_path())})
@@ -1262,3 +1268,158 @@ def test_the_legacy_registration_is_empty_on_windows(
     monkeypatch.setattr(install.sys, "platform", "win32")
 
     assert install._legacy_path() is None
+
+
+# --------------------------------------------------------------------------
+# An install that would change nothing must do nothing.
+#
+# See the mobile installer's twin cells for the full rationale: an
+# unconditional plist rewrite plus a bootout/bootstrap is exactly the pair of
+# signals an EDR reads as "Persistence: launchd job / plist file modification"
+# (MITRE T1543.001), and the bridge's plist path is stable, so a re-run usually
+# renders identical bytes.
+# --------------------------------------------------------------------------
+
+
+class _LaunchctlRig:
+    """`install()` with everything outside itself faked, and the calls recorded.
+
+    ``job_running`` is faked rather than exercised because the browser derives
+    its label PER CONFIG ROOT (a sandbox gets a suffixed label, so this arm can
+    never address the operator's bridge — unlike the mobile and tunnel arms,
+    whose labels are fixed constants). The identity guard those two need is
+    pinned at the launchd level and by the mobile installer's own sandbox cell.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self.plist = tmp_path / "com.local-operator.browser.plist"
+        self.calls: list[list[str]] = []
+        self.running = True
+        self.answering = True
+        monkeypatch.setattr(install, "plist_path", lambda: self.plist)
+        monkeypatch.setattr(install, "log_path", lambda: tmp_path / "log" / "browser.log")
+        monkeypatch.setattr(install, "_supervisor", lambda: "launchctl")
+        monkeypatch.setattr(install, "legacy_registration", lambda: None)
+        # ANSWERING is part of the skip decision (round 1, R-5/Q-1): a job
+        # launchd holds a live pid for but that no longer answers must not be
+        # left as it is, which is what liveness alone did.
+        monkeypatch.setattr(
+            install, "health", lambda *a, **k: {"ok": True} if self.answering else None
+        )
+        monkeypatch.setattr(install, "_launchctl", self._launchctl)
+        monkeypatch.setattr(install.launchd, "job_running", lambda **kwargs: self.running)
+        monkeypatch.setattr(install.launchd, "kickstart", self._kickstart)
+
+    def _launchctl(self, *cmd: str) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(cmd))
+        return subprocess.CompletedProcess(list(cmd), 0, "pid = 4242", "")
+
+    def _kickstart(self, **kwargs: object) -> bool:
+        self.calls.append(["kickstart", "-k", str(kwargs.get("label"))])
+        self.answering = True  # the restart brought it back
+        return True
+
+    def write_current_plist(self, port: int) -> None:
+        self.plist.parent.mkdir(parents=True, exist_ok=True)
+        self.plist.write_bytes(plistlib.dumps(install.render_plist(port)))
+
+
+def test_a_loaded_but_wedged_bridge_is_repaired_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-5/Q-1: a pid that no longer answers is not a reason to leave it alone.
+
+    Liveness alone skipped this state, and the install then failed its own
+    health check — the wedged bridge the old unconditional reload used to repair
+    as a side effect. The gate is now liveness AND serving, the mobile twin's
+    shape; the plist is still not rewritten, because the file is correct.
+    """
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4099)
+    rig.answering = False
+    before = rig.plist.stat().st_mtime_ns
+
+    result = install.install(4099)
+
+    assert result["ok"] is True, result
+    assert rig.plist.stat().st_mtime_ns == before, "the plist was already correct"
+    assert [call[:2] for call in rig.calls] == [["kickstart", "-k"]], rig.calls
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert not any("left it loaded" in step for step in steps), steps
+
+
+def test_install_skips_a_plist_that_already_says_what_it_would_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Equal content and a live job: no write, NO launchctl call, no false claim."""
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4099)
+    before = rig.plist.stat().st_mtime_ns
+
+    result = install.install(4099)
+
+    assert result["ok"] is True
+    assert rig.plist.stat().st_mtime_ns == before, "the plist was rewritten"
+    assert rig.calls == [], f"install reached launchctl for no reason: {rig.calls}"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert any("already current" in step for step in steps), steps
+    assert not any(
+        "loaded the LaunchAgent" in step for step in steps
+    ), "an install that skipped the load must not report one"
+
+
+def test_install_still_writes_and_reloads_a_changed_plist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A plist from an older build is still replaced and reloaded."""
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4098)
+    reloads: list[Path] = []
+
+    def fake_reload(**kwargs: object) -> install.launchd.JobReload:
+        reloads.append(kwargs["path"])  # type: ignore[arg-type]
+        return install.launchd.JobReload(label=str(kwargs["label"]), outcome="reloaded")
+
+    monkeypatch.setattr(install.launchd, "reload_job", fake_reload)
+
+    result = install.install(4099)
+
+    assert result["ok"] is True
+    assert plistlib.loads(rig.plist.read_bytes()) == install.render_plist(4099)
+    assert reloads == [rig.plist], "a changed plist must still be reloaded"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert not any("already current" in step for step in steps), steps
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+def test_the_verbs_refuse_a_redirected_home(
+    action: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_root: Path
+) -> None:
+    """R-8: every launchd verb is guarded, not only the adopted branch.
+
+    ``label()`` already carries a per-root digest, so a redirected ``HOME``
+    cannot NAME the operator's bridge; this pins the half that matters when the
+    name is right anyway — an adopted registration addresses the unsuffixed
+    ``LABEL`` — by leaving the launchd-level passwd home at the operator's while
+    ``Path.home`` is a tmpdir. Nothing may be addressed at all.
+    """
+    home = tmp_path / "redirected"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(install.sys, "platform", "darwin")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *a: calls.append(a) or subprocess.CompletedProcess(list(a), 0, "", ""),
+    )
+
+    result = install.service_action(action)
+
+    assert result["ok"] is False, result
+    assert calls == [], f"a redirected home reached launchd: {calls}"
+    assert "not the LaunchAgent the real home owns" in str(result["error"])
