@@ -234,7 +234,18 @@ def test_pair_status_reports_pending_then_the_certificate(
         "scope",
         "exp",
         "name",
+        # WHETHER THE MACHINE CAN HONOUR A SIGNATURE AT ALL (UX round 6, U2). This
+        # is the one fact the phone cannot read for itself, and the one its success
+        # box used to assert without knowing: between `lop operator init` (which only
+        # stages the anchor) and `lop operator install` (the privileged step) a
+        # correctly paired device signs and the runtime refuses every one of them.
+        # Asserted against the SHARED predicate, so the three surfaces that answer
+        # this question cannot drift into three answers.
+        "authority_ready",
     }
+    from local_operator.operator import operator_authority_unusable
+
+    assert body["authority_ready"] is (not operator_authority_unusable()), body
 
 
 def test_pair_status_refuses_a_device_id_that_is_not_an_id(tmp_path: Path, monkeypatch) -> None:

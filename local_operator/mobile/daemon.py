@@ -3269,6 +3269,16 @@ def build_app(daemon: MobileDaemon):
             return JSONResponse({"error": "bad device id"}, status_code=422)
         if stored is None:
             return JSONResponse({"paired": False, "device_id": device_id})
+        # WHETHER THE MACHINE CAN HONOUR A SIGNATURE AT ALL (UX round 6, U2).
+        # The phone's success box promised authority it may not have: between
+        # `lop operator init` (which stages the anchor) and `lop operator install`
+        # (the privileged step that lands it) a correctly paired device signs and
+        # the runtime refuses every one of them, because there is no key to verify
+        # against. The portal cannot read the machine's filesystem, so the machine
+        # has to say — and it is the same predicate the runtime and the pairing
+        # receipt use, so the three surfaces cannot disagree.
+        from local_operator.operator import operator_authority_unusable
+
         return JSONResponse(
             {
                 "paired": True,
@@ -3278,6 +3288,7 @@ def build_app(daemon: MobileDaemon):
                 "scope": list(stored.scope),
                 "exp": stored.not_after,
                 "name": stored.name,
+                "authority_ready": not operator_authority_unusable(),
             }
         )
 

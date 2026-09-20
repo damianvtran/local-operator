@@ -25,10 +25,15 @@
  * rather than a second one is the point.
  */
 import { useState } from "react";
-import { requestOperatorChallenge, sendCommandWithProof } from "../api";
+import {
+	HttpError,
+	isAuthorityRefusalCode,
+	requestOperatorChallenge,
+	sendCommandWithProof,
+} from "../api";
 import { Button } from "./ui/button";
 import { Sheet } from "./ui/sheet";
-import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
+import { NotPairedError, operatorFieldsFor, storedCertificate } from "../lib/operator-device";
 import { PairPromptSheet } from "../screens/pair";
 
 type Mode = "ask" | "auto";
@@ -37,15 +42,34 @@ export function GateSheet({
 	open,
 	onClose,
 	sessionId,
+	onReceipt,
 }: {
 	open: boolean;
 	onClose: () => void;
 	sessionId: string;
+	/** Where a SUCCESS report goes so it outlives this sheet.
+
+	    WHY IT IS A PROP AND NOT `notice` (design round 6, D2). The success path used
+	    to `setNotice(...)` and then `onClose()` in the same commit — and the notice
+	    is rendered INSIDE the `Sheet`, which returns null when closed — so the
+	    receipt was set and unmounted before a frame was painted. Measured: the panel
+	    gone from the DOM, the paragraph list empty, the header still reading "needs
+	    you", and the user told nothing about whether the tap worked. The sheet is the
+	    wrong owner for a receipt about something that already happened; the surface
+	    it closes back onto is the right one. */
+	onReceipt: (text: string) => void;
 }) {
 	const [busy, setBusy] = useState<Mode | null>(null);
 	const [error, setError] = useState("");
 	const [notice, setNotice] = useState("");
 	const [pairPrompt, setPairPrompt] = useState(false);
+	/* Read ONCE per render, synchronously, from storage this phone already has:
+	   the point is to say what will be refused BEFORE the tap rather than after
+	   (design round 6, D4). No async probe — `ask` must stay usable while this is
+	   unknown, and a device that is paired but whose certificate the machine has
+	   revoked still passes this check, which is why it HEADS THE DECISION rather
+	   than replaces the refusal. */
+	const paired = storedCertificate() !== null;
 
 	async function choose(mode: Mode) {
 		if (busy) return;
@@ -77,7 +101,11 @@ export function GateSheet({
 	async function loosen() {
 		try {
 			await sendLoosened();
-			setNotice("this session's gate is now auto — gated tools run without asking");
+			// OUT FIRST, THEN CLOSE: the receipt has to exist somewhere that is not
+			// this sheet before the sheet unmounts (design round 6, D2). The
+			// tightening path keeps its in-sheet notice because it does NOT close,
+			// which is why that one never had this bug.
+			onReceipt("this session's gate is now auto — gated tools run without asking");
 			onClose();
 		} catch (failure) {
 			if (failure instanceof NotPairedError) {
@@ -127,6 +155,20 @@ export function GateSheet({
 					<Button disabled={busy !== null} onClick={() => void choose("auto")}>
 						{busy === "auto" ? "…" : "run without asking (auto)"}
 					</Button>
+					{!paired ? (
+						/* SAID BEFORE THE TAP, not after (design round 6, D4). Both buttons
+						   rendered identically — same size, same weight, no state — while
+						   only one of them can fail here, and the refusal and the pairing
+						   prompt arrived only once it had been pressed. `ask` works unpaired
+						   by design (the gate sheet's own comment), so the asymmetry is the
+						   honest thing to state; `storedCertificate()` is a synchronous read
+						   this component already has. */
+						<p className="text-meta text-ink-muted">
+							This phone is not paired with that machine, so <strong>run without asking</strong>{" "}
+							will ask you to pair it first. Keeping approvals at <strong>ask</strong> never needs
+							a pairing.
+						</p>
+					) : null}
 					{notice ? <p className="text-body-sm text-ink-muted">{notice}</p> : null}
 					{error ? <p className="text-body-sm text-danger">{error}</p> : null}
 				</div>
@@ -142,6 +184,25 @@ export function GateSheet({
     here — a second copy of one refusal is how two surfaces end up describing the
     same rule differently. */
 export function humanizeGateError(error: unknown): string {
+	if (error instanceof HttpError && isAuthorityRefusalCode(error.code)) {
+		if (error.code === "operator_authority_unconfigured") {
+			/* THE RUNTIME'S OWN COPY, and nothing added: on this host it already
+			   names `lop operator install`, which is the command that unlocks both
+			   remedies it mentions. Appending a second copy is how two surfaces end
+			   up describing one rule differently (UX round 6, U1/U2). */
+			return error.message;
+		}
+		if (error.code === "operator_authority_required") {
+			/* THE READER IS ALREADY ON THE PAIRED PHONE (design round 6, D5). The
+			   runtime's sentence ends "authorise it from this machine (Touch ID) or
+			   from your paired phone" — and this surface IS the paired phone, having
+			   just used it. Passing the sentence through unchanged is right (the phone
+			   must not reword a refusal it does not own), but the one step that is
+			   actually left is knowable here and nowhere else: the machine refused a
+			   signature from a device that believed it was paired. */
+			return `${error.message} (This phone's signature was refused — on that machine, \`lop operator devices\` shows whether this device is revoked or expired.)`;
+		}
+	}
 	const message = String((error as Error)?.message ?? error);
 	if (message.includes("504") || message.toLowerCase().includes("did not answer")) {
 		return "The session didn’t respond in time — try again.";

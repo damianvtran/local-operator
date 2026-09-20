@@ -49,7 +49,14 @@ function Header({
 	sessionId: string;
 }) {
 	const [gateOpen, setGateOpen] = useState(false);
+	/* THE LOOSENING RECEIPT, held HERE rather than in the sheet (design round 6,
+	   D2). The sheet unmounts the moment it closes, and a report set inside it was
+	   never painted — measured: panel gone, header still "needs you", the user told
+	   nothing. The header is the surface the sheet closes back onto, so the receipt
+	   belongs to it and survives. */
+	const [gateReceipt, setGateReceipt] = useState("");
 	return (
+		<>
 		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 			<button
 				type="button"
@@ -77,8 +84,25 @@ function Header({
 			>
 				{projection.pending ? "needs you" : "approvals"}
 			</button>
-			<GateSheet open={gateOpen} onClose={() => setGateOpen(false)} sessionId={sessionId} />
+			<GateSheet
+				open={gateOpen}
+				onClose={() => setGateOpen(false)}
+				sessionId={sessionId}
+				onReceipt={setGateReceipt}
+			/>
 		</header>
+		{gateReceipt ? (
+			/* Cleared by the next tightening/loosening gesture rather than on a timer:
+			   a receipt that vanishes while the user is looking at it is the defect
+			   this exists to fix. */
+			<p
+				role="status"
+				className="border-b border-hairline bg-elevated px-2 py-1 text-meta text-ink-muted"
+			>
+				{gateReceipt}
+			</p>
+		) : null}
+		</>
 	);
 }
 

@@ -49,7 +49,7 @@ const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 type Status =
 	| { kind: "idle" }
 	| { kind: "waiting"; deviceId: string }
-	| { kind: "paired"; deviceId: string; name: string }
+	| { kind: "paired"; deviceId: string; name: string; authorityReady: boolean }
 	| { kind: "failed"; message: string };
 
 export function PairScreen() {
@@ -92,6 +92,16 @@ export function PairScreen() {
 						kind: "paired",
 						deviceId,
 						name: answer.name || name.trim(),
+						/* WHETHER THE MACHINE CAN ACT ON IT YET (UX round 6, U2). The
+						   success box used to promise authority unconditionally, and
+						   between `lop operator init` (which only stages the anchor) and
+						   `lop operator install` (the privileged step that lands it) that
+						   promise was false: the runtime has no key to verify this
+						   device's signatures against, and refuses every one. The
+						   machine reports the state; this box repeats it rather than
+						   inventing one. Absent (an older relay) reads as ready, which is
+						   the pre-existing promise and the common case. */
+						authorityReady: answer.authority_ready !== false,
 					});
 					return;
 				}
@@ -167,11 +177,21 @@ export function PairScreen() {
 					<p className="text-body-sm">
 						Paired as <strong>{status.name}</strong>.
 					</p>
-					<p className="text-meta text-ink-muted">
-						This phone can now approve parked tool calls and loosen a session&rsquo;s approval
-						gate ({DEVICE_SCOPES.join(", ")}). Revoke it on the machine with{" "}
-						<code>lop operator devices --revoke {status.deviceId}</code>.
-					</p>
+					{status.authorityReady ? (
+						<p className="text-meta text-ink-muted">
+							This phone can now approve parked tool calls and loosen a session&rsquo;s
+							approval gate ({DEVICE_SCOPES.join(", ")}). Revoke it on the machine with{" "}
+							<code>lop operator devices --revoke {status.deviceId}</code>.
+						</p>
+					) : (
+						<p className="text-meta text-ink-muted">
+							It cannot sign yet: that machine has not installed its operator authority,
+							so it has no key to check this phone&rsquo;s signatures with. Run{" "}
+							<code>lop operator install</code> there (one privileged step) — then this
+							phone&rsquo;s approvals and loosenings will be accepted. Revoke it with{" "}
+							<code>lop operator devices --revoke {status.deviceId}</code>.
+						</p>
+					)}
 				</div>
 			) : null}
 

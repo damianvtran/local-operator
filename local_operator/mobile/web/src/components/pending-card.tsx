@@ -61,7 +61,13 @@
  * no per-field remount key here.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { requestOperatorChallenge, sendCommand, sendCommandWithProof } from "../api";
+import {
+	HttpError,
+	isAuthorityRefusalCode,
+	requestOperatorChallenge,
+	sendCommand,
+	sendCommandWithProof,
+} from "../api";
 import { cn } from "../lib/cn";
 import { PENDING_CARD_FRACTION, columnCap } from "../lib/column";
 import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
@@ -98,15 +104,28 @@ function humanizeError(message: string): string {
 /** Whether this refusal is the AUTHORITY one — the runtime saying a signature is
     needed — rather than a transport or staleness failure.
 
-    Matched on the two clauses the runtime's own copy uses (`harness/approval.py`'s
-    ``CARD_APPROVAL_REFUSED_NOTICE`` for a card and
-    ``OPERATOR_AUTHORITY_REQUIRED_NOTICE`` for a command), not on a status code:
-    the refusal travels as an ``error`` frame the relay renders as a 422, exactly
-    like a stale tap, so the code cannot tell them apart. A phrase is the honest
-    discriminator here, and it is the phrase the reader is shown either way. */
-function isAuthorityRefusal(message: string): boolean {
-	const m = message.toLowerCase();
-	return m.includes("only the operator can allow it") || m.includes("needs the operator's own consent");
+    KEYED ON THE TYPED CODE, not on the sentence (UX round 6, U6). This used to
+    match substrings of the runtime's copy (`"only the operator can allow it"` /
+    `"needs the operator's own consent"`) because a 422 carried only prose. That
+    copy has already been rewritten twice between revisions, and the failure mode is
+    silent: after a third rewrite this returns false, so the phone shows the refusal
+    with no retry and no pair prompt — exactly the dead end UX round 2 (U8) was
+    raised to remove — and nothing would notice.
+
+    The CODE now rides beside the copy (`mobile/daemon.api_command`), and it is a
+    closed set rather than prose, so this cannot drift. The prose fallback stays for
+    one reason only: an older relay that predates the field. It is a fallback, not a
+    second implementation of the rule.
+    */
+export function isAuthorityRefusal(failure: unknown): boolean {
+	if (failure instanceof HttpError && failure.code) {
+		return isAuthorityRefusalCode(failure.code);
+	}
+	const message = String((failure as Error)?.message ?? failure).toLowerCase();
+	return (
+		message.includes("only the operator can allow it") ||
+		message.includes("needs the operator's own consent")
+	);
 }
 
 export function PendingCard({
@@ -212,8 +231,7 @@ export function PendingCard({
 			await sendCommand(pid, plain);
 			return;
 		} catch (failure) {
-			const message = String((failure as Error)?.message ?? failure);
-			if (!approved || !isAuthorityRefusal(message)) throw failure;
+			if (!approved || !isAuthorityRefusal(failure)) throw failure;
 			await approveFromHere(plain);
 		}
 	};
