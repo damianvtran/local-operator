@@ -479,8 +479,8 @@ def test_a_refusal_the_host_made_after_arming_is_reported_as_a_refusal() -> None
     rows = _download_rows()
     assert [row["verdict"] for row in rows] == ["armed_refused"]
     # The row carries what was said, without the copy's prefix: the prefix is the
-    # sentence's, the clause is the record's, and the test above pins that the two
-    # compose to the host's own words.
+    # sentence's, the clause is the record's, and the equality asserted just above
+    # pins that the two compose to the host's own words.
     assert rows[0]["reason"] == "`evil.exe` is an executable/script type; nothing was saved"
     assert rows[0]["name"] == "" and rows[0]["action"] == "download"
 
