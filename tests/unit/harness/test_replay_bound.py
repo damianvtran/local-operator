@@ -159,7 +159,7 @@ def test_every_text_block_is_bounded_and_images_are_left_alone():
     bounded = out[0]
     assert bounded.content[1] is frame
     for index in (0, 2):
-        assert len(bounded.content[index].text) <= BOUND
+        assert len(text_at(bounded, index)) <= BOUND
 
 
 def test_error_results_keep_their_head_and_tail():
