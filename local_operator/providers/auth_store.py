@@ -678,11 +678,45 @@ class AuthStore:
         import is lazy because `tunnels.install` reaches `launchd`, `paths` and
         the tunnels package, none of which belong on the import path of a
         credential write — and because this module is imported BY that package.
+
+        OFF THE EVENT LOOP where there is one (review round 1, m3). The guard
+        chain ends in a real `launchctl kickstart` / `systemctl --user start`
+        with a 20-second timeout, and this write path is reached from the desktop
+        login route and from `/login` in the TUI — both on the loop that also
+        serves every other request, so a hung service manager stalled the whole
+        server for up to 20 seconds. There is nothing to return here, so the
+        cheapest correct thing is to hand the call to a worker thread and let the
+        caller proceed: the operator is told the sign-in succeeded, and the
+        connector's own state file says the rest.
         """
         try:
             from local_operator.tunnels import install
+        except Exception:  # noqa: BLE001 — a login must not fail over a service restart
+            logger.warning(
+                "could not re-arm a parked tunnel connector for %s after a login",
+                provider,
+            )
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop on this thread. Deliberately the same call rather than a
+            # skipped one: a script driving a login still wants its connector
+            # back, and there is no loop here to stall.
+            self._rearm_off_thread(install, provider, stored.id)
+            return
+        loop.run_in_executor(None, self._rearm_off_thread, install, provider, stored.id)
 
-            note = install.rearm_if_parked(provider=provider, credential_id=stored.id)
+    @staticmethod
+    def _rearm_off_thread(install: Any, provider: str, credential_id: int) -> None:
+        """The re-arm itself, where a blocking call costs nobody a turn.
+
+        Never raises: a re-arm that fails must not fail the login that triggered
+        it — and on the executor path an exception would surface only as an
+        unretrieved future exception, which is neither a log line nor a shrug.
+        """
+        try:
+            note = install.rearm_if_parked(provider=provider, credential_id=credential_id)
         except Exception:  # noqa: BLE001 — a login must not fail over a service restart
             logger.warning(
                 "could not re-arm a parked tunnel connector for %s after a login",

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
@@ -35,12 +36,12 @@ def _tunnel_dir(tmp_path: Path) -> Path:
     return directory
 
 
-def _configure(tmp_path: Path, *, stopped: bool = False) -> None:
+def _configure(tmp_path: Path, *, stopped: bool = False, credential_id: int = 7) -> None:
     _tunnel_dir(tmp_path).joinpath("config.json").write_text(
         json.dumps(
             {
                 "tunnel_id": "tunnel-1",
-                "credential_id": 7,
+                "credential_id": credential_id,
                 "gateway_port": 4100,
                 "stopped": stopped,
                 "record": {"id": "tunnel-1", "status": "active"},
@@ -115,7 +116,10 @@ async def test_the_route_reports_the_park_rather_than_a_dead_gateway(desktop) ->
     # Radient, which is also the only answer available when the login is dead.
     assert result["cloud"] == {"status": "active", "source": "cached", "reason": ""}
     # No credential row exists in this fixture, so the login verdict is the
-    # honest "sign in" — decided on this device, without a network call.
+    # honest "sign in": there is nothing stored for this tunnel to refresh, which
+    # is why no call is made at all. (A row that is merely STALE does make one —
+    # bounded and memoised, see REFRESH_WAIT_S — which the tests at the end of
+    # this file drive.)
     assert result["login"] == {"credential_id": 7, "state": "login_required"}
 
 
@@ -159,3 +163,132 @@ async def test_the_account_status_carries_the_login_verdict(desktop) -> None:
         "command": "lop login radient",
         "url": "https://console.invalid",
     }
+
+
+async def test_a_hanging_token_endpoint_cannot_hold_the_poll_open(desktop, monkeypatch) -> None:
+    """M1: the login verdict is BOUNDED, so a partitioned network cannot stall the poll.
+
+    Measured on this branch before the fix: **30.9 s** for one
+    `GET /v1/desktop/tunnel` — the store's own client timeout for the refresh
+    POST, spent on a call whose answer is "I could not check", on the loop that
+    serves every other request.
+
+    The assertion is structural rather than a stopwatch: the stubbed endpoint
+    parks for several times the bound and records whether it ever finished, so a
+    passing test means the refresh was CANCELLED at the bound. An unbounded call
+    would have completed it, and `finished` is what says which happened — a
+    duration would only say how fast the machine is.
+    """
+    import asyncio
+    from contextlib import closing
+
+    from local_operator.providers import auth_store
+    from local_operator.tunnels import report
+
+    client, tmp_path, _app = desktop
+    with closing(auth_store.AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "stored-refresh",
+                # Outside the refresh skew, so the verdict has to ASK: a fresh
+                # token is served without a call and this test would prove
+                # nothing.
+                "expires": 1,
+            },
+        )
+    _configure(tmp_path, credential_id=row.id)
+
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def hanging(credentials):  # noqa: ANN001 — the store's own refresh fn
+        started.set()
+        await asyncio.sleep(report.REFRESH_WAIT_S * 3)
+        finished.set()
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: hanging)
+
+    result = (await client.get("/v1/desktop/tunnel")).json()["result"]
+
+    assert started.is_set(), "the refresh was never attempted: the fixture proves nothing"
+    assert not finished.is_set(), "the route waited for the token endpoint instead of bounding it"
+    # The honest answer for a check that did not finish, and NOT `login_required`:
+    # sending an operator whose network is down to a login is the misdirection
+    # this surface exists to remove.
+    assert result["login"] == {"credential_id": row.id, "state": "unknown"}
+
+
+async def test_a_verdict_that_cost_a_call_is_not_re_asked_on_every_poll(
+    desktop, monkeypatch
+) -> None:
+    """M1: a negative verdict is reused for the window the store blocks the row for.
+
+    The same treatment #1340 gave the desktop's own side of this question
+    (`DIAGNOSIS_TTL_S`): the answer needed a token-endpoint POST, and asking
+    again inside the window changes nothing while paying again.
+
+    The row's own write stamp is in the memo's key, so a login that LANDS in
+    between is decided again — that half is asserted, because a memo that masked a
+    re-login would turn this fix into a worse bug than the cost it removes. The
+    store's clock is stepped rather than slept past: it stamps writes in whole
+    milliseconds, and two writes in one millisecond are indistinguishable to a
+    key built from that stamp.
+    """
+    import itertools
+    from contextlib import closing
+
+    from local_operator.providers import auth_store
+
+    client, tmp_path, _app = desktop
+    clock = itertools.count(start=1_800_000_000_000, step=1_000)
+    monkeypatch.setattr(auth_store.AuthStore, "_now_ms", staticmethod(lambda: next(clock)))
+    attempts: list[str] = []
+
+    async def offline(credentials):  # noqa: ANN001 — the store's own refresh fn
+        attempts.append(str(credentials.get("refresh")))
+        raise httpx.ConnectError("network is unreachable")
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: offline)
+    with closing(auth_store.AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "first-refresh",
+                "expires": 1,
+            },
+        )
+    _configure(tmp_path, credential_id=row.id)
+
+    first = (await client.get("/v1/desktop/tunnel")).json()["result"]
+    assert first["login"] == {"credential_id": row.id, "state": "unknown"}
+    assert len(attempts) == 1
+
+    # The same poll again inside the window: the verdict stands and the token
+    # endpoint is not asked a second time.
+    second = (await client.get("/v1/desktop/tunnel")).json()["result"]
+    assert second["login"] == first["login"]
+    assert len(attempts) == 1, "the poll paid for the same answer twice"
+
+    # A login lands (the same identity, written again): the row CHANGED, so the
+    # verdict is decided again whatever the clock says.
+    with closing(auth_store.AuthStore()) as store:
+        store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "fresh-access",
+                "refresh": "second-refresh",
+                "expires": 1,
+            },
+        )
+    third = (await client.get("/v1/desktop/tunnel")).json()["result"]
+    assert len(attempts) == 2, "a landed login was masked by the memo"
+    assert third["login"] == first["login"]
