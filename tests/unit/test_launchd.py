@@ -33,7 +33,9 @@ from __future__ import annotations
 import os
 import plistlib
 import subprocess
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -598,3 +600,181 @@ class TestReloadJob:
         assert result.outcome == "not-addressable"
         assert f"passwd entry for uid {os.getuid()}" in result.detail, result.detail
         assert "reinstall" not in result.detail
+
+
+# ---------------------------------------------------------------------------
+# The non-POSIX guards (A13/A14/D25)
+#
+# `local_operator.launchd` is the macOS half of a three-platform supervisor
+# layer, and it must refuse on the other two rather than raise. It did raise:
+# `real_home()` had `import pwd` OUTSIDE its try (so Windows got
+# `ModuleNotFoundError`, from the one function whose answer decides whether
+# launchd is addressed at all), `os.getuid()` would have raised `AttributeError`
+# immediately after, and `job_domain()` used it directly — from inside
+# `reload_job`, whose documented contract is that nothing in its sequence raises.
+#
+# `os.getuid`/`pwd` cannot be removed from this host, so the calls themselves are
+# what is made to fail: the import is what is simulated, exactly as it fails on
+# Windows.
+# ---------------------------------------------------------------------------
+
+
+def test_real_home_answers_none_when_there_is_no_pwd_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows has no `pwd`; the answer is None, not ModuleNotFoundError."""
+    import builtins
+    import sys
+
+    real_import = builtins.__import__
+
+    def no_pwd(
+        name: str,
+        globals_: Mapping[str, object] | None = None,
+        locals_: Mapping[str, object] | None = None,
+        fromlist_: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> ModuleType:
+        """``__import__`` with ``pwd`` missing; everything else is forwarded.
+
+        The five parameters are spelled out rather than taken as ``*args:
+        object`` because ``builtins.__import__`` DECLARES them
+        (``Mapping``/``Sequence``/``int``) and forwarding ``object``s made the
+        forwarding call unverifiable. They are handed over POSITIONALLY, which
+        is how CPython's ``IMPORT_NAME`` always calls ``__import__``; the names
+        differ from the builtins they shadow only to keep that shadowing out of
+        this module's namespace.
+        """
+        if name == "pwd":
+            raise ModuleNotFoundError("No module named 'pwd'")
+        return real_import(name, globals_, locals_, fromlist_, level)
+
+    monkeypatch.setattr(builtins, "__import__", no_pwd)
+    monkeypatch.delitem({}, "", raising=False)  # no-op; keeps monkeypatch handles distinct
+    monkeypatch.delitem(sys.modules, "pwd", raising=False)
+    try:
+        assert launchd.real_home() is None
+    finally:
+        sys.modules.pop("pwd", None)
+
+
+def test_real_home_answers_none_without_getuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second half of the same trap: a `pwd` module with no `os.getuid`."""
+    monkeypatch.delattr(launchd.os, "getuid", raising=False)
+
+    assert launchd.real_home() is None
+    assert launchd.config_lives_in_real_home(Path("/tmp/anything")) is False
+    assert launchd.is_own_plist(Path("/tmp/x.plist"), "com.local-operator.wakes") is False
+
+
+def test_job_domain_names_its_own_refusal_without_getuid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(launchd.os, "getuid", raising=False)
+
+    with pytest.raises(launchd.JobDomainUnavailable):
+        launchd.job_domain()
+
+
+def test_reload_job_still_never_raises_without_getuid(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The contract, at the one function that has it.
+
+    `reload_job` is called by an installer that has just taken a daemon down, so
+    an escaping AttributeError would hand the operator a traceback while the
+    service was already stopped.
+    """
+    monkeypatch.delattr(launchd.os, "getuid", raising=False)
+    monkeypatch.setattr(launchd, "real_home", lambda: None)
+
+    reloaded = launchd.reload_job(
+        label="com.local-operator.wakes", path=tmp_path / "x.plist", runner=lambda *a: None
+    )
+
+    assert reloaded.ok is False
+    assert reloaded.outcome == "not-addressable"
+
+
+class TestRepairHelpers:
+    """``job_running``/``kickstart`` — the compare-then-skip's two launchd calls.
+
+    BOTH take the plist path and apply the same :func:`launchd.is_own_plist`
+    precondition :func:`launchd.reload_job` documents, because the label is a
+    fixed module constant in two of the three installers while the plist path
+    moves with ``$HOME``. Round 1 (R-1) reproduced the consequence: a sandboxed
+    install that found a loaded-but-stopped job issued ``kickstart -k
+    gui/501/<label>`` against the operator's live daemon — the inverse of the
+    incident ``AGENTS.md`` records for the browser bridge.
+    """
+
+    def _own_path(self, label: str = PLIST) -> Path:
+        """The path the REAL passwd home owns — what the guard is asked about.
+
+        Real, like the reload cells above; the RUNNER is the fake, so nothing
+        reaches launchd (``is_own_plist`` is asked first and answers True here).
+        """
+        home = launchd.real_home()
+        assert home is not None
+        return home / "Library" / "LaunchAgents" / f"{label}.plist"
+
+    def test_a_foreign_path_is_refused_without_asking_launchd(self, tmp_path: Path) -> None:
+        """THE REPRODUCTION: a sandboxed path must produce NO launchctl call.
+
+        The recording runner stands in for launchd, so a missing guard shows up
+        as the exact call that would have restarted the operator's real job.
+        """
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(0, stdout="\tpid = 4242\n")
+
+        foreign = tmp_path / "Library" / "LaunchAgents" / f"{PLIST}.plist"
+
+        assert launchd.job_running(label=PLIST, path=foreign, run=runner) is False
+        assert launchd.kickstart(label=PLIST, path=foreign, run=runner) is False
+        assert calls == [], f"a foreign path reached launchd: {calls}"
+
+    def test_a_live_pid_behind_the_label_reads_as_running(self) -> None:
+        def runner(*args: str) -> _Result:
+            return _Result(0, stdout="\tpid = 4242\n\tstate = running\n")
+
+        assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is True
+
+    def test_a_loaded_label_with_no_pid_is_not_running(self) -> None:
+        """`print` exits 0 for a loaded-but-exited job: the pid line is the signal."""
+
+        def runner(*args: str) -> _Result:
+            return _Result(0, stdout="\tstate = exited\n")
+
+        assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is False
+
+    def test_an_unregistered_label_is_not_running(self) -> None:
+        def runner(*args: str) -> _Result:
+            return _Result(113, stderr="Could not find service")
+
+        assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is False
+
+    def test_the_own_path_kickstarts_this_label(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def runner(*args: str) -> _Result:
+            calls.append(args)
+            return _Result(0)
+
+        assert launchd.kickstart(label=PLIST, path=self._own_path(), run=runner) is True
+        assert calls == [("kickstart", "-k", f"gui/{os.getuid()}/{PLIST}")], calls
+
+    def test_a_refused_kickstart_is_false_not_an_exception(self) -> None:
+        def runner(*args: str) -> _Result:
+            return _Result(113, stderr="Could not find service")
+
+        assert launchd.kickstart(label=PLIST, path=self._own_path(), run=runner) is False
+
+    def test_a_wedged_supervisor_never_raises(self) -> None:
+        def runner(*args: str) -> _Result:
+            raise subprocess.TimeoutExpired("launchctl", 15)
+
+        assert launchd.job_running(label=PLIST, path=self._own_path(), run=runner) is False
+        assert launchd.kickstart(label=PLIST, path=self._own_path(), run=runner) is False

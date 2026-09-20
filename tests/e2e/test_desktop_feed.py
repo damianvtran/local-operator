@@ -35,6 +35,7 @@ import os
 import secrets
 import socket
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -56,8 +57,29 @@ from local_operator.session.runtime.presence import (
 )
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.session.runtime.viewers import ViewerRecord
+from tests.notification_opt_in import notification_path_opt_in
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.fixture(autouse=True)
+def notification_path_on(headless_tui_env: Path) -> Iterator[None]:
+    """This suite's subject IS the ``notification`` frame, so it opts in.
+
+    BOTH gates suppress it otherwise, and here the SECOND one is load-bearing:
+    the fixture creates its sessions on the test hosting (the deterministic
+    wire), so the feed declines them as test sessions and the frame the
+    assertions look for never appears. That is what CI caught on the merge — the
+    kill-switch opt-in this suite never had is only half of it.
+
+    It TAKES ``headless_tui_env`` because pytest builds an autouse fixture
+    before a same-scope one that does not depend on it, so a bare fixture would
+    clear the switch and be re-armed by the e2e conftest's fixture a moment
+    later. See ``tests/notification_opt_in`` for what the escape can and cannot
+    do.
+    """
+    with notification_path_opt_in():
+        yield
 
 
 def _published_record(root: Path) -> dict[str, Any]:

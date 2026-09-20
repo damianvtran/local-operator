@@ -426,6 +426,15 @@ class _LatchHost:
     def __init__(self, *, reason: str = "") -> None:
         self._retiring_cause = ""
         self._retiring_detail = ""
+        # The two state bits ``_retiring_refusal`` reads to decide whether the
+        # refusal owes a successor (memo §4.2 piece 3): ``begin_retire`` — the
+        # only latch this host exercises — commits its exit in the same step it
+        # sets the cause, so no handover is ever owed here. Spelled out rather
+        # than left to ``getattr`` defaults because the method's own contract is
+        # to answer from the handle's state, and a double that cannot answer must
+        # fail loudly rather than get the wrong sentence.
+        self._draining = False
+        self._exit_committed = False
         self.reason = reason
         self.notes: list[tuple[str, str]] = []
 

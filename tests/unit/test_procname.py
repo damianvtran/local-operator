@@ -24,9 +24,12 @@ without planting links on the machine running the suite.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -49,6 +52,83 @@ def _fake_venv(tmp_path: Path) -> Path:
     (tmp_path / "bin").mkdir(parents=True, exist_ok=True)
     (tmp_path / "lib").mkdir(parents=True, exist_ok=True)
     return tmp_path
+
+
+def _generation_venv(root: Path) -> Path:
+    """A SECOND venv-shaped tree, as a ``lop`` generation looks to a spawn.
+
+    Returns its ``bin/python3``. Four choices in here are deliberate:
+
+    * ``bin/python3`` is a SYMLINK to the versioned binary — which is what every
+      generation venv has, and the whole bug: the kernel resolves a symlink,
+      takes ``p_comm`` from the target, and the process is ``python3.x``.
+    * the interpreter it points at is a COPY, in a SEPARATE base tree, rather
+      than another hardlink to the real one — so the inode this test plants
+      against, and any branded child it executes, belongs to a throwaway tree.
+      Measured reason: a remediation an EDR applies to a flagged branded file
+      reaches the SHARED interpreter through a hardlink, and on 2026-09-19 that
+      took out uv's 3.12.13 and 3.13.12 on the operator's machine (see
+      ``docs/ENDPOINT_PROTECTION.md``). A test run must not be able to do that to
+      the fleet's interpreters.
+    * the base tree is SEPARATE from the venv because that is production's shape
+      (a generation venv's ``python3`` points into a shared interpreter tree),
+      and it is what makes the companion-dylib claim testable at all (review
+      round 1, R-2): the plant's SOURCE is the base tree's ``lib`` and its
+      TARGET is the venv's, so a missing or wrong venv-side pin is a state the
+      plant has to repair. With source and target in one directory they coincide
+      and no assertion can tell the plant from the fixture — mutation
+      ``_plant_libpython -> True`` passed every cell then.
+    * ``<venv>/lib`` starts EMPTY: nothing is pre-planted, so the symlink the
+      cells assert on is the plant's own work.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    base = _generation_base(root)
+    (root / "bin").mkdir(parents=True, exist_ok=True)
+    (root / "lib").mkdir(parents=True, exist_ok=True)
+    (base / "bin").mkdir(parents=True, exist_ok=True)
+    (base / "lib").mkdir(parents=True, exist_ok=True)
+    real = Path(os.path.realpath(sys.executable))
+    reason = _unbrandable_reason(root)
+    if reason is not None:
+        pytest.skip(reason)
+    dylib = real.parent.parent / "lib" / f"lib{real.name}.dylib"
+    if not dylib.is_file():
+        pytest.skip(f"no {dylib.name} beside {real}: the copy could not be executed")
+    (root / "pyvenv.cfg").write_text(
+        f"home = {base / 'bin'}\ninclude-system-site-packages = false\n", encoding="utf-8"
+    )
+    shutil.copy(real, base / "bin" / real.name)
+    # The BASE tree's pin is the plant's source; the venv's is the plant's job.
+    os.symlink(dylib, base / "lib" / dylib.name)
+    target = root / "bin" / "python3"
+    os.symlink(Path("..") / ".." / base.name / "bin" / real.name, target)
+    return target
+
+
+def _generation_base(root: Path) -> Path:
+    """The shared interpreter tree a generation venv's ``bin/python3`` points into.
+
+    Spelled once because the fixture creates it and the companion-dylib
+    assertion names it as the plant's SOURCE; two spellings would let the test
+    prove a different directory from the one the fixture built.
+    """
+    return root.parent / f"{root.name}-base"
+
+
+def _unbrandable_reason(root: Path) -> str | None:
+    """Why a plant into ``root`` cannot be attempted, or ``None``.
+
+    The same two refusals the ``branded`` fixture checks, spelled once: a
+    framework interpreter (whose stub re-execs and discards the link's name)
+    and a cross-device tmp dir (``os.link`` cannot cross filesystems). Both are
+    environment properties, not test failures.
+    """
+    real = Path(os.path.realpath(sys.executable))
+    if ".framework" in str(real):
+        return "framework interpreters cannot be branded (stub re-exec)"
+    if real.stat().st_dev != os.stat(root).st_dev:
+        return "interpreter and tmp_path on different devices: hardlink impossible"
+    return None
 
 
 @pytest.fixture()
@@ -156,6 +236,77 @@ class TestStaleness:
         assert not dead.exists(), "a dead pid's temp must be swept"
         assert mine.exists(), "a live pid's temp must be left alone"
 
+    def test_the_orphan_sweep_asks_procstate_and_never_signals(self, branded, monkeypatch):
+        """The sweep asks ``procstate.pid_alive``; it must never touch ``os.kill``.
+
+        THE C1-CLASS TRAP: ``os.kill(pid, 0)`` is a liveness probe on POSIX and
+        ``TerminateProcess`` on Windows, so a sweep written on it would KILL
+        whichever live process matched a stale temp entry's embedded pid — then
+        read the successful kill as "still running" and keep the entry as well.
+        This runs on every startup, so the blast radius is "any live process".
+
+        Pinned as a FORBIDDEN CALL rather than behind a platform branch: making
+        the signal fatal fails this test on macOS too, which is what stops the
+        probe being reintroduced on the platform where nobody would notice.
+        """
+        from local_operator import procstate
+
+        def _forbidden(pid: int, sig: int) -> None:  # pragma: no cover - the guard
+            raise AssertionError("the orphan sweep must not signal: os.kill is a KILL on Windows")
+
+        monkeypatch.setattr(os, "kill", _forbidden)
+        asked: list[int] = []
+
+        def _dead(pid: int) -> bool:
+            asked.append(pid)
+            return False
+
+        monkeypatch.setattr(procstate, "pid_alive", _dead)
+
+        orphan = branded.parent / f".{procname.BRAND}.999999.tmp"
+        orphan.write_bytes(b"orphan")
+        branded.unlink()  # force the replant path, which is where the sweep runs
+
+        assert procname.ensure_branded_interpreter() == branded
+
+        assert 999999 in asked, "the sweep must ask the shared liveness probe"
+        assert not orphan.exists()
+
+    def test_importing_procname_defers_procstate(self) -> None:
+        """MINOR 2 (review round 4): the sweep's import stays inside the sweep.
+
+        ``procname`` is imported on the startup path of every ``lop`` invocation, and
+        the ``procstate`` import inside :func:`close_orphaned_temps` is deliberate:
+        measured, ``import local_operator.procname`` leaves ``procstate`` out of
+        ``sys.modules``. (What it does NOT save is ``subprocess`` — ``cli.py`` imports
+        that itself — so the deferral buys one stdlib-only module body, which is the
+        whole reason the comment above it says so.) Nothing pinned that locality, so
+        restoring the module-level form — the line a merge resolution dropped — read
+        like a no-op cleanup while quietly adding a module body to every invocation.
+
+        THE PROBE RUNS IN A CHILD, like the sibling spawn/import probes above, and for
+        the same reason: this test module and the suite's other imports may already
+        have pulled ``procstate`` in, so an in-process ``sys.modules`` check would
+        assert about collection order rather than about ``procname``.
+        """
+        probe = (
+            "import sys;"
+            "sys.path.insert(0, %r);" % str(Path(__file__).resolve().parents[2])
+            + "import local_operator.procname;"
+            "print('local_operator.procstate' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "False", (
+            "importing procname must not pull procstate in: the common startup path "
+            "does not need it, and the sweep imports it for itself"
+        )
+
     def test_replants_when_libpython_points_at_the_wrong_library(self, branded):
         """Trigger (c), second half: a LIVE symlink is not automatically CORRECT.
 
@@ -194,6 +345,82 @@ class TestStaleness:
 
         assert not bin_orphan.exists(), "bin/ orphan must be swept"
         assert not lib_orphan.exists(), "lib/ orphan must be swept too"
+
+    def test_replanting_onto_an_identical_link_consumes_its_temp(self, branded):
+        """REGRESSION: the ordinary replant must not leak its staging name.
+
+        Trigger (c) — the missing companion libpython — fires while ``branded``
+        ALREADY names the right inode, so the plant's ``os.replace(tmp, link)``
+        moves one hardlink onto another hardlink of the SAME file. POSIX says
+        that call "shall return successfully and perform no other action", so
+        the temp was never consumed: measured on this host as 573 leftovers
+        across 17 generations, one per stale-fleet startup, and the reproduced
+        shape below is a single plant call leaving one behind.
+
+        This is checked through the real entry point, because that is where the
+        leak reaches the operator's ``<venv>/bin`` — and because the sweep that
+        runs immediately before the plant cannot mask it: the temp carries THIS
+        process's pid, which is alive.
+        """
+        real = Path(os.path.realpath(sys.executable))
+        assert os.stat(branded).st_ino == os.stat(real).st_ino, "precondition: same inode"
+        name = procname._libpython_name()
+        assert name
+        lib = branded.parent.parent / "lib" / name
+        lib.unlink()
+        lib.symlink_to("/nonexistent/libpython.dylib")  # trigger (c), and only (c)
+
+        assert procname.ensure_branded_interpreter() == branded
+
+        leftovers = sorted(path.name for path in branded.parent.glob(f".{procname.BRAND}.*.tmp"))
+        assert leftovers == [], f"the replant leaked its temp: {leftovers}"
+        assert branded.exists(), "the link the caller asked for must survive"
+
+    def test_orphan_temp_of_a_zombie_planter_is_swept(self, branded):
+        """A SIGKILLed plant is a ZOMBIE, not a live pid, and its temp is litter.
+
+        ``os.kill(pid, 0)`` answers for an exited-but-unreaped process exactly
+        as it does for a running one — measured here on a killed child that
+        ``ps`` reports as ``Z``. The sweep therefore kept every temp of every
+        crashed plant for as long as the parent failed to reap it, which is
+        precisely the fleet-wide case it exists for: when 25 runtimes die at
+        once, the parent that would reap them is the frontend that just lost
+        them, so signal 0 goes on saying "alive" for all 25.
+
+        A pid that is alive in any other state must still be left alone —
+        ``test_orphan_temps_from_dead_plants_are_swept`` pins that half.
+        """
+        from local_operator import procstate
+
+        # ``posix_spawn`` rather than ``os.fork``/``Popen``: this runs inside an
+        # xdist worker (multi-threaded, so ``fork`` warns about deadlocks), and
+        # the child must die WITHOUT the parent reaping it — which is exactly
+        # what a Popen object cannot promise, since every poll/context-manager
+        # exit reaps it. The pid is kept, never handed to anything that waits.
+        pid = os.posix_spawn(sys.executable, [sys.executable, "-c", "pass"], dict(os.environ))
+        try:
+            # Wait on the EVENT (this pid is now a zombie), never on a clock.
+            for _ in range(500):
+                if procstate.is_zombie(pid):
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail(f"pid {pid} never became a zombie")
+            # Precondition for the bug rather than a restatement of it: the
+            # probe the sweep used to rely on cannot tell a zombie from a
+            # running plant, so this pid reads alive to it.
+            os.kill(pid, 0)
+
+            bin_dir = branded.parent
+            zombie_temp = bin_dir / f".{procname.BRAND}.{pid}.tmp"
+            zombie_temp.write_bytes(b"orphan of a killed plant")
+
+            branded.unlink()  # force the replant path, which is where the sweep runs
+            assert procname.ensure_branded_interpreter() == branded
+
+            assert not zombie_temp.exists(), "a zombie plant's temp must be swept"
+        finally:
+            os.waitpid(pid, 0)
 
     def test_unreadable_libpython_parent_does_not_raise(self, branded, tmp_path):
         """QA round 2, Q3: `_needs_replant` is contractually no-raise.
@@ -244,6 +471,102 @@ class TestStaleness:
         assert procname.ensure_branded_interpreter() == branded
         after = os.stat(branded)
         assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns)
+
+    def test_replants_when_the_link_is_present_but_not_executable(self, tmp_path):
+        """Trigger (d), isolated from (a) and (b) so it cannot pass by accident.
+
+        MEASURED, not imagined: an EDR on the operator's machine replaced the
+        planted link in five worktree venvs with a 49968-byte, mode-0600 file
+        owned by its own agent user (``_sentinel``), so the path named an image
+        ``ds`` could neither read nor exec. The shape it replaced was otherwise
+        correct.
+
+        So the link here genuinely IS the interpreter's inode with
+        ``st_nlink >= 2`` — the file it points at is a COPY of the interpreter,
+        which is the only way to hold a non-executable inode without
+        ``chmod``-ing the shared interpreter (see the module docstring: a mode
+        write on the link changes the mode of every venv on the machine).
+        Only the new exec probe can fire, and the positive control on the next
+        line proves the same shape is otherwise considered healthy.
+        """
+        real = tmp_path / "bin" / "python3"
+        real.parent.mkdir(parents=True)
+        real.write_bytes(Path(os.path.realpath(sys.executable)).read_bytes())
+        link = tmp_path / "bin" / procname.BRAND
+        real.chmod(0o755)
+        os.link(real, link)
+        assert (
+            procname._needs_replant(link, real, None) is False
+        ), "the control: an executable inode-matching link is healthy"
+        real.chmod(0o600)
+        assert procname._needs_replant(link, real, None) is True
+
+    def test_a_neutered_link_is_repaired_rather_than_handed_out(self, branded):
+        """(d's) outcome: the plant replaces it, and the pair gets the new link.
+
+        ``branded`` planted a healthy link; the file is then replaced with the
+        measured EDR shape (a FOREIGN file, not the interpreter's inode, mode
+        0600). Both halves matter: the next spawn must not be handed that file
+        as ``executable=`` (it would die at ``execve``), and the repair must be
+        a real one rather than a withheld name.
+        """
+        branded.unlink()
+        branded.write_bytes(b"x" * 49968)
+        branded.chmod(0o600)
+        assert os.access(branded, os.X_OK) is False
+
+        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+
+        assert executable == str(branded)
+        assert os.access(branded, os.X_OK) is True
+        assert (
+            branded.stat().st_ino == os.stat(os.path.realpath(sys.executable)).st_ino
+        ), "the repair must plant the interpreter, not something else"
+        assert argv0 == "Local Operator [eval] session=deadbeef"
+
+    def test_a_link_with_no_identifiable_dylib_is_never_handed_out(self, branded, monkeypatch):
+        """The no-dylib refusal must cover "link present, companion unverifiable".
+
+        With no dylib name, trigger (c) cannot run at all — so a link that is the
+        interpreter's inode, executable and ``nlink >= 2`` would otherwise be
+        handed out as ``executable=`` with its companion missing or
+        unidentifiable, and dyld aborts at load, which is the one failure no
+        ``os.access`` check can see (review round 1, R-4). The refusal therefore
+        comes BEFORE the staleness early return.
+
+        ``branded`` has just planted a healthy shape, which is what makes this
+        discriminate: with the check below the early return, the healthy link was
+        returned here and this cell would fail.
+        """
+        monkeypatch.setattr(procname, "_libpython_name", lambda: None)
+
+        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+
+        assert executable is None
+        assert argv0 == sys.executable
+
+    def test_an_unrepairable_neutered_link_withholds_the_label_too(self, branded, monkeypatch):
+        """The EDR-RACE case: the plant reports success and the file is still dead.
+
+        A spawn that trusted the plant's return value would hand ``subprocess``
+        an image that is not executable by us. Rung 2 is the contract here —
+        the bare interpreter and NO label (a labelled ``argv[0]`` alongside no
+        image is the row this whole change exists to remove).
+
+        The plant is faked as succeeding while the file stays inert because
+        that is literally what the machine does: the EDR rewrites the link
+        after our ``os.replace``.
+        """
+        branded.unlink()
+        branded.write_bytes(b"x" * 49968)
+        branded.chmod(0o600)
+        monkeypatch.setattr(procname, "_plant_hardlink", lambda link, real: True)
+
+        argv0, executable = procname.spawn_identity(procname.LABEL_EVAL, id="deadbeef")
+
+        assert executable is None
+        assert argv0 == sys.executable
+        assert procname.branded_argv0(procname.LABEL_EVAL, id="deadbeef") not in argv0
 
 
 class TestFallbackLadder:
@@ -333,6 +656,44 @@ class TestFallbackLadder:
             (["python", "-c", "import local_operator.cli"], False),
             (["python"], False),
             (["python", "/x/bin/some-other-tool"], False),
+            # LEADING INTERPRETER OPTIONS ARE NOT THE PROGRAM. The first row is
+            # OUR OWN reload successor — the argv `server/reload.py` execs when
+            # it replaces a serving daemon (live pid 1343: `python3.14`, ppid 1,
+            # `--listener-fd`) — and the second is a spawn of ours that answered
+            # False before this change. The desktop app is NOT in this list and
+            # must not be added: it launches its backend as `-c …` and probes
+            # with the same string, which is the row two lines below that has to
+            # stay False (review round 1, R-6).
+            (["python", "-P", "-m", "local_operator.cli", "serve"], True),
+            (["python", "-P", "-m", "local_operator.cli", "serve", "--port", "1"], True),
+            (["python", "-u", "-m", "local_operator.tools.eval_worker"], True),
+            (["python", "-P", "-u", "-E", "-s", "-I", "-B", "-m", "local_operator"], True),
+            (["python", "-X", "dev", "-m", "local_operator.cli"], True),
+            (["python", "-Xdev", "-m", "local_operator.cli"], True),
+            (["python", "-W", "ignore", "-m", "local_operator.cli"], True),
+            (["python", "-Wignore", "-m", "local_operator.cli"], True),
+            (["python", "--check-hash-based-pycs=always", "-m", "local_operator.cli"], True),
+            (["python", "-P", "/x/bin/lop"], True),
+            # ANY submodule of the package, not just the two spellings the old
+            # test listed: a spawn of our own module is a launch of this
+            # product, which is why the eval worker and the runtime's own
+            # module are in this list.
+            (["python", "-m", "local_operator.tools.eval_worker"], True),
+            (["python", "-m", "local_operator.session.runtime.process"], True),
+            # ... and the two directions that must NOT move. The `-c` refusal is
+            # a contract with the desktop app, not an oversight: its identity
+            # probe is the same `-c` string asking for `sys.executable`, and a
+            # branded answer makes the app refuse its own backend.
+            (["python", "-P", "-c", "from local_operator.cli import main; main()"], False),
+            (["python", "-P", "-u", "-c", "import local_operator.cli"], False),
+            (["python", "-ccode"], False),
+            (["python", "-P", "-m", "pytest", "tests/unit"], False),
+            (["python", "-P", "-m"], False),
+            (["python", "-P"], False),
+            (["python", "-Q", "-m", "local_operator.cli"], False),
+            # Bounded at the dot: a similarly-named distribution is not ours.
+            (["python", "-m", "local_operators.cli"], False),
+            (["python", "-m", "local_operator_x"], False),
         ],
     )
     def test_launch_detection(self, monkeypatch, orig_argv, expected):
@@ -672,6 +1033,223 @@ class TestSpawnIdentity:
         assert executable is None
 
 
+class TestCrossTreeSpawnIdentity:
+    """``spawn_identity_for_interpreter``: the pair for ANOTHER tree's build.
+
+    WHAT WAS BROKEN, in the operator's own words on 2026-09-19: an EDR killed a
+    Local Operator process 1079 times on a colleague's Mac. The threat name was
+    ``python3.14`` and the flagged child's argv read ``Local Operator [daemons]
+    refresh …`` — a LABEL ON AN UNBRANDED IMAGE, which is both the row an EDR
+    keys on and a violation of this module's own rule that the label rides with
+    the image or not at all. Both production sites that run a different tree's
+    interpreter were doing exactly that.
+
+    So the assertions here are about the PAIR, and the headline one is negative:
+    a label must be impossible without an image we can execute.
+    """
+
+    def test_plants_beside_the_target_and_pairs_the_label(self, tmp_path):
+        target = _generation_venv(tmp_path / "gen")
+        link = target.parent / procname.BRAND
+
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(target)
+        )
+
+        assert argv0 == "Local Operator [daemons] refresh"
+        assert executable == str(link)
+        assert link.stat().st_ino == os.stat(os.path.realpath(target)).st_ino
+        assert os.access(link, os.X_OK), "an image a spawn will exec must be executable"
+        # The companion dylib pin is mandatory (the 100%-abort mode) and it must
+        # be planted INTO THE TARGET'S venv, pointing at the TARGET's own dylib
+        # rather than at ours. The fixture leaves `<venv>/lib` empty and puts the
+        # source in a separate base tree precisely so this asserts the PLANT's
+        # work: before that, the fixture pre-created the symlink and mutation
+        # `_plant_libpython -> True` (a no-op plant) passed every cell here
+        # (review round 1, R-2).
+        pin = target.parent.parent / "lib" / f"lib{Path(os.path.realpath(target)).name}.dylib"
+        assert pin.is_symlink(), f"the plant must create {pin}"
+        assert pin.resolve() == (_generation_base(tmp_path / "gen") / "lib" / pin.name).resolve()
+
+    def test_the_pair_runs_the_target_tree(self, tmp_path):
+        """Executed, not merely returned — and the child is the TARGET's build.
+
+        Two properties on one spawn, and the second is why the helper takes an
+        interpreter at all: the name must come from the tree being executed,
+        and the child must still report THAT tree's ``sys.prefix`` (a
+        generation flip converges one session at a time through it).
+        """
+        target = _generation_venv(tmp_path / "gen")
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(target)
+        )
+        probe = (
+            "import ctypes, os, sys;"
+            "l=ctypes.CDLL('/usr/lib/libSystem.dylib');"
+            "b=ctypes.create_string_buffer(64);"
+            "l.proc_name(ctypes.c_int(os.getpid()),b,ctypes.c_uint(64));"
+            "print(b.value.decode());"
+            "print(sys.prefix)"
+        )
+        result = subprocess.run(
+            [argv0, SAFE_PATH_FLAG, "-c", probe],
+            executable=executable,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        name, prefix = result.stdout.strip().splitlines()[:2]
+        assert name == procname.BRAND
+        assert os.path.realpath(prefix) == os.path.realpath(target.parent.parent)
+
+    def test_an_interpreter_with_no_venv_beside_it_is_rung_2(self, tmp_path):
+        """A non-venv target is refused the same way the own-venv path refuses one."""
+        root = tmp_path / "usr" / "bin"
+        root.mkdir(parents=True)
+        target = root / "python3"
+        os.symlink(Path(os.path.realpath(sys.executable)), target)
+
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(target)
+        )
+
+        assert (argv0, executable) == (str(target), None)
+        assert not (root / procname.BRAND).exists()
+
+    def test_a_target_with_no_dylib_is_rung_2(self, tmp_path):
+        """No dylib to pin means the hardlink would abort: refuse, never plant.
+
+        A copy of the interpreter in a tree with an empty ``lib/`` is the
+        cleanest real stand-in for the static-build case ``_libpython_name``
+        already refuses for this venv. The interpreter is never executed, so
+        its ``@rpath`` is irrelevant here.
+        """
+        target = _generation_venv(tmp_path / "gen")
+        weird = tmp_path / "weird"
+        (weird / "bin").mkdir(parents=True)
+        (weird / "lib").mkdir(parents=True)
+        (weird / "pyvenv.cfg").write_text("home = /nowhere\n", encoding="utf-8")
+        copied = weird / "bin" / "python3.12"
+        copied.write_bytes(Path(os.path.realpath(target)).read_bytes())
+
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(copied)
+        )
+
+        assert (argv0, executable) == (str(copied), None)
+
+    def test_a_cross_device_target_is_rung_2(self, tmp_path, monkeypatch):
+        """``EXDEV`` is an expected outcome, not an error to report (see the ladder)."""
+        import errno
+
+        target = _generation_venv(tmp_path / "gen")
+
+        def cross_device(source, destination):
+            raise OSError(errno.EXDEV, "Cross-device link")
+
+        monkeypatch.setattr(procname.os, "link", cross_device)
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(target)
+        )
+
+        assert (argv0, executable) == (str(target), None)
+
+    def test_a_neutered_link_is_replanted_not_handed_out(self, tmp_path):
+        """The measured EDR shape, on the target side this time.
+
+        The first call plants a healthy pair; the link is then replaced with a
+        mode-0600 foreign file (different inode, not executable by us). The
+        second call must repair it — and the pair it returns must name the
+        REPAIRED link, never the dead one.
+        """
+        target = _generation_venv(tmp_path / "gen")
+        link = target.parent / procname.BRAND
+        procname.spawn_identity_for_interpreter(procname.LABEL_DAEMONS_REFRESH, str(target))
+        link.unlink()
+        link.write_bytes(b"x" * 49968)
+        link.chmod(0o600)
+
+        _, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(target)
+        )
+
+        assert executable == str(link)
+        assert os.access(link, os.X_OK) is True
+        assert link.stat().st_ino == os.stat(os.path.realpath(target)).st_ino
+
+    def test_an_unrepairable_target_link_withholds_the_label(self, tmp_path):
+        """A read-only target ``bin/``: no repair is possible, so NO label.
+
+        This is the invariant, not a corner case: the rung-2 pair is the bare
+        target path, which still runs the right build, and no ``ps`` reader is
+        told a name the process does not have.
+        """
+        target = _generation_venv(tmp_path / "gen")
+        link = target.parent / procname.BRAND
+        link.write_bytes(b"x" * 49968)
+        link.chmod(0o600)
+        target.parent.chmod(0o500)
+        try:
+            argv0, executable = procname.spawn_identity_for_interpreter(
+                procname.LABEL_DAEMONS_REFRESH, str(target)
+            )
+        finally:
+            target.parent.chmod(0o700)
+
+        assert (argv0, executable) == (str(target), None)
+        assert procname.BRAND not in argv0
+
+    def test_an_unidentifiable_dylib_withholds_the_label_beside_a_target(self, tmp_path):
+        """R-4 on the cross-tree axis, and the case the old order missed.
+
+        The base tree's dylib is removed BEFORE any plant, so the interpreter
+        stays executable and the PATH SHAPE is unchanged — only the companion
+        becomes unidentifiable. The refusal must still be total, because a link
+        handed out here would abort at load with nothing to see it.
+        """
+        target = _generation_venv(tmp_path / "gen")
+        base = _generation_base(tmp_path / "gen")
+        (base / "lib" / next(iter((base / "lib").iterdir())).name).unlink()
+
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(target)
+        )
+
+        assert (argv0, executable) == (str(target), None)
+        assert not (target.parent / procname.BRAND).exists()
+
+    def test_a_framework_target_is_refused(self, tmp_path):
+        """A framework interpreter discards our name at its own stub re-exec.
+
+        Skipped where this machine has no framework Python: the detection is
+        path-based on the RESOLVED binary, so it cannot be faked by symlinking
+        into a directory named ``Python.framework``.
+        """
+        candidates = [
+            Path("/opt/homebrew/bin/python3.14"),
+            Path("/opt/homebrew/bin/python3.13"),
+            Path("/usr/local/bin/python3"),
+        ]
+        framework = next(
+            (c for c in candidates if c.exists() and ".framework" in str(c.resolve())),
+            None,
+        )
+        if framework is None:
+            pytest.skip("no framework Python on this machine")
+        root = tmp_path / "framework-venv"
+        (root / "bin").mkdir(parents=True)
+        (root / "pyvenv.cfg").write_text("home = /nowhere\n", encoding="utf-8")
+        target = root / "bin" / "python3"
+        os.symlink(framework, target)
+
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_DAEMONS_REFRESH, str(target)
+        )
+
+        assert (argv0, executable) == (str(target), None)
+
+
 class TestLaunchdJob:
     """``Program`` + role label: the shape three daemons could not be told apart in."""
 
@@ -864,6 +1442,143 @@ class TestSpawnDetachedLabel:
         assert proc.spawn_detached([sys.executable, "-c", "pass"]) is True
         assert captured["executable"] is None
         assert captured["argv"] == [sys.executable, "-c", "pass"]
+
+
+class TestCrossTreeSpawnSites:
+    """The two production sites that run ANOTHER tree's interpreter.
+
+    A test of the helper alone would not stop a site going back to the shape
+    that caused the incident — `spawn_identity`'s label kept while `executable`
+    was overwritten with the other tree's bare interpreter. So each site is
+    asserted on the argv/executable it REALLY builds, with the plant live on
+    disk, and the same-tree branch is pinned next to it so the fix cannot turn
+    into "always replant somewhere else".
+    """
+
+    def test_the_daemon_refresh_child_pairs_the_label_with_the_target_image(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The exact row SentinelOne killed: ``[daemons] refresh``.
+
+        Its argv read ``Local Operator [daemons] refresh`` while its image was
+        ``python3.14`` — the label without the image. ``update.current_interpreter``
+        is faked to a throwaway generation venv, which is what the real one
+        returns on a machine with the generation layout.
+        """
+        from local_operator import update
+
+        target = _generation_venv(tmp_path / "gen")
+        monkeypatch.setattr(update, "current_interpreter", lambda: target)
+
+        plan = update._daemon_refresh_invocation()
+
+        assert plan is not None
+        argv, executable = plan
+        assert executable == str(target.parent / procname.BRAND)
+        assert argv == [
+            "Local Operator [daemons] refresh",
+            SAFE_PATH_FLAG,
+            "-m",
+            "local_operator.cli",
+            "update",
+            "--refresh-daemons",
+        ]
+        assert os.access(str(executable), os.X_OK)
+
+    def test_the_runtime_spawn_uses_the_target_trees_image(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``_spawn_runtime`` on the engage-onto-the-next-generation path.
+
+        Both halves are asserted together because they are two independent
+        properties on one spawn: the label in ``argv[0]`` and the branded image
+        beside the interpreter the child will ACTUALLY run — the current
+        generation's, which is what makes a mixed-generation fleet converge.
+        """
+        from local_operator.session.runtime import launch as launch_module
+
+        target = _generation_venv(tmp_path / "gen")
+        monkeypatch.setattr(launch_module, "_spawn_interpreter", lambda: str(target))
+        recorded: dict[str, Any] = {}
+
+        class _Popen:
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                return None
+
+        def fake_popen(argv, **kwargs: Any):
+            recorded["argv"] = list(argv)
+            recorded["executable"] = kwargs.get("executable")
+            return _Popen()
+
+        monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+        process = launch_module._spawn_runtime("sess-xtree", str(tmp_path), defer_materialise=True)
+        capture = getattr(process, "lop_capture_path", None)
+        if capture is not None:
+            capture.unlink(missing_ok=True)
+
+        assert recorded["argv"][0] == "Local Operator [session] id=sess-xtr"
+        assert recorded["argv"][1] == SAFE_PATH_FLAG
+        assert recorded["executable"] == str(target.parent / procname.BRAND), (
+            "the runtime must exec the branded link beside the generation's "
+            "interpreter, not ours"
+        )
+        assert os.access(str(recorded["executable"]), os.X_OK)
+
+    def test_a_same_tree_spawn_still_uses_this_processs_image(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The other branch, pinned so the fix is not "plant somewhere else, always".
+
+        ``_spawn_interpreter`` answers ``sys.executable`` whenever no generation
+        layout is resolvable (a source checkout, a pip/pipx machine, an
+        interrupted flip). Then the pair must come from ``spawn_identity`` —
+        this process's own venv — exactly as it did before.
+        """
+        from local_operator.session.runtime import launch as launch_module
+
+        monkeypatch.setattr(launch_module, "_spawn_interpreter", lambda: sys.executable)
+        calls: list[str] = []
+        real_pair = procname.spawn_identity
+        real_cross = procname.spawn_identity_for_interpreter
+
+        def spy_own(*args: Any, **kwargs: Any):
+            calls.append("own")
+            return real_pair(*args, **kwargs)
+
+        def spy_cross(*args: Any, **kwargs: Any):
+            calls.append("cross")
+            return real_cross(*args, **kwargs)
+
+        monkeypatch.setattr(procname, "spawn_identity", spy_own)
+        monkeypatch.setattr(procname, "spawn_identity_for_interpreter", spy_cross)
+        recorded: dict[str, Any] = {}
+
+        class _Popen:
+            returncode = None
+
+            def poll(self):
+                return None
+
+            def kill(self):
+                return None
+
+        def fake_popen(argv, **kwargs: Any):
+            recorded["executable"] = kwargs.get("executable")
+            return _Popen()
+
+        monkeypatch.setattr(launch_module.subprocess, "Popen", fake_popen)
+        process = launch_module._spawn_runtime("sess-own", str(tmp_path), defer_materialise=True)
+        capture = getattr(process, "lop_capture_path", None)
+        if capture is not None:
+            capture.unlink(missing_ok=True)
+
+        assert calls == ["own"], f"a same-tree spawn must not replant elsewhere: {calls}"
+        assert recorded["executable"] in (None, str(procname.ensure_branded_interpreter()))
 
 
 def test_branded_image_actually_renames_the_process(branded):

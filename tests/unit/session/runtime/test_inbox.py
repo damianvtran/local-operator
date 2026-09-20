@@ -15,20 +15,38 @@ import os
 import threading
 from pathlib import Path
 
+import pytest
+
+from local_operator.harness.types import StreamEndEvent
 from local_operator.session.protocol import RuntimeLocality
 from local_operator.session.runtime.inbox import (
     MAX_INBOX_ROWS,
+    SOURCE_PEER,
+    SOURCE_USER,
     InboxLine,
     append_inbox,
     drain_inbox,
     inbox_path,
     peek_inbox,
+    withdraw_inbox,
 )
 from local_operator.session.transcript import TRANSCRIPT_FILENAME
 
 
-def _line(text: str) -> InboxLine:
-    return InboxLine(text=text, sender={"pid": 1, "conversation_name": "peer"})
+def _line(
+    text: str,
+    *,
+    source: str = "",
+    command_id: str = "",
+    wake: bool = False,
+) -> InboxLine:
+    return InboxLine(
+        text=text,
+        sender={"pid": 1, "conversation_name": "peer"},
+        source=source,
+        command_id=command_id,
+        wake=wake,
+    )
 
 
 def test_append_then_drain_preserves_write_order(tmp_path: Path) -> None:
@@ -155,14 +173,82 @@ def test_the_drain_is_wired_before_the_socket_starts_listening() -> None:
     from "drained fast enough", and a timing test would be measuring luck. If
     someone moves the drain below the server start, the ordering silently
     becomes a race and every functional test still passes.
+
+    PARSED, NOT SUBSTRING-MATCHED. This used to locate the listener with
+    ``source.index("start_in_process()")``, and when the daemon's serving plane
+    moved to ``start()`` the only occurrence of that string left in ``amain`` was
+    inside the COMMENT explaining the move — so the assertion kept passing
+    against prose, would have failed only if somebody reworded the paragraph,
+    and could reject correct code placed between the two. A paragraph is not a
+    statement; this resolves the calls.
     """
+    import ast
     import inspect
+    import textwrap
 
     from local_operator.session.runtime import process
 
-    source = inspect.getsource(process.amain)
-    drain_at = source.index("_drain_inbox_into(handle)")
-    listen_at = source.index("start_in_process()")
+    tree = ast.parse(textwrap.dedent(inspect.getsource(process.amain)))
+
+    def own_body(node: ast.AST) -> list[ast.AST]:
+        """Every node in ``amain``'s OWN body — nested scopes excluded.
+
+        A nested ``def`` is not part of the statement order this assertion is
+        about, so a call inside one must not be able to satisfy it (review round
+        2, NIT-2).
+        """
+        out: list[ast.AST] = []
+        stack = list(ast.iter_child_nodes(node))
+        while stack:
+            child = stack.pop()
+            out.append(child)
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            stack.extend(ast.iter_child_nodes(child))
+        return out
+
+    def runtime_name() -> str:
+        """The local the runtime is bound to — ``runtime`` today, whatever after.
+
+        Resolved from the construction rather than hard-coded, so renaming the
+        local cannot fail a valid ordering (review round 2, NIT-2).
+        """
+        for node in own_body(tree.body[0]):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Call)
+                and isinstance(node.value.func, ast.Name)
+                and node.value.func.id == "RuntimeServer"
+            ):
+                return node.targets[0].id
+        raise AssertionError("amain no longer constructs a RuntimeServer")
+
+    def call_line(
+        *, function: str | None = None, method: str | None = None, receiver: str | None = None
+    ) -> int:
+        """The earliest line calling ``function(...)`` or ``<receiver>.method(...)``."""
+        found: list[int] = []
+        for node in own_body(tree.body[0]):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func
+            if function is not None and isinstance(called, ast.Name) and called.id == function:
+                found.append(node.lineno)
+            if (
+                method is not None
+                and isinstance(called, ast.Attribute)
+                and called.attr == method
+                and isinstance(called.value, ast.Name)
+                and called.value.id == receiver
+            ):
+                found.append(node.lineno)
+        assert found, f"amain no longer calls {function or method}"
+        return min(found)
+
+    drain_at = call_line(function="_drain_inbox_into")
+    listen_at = call_line(method="start", receiver=runtime_name())
     assert drain_at < listen_at, (
         "the inbox drain must run before the control socket listens; "
         "moving it after turns the delivery guarantee into a race"
@@ -361,3 +447,159 @@ def test_the_drain_reads_a_property_the_session_exposes(tmp_path: Path) -> None:
     assert delivered == 1
     assert handle.received == ["a quiet note"]
     assert not (transcript.directory / "inbox.jsonl").read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_a_twice_spooled_owner_row_steers_once_inside_the_first_turn(tmp_path: Path) -> None:
+    """The mid-turn arm's own repeat, on a REAL session (agent review round 1, R3).
+
+    ``process._drain_inbox_into`` answers a repeated owner row from the durable
+    index, but the mid-turn twin steers instead, and a queued steer reaches the
+    index only when the correction is drained at a later tool boundary — so two
+    rows carrying one ``command_id`` in ONE batch would steer the user's text
+    twice. The batch-local seen-set closes exactly that window; this cell drives
+    the real ``Session._drain_spooled_peer_inbox`` over a real spool and asserts
+    one queued correction rather than two.
+    """
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    session_dir = tmp_path / "sess"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / TRANSCRIPT_FILENAME).write_text(
+        json.dumps(
+            {
+                "id": "h1",
+                "ts": 1,
+                "type": "message",
+                "payload": {"kind": "message", "role": "user", "content": []},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    for _ in range(2):
+        assert append_inbox(
+            session_dir,
+            _line("deploy the fix", source=SOURCE_USER, command_id="p" * 8, wake=True),
+        )
+
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    await session._drain_spooled_peer_inbox()
+
+    queued = session.queued_steering()
+    assert len(queued) == 1, [getattr(item, "id", "") for item in queued]
+
+
+def test_a_recall_marker_withholds_its_row_from_both_readers(tmp_path: Path) -> None:
+    """The recall is an append-only marker, and both readers honour it.
+
+    Rewriting the spool instead — the obvious shape — cannot be made safe here:
+    ``append_inbox`` proceeds unlocked when it cannot take the lock, so a
+    concurrent append is either cut by an in-place truncate or orphaned by a
+    staged replace (measured: 14 of 42 acked rows lost with the staged shape, 1
+    of 241 and 8 of 488 with the truncate, in the PR thread). So the withdrawal
+    appends ``SOURCE_RECALL`` and nothing is rewritten; the marker and the row it
+    names both leave with the batch.
+    """
+    assert append_inbox(
+        tmp_path, _line("deploy the fix", source=SOURCE_USER, command_id="p" * 8, wake=True)
+    )
+    assert append_inbox(tmp_path, _line("fyi from a peer"))
+
+    assert withdraw_inbox(tmp_path, "p" * 8) is True
+
+    # READERS: the recalled row is not deliverable, and neither is the marker.
+    assert [line.text for line in peek_inbox(tmp_path)] == ["fyi from a peer"]
+    assert [line.text for line in drain_inbox(tmp_path)] == ["fyi from a peer"]
+    # CONSUMED TOGETHER: the batch took the marker with it, so nothing is left
+    # asserting a recall whose message can no longer arrive.
+    assert peek_inbox(tmp_path) == []
+
+
+def test_a_recall_of_a_row_that_is_gone_is_refused(tmp_path: Path) -> None:
+    """A drained row cannot be recalled, and the caller is told so."""
+    assert append_inbox(tmp_path, _line("deploy the fix", source=SOURCE_USER, command_id="p" * 8))
+    assert drain_inbox(tmp_path) != []
+
+    assert withdraw_inbox(tmp_path, "p" * 8) is False
+    assert withdraw_inbox(tmp_path, "") is False
+
+
+def test_a_recall_never_touches_a_peer_row_with_the_same_id(tmp_path: Path) -> None:
+    """Only the OWNER's rows carry a recallable identity."""
+    assert append_inbox(
+        tmp_path,
+        InboxLine(
+            text="peer words",
+            sender={"pid": 2},
+            source=SOURCE_PEER,
+            command_id="p" * 8,
+        ),
+    )
+
+    assert withdraw_inbox(tmp_path, "p" * 8) is False
+    assert [line.text for line in drain_inbox(tmp_path)] == ["peer words"]
+
+
+def test_a_marker_appended_while_the_drain_reads_still_withholds_its_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QA Q-1 (round 3): the recall must be honoured by the batch being drained.
+
+    The receipt says the message was taken back, so the drain that is *reading*
+    the batch while the marker lands must not deliver it. ``_parse`` is hooked to
+    append the marker on its first call, which is exactly that interleave made
+    deterministic: without the drain's late re-read the row is in the list it had
+    already built, and the user is told a recall worked while their message runs.
+    Measured by QA at 4/120 trials naturally, 0/120 after this re-read.
+    """
+    import local_operator.session.runtime.inbox as inbox_mod
+
+    assert append_inbox(tmp_path, _line("deploy the fix", source=SOURCE_USER, command_id="q" * 8))
+
+    real_parse = inbox_mod._parse
+    calls = {"n": 0}
+
+    def parse_then_recall(raw: bytes):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # The concurrent recall: its marker is written after this batch's
+            # first read and before the decision.
+            assert withdraw_inbox(tmp_path, "q" * 8) is True
+        return real_parse(raw)
+
+    monkeypatch.setattr(inbox_mod, "_parse", parse_then_recall)
+    delivered = drain_inbox(tmp_path)
+
+    assert delivered == [], [line.text for line in delivered]
+    assert peek_inbox(tmp_path) == []
+
+
+def test_a_recall_that_loses_the_race_answers_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The verify is what makes "taken back" true — and what refuses to say it.
+
+    When the drain's batch has the row by the time the marker lands, the append
+    is too late and the answer must be ``False`` — the caller renders "the next
+    runtime already has that message", which is then the truth. ``_read_all`` is
+    hooked so the VERIFY sees the batch already consumed, which is the interleave
+    the lock cannot always exclude (a third holder).
+    """
+    import local_operator.session.runtime.inbox as inbox_mod
+
+    assert append_inbox(tmp_path, _line("deploy the fix", source=SOURCE_USER, command_id="w" * 8))
+
+    real_read_all = inbox_mod._read_all
+    state = {"calls": 0}
+
+    def read_all(fd: int) -> bytes:
+        state["calls"] += 1
+        if state["calls"] == 2:
+            # Between the peek and the verify, a drain consumed the batch.
+            os.ftruncate(fd, 0)
+        return real_read_all(fd)
+
+    monkeypatch.setattr(inbox_mod, "_read_all", read_all)
+
+    assert withdraw_inbox(tmp_path, "w" * 8) is False

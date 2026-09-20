@@ -52,6 +52,7 @@ import functools
 import json
 import logging
 import math
+import os
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -136,11 +137,15 @@ class Scope(enum.Enum):
     #: Takes effect immediately in every running session on this machine —
     #: on the same call stack in the process that wrote it, and within
     #: ``ConfigWatcher.POLL_INTERVAL_S`` for sessions in other processes (see
-    #: :mod:`local_operator.config_watch`). Per-key caveats live on the
-    #: SECTION description (``model``: a session that chose with ``/model``
-    #: keeps its choice; ``web_tools``: the inventory catches up at the next
-    #: turn while execution refuses at once) — the scope says WHEN, the
-    #: description says what "applied" means for that key.
+    #: :mod:`local_operator.config_watch`) — SUBJECT to the per-key caveats on
+    #: the SECTION description, which is where "applied" is spelled out for a
+    #: key whose live half is conditional: ``model`` (a session that chose with
+    #: ``/model`` keeps its choice), ``web_tools`` (the inventory catches up at
+    #: the next turn while execution refuses at once), and ``approvals`` (a
+    #: LOOSENING reaches only the session whose own process wrote it, while a
+    #: tightening is unconditional — see the section description and
+    #: :func:`local_operator.harness.approval.loosening_is_authorised`). The
+    #: scope says WHEN, the description says what "applied" means for that key.
     LIVE = "live"
     #: Read when a session is built — a ``/new`` or ``/reload`` picks it up.
     #: Only ``local_providers`` carries it now: ``approvals``, ``model`` and
@@ -372,23 +377,42 @@ SECTIONS: tuple[Section, ...] = (
         "Keys for starting and resuming conversations. Press enter on a row, "
         "then press the key you want.",
     ),
-    # LIVE — a reversal of the original design, which kept the approval mode
-    # build-time on the theory that a gate flipping under a running turn is a
-    # security-relevant surprise. The operator's actual request ("if I change
-    # a setting I want it to go into effect for all my agents") is the
-    # opposite: a disk write IS the machine-wide intent, and it overrides any
-    # per-session ``/approvals`` toggle. Two rules keep it safe: the new mode
-    # applies at the next approval DECISION (``ServingSessionHandle`` reads its
-    # flag per gate call), so a prompt already parked on screen is left for
-    # the human — never auto-answered, never auto-denied; and every viewer
-    # prints the amber "tool approvals now auto" notice. ``--yolo`` is an
-    # explicit pin that outranks the key. Its own section because ``session``
-    # (autosave + cleanup) is launch-time and scope is uniform per section.
+    # LIVE — the SCOPE is right (a config write reaches every running session
+    # within a poll) and the description below carries the key's one caveat, so
+    # it is not a lie on a section header. Two rules keep the live half safe:
+    # the new mode applies at the next approval DECISION (``ServingSessionHandle``
+    # reads its flag per gate call), so a prompt already parked on screen is left
+    # for the human — never auto-answered, never auto-denied; and a LOOSENING is
+    # only honoured when the process holding the gate made the write itself
+    # through this facade (issue #1282, ``harness.approval
+    # .loosening_is_authorised``) — a model-run shell command rewriting
+    # ``config.yml``, an editor, another pane, the settings API elsewhere, and
+    # ``lop config edit`` may all TIGHTEN a running session and none may loosen
+    # one. ``--yolo`` is an explicit pin that outranks the key. Its own section
+    # because ``session`` (autosave + cleanup) is launch-time and scope is
+    # uniform per section.
+    #
+    # THE DESCRIPTION BELOW IS THE ONLY APPROVALS CAVEAT THIS REGISTRY CARRIES,
+    # and it has exactly ONE consumer: the desktop settings header
+    # (``server/routes/settings.py`` -> the section header component). The TUI
+    # ``/settings`` page paints the section TITLE and its scope tag, then the
+    # ROW and the row HELP (``Tool approval mode`` / ``tool_approval_mode``'s
+    # own ``help``) — never this sentence — so the row help has to stand on its
+    # own and say the same thing in its own cell budget (58 cells of the 74-cell
+    # detail line, which must still fit its ``· default: ask`` clause; the
+    # measurement is at that row. Design round 1, D1; agent review round 1,
+    # m1). Keep the two in step: both must be TRUE for the embedded
+    # pane (whose own page write IS the gate-holding process's write, and so
+    # does loosen) and for the attached one (where only ``/approvals auto`` in
+    # the session loosens).
     Section(
         "approvals",
         "Approvals",
         Scope.LIVE,
-        "Whether write and command tools prompt, in every running session.",
+        "Whether write and command tools prompt, in every running session. A config "
+        "write tightens every running session at once; loosening one needs a write "
+        "from that session's own process (/approvals auto in it, or a /settings page "
+        "in that process).",
     ),
     # NEW_LAUNCH, honestly: ``auto_save_conversation`` is read ONCE by the CLI
     # at process start (``cli.py`` sets ``args.train``) to pick the transcript
@@ -437,8 +461,9 @@ SECTIONS: tuple[Section, ...] = (
         # bought: the help paints on the SELECTED row's detail line, clipped
         # from 78 columns down, so at rest the page said "Resource
         # recommendations" twice and never the word a tip sent the user to look
-        # for (design round 2, D11). The runtime's own message is separate and
-        # unchanged: it says "Suggestion added…".
+        # for (design round 2, D11). The runtime used to have its own message as
+        # well ("Suggestion added…"); that line is deleted — the layer is silent
+        # in the chat — so the title is now the only name on screen.
         "Smart hints",
         Scope.NEW_SESSIONS,
         "Advisory skills, guides and MCP servers a decision model may suggest "
@@ -611,6 +636,16 @@ REJECTION_VALUE_SEP = " — "
 ADVICE_NOT_FOUND = "does not exist; clicks open a terminal. Clear this to discover the app."
 ADVICE_NOT_EXECUTABLE = "not executable; clicks open a terminal. Clear this to discover the app."
 ADVICE_NOT_ON_PATH = "not on PATH; clicks open a terminal. Clear this to discover the app."
+
+#: Whether this process is on Windows, read ONCE as a module constant.
+#:
+#: Both places below ask a Windows question — which shell the bash row promises
+#: and what "executable" means for a click launcher — and neither can be asked
+#: with an inline ``os.name`` read a test can flip: patching ``os.name``
+#: process-wide makes ``pathlib`` build a ``WindowsPath`` and refuse on the host
+#: running the test (see :mod:`local_operator.procstate`, which holds its
+#: platform the same way). One name, read once, patched in tests.
+_IS_WINDOWS = os.name == "nt"
 _VALUE_REJECTION_ADVICE: tuple[str, ...] = (
     ADVICE_NOT_FOUND,
     ADVICE_NOT_EXECUTABLE,
@@ -784,11 +819,48 @@ def _validate_desktop_launch_command(value: Any) -> None:
     if os.sep in executable or (os.altsep and os.altsep in executable):
         if not os.path.exists(executable):
             raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_FOUND}")
-        if not os.access(executable, os.X_OK):
+        # TWO QUESTIONS, ONE PER PLATFORM, and the POSIX one is unchanged: on
+        # Windows "is it executable" has no mode-bit answer at all
+        # (:func:`_windows_command_is_runnable`), and the vacuous `X_OK` that
+        # used to stand in for it let any existing file through.
+        runnable = (
+            _windows_command_is_runnable(executable)
+            if _IS_WINDOWS
+            else os.access(executable, os.X_OK)
+        )
+        if not runnable:
             raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_EXECUTABLE}")
         return
     if shutil.which(executable) is None and not _resolvable_for_the_user(executable):
         raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_ON_PATH}")
+
+
+def _windows_command_is_runnable(executable: str) -> bool:
+    """Whether WINDOWS would actually run ``executable``.
+
+    ``os.access(path, os.X_OK)`` cannot answer this (audit D23). It is a POSIX
+    question — "does this file carry the execute bit?" — and on Windows there is
+    no such bit: the call is satisfied for any existing file, so the check this
+    replaces accepted a ``.txt`` or a ``.ps1`` as a click launcher and the
+    failure surfaced later as an unexplained refusal to launch.
+
+    The platform's own answer is the one ``cmd`` uses: a file is runnable when
+    its extension is in ``PATHEXT`` (``.COM;.EXE;.BAT;.CMD;…``). A path with NO
+    extension is also runnable, because ``CreateProcess`` appends ``.exe`` to a
+    name that carries none — so ``C:\\tools\\notepad`` runs ``notepad.exe``.
+    PATHEXT is read from the environment rather than hardcoded: it is the user's
+    own list, and a host that has added an extension to it means it.
+    """
+    suffix = os.path.splitext(executable)[1]
+    if not suffix:
+        return os.path.isfile(executable + ".exe")
+    # Split on ";" and not on ``os.pathsep``: the list's separator is a WINDOWS
+    # fact (there it happens to equal ``os.pathsep``, which is why the two look
+    # interchangeable) and reading it as the host's would make this function
+    # answer differently on a machine that is not Windows — including in a test,
+    # which is where the difference would otherwise hide.
+    extensions = (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";")
+    return suffix.upper() in {ext.strip().upper() for ext in extensions if ext.strip()}
 
 
 def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:
@@ -887,6 +959,49 @@ def _effort_choices() -> tuple[Choice, ...]:
         Choice("", "auto", "the model's own default"),
         *(Choice(level, level, _EFFORT_LEVEL_HELP.get(level, "")) for level in EFFORT_ORDER),
     )
+
+
+def _bash_shell_help(windows: bool) -> str:
+    """The ``bash.shell`` row's help for a platform, and why it is platform-shaped.
+
+    The sentence NAMES A PATH — "empty uses bash on PATH, else /bin/sh" — so it
+    has to name the one this OS falls back to (audit B26). The resolver is
+    ``tools.builtin.resolve_bash_shell``: the configured value, else ``bash`` on
+    PATH, else that module's last resort. On Windows the last resort is NOT
+    ``/bin/sh`` — there is no such file there — it is the ``bash.exe`` of a Git
+    for Windows install, and when even that is absent the tool REFUSES the call
+    with an install hint (``WINDOWS_NO_BASH_MESSAGE``) rather than executing
+    every command in a dialect it does not advertise. Promising ``/bin/sh`` on
+    that row would describe an interpreter that cannot exist on the machine the
+    operator is reading it on.
+
+    A FUNCTION RATHER THAN ONE INLINE CONDITIONAL, so both spellings are
+    reachable by a test on either host: the row itself is built at import, and
+    the only other way to exercise the Windows string from macOS would be to
+    patch ``os.name`` process-wide. The text is spelled here rather than imported
+    from ``tools.builtin`` for the reason the row's ``path`` is pinned by test
+    instead of imported: this module must stay cheap for the CLI, and
+    ``tools.builtin`` is not (see the module docstring on Textual).
+
+    THE WINDOWS SPELLING IS 72 CELLS, and that is a constraint rather than a
+    coincidence (design round 1, D1). This field does not wrap, its shed ladder
+    has no rung below "help alone", and the floor cuts the sentence mid-clause
+    with a visible ``…`` — so the 163-cell spelling this replaces was clipped at
+    `else the bash.exe` at 80 columns AND at `with neit` at 120, i.e. unreadable
+    on the platform it was written for at every width the page supports. The
+    clause it drops is not information lost: "with neither, the tool refuses and
+    says how to install one" is the first line of that module's own refusal
+    (``tools.builtin.WINDOWS_NO_BASH_MESSAGE``), which the tool card renders with
+    room around it. `Git for Windows` also had to go — the cells are the budget
+    here, and the refusal's install hint is where a user reads the product name.
+    """
+    if windows:
+        return "Interpreter for the bash tool. Empty: bash on PATH, else Git's bash.exe."
+    return "Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh."
+
+
+#: This host's spelling, baked into the row below at import.
+_BASH_SHELL_HELP = _bash_shell_help(_IS_WINDOWS)
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -1453,6 +1568,20 @@ SETTINGS: tuple[Setting, ...] = (
         choices=_bool_choices("keep narration", "hide narration once tools run"),
     ),
     Setting(
+        key="display.reasoning",
+        path=("display.reasoning",),
+        section="appearance",
+        label="Live model reasoning",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Show the model's private thinking while it thinks. It collapses to "
+            "one row when the answer starts, and never joins the transcript, "
+            "so it is absent after /resume either way."
+        ),
+        choices=_bool_choices("show live reasoning", "hide reasoning"),
+    ),
+    Setting(
         key="display.rail",
         path=("display.rail",),
         section="appearance",
@@ -1696,8 +1825,26 @@ SETTINGS: tuple[Setting, ...] = (
         label="Tool approval mode",
         kind=Kind.ENUM,
         default="ask",
-        # 74 cells — see the note on `hosting`.
-        help="How every running session treats write and exec tools, from its next call.",
+        # 58 cells, and the number is the LADDER's, not a taste call. The detail
+        # line composes ``<help> · default: <default>`` when the row is off its
+        # default and sheds whole rungs to fit — so the budget that decides
+        # whether this sentence is on the frame at all is 74 cells MINUS the
+        # 15-cell ``· default: ask`` suffix, i.e. 59. Measured on the head with
+        # the real page: the 72-cell sentence I first wrote (design round 1,
+        # D1's recommendation, which was measured against the width with no
+        # clause) painted NOTHING off-default at 80x24 — the ladder fell through
+        # to ``default: ask   tool_approval_mode``, which is exactly the state the
+        # operator is in after the write this change is about. Verified again
+        # after this edit: 80x24 off-default shows the help and the clause, and
+        # only 60 cols ellipsizes (today's string already did).
+        #
+        # The sentence is the SECTION description's rule in the TUI's own words —
+        # one clause, no head — because that description is painted by the desktop
+        # header alone and this is the only approvals copy the TUI page shows
+        # (design round 1, D1; agent review round 1, m1). Both must stay true for
+        # the embedded pane (whose own page write IS the gate-holding process's
+        # write) and for the attached one.
+        help="Loosening needs a write in this session — /approvals auto.",
         choices=(
             Choice("ask", "ask", "prompt before write/exec tools"),
             Choice("auto", "auto", "run them without asking"),
@@ -2131,21 +2278,10 @@ SETTINGS: tuple[Setting, ...] = (
         minimum=0,
         gated_by="classification.auto",
     ),
-    Setting(
-        key="classification.notice",
-        path=("classification", "notice"),
-        section="classification",
-        label="↳ notice",
-        kind=Kind.BOOL,
-        default=True,
-        # ON by default, unlike the master switch: the notice is the only place
-        # the spend and the vendor are visible, and a user who turned the layer on
-        # asked for that. It appears once per message and only when the model
-        # actually recommended something.
-        help="Needs recommendations on. Names vendor, resources, cost.",
-        choices=_bool_choices("show the one-line notice", "stay silent"),
-        gated_by="classification.auto",
-    ),
+    # ``classification.notice`` used to sit here. The layer no longer renders a line
+    # into the transcript at all (the operator asked for it gone: it is an internal
+    # resource-selection step, and it was landing under the reply), so the switch has
+    # nothing left to gate — see the retired row below.
     # -- fork ---------------------------------------------------------------
     #
     # Both paths are genuinely NESTED two-element tuples, not flat dotted keys.
@@ -2333,7 +2469,12 @@ SETTINGS: tuple[Setting, ...] = (
         label="Providers",
         kind=Kind.LIST,
         default=["duckduckgo", "tavily"],
-        help="Comma-separated, in priority order.",
+        # A PRIORITY PREFIX, not an allowlist: naming a provider here means "try
+        # this first", and every other usable provider still follows in its
+        # automatic band. The help says so, because a user who reads the list as
+        # "exactly these" would be surprised by the chain -- and that surprise is
+        # the documented cost of not writing a freezing migration.
+        help="Comma-separated, in priority order; tried before the automatic free providers.",
         members=(
             "duckduckgo",
             "tavily",
@@ -2341,6 +2482,32 @@ SETTINGS: tuple[Setting, ...] = (
             "perplexity",
             "brave",
             "exa",
+            "parallel",
+            "serpapi",
+            "searxng",
+        ),
+    ),
+    Setting(
+        key="web_search.excluded_providers",
+        path=("web_search", "excluded_providers"),
+        section="web_search",
+        label="Excluded providers",
+        kind=Kind.LIST,
+        default=[],
+        # `empty_unsets` is required HERE and is exactly what is wrong for
+        # web_search.providers: [] is this key's DEFAULT (nothing excluded), so an
+        # empty field clears the key rather than failing validation the way an
+        # empty priority list does.
+        empty_unsets=True,
+        help="Never used, even in the automatic chain. Comma-separated; empty = none excluded.",
+        members=(
+            "duckduckgo",
+            "tavily",
+            "deepseek",
+            "perplexity",
+            "brave",
+            "exa",
+            "parallel",
             "serpapi",
             "searxng",
         ),
@@ -2512,7 +2679,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Bash interpreter",
         kind=Kind.TEXT,
         default="",
-        help="Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
+        help=_BASH_SHELL_HELP,
         empty_unsets=True,
     ),
     # -- shell_environment ----------------------------------------------
@@ -2647,6 +2814,28 @@ SETTINGS: tuple[Setting, ...] = (
         kind=Kind.READONLY,
         default=50,
         help="Deprecated. Superseded by the compaction engine.",
+    ),
+    Setting(
+        key="classification.notice",
+        path=("classification", "notice"),
+        section="retired",
+        label="Smart hints notice",
+        kind=Kind.READONLY,
+        default=True,
+        # RETIRED RATHER THAN DELETED, by this section's own rule above: a user who
+        # set it deserves to see that it is inert rather than to find the row gone
+        # and guess whether the layer stopped using it or stopped existing. The
+        # surface it gated was removed outright instead of being left behind a false
+        # switch — the per-call cost line the guide points at is at INFO in the
+        # session log, so the diagnostic is not lost, and nothing draws into the
+        # transcript any more.
+        #
+        # The copy names the feature the way EVERY other name on that screen does
+        # ("Smart hints" — the section title, the live row's label, the tips, and the
+        # guide, which says in as many words that all three use that name). "the layer"
+        # is this codebase's word, not the user's; design round 1 (D1) measured that a
+        # user who once saw a suggestion line has no anchor for it.
+        help="Deprecated. Smart hints is silent in the chat; the call is in the log.",
     ),
     Setting(
         key="desktop.launch_command",

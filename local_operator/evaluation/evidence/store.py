@@ -9,7 +9,6 @@ side-effect authority cannot be reconstructed from bytes after a crash.
 from __future__ import annotations
 
 import errno
-import fcntl
 import hashlib
 import os
 import secrets
@@ -57,6 +56,7 @@ from local_operator.evaluation.evidence.models import (
 )
 from local_operator.evaluation.evidence.verify import verify_bundle
 from local_operator.evaluation.receipts import RedactionSet
+from local_operator.procstate import O_BINARY
 
 _LOCK = ".lock"
 _MANIFEST = "manifest.json"
@@ -107,17 +107,49 @@ def _after_fork_child() -> None:
         writer._invalidate_inherited_child()
 
 
-os.register_at_fork(
-    before=_before_fork,
-    after_in_parent=_after_fork_parent,
-    after_in_child=_after_fork_child,
-)
-_WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+#: The at-fork registry, installed only where fork exists.
+#:
+#: ``os.register_at_fork`` is POSIX-only, and a bare call to it here made this
+#: MODULE unimportable on Windows (``AttributeError: module 'os' has no attribute
+#: 'register_at_fork'``) — which is strictly worse than an unguarded call inside a
+#: function, because it fires before :meth:`EvidenceWriter._supported` can say
+#: anything, and it propagates through ``evaluation.runner.episode`` to make the
+#: whole evaluation runner unimportable. Measured on the Windows Server 2025
+#: runner (this PR's ``xplat-probe-windows`` job), which is what the capability
+#: test records.
+#:
+#: The capability test, not ``os.name``: what matters is whether THIS interpreter
+#: can fork, and on Windows there is no fork for the snapshot/reopen dance below
+#: to protect, so there is nothing to register rather than something being lost.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_parent,
+        after_in_child=_after_fork_child,
+    )
+
+# Every flag below is getattr-guarded for the same reason as the at-fork call
+# above: ``O_CLOEXEC``/``O_NOFOLLOW``/``O_NONBLOCK`` are POSIX-only, and a bare
+# attribute reference is evaluated at IMPORT time whether or not the platform
+# would ever reach the call that uses it.
+# `| O_BINARY`: this fd carries length- or newline-framed BYTES the reader
+# counts, and on Windows `os.open` is the CRT's TEXT mode unless the flag
+# is given — a `0x0A` in the payload lands as `0x0D 0x0A` and every later
+# record is misparsed. See `procstate.O_BINARY` for the measured case.
+_WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | O_BINARY
+# `| O_BINARY` is the READ half of the write-side fix, and it was
+# found by review rather than by the reading that produced the write
+# half: text mode rewrites on the way IN too, so an artifact whose
+# bytes contain `0x0D 0x0A` was hashed as something other than what
+# is on disk. `verify.py` compares that digest to the file NAME, so
+# on Windows such an artifact failed its own verification. Same flag,
+# same reason, opposite direction.
 _READ_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
+    | O_BINARY
 )
 _DIR_FLAGS = _READ_FLAGS | getattr(os, "O_DIRECTORY", 0)
 
@@ -563,6 +595,23 @@ class EvidenceWriter:
 
     @staticmethod
     def _supported() -> None:
+        """Refuse by name before any POSIX syscall is attempted.
+
+        ``fcntl`` is imported HERE rather than at module scope, and that is the
+        whole fix for the audit's D5: at module scope the POSIX-only import
+        made this module — and, through
+        ``local_operator.evaluation.runner.episode``, the entire evaluation
+        runner — unimportable on Windows with a bare ``ModuleNotFoundError``,
+        raised before this function could say anything. Moved here, the
+        refusal below is what a caller on such a platform actually sees, and it
+        already names the reason. Nothing else in the module touches
+        ``fcntl``: the only other user is :meth:`_lock`, which has both of its
+        callers behind this check.
+        """
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - win32, where the guard below refuses
+            fcntl = None  # type: ignore[assignment]
         if os.name != "posix" or sys.platform.startswith("win") or not hasattr(fcntl, "flock"):
             raise EvidenceUnsupported(
                 "evidence bundles require POSIX flock and directory descriptors"
@@ -578,6 +627,10 @@ class EvidenceWriter:
 
     @staticmethod
     def _lock(root_fd: int) -> int:
+        # Both callers run `_supported()` first, so reaching this line means the
+        # platform has flock and the import cannot fail here.
+        import fcntl
+
         fd = os.open(_LOCK, _WRITE_FLAGS | os.O_CREAT, 0o600, dir_fd=root_fd)
         try:
             _safe_file(fd)

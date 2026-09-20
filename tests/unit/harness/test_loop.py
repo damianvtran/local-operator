@@ -47,8 +47,10 @@ from local_operator.harness.types import (
     LoopConfig,
     Message,
     MessageStartEvent,
+    MessageUpdateEvent,
     ModelSpec,
     NoticeEvent,
+    ReasoningDeltaEvent,
     StreamEndEvent,
     StreamEvent,
     StreamReasoningDelta,
@@ -235,25 +237,38 @@ async def test_full_turn_text_tool_text():
 
 
 @pytest.mark.asyncio
-async def test_a_reasoning_delta_changes_nothing_a_consumer_can_see() -> None:
-    """The reasoning channel reaches no surface, and that claim is load-bearing.
+async def test_a_reasoning_delta_reaches_the_front_end_and_no_message() -> None:
+    """Reasoning is PUBLISHED as an event and stays out of every message.
+
+    Both halves are load-bearing, and they fail in opposite directions:
+
+    * a harness that drops ``StreamReasoningDelta`` leaves the model's whole
+      reasoning phase invisible (the operator's 3-5 s of nothing, measured at
+      455 ms of hidden wait on a 102-token prompt and 1,750 ms on a 142k-token
+      one), so the event must be yielded, as it arrives, attributed to the
+      message being streamed;
+    * a harness that treats it as content would append the model's private
+      thinking to the answer -- the loop is the one consumer that could do that
+      silently. What must never carry the fragment is any ``message`` field:
+      the transcript, the summariser and the next request are all built from
+      those, and deepseek refuses a request whose ``reasoning_content`` echo
+      does not match what it sent (``providers.clients._replay_chat_message``).
 
     ``stream_with_failover`` carves ``StreamReasoningDelta`` out of its "the
-    caller has seen output" gate on the strength of this property, and the
-    harness claims a consumer that ignores the event renders the old turn
-    unchanged. The loop is the one consumer that could regress silently, so the
-    same turn is run twice -- with and without a leading reasoning fragment --
-    and the two runs are compared: identical event types, identical assembled
-    text, and no emitted event (serialized in full) carrying the fragment.
+    caller has seen output" gate on the strength of the second property (the
+    first half is why it is now rendered, so a retry can re-emit thinking --
+    cosmetic, and the retry is worth more).
     """
+
+    fragment = "weighing the options"
 
     def turn(with_reasoning: bool) -> list[StreamEvent]:
         leading: list[StreamEvent] = (
-            [StreamReasoningDelta(delta="weighing the options")] if with_reasoning else []
+            [StreamReasoningDelta(delta=fragment)] if with_reasoning else []
         )
         return [*leading, StreamTextDelta(delta="Done"), StreamEndEvent(stop_reason="stop")]
 
-    async def run(with_reasoning: bool) -> list[Any]:
+    async def run(with_reasoning: bool, events: list[Any] | None = None) -> list[Any]:
         stream = ScriptedStream([turn(with_reasoning)])
         context = LoopContext(system_blocks=["sys"], tools=[])
         return [
@@ -266,12 +281,33 @@ async def test_a_reasoning_delta_changes_nothing_a_consumer_can_see() -> None:
     with_reasoning = await run(True)
     without = await run(False)
 
-    assert [event.type for event in with_reasoning] == [event.type for event in without]
+    # 1. The reasoning ARRIVES, before the text it preceded on the wire, and it
+    #    names the assistant message it belongs to (the same id message_start
+    #    and message_end announce, which is what lets a consumer retire the
+    #    phase when the answer starts).
+    reasoning_events = [e for e in with_reasoning if isinstance(e, ReasoningDeltaEvent)]
+    assert len(reasoning_events) == 1
+    assert reasoning_events[0].delta == fragment
+    assert reasoning_events[0].message_id == with_reasoning[-1].messages[0].id
+    assert with_reasoning.index(reasoning_events[0]) < next(
+        index for index, event in enumerate(with_reasoning) if isinstance(event, MessageUpdateEvent)
+    )
+
+    # 2. Nothing message-shaped carries it -- not the assembled message, not the
+    #    raw message on any event, not the model's own text.
     assert with_reasoning[-1].messages[0].text == "Done"
     assert without[-1].messages[0].text == "Done"
-    assert not any(
-        "weighing" in json.dumps(event.model_dump(mode="json")) for event in with_reasoning
-    )
+    for event in with_reasoning:
+        if isinstance(event, ReasoningDeltaEvent):
+            continue
+        dumped = json.dumps(event.model_dump(mode="json"))
+        assert fragment not in dumped, event.type
+
+    # 3. And the rest of the turn is untouched: the same event types, in the
+    #    same order, as the run without a reasoning fragment.
+    assert [
+        event.type for event in with_reasoning if not isinstance(event, ReasoningDeltaEvent)
+    ] == [event.type for event in without]
 
 
 @pytest.mark.asyncio

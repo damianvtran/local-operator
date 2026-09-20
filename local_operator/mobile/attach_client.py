@@ -96,6 +96,27 @@ STOPPED_REASON = "owner stopped the session"
 #: retires only when idle (``ServingSessionHandle.may_refresh``).
 RETIRING_REASON = "owner retired for a newer build"
 
+#: Disconnect reason for a connection the owner could not BIND — its canonical
+#: ``frontend_sync`` never arrived and the runtime closed this one connection.
+#:
+#: The third member of the reason class above, and the one whose absence was a
+#: lie: with no frame carrying it, the closed socket fell through to
+#: :data:`_pump`'s default (``"owner exited"``), so a viewer told the person
+#: their SESSION had died when the truth was that the process was alive, the
+#: session untouched, and one connection unbound. The frame that carries it
+#: (``bind_failed``) is additive — an older client ignores an unknown op and
+#: reports exactly what it reported before.
+#:
+#: THE SENTENCE CARRIES THE TWO THINGS THE OTHER REASONS LEAVE IMPLICIT, and it
+#: has to, because this one is the only reason whose truth is the OPPOSITE of
+#: what the neighbouring string says: ``"owner exited"`` is the default this
+#: replaces, so a reader who has learned that class of sentence will assume the
+#: session is gone unless told otherwise. Hence the liveness clause, and hence a
+#: remedy in the shape this module's refusal copy uses (``"owner returned no
+#: fork; retry /fork"``): a bare cause leaves the person with a dead socket and
+#: nothing to do. Review round 3, UX U3.
+BIND_FAILED_REASON = "owner could not prepare this view; the session is alive — reconnect to retry"
+
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
 #: the writer refuses to exceed it and the reader refuses to read past it, so
 #: two different numbers would mean a frame the owner considers sendable is one
@@ -1193,6 +1214,16 @@ class AttachClient:
                             self._on_retiring(frame)
                         except Exception:  # noqa: BLE001
                             continue
+                elif op == "bind_failed":
+                    # The owner could not prepare THIS connection (its canonical
+                    # state never arrived and the socket is about to close).
+                    # Carried in the disconnect reason like ``stopping`` and
+                    # ``retiring`` above, and for the same reason: the EOF is
+                    # moments away and every consumer already reads that string.
+                    # What it buys is the truth — without it the close fell
+                    # through to the pump's default and the person was told
+                    # their session had died.
+                    reason = BIND_FAILED_REASON
                 elif op in ("ack", "error", "result"):
                     req = frame.get("req")
                     future = self._pending.pop(req, None)
@@ -1415,7 +1446,12 @@ class AttachClient:
                 images=command.images,
             )
         except RuntimeError as exc:
-            if "already streaming" not in str(exc):
+            # Local import, matching this module's other `session.errors` use:
+            # the check is a TYPE when this build raised it and the old sentence
+            # when the producer is a build that has never heard of the class.
+            from local_operator.session.errors import TurnInFlight
+
+            if not isinstance(exc, TurnInFlight) and "already streaming" not in str(exc):
                 raise
             return await self.steer(
                 command.text, command_id=command.command_id, images=command.images
@@ -1786,7 +1822,7 @@ async def continue_command(
     """
     from local_operator.session.runtime.launch import PromptErrand, engage_runtime
 
-    await engage_runtime(
+    outcome = await engage_runtime(
         command.session_id,
         str(Path.home()),
         PromptErrand(
@@ -1801,6 +1837,15 @@ async def continue_command(
     # turn it started. A record must exist now (engage_runtime only returns
     # once one answered), so a miss here is a runtime that died in the gap and
     # is reported as the same timeout the caller already handles.
+    #
+    # THE RECEIPT IS THE ENGAGE'S OWN DETAIL, never a hardcoded sentence. On a
+    # draining owner the runtime spools the message for the build that replaces
+    # it, and its answer is ``inbox.SPOOL_RECEIPT_PROMPT`` — a deferral. This
+    # used to return the literal "prompt admitted" over whatever the runtime
+    # said, so the phone was told the owner had the message and waited for a
+    # reply only another process would produce, after this one exited (agent
+    # review round 1, R2).
+    admitted_detail = outcome.detail or "prompt admitted"
     record, _ = await asyncio.to_thread(find_runtime_record, config_dir, command.session_id)
     if record is None:
         raise TimeoutError("Couldn’t continue this conversation. Try again.")
@@ -1813,4 +1858,4 @@ async def continue_command(
     except (ConnectionError, RuntimeError, TimeoutError) as exc:
         client.close()
         raise TimeoutError("Couldn’t continue this conversation. Try again.") from exc
-    return client, "prompt admitted"
+    return client, admitted_detail

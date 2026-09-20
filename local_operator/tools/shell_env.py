@@ -52,8 +52,9 @@ What the child may still legitimately see in either mode
 -------------------------------------------------------
 Both modes keep the harness's INTENTIONAL injections, and the strict mode
 carries them through deliberately rather than by omission. What those are
-differs per tool — the ``bash`` child gets ``NON_INTERACTIVE_ENV`` and the
-session credential store's ``credential_env()``, while the ``eval`` worker gets
+differs per tool — the ``bash`` child gets ``NON_INTERACTIVE_ENV``, the
+session credential store's ``credential_env()`` and the delegation allowance
+(``LOCAL_OPERATOR_AGENT_MAY_DELEGATE``), while the ``eval`` worker gets
 its own protocol channel — and each spawn site passes them as ``injections``
 because they are values the harness decides to hand over, not names it happens
 to have inherited:
@@ -61,13 +62,24 @@ to have inherited:
 * ``local_operator.tools.builtin.NON_INTERACTIVE_ENV`` (``CI``,
   ``LOCAL_OPERATOR_AGENT_SHELL``, the pager/editor overrides, ``TERM=dumb``) —
   the non-interactive contract the ``bash`` tool documents at its definition.
+* ``LOCAL_OPERATOR_AGENT_MAY_DELEGATE`` — whether the session running the
+  command holds ``task``, and so whether a `lop` it starts may open a session
+  (``agent_shell.py``). Signed in THREE arms from the same spawn site: ``1`` when
+  the session may delegate; the EMPTY value when the name is inherited and must
+  be cleared, because in ``inherit`` mode a marker copied from the parent's
+  environment would otherwise outlive the session it described; and NOT WRITTEN
+  AT ALL otherwise, so a session that never had the allowance is not handed its
+  spelling — the name is the mechanism, and an absent marker reads as "no"
+  exactly as an empty one does. The third grant, and here for the same reason as
+  the other two — it is a value the harness decides to hand over, not one the
+  child happens to have inherited.
 * the session credential store's ``credential_env()`` — the value the agent is
   meant to *use* without being able to *read* it. The store is the grant; this
   module does not second-guess it.
 * the ``eval`` worker's scrub fd (``LOCAL_OPERATOR_EVAL_SCRUB_FD``), which is
   its own protocol channel and is popped from the environment by the worker.
 
-``exclude`` still wins over all three — naming a variable there is an operator
+``exclude`` still wins over every one of them — naming a variable there is an operator
 saying "not even that".
 
 What the strict mode does NOT close (read this before claiming it does)

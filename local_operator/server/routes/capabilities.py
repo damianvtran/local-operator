@@ -308,6 +308,30 @@ async def capabilities():
                 # impossible to express — the same argument `session_search`
                 # makes for not riding `session_catalogue`.
                 "session_delete": 1,
+                # This machine's tunnel and Radient-login state:
+                # `GET /v1/desktop/tunnel`, plus `radient_login` and
+                # `tunnel_remedy` on `GET /v1/auth/status`.
+                #
+                # ITS OWN KEY, and it gates one narrow thing: whether the
+                # account section may tell a user that their stored Radient
+                # login is no longer accepted for remote access, and whether the
+                # tunnel panel may show a connector state at all. The question
+                # those answer is about THIS MACHINE, which the rest of the auth
+                # surface cannot answer — a row can be `configured` with an
+                # unexpired access token and still be refused by the identity
+                # provider.
+                #
+                # Absent ⇒ the renderer shows no tunnel state and no sign-in
+                # callout, and the account section keeps its current wording
+                # (which is not wrong, only incomplete). It must NOT treat an
+                # absent key as "the tunnel is fine": a backend that has never
+                # heard of this route cannot be asked, and a green claim nobody
+                # made is worse than the silence.
+                #
+                # NOT a bump of `auth`: nothing on that surface changes shape,
+                # an old renderer ignores the extra fields, and bumping would
+                # hide a working sign-in flow behind an update it does not need.
+                "tunnel": 1,
             },
         },
     )

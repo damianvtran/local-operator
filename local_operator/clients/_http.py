@@ -23,11 +23,16 @@ Two shapes exist on purpose:
 """
 
 import json
-import re
-from typing import Any, Dict, Iterable, Optional, Pattern, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 import requests
 from requests.exceptions import RequestException
+
+# The shared credential-shape scrubber. Imported under an alias because this
+# module defines the public `scrub_secrets` wrapper below, and re-exporting
+# the name directly would make the two indistinguishable at a call site.
+from local_operator.redaction_shapes import REDACTION_MARKER
+from local_operator.redaction_shapes import scrub_secrets as scrubbed_secrets
 
 NO_RESPONSE_BODY = "No response body"
 """Stand-in used in error messages when a failed request has no readable body."""
@@ -100,20 +105,23 @@ def scrubbed_response_body(response: Optional[requests.Response]) -> str:
     return scrub_secrets(body) if body.strip() else NO_RESPONSE_BODY
 
 
-REDACTION_MARKER = "[redacted]"
-"""What a credential is replaced with in anything about to be surfaced."""
+#: What a credential is replaced with in anything about to be surfaced.
+#:
+#: Imported from :mod:`local_operator.redaction_shapes` rather than defined
+#: again here: every surface shares the marker, and a second copy in a second
+#: module is how two redaction paths drift into disagreeing about what a
+#: scrubbed value looks like.
 
 
 def redact_secrets(text: str, secrets: Iterable[Optional[str]]) -> str:
-    """Replace every occurrence of a credential in ``text`` with a marker.
+    """Replace every occurrence of a KNOWN credential value with a marker.
 
-    WHY THIS EXISTS: an upstream is free to reflect the request it received -- the
-    ``Authorization`` header included -- into its error body, and an error body is
-    exactly what a useful failure message quotes. Quoting it verbatim is how an
-    operator's API key ends up in a message the desktop app renders and the log
-    keeps, so the body a caller is about to surface goes through here first. The
-    body is otherwise kept: for a failure the upstream did not design an error
-    vocabulary for, it is the only thing that says what happened.
+    The exact-value half, and the only half a caller can supply values for. The
+    shape half (a credential recognised by how it is SPELLED, which is what
+    catches a secret the session was never told) lives in
+    :func:`local_operator.redaction_shapes.scrub_secrets`; this function stays
+    because a client that knows its own key should still remove it byte-for-byte
+    — the key is not always spelled the way a shape would recognise.
 
     Args:
         text: The text about to be surfaced.
@@ -130,72 +138,24 @@ def redact_secrets(text: str, secrets: Iterable[Optional[str]]) -> str:
     return text
 
 
-#: Credential SHAPES masked in anything about to be surfaced, as
-#: ``(pattern, replacement)``. A pattern rather than the caller's own key values
-#: because this module produces the body for every client in the package and
-#: knows none of their keys: a scrubber that has to be handed the secret is one
-#: each new call site can forget, which is exactly how the fix to ``response_body``
-#: briefly widened the exposure to five clients that never redacted anything.
-#:
-#: Kept NARROW on purpose. Masking too much makes an upstream's refusal
-#: unreadable (the body is often the only account of what happened), so each rule
-#: needs a credential to be spelled in a way its issuer spells one: a scheme
-#: keyword, a credential-name assignment, a query parameter, or an issuer prefix
-#: on a bare token. A high-entropy fragment with none of those around it is left
-#: alone -- see :func:`scrub_secrets` for what that costs.
-_CREDENTIAL_SHAPES: Tuple[Tuple[Pattern[str], str], ...] = (
-    # `Authorization: Bearer <token>`, in every casing and with every punctuation
-    # an upstream might use. The scheme keyword IS the credential context here.
-    (re.compile(r"(?i)\b(bearer)\s+([A-Za-z0-9._~+/=-]{4,})"), r"\1 " + REDACTION_MARKER),
-    # A named credential: `"api_key": "..."`, `api_key=...`, `token: ...`. The
-    # name is bounded by word characters, so `max_tokens` (an ordinary model
-    # parameter) is not one of these and its value survives -- the underscore is
-    # a word character and there is no boundary between it and `tokens`.
-    #
-    # The 8-character floor is what keeps ordinary prose out of it: `"api_key":
-    # "missing"` stays readable, while a key of real length is masked.
-    (
-        re.compile(
-            r"(?i)\b(authorization|proxy-authorization|api[-_]?key|apikey|x-api-key|"
-            r"access[-_]?token|refresh[-_]?token|auth[-_]?token|id[-_]?token|"
-            r"secret[-_]?key|client[-_]?secret|password|passwd|token|secret)"
-            r"\b(\"?\s*[:=]\s*)(\"?)([A-Za-z0-9._~+/=-]{8,})"
-        ),
-        r"\1\2\3" + REDACTION_MARKER,
-    ),
-    # A credential in a query string, which is how several of these APIs accept
-    # one and therefore how one comes back in a URL an upstream quotes.
-    (
-        re.compile(r"(?i)([?&](?:api[-_]?key|apikey|key|token|access[-_]?token)=)([^&\s\"']{4,})"),
-        r"\1" + REDACTION_MARKER,
-    ),
-    # A BARE credential, by the prefix its issuer gives it -- the shape left over
-    # when an upstream quotes the request's header value without the header. The
-    # prefixes are the issuers this package actually talks to and the vendors
-    # whose keys are widely used here, not a general "looks random" heuristic.
-    (
-        re.compile(r"\b(?:sk|pk|rk|hf|gsk|xai|tvly|fal|serp|glpat|ya29)[-_][A-Za-z0-9_.-]{6,}"),
-        REDACTION_MARKER,
-    ),
-    (re.compile(r"\b(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{20,}\b"), REDACTION_MARKER),
-    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), REDACTION_MARKER),
-    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), REDACTION_MARKER),
-    (re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"), REDACTION_MARKER),
-    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), REDACTION_MARKER),
-)
+#: The shape table used to live in this module, with this package's clients as
+#: its only callers. It moved to :mod:`local_operator.redaction_shapes` when the
+#: same masking had to run on tool output, transcripts and live streams — a
+#: pattern table reachable only from the HTTP clients was the reason a
+#: credential printed by ``kubectl exec … env`` reached a transcript in full.
+#: ``scrub_secrets`` below is that module's function, unchanged for callers here.
 
 
 def scrub_secrets(text: str, secrets: Iterable[Optional[str]] = ()) -> str:
-    """Remove credential-shaped content from a body about to be surfaced.
+    """Remove known credential VALUES, then credential SHAPES, from a body.
 
     WHAT THIS GUARANTEES, AND WHAT IT DOES NOT: it guarantees that a credential
-    spelled the way its issuer spells one -- a ``Bearer`` header, a named field, a
-    query parameter, a vendor-prefixed token -- cannot reach a message, whoever
-    the caller is and whether or not they remembered anything. It does NOT
-    recognise an opaque value with no such context around it (a bare tenant id, a
-    short legacy key); for that, a client that KNOWS its own credential should
-    also pass it to :func:`redact_secrets`, which removes exact values and is what
-    ``RadientClient`` does around this call.
+    spelled the way its issuer spells one -- a ``Bearer`` header, a named field,
+    a query parameter, a vendor-prefixed token, a connection string -- cannot
+    reach a message, whoever the caller is and whether or not they remembered
+    anything. It does NOT recognise an opaque value with no such context around
+    it (a bare tenant id, a short legacy key); for that, a client that KNOWS its
+    own credential should also pass it to :func:`redact_secrets`.
 
     Every body this package surfaces goes through here, so the cheap catch is
     applied once and centrally. The cost of a miss is a leaked credential in a
@@ -210,10 +170,7 @@ def scrub_secrets(text: str, secrets: Iterable[Optional[str]] = ()) -> str:
         The text with every recognised credential replaced by a marker.
     """
 
-    text = redact_secrets(text, secrets)
-    for pattern, replacement in _CREDENTIAL_SHAPES:
-        text = pattern.sub(replacement, text)
-    return text
+    return scrubbed_secrets(text, secrets)
 
 
 def scrub_details(value: Any, secrets: Iterable[Optional[str]] = ()) -> Any:

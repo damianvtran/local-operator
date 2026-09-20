@@ -6,6 +6,9 @@ import { screenshot } from "./commands/shot";
 import { snapshot } from "./commands/snapshot";
 import { scroll } from "./commands/scroll";
 import { logs } from "./commands/logs";
+import { upload } from "./commands/upload";
+import { download } from "./commands/download";
+import { disabledCapabilities, hasConsentSwitch } from "./consent";
 import { BridgeCommandError, releaseAllSurfaces } from "./cdp";
 import { clearAllAccessGrants, revokeExactOrigin, revokeLoopbackHost, revokeSiteGrant } from "./access-grants";
 import { ACCESS_EXPIRY_ALARM, allowAllPending } from "./approval-store";
@@ -48,6 +51,22 @@ const HANDLERS: Record<
   tabs,
   scroll,
   logs,
+  // Attach local files to a page's file input, and save a file the page offers.
+  // BOTH are gated by the operator's own switches (`consent.ts`), which is why
+  // this table is no longer the same thing as what gets advertised: `upload`
+  // rides the `debugger` permission the extension already holds, `download`
+  // additionally needs the optional `downloads` permission the operator grants
+  // when they turn its switch on, and either can be off at any moment. The
+  // advertisement below is therefore this table FILTERED BY CONSENT — the honest
+  // statement of what this build will serve right now, which is also what keeps
+  // an old daemon (which refuses to send an unadvertised method) from sending a
+  // switched-off command at all.
+  //
+  // The handlers ALSO refuse an unconsented call themselves (`requireConsent`),
+  // because a daemon that predates the advertisement sends regardless and a
+  // switch can be flipped off between the advertisement and the command.
+  upload,
+  download,
   // Async site-approval flow: request returns immediately after raising the
   // prompt; await polls the stored decision in bounded slices (access.ts
   // explains why slices, not a daemon long-poll).
@@ -409,8 +428,82 @@ function codeFor(code: string): ErrorCode {
   return (values.includes(code) ? code : ErrorCode.INTERNAL) as ErrorCode;
 }
 
-async function connect(): Promise<void> {
-  // `connecting` guards the window between `new WebSocket()` and `onopen`, when
+/* What this build will serve right now, and which of those the operator has
+ * switched off — the two frames that carry capability (design §6.3, §17.13).
+ *
+ * Both are computed from live state on EVERY send rather than cached: the
+ * operator's switch and the Chrome permission behind `download` can each change
+ * while this worker is alive — the second one without any event this process is
+ * guaranteed to receive before the next dial — and a cached answer would keep
+ * advertising a capability the operator has just revoked.
+ *
+ * `methods` is the dispatch table FILTERED BY CONSENT, so an advertised
+ * capability still cannot drift from a served one: this is what the daemon reads
+ * to decide whether it may send a method at all, and a switched-off method must
+ * therefore be absent from it. The `disabled` list is what keeps that absence
+ * legible: without it the harness cannot tell "this build cannot" (update it)
+ * from "the operator has not enabled this" (point at the switch), and sends the
+ * user to a remedy that cannot help.
+ */
+async function announceCapabilities(target?: WebSocket): Promise<void> {
+  const version = chrome.runtime.getManifest().version;
+  const disabled = await disabledCapabilities();
+  const methods = Object.keys(HANDLERS).filter(
+    (method) => !hasConsentSwitch(method) || !disabled.includes(method),
+  );
+  const frames: ExtensionEvent[] = [
+    // `capabilities` FIRST, and the order is load-bearing (round-1 Q3). A reader
+    // that lands between the two frames sees one of two contradictions: with this
+    // order it may still find the method in the STALE `disabled` list while the
+    // new advertisement already serves it — harmless, because the method is
+    // present and the call is accepted — whereas the other order leaves a
+    // just-enabled method absent from `capabilities` AND absent from `disabled`,
+    // which is the wedge shape the harness renders as "neither can serve this nor
+    // has a switch", for the ~15 ms it takes the second frame to arrive.
+    { event: "capabilities", methods, version },
+    { event: "capability_switches", disabled, version },
+  ];
+  for (const frame of frames) {
+    const body = JSON.stringify(frame);
+    // `target` is the socket being opened, which is not yet installed as the
+    // module-level `socket` when `onopen` runs — the reason this function takes
+    // one rather than always going through `send`.
+    if (target) {
+      if (target.readyState === WebSocket.OPEN) target.send(body);
+      continue;
+    }
+    send(frame);
+  }
+}
+
+/* THE WORKER'S OWN HALF OF A REVOKED GRANT (round-1 R6).
+ *
+ * The options page repaints itself when Chrome takes the permission away, but the
+ * ADVERTISEMENT is what the daemon gates on: without this, an extension that has
+ * lost `downloads` keeps claiming it until the socket happens to drop, the daemon
+ * sends the method, and the last gate refuses with a consent sentence about a
+ * switch the user never touched — a correct refusal for the wrong reason, and a
+ * user sent to the wrong remedy. Both directions are handled: a removal withdraws
+ * the capability, and a grant restored in chrome://extensions does not by itself
+ * enable anything (the switch is the consent) but does change the answer to "is the
+ * permission held", so both frames are recomputed and re-sent either way.
+ *
+ * Best-effort by construction: `announceCapabilities` recomputes from live state
+ * and `send` no-ops without an open socket, so the cost of a fire-and-forget here
+ * is one storage read per Chrome event.
+ */
+chrome.permissions?.onRemoved?.addListener(() =>
+  // `fireAndForget`, not a bare `void`: this function awaits `storedSwitch`, which
+  // goes through the API deadline, and a deadline rejection escaping into a Chrome
+  // event handler is the `Uncaught (in promise)` this file's own helper exists to
+  // contain (round-2 M4 — the same defect its docstring records, reintroduced here).
+  fireAndForget(announceCapabilities(), "capability re-announce after a revoked grant"),
+);
+chrome.permissions?.onAdded?.addListener(() =>
+  fireAndForget(announceCapabilities(), "capability re-announce after a restored grant"),
+);
+
+async function connect(): Promise<void> {  // `connecting` guards the window between `new WebSocket()` and `onopen`, when
   // `connected` is still false: without it, a `chrome.alarms` tick (or a wake
   // event) firing in that window starts a SECOND socket, the daemon's
   // "later-connection-wins" rule closes the first, and the resulting
@@ -484,6 +577,15 @@ async function connect(): Promise<void> {
   };
 
   wire.onopen = () => {
+    // `fireAndForget`, because this handler is now SYNCHRONOUS and owns an async
+    // handshake: an `async` event handler's rejection reaches the runtime as
+    // `Uncaught (in promise)` — which is what a storage failure inside
+    // `announceCapabilities` produced here, and the SECOND site of the defect round-2
+    // M4 fixed in the two `chrome.permissions` listeners (this test caught it).
+    fireAndForget(openWire(wire), "capability announce on connect");
+  };
+
+  const openWire = async (wire: WebSocket): Promise<void> => {
     clearDialTimer();
     if (socket !== wire) {
       // A later dial already owns the worker; this one must not claim
@@ -501,6 +603,19 @@ async function connect(): Promise<void> {
     attempt = 0;
     const hello: ExtensionEvent = { event: "hello", proto: PROTO_VERSION, token: token ?? "", extension_version: chrome.runtime.getManifest().version, browser: navigator.userAgent };
     wire.send(JSON.stringify(hello));
+    // What THIS build serves right now, and which of those the operator has
+    // switched off. Two frames, and the order matters: the switch answer goes
+    // first so a reader that lands between them never sees "absent from methods"
+    // without the reason that tells it apart from a build that cannot serve the
+    // method at all (design §17.13's three states).
+    //
+    // `capabilities` is derived from the dispatch table rather than hand-written,
+    // as before — filtered by consent, so an advertised capability cannot drift
+    // from a served one. Why an EVENT rather than a field on `hello`: `Hello` is
+    // validated with `extra="forbid"`, so a new field there is closed 4001 by
+    // every already-released daemon, while an unknown event is dropped harmlessly
+    // — which is what lets both of these travel with PROTO_VERSION still at 1.
+    await announceCapabilities(wire);
   };
   wire.onmessage = (message) => {
     if (socket !== wire) return; // a superseded socket's frames are not ours
@@ -728,6 +843,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
   // that are now moot so paused navigations resume instead of timing out.
   if (area === "local" && changes.allowAllSites && changes.allowAllSites.newValue === true) {
     void allowAllPending().catch((error) => console.warn("allow-all queue resolution failed", error));
+  }
+  // The two file-transfer switches are also written by the options page and never
+  // by a message to this worker (consent.ts rule 1). Re-announcing is the whole
+  // reaction: the daemon's record is what the harness decides from, so a switch
+  // the operator just turned on must stop reading as off before the next
+  // heartbeat, and one turned OFF must stop the daemon sending the method at all
+  // — otherwise the model keeps being told a capability is unavailable for a
+  // reason the user has already fixed, or the harness keeps dispatching a
+  // command the extension will now refuse.
+  if (area === "local" && (changes.allowDownloads || changes.allowUploads)) {
+    fireAndForget(announceCapabilities(), "capability re-announce");
   }
 });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

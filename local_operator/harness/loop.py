@@ -43,6 +43,7 @@ from local_operator.harness.intent import (
     sanitize_intent,
     scan_streaming_intent,
 )
+from local_operator.harness.redaction import tool_source
 from local_operator.harness.types import (
     FAULT_INVALID_ARGUMENTS,
     FAULT_KEY,
@@ -71,11 +72,13 @@ from local_operator.harness.types import (
     ModelSpec,
     NoticeEvent,
     ProviderTurnStartEvent,
+    ReasoningDeltaEvent,
     RenderedStreamError,
     StaleAside,
     StreamEndEvent,
     StreamEvent,
     StreamModelEvent,
+    StreamReasoningDelta,
     StreamStartEvent,
     StreamTextDelta,
     StreamToolCallDelta,
@@ -932,6 +935,98 @@ async def _cancel_when_aborted(signal: AbortSignal, task: asyncio.Task[None]) ->
     task.cancel()
 
 
+def _call_arguments(context: "LoopContext", tool_call_id: str) -> dict[str, Any]:
+    """The arguments of the call a result belongs to, for the redaction hook.
+
+    Searched in ``context.messages`` rather than kept beside the result: a
+    ``ToolResult`` carries the call's ID and name but not what it was asked to
+    do, and the assistant message that holds the arguments is the message the
+    loop appended one step earlier. ``reversed`` because the result being
+    appended belongs to the most recent batch.
+    """
+    for message in reversed(context.messages):
+        # ``AgentMessage`` is ``Message | CustomMessage`` and only the former
+        # carries tool calls; a notice parked beside the batch is skipped rather
+        # than assumed absent.
+        if not isinstance(message, Message):
+            continue
+        for call in message.tool_calls:
+            if call.id == tool_call_id:
+                return call.arguments
+    return {}
+
+
+def _scrub_argument_value(value: Any, redact: Callable[[str], str]) -> tuple[Any, bool]:
+    """Recursively scrub every string in a JSON-ish argument value.
+
+    Recursive rather than top-level because an argument may be a dict or a list
+    of dicts (a batch of paths, a structured query), and a credential in one of
+    those positions is persisted exactly like a top-level one.
+    """
+    if isinstance(value, str):
+        scrubbed = redact(value)
+        return scrubbed, scrubbed != value
+    if isinstance(value, dict):
+        changed = False
+        result: dict[Any, Any] = {}
+        for key, item in value.items():
+            new_item, item_changed = _scrub_argument_value(item, redact)
+            result[key] = new_item
+            changed = changed or item_changed
+        return result, changed
+    if isinstance(value, (list, tuple)):
+        changed = False
+        items: list[Any] = []
+        for item in value:
+            new_item, item_changed = _scrub_argument_value(item, redact)
+            items.append(new_item)
+            changed = changed or item_changed
+        return items, changed
+    return value, False
+
+
+def _scrub_history_arguments(message: Message, redact: Callable[[str], str] | None) -> Message:
+    """The copy of an assistant turn that history STORES and REPLAYS.
+
+    **Why a copy rather than a scrub in place.** ``tool_calls[].arguments`` is
+    what the tool is asked to run, so the object the executor reads must be
+    untouched — scrubbing it would change the command. The same dict is what the
+    transcript persists and what every later provider request replays, so a
+    credential typed into a call (``mysql -p…``, ``curl -u…``, a DSN behind a
+    ``--flag``) was surviving in the journal in full even though the RESULT of
+    that call is scrubbed. This returns the copy for that second use; the caller
+    keeps executing the original.
+
+    **IDENTITY IS PRESERVED when nothing changed**, and that is load-bearing
+    rather than tidy: the loop's error and refusal paths retract a message they
+    just appended by identity (``context.messages[-1] is assistant``). Those
+    paths never carry tool calls, so a scrubbed copy is only ever produced where
+    that check is not in play — but returning a copy unconditionally would leave
+    a refused turn in history the moment one of them grew a call.
+    """
+    if redact is None or not message.tool_calls:
+        return message
+    calls: list[ToolCall] = []
+    changed = False
+    for call in message.tool_calls:
+        # Published for the same reason ``_append_results`` publishes it: this
+        # pass can be the one that finds a credential (the command ITSELF
+        # carries it), and a hit found here must be reported with the call it
+        # came from rather than as an anonymous one.
+        with tool_source(call.name, call.arguments):
+            arguments, arguments_changed = _scrub_argument_value(call.arguments, redact)
+            raw = redact(call.raw_arguments) if isinstance(call.raw_arguments, str) else None
+        changed = changed or arguments_changed or raw != call.raw_arguments
+        calls.append(
+            call
+            if not (arguments_changed or raw != call.raw_arguments)
+            else call.model_copy(update={"arguments": arguments, "raw_arguments": raw})
+        )
+    if not changed:
+        return message
+    return message.model_copy(update={"tool_calls": calls})
+
+
 class AgentLoop:
     """Runs turns: model streaming, tool execution, steering re-entry.
 
@@ -1196,8 +1291,14 @@ class AgentLoop:
                                 # message is never final, so the rule does not
                                 # apply and nothing has to be trimmed away from
                                 # what was displayed.
-                                context.messages.append(assistant)
-                                new_messages.append(assistant)
+                                # Journaled/replayed copy: see
+                                # ``_scrub_history_arguments`` for why the
+                                # executor keeps the original.
+                                stored = _scrub_history_arguments(
+                                    assistant, config.redact_tool_result
+                                )
+                                context.messages.append(stored)
+                                new_messages.append(stored)
                                 if assistant.tool_calls:
                                     # PAIR the survivors. An assistant turn
                                     # carrying a `tool_use` block with no matching
@@ -1370,8 +1471,9 @@ class AgentLoop:
                         # omits it must not blank a figure the previous call
                         # (or the host's seed) supplied.
                         run_context_tokens = int(assistant.usage.context_tokens)
-                    context.messages.append(assistant)
-                    new_messages.append(assistant)
+                    stored = _scrub_history_arguments(assistant, config.redact_tool_result)
+                    context.messages.append(stored)
+                    new_messages.append(stored)
 
                     if stop_reason in ("error", "aborted", "refusal"):
                         # FIRST recovery for a refused reasoning echo: re-send the
@@ -2127,6 +2229,28 @@ class AgentLoop:
                 elif isinstance(event, StreamTextDelta):
                     text_parts.append(event.delta)
                     yield MessageUpdateEvent(message=assistant, delta=event.delta)
+                elif isinstance(event, StreamReasoningDelta):
+                    # The model is THINKING, and the user can see it from here.
+                    #
+                    # DELIBERATELY NOT a mutation of ``assistant``: a reasoning
+                    # fragment is not transcript content, so it is not appended
+                    # to ``text_parts`` and no content block is opened for it.
+                    # ``ReasoningDeltaEvent`` carries the whole of it (see its
+                    # docstring for the three places display-only is
+                    # load-bearing, and for why the wire's ``reasoning_content``
+                    # echo must never carry anything a front end painted).
+                    #
+                    # ``event.delta``, never an accumulation: the provider
+                    # already sends fragments, and the desktop's frame path
+                    # sizes and merges this family as deltas.
+                    #
+                    # ``assistant.id`` groups one model call's thinking. It is
+                    # the same id ``message_start``/``message_end`` announce, so
+                    # a consumer can attribute the fragments and retire them
+                    # when the answer starts -- including across a retry, which
+                    # re-emits ``reasoning_delta`` under the same id (see
+                    # ``providers/failover._RETRY_SAFE_STREAM_EVENTS``).
+                    yield ReasoningDeltaEvent(message_id=assistant.id, delta=event.delta)
                 elif isinstance(event, StreamToolCallDelta):
                     state = tool_states.setdefault(
                         event.index,
@@ -2964,18 +3088,19 @@ class AgentLoop:
                     # Redact before the result crosses back into arbitrary
                     # Python, the same text policy used for native history.
                     if config.redact_tool_result is not None:
-                        result = result.model_copy(
-                            update={
-                                "content": [
-                                    (
-                                        TextContent(text=config.redact_tool_result(block.text))
-                                        if isinstance(block, TextContent)
-                                        else block
-                                    )
-                                    for block in result.content
-                                ]
-                            }
-                        )
+                        with tool_source(name, planned.args):
+                            result = result.model_copy(
+                                update={
+                                    "content": [
+                                        (
+                                            TextContent(text=config.redact_tool_result(block.text))
+                                            if isinstance(block, TextContent)
+                                            else block
+                                        )
+                                        for block in result.content
+                                    ]
+                                }
+                            )
                     result.duration_s = time.monotonic() - started
                     queue.put_nowait(
                         ToolExecutionEndEvent(
@@ -3787,10 +3912,20 @@ class AgentLoop:
             # still text, so an image-only result is untouched and a genuinely
             # empty one still gets the placeholder it needs to serialize.
             if redact is not None:
-                content = [
-                    TextContent(text=redact(item.text)) if isinstance(item, TextContent) else item
-                    for item in content
-                ]
+                # Publish WHICH call these bytes belong to for the duration of
+                # the hook. The hook is called with text alone (see
+                # ``harness/redaction.py``), and a host that has to report a
+                # shape-masked result needs the tool name and the arguments it
+                # was given — neither of which can be read off the text.
+                with tool_source(result.tool_name, _call_arguments(context, result.tool_call_id)):
+                    content = [
+                        (
+                            TextContent(text=redact(item.text))
+                            if isinstance(item, TextContent)
+                            else item
+                        )
+                        for item in content
+                    ]
             # coerceToolResult: an empty tool result serializes as "" on
             # most wires and Anthropic REJECTS an empty ``is_error`` content
             # with a 400 — backfill one placeholder block. Image-only results

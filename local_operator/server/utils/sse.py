@@ -46,10 +46,12 @@ because silently downgrading is how a UI ends up rendering a hole forever.
 BACKWARD COMPATIBILITY
 ----------------------
 ``record.*`` events carry the legacy ``CodeExecutionResult`` dump verbatim,
-including the ``message_id``/``connection_type`` keys the WebSocket path
-injects. A client can therefore treat SSE as a transport swap and feed its
-existing reducer unchanged, then adopt the richer ``message.delta`` and
-``tool.*`` events at its own pace. The WebSocket publish path is untouched.
+including the ``message_id``/``connection_type`` keys the removed WebSocket
+path injected. A client can therefore treat SSE as a transport swap and feed
+its existing reducer unchanged, then adopt the richer ``message.delta`` and
+``tool.*`` events at its own pace. Those injections are load-bearing, not
+leftovers: an installed client's reducer reads them, and only the transport
+that gave them their name is gone.
 """
 
 from __future__ import annotations
@@ -109,17 +111,29 @@ class EventName:
     KEEPALIVE = "keepalive"
 
     # -- legacy-compatible record frames ----------------------------------
-    #: A ``CodeExecutionResult`` snapshot - byte-compatible with the WebSocket
-    #: data frame. Maps to ``runtime.agent.item.updated``.
+    #: A ``CodeExecutionResult`` snapshot - byte-compatible with the removed
+    #: WebSocket data frame, which is what an installed client parses. Maps to
+    #: ``runtime.agent.item.updated``.
     RECORD_UPDATE = "record.update"
     #: The same shape, with ``is_complete`` set. Maps to
     #: ``runtime.agent.item.completed``.
     RECORD_COMPLETE = "record.complete"
 
-    # -- richer engine events (dropped by the WebSocket bridge) ------------
+    # -- richer engine events (which the removed WebSocket bridge dropped) --
     #: Incremental assistant text: ``delta`` plus a cumulative ``snapshot``.
     #: Maps to ``runtime.agent.item.delta``.
     MESSAGE_DELTA = "message.delta"
+    #: The model's PRIVATE reasoning, streamed: ``delta``, display-only.
+    #:
+    #: Deliberately its own name rather than a flag on ``message.delta``. A
+    #: consumer that does not know this name renders exactly what it rendered
+    #: before; a consumer that DID know ``message.delta`` and received reasoning
+    #: under it would append the model's private thinking to the answer it is
+    #: painting, which is transcript corruption, not a rendering choice. It
+    #: carries no cumulative ``snapshot``: reasoning is never persisted, so
+    #: there is nothing for a late or lossy consumer to repaint from, and a
+    #: supervisor re-mapping this family names its own event.
+    REASONING_DELTA = "reasoning.delta"
     #: Tool invocation announced. Maps to ``runtime.agent.item.started`` with
     #: an item type of ``command_execution``.
     TOOL_START = "tool.start"

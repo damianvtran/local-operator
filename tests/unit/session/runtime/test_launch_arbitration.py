@@ -18,6 +18,7 @@ production ones.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import sys
@@ -38,14 +39,47 @@ from local_operator.session.runtime.launch import (
     PeerMessageErrand,
     PromptErrand,
     RuntimeStartupError,
+    WakeErrand,
     WarmErrand,
     _poll_delay,
     engage_runtime,
 )
-from local_operator.session.runtime.types import SessionRecord
+from local_operator.session.runtime.types import LEAVING_FOR_BUILD, SessionRecord
 from local_operator.session_lease import SessionLeaseHeldError, acquire_session_lease
 
 SESSION_ID = "sessionaaa01"
+
+
+def _draining_record() -> SessionRecord:
+    """A live record carrying the drain's own phrase, as the runtime publishes it.
+
+    ``server.note_leaving`` writes ``leaving`` in the same call that announces the
+    ``retiring`` frame, so this is a read of published state rather than a fixture
+    invention; only the process is missing, which is why the two cells that need
+    a real one go through ``FakeRuntimeFleet.publish_draining_predecessor``.
+    """
+    return SessionRecord(
+        pid=os.getpid(),
+        kind="daemon",
+        session_id=SESSION_ID,
+        conversation_name="fake",
+        cwd="/tmp/fake",
+        model_label="test/model",
+        control_port=1,
+        control_key="k" * 16,
+        leaving=LEAVING_FOR_BUILD,
+    )
+
+
+def _healthy_record() -> SessionRecord:
+    """The same record with the drain's phrase absent — the control.
+
+    Without this pair the leaving check could pass by answering everything with
+    the leaving detail, which would be the same lie in the other direction: a
+    runtime that is not going anywhere would stop being reported ready.
+    """
+    return dataclasses.replace(_draining_record(), leaving="")
+
 
 #: Distinguishes "no ``cwd=`` was passed" from "``cwd=None`` was passed"; the
 #: spawn contract under test is the ABSENCE of the kwarg, not a null value.
@@ -116,7 +150,7 @@ class FakeRuntimeFleet:
             await asyncio.sleep(self.construction_delay_s)
         await self._serve(session_id)
 
-    async def _serve(self, session_id: str) -> None:
+    async def _serve(self, session_id: str, *, leaving: str = "") -> None:
         """Publish a record backed by a socket that acks like a runtime."""
         from local_operator.session.runtime import registry
 
@@ -132,6 +166,7 @@ class FakeRuntimeFleet:
             model_label="test/model",
             control_port=port,
             control_key="k" * 16,
+            leaving=leaving,
         )
         registry.publish(record, self.config_dir)
         # The lease marker the record scan consults for liveness.
@@ -177,6 +212,46 @@ class FakeRuntimeFleet:
                 + b"\n"
             )
             await writer.drain()
+
+    # -- a predecessor that has latched a drain ------------------------------
+
+    async def publish_draining_predecessor(self, session_id: str) -> None:
+        """Publish the INCIDENT'S OWN STATE: live, leased, and leaving.
+
+        A genuine record with the drain's phrase on it, a genuine lease held by
+        an alive pid, and no work in flight — the shape 21 sessions on the
+        operator's host were left in by one install, where a record read `live`,
+        the heartbeat was fresh, and every admission was refused (memo §2.3).
+        The record and the lease are the production ones because they are what
+        the engage's arbitration reads; only the process is a fake.
+
+        Its own transcript claim is deliberately NOT released here: exactly one
+        writer may hold it, and the successor's engage must wait for the
+        dispose below rather than take it early.
+        """
+        directory = self.config_dir / "sessions" / session_id
+        directory.mkdir(parents=True, exist_ok=True)
+        self._lease = acquire_session_lease(directory)
+        self.session_id = session_id
+        await self._serve(session_id, leaving=LEAVING_FOR_BUILD)
+
+    def dispose_predecessor(self) -> None:
+        """The draining runtime's own exit: withdraw the record, free the claim.
+
+        This is ``process._clean_exit``'s ordering, which is the whole reason a
+        successor's spawn is allowed to wait in the first place: the record goes
+        first (``_clear_boot_record``), then the lease (``session_factory``
+        registers its release as a dispose hook).
+        """
+        from local_operator.session.runtime import registry
+
+        registry.unpublish(os.getpid(), self.config_dir)
+        if self._server is not None:
+            self._server.close()
+            self._server = None
+        if self._lease is not None:
+            self._lease.release()
+            self._lease = None
 
     def close(self) -> None:
         if self._server is not None:
@@ -822,6 +897,8 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     """
     from local_operator.interpreter import SAFE_PATH_FLAG
     from local_operator.session.runtime import launch as launch_module
+    from local_operator.session.runtime.reclaim import runtime_processes
+    from local_operator.session.runtime.types import RUNTIME_MODULE
 
     recorded: dict[str, Any] = {}
 
@@ -859,7 +936,20 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     assert argv.index(SAFE_PATH_FLAG) < argv.index(
         "-m"
     ), f"the flag must precede -m or the interpreter ignores it; argv={argv}"
-    assert argv[2:] == ["-m", "local_operator.session.runtime.process"], argv
+    assert argv[2:] == ["-m", RUNTIME_MODULE], argv
+    # AND THE OTHER HALF OF THE SAME CONTRACT: the residency sweep recognises a
+    # runtime by exactly this ``-m <module>`` word in an argv (``reclaim``
+    # .runtime_processes), so the census is fed THIS argv — the one the real spawn
+    # just built — and must report it as a runtime. Before the constant had one home
+    # the two literals could drift, and the drift is silent and one-directional: the
+    # census matches nothing, every store reads as having no runtimes, and the
+    # residency bound goes inert with no failing test anywhere. This is that failing
+    # test, and it goes red if the spawn stops writing ``-m <RUNTIME_MODULE>`` or
+    # writes it anywhere else in the argv.
+    row = f"  4242      1     05:00  0:00.02 {' '.join(argv)}\n"
+    assert [item.pid for item in runtime_processes(run=lambda command, timeout_s: row)] == [4242]
+    elsewhere = f"  4242      1     05:00  0:00.02 {' '.join([*argv[:3], 'some.other.module'])}\n"
+    assert runtime_processes(run=lambda command, timeout_s: elsewhere) == []
     # Still no `cwd=`: if one is ever added the flag stops being the thing that
     # protects the import, and this assertion should be revisited deliberately.
     assert recorded["cwd"] is _MISSING, f"spawn grew a cwd= kwarg: {recorded['cwd']!r}"
@@ -1281,3 +1371,104 @@ async def test_a_published_record_that_refuses_the_dial_is_not_polled_densely(
     # Retries are bounded by the backoff, not by the poll floor: an order of
     # magnitude fewer than the ~300 the dense regime produced over 3 s.
     assert dials < 30, f"{dials} dial attempts in a 3 s window is a retry storm"
+
+
+# -- a draining predecessor and the successor it owes (memo §4.2) ---------------
+#
+# The incident's shape, in two cells. A live session that has latched a build
+# drain keeps publishing a record and keeps holding its transcript lease for as
+# long as its work takes (measured: 1 h 40 m on the operator's host, 21 sessions
+# at once). The engage is the only thing that can start the successor, and
+# before this it answered "runtime ready" to that record — so the warm bind the
+# TUI performs on the `retiring` frame reported success, bound the facade to the
+# departing runtime, and set the flag that stops any further attempt. Nothing
+# ever started a successor, and every prompt in the window was refused.
+
+
+@pytest.mark.asyncio
+async def test_a_draining_record_is_never_reported_as_a_completed_errand(
+    tmp_path: Path,
+) -> None:
+    """The lie, at its source: a warm/wake errand against a leaving runtime.
+
+    Neither errand delivers anything — reaching a live runtime IS the completed
+    errand — which is exactly why a draining one must not answer for it. The
+    record carries the drain's own phrase (``types.LEAVING_FOR_BUILD``), written
+    by the same call that announces the `retiring` frame, so this is a read of
+    state the runtime already publishes rather than a new signal.
+    """
+    record = _draining_record()
+    for errand in (WarmErrand(), WakeErrand(schedule_id="wake1", occurrence_ms=1_700_000_000_000)):
+        detail, _duplicate = await launch_module._deliver(record, SESSION_ID, errand)
+        assert detail == launch_module.LEAVING_DETAIL, (
+            f"{type(errand).__name__} against a draining runtime answered {detail!r}; "
+            "nothing delivers that errand, so this reports a completed handover "
+            "for a message no runtime will run"
+        )
+
+    # AND IT IS A DETAIL RATHER THAN A RAISE, which is the other half of the same
+    # finding and the half a raise got wrong: the caller's bind must still reach
+    # this record. It is LIVE and it is dialable, and the transcript it holds is
+    # the one a joiner reads — measured on the production bind path, raising here
+    # meant a cold viewer never dialled at all (agent review round 1, R1).
+    quiet = _healthy_record()
+    detail, _duplicate = await launch_module._deliver(quiet, SESSION_ID, WarmErrand())
+    assert detail == "runtime ready", detail
+
+
+@pytest.mark.asyncio
+async def test_a_draining_record_is_reported_as_leaving_then_the_next_engage_spawns(
+    fleet: FakeRuntimeFleet, tmp_path: Path
+) -> None:
+    """What the change actually ships, stated as the code behaves.
+
+    The claim is NOT "a successor is engaged while its predecessor drains" — the
+    arbitration cannot do that and should not: the predecessor holds the
+    transcript claim for its whole life, so a candidate spawned against it would
+    be doomed, and only the lease decides who runs (agent review round 1, R5).
+    What ships is the pair of halves this cell asserts: the engage against a
+    draining record STOPS reporting it ready and returns immediately with the
+    leaving detail, and the successor is started by the next engage, the moment
+    the claim is released. That is also why the incident's message survives on
+    the spool rather than in a turn: the drain can outlast any engage envelope.
+    """
+    fleet.loop = asyncio.get_running_loop()
+    await fleet.publish_draining_predecessor(SESSION_ID)
+
+    engage = asyncio.ensure_future(
+        engage_runtime(
+            SESSION_ID,
+            str(tmp_path),
+            WarmErrand(),
+            config_dir=tmp_path,
+            deadline_s=20.0,
+        )
+    )
+    # RETURNED, not waited out. The old shape sat here for the whole 20 s
+    # envelope (and, in production, for the full 30 s deadline) because the
+    # record existed and the errand could never complete against it — the wait
+    # that became `ConnectionError("the runtime is reconnecting")` upstream
+    # before the bind's dial loop was ever entered (agent review round 1, R1).
+    outcome = await asyncio.wait_for(engage, timeout=5)
+    assert outcome.detail == launch_module.LEAVING_DETAIL, outcome.detail
+    assert outcome.spawned is False, "nothing may spawn against a live lease holder"
+    assert fleet.spawns == 0, "a candidate was spawned against a live lease holder"
+
+    # The predecessor's own ``_clean_exit`` ordering, which the fleet
+    # reproduces: record withdrawn, then lease released.
+    fleet.dispose_predecessor()
+    outcome = await asyncio.wait_for(
+        engage_runtime(
+            SESSION_ID,
+            str(tmp_path),
+            WarmErrand(),
+            config_dir=tmp_path,
+            deadline_s=20.0,
+        ),
+        timeout=20,
+    )
+
+    assert outcome.spawned is True, "the engage never started the successor"
+    assert outcome.detail == "runtime ready", outcome.detail
+    assert fleet.winners == 1, "no runtime took the transcript"
+    assert fleet.losers == 0, "a doomed candidate was spawned into the drain window"

@@ -39,7 +39,6 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessionBridge,
     DesktopSessions,
 )
-from local_operator.server.utils.websocket_manager import WebSocketManager
 from local_operator.update import BuildStamp
 
 OLD = BuildStamp(version="0.54.30", source_ref="1111111")
@@ -503,29 +502,6 @@ async def test_an_open_sse_stream_holds_the_daemon(disk: dict[str, Any]) -> None
 
 
 @pytest.mark.asyncio
-async def test_an_open_websocket_holds_the_daemon(disk: dict[str, Any]) -> None:
-    manager = WebSocketManager()
-    app, publisher = FakeApp(websocket_manager=manager), FakePublisher(_record())
-    task, stop, exited = await _start(app, publisher)
-    await asyncio.sleep(QUIET_S)
-
-    # The real manager's own structure, since the count reads it: one socket
-    # subscribed to one message id, exactly what ``connect`` builds. A bare
-    # ``object()`` stands in for the socket — nothing here touches it.
-    manager.connections[next(iter(manager.connections))]["message-1"] = {cast(Any, object())}
-    disk["build"] = NEW
-    await _wait_for_announcement(publisher)
-    await asyncio.sleep(QUIET_S)
-    _announced_not_latched(app, publisher, exited)
-    assert manager.live_connection_count() == 1
-
-    manager.connections.clear()
-    await asyncio.wait_for(task, 2.0)
-    assert exited == [True]
-    assert retire.retiring(cast(Any, app)) is True
-
-
-@pytest.mark.asyncio
 async def test_an_in_flight_desktop_request_holds_the_daemon(
     disk: dict[str, Any], tmp_path
 ) -> None:
@@ -626,7 +602,6 @@ async def test_an_idle_daemon_retires_once_every_term_is_clear(
     pool.bridges["0123456789ab"] = _live_bridge(tmp_path)  # present but idle
     app = FakeApp(
         event_broker=SimpleNamespace(stats=lambda: {"subscribers": 0}),
-        websocket_manager=WebSocketManager(),
         desktop_sessions=pool,
     )
     publisher = FakePublisher(_record())
@@ -1758,49 +1733,33 @@ async def test_a_dead_poll_is_logged_rather_than_silent(
     assert caplog.text == "", "a cancelled poll is not a dead one"
 
 
-@pytest.mark.parametrize("probe", ["event broker", "websocket manager"])
 @pytest.mark.asyncio
 async def test_an_unreadable_probe_means_stay(
-    probe: str,
     disk: dict[str, Any],
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A probe this process cannot READ pins it, rather than releasing it (MINOR-4).
 
-    The probe helpers used to fail OPEN: a raising ``stats()`` read as "no
-    streams" and a raising accessor as no sockets, so a probe that broke let the
-    daemon exit under a live stream — "an interruption nobody undoes", and the
-    opposite of the rule this module states. Missing probes are still benign (a
-    reduced app has nothing in flight either way, and reading those as "stay"
-    would pin every unit-sized app forever); it is the RAISING ones that mean
-    stay.
+    The probe helper used to fail OPEN: a raising ``stats()`` read as "no
+    streams", so a probe that broke let the daemon exit under a live stream —
+    "an interruption nobody undoes", and the opposite of the rule this module
+    states. A MISSING probe is still benign (a reduced app has nothing in
+    flight either way, and reading that as "stay" would pin every unit-sized
+    app forever); it is the RAISING one that means stay, and the log has to name
+    it, which is what makes the daemon explain why it is still here.
 
-    One probe broken at a time: the predicate short-circuits, so a test that
-    broke all of them would only ever exercise the first — and the message has to
-    name the probe that could not be read, which is what makes the daemon's log
-    explain why it is still here.
+    The second probe this case used to cover — the removed websocket manager's
+    live-connection count — is gone with the transport; the desktop plane has
+    its own case below.
     """
-    state: dict[str, Any] = {}
-    if probe == "event broker":
-        broker = SimpleNamespace(stats=_raiser("the broker is broken"))
-        state["event_broker"] = broker
-        expected = "the event broker's subscriber count"
+    broker = SimpleNamespace(stats=_raiser("the broker is broken"))
+    expected = "the event broker's subscriber count"
 
-        def heal() -> None:
-            broker.stats = lambda: {"subscribers": 0}
+    def heal() -> None:
+        broker.stats = lambda: {"subscribers": 0}
 
-    else:
-        manager = WebSocketManager()
-        broken = _raiser("the manager is broken")
-        manager.live_connection_count = broken  # type: ignore[method-assign]
-        state["websocket_manager"] = manager
-        expected = "the websocket connection count"
-
-        def heal() -> None:
-            manager.live_connection_count = lambda: 0  # type: ignore[method-assign]
-
-    app, publisher = FakeApp(**state), FakePublisher(_record())
+    app, publisher = FakeApp(event_broker=broker), FakePublisher(_record())
     task, stop, exited = await _start(app, publisher)  # type: ignore[arg-type]
     await asyncio.sleep(QUIET_S)
 

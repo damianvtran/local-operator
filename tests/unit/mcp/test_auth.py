@@ -1502,6 +1502,23 @@ class TestBrowserLaunchContainment:
         monkeypatch.setenv("BROWSER", f"{self._noisy_browser(tmp_path)} %s")
         monkeypatch.setattr("local_operator.logger.console_is_silenced", lambda: True)
 
+        # The launcher's spawn is recorded through the seam it uses so the
+        # DETACHMENT the child is really given is what the assertion reads,
+        # rather than a copy of the kwargs kept in the test.
+        from local_operator import procstate
+
+        real_spawn = auth_mod.asyncio.create_subprocess_exec
+        seen: list[dict[str, object]] = []
+
+        # ``Any`` rather than ``object``: the wrapper forwards the argv and
+        # kwargs straight to the real spawn, and ``object`` parameters cannot be
+        # passed back into a typed call.
+        async def recording_spawn(*argv: Any, **kwargs: Any) -> Any:
+            seen.append(kwargs)
+            return await real_spawn(*argv, **kwargs)
+
+        monkeypatch.setattr(auth_mod.asyncio, "create_subprocess_exec", recording_spawn)
+
         with caplog.at_level(logging.INFO, logger="local_operator.mcp.auth"):
             opened = await open_browser_quietly("https://provider.test/authorize")
 
@@ -1510,6 +1527,16 @@ class TestBrowserLaunchContainment:
         # Not discarded: a browser that could not start is a real login failure,
         # and this line is the only place the reason survives.
         assert "Gtk-Message: Failed to load module" in caplog.text
+        # And the child is still detached from this process's session, which is
+        # what keeps a login alive when the console that started it goes away.
+        # POSIX detaches with ``start_new_session``; Windows ignores that flag
+        # outright, so there the answer is ``creationflags`` — the reason the
+        # kwargs come from ``procstate.detached_popen_kwargs()`` at all.
+        assert seen, "the browser is launched as a subprocess, not in-process"
+        if procstate.is_windows():
+            assert "creationflags" in seen[0]
+        else:
+            assert seen[0].get("start_new_session") is True
 
     @pytest.mark.asyncio
     async def test_owning_the_terminal_keeps_the_in_process_call(

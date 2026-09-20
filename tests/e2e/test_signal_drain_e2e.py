@@ -61,6 +61,7 @@ import pytest
 
 from local_operator.session.runtime import control, registry
 from local_operator.session.runtime.process import SIGNAL_DRAIN_S
+from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.e2e.test_cut_off_turns_e2e import (
     _attach,
     _child_env,
@@ -645,6 +646,11 @@ async def test_refresh_moves_the_idle_stale_runtime_and_queues_the_busy_one(
         "LOP_BUILD_SETTLE_S": "0.5",
         "LOP_BUILD_STAGGER_S": "30",
     }
+    # The rig spawns real runtime children on the ``test``/mock hosting and ends
+    # their turns; gated so a completion cannot banner from this cell (the
+    # shared constant, so this file cannot disagree with the other builders
+    # about which switches it means).
+    env.update(NO_NOTIFY_ENV)
     rig = _Rig(config)
     try:
         with bounded(300, "signal drain: refresh reports moved and busy"):
@@ -810,7 +816,21 @@ async def test_a_signalled_runtime_publishes_its_pending_exit_and_keeps_its_turn
                 )
             assert refusal.HEAD == RuntimeRetiring.HEAD_SIGNALLED, refusal.HEAD
             assert "newer build" not in str(refusal), str(refusal)
-            assert RuntimeRetiring.TAIL in str(refusal), str(refusal)
+            # AND THE TAIL IS THE CARRIED ONE, not the plain "send it again once
+            # the session is running again". A signalled runtime spools an
+            # owner's prompt exactly as a build drain does (the spool is not
+            # build-specific — only the sentence about the DEPARTURE is), so
+            # ``prompt_and_wait`` sees the spool receipt and answers with the
+            # deferral it established: the message is on the spool and runs when
+            # this session next runs. Asking for a re-send here would invite the
+            # duplicate the admission identity exists to prevent. The assertion
+            # this cell was written for — that a SIGNALLED runtime is never
+            # handed the build story — is the line above.
+            # ...and on a SIGNALLED departure the queued tail is the conditional
+            # one: the spool row is durable, but no successor is owed, so the
+            # sentence may not promise a future this departure does not establish
+            # (agent review round 2, NIT-1).
+            assert refusal.TAIL == RuntimeRetiring.TAIL_QUEUED_OTHER, refusal.TAIL
             # And nothing was cut by the refusal: the turn is still the one the
             # signal asked this runtime to finish.
             assert rig.children["drainvis01"].poll() is None, "a refusal signals nothing"

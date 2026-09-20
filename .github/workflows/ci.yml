@@ -128,6 +128,7 @@ jobs:
       unit: ${{ steps.classify.outputs.unit }}
       tui: ${{ steps.classify.outputs.tui }}
       windows: ${{ steps.classify.outputs.windows }}
+      xplat: ${{ steps.classify.outputs.xplat }}
       audit: ${{ steps.classify.outputs.audit }}
       cli: ${{ steps.classify.outputs.cli }}
       server: ${{ steps.classify.outputs.server }}
@@ -479,6 +480,156 @@ jobs:
           New-Item -ItemType Directory -Force $env:HOME | Out-Null
           python -m pytest tests/unit/test_agent_import_boundary.py tests/unit/server/test_edit_workspace_boundary.py -n0 -q
 
+  # The cross-platform probe battery (`scripts/xplat_probe.py`), one leg per OS.
+  #
+  # WHY THIS IS NOT COVERED BY THE UNIT MATRIX: the suite runs on Linux and the
+  # interactive surface is exercised on macOS, so a mechanism that is silently
+  # POSIX-only -- or silently macOS-only -- passes every other gate in this
+  # file. The failure class it targets is the SILENT one: not an `ImportError`
+  # at startup, which somebody would notice, but a code path that reports
+  # success and does nothing on this platform (the measured baseline was
+  # `wake.install` and `mobile.install` both FAILing on Linux -- "no supervisor
+  # installer for this platform" and "install needs macOS launchd" -- while
+  # `mobile.status` still answered, i.e. the portal looked present and could not
+  # be installed).
+  #
+  # The battery is stdlib-only, self-driving and isolated (it re-homes HOME and
+  # the config root into a scratch sandbox, and strips inherited `CMUX_*`), so
+  # these legs need no pytest, no fixtures, no secrets and no network -- and
+  # therefore run on fork pull requests. It exits non-zero when any probe
+  # FAILed, which is what makes this a gate rather than a report: the matrix it
+  # prints is the failure message.
+  #
+  # Two jobs rather than one `os:` matrix, because they share no step bodies:
+  # the Windows leg is PowerShell end to end (see below) and carries the longer
+  # ceiling. `fail-fast` is therefore not in play here -- neither leg can cancel
+  # the other.
+  #
+  # WHAT THIS CANNOT COVER, and why it is a separate rig: one GitHub runner is
+  # one Ubuntu LTS, while `lop`'s Linux mechanisms (a user systemd instance,
+  # `notify-send`, `xdg-open`, the terminal it was launched from) are exactly
+  # what a distro changes. Other distributions are read through
+  # `scripts/xplat_linux_matrix.sh`, which builds containers locally -- a
+  # container cannot be a GitHub runner. Windows is the reverse case: a Windows
+  # container needs a Windows kernel underneath it and cannot run on a macOS or
+  # Linux host at all, so Windows validation is this real Windows runner and
+  # never an emulation container.
+  xplat-probe-linux:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.xplat != 'false'
+    runs-on: ubuntu-latest
+    # The battery bounds each probe itself (60-600 s, a timed-out probe is a
+    # reported FAIL, not a hang) and is then bounded AGAIN, in aggregate, by the
+    # `--budget` below -- so this ceiling only has to cover install and queue
+    # time above that budget. It has to be ABOVE the budget: the per-probe
+    # timeouts sum to ~64 minutes, and a battery that runs out of budget returns
+    # a partial matrix with the unreached probes marked `SKIP not run`, while a
+    # job killed at its own ceiling prints no matrix and uploads nothing at all.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run the cross-platform probe battery
+        # The console script is deliberately not used: the probes invoke the
+        # entry point through the interpreter so a host with the package
+        # present but no installed shim is still measurable (the same reason the
+        # battery's own `_cli_argv` exists), and this line is the reading the
+        # `--json` artifact records.
+        #
+        # `--budget 1200`: the battery stops STARTING probes once 20 minutes of
+        # wall clock are gone, marks the rest `SKIP not run`, and still writes
+        # the matrix -- 5 minutes under the job ceiling for install and setup.
+        # Without it the per-probe timeouts sum to ~64 minutes, so three probes
+        # hanging to their own documented bound would spend the whole ceiling
+        # and produce no evidence at all.
+        run: python scripts/xplat_probe.py --json xplat-ubuntu.json --budget 1200
+
+      - name: Upload the probe matrix
+        # `always()`: the JSON is most worth having on the run that FAILed. The
+        # reason it is actually there is `_write_matrix`'s call site -- the
+        # battery rewrites the artifact after EVERY probe, so a run that is
+        # killed part-way (a job timeout, a crash out of the loop) still uploads
+        # the reads that completed rather than an empty set.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xplat-probe-linux
+          path: xplat-ubuntu.json
+          retention-days: 7
+
+  xplat-probe-windows:
+    needs: [changes]
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.xplat != 'false'
+    # Native Windows, not a container and not a simulated `os.name`: the probes
+    # that matter here are the ones where Windows differs in substance
+    # (`os.startfile`, `socket.SO_EXCLUSIVEADDRUSE`, `signal.SIGBREAK` via
+    # `CTRL_BREAK_EVENT`, `%USERPROFILE%` rather than `$HOME`, no module-level
+    # `fcntl`/`pty`, a non-POSIX file lock). A POSIX host with `os.name` patched
+    # cannot answer any of them.
+    runs-on: windows-latest
+    # Longer than the Linux leg on purpose: the same battery on a slower runner
+    # with slower installs, and --budget 2400 (40 minutes) against this ceiling.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run the cross-platform probe battery
+        shell: pwsh
+        run: |
+          # Same sandbox shape as `filesystem-boundaries-windows`, and for the
+          # same reason: a probe that reads the runner's real profile is
+          # measuring the machine, not the code. `USERPROFILE` is not decoration
+          # -- it, not `HOME`, is what `os.path.expanduser` consults on Windows,
+          # so a sandbox that sets only `HOME` leaves the real profile live.
+          #
+          # `--budget 2400` is the aggregate bound this leg's ceiling sits above:
+          # the per-probe timeouts sum to ~64 minutes, and this runner is the
+          # slow one, so the battery returns a partial matrix (unreached probes
+          # `SKIP not run`) rather than letting the job die at 45 minutes with
+          # nothing uploaded. See the Linux leg for the same reasoning.
+          $env:HOME = Join-Path $env:RUNNER_TEMP "lop-xplat-home"
+          $env:USERPROFILE = $env:HOME
+          $env:LOCAL_OPERATOR_CONFIG_DIR = Join-Path $env:HOME ".local-operator"
+          New-Item -ItemType Directory -Force $env:HOME | Out-Null
+          python scripts/xplat_probe.py --json xplat-windows.json --budget 2400
+
+      - name: Upload the probe matrix
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: xplat-probe-windows
+          path: xplat-windows.json
+          retention-days: 7
+
   test:
     needs: [changes]
     if: >-
@@ -552,8 +703,51 @@ jobs:
 
       - name: Run test shard with coverage
         run: |
-          pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report=
+          pytest $(cat shard_tests.txt | tr '\n' ' ') --cov --cov-fail-under=0 --cov-report= \
+            --junit-xml=junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
           mv .coverage .coverage.${{ matrix.python-version }}.${{ matrix.shard }}
+
+      - name: Upload junit timings
+        # WHY THE SUITE PAYS FOR A JUNIT FILE EVERY RUN: this is the only
+        # channel that turns committed shard weights into MEASURED ones on
+        # dedicated hardware. `tests/durations.json` is currently measured on a
+        # developer machine, whose load distorts the event-loop-bound TUI files
+        # that carry 82% of the tree's weight (scripts/gen_test_durations.py
+        # says so and names CI as the better source, blocked only because the
+        # workflow emitted nothing to read). With this artifact,
+        # `gh run download <run> -n junit-timings-<py>-*` then
+        # `python scripts/gen_test_durations.py --tree unit --junit '*.xml'`
+        # regenerates the manifest from the run that actually suffered the
+        # imbalance — no local full-suite run needed.
+        #
+        # `if: always()` is deliberate, and its reach is narrower than it looks.
+        # It covers the FAILING case: an ordinary pytest failure exits 1 and
+        # still writes the XML, with `failures="1"` and per-test times for
+        # everything that ran, which is a run whose weights want correcting.
+        #
+        # It does NOT cover the case this job actually cares about: a shard
+        # killed by the `faulthandler` watchdog (tests/e2e/watchdog.py exits
+        # with `os._exit(1)`) never reaches pytest's `sessionfinish`, and that
+        # is where the JUnit file is written -- so there is no file to upload,
+        # and `if-no-files-found: ignore` means the step reports success with
+        # an empty artifact. Measured both ways on 2026-09-19: a failing test
+        # leaves `failures="1"` in the XML, while a test that calls
+        # `os._exit(1)` (what the watchdog does) leaves no XML at all.
+        #
+        # Cancellation is deliberately NOT claimed either way. It is a third
+        # exit path this change did not measure, and the two signals differ: a
+        # round-2 review measured that SIGINT (which is how GitHub's
+        # documented cancellation begins) leaves the XML, while SIGTERM does
+        # not. The two cases above are what this rationale rests on.
+        # A hung shard's timings are therefore NOT recoverable from this
+        # artifact; the weights for such a run come from a healthy one.
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-timings-${{ matrix.python-version }}-${{ matrix.shard }}
+          path: junit-${{ matrix.python-version }}-${{ matrix.shard }}.xml
+          retention-days: 1
+          if-no-files-found: ignore
 
       - name: Print the shard stall report
         # `always()` unconditionally: the report exists exactly when this job is
@@ -833,10 +1027,41 @@ jobs:
     #
     # `fail-fast: false` so a macOS queue delay or a Linux-only regression each
     # report on their own rather than cancelling the other leg's evidence.
+    #
+    # TWO axes, and each one answers a different requirement.
+    #
+    # `os` is the guard's own requirement: macOS is the only platform where the
+    # #401 event-loop freeze can go red at all (see the long note above), so
+    # dropping the leg disarms the stage. Both OSes run every shard.
+    #
+    # `shard` is how this stage stopped being the longest job in the run. The
+    # whole tree ran serially on each leg — `-n0` is required (a fired watchdog
+    # kills the process, which under xdist takes unrelated tests with it) — and
+    # measured `184 passed, 7 skipped ... in 1111.95s` on run 35414372114: 19.1
+    # and 19.8 min, the critical path of the entire workflow. Splitting the
+    # TREE across RUNNERS is the one axis that leaves the `-n0` requirement
+    # untouched: each matrix leg is its own machine, with its own process, its
+    # own `flock` files and its own app lifecycles, so no shard can see a
+    # sibling's hang.
+    #
+    # WHY THREE AND NOT TWO, and what the trade is. Measured on run 35420676112
+    # (the split from CI-measured timings): legs of 414/412/401 s on ubuntu and
+    # 442/441/400 s on macOS, i.e. ~7.5 min per leg including install, against a
+    # unit shard whose job wall is ~12-15 min. So the e2e job is NO LONGER the
+    # critical path at three shards, and two shards (~11 min per leg) would also
+    # finish first. Three buys earlier freeze-guard feedback on a tree that only
+    # grows, and costs two more jobs per run: this matrix takes a pull request
+    # from 17 jobs to 21, against the ~20-job account-wide budget the `test`
+    # job's comment names, on main from 20 to 24. That is a deliberate trade,
+    # not an oversight: if runner queue pressure becomes the binding constraint,
+    # `shard: [0, 1]` with `--total 2` restores the job count at the same
+    # critical path — which is why the matrix and `--total` are asserted equal
+    # in tests/unit/test_ci_hygiene.py rather than kept in sync by hand.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        shard: [0, 1, 2]
     runs-on: ${{ matrix.os }}
     # NO fork gate, deliberately, unlike cli-sanity/server-sanity below. Those
     # need a real OpenRouter key, so they are skipped on fork PRs that cannot
@@ -891,6 +1116,17 @@ jobs:
     # dump — a pre-fix red lands in ~63 s. This ceiling is only the backstop
     # for a hang that escapes those, so it should never be what reports a
     # freeze; it is sized to absorb macOS install and queue time instead.
+    #
+    # NOT tightened now that the tree is sharded, deliberately. The split cut
+    # the measured wall to a fraction of it, so this ceiling is now several
+    # times the healthy cost — but the thing it exists to leave room for is NOT
+    # the healthy cost: it is install + queue on a slow macOS runner, and a
+    # genuine freeze is reported by the per-test `faulthandler` bound (see
+    # tests/e2e/watchdog.py) long before this fires. Tightening it toward the
+    # measured wall would turn runner slowness into red shards without making a
+    # real hang report any sooner. `tests/unit/test_ci_hygiene.py` pins the
+    # relationship in the direction that matters: the ceiling must exceed every
+    # shard wall the manifest projects.
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -909,6 +1145,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Partition the e2e suite
+        # Same partitioner as the unit matrix, pointed at the other tree: the
+        # LPT split by measured per-file duration (tests/durations-e2e.json),
+        # not by file count. `--total` must equal the matrix length above, and
+        # tests/unit/test_ci_hygiene.py checks that coupling rather than
+        # trusting it — an orphaned shard is a set of tests that never runs.
+        #
+        # The file list is written rather than passed through `$()` so the job
+        # log records exactly which files ran in this shard, on this leg.
+        run: |
+          python scripts/shard_tests.py \
+            --tree e2e --shard ${{ matrix.shard }} --total 3 --out e2e_tests.txt
+      - name: Print the shard's file list
+        # Cheap, and it is the difference between "a shard failed" and "which
+        # tests were in it". Ordered as the partitioner ordered it.
+        run: cat e2e_tests.txt
       - name: Run headless TUI end-to-end tests
         # `-m e2e` overrides the `-m "not e2e"` in pyproject's addopts, which
         # keeps this stage out of the unit run (a fired watchdog exits the
@@ -917,9 +1169,37 @@ jobs:
         # app lifecycles, so they run serially rather than under xdist.
         # `env -u NO_COLOR TERM=xterm-256color` is what the TUI suite needs to
         # compose a real frame, same as the documented local invocation.
+        #
+        # The file list is this shard's slice of tests/e2e, written by the
+        # step above; `-m e2e` still applies, because the marker is added by
+        # tests/e2e/conftest.py AT COLLECTION by path, so naming files
+        # explicitly does not drop it.
+        #
+        # `--junit-xml` for the same reason the unit shards write one: it is
+        # the only measurement of this tree taken on a runner rather than on a
+        # loaded developer box, and regenerating tests/durations-e2e.json from
+        # it costs one `gh run download` instead of a 20-minute local run.
         run: |
           env -u NO_COLOR TERM=xterm-256color \
-            python -m pytest tests/e2e -m e2e -n0 -q
+            python -m pytest $(cat e2e_tests.txt | tr '\n' ' ') -m e2e -n0 -q \
+              --junit-xml=junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+      - name: Upload e2e junit timings
+        # `if: always()` for the FAILING case: a shard that fails an assertion
+        # exits 1 and still writes the XML, with times for every test that ran.
+        #
+        # NOT for a hang. A tripped watchdog calls `os._exit(1)`, so pytest
+        # never reaches `sessionfinish` and writes nothing -- and
+        # `if-no-files-found: ignore` then reports this step as a success with
+        # no artifact, which is how that limit would otherwise go unnoticed.
+        # Measured both ways on 2026-09-19 (see the sibling note on the unit
+        # job's upload step).
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-timings-e2e-${{ matrix.os }}-${{ matrix.shard }}
+          path: junit-e2e-${{ matrix.os }}-${{ matrix.shard }}.xml
+          retention-days: 1
+          if-no-files-found: ignore
       - name: Report a hang's thread dump
         # A tripped watchdog kills the process, so pytest never gets to print
         # anything: the stacks of the parked threads live only in a dump file,

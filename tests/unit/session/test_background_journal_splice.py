@@ -328,13 +328,16 @@ async def test_a_later_turn_rides_a_clean_prefix(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_journal_incident_is_parked_the_same_way(tmp_path):
-    """The sibling door: ``journal_incident`` shares the guard.
+async def test_journal_mcp_unavailable_is_parked_the_same_way(tmp_path):
+    """The sibling door: both journal notices share the guard.
 
-    ``_on_mcp_incident`` fires it from a background task and the failover path
-    calls it on every provider error, so an incident landing mid-batch would
-    corrupt the context exactly as the model switch did. Driven through
-    ``_on_mcp_incident`` so the real trigger is covered, not just the method.
+    ``_on_mcp_incident`` fires ``journal_mcp_unavailable`` from a background
+    task and the failover path awaits ``journal_incident`` on every provider
+    error, so either landing mid-batch would corrupt the context the same way
+    the model switch did. Driven through ``_on_mcp_incident`` for the MCP row —
+    the real trigger, not just the method — and directly for the failover row,
+    because the two doors are separate call sites and only one of them is
+    reachable from a tool body.
     """
     holder: dict[str, Session] = {}
     stream = _tool_then_text()
@@ -347,6 +350,7 @@ async def test_journal_incident_is_parked_the_same_way(tmp_path):
         if tool_call_id == "toolu_A":
             session._on_mcp_incident("files", "circuit breaker opened")
             await _drain_background(session)
+            await session.journal_incident("429 too many requests")
         return ToolResult(
             tool_call_id=tool_call_id, tool_name="echo", content=[TextContent(text="ok")]
         )
@@ -364,6 +368,7 @@ async def test_journal_incident_is_parked_the_same_way(tmp_path):
         "assistant",
         "tool",
         "tool",
+        "custom:session_mcp_unavailable",
         "custom:session_incident",
         "assistant",
     ], f"unexpected live shape: {_roles(session)}"
@@ -371,7 +376,7 @@ async def test_journal_incident_is_parked_the_same_way(tmp_path):
     wire = _wire_messages(stream.requests[1])
     assert (
         _dangling_tool_use(wire) == []
-    ), "journal_incident spliced its notice into the open batch, orphaning it"
+    ), "a journal notice spliced into the open batch, orphaning it"
 
 
 @pytest.mark.asyncio

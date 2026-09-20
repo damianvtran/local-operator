@@ -9,7 +9,9 @@ achieved, and a supervisor label that collided across config roots.
 The systemd branch is exercised on macOS by monkeypatching ``sys.platform``
 and ``shutil.which`` — the same technique ``tests/unit/mcp/test_manager.py``
 already uses — because the code under test dispatches on exactly those two
-things. Where a claim can only be settled by a real service manager (whether
+things. Those patches are GLOBAL (``install.sys`` IS the ``sys`` module), which
+is what lets them reach :mod:`local_operator.supervisors`, where the
+supervisor discovery lives now. Where a claim can only be settled by a real service manager (whether
 ``append:`` actually redirects, whether a non-lingering user has a manager at
 all) it was verified by hand against systemd 255 in a container and is cited
 in the docstrings; those are deliberately NOT asserted here, since a test that
@@ -20,12 +22,15 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
+from local_operator import supervisors
 from local_operator.browser_bridge import install
 
 
@@ -33,14 +38,14 @@ from local_operator.browser_bridge import install
 def linux(monkeypatch: pytest.MonkeyPatch) -> None:
     """Present as Linux WITH systemd available."""
     monkeypatch.setattr(install.sys, "platform", "linux")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
 
 
 @pytest.fixture
 def linux_without_systemd(monkeypatch: pytest.MonkeyPatch) -> None:
     """Devuan/Alpine/Void/OpenRC/WSL2-without-systemd, and every container."""
     monkeypatch.setattr(install.sys, "platform", "linux")
-    monkeypatch.setattr(install.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
 
 
 @pytest.fixture
@@ -100,6 +105,9 @@ def test_logs_command_reads_the_journal_when_the_log_file_is_not_written(
     assert command[:2] == ["journalctl", "--user"]
     assert install.systemd_unit() in command
     assert "-f" not in command
+    # And the CLI's question gets the same answer as the argv: this command
+    # reads the journal, so an absent log FILE says nothing about the daemon.
+    assert install.logs_read_the_log_file() is False
 
 
 def test_logs_command_follows_the_journal_when_asked(
@@ -116,6 +124,106 @@ def test_logs_command_tails_the_file_when_systemd_does_redirect(
     command = install.logs_command(50)
     assert command[0] == "tail"
     assert command[-1] == str(install.log_path())
+    assert install.logs_read_the_log_file() is True
+
+
+def test_logs_command_reads_the_file_without_tail_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows has no ``tail``, and ``lop browser logs`` RUNS this argv (C9).
+
+    The defect was not a cosmetic one: ``subprocess.call(["tail", ...])`` on
+    Windows raises ``FileNotFoundError``, i.e. the product's own instruction for
+    reading the daemon's log was a command that cannot run there. The platform's
+    equivalent is ``Get-Content`` — a PowerShell CMDLET, so the argv names the
+    host that can run it rather than the cmdlet alone, which would fail one
+    layer down. ``-Wait`` is the ``-f``.
+    """
+    monkeypatch.setattr(install, "_IS_WINDOWS", True)
+    # Stated rather than inherited from the runner's OS: this is the arm that
+    # decides the command reads a FILE, and ``_supervisor`` is what
+    # ``logs_read_the_log_file`` asks.
+    monkeypatch.setattr(install, "_supervisor", lambda: "schtasks")
+
+    command = install.logs_command(50)
+    assert command[0] == "powershell"
+    assert command[1] == "-NoProfile"
+    assert "Get-Content -Tail 50" in command[-1]
+    assert str(install.log_path()) in command[-1]
+    assert "-Wait" not in command[-1], "no follow unless it was asked for"
+    # ``Get-Content`` READS ``log_path`` (the scheduled task redirects into it),
+    # so the CLI's "no daemon log yet" sentence must fire here — the case a
+    # ``command_line[0] == "tail"`` check could never see.
+    assert install.logs_read_the_log_file() is True
+
+    followed = install.logs_command(7, follow=True)
+    assert "Get-Content -Tail 7 -Wait" in followed[-1]
+
+
+def test_logs_command_is_unchanged_where_tail_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The POSIX spelling is byte-for-byte what it was (macOS and Linux)."""
+    monkeypatch.setattr(install, "_IS_WINDOWS", False)
+    assert install.logs_command(50) == ["tail", "-n", "50", str(install.log_path())]
+    assert install.logs_command(50, follow=True) == [
+        "tail",
+        "-n",
+        "50",
+        "-f",
+        str(install.log_path()),
+    ]
+    assert install.logs_read_the_log_file() is True
+
+
+def test_the_cli_names_the_missing_log_file_on_the_windows_arm(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``lop browser logs`` on a Windows whose daemon never ran must say WHY.
+
+    THE OLD CHECK FIRED NOWHERE HERE: it asked ``command_line[0] == "tail"``,
+    and the Windows argv starts with ``powershell`` — so the operator got
+    PowerShell's own "cannot find the path" instead of the sentence naming the
+    supervisor that writes the file. Asked of the install, the same machine
+    gets the answer the macOS arm gets.
+    """
+    from argparse import Namespace
+
+    from local_operator.cli import browser_command
+
+    monkeypatch.setattr(install, "_IS_WINDOWS", True)
+    monkeypatch.setattr(install, "_supervisor", lambda: "schtasks")
+    missing = tmp_path / "bridge.log"
+    monkeypatch.setattr(install, "log_path", lambda: missing)
+
+    code = browser_command(Namespace(browser_command="logs", lines=100, follow=False))
+
+    assert code == 1
+    assert f"no daemon log at {missing}" in capsys.readouterr().out
+
+
+def test_the_cli_stays_quiet_where_the_command_reads_the_journal(
+    linux: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half: no log file is NORMAL on a journal platform.
+
+    Asserting the absence is what keeps the Windows fix from turning the
+    journal arm's ordinary state into a refusal.
+    """
+    from argparse import Namespace
+
+    from local_operator.cli import browser_command
+
+    monkeypatch.setattr(install, "systemd_version", lambda: 239)
+    monkeypatch.setattr(install, "log_path", lambda: tmp_path / "never-written.log")
+    ran: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "call", lambda argv: ran.append(list(argv)) or 0)
+
+    code = browser_command(Namespace(browser_command="logs", lines=100, follow=False))
+
+    assert code == 0
+    assert "no daemon log at" not in capsys.readouterr().out
+    assert ran and ran[0][0] == "journalctl"
 
 
 def test_status_reports_the_journal_as_the_log_location_on_old_systemd(
@@ -327,7 +435,7 @@ def test_an_unrelated_systemctl_error_is_passed_through_unchanged() -> None:
 def test_enable_linger_is_absent_rather_than_raising_without_loginctl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(install.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     assert install.enable_linger() is False
 
 
@@ -514,6 +622,32 @@ def test_status_names_the_supervisor_and_root_it_reports_on(
 # --------------------------------------------------------------------------
 
 
+def test_the_reported_supervisor_follows_the_capability_not_the_platform(
+    monkeypatch: pytest.MonkeyPatch, isolated_root: Path
+) -> None:
+    """A8: the ``status`` field keyed on ``sys.platform`` while the rest of the
+    module asks the binary — so a darwin with no ``launchctl`` reported a launchd
+    label and a systemd-less Linux reported a unit, both registrations that
+    cannot exist.
+
+    Driven through ``status()``, the consumer, and not through the helper: a
+    test of the helper alone stays green when the payload keeps its own
+    platform branch, which is the defect.
+    """
+    monkeypatch.setattr(install, "health", lambda *a, **k: None)
+
+    monkeypatch.setattr(install, "_supervisor", lambda: None)
+    assert (
+        install.status()["supervisor"] == "none"
+    ), "a launchd label was named for a host with no launchctl"
+
+    monkeypatch.setattr(install, "_supervisor", lambda: install.supervisors.SCHTASKS)
+    assert install.status()["supervisor"] == install.task_name()
+
+    monkeypatch.setattr(install, "_supervisor", lambda: install.supervisors.SYSTEMCTL)
+    assert install.status()["supervisor"] == install.systemd_unit()
+
+
 def test_uninstall_carries_an_error_string_for_the_cli_to_print(
     linux_without_systemd: None,
 ) -> None:
@@ -551,9 +685,15 @@ def inherited_darwin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_r
     home = tmp_path / "home"
     (home / "Library" / "LaunchAgents").mkdir(parents=True)
     monkeypatch.setattr(install.sys, "platform", "darwin")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
+    # THIS TMPDIR IS THE REAL HOME for this fixture, and the launchd-level view
+    # has to agree with the installer's own: the verbs now apply
+    # `launchd.is_own_plist` to the pair they address (round 2, R-8), and a
+    # fixture whose `HOME` is a tmpdir would otherwise be refused before any
+    # call — which would make adoption untestable rather than guarded.
+    monkeypatch.setattr(install.launchd, "real_home", lambda: home)
     legacy = home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
     legacy.write_bytes(
         plistlib.dumps({"Label": install.LABEL, "StandardOutPath": str(install.log_path())})
@@ -589,7 +729,7 @@ def test_uninstall_does_not_claim_a_removal_it_did_not_make(
     home = tmp_path / "empty-home"
     (home / "Library" / "LaunchAgents").mkdir(parents=True)
     monkeypatch.setattr(install.sys, "platform", "darwin")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
     monkeypatch.setattr(
@@ -686,7 +826,7 @@ def test_a_redirected_home_never_adopts_the_passwd_homes_registration(
     redirected = tmp_path / "redirected-home"
     (redirected / "Library" / "LaunchAgents").mkdir(parents=True)
     monkeypatch.setattr(install.sys, "platform", "darwin")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: redirected))
     monkeypatch.setattr(install, "_passwd_home", lambda: passwd_home)
 
@@ -742,7 +882,7 @@ def test_the_legacy_unit_is_resolved_on_linux_too(
         encoding="utf-8",
     )
     monkeypatch.setattr(install.sys, "platform", "linux")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
 
@@ -788,7 +928,7 @@ def inherited_linux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_ro
     home = tmp_path / "linux-home"
     (home / ".config" / "systemd" / "user").mkdir(parents=True)
     monkeypatch.setattr(install.sys, "platform", "linux")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
     legacy = home / ".config" / "systemd" / "user" / install.SYSTEMD_UNIT
@@ -846,7 +986,7 @@ def test_uninstall_leaves_no_systemd_unit_untouched_when_nothing_was_inherited(
     home = tmp_path / "bare-home"
     (home / ".config" / "systemd" / "user").mkdir(parents=True)
     monkeypatch.setattr(install.sys, "platform", "linux")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     calls = _systemctl_spy(monkeypatch)
     install.uninstall()
@@ -882,7 +1022,7 @@ def test_a_non_default_root_never_claims_the_default_roots_registration(
     home = tmp_path / "home"
     (home / ".local-operator").mkdir(parents=True)  # the default root, present
     monkeypatch.setattr(install.sys, "platform", "darwin")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
     # Evidence that would otherwise satisfy ownership: still refused.
@@ -903,7 +1043,7 @@ def test_a_registration_written_by_another_root_is_refused(
     """Ownership is decided by recorded evidence, not by location."""
     home = tmp_path / "home"
     monkeypatch.setattr(install.sys, "platform", "darwin")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
     other = _plant(home, log_path="/some/other/root/logs/browser-bridge.log")
@@ -929,7 +1069,7 @@ def test_ownership_evidence_is_compared_canonically(
     """
     home = tmp_path / "home"
     monkeypatch.setattr(install.sys, "platform", "darwin")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
     # A real symlink, since `Path` collapses `./` in its own constructor and
@@ -967,7 +1107,7 @@ def test_an_unclaimable_registration_is_reported_not_silently_ignored(
     home = tmp_path / "home"
     (home / ".local-operator").mkdir(parents=True)
     monkeypatch.setattr(install.sys, "platform", "darwin")
-    monkeypatch.setattr(install.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
     _plant(home, log_path=str(install.log_path()))
@@ -1016,3 +1156,270 @@ def test_ambiguous_uninstall_advice_preserves_configuration_and_sessions(
     assert "Keep all configuration and session data" in output
     assert inherited_darwin.read_bytes() == original
     assert transcript.read_text(encoding="utf-8") == '{"synthetic": true}\n'
+
+
+# ---------------------------------------------------------------------------
+# The Windows arm (A1/A8)
+#
+# This module was the ONLY daemon with platform-correct supervisor discovery,
+# and it still had no Windows arm: `install()` returned NO_SUPERVISOR_ERROR and
+# nothing anywhere in the repo attempted task scheduling. The task is registered
+# through fakes here; whether a real Task Scheduler accepts the XML is stated as
+# unproven in the PR rather than implied.
+# ---------------------------------------------------------------------------
+
+
+class _Recorded(TypedDict):
+    """What ``_task_arm``'s fakes saw, typed so the assertions can read it.
+
+    A plain ``dict`` left the two lists opaque, so every ``recorded[...]``
+    below indexed an ``object``; the tuple shapes are what these tests unpack
+    and compare, so they are stated here rather than re-narrowed per assertion.
+    """
+
+    created: list[tuple[str, str]]
+    runs: list[tuple[str, ...]]
+
+
+def _task_arm(
+    monkeypatch: pytest.MonkeyPatch,
+    root: Path,
+    *,
+    create: tuple[bool, str] = (True, "ok"),
+) -> _Recorded:
+    """Drive the Windows arm with fakes; `root` is this install's config root.
+
+    The root comes through ``LOCAL_OPERATOR_CONFIG_DIR`` rather than through a
+    patched ``config_dir``, because the TASK NAME is derived from the same root
+    (see ``task_name``) and that derivation reads ``paths.config_dir()``.
+    """
+    recorded: _Recorded = {"created": [], "runs": []}
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setattr(install, "_supervisor", lambda: "schtasks")
+
+    def fake_create(name: str, xml: str) -> tuple[bool, str]:
+        recorded["created"].append((name, xml))
+        return create
+
+    monkeypatch.setattr(supervisors, "create_task", fake_create)
+    monkeypatch.setattr(
+        supervisors,
+        "schtasks",
+        lambda *args, **kw: recorded["runs"].append(args)
+        or subprocess.CompletedProcess(list(args), 0, "", ""),
+    )
+    monkeypatch.setattr(supervisors, "task_state", lambda _name: (True, True, "Running"))
+    return recorded
+
+
+def test_install_registers_a_task_with_the_root_in_its_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Per-root NAMING, because the user's task folder is a global namespace."""
+    monkeypatch.setattr(install, "log_path", lambda: tmp_path / "bridge.log")
+    monkeypatch.setattr(install, "health", lambda port=None, timeout=3.0: {"ok": True})
+    recorded = _task_arm(monkeypatch, tmp_path / "isolated")
+
+    result = install.install(4099)
+
+    assert result["ok"] is True, result
+    name, xml = recorded["created"][0]
+    assert name.startswith(install.TASK_NAME)
+    assert name != install.TASK_NAME, "an isolated root took the default root's task name"
+    assert "local_operator.browser_bridge.daemon" in xml
+    assert "4099" in xml
+    assert ("/Run", "/TN", name) in recorded["runs"]
+
+
+def test_a_refused_registration_is_reported_verbatim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(install, "log_path", lambda: tmp_path / "bridge.log")
+    _task_arm(monkeypatch, tmp_path / "isolated", create=(False, "ERROR: Access is denied."))
+
+    result = install.install(4099)
+
+    assert result["ok"] is False
+    assert "Access is denied." in str(result["error"])
+
+
+def test_service_action_maps_onto_schtasks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    recorded = _task_arm(monkeypatch, tmp_path / "isolated")
+
+    assert install.service_action("restart")["ok"] is True
+    assert [call[0] for call in recorded["runs"]] == ["/End", "/Run"]
+    assert install.service_action("stop")["ok"] is True
+
+
+def test_the_registration_question_is_asked_of_the_task_scheduler(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _task_arm(monkeypatch, tmp_path / "isolated")
+    assert install._own_registration_exists() is True
+    monkeypatch.setattr(supervisors, "task_state", lambda _name: (False, False, "not found"))
+    assert install._own_registration_exists() is False
+
+
+def test_the_legacy_registration_is_empty_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """There was no pre-per-root Windows build, so there is nothing to adopt."""
+    monkeypatch.setattr(install.sys, "platform", "win32")
+
+    assert install._legacy_path() is None
+
+
+# --------------------------------------------------------------------------
+# An install that would change nothing must do nothing.
+#
+# See the mobile installer's twin cells for the full rationale: an
+# unconditional plist rewrite plus a bootout/bootstrap is exactly the pair of
+# signals an EDR reads as "Persistence: launchd job / plist file modification"
+# (MITRE T1543.001), and the bridge's plist path is stable, so a re-run usually
+# renders identical bytes.
+# --------------------------------------------------------------------------
+
+
+class _LaunchctlRig:
+    """`install()` with everything outside itself faked, and the calls recorded.
+
+    ``job_running`` is faked rather than exercised because the browser derives
+    its label PER CONFIG ROOT (a sandbox gets a suffixed label, so this arm can
+    never address the operator's bridge — unlike the mobile and tunnel arms,
+    whose labels are fixed constants). The identity guard those two need is
+    pinned at the launchd level and by the mobile installer's own sandbox cell.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self.plist = tmp_path / "com.local-operator.browser.plist"
+        self.calls: list[list[str]] = []
+        self.running = True
+        self.answering = True
+        monkeypatch.setattr(install, "plist_path", lambda: self.plist)
+        monkeypatch.setattr(install, "log_path", lambda: tmp_path / "log" / "browser.log")
+        monkeypatch.setattr(install, "_supervisor", lambda: "launchctl")
+        monkeypatch.setattr(install, "legacy_registration", lambda: None)
+        # ANSWERING is part of the skip decision (round 1, R-5/Q-1): a job
+        # launchd holds a live pid for but that no longer answers must not be
+        # left as it is, which is what liveness alone did.
+        monkeypatch.setattr(
+            install, "health", lambda *a, **k: {"ok": True} if self.answering else None
+        )
+        monkeypatch.setattr(install, "_launchctl", self._launchctl)
+        monkeypatch.setattr(install.launchd, "job_running", lambda **kwargs: self.running)
+        monkeypatch.setattr(install.launchd, "kickstart", self._kickstart)
+
+    def _launchctl(self, *cmd: str) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(cmd))
+        return subprocess.CompletedProcess(list(cmd), 0, "pid = 4242", "")
+
+    def _kickstart(self, **kwargs: object) -> bool:
+        self.calls.append(["kickstart", "-k", str(kwargs.get("label"))])
+        self.answering = True  # the restart brought it back
+        return True
+
+    def write_current_plist(self, port: int) -> None:
+        self.plist.parent.mkdir(parents=True, exist_ok=True)
+        self.plist.write_bytes(plistlib.dumps(install.render_plist(port)))
+
+
+def test_a_loaded_but_wedged_bridge_is_repaired_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """R-5/Q-1: a pid that no longer answers is not a reason to leave it alone.
+
+    Liveness alone skipped this state, and the install then failed its own
+    health check — the wedged bridge the old unconditional reload used to repair
+    as a side effect. The gate is now liveness AND serving, the mobile twin's
+    shape; the plist is still not rewritten, because the file is correct.
+    """
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4099)
+    rig.answering = False
+    before = rig.plist.stat().st_mtime_ns
+
+    result = install.install(4099)
+
+    assert result["ok"] is True, result
+    assert rig.plist.stat().st_mtime_ns == before, "the plist was already correct"
+    assert [call[:2] for call in rig.calls] == [["kickstart", "-k"]], rig.calls
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert not any("left it loaded" in step for step in steps), steps
+
+
+def test_install_skips_a_plist_that_already_says_what_it_would_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Equal content and a live job: no write, NO launchctl call, no false claim."""
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4099)
+    before = rig.plist.stat().st_mtime_ns
+
+    result = install.install(4099)
+
+    assert result["ok"] is True
+    assert rig.plist.stat().st_mtime_ns == before, "the plist was rewritten"
+    assert rig.calls == [], f"install reached launchctl for no reason: {rig.calls}"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert any("already current" in step for step in steps), steps
+    assert not any(
+        "loaded the LaunchAgent" in step for step in steps
+    ), "an install that skipped the load must not report one"
+
+
+def test_install_still_writes_and_reloads_a_changed_plist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A plist from an older build is still replaced and reloaded."""
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4098)
+    reloads: list[Path] = []
+
+    def fake_reload(**kwargs: object) -> install.launchd.JobReload:
+        reloads.append(kwargs["path"])  # type: ignore[arg-type]
+        return install.launchd.JobReload(label=str(kwargs["label"]), outcome="reloaded")
+
+    monkeypatch.setattr(install.launchd, "reload_job", fake_reload)
+
+    result = install.install(4099)
+
+    assert result["ok"] is True
+    assert plistlib.loads(rig.plist.read_bytes()) == install.render_plist(4099)
+    assert reloads == [rig.plist], "a changed plist must still be reloaded"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert not any("already current" in step for step in steps), steps
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+def test_the_verbs_refuse_a_redirected_home(
+    action: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_root: Path
+) -> None:
+    """R-8: every launchd verb is guarded, not only the adopted branch.
+
+    ``label()`` already carries a per-root digest, so a redirected ``HOME``
+    cannot NAME the operator's bridge; this pins the half that matters when the
+    name is right anyway — an adopted registration addresses the unsuffixed
+    ``LABEL`` — by leaving the launchd-level passwd home at the operator's while
+    ``Path.home`` is a tmpdir. Nothing may be addressed at all.
+    """
+    home = tmp_path / "redirected"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(install.sys, "platform", "darwin")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *a: calls.append(a) or subprocess.CompletedProcess(list(a), 0, "", ""),
+    )
+
+    result = install.service_action(action)
+
+    assert result["ok"] is False, result
+    assert calls == [], f"a redirected home reached launchd: {calls}"
+    assert "not the LaunchAgent the real home owns" in str(result["error"])

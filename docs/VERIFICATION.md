@@ -896,7 +896,10 @@ mixed scripts), not ~6x; `xai-oauth` is not `is_usable` at all with only
 ## SSE streaming surface (commit 27cebcc)
 
 `GET /v1/sse/messages/{message_id}`, `GET /v1/sse/jobs/{job_id}`, and
-`GET /v1/sse/capabilities`, with the WebSocket left untouched as the fallback.
+`GET /v1/sse/capabilities`. Measured while the deprecated `/v1/ws` socket was
+still mounted, which is what the transport-parity row below compares against;
+that socket has since been removed (route, mount, fan-out and capability
+advertisement), so every row here now describes SSE as the ONLY transport.
 All evidence below is live against a real agent turn on
 `openrouter/deepseek-v4-flash-0731`, served on port 1177.
 

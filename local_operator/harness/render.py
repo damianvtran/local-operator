@@ -53,6 +53,7 @@ from local_operator.harness.message_types import (
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+    SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
@@ -135,6 +136,7 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             SESSION_MODEL_SWITCH_MESSAGE_TYPE,
             SESSION_CREDENTIAL_MESSAGE_TYPE,
             SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+            SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
             "session_state",
         ):
             # An incident rides the sender's preformatted text (the classifier
@@ -148,10 +150,12 @@ def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:
             # ``/credential`` is ANNOUNCED to the model rather than only
             # changing the prompt tail, which the model has no reason to
             # re-read (the failure behind session 835fbcafdc27).
-            # An MCP-recovery record rides it for the symmetric reason: the
-            # FAILURE reaches the model as a ``session_incident`` user turn, so
-            # the recovery that supersedes it has to arrive on the same surface
-            # or the model keeps believing the older, more emphatic claim.
+            # An MCP record rides it as a pair: the FAILURE reaches the model
+            # as a ``session_mcp_unavailable`` WARNING (a preformatted row, so
+            # it never touches the classifier), and the recovery that
+            # supersedes it has to arrive on the same surface or the model
+            # keeps believing the older, more emphatic claim that its tools are
+            # gone.
             out.append(_injected_user_message(message.details.get("text", ""), message.id))
         elif message.custom_type == GATE_TIMEOUT_CUSTOM_TYPE:
             # An unattended gate that expired is NOT a user decision, and the

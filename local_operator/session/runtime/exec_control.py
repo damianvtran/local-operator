@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
     from local_operator.session.runtime.server import RuntimeServer
@@ -131,7 +131,19 @@ class ExecControl:
         except Exception:  # noqa: BLE001 — announcing is best-effort courtesy
             logger.debug("exec control: stop announcement failed", exc_info=True)
         try:
-            await self.runtime.aclose()
+            # ``aclose_remote`` rather than ``aclose``, and the difference is the
+            # whole reason this call site is in the change at all: ``aclose``
+            # raises off the runtime's owning loop by design, and this teardown
+            # runs on the SESSION's loop — which stopped being the runtime's loop
+            # when the exec surface moved to ``start()``. The raise was wrapped,
+            # so it was silent: teardown STARTED (``aclose`` requests the close
+            # before raising) and nothing waited for it. Best-effort either way,
+            # but the two are not the same best-effort.
+            remote = getattr(self.runtime, "aclose_remote", None)
+            if callable(remote):
+                await cast(Callable[[], Awaitable[None]], remote)()
+            else:  # pragma: no cover - a reduced host answering only the owner-loop form
+                await self.runtime.aclose()
         except Exception:  # noqa: BLE001 — teardown must not fail the run
             logger.warning("exec control: runtime shutdown failed", exc_info=True)
         # Deregister the handle's secret session as part of the same teardown.
@@ -155,12 +167,26 @@ async def start_exec_control(
 ) -> ExecControl:
     """Publish a record and serve the control socket for ``session``.
 
-    ``start_in_process`` rather than ``start``: the exec session already lives
-    on the caller's running loop, so a second loop on its own thread (what the
-    TUI needs, because Textual owns its loop) would force every control request
-    through a cross-thread hop for no benefit. This mirrors
-    ``session.runtime.process.amain``, the daemon child that made the same
-    choice for the same reason.
+    ``start()``, NOT ``start_in_process`` — reversed deliberately, and this is
+    the call site where the reversal is a trade rather than a free win. The
+    earlier reading was: the exec session already lives on the caller's running
+    loop, so a second loop on its own thread (what the TUI needs, because
+    Textual owns its loop) forces every control request through a cross-thread
+    hop for no benefit. The benefit is real and measured, though: in process,
+    the listener, the welcome, ``ping`` and the heartbeat share the workload's
+    loop, so one synchronous step of a turn parks the entire control plane at
+    once. Measured on the audit's rig under a 50 s block with NO client
+    attached: the record crossed into ``wedged`` at t=46.2 s and a fresh dial
+    received no welcome within 15 s; with the serving plane on its own thread,
+    welcome immediate, ``ping`` -> ``pong`` in 0.00 s, heartbeat never past
+    14.2 s. A supervisor watching an ``lop exec --control`` run is exactly the
+    surface that misreads the in-process shape as a dead run.
+
+    The hop is not free and is not pretended to be: the registrations this
+    surface needs are performed on the session's loop (see
+    ``RuntimeServer._handle_call_on_session_loop``), so a cross-thread hop that
+    the earlier reading called "for no benefit" is what buys a control plane
+    the turn cannot park.
 
     ``yolo`` maps to the handle's ``auto_approve``, so ``exec --control --yolo``
     keeps approving every tier inline instead of parking a card no supervisor
@@ -206,7 +232,46 @@ async def start_exec_control(
     # closed and unpublished in the ordering :meth:`ExecControl.aclose` owns.
     handle.on_stop_requested = lambda: session.abort("stopped by supervisor")
     runtime = RuntimeServer(handle, kind=EXEC_RECORD_KIND)
-    await runtime.start_in_process()
+    runtime.start()
+    # THIS WAIT IS THE ONE C2 EXISTS FOR. The two fields read below — the
+    # listener's port and the record path a supervisor is handed — are stamped
+    # on the runtime's own thread, so reading them straight after ``start()``
+    # reads the constructor's ``port=0`` and may name a file nothing has written
+    # yet: an endpoint line the supervisor cannot use, for the one purpose that
+    # line has. A bind that failed releases the latch too, and here that is a
+    # FATAL answer rather than a degraded one — ``maybe_start_exec_control``
+    # documents the contract: continuing without the surface hands the
+    # supervisor an agent it cannot stop while reporting success.
+    if not await runtime.wait_until_published():
+        # CLOSE WHAT WE STARTED BEFORE RAISING. ``start()`` has already put a
+        # thread, a loop and (on the timeout path) a still-running boot prologue
+        # behind the caller who is about to fail this run; raising alone leaves
+        # all three behind a decision that says the surface is unusable, which is
+        # the opposite of what that answer means.
+        #
+        # ``aclose_remote`` rather than ``close``, and the difference is this
+        # call site's whole problem: this runs on the SESSION's loop, and
+        # ``close`` is a bounded SYNCHRONOUS join — a cross-thread wait on the
+        # loop every other part of this change exists to keep free (review round
+        # 1, D-5). ``aclose_remote`` awaits the same bounded join through a
+        # thread hop, which is the spelling ``process._clean_exit`` already uses
+        # for the same teardown.
+        #
+        # THE FALLBACK IS THE SAME SHAPE AS THE THREE SIBLING SITES (review
+        # round 2, MINOR-2). Calling ``aclose_remote`` directly made a reduced
+        # host — one answering only the owner-loop ``aclose`` form — raise
+        # ``AttributeError`` out of a failure path, REPLACING the RuntimeError
+        # this contract is written on, so the supervisor would be told an
+        # attribute is missing instead of that the surface never published.
+        remote = getattr(runtime, "aclose_remote", None)
+        if callable(remote):
+            await cast(Callable[[], Awaitable[None]], remote)()
+        else:  # pragma: no cover - a reduced host answering only the owner-loop form
+            await runtime.aclose()
+        raise RuntimeError(
+            "the exec control surface was asked for but the runtime never "
+            "published its record; the run cannot be supervised"
+        )
     record = runtime.record
     return ExecControl(
         handle=handle,

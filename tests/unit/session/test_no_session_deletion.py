@@ -87,8 +87,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/procname.py::_plant_hardlink",
         "os.unlink",
-        "Clears this pid's own .tmp link in <venv>/bin before/after linking",
-        2,
+        # THREE calls, and each is the SAME ``tmp`` name (``.<brand>.<pid>.tmp``)
+        # in the merged venv's ``bin/``: before the link (a leftover from this
+        # pid), after ``os.replace`` (a same-inode replace is a documented no-op
+        # and consumes nothing, so the temp would otherwise leak once per replant
+        # — 609 leftovers across 16 generations measured on the reporting host),
+        # and on the error path. Never ``link`` itself, and never a path derived
+        # from a session id or a config dir.
+        "Clears this pid's own .tmp link in <venv>/bin before, after and on error",
+        3,
     ),
     (
         "local_operator/procname.py::_plant_libpython",
@@ -144,6 +151,51 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/browser_bridge/resources.py::BrowserResource._save",
         "os.unlink",
         "Removes only this call's own mkstemp sidecar temp file after a failed replace",
+    ),
+    # The browser file-transfer quarantine. Every path these two calls touch is
+    # composed by `browser_files.session_dir()` as
+    # `<config_dir>/browser/downloads/<stamp>-<session8>/` — a SIBLING of
+    # `sessions/` under the config root, never a descendant of it — and the
+    # candidate names are produced by listing THAT directory (`browser_files.
+    # snapshot`). The unlink is the refusal's tidy-up of one direct child entry
+    # (the entry, never a resolved target: review round 1's R1), and the rename
+    # is the content-corrected name of one landed file, with BOTH sides direct
+    # children of the same quarantine directory. Neither can name a session
+    # directory, and no path here is derived from a session id beyond the eight
+    # characters sanitised into the directory's own label.
+    (
+        "local_operator/tools/builtin.py::_unlink_quietly",
+        "<path>.unlink",
+        "Deletes one refused ENTRY inside the browser download quarantine "
+        "(<config_dir>/browser/downloads/<stamp>-<session8>/), never a session directory",
+    ),
+    (
+        "local_operator/tools/builtin.py::_browser_download",
+        "<path>.rename",
+        "Renames one landed file WITHIN that same quarantine directory to its "
+        "content-corrected name; both sides are direct children of it",
+    ),
+    # The same quarantine, reached from `browser_files` itself — the two additions
+    # the operator's decision needs and PR A did not have. The proof is a BRANCH,
+    # not an assumption: `intake_landed` refuses `is_within(source, config_dir())`
+    # BEFORE any of these calls, so a source can never be a session directory (or
+    # anything else under the config root), and the destination is composed by
+    # `session_dir()` as `<config_dir>/browser/downloads/<stamp>-<session8>/`, a
+    # SIBLING of `sessions/`. Same reasoning, one level down: the unlink removes
+    # the ENTRY the host named (never a resolved target — review round 1's R1) and
+    # the move relocates the file the browser wrote into the user's own download
+    # directory, which is outside the config root by definition.
+    (
+        "local_operator/browser_files.py::_unlink_entry",
+        "os.unlink",
+        "Removes the single entry intake refused; every caller runs after the "
+        "config-root refusal, so the path cannot be under sessions/",
+    ),
+    (
+        "local_operator/browser_files.py::intake_landed",
+        "shutil.move",
+        "Relocates one landed file into <config_dir>/browser/downloads/<stamp>-<session8>/ "
+        "(a sibling of sessions/); the source is outside the config root by the same branch",
     ),
     (
         "local_operator/tui/session_drafts.py::SessionDraftStore._write",
@@ -673,6 +725,19 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "wakes/deliveries/<id>.json FILE",
     ),
+    # The serving plane's publication latch. `wait_until_published` takes its own
+    # waiter back OUT of `_publication_gates` when its bound expires, so a
+    # runtime whose boot prologue never settles cannot leave a dead
+    # `PublicationGate` behind in a list that every later waiter walks (review
+    # round 1, NIT-2). The call is a `list.remove` on an in-memory list of
+    # objects authored in this class: no receiver on that line is a path, and
+    # nothing in the method is derived from a session id or a transcript.
+    (
+        "local_operator/session/runtime/server.py::RuntimeServer.wait_until_published",
+        "<path>.remove",
+        "`_publication_gates.remove(gate)` — a LIST of in-memory PublicationGate "
+        "objects, never a path",
+    ),
     # The registry's staged write is now ONE helper shared by the discovery
     # record and the durable stop marker, and the reaper MOVES a dead record
     # into the run namespace's `reaped/` sidecar instead of unlinking it (a
@@ -836,9 +901,12 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         # with a suffixed supervisor name inherits that file, and leaving it
         # behind made `uninstall` report success while the daemon kept running.
         # Both are supervisor config FILEs the user asked to remove — never a
-        # session, transcript or state directory.
-        "plist/unit FILEs (own + one inherited from a pre-per-root build)",
-        4,
+        # session, transcript or state directory. Five calls because this daemon
+        # has one registration FILE per platform (LaunchAgent plist, systemd
+        # user unit, the recorded Windows task definition), plus the one a
+        # pre-per-root build left behind.
+        "plist/unit/task FILEs (own + one inherited from a pre-per-root build)",
+        5,
     ),
     (
         "local_operator/browser_bridge/install.py::uninstall",
@@ -866,7 +934,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "one-shot fork-boundary sidecar FILE",
     ),
-    ("local_operator/mobile/install.py::uninstall", "<path>.unlink", "plist FILE"),
+    (
+        "local_operator/mobile/install.py::uninstall",
+        "<path>.unlink",
+        "ONE registration FILE per platform: LaunchAgent plist, systemd user unit, "
+        "or the recorded Windows task definition",
+        3,
+    ),
     (
         "local_operator/model/catalogue.py::_ListingFetchLease.acquire",
         "<path>.unlink",
@@ -933,6 +1007,34 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/session/retention.py::release_session",
         "<path>.unlink",
         ".session.pid marker FILE",
+    ),
+    # The update window's handover marker (2026-09-19): the outgoing runtime drops a
+    # FILE beside the inbox so its successor can report the move as applied
+    # (``types.UPDATING``). Both calls are built from ``update_window_path``, i.e.
+    # ``<the passed session dir>/update-window.json`` — one fixed basename, no caller
+    # input, no session id, and neither can name a DIRECTORY, so a session directory
+    # is not reachable from either: the unlink removes only the marker itself.
+    #
+    # THE TEMPORARY IS A UNIQUE ``mkstemp`` NAME, not ``update-window.json.tmp``
+    # (agent review round 1, MINOR 4): that one shared name measured 59 absent-or-
+    # corrupt reads and 2374 failed writes when two runtimes served one session
+    # directory, so the temp is now created by ``mkstemp`` with this fixed PREFIX
+    # inside the same directory — still a fixed basename plus a random suffix from
+    # the kernel, and still unable to name a directory.
+    (
+        "local_operator/session/runtime/inbox.py::write_update_window",
+        "os.replace",
+        "temp FILE -> update-window.json, both fixed names inside the session dir",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::write_update_window",
+        "os.unlink",
+        "removes only this call's own mkstemp sidecar temp file",
+    ),
+    (
+        "local_operator/session/runtime/inbox.py::clear_update_window",
+        "<path>.unlink",
+        "update-window.json marker FILE",
     ),
     (
         "local_operator/session/runtime/registry.py::scan",
@@ -1086,7 +1188,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "cleanup of this function's own mkstemp temp FILE",
     ),
-    ("local_operator/wakes/install.py::uninstall", "<path>.unlink", "plist FILE"),
+    (
+        "local_operator/wakes/install.py::uninstall",
+        "<path>.unlink",
+        "the LaunchAgent plist, or the systemd SERVICE + TIMER units, or the "
+        "recorded Windows task definition — one platform's set, never a directory",
+        4,
+    ),
     ("local_operator/wakes/store.py::remove_entry", "<path>.unlink", "wakes/<id>.json FILE"),
     ("local_operator/web_fetch/service.py::_prune_cache", "<path>.unlink", "fetch cache FILEs"),
     # -- container/in-memory .remove()/.replace(), not the filesystem --------
@@ -1247,6 +1355,76 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "os.unlink",
         "Removes only the probe FILE mkstemp just created in a scratch base "
         "($TMPDIR//tmp-class); never a directory, never under sessions/",
+    ),
+    # -- the supervisor layer's file removals (2026-09-18) --------------------
+    # Making the four daemons work off macOS (a systemd user unit, a Task
+    # Scheduler task) added file removals in the shared supervisor module and in
+    # the password store. Every path in this block is one of:
+    #
+    #   * a supervisor REGISTRATION FILE the user asked to remove —
+    #     `~/.config/systemd/user/<unit>`, `~/Library/LaunchAgents/<label>.plist`,
+    #     or the task definition this installer wrote under the CONFIG ROOT;
+    #   * a PASSWORD FILE in the config root's `mobile/` directory, removed by an
+    #     explicit `uninstall --purge`;
+    #   * the temp FILE `tempfile` just created and returned inside `create_task`.
+    #
+    # None of them is derived from a session id, a transcript path, or any
+    # caller-supplied name, and none can name a DIRECTORY: the registration paths
+    # are built from a fixed unit/label name plus the real home or the config
+    # root, and the unlink calls are `missing_ok=True` no-ops on an absent file.
+    (
+        "local_operator/supervisors.py::create_task",
+        "<path>.unlink",
+        "the temp task-definition FILE mkstemp just created, removed in a finally",
+    ),
+    (
+        "local_operator/mobile/auth.py::_store_secret_tool",
+        "<path>.unlink",
+        "the plaintext password FILE a keyring write just superseded",
+    ),
+    (
+        "local_operator/mobile/auth.py::delete_password",
+        "<path>.unlink",
+        "the password FILEs (0600 fallback + DPAPI blob) that --purge removes",
+    ),
+    (
+        "local_operator/tunnels/install.py::_uninstall_task",
+        "<path>.unlink",
+        "our recorded copy of the Windows task definition FILE",
+    ),
+    # Both rows below arrived independently and BOTH are kept: each side
+    # appended its own entry to this tuple, so the union is the resolution —
+    # neither row supersedes the other and dropping either would let a real
+    # removal go unallow-listed (the guard would fail, not silently pass).
+    # The phone web bundle's refused build (2026-09-19). The call removes
+    # `<web>/dist` and nothing else: `web_dir` is `Path(__file__).parent /
+    # "web"` for this install, or the snapshot tree the updater is about to
+    # install, and the removed path is always that tree's `dist/` — a vite
+    # artifact the build itself just wrote, dropped when the bundle guard
+    # refuses it so a utility-less stylesheet cannot be served as "built".
+    # Never derived from a session id, the config dir, or caller input, and the
+    # argument always ends in "dist" (`_dist_dir`). One row because the removal
+    # has one owner (`_discard_bundle`) rather than three call sites.
+    (
+        "local_operator/mobile/install.py::_discard_bundle",
+        "shutil.rmtree",
+        "Drops <web>/dist after the bundle guard refuses it; web_dir is package/snapshot-derived",
+    ),
+    # The tunnel connector's park record (2026-09-19). `state.clear()` unlinks
+    # `tunnel/state.json` when the condition it describes is over — the connector
+    # is serving again, or retrying, or the operator stopped the tunnel — because
+    # every surface (the terminal's notice, `lop tunnel status`, the desktop
+    # route) reads that file as the truth about a process none of them can see,
+    # and a park that outlived its condition would have all of them describing a
+    # connector that is not parked. The path is `config.directory()` + a fixed
+    # basename: that is `$LOCAL_OPERATOR_CONFIG_DIR` (or `~/.local-operator`),
+    # never a session id, never a caller, and never a directory under
+    # `sessions/`; `unlink` takes the one FILE the connector itself wrote.
+    (
+        "local_operator/tunnels/state.py::clear",
+        "<path>.unlink",
+        "Removes only the park FILE tunnel/state.json under the config dir; "
+        "never a directory, never under sessions/",
     ),
 )
 
@@ -1435,6 +1613,8 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/resume.py::_write_title_scan_sentinel",  # tmp -> title-scan.json
         "local_operator/resume.py::_save_origin_cache",  # tmp -> origin cache FILE
         "local_operator/session/cleanup.py::_write_record",  # tmp -> last-cleanup.json
+        # tmp -> update-window.json (the update window's handover marker)
+        "local_operator/session/runtime/inbox.py::write_update_window",
         "local_operator/session/frontend_state.py::SnapshotJobs.__init__",  # str.replace
         "local_operator/session/frontend_state.py::SnapshotWakeScheduler.__init__",
         "local_operator/session/frontend_state.py::SnapshotSubagentComms.__init__",

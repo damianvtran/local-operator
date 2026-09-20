@@ -51,6 +51,7 @@ from local_operator.harness.types import (
     ModelSpec,
     NoticeEvent,
     PeerMessageDeliveredEvent,
+    ReasoningDeltaEvent,
     RetryEndEvent,
     RetryStartEvent,
     SteeringDeliveredEvent,
@@ -112,6 +113,7 @@ from local_operator.session.protocol import (
     unanswered_tail_call_ids,
 )
 from local_operator.session.restored_rows import resolve_restored_rows, roster_records
+from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
 from local_operator.session.runtime.types import drain_phrase_for_frame
 from local_operator.session.spend import SESSION_SPEND_CUSTOM_TYPE, SessionSpend
 from local_operator.session.transcript import (
@@ -518,6 +520,7 @@ _EVENT_TYPES: dict[str, type[AgentEvent[Any]]] = {
         MessageStartEvent,
         MessageUpdateEvent,
         MessageEndEvent,
+        ReasoningDeltaEvent,
         HistoryDeltaEvent,
         ToolCallComposeEvent,
         ToolExecutionStartEvent,
@@ -882,6 +885,32 @@ def _fresh_spec_states_a_budget(spec: FrontendModelSpec) -> bool:
     return True
 
 
+def _accepts_updating(callback: Any) -> bool:
+    """Whether ``callback`` can be handed the ``updating`` keyword.
+
+    ASKED BEFORE THE CALL, because the call is inside a blanket ``except Exception``
+    (agent review round 1, NIT 3). The drain callback is a HOST's function — in this
+    tree always the app's own ``_on_runtime_draining``, but the seam is a public one
+    (``session/protocol.py``), and a host written against the one-argument contract
+    would raise ``TypeError`` into the guard that exists to keep a viewer's failure
+    from breaking the pump. It would then lose the WHOLE notice — including the drain
+    sentence it used to receive — and report nothing but a ``logger.debug``.
+
+    ``VAR_KEYWORD`` counts as accepting it: a host that takes ``**kwargs`` is not
+    surprised by one more. An unreadable signature reads as NO, which degrades to the
+    pre-change behaviour rather than to silence.
+    """
+    if callback is None:
+        return False
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):  # pragma: no cover - builtins, partials, C callables
+        return False
+    if "updating" in parameters:
+        return True
+    return any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
 class AttachedSession:
     """A SessionProtocol facade backed by one owner's v5 attach socket.
 
@@ -986,7 +1015,14 @@ class AttachedSession:
         #: ``LEAVING_ON_SIGNAL``, because the frame's own ``reason``/``to`` decide
         #: (:func:`types.drain_phrase_for_frame`) and have done since design round
         #: 4, D9 (agent review round 5, MINOR-2).
-        self._drain_callback: Callable[[str], Any] | None = None
+        #: The drain/window callback: the frame's leaving PHRASE, plus the update
+        #: window's build pair as a keyword ("" when the frame carries no window).
+        self._drain_callback: Callable[..., Any] | None = None
+        #: Whether ``_drain_callback`` accepts that keyword, resolved once when it is
+        #: set: the call site is inside a blanket exception guard, so the answer has
+        #: to be known BEFORE the call rather than discovered by catching a TypeError
+        #: (see :func:`_accepts_updating`).
+        self._drain_callback_takes_updating: bool = False
         #: True once THIS follower asked the owner to stop the session
         #: (``request_stop`` acked) or the wire evidence says the session was
         #: deliberately ended (the owner served the stop and unpublished).
@@ -6177,7 +6213,7 @@ class AttachedSession:
         """
         self._refresh_callback = callback
 
-    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
+    def set_drain_callback(self, callback: Callable[..., Any] | None) -> None:
         """Told when the runtime announces a departure that is REFUSING work.
 
         Fired from the ``retiring`` frame itself, so the operator hears it
@@ -6196,17 +6232,24 @@ class AttachedSession:
         be painted with the build's notice; design round 4, D9: the frames that
         carry no key at all). Only a frame that establishes NEITHER trigger
         reaches the host as ``""``.
+
+        ``updating`` (the window's build pair) is passed as a KEYWORD and only to a
+        callback that accepts it — see :func:`_accepts_updating`. A host written
+        against the one-argument contract keeps receiving every phrase it used to.
         """
         self._drain_callback = callback
+        self._drain_callback_takes_updating = _accepts_updating(callback)
 
     def _on_retiring_frame(self, frame: Mapping[str, Any]) -> None:
         """A ``retiring`` frame arrived; act on it while the runtime is alive.
 
-        The frame is additive twice over: a runtime older than the ``draining``
+        The frame is additive three times over: a runtime older than the ``draining``
         field is therefore read as the idle handover, which is the pre-change
-        behaviour and paints nothing, and a runtime older than ``leaving`` has
-        its trigger read off the frame's ``reason``/``to`` by
-        :func:`types.drain_phrase_for_frame`.
+        behaviour and paints nothing, a runtime older than ``leaving`` has its
+        trigger read off the frame's ``reason``/``to`` by
+        :func:`types.drain_phrase_for_frame`, and a runtime older than ``updating``
+        has no window to announce — an idle handover from it is as silent as it was
+        before this key existed.
 
         THAT SECOND FALLBACK USED TO CLAIM MORE THAN IT KNEW. It handed the host
         ``""`` on the grounds that an absent phrase is "the build handover, the
@@ -6219,7 +6262,7 @@ class AttachedSession:
         they decide; a frame that names neither trigger still yields ``""``, and
         the host paints the sentence that is true of any drain.
         """
-        if not frame.get("draining"):
+        if not frame.get("draining") and not frame.get("updating"):
             return
         callback = self._drain_callback
         if callback is None:
@@ -6231,7 +6274,24 @@ class AttachedSession:
             # (agent review round 5, NIT-1). The client remembers the same phrase
             # for the refusals it decodes, from the same helper — see
             # ``AttachClient._raise_for_reply_error``.
-            callback(drain_phrase_for_frame(frame))
+            #
+            # ``updating`` RIDES ALONGSIDE THE PHRASE rather than through it. The
+            # idle handover announces with ``draining=False`` — it is not draining
+            # anything, it is moving — so before this key it never reached the host
+            # at all, and the one handover that QUEUES the operator's message was
+            # the one they were told nothing about (``types.UPDATING``).
+            #
+            # PASSED ONLY WHEN THE CALLBACK CAN TAKE IT (agent review round 1, NIT 3).
+            # The call sits inside a blanket ``except Exception``, so a host whose
+            # callback predates the keyword would take a ``TypeError`` there and lose
+            # the ENTIRE notice — including the drain sentence it used to get — with
+            # nothing but a ``logger.debug`` to show for it. A one-argument host now
+            # gets the phrase and no window, which is exactly the pre-change behaviour.
+            phrase = drain_phrase_for_frame(frame)
+            if self._drain_callback_takes_updating:
+                callback(phrase, updating=str(frame.get("updating") or ""))
+            else:
+                callback(phrase)
         except Exception:  # noqa: BLE001 — a viewer notice must not break the pump
             logger.debug("drain callback failed", exc_info=True)
 
@@ -7554,7 +7614,27 @@ class AttachedSession:
         try:
             # Loop iterations are queued prompt turns, never steering inferred
             # from a transient current-busy observation.
-            await client.send_command(command, streaming=False)
+            receipt = await client.send_command(command, streaming=False)
+            if receipt == SPOOL_RECEIPT_PROMPT:
+                # A DRAINING OWNER THAT QUEUED THE MESSAGE FOR ITS SUCCESSOR.
+                # The message is safe — the successor runs it (memo §4.2) — but
+                # THIS connection cannot observe that turn: the row it would
+                # correlate on is written by another process, after this one
+                # exits, and no ``MessageStartEvent`` for `command_id` will ever
+                # arrive here. Waiting for `completed` would park this caller
+                # until its own timeout on a turn that is not coming.
+                #
+                # So it gets the typed refusal, which is the honest answer for a
+                # caller whose contract is "the owner's actual terminal outcome":
+                # this runtime will not run it, and the message itself is queued
+                # (``queued=True`` selects that tail — the default one asks for a
+                # re-send, which would be false advice for a message already on
+                # the successor's spool).
+                from local_operator.session.errors import RuntimeRetiring
+
+                raise RuntimeRetiring(
+                    leaving=str(getattr(client, "_drain_phrase", "") or ""), queued=True
+                )
             outcome = await completed
             if outcome.error:
                 raise RuntimeError(outcome.error)
@@ -7574,7 +7654,7 @@ class AttachedSession:
         images: Sequence[ImageContent] | None = None,
         *,
         message_id: str | None = None,
-    ) -> None:
+    ) -> str:
         """Send a prompt to the owner, optionally under a caller-supplied id.
 
         ``message_id`` becomes the ``ContinuationCommand`` id, which the owner
@@ -7590,6 +7670,18 @@ class AttachedSession:
         (``_send_steer_when_ready`` sends ``command_id=message.id``); this is
         the prompt path catching up with its own sibling. Minted here when the
         caller supplies nothing, which is the historical behaviour.
+
+        RETURNS THE OWNER'S RECEIPT LINE, which is a protocol fact this method
+        had been dropping: ``prompt``'s reply IS a sentence (``serving``'
+        'prompt admitted', the spool receipt, or the legacy 'prompt queued
+        (n)'), and a viewer that discards it cannot tell an admission from a
+        deferral. The TUI needs exactly that distinction against a DRAINING
+        owner, where the message is queued onto the successor instead of run
+        (memo §4.4) — the incident's whole complaint being that a refusal was
+        the only report the app could give of a state it could have named.
+        Empty for the in-process takeover target, whose ``prompt`` runs the
+        whole turn and returns nothing (its caller awaits completion, not a
+        receipt).
         """
         # The cold-to-attached seam: a viewer that has been LOOKING at a
         # session starts working in it here, which is the first moment a
@@ -7606,7 +7698,7 @@ class AttachedSession:
                 await target.prompt(text, images, message_id=message_id)
             else:
                 await target.prompt(text, images)
-            return
+            return ""
         client = self._client
         if client is None or not client.connected:
             raise ConnectionError(self._unavailable_reason())
@@ -7621,7 +7713,7 @@ class AttachedSession:
             if message_id
             else ContinuationCommand.create(self._session_id, text, images_wire)
         )
-        await client.send_command(command, streaming=self._streaming)
+        return await client.send_command(command, streaming=self._streaming)
 
     async def seed_history(self, messages: list[Message]) -> None:
         if self.history_message_count:

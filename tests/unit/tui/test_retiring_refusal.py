@@ -37,19 +37,30 @@ from typing import Any
 import pytest
 
 from local_operator.session.errors import RuntimeRetiring, admission_error
+from local_operator.session.runtime.inbox import SPOOL_RECEIPT_PROMPT
 from local_operator.session.runtime.types import LEAVING_FOR_BUILD, LEAVING_ON_SIGNAL
 from local_operator.tui.app import (
     DRAIN_NOTICE,
     DRAIN_NOTICE_OTHER,
+    QUEUED_ELSEWHERE_NOTICE,
+    QUEUED_PROMPT_MISSED_NOTICE,
+    QUEUED_PROMPT_TAKEN_BACK_NOTICE,
     RESTORE_SEAM,
     SIGNAL_DRAIN_NOTICE,
     OperatorApp,
     _is_retiring_refusal,
     _retiring_notice_text,
 )
+from local_operator.tui.events import UserMessageStart
 from local_operator.tui.session_presentation import DraftRecoveryNotice
 from local_operator.tui.widgets.editor import Editor
-from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView, UserBlock
+from local_operator.tui.widgets.transcript import (
+    QUEUED_ROW_TEXT,
+    QUEUED_ROW_TEXT_OLDER,
+    NoticeBlock,
+    TranscriptView,
+    UserBlock,
+)
 
 from .test_app_pilot import FakeSession, _factory
 
@@ -425,11 +436,13 @@ async def test_each_trigger_keeps_its_own_sentence_at_the_notice_seam(
 
         facade = AttachedSession.__new__(AttachedSession)
         fired: list[str] = []
+        windows: list[str] = []
 
-        def drain(leaving: str) -> None:
+        def drain(leaving: str, *, updating: str = "") -> None:
             fired.append(leaving)
+            windows.append(updating)
 
-        facade._drain_callback = drain
+        facade.set_drain_callback(drain)
         facade._on_retiring_frame(
             {"op": "retiring", "reason": "shutdown-drain", "to": "", "draining": True}
         )
@@ -440,6 +453,7 @@ async def test_each_trigger_keeps_its_own_sentence_at_the_notice_seam(
             {"op": "retiring", "reason": "retiring for 0.55.6@46a4e9b", "draining": True}
         )
         assert fired == [LEAVING_ON_SIGNAL, LEAVING_FOR_BUILD, LEAVING_FOR_BUILD], fired
+        assert windows == ["", "", ""], "a drain carries no update window"
 
 
 @pytest.mark.asyncio
@@ -543,7 +557,16 @@ def test_the_facade_only_acts_on_a_draining_frame() -> None:
 
     facade = AttachedSession.__new__(AttachedSession)
     fired: list[str] = []
-    facade._drain_callback = lambda leaving: fired.append(leaving)  # type: ignore[method-assign]
+    windows: list[str] = []
+
+    def drain(leaving: str, *, updating: str = "") -> None:
+        fired.append(leaving)
+        windows.append(updating)
+
+    # ``set_drain_callback``, not a direct attribute write: the facade resolves
+    # whether the host takes the ``updating`` keyword when the callback is SET, so a
+    # cell that bypasses the setter is testing a state the runtime cannot produce.
+    facade.set_drain_callback(drain)
 
     facade._on_retiring_frame({"op": "retiring", "draining": True, "leaving": LEAVING_ON_SIGNAL})
     assert fired == [LEAVING_ON_SIGNAL], fired
@@ -579,3 +602,659 @@ def test_the_facade_only_acts_on_a_draining_frame() -> None:
         LEAVING_FOR_BUILD,
         "",
     ], fired
+
+    # AN UPDATE WINDOW SPEAKS EVEN THOUGH NOBODY IS DRAINING, and that is the new
+    # half of this seam rather than a fourth drain. The idle rung announces with
+    # ``draining`` false — it is not finishing work, it is moving, and its messages
+    # are QUEUED rather than refused — so before the ``updating`` key that frame
+    # reached this host not at all, and the one handover that holds the operator's
+    # message was the one they were told nothing about (``types.UPDATING``, the
+    # 2026-09-19 incident).
+    facade._on_retiring_frame(
+        {
+            "op": "retiring",
+            "draining": False,
+            "reason": "stale-build",
+            "to": "0.59.11@ead71b6",
+            "updating": "0.59.9 → 0.59.11@ead71b6",
+        }
+    )
+    assert fired[-1] == LEAVING_FOR_BUILD, fired
+    assert windows[-1] == "0.59.9 → 0.59.11@ead71b6", windows
+    assert set(windows[:-1]) == {""}, "only a window frame may carry a pair"
+
+
+# -- the THIRD outcome: the message is queued for the build replacing this one -----
+#
+# The refusal above is the fallback, not the ordinary path any more. A draining
+# runtime spools the user's own prompt for its successor (memo §4.2), and the
+# answer it gives is a receipt rather than an exception — so the two behaviours
+# the refusal branch exists for are exactly WRONG here: there is nothing to hand
+# back (the successor has the message) and nothing to retract (the row stands for
+# a message that will run).
+#
+# WHAT THE QUEUED STATE IS, AND WHERE IT ENDS (design round 1, D2/D3/D4; UX round
+# 1, U1/U3). The state is painted on the message's own row and taken down by the
+# successor's announcement of that message — one statement, with an end — rather
+# than as a receipt row below it, which could only accumulate one identical line
+# per send and could never stop asserting the queue after the message had run.
+# The cells below drive: the receipt (row marked, nothing handed back, no notice),
+# the settlement (marker off when the message is announced), and the recall
+# (withdrawn from the spool, or an honest "too late").
+
+
+class _QueuedSession(FakeSession):
+    """A session whose runtime queued the message for the build taking over.
+
+    It accepts ``message_id`` exactly as both in-tree sessions do. That keyword
+    is the correlation id the app mints, and it is the ONLY key that survives the
+    handover — a fake without it sends every cell down the id-less path, where no
+    marker can exist and no announcement can be matched.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.queued_ids: list[str] = []
+
+    async def prompt(  # type: ignore[override] — the fake widens nothing but the return
+        self, text: str, images: Any = None, *, message_id: str = ""
+    ) -> Any:
+        self.prompts.append(text)
+        self.prompt_images.append(list(images or []))
+        self.queued_ids.append(message_id)
+        return SPOOL_RECEIPT_PROMPT
+
+
+def _queued_session() -> _QueuedSession:
+    return _QueuedSession()
+
+
+def _user_rows(app: OperatorApp) -> list[str]:
+    """One string per user block: its painted rows, marker rows included.
+
+    ``UserBlock.text()`` is the PROMPT, deliberately — the receipt rows are the
+    app talking and are excluded from a copy — so the marker has to be read off
+    the authored rows, which is what the frame paints.
+
+    JOINED WITH ONE SPACE, because the marker WRAPS (design round 2, D6) and the
+    tests care about the sentence, not the width the harness happened to lay the
+    frame out at: ``wrap_cells`` splits on spaces and rebuilds with a single one,
+    so the join reproduces the text the app painted.
+    """
+    return [" ".join(block._rows(40)) for block in _blocks(app) if isinstance(block, UserBlock)]
+
+
+def _spool_row(app: OperatorApp, command_id: str, text: str) -> None:
+    """Write the row the draining runtime would have spooled for this message."""
+    from local_operator.paths import config_dir
+    from local_operator.session.runtime.inbox import (
+        SOURCE_USER,
+        InboxLine,
+        append_inbox,
+    )
+
+    session = app._session
+    assert session is not None, "the app has not booted a session"
+    directory = config_dir() / "sessions" / str(session.session_id)
+    assert append_inbox(
+        directory,
+        InboxLine(text=text, sender={}, source=SOURCE_USER, command_id=command_id, wake=True),
+    ), "the spool row could not be written"
+
+
+def _admitting_session() -> FakeSession:
+    """The ordinary case, which must stay silent."""
+    session = FakeSession()
+
+    async def prompt(text: str, images: Any = None, **kwargs: Any) -> str:
+        return "prompt admitted"
+
+    session.prompt = prompt  # type: ignore[assignment]
+    return session
+
+
+async def _send_queued(pilot: Any, editor: Editor, text: str, session: Any) -> None:
+    """Submit, then wait for the prompt worker to record the queued receipt.
+
+    ``_send``'s own wait is on the composer refilling, which is precisely what
+    must NOT happen for a queued message — so the wait is on the session having
+    seen the send, which is the fact the assertions below then read.
+    """
+    editor.text = text
+    await pilot.pause()
+    await pilot.press("enter")
+    for _ in range(100):
+        await pilot.pause()
+        await asyncio.sleep(0.01)
+        if session.queued_ids:
+            return
+    raise AssertionError("the queued receipt never reached the session")
+
+
+@pytest.mark.asyncio
+async def test_a_queued_prompt_keeps_its_row_and_carries_the_queued_state() -> None:
+    """The receipt is not a refusal, and the state it leaves is ON the row.
+
+    Everything the refusal branch does here would be a falsehood: the draft is
+    not returned (the successor holds the message, and a composer copy invites
+    the user to send it twice) and the echo row is not withdrawn (the message is
+    real and the successor runs it).
+
+    AND NO NOTICE IS APPENDED (design round 1, D4/U3): the row itself carries
+    :data:`QUEUED_ROW_TEXT`, so three messages sent during one drain cost three
+    rows rather than three identical receipts plus the standing drain row.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+
+        assert editor.text == "", "a queued message was handed back as unsent"
+        assert _user_texts(app) == ["deploy the fix"], "the row for a queued message was retracted"
+        assert _notices(app) == [], [n._text for n in _notices(app)]
+        rows = _user_rows(app)
+        assert any(QUEUED_ROW_TEXT in row for row in rows), rows
+        # The refusal's own copy must not appear anywhere: this message is not
+        # coming back, and the drain's sentence is the standing notice's job.
+        assert not [row for row in rows if "back in the composer" in row], rows
+        # Matched by IDENTITY against the constant the runtime answers with: the
+        # message id travelled with the send, which is what the settlement and
+        # the recall both key on.
+        assert session.queued_ids and session.queued_ids[-1], session.queued_ids
+
+
+@pytest.mark.asyncio
+async def test_the_queued_marker_comes_down_when_the_successor_runs_the_message() -> None:
+    """D2: the state has an END, and the successor's own announcement is it.
+
+    The marker is the only evidence the message exists — it is in the spool and
+    in no transcript — so a marker that never comes down reads identically
+    before the successor has served the message and after it has. The
+    announcement is matched on the id the app sent, which is the same id the
+    successor's turn carries.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        message_id = session.queued_ids[-1]
+        assert any(QUEUED_ROW_TEXT in row for row in _user_rows(app))
+
+        app.post_message(UserMessageStart("deploy the fix", 0, message_id))
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if QUEUED_ROW_TEXT not in _user_rows(app):
+                break
+
+        assert not any(QUEUED_ROW_TEXT in row for row in _user_rows(app)), _user_rows(app)
+        assert session.session_id  # the row, and only the marker, changed
+
+
+@pytest.mark.asyncio
+async def test_esc_takes_a_queued_prompt_back_out_of_the_spool() -> None:
+    """U1: the queued message is recallable, and the recall says what happened.
+
+    Enter committed the user's words to a process that may run them hours later,
+    so the cancel key has to be able to take them back — the neighbouring steer
+    channel already works this way (Esc lifts the newest queued steer into the
+    composer). The message lives in a FILE, which is why this needs no op: no
+    runtime has read the row, and that is exactly what makes it recallable.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        command_id = session.queued_ids[-1]
+        _spool_row(app, command_id, "deploy the fix")
+
+        await pilot.press("escape")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if editor.text:
+                break
+
+        assert editor.text == "deploy the fix", editor.text
+        assert _user_texts(app) == [], "the row for a withdrawn message stayed up"
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import (
+            SOURCE_RECALL,
+            inbox_path,
+            peek_inbox,
+        )
+
+        directory = config_dir() / "sessions" / str(session.session_id)
+        # NOT DELIVERABLE — which is the whole contract — rather than "gone from
+        # the file": the recall is an append-only MARKER (see `withdraw_inbox`),
+        # so the row is still on disk until the next drain consumes the batch,
+        # and every reader drops it in the meantime.
+        assert peek_inbox(directory) == [], peek_inbox(directory)
+        raw = inbox_path(directory).read_text(encoding="utf-8")
+        assert SOURCE_RECALL in raw, raw
+        assert command_id in raw, raw
+        assert [n._text for n in _notices(app)] == [QUEUED_PROMPT_TAKEN_BACK_NOTICE], [
+            n._text for n in _notices(app)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_esc_says_so_when_the_successor_has_already_taken_the_message() -> None:
+    """U1: losing the race is an ANSWER, never a silent no-op.
+
+    Once the successor has drained the spool the row is gone and the message WILL
+    run. A recall that quietly did nothing would leave the user believing they had
+    taken it back — so the miss says exactly that, and the marker stays up because
+    the message is still queued, only out of reach.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+
+        await pilot.press("escape")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if _notices(app):
+                break
+
+        assert editor.text == "", "a message already in the successor's hands was handed back"
+        assert [n._text for n in _notices(app)] == [QUEUED_PROMPT_MISSED_NOTICE], [
+            n._text for n in _notices(app)
+        ]
+        assert any(
+            QUEUED_ROW_TEXT in row for row in _user_rows(app)
+        ), "the message is still queued; only out of reach"
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_prompt_paints_no_handover_row() -> None:
+    """The receipt is matched by IDENTITY, so the ordinary answer stays silent.
+
+    ``prompt admitted`` is the durable append and needs no explanation; a viewer
+    that painted the handover row for it (or for any other receipt) would tell the
+    user their message was deferred when it was already in the history.
+    """
+    session = _admitting_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        editor.text = "an ordinary message"
+        await pilot.pause()
+        await pilot.press("enter")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+
+        assert _notices(app) == [], [n._text for n in _notices(app)]
+        assert _user_texts(app) == ["an ordinary message"]
+
+
+def _editor(app: OperatorApp) -> Any:
+    """The app's composer, wherever the interaction hides it."""
+    return app._editor()
+
+
+def _durable_row_for(app: OperatorApp, command_id: str) -> None:
+    """Write the row the successor appends when it RUNS a spooled message.
+
+    The real shape: a user row carrying ``producer_command_id`` is what puts the
+    id into the transcript's append-only index, which is the evidence
+    ``Transcript.has_admitted_command`` answers from — and the same index the
+    runtime uses to avoid running a twice-spooled message.
+    """
+    import json
+
+    from local_operator.paths import config_dir
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    session = app._session
+    assert session is not None, "the app has not booted a session"
+    directory = config_dir() / "sessions" / str(session.session_id)
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / TRANSCRIPT_FILENAME).open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": command_id,
+                    "ts": 1,
+                    "type": "message",
+                    "payload": {
+                        "kind": "message",
+                        "role": "user",
+                        "content": [],
+                        "producer_command_id": command_id,
+                    },
+                }
+            )
+            + "\n"
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_marker_comes_down_on_the_durable_row_not_only_on_the_announcement() -> None:
+    """U2 (UX round 2): on the REAL handover, the settlement is the transcript.
+
+    The boot drain admits the spooled row BEFORE the successor's control socket
+    exists, so a viewer that binds afterwards never receives that message's
+    ``USER-MESSAGE-START`` — measured on the live handover: the marker was still
+    up 60 s after the successor had answered, and the recall was still offered
+    for a message that had already run. The previous cell fed the announcement by
+    hand (``app.post_message``), which is the seam the real handover cannot
+    supply. This one writes the DURABLE ROW the successor writes, and lets the
+    bind-time settle find it.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        command_id = session.queued_ids[-1]
+        assert any(QUEUED_ROW_TEXT in row for row in _user_rows(app))
+
+        _durable_row_for(app, command_id)
+        assert app._interaction is not None
+        app._settle_handed_over_queues(app._interaction)
+        await pilot.pause()
+
+        assert not any(QUEUED_ROW_TEXT in row for row in _user_rows(app)), _user_rows(app)
+        assert app._interaction.turn.queued_prompts == {}, app._interaction.turn.queued_prompts
+        # AND THE RECALL IS NO LONGER OFFERED for a message the spool no longer
+        # holds: the press falls through to Esc's ordinary meaning rather than
+        # answering about a message that has run.
+        await pilot.press("escape")
+        await pilot.pause()
+        assert [n._text for n in _notices(app)] == [], [n._text for n in _notices(app)]
+
+
+@pytest.mark.asyncio
+async def test_a_recall_never_stops_the_turn_in_flight() -> None:
+    """U1 (UX round 2): the key the row advertises must do ONE thing.
+
+    With a turn streaming, one Esc that recalled a queued message used to fall
+    through to ``action_stop`` and abort that turn — and since a drain's liveness
+    IS the work in flight, killing it ended the drain, booted the successor and
+    put every other queued message beyond the recall's reach about three seconds
+    later. The row promises an inert undo of the user's own words.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        # The message is QUEUED first (the drain's receipt), and the turn is
+        # live by the time the user reaches for the key — which is the incident's
+        # state, not a second submit: a submit with a live turn is routed to a
+        # steer and never reaches the spool.
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        command_id = session.queued_ids[-1]
+        _spool_row(app, command_id, "deploy the fix")
+        session.streaming = True
+        await pilot.pause()
+
+        await pilot.press("escape")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if editor.text:
+                break
+
+        assert editor.text == "deploy the fix", editor.text
+        assert session.aborts == [], f"the recall stopped the turn: {session.aborts}"
+
+
+@pytest.mark.asyncio
+async def test_a_recall_reaches_a_queued_message_while_children_are_running() -> None:
+    """U3 (UX round 2): with children up the press used to be spent on them.
+
+    The recall sat behind ``if not children:``, so press 1 offered to stop the
+    subagents, press 2 STOPPED them, and the queued message the row was
+    advertising keeps sitting there untouched — at the incident's own shape
+    (``subagents_running=3``). The recall is inert and safe, so it answers first.
+    """
+    session = _queued_session()
+    session.running_children = 3
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        command_id = session.queued_ids[-1]
+        _spool_row(app, command_id, "deploy the fix")
+
+        await pilot.press("escape")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if editor.text:
+                break
+
+        assert editor.text == "deploy the fix", editor.text
+        assert (
+            session.subagent_cancels == []
+        ), f"the recall stopped the children: {session.subagent_cancels}"
+
+
+@pytest.mark.asyncio
+async def test_only_the_newest_queued_message_offers_the_recall_key() -> None:
+    """U4 (UX round 2): two rows offering, one honouring.
+
+    The recall lifts one message at a time, so an older queued row carrying the
+    same offer promises a press that will decline — the user has to learn the
+    rule by pressing. Only the newest advertises it, and the offer moves back down
+    the queue when the newest leaves it.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "first queued", session)
+        first_id = session.queued_ids[-1]
+        await _send_queued(pilot, editor, "second queued", session)
+
+        # Compared on the END of the row, not by containment: the offer-less
+        # marker is a PREFIX of the one carrying the offer, so `in` would read
+        # the newest row as both.
+        def _offers(app_rows: list[str]) -> int:
+            return sum(1 for row in app_rows if row.endswith(QUEUED_ROW_TEXT))
+
+        def _offerless(app_rows: list[str]) -> int:
+            return sum(1 for row in app_rows if row.endswith(QUEUED_ROW_TEXT_OLDER))
+
+        rows = _user_rows(app)
+        assert len(rows) == 2, rows
+        assert _offers(rows) == 1, rows
+        assert _offerless(rows) == 1, rows
+        assert rows[-1].endswith(QUEUED_ROW_TEXT), rows
+
+        # Recall the newest: the offer moves to the one still queued.
+        _spool_row(app, session.queued_ids[-1], "second queued")
+        await pilot.press("escape")
+        for _ in range(50):
+            await pilot.pause()
+            await asyncio.sleep(0.01)
+            if _offers(_user_rows(app)) == 1 and len(_user_rows(app)) == 1:
+                break
+
+        rows = _user_rows(app)
+        assert len(rows) == 1, rows
+        assert _offers(rows) == 1, rows
+        assert first_id not in " ".join(rows), "the recalled row should be gone"
+
+
+@pytest.mark.asyncio
+async def test_the_joiner_row_is_taken_down_when_the_spool_empties() -> None:
+    """D7 (design round 2): the joiner's row had no end either.
+
+    ``QUEUED_ELSEWHERE_NOTICE`` announced messages the spool held and could never
+    stop announcing them, so it sat directly above the answer it described. It
+    goes on the same bind-time settle as the marker, when the spool holds no
+    owner row this surface is not already showing.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        assert app._interaction is not None
+        _spool_row(app, "f" * 32, "a message from the other front end")
+        app._on_runtime_draining(LEAVING_FOR_BUILD)
+        await pilot.pause()
+        # The standing drain notice is on the frame too — the row under test is
+        # the queued-messages one.
+        assert QUEUED_ELSEWHERE_NOTICE in [n._text for n in _notices(app)], [
+            n._text for n in _notices(app)
+        ]
+
+        from local_operator.paths import config_dir
+        from local_operator.session.runtime.inbox import drain_inbox
+
+        directory = config_dir() / "sessions" / str(session.session_id)
+        assert drain_inbox(directory) != []
+        app._settle_handed_over_queues(app._interaction)
+        await pilot.pause()
+
+        assert QUEUED_ELSEWHERE_NOTICE not in [n._text for n in _notices(app)], [
+            n._text for n in _notices(app)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_a_bind_with_an_empty_queue_replays_no_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MAJOR-3 (review round 3): the settle runs on EVERY bind, so it must be free.
+
+    ``Transcript(directory)`` replays the whole journal eagerly — measured on this
+    store's own 252.7 MB / 22,334-row journal at 3,916 ms synchronously on the
+    event loop — and the settle is called after every successful bind, which is
+    the join path the operator's requirement is about. With nothing queued there
+    is nothing to settle, so nothing may be read.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.session import transcript as transcript_mod
+    from local_operator.session.transcript import TRANSCRIPT_FILENAME
+
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        await _boot(pilot, app)
+        assert app._interaction is not None
+        # THE SEED IS WHAT MAKES THIS CELL A TEST. Without a durable row the
+        # session directory does not exist yet, and `_handover_admitted_ids`'s
+        # own `is_file()` guard returns before any construction — so the
+        # assertion below holds on a tree with the empty-queue guard DELETED, and
+        # round 3 shipped exactly that vacuous cell (agent review round 4, QA
+        # Q-2). A real journal on disk makes the guard the only thing standing
+        # between the bind and a whole-journal replay.
+        _durable_row_for(app, "seed-row")
+        assert (
+            config_dir() / "sessions" / str(session.session_id) / TRANSCRIPT_FILENAME
+        ).is_file(), "the seed must have created the journal this cell is about"
+        built: list[tuple[Any, ...]] = []
+        real = transcript_mod.Transcript
+
+        class Counting(real):  # type: ignore[misc, valid-type]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                built.append(args)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(transcript_mod, "Transcript", Counting)
+
+        app._settle_handed_over_queues(app._interaction)
+        await pilot.pause()
+        assert built == [], "an empty queue must not replay the journal"
+
+        # NOT A REMOVAL OF THE FEATURE: with something queued and a durable row
+        # for it, the read happens and the settle lands.
+        await _send_queued(pilot, editor=_editor(app), text="deploy the fix", session=session)
+        command_id = session.queued_ids[-1]
+        _durable_row_for(app, command_id)
+        app._settle_handed_over_queues(app._interaction)
+        await pilot.pause()
+        assert built, "a queued message must still be settled from the transcript"
+        assert app._interaction.turn.queued_prompts == {}
+
+
+@pytest.mark.asyncio
+async def test_a_recall_that_missed_does_not_stop_the_turn() -> None:
+    """UX U1 (round 4): the losing press must not kill the turn it just spoke about.
+
+    The miss is the arm this delta widened: the successor's batch already has the
+    row, the notice says so ("the next runtime already has that message"), and
+    that sentence means the message WILL run. Falling through to the stop ladder
+    then aborted the turn in flight on the same press — measured on the real flow
+    as ``end_cause='user-stop'``, an extra ``interrupted`` row, and an answer that
+    never arrives.
+    """
+    session = _queued_session()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 24)) as pilot:
+        editor = await _boot(pilot, app)
+        await _send_queued(pilot, editor, "deploy the fix", session)
+        # The successor's batch took it: the spool no longer holds the row, which
+        # is what makes this press a MISS rather than a recall.
+        session.streaming = True
+        await pilot.pause()
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert QUEUED_PROMPT_MISSED_NOTICE in [n._text for n in _notices(app)], [
+            n._text for n in _notices(app)
+        ]
+        assert (
+            session.aborts == []
+        ), f"the losing recall stopped the turn it said would run: {session.aborts}"
+
+
+def test_a_one_argument_drain_callback_still_hears_the_phrase() -> None:
+    """Agent review round 1 (NIT 3): the keyword must not cost an old host its notice.
+
+    The frame callback is passed ``updating=`` through a ``Callable[..., Any]`` inside
+    a blanket ``except Exception``, so a host whose callback predates the keyword would
+    raise ``TypeError`` INSIDE that guard and lose the whole notice — including the
+    drain sentence it used to receive — with nothing but a ``logger.debug`` to show for
+    it. The pre-change behaviour for such a host is the phrase and no window, which is
+    what it now gets.
+    """
+    from local_operator.session.attached import AttachedSession
+
+    facade = AttachedSession.__new__(AttachedSession)
+    fired: list[str] = []
+
+    def drain(leaving: str) -> None:
+        fired.append(leaving)
+
+    facade.set_drain_callback(drain)
+    frame = {
+        "op": "retiring",
+        "reason": "stale-build",
+        "to": "0.55.6@46a4e9b",
+        "draining": True,
+        "updating": "0.55.6 → 0.59.11@ead71b6",
+    }
+    facade._on_retiring_frame(frame)
+
+    assert fired == [LEAVING_FOR_BUILD], fired
+
+
+def test_the_callback_probe_reads_the_signature_it_needs() -> None:
+    """The three shapes a host can present, and the answer for each."""
+    from local_operator.session.attached import AttachedSession, _accepts_updating
+
+    def one(_leaving: str) -> None: ...
+
+    def keyword(_leaving: str, *, updating: str = "") -> None: ...
+
+    def splatted(**kwargs: Any) -> None: ...
+
+    assert _accepts_updating(keyword) is True
+    assert _accepts_updating(splatted) is True
+    assert _accepts_updating(one) is False
+    # The state, not just the answer: ``set_drain_callback`` is what the facade calls.
+    facade = AttachedSession.__new__(AttachedSession)
+    facade.set_drain_callback(one)
+    assert facade._drain_callback_takes_updating is False

@@ -34,6 +34,11 @@ import pytest
 from local_operator import update
 from local_operator.session.attention import _classify_orphaned_run
 from local_operator.session.runtime import journal, registry
+from local_operator.session.runtime.types import (
+    BUILD_DRAIN_OVERDUE_CAUSE,
+    BUILD_DRAIN_PROGRESS_S,
+    bound_text,
+)
 
 #: A child that opens a real journal row, records a real tool boundary, writes
 #: its boot record, and then blocks. The test SIGKILLs it: nothing in this
@@ -303,7 +308,7 @@ def test_note_exit_normalizes_both_writers_to_one_token(tmp_path: Path) -> None:
     the signal drain reaches ``_clean_exit`` with a sentence (``leaving after
     SIGTERM``). The reader keys on the token, so without one vocabulary the
     escalated-sweep rung would hold only by which writer happened to run last —
-    and it would answer ``runtime-killed`` ("nothing recorded a stop") for a
+    and it would answer ``runtime-killed`` ("no stop was asked for") for a
     death where a signal WAS recorded.
     """
     directory = _session_directory(tmp_path, "sess-writer")
@@ -338,6 +343,82 @@ def test_a_recorded_signal_survives_a_later_writer_without_one(tmp_path: Path) -
     assert row is not None
     assert row.exit_cause == "SIGKILL", row.exit_cause
     assert journal.death_verdict(row)[1] == "runtime-shutdown"
+
+
+def test_a_recorded_bound_outranks_the_install_inference(tmp_path: Path) -> None:
+    """Q-2/R3: the row's own last word is narrated ahead of an inference.
+
+    Measured before this: a runtime that cut its turn under the drain's progress
+    bound left ``exit_cause`` naming the bound, and the successor narrated
+    ``install-mid-update`` instead. That sentence is true — the install HAS moved,
+    which is why the drain latched — but it is also the sentence every ordinary
+    build handover leaves, so the fact the operator needs (this turn was cut by a
+    bound rather than waited out) was invisible in the one account that outlives the
+    process. ``lop sessions`` loses the record ~97 ms after the escalation, so that
+    row is all there is.
+    """
+    directory = _session_directory(tmp_path, "sess-overdue")
+    writer = journal.TurnJournal(directory, "sess-overdue", update.BuildStamp("1.0.0", "aaa"))
+    writer.open_turn(command_id="cmd-over")
+    writer.note_exit(BUILD_DRAIN_OVERDUE_CAUSE)
+
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+    assert row.exit_cause == BUILD_DRAIN_OVERDUE_CAUSE
+    assert journal.install_moved(row), (
+        "the fixture must be one where the inference WOULD have won, or this test "
+        "proves nothing about the ordering"
+    )
+    kind, cause, reason = journal.death_verdict(row)
+    assert kind == "error"
+    assert cause == BUILD_DRAIN_OVERDUE_CAUSE, cause
+    assert "no movement" in reason, reason
+    assert bound_text(BUILD_DRAIN_PROGRESS_S) in reason, reason
+
+
+def test_the_killing_token_is_never_answered_by_the_recorded_rung(tmp_path: Path) -> None:
+    """MINOR 1 (review round 4): the verdict token must not be its own evidence.
+
+    Rung 2 answers a row's own recorded cause whenever ``CUT_OFF_CAUSES`` knows the
+    token, and that table holds the very token the unattributed arm returns —
+    ``KILL_CAUSE``, this taxonomy's name for a death nobody recorded an act for.
+    Membership alone therefore let such a row be rendered by ITSELF: the sentence a
+    runtime is owed when the kill went unattributed, minus the attribution, on the
+    arm that cannot name its actor. No writer records the token today (``note_exit``
+    is reached only from ``process._clean_exit`` and the direct-dispose path, and
+    neither passes it), so this is an invariant held against a future writer rather
+    than a live defect — which is exactly why it is pinned here instead of left to
+    the reader's prose.
+
+    THE FIXTURE CARRIES NO BUILD STAMP ON PURPOSE. ``install_moved`` (rung 3) answers
+    False for a row with no stamp, so rung 2 and the unattributed arm are the only
+    rungs left and the assertion is about the exclusion rather than about the rung
+    order: with the token admitted to rung 2 the sentence loses its
+    ``(unattributed)`` clause, and nothing else in the fixture can supply one.
+    """
+    from local_operator.incidents import KILL_CAUSE, KILL_UNATTRIBUTED
+
+    directory = _session_directory(tmp_path, "sess-recorded-kill")
+    writer = journal.TurnJournal(directory, "sess-recorded-kill")
+    writer.open_turn(command_id="cmd-kill")
+    writer.note_exit(KILL_CAUSE)
+
+    row = journal.TurnJournalRow.from_json(registry.read_turn_journal(directory))
+    assert row is not None
+    assert row.exit_cause == KILL_CAUSE, (
+        "the writer must record the token verbatim, or this test is about the "
+        "normalizer rather than about rung 2"
+    )
+    assert not journal.install_moved(row), (
+        "the fixture must be one no inference claims, or a verdict here would say "
+        "nothing about rung 2"
+    )
+
+    kind, cause, reason = journal.death_verdict(row)
+
+    assert kind == "error"
+    assert cause == KILL_CAUSE, cause
+    assert KILL_UNATTRIBUTED in reason, reason
 
 
 def test_a_non_signal_exit_cause_is_recorded_verbatim(tmp_path: Path) -> None:

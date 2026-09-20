@@ -379,13 +379,18 @@ async def test_a_composer_key_warns_even_though_textual_reports_no_clash() -> No
 async def test_a_settings_page_write_rebinds_THIS_process(tmp_path: Path) -> None:
     """THE local-branch trap, re-run.
 
-    ``_on_config_change`` returns early on ``source == "local"``, and a hotkey
-    write from the page in this process is applied by NOTHING else — the page
-    stores config, the app holds the BindingsMap. This is verbatim the
-    ``tool_approval_mode`` defect that method documents at length: the section
-    is labelled LIVE, the page paints that claim, and the pane goes on
-    answering the old key. The apply is on both branches; this asserts the one
-    that is easy to omit.
+    ``_on_config_change``'s local branch applies a ``source == "local"`` write
+    and nothing else does — the page stores config, the app holds the
+    BindingsMap — so a hotkey written from the page in this process is applied
+    by nothing but that branch. This is verbatim the ``tool_approval_mode``
+    defect that method documents at length: the section is labelled LIVE, the
+    page paints that claim, and the pane goes on answering the old key. The
+    apply is on both branches; this asserts the one that is easy to omit.
+
+    That branch carries a second duty since #1282 — ``"local"`` is also the one
+    delivery that may LOOSEN the approval gate, in the process that owns it — so
+    "the fast path can be skipped" would now cost an operator action as well as
+    a stale hotkey.
     """
     app = OperatorApp(lambda: _factory(FakeSession()))
     async with app.run_test(size=(100, 30)) as pilot:

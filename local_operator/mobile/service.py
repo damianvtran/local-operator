@@ -13,9 +13,11 @@ import logging
 import os
 import signal
 
+from local_operator import supervisors
 from local_operator.logger import configure_console_logging, quiet_wire_clients
-from local_operator.mobile.auth import load_password
+from local_operator.mobile.auth import load_password, store_description
 from local_operator.mobile.daemon import DEFAULT_PORT, MobileDaemon, build_app
+from local_operator.procstate import install_loop_signal_handlers
 
 logger = logging.getLogger(__name__)
 
@@ -39,11 +41,32 @@ async def amain(port: int = DEFAULT_PORT) -> int:
     if not password:
         # First-run is an operator action, not a silent default: the daemon
         # refuses to bind unauthenticated rather than guess a password.
-        print(
-            "no mobile password set. Run `lop mobile install` (or set "
-            "LOP_MOBILE_PASSWORD) first.",
-            flush=True,
-        )
+        #
+        # WHICH COMMAND THIS NAMES DEPENDS ON THE HOST (audit A23). `lop mobile
+        # install` supervises the daemon through launchd, systemd --user or Task
+        # Scheduler, and a host that has none of those — a container, OpenRC/
+        # Alpine, a Linux without systemd — refuses it outright
+        # (``supervisors.no_supervisor_error``). Telling that operator to run it
+        # names a command that cannot work, so this branches on the same
+        # discovery the installer uses. ``store_description()`` is the other
+        # half: the answer used to be "the Keychain" on every platform, which
+        # is one of the three stores this now picks between.
+        if supervisors.supervisor() is None:
+            print(
+                "no mobile password set, and this host has no user service "
+                "supervisor, so `lop mobile install` cannot run here. Run "
+                f"`lop mobile password` to store one in {store_description()}, "
+                "then run the daemon in the foreground with `lop mobile serve` "
+                "(or set LOP_MOBILE_PASSWORD).",
+                flush=True,
+            )
+        else:
+            print(
+                "no mobile password set. Run `lop mobile install` (it stores "
+                f"the password in {store_description()}), or set "
+                "LOP_MOBILE_PASSWORD first.",
+                flush=True,
+            )
         return 2
 
     # A SECOND daemon on the same machine must never dial registrants: each
@@ -74,8 +97,13 @@ async def amain(port: int = DEFAULT_PORT) -> int:
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
+    # `loop.add_signal_handler` is Unix-only, and the Windows Proactor loop's
+    # inherited stub raises NotImplementedError — which escaped `amain` and
+    # killed the relay at startup, before it could bind. The helper falls back
+    # to `signal.signal` there. `lop mobile serve` is the ONLY supported way to
+    # run this daemon off macOS (`lop mobile install` refuses), so this is the
+    # difference between the relay working on Windows and not existing.
+    install_loop_signal_handlers(loop, {signal.SIGTERM: stop.set, signal.SIGINT: stop.set})
 
     serve_task = asyncio.ensure_future(server.serve())
     stop_task = asyncio.ensure_future(stop.wait())

@@ -2746,8 +2746,20 @@ def _live_row_cost(value: Any) -> int:
         return LIVE_EVENT_TEXT_FRAME_BUDGET_CHARS + 1
 
 
-def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
+def _bound_live_result_in_place(
+    result: dict[str, Any],
+    *,
+    share: int,
+    placeholder: str = LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER,
+) -> None:
     """Spend one retained end's share across everything it actually carries.
+
+    ``placeholder`` is the stand-in for a block this bound cannot clip (an
+    image's base64, or any future payload under a key this module has never
+    heard of). It is a parameter because this bound is now spent on a second
+    frame with a different reader — an ``agent_end`` conversation frame bounded
+    for the wire (``harness/wire.py``) — and a row elided from THAT frame must
+    not tell the reader it was dropped from a reconnect snapshot it never rode.
 
     Driven by MEASURED cost rather than by key names, so a payload-bearing
     field cannot escape by not being a string (see
@@ -2827,9 +2839,7 @@ def _bound_live_result_in_place(result: dict[str, Any], *, share: int) -> None:
             block.clear()
             block["type"] = "text"
             block["text"] = (
-                LIVE_EVENT_BLOCK_ELIDED_SEPARATOR + LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
-                if emitted_text
-                else LIVE_EVENT_BLOCK_ELIDED_PLACEHOLDER
+                LIVE_EVENT_BLOCK_ELIDED_SEPARATOR + placeholder if emitted_text else placeholder
             )
         emitted_text = emitted_text or bool(block.get("text"))
         remaining = max(0, remaining - _live_row_cost(block))

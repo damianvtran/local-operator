@@ -52,6 +52,20 @@ boundary. Do not shorten it to “browser automation.”
 
 > When the agent asks to open a site the user has not yet allowed, the extension raises a system notification naming the site so the user notices the pending decision even if the popup is closed. Without it, an approval the agent is blocked on could go unseen until it times out. Notifications are only shown for a pending site-permission decision; the extension does not send marketing or background notifications.
 
+### `downloads` (optional — requested at runtime, absent at install)
+
+> Local Operator uses `chrome.downloads` for one thing: saving a file the page offers, when the user has turned on "Allow downloads" in the extension's own settings. The permission is declared as an **optional** permission, so installing or updating the extension never widens what it may do; Chrome asks the user the moment they turn that switch on, and the switch reflects the answer. Nothing is downloaded before that grant, and turning the switch off — or revoking the permission in Chrome — disables the capability immediately. The extension never chooses a destination: Chrome writes to the user's normal download folder, the extension only learns the absolute path Chrome reports for the transfer it started, and the Local Operator app on the same computer then moves that file into the agent session's own private folder with 0600 permissions. The permission is not used to read the user's download history, to enumerate other downloads, or to fetch anything the user did not ask the agent to save.
+
+Why this is reviewable: it is opt-in at runtime rather than install-time, it names
+why the API is needed (a page's own download control, not an arbitrary fetch), and
+it states the destination boundary honestly — the file does appear briefly in the
+user's normal download folder before the local app relocates it, which is a
+consequence of Chrome refusing to let an extension choose a path.
+
+The upload direction needs no permission at all: it rides the `debugger` grant
+above. It is gated the same way, by an "Allow uploads" switch in the same
+settings page that is off by default.
+
 ### Host permission: `<all_urls>`
 
 > Users may ask their Local Operator agent to browse any HTTP or HTTPS site, so the extension cannot declare a fixed site list. Access is denied by default: before the agent-owned tab enters a new origin, the extension displays an in-browser prompt with a scope dropdown (all pages on this domain, only this site, just this once) and Allow/Deny buttons, and it repeats the check for redirect destinations. The domain option is computed from the bundled Public Suffix List so `co.uk` and `github.io` are never offered as domains. Literal loopback hosts additionally offer an explicit any-port grant; no other hostname is eligible. A separate opt-in Settings switch allows every website without prompting, gated behind a confirmation dialog and off by default. `<all_urls>` is required for `chrome.scripting` and debugger-backed actions on the specific origins the user approves. The extension independently rejects non-HTTP(S) schemes and does not use this permission on the user's other tabs.
@@ -60,8 +74,11 @@ boundary. Do not shorten it to “browser automation.”
 **built** `extension/dist/manifest.json`, not the source list. The built name is
 `Local Operator`, and the permission set that must match here is
 `debugger, tabs, tabGroups, scripting, storage, alarms, webNavigation, notifications` plus
-host `<all_urls>`. Any implementation change to the manifest updates this file,
-not the reverse.
+host `<all_urls>`, plus the **optional** permission `downloads` (declared under
+`optional_permissions`, requested at runtime — it is NOT part of the install-time
+set, and a reviewer diff that finds it in `permissions` means the switch's grant
+flow has been bypassed). Any implementation change to the manifest updates this
+file, not the reverse.
 
 **Implementation assumption to verify:** `<all_urls>` in Chrome includes schemes
 beyond HTTP(S), while the design requires independent runtime rejection of
