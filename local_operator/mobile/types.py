@@ -49,7 +49,11 @@ from typing import Any, Literal
 # stack — daemon, web layer, attach client, peer send — keeps importing them
 # from the path it always has. See local_operator/session/runtime/types.py for
 # why that package is neutral and why RUN_DIRNAME keeps its mobile-era name.
-from local_operator.harness.approval import OPERATOR_CAP_BYTES, is_wire_hex
+from local_operator.harness.approval import (
+    OPERATOR_CAP_BYTES,
+    is_operator_key_id,
+    is_wire_hex,
+)
 from local_operator.session.runtime.types import (  # noqa: F401  (re-exported)
     ATTACH_MAX_CLIENTS,
     HEARTBEAT_INTERVAL_S,
@@ -202,7 +206,13 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         except ValueError as exc:
             raise ValueError("operator_sig must be a hex string") from exc
     if "operator_key_id" in frame:
-        if not is_wire_hex(frame.get("operator_key_id")):
+        # ``is_operator_key_id``, NOT the nonce's shape: the key id is a truncated
+        # digest (32 hex characters) while a nonce/salt/proof is a full 32-byte
+        # value (64). The nonce's rule here rejected every signature the relay
+        # carried before the runtime ever saw it (stage D, found by the phone
+        # e2e cell) — the raw-socket path does not run through this validator,
+        # which is why nothing caught it sooner.
+        if not is_operator_key_id(frame.get("operator_key_id")):
             raise ValueError("operator_key_id must be a hex string")
     if "operator_cert" in frame:
         certificate = frame.get("operator_cert")

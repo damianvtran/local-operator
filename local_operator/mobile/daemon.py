@@ -34,6 +34,7 @@ import gzip
 import json
 import logging
 import os
+import secrets
 import sqlite3
 import subprocess
 import time
@@ -1081,6 +1082,20 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         if entry.operator_nonce:
             # A nonce, never the capability: see ``harness/approval._proof``.
             auth["operator_nonce"] = entry.operator_nonce
+        # AND THE PAIRED-DEVICE DECLARATION (stage D). A certificate in this
+        # machine's store says a phone is authorised to sign for the operator, so
+        # the runtime can answer "this connection may loosen" before any frame
+        # arrives — which is what decides whether `/approvals` offers the phone a
+        # command it can carry out or sends it looking for a window it does not
+        # have. A certificate is PUBLIC data; the private half never leaves the
+        # phone, so declaring one here grants nothing and the runtime verifies it
+        # under the anchored operator key regardless.
+        #
+        # Absent when nothing is paired, and an older runtime ignores the field
+        # entirely, which is why no PROTOCOL_VERSION moves.
+        device_certificate = daemon.operator_device_certificate()
+        if device_certificate:
+            auth["operator_device"] = device_certificate
         writer.write(json.dumps(auth).encode() + b"\n")
         await writer.drain()
         while True:
@@ -1985,6 +2000,28 @@ class MobileDaemon:
             asyncio.get_running_loop().create_task(send())
         except RuntimeError:  # no loop (tests constructing the daemon directly)
             pass
+
+    def operator_device_certificate(self) -> str:
+        """A paired device certificate to DECLARE on this relay's auth frames, or "".
+
+        Reads the same store the pairing flow writes (``operator/devices``), so a
+        phone paired while the daemon is running is picked up on the next dial
+        rather than needing a restart: the dial is the moment the value is read,
+        and nothing caches it.
+
+        It is a DECLARATION, not a credential. The relay forwards the phone's
+        signature and can no more produce one having read this file than it could
+        before — which is the property the whole stage turns on, and the reason
+        this method is allowed to exist on a process that holds the portal
+        password.
+        """
+        from local_operator.operator import devices
+        from local_operator.paths import config_dir
+
+        try:
+            return devices.paired_certificate(config_dir()) or ""
+        except (OSError, ValueError):  # pragma: no cover — an unreadable store
+            return ""
 
     async def request(self, pid: int, op: str, **fields: Any) -> dict[str, Any]:
         """Send one control frame to a session and await its ack/error."""
@@ -2920,16 +2957,32 @@ def build_app(daemon: MobileDaemon):
         # sends one learns nothing about the field's shape — and so the
         # endpoint's error surface is unchanged for every ordinary request.
         body.pop("operator_cap", None)
-        # AND THE SIGNATURE FIELDS, for the reason above and against the direction
-        # the design eventually wants (revision 2, §2.3): a signature arriving in
-        # an HTTP body from a local process can only be a forgery attempt while
-        # the relay has no way to MINT a challenge for a phone to sign. Stage D
-        # narrows this — machine-held proof fields stay dropped, signature fields
-        # are admitted, because an operator signature is unforgeable and its
-        # challenge is single-use — and this comment is the marker for that
-        # change so it is made deliberately rather than by deleting a line.
-        for field in ("operator_sig", "operator_key_id", "operator_cert"):
-            body.pop(field, None)
+        # ...AND THE SIGNATURE FIELDS ARE ADMITTED (stage D, revision 2 §2.4,
+        # §4.2). This is the NARROWING the earlier revision's comment marked as
+        # its own reversal point, and the direction is the whole design: the
+        # phone cannot be a signer while the relay refuses to carry its
+        # signature. `operator_cap` above stays dropped forever — it is
+        # MACHINE-HELD proof material, the relay mints its own when it is the
+        # spawner, and a value arriving in an HTTP body can only be a forgery.
+        #
+        # The three admitted fields are a different class:
+        #
+        # * `operator_sig` is an ES256 signature over a challenge THIS runtime
+        #   minted for THIS connection, action and request id; a local attacker
+        #   who replays one gains nothing, because the challenge is single-used
+        #   and popped before verification (`server._operator_signature_verdict`)
+        #   — the second presentation finds no challenge at all;
+        # * `operator_cert` is a PUBLIC statement the operator signed; presenting
+        #   it proves nothing without the device's private half, which never
+        #   leaves the phone;
+        # * `operator_key_id` only routes which key to try.
+        #
+        # None of the three can be MINTED here, which is the property that keeps
+        # the relay a courier: it holds the portal password and nothing else that
+        # can produce a signature. `operator_handshake` is deliberately NOT in
+        # this list and never arrives from a caller — the relay computes its own
+        # in `request()` and overwrites whatever a body carried, so a forged one
+        # is not refused, it is replaced.
         op = body.pop("op", None)
         if not isinstance(op, str) or not op:
             return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)
@@ -3017,6 +3070,179 @@ def build_app(daemon: MobileDaemon):
         except RuntimeError as exc:
             return JSONResponse({"error": str(exc)}, status_code=422)
         return JSONResponse({"ok": True, "detail": reply.get("detail", "")})
+
+    async def api_operator_challenge(request: Request) -> Response:
+        """Mint a per-action operator challenge for THIS session's live connection.
+
+        THE PHONE'S HALF OF THE SIGNING FLOW (stage D, revision 2 §2.3). The phone
+        cannot ask the runtime directly — the runtime's control socket is loopback
+        and speaks the record key, which lives on this machine — so it asks us and
+        we relay one ordinary frame. Ordinary is the load-bearing word: the op
+        grants nothing by itself, so it rides the record key like any other control
+        request and needs no authority of its own. The SIGNATURE the phone then
+        produces is what carries authority, and only the runtime can judge it.
+
+        THE CHALLENGE MUST BE MINTED ON THE CONNECTION THE FRAME WILL ARRIVE ON,
+        and that is why this goes through ``daemon.request`` rather than opening
+        anything of its own: the runtime binds a challenge to
+        ``(connection, session_id, action, request_id)``, and ``request()`` writes
+        on the relay's single persistent connection per session. A challenge minted
+        anywhere else would be refused — correctly.
+
+        Only the CHALLENGE travels back. It is not a credential (it is worth
+        exactly one signature, which only the paired phone can make), and holding
+        one lets nobody sign: the private half never leaves the device.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+
+        # THE AUTHORITY FIELDS ARE STRIPPED FROM THIS BODY, and only here. This
+        # endpoint's whole output is a challenge, so a body carrying proof or
+        # signature material is a caller confusing two endpoints — and relaying
+        # it would send a half-finished frame through the ordinary path, where an
+        # accidental `operator_cap` could be replayed where it means something.
+        # The real command arrives on the command endpoint, which is the one that
+        # was deliberately narrowed to admit signatures.
+        for field in ("operator_cap", "operator_sig", "operator_key_id", "operator_cert"):
+            body.pop(field, None)
+        action = body.pop("action", None)
+        if action not in ("loosen", "approve"):
+            return JSONResponse({"error": "action must be 'loosen' or 'approve'"}, status_code=422)
+        request_id = body.pop("request_id", "")
+        if not isinstance(request_id, str):
+            return JSONResponse({"error": "request_id must be a string"}, status_code=422)
+        session_id = str(body.pop("session_id", "") or request.path_params.get("session_id", ""))
+        entry = _entry_for_session(daemon, session_id)
+        if entry is None:
+            return JSONResponse({"error": "session not connected"}, status_code=409)
+        try:
+            reply = await daemon.request(
+                entry.record.pid, "operator_challenge", action=action, request_id=request_id
+            )
+        except KeyError:
+            return JSONResponse({"error": "session not connected"}, status_code=409)
+        except TimeoutError:
+            return JSONResponse({"error": "session did not answer"}, status_code=504)
+        except (ConnectionError, OSError) as exc:
+            return JSONResponse({"error": str(exc)[:200]}, status_code=502)
+        except (ValueError, RuntimeError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=422)
+        challenge = reply.get("challenge")
+        if not isinstance(challenge, str) or not challenge:
+            return JSONResponse({"error": "the session sent no challenge"}, status_code=502)
+        return JSONResponse(
+            {
+                "challenge": challenge,
+                "expires_s": int(reply.get("expires_s") or 0),
+                "session_id": entry.record.session_id,
+                "action": action,
+                "request_id": request_id,
+            }
+        )
+
+    async def api_pair(request: Request) -> Response:
+        """Claim a pairing code with a device's public key (stage D).
+
+        A COURIER'S ENDPOINT, and the security argument is what it CANNOT do. It
+        checks the code ``lop pair`` minted, records the device's public point,
+        and answers — it holds no operator key, cannot obtain a signature, and
+        therefore cannot make a device a signer. The certificate that does that
+        is produced on the machine by the operator's own gesture and is written by
+        ``lop pair``, not by anything reachable from here. A local attacker driving
+        this endpoint with the portal password (matrix cell N2) can at most leave a
+        pending request the operator must still refuse.
+
+        The PRIVATE HALF IS NEVER SENT HERE, and the shape of the body is what
+        enforces it: there is no field for it. The phone generates its key in
+        WebCrypto with ``extractable: false``, so it could not export one even if
+        this endpoint asked.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "request body must be an object"}, status_code=400)
+
+        from local_operator.operator import devices
+        from local_operator.paths import config_dir
+
+        root = config_dir()
+        code = str(body.get("code") or "").strip()
+        live_code = devices.read_pairing(root)
+        if live_code is None:
+            # NO LIVE CODE and A WRONG CODE are answered identically on purpose:
+            # the distinction would tell a guesser whether a pairing window is
+            # open on this machine, which is the one fact they need to time an
+            # attempt.
+            return JSONResponse({"error": "that pairing code is not valid"}, status_code=403)
+        if not secrets.compare_digest(code, live_code):
+            return JSONResponse({"error": "that pairing code is not valid"}, status_code=403)
+
+        spki = devices.decode_spki(body.get("spki"))
+        if spki is None:
+            return JSONResponse(
+                {"error": "spki must be an uncompressed P-256 public point, base64url"},
+                status_code=422,
+            )
+        device_id = devices.new_device_id(spki)
+        if devices.is_revoked_here(root, device_id):
+            # A revoked device must not be able to re-pair on a fresh code and
+            # quietly become a signer again. The renaming attack is closed by the
+            # id being DERIVED from the key rather than chosen.
+            return JSONResponse({"error": "this device has been revoked"}, status_code=403)
+        name = str(body.get("name") or "")[:64]
+        devices.write_pending(
+            root,
+            device_id=device_id,
+            name=name,
+            spki=devices.encode_spki(spki),
+            code=live_code,
+        )
+        return JSONResponse({"ok": True, "device_id": device_id})
+
+    async def api_pair_status(request: Request) -> Response:
+        """Whether the operator has approved a claimed code yet.
+
+        The phone polls this. It never returns private material — a certificate is
+        a public statement — and it is the only way the device learns the string
+        it has to present, since the certificate is minted on the machine rather
+        than by anything the phone can reach.
+        """
+        denied = gate(request)
+        if denied is not None:
+            return denied
+        from local_operator.operator import devices
+        from local_operator.paths import config_dir
+
+        device_id = str(request.path_params["device_id"])
+        try:
+            stored = devices.read_device(config_dir(), device_id)
+        except ValueError:
+            return JSONResponse({"error": "bad device id"}, status_code=422)
+        if stored is None:
+            return JSONResponse({"paired": False, "device_id": device_id})
+        return JSONResponse(
+            {
+                "paired": True,
+                "device_id": stored.device_id,
+                "certificate": stored.certificate,
+                "operator_key_id": stored.operator_key_id,
+                "scope": list(stored.scope),
+                "exp": stored.not_after,
+                "name": stored.name,
+            }
+        )
 
     async def api_commands(request: Request) -> Response:
         denied = gate(request)
@@ -3193,6 +3419,13 @@ def build_app(daemon: MobileDaemon):
         Route("/api/sessions/{session_id:str}/history", api_session_history),
         Route("/api/sessions/{session_id:str}/image", api_session_image),
         Route("/api/sessions/{session_id:str}/command", api_command, methods=["POST"]),
+        Route(
+            "/api/sessions/{session_id:str}/operator/challenge",
+            api_operator_challenge,
+            methods=["POST"],
+        ),
+        Route("/api/pair", api_pair, methods=["POST"]),
+        Route("/api/pair/{device_id:str}", api_pair_status),
         Route("/api/commands", api_commands),
         Route("/api/models", api_models),
         Route("/mark.png", mark_png),

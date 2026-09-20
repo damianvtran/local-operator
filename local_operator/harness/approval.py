@@ -392,6 +392,32 @@ def is_wire_hex(value: object) -> bool:
 _PROOF_LABEL_HANDSHAKE = b"lop-operator-cap-handshake-v1"
 _PROOF_LABEL_REQUEST = b"lop-operator-cap-request-v1"
 
+#: How many hex characters an ``operator_key_id`` has. ``verify.key_id_for``
+#: truncates the SHA-256 of the public point to 32, and this module states the
+#: number rather than importing it because it is stdlib-only by contract (see
+#: the module docstring) while ``operator.verify`` reaches for ``cryptography``.
+#: A test pins it against the real producer, so the two cannot drift.
+KEY_ID_HEX_CHARS = 32
+
+
+def is_operator_key_id(value: object) -> bool:
+    """Whether ``value`` has the wire shape of an ``operator_key_id``.
+
+    NOT :func:`is_wire_hex`, and that distinction is the whole reason this exists.
+    The key id is a TRUNCATED digest — 32 hex characters — while the nonce, salt
+    and proof are full 32-byte values, 64. Validating the id with the nonce's
+    rule made every signature the RELAY carried a 422 before it reached the
+    runtime; the anchored-key path over the raw socket was unaffected (it does
+    not run through ``mobile.types.validate_control_frame``), which is exactly why
+    nothing caught it until stage D put the phone on that route.
+
+    A shape check, not an authentication one: the signature is the authentication
+    and this field only routes which key to try.
+    """
+    if not isinstance(value, str) or len(value) != KEY_ID_HEX_CHARS:
+        return False
+    return all(character in "0123456789abcdef" for character in value.lower())
+
 
 def _proof(label: bytes, cap: bytes, client_nonce: str, server_salt: str) -> str:
     """``hmac_sha256(cap, label || client_nonce || ":" || server_salt)``, hex.
@@ -633,15 +659,32 @@ CARD_APPROVAL_REFUSED_NOTICE = (
 #: drifted into two forms, and because the reader can be a PHONE: "this
 #: machine's config.yml" reads as the phone's own filesystem from there, so the
 #: sentence names the machine the SESSION runs on instead (design round 3, D16).
-#: The second half is the caller's to choose — whether `/approvals auto` works
-#: from where the reader is — and ``None`` means the connection has not PROVED
-#: it may loosen, which takes the conservative form (agent review round 3, R3-1).
+#: The second half is the caller's choice — whether `/approvals auto` works from
+#: where the reader is — and ``None`` means the connection has not PROVED it may
+#: loosen, which takes the conservative form (agent review round 3, R3-1).
+#:
+#: THE CONSERVATIVE FORM NAMES THE REAL LEVERS, NOT THE SPAWNER (revision 2, §5).
+#: It used to read "/approvals auto has to come from the window that started it",
+#: and under the spawner-authority model that was true. Under this one it is the
+#: user-visible regression the redesign exists to delete: a background-started
+#: runtime HAS no window that started it, so the sentence sent its reader looking
+#: for something that does not exist, and the remedy behind it — retire the
+#: runtime and reopen it here — is exactly the capability loss being repaired.
+#: The replacement names the three levers that work from anywhere, in the order a
+#: reader can act on them: this machine's presence store, a paired phone, and the
+#: launch-time lever for a NEW session. It is deliberately the same set
+#: ``OPERATOR_AUTHORITY_REQUIRED_NOTICE`` names, because a reader who has seen one
+#: of these sentences has seen the other.
+#:
+#: It stays under the 400-character error-frame cap (``server.py``'s
+#: ``str(exc)[:400]``) so it travels whole rather than truncated mid-remedy.
 def approvals_default_notice(*, may_loosen: bool | None) -> str:
     switch = (
         "/approvals ask|auto switches this session now"
         if may_loosen
-        else "/approvals ask switches this session now; /approvals auto has to come "
-        "from the window that started it"
+        else "/approvals ask switches this session now; /approvals auto needs the "
+        "operator's own consent — from this machine (Touch ID) or your paired phone "
+        "— and a NEW session can start loosened with --yolo or tool_approval_mode: auto"
     )
 
     return (
@@ -776,6 +819,203 @@ class OperatorCapHandoff:
 #: (``session/runtime/process.main``) are different processes at different
 #: times, and a typo in either is a silent "no capability" at best.
 OPERATOR_FD_FLAG = "--operator-fd"
+
+#: The argv flag for the REVERSE direction: the descriptor a supervised
+#: ``lop exec --control`` run writes ITS capability to (stage E). One constant
+#: for the same reason as the flag above — the writer is
+#: ``exec_control.start_exec_control`` and the reader is a supervisor in a
+#: different process, and the two must agree on the spelling.
+#:
+#: WHY THE CAPABILITY TRAVELS UPWARD HERE, and why it is the same trade the
+#: downward handoff makes. A supervisor watching a supervised run needs to
+#: ANSWER the cards that run parks (design §3, row 4), and the only credential
+#: that can do so without a human gesture is proof of the runtime's capability.
+#: Every on-disk channel for it is forbidden for the reasons the class above
+#: records — argv and the environment are ps-readable, a log file is readable by
+#: the model, and the record is the defect #1310 exists for. So the runtime MINT
+#: s its own capability and writes it up a descriptor the supervisor already
+#: holds, then CLOSES it: a descriptor number in argv is not a secret, and by the
+#: time any tool subprocess exists the descriptor is gone from the runtime's
+#: table as well (tool spawns use ``close_fds=True``).
+SUPERVISOR_FD_FLAG = "--supervisor-fd"
+
+
+def deliver_operator_cap_to(descriptor: int, cap: bytes) -> bool:
+    """The RUNTIME's end of the upward handoff: write the capability and close.
+
+    The mirror of :meth:`OperatorCapHandoff.deliver`, which is the same two steps
+    in the other direction. A 32-byte write into an empty socketpair cannot
+    block, so this is safe to call synchronously from the runtime's start path.
+
+    Returns whether the write landed. ``False`` is NOT fatal and must not be: the
+    run has already published its record and is about to do the work the user
+    asked for, and a supervisor that went away before reading the capability
+    loses the ability to approve cards — a capability loss on a surface that no
+    longer exists — rather than anything about this run. Logged, not raised.
+
+    The descriptor is closed on EVERY path, including the failing one. Leaving it
+    open would defeat the vector: the write end would still be in this process's
+    table for a later tool subprocess to find by number.
+    """
+    if os.name == "nt":  # pragma: no cover — Windows only; CI runs POSIX
+        try:
+            _win32_handle_writer(descriptor)(bytes(cap))
+        except OSError:
+            logger.warning("exec control: could not write the operator capability upward")
+            return False
+        return True
+    try:
+        os.write(descriptor, bytes(cap))
+    except OSError:
+        logger.warning(
+            "exec control: the supervisor's capability descriptor was already closed; "
+            "the supervisor will not be able to approve cards on this run"
+        )
+        return False
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:  # pragma: no cover — already closed
+            logger.debug("exec control: capability descriptor already closed", exc_info=True)
+    return True
+
+
+class SupervisorCapChannel:
+    """The SUPERVISOR's end of the upward capability handoff (stage E).
+
+    A supervisor uses it in four steps, and the ORDER of the last two is what
+    makes the capability useful rather than merely present:
+
+    1. one channel per ``lop exec`` run: ``channel = open_supervisor_cap_channel()``;
+    2. launch the run with ``channel.argv`` appended and ``channel.pass_fds``
+       handed to the spawn (``close_fds=True`` on POSIX — only that descriptor
+       survives the exec, exactly as the downward handoff requires);
+    3. read the run's endpoint line, which carries the pid;
+    4. ``remember_operator_cap(pid, channel.read())`` — after which the
+       supervisor's own ``AttachClient`` presents the proof on every
+       authority-increasing frame with no further work, because that is the one
+       place a proof is constructed (:meth:`AttachClient.authority_proof`).
+
+    ``read()`` is the ONLY reader, and it closes both ends whatever happens. A
+    supervisor that never reads (its own timeout, a crashed driver) must not
+    leave a descriptor in its own table for a later child to inherit.
+    """
+
+    def __init__(
+        self,
+        *,
+        argv: list[str],
+        pass_fds: tuple[int, ...],
+        close_fds: bool,
+        reader: Callable[[float], bytes],
+        closer: Callable[[], None],
+    ) -> None:
+        #: Append to the run's argv. Carries the descriptor NUMBER only.
+        self.argv = argv
+        self.pass_fds = pass_fds
+        self.close_fds = close_fds
+        self._reader = reader
+        self._closer = closer
+        self._closed = False
+
+    def read(self, *, timeout_s: float = 10.0) -> bytes | None:
+        """The capability the run minted and wrote upward, or ``None``.
+
+        ``None`` for a short read, a closed peer, a timeout, or a second call —
+        the fail-closed answers, all of which mean the same thing to a caller:
+        this supervisor holds no credential for that run and will be refused on
+        an authority-increasing frame, while every ordinary operation continues
+        to work. A short read is refused rather than padded: a capability this
+        side invented is one the runtime never held.
+        """
+        if self._closed:
+            return None
+        try:
+            received = self._reader(timeout_s)
+        except OSError:
+            logger.warning("exec supervisor: could not read the run's operator capability")
+            received = b""
+        finally:
+            self.close()
+        if len(received) != OPERATOR_CAP_BYTES:
+            return None
+        return received
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closer()
+        self._closed = True
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+
+def open_supervisor_cap_channel() -> SupervisorCapChannel:
+    """Create the descriptor pair a supervisor hands a new ``lop exec`` run.
+
+    The mirror of :func:`open_operator_cap_handoff`: same socketpair, same
+    "only its number rides in argv" rule, and the two ends swapped — here this
+    process READS, because the credential is the runtime's own and it is this
+    process that must be told it.
+    """
+    if os.name == "nt":  # pragma: no cover — Windows only; CI runs POSIX
+        read_handle, write_handle = _win32_inheritable_pipe()
+
+        def read_windows(timeout_s: float) -> bytes:  # pragma: no cover — Windows only
+            import msvcrt
+
+            flags = os.O_RDONLY | os.O_BINARY  # type: ignore[attr-defined]  (Windows-only)
+            fd = msvcrt.open_osfhandle(read_handle, flags)  # type: ignore[attr-defined]
+            try:
+                return os.read(fd, OPERATOR_CAP_BYTES)
+            finally:
+                os.close(fd)
+
+        return SupervisorCapChannel(
+            argv=[SUPERVISOR_FD_FLAG, str(int(write_handle))],
+            pass_fds=(),
+            close_fds=False,
+            reader=read_windows,
+            closer=lambda: _win32_close(int(read_handle), int(write_handle)),
+        )
+
+    parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    child_fd = child.fileno()
+
+    def read_posix(timeout_s: float) -> bytes:
+        parent.settimeout(max(0.0, timeout_s))
+        buffer = bytearray()
+        while len(buffer) < OPERATOR_CAP_BYTES:
+            try:
+                chunk = parent.recv(OPERATOR_CAP_BYTES - len(buffer))
+            except (TimeoutError, OSError):
+                return bytes(buffer)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+        return bytes(buffer)
+
+    def closer() -> None:
+        # BOTH ends, and this process's copy of the CHILD's end with them: the
+        # same reason the downward handoff closes both — a descriptor left in
+        # this table would be inherited by every later child with
+        # ``close_fds=False``, which is not a property any caller should have to
+        # know about to be safe.
+        for sock in (parent, child):
+            try:
+                sock.close()
+            except OSError:  # pragma: no cover — closing an already-closed pair
+                logger.debug("supervisor cap channel already closed", exc_info=True)
+
+    return SupervisorCapChannel(
+        argv=[SUPERVISOR_FD_FLAG, str(child_fd)],
+        pass_fds=(child_fd,),
+        close_fds=True,
+        reader=read_posix,
+        closer=closer,
+    )
 
 
 def open_operator_cap_handoff() -> OperatorCapHandoff:
@@ -995,12 +1235,17 @@ __all__ = [
     "CARD_APPROVAL_REFUSED_NOTICE",
     "OPERATOR_AUTHORITY_REQUIRED_NOTICE",
     "OPERATOR_FD_FLAG",
+    "SUPERVISOR_FD_FLAG",
+    "SupervisorCapChannel",
     "approvals_default_notice",
+    "deliver_operator_cap_to",
+    "open_supervisor_cap_channel",
     "OperatorCapHandoff",
     "ask_approval",
     "frame_authority",
     "handshake_proof",
     "handshake_proof_ok",
+    "is_operator_key_id",
     "is_wire_hex",
     "loosening_is_authorised",
     "mint_operator_cap",
