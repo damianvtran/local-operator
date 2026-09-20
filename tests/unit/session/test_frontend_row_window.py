@@ -1260,9 +1260,12 @@ def test_the_release_key_covers_every_element_that_can_move_alone(
     """R4: each element added for S1 must be able to fail this file ON ITS OWN.
 
     Round 2's per-element sweep found the first test pinned only the usage and
-    descendant elements: ``model_label``, ``context_window`` and the plan could
-    all be dropped from the key with the file still green, and the trajectory
-    pair is falsifiable only as a PAIR (either element catches the same append).
+    descendant elements: ``model_label`` and the plan could also be dropped with
+    the file still green, and the trajectory pair was falsifiable only as a PAIR
+    until the front-deletion leg below gave the length element a shape of its
+    own. (``context_window`` had no row in that sweep because it was not in the
+    key at all -- that was round 2's R1, not a gap in the pinning; review round
+    3, T5.)
 
     Driven through ``_ReleasedRows.row`` directly rather than through
     ``refresh_jobs``, because one of these legs -- a rotation at constant
