@@ -328,6 +328,49 @@ def test_the_failed_window_does_not_wear_the_idle_row_ink() -> None:
     assert failed_spans != idle_spans
 
 
+def test_a_failure_under_a_latched_drain_keeps_the_drain_ink() -> None:
+    """Both facts at once: one ink per row, and the drain is the one that takes it.
+
+    ``update_failed`` is cleared only by the NEXT window, so a record that failed an
+    update and has since latched a drain carries both facts — and before this ordering
+    the failure arm came first, which took the accent marker off a row that is leaving
+    and left the departure inked by nothing while the words beside it still named it
+    (agent review round 3, NIT). The failure is not lost in the exchange: it stays on
+    the record, on the fleet row's ``update_failed``, and in the incident the abandon
+    arm wrote — what changes is which ink carries the fact a reader acts on NOW.
+    """
+    failed_and_leaving = SessionLine(
+        pid=1,
+        kind="daemon",
+        state="live",
+        session_id="1" * 12,
+        conversation_name="failed and leaving",
+        update_failed=WIDEST_PAIR,
+        leaving=types.LEAVING_FOR_BUILD,
+    )
+    leaving_only = SessionLine(
+        pid=2,
+        kind="daemon",
+        state="live",
+        session_id="2" * 12,
+        conversation_name="leaving",
+        leaving=types.LEAVING_FOR_BUILD,
+    )
+    both_spans = _section_spans(110, failed_and_leaving)[0]
+    drain_spans = _section_spans(110, leaving_only)[0]
+
+    def marker_style(spans: list[tuple[str, str]]) -> str:
+        for text, style in spans:
+            if text.strip():
+                return style
+        raise AssertionError(f"no marker segment in {spans}")
+
+    assert marker_style(both_spans) == marker_style(drain_spans), (
+        "a draining row keeps the drain's accent marker even when it also carries a "
+        f"failed update ({both_spans} vs {drain_spans})"
+    )
+
+
 def test_the_window_outranks_the_drain_at_every_width() -> None:
     """D7: one ranking in both renderings, and the queued fact wins.
 

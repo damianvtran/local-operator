@@ -446,6 +446,15 @@ async def test_the_stop_arm_leaves_the_spooled_message_for_the_next_boot(
     assert rows[0].source == SOURCE_USER
     assert host.updating == "", "the window still closes: it queues for nobody now"
     assert host.lock_held is False, "and the lock goes with it"
+    # AND THE DURABLE MARKER GOES WITH IT, asserted on DISK rather than through the
+    # double's attribute (agent review round 3, MINOR). The attribute alone let a
+    # mutation of ``_close_update_window`` — the one place that decides this — keep the
+    # marker while this cell stayed green, so the regression R2-1 names (a successor
+    # reporting a move a stop had cancelled) was unpinned. The successor reads the file,
+    # not the attribute, so the file is what the cell has to check.
+    assert read_update_window(session.transcript.directory) == "", (
+        "a stop cancelled the move, so no successor may find a marker claiming one"
+    )
     assert runtime.failures == [], "a stop is not a failed update"
 
 
