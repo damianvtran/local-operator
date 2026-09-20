@@ -4225,6 +4225,26 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
         if snapshot.version
         else snapshot.install_shape
     )
+    # The mobile bundle, built INTO the snapshot before uv copies it: a source
+    # snapshot carries the web SOURCES and no dist/ (gitignored), so installing
+    # without this lands a generation with no UI — every authed GET answers 503
+    # "bundle not built" until someone runs `lop mobile install` on that
+    # machine, which is exactly what happened on 2026-09-19. The host script
+    # `~/.local/bin/lop-update` already builds the tree it prepares (lines
+    # ~209-246 of that script); this path had no equivalent, so the two
+    # installers disagreed about whether a snapshot has a UI. Same line, same
+    # wording as the host script's.
+    #
+    # Imported HERE rather than at module scope for the reason recorded on
+    # _DAEMON_PLIST_LABELS: mobile.install pulls Starlette into the updater,
+    # and that probe runs in the CLI and in the TUI's update worker.
+    from local_operator.mobile.install import snapshot_bundle
+
+    print(
+        "lop-update: mobile web bundle: "
+        f"{snapshot_bundle(snapshot.path / 'local_operator' / 'mobile' / 'web')}",
+        flush=True,
+    )
     print(f"installing {snapshot.install_label} ({shape})")
     try:
         install_into_generation(

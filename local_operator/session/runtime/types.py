@@ -279,6 +279,28 @@ SERVE_RUN_DIRNAME = "run/serve"
 #: same rule applied to a session record).
 HOST_RUN_DIRNAME = "run/host"
 
+#: The ``-m`` target of a session runtime process — THE SPAWN CONTRACT, and the
+#: one thing an external census may match a runtime on.
+#:
+#: ONE HOME, because the two halves of this contract live in different modules
+#: and nothing used to tie them together: three spawners write this string into
+#: an argv (``session/runtime/launch.py``, ``mobile/daemon.py``) and the
+#: residency sweep matches it (``session/runtime/reclaim.py``, which reads it
+#: from here). A drift between them is SILENT and one-directional — the sweep's
+#: census matches nothing, every root reads as having no runtimes, and the
+#: feature goes inert with no failing test anywhere. It sits here rather than in
+#: ``reclaim`` because ``launch`` must not import the sweep to write an argv:
+#: ``reclaim`` pulls in ``registry`` and ``viewers``, and this module is the
+#: runtime's shared vocabulary with no local imports of its own.
+#:
+#: Matched as a WHOLE ARGV WORD after a ``-m``, never as a substring, by the
+#: census that consumes it: a person running ``grep
+#: local_operator.session.runtime.process`` would otherwise be listed as a
+#: runtime, which is the single misidentification that could make a sweep signal
+#: a stranger.
+RUNTIME_MODULE = "local_operator.session.runtime.process"
+
+
 # SESSIONS_DIRNAME (imported above) is the name of the directory holding one
 # directory per conversation, and session_dir() names the join once for the
 # stop marker's writer and reader, so neither re-derives the layout.
@@ -535,6 +557,159 @@ PUBLISHED_LEAVING_PHRASES: tuple[str, ...] = (
     LEAVING_FOR_BUILD_OVERDUE,
 )
 
+#: The three phases of an UPDATE WINDOW, as stable tokens.
+#:
+#: WHAT A WINDOW IS. An IDLE runtime that decides to move to the build on disk
+#: (``process._refresh_for``) publishes one of these, holds them for the ~1 s the
+#: handover takes, and QUEUES admissions for its successor instead of refusing
+#: them. The incident this answers (2026-09-19): a fleet on a superseded build
+#: refusing the operator's own messages with "This session is leaving; it will not
+#: start a new turn. Your message is back in the composer — send it again once the
+#: session is running again", recoverable only with ``/stop`` + ``/resume``. The
+#: runtime was IDLE, so the refusal protected nothing: the successor would have run
+#: the message had anyone held it.
+#:
+#: WHY TOKENS AND NOT SENTENCES, which is the one structural difference from
+#: :data:`PUBLISHED_LEAVING_PHRASES`. Every updating sentence carries a BUILD PAIR
+#: ("0.59.9 → 0.59.11@ead71b6"), so a consumer table keyed by the full sentence —
+#: the shape the leaving vocabulary uses and pins — could not be written at all:
+#: the key would be different for every pair a host ever runs. So the tokens are
+#: the enumerable, test-keyed vocabulary, and the two renderers below are the only
+#: places a sentence is composed from them (``update_phrase`` for prose surfaces,
+#: ``update_short`` for the fleet cell), which is what keeps the copy from drifting
+#: now that it cannot be keyed.
+UPDATING = "updating"
+UPDATING_DONE = "updated"
+UPDATE_FAILED = "update-failed"
+
+#: Every phase of an update window, in the one place a test can enumerate them.
+#: The pin is ``tests/unit/session/runtime/test_updating_vocabulary.py``, which
+#: walks this tuple against every consumer table: a phase with no entry there
+#: paints that surface's FALLBACK, which is a sentence about a different phase —
+#: for the failed phase, the reassurance that the update is still coming.
+PUBLISHED_UPDATE_PHASES: tuple[str, ...] = (UPDATING, UPDATING_DONE, UPDATE_FAILED)
+
+#: The CAUSE token a window that ran out of its bound is recorded under: the
+#: runtime stays on the build it is running, releases the admission lock, and
+#: journals this token so the failure is reportable rather than silent.
+#:
+#: SAME CLASS AS :data:`BUILD_DRAIN_OVERDUE_CAUSE`, and for its reason: an
+#: ``incidents.CUT_OFF_CAUSES`` key, so every surface that repeats a cause can
+#: render it as a sentence. It is deliberately NOT ``runtime-retired``, which is
+#: what a handover that SUCCEEDED records — a failed update narrated as an
+#: ordinary retirement is the failure mode QA round 1 (Q-2) measured for the
+#: overdue bound.
+#:
+#: IT IS NOT A ``DELIBERATE_CUT_OFF_CAUSE`` either: nobody asked for the update to
+#: fail, and the deliberate set exists to keep an involuntary event from being
+#: narrated as a user's own stop.
+UPDATE_FAILED_CAUSE = "runtime-update-failed"
+
+#: What the pair-less rendering says: a runtime whose boot stamp is unreadable can
+#: still move to the build on disk (``buildwatch.proves_a_move`` is the guard on the
+#: ACT, not on the reading), and a window that said nothing about which build would
+#: leave the operator unable to tell a rebuild from a version bump.
+#:
+#: IT IS ALSO THE PUBLISHED FALLBACK, so a window is never opened with an empty
+#: pair: ``""`` is simultaneously the record's "no window" sentinel and the
+#: admission gate, so a window that stored it would be invisible AND would queue
+#: nothing while the sender got a receipt (agent review round 1, NIT 2).
+#: ``process._refresh_for`` substitutes this when ``buildwatch.update_pair_text``
+#: cannot name the pair, and ``begin_update`` refuses an empty one outright.
+UPDATE_UNNAMED_PAIR = "the build on disk"
+
+
+def update_phase(
+    updating: str = "", updated: str = "", update_failed: str = ""
+) -> "tuple[str, str]":
+    """``(phase, pair)`` for a record's three update fields: the ONE reading of them.
+
+    WHY A READER AND NOT THREE FIELDS ON EVERY SURFACE. The record keeps the three
+    facts apart because they are written at different times by different processes
+    (a window opens, a window fails, a successor boots having applied one), and each
+    has to survive the wire on its own. Every READER wants the same single answer —
+    which phase is this session in, and about which build — so the precedence lives
+    here rather than being re-derived (differently) by ``lop sessions``, the info
+    panel and the phone.
+
+    PRECEDENCE, and each step is a fact about time: an OPEN window is the live state
+    and outranks both terminal facts; a FAILED one is the newest terminal fact about
+    the last attempt (and the runtime that owns it is still serving, which is what a
+    reader must act on); ``updated`` is the oldest — it is true of this process's
+    whole life, so it loses to anything newer. An EMPTY pair is not a phase: all
+    three fields empty returns ``("", "")``, which is the ordinary idle row.
+    """
+    if updating:
+        return UPDATING, updating
+    if update_failed:
+        return UPDATE_FAILED, update_failed
+    if updated:
+        return UPDATING_DONE, updated
+    return "", ""
+
+
+def update_phrase(phase: str, pair: str = "") -> str:
+    """The sentence for one phase of an update window, from the ONE vocabulary.
+
+    The prose surfaces (the TUI notice, the info panel's note) render through
+    this and never compose their own copy — see :data:`UPDATING` for why the
+    sentence cannot be a table key.
+
+    WHAT EACH PHASE PROMISES, because the three are not degrees of one thing:
+    ``UPDATING`` says the message is HELD and arrives when the successor is up
+    (the promise the incident's refusal broke); ``UPDATING_DONE`` says the move
+    happened and the successor is running it; ``UPDATE_FAILED`` says the runtime
+    is still here, on the OLD build, and the update needs reporting. A reader
+    who cannot tell the last one from the first would keep waiting for a handover
+    that has already been abandoned.
+    """
+    where = pair or UPDATE_UNNAMED_PAIR
+    if phase == UPDATING:
+        return (
+            f"updating to {where} — messages are queued and will be sent when the new "
+            f"build is up"
+        )
+    if phase == UPDATING_DONE:
+        return f"updated to {where} — the new build is running this session"
+    if phase == UPDATE_FAILED:
+        return (
+            f"the update to {where} did not finish — this session is still running the "
+            f"build it loaded, and your messages are running on it"
+        )
+    return ""
+
+
+def update_short(phase: str, pair: str = "") -> str:
+    """The fleet cell for one phase: one row of ``lop sessions``, not a sentence.
+
+    The pair is the wide part, so the compact form names the NEW build only — the
+    question a rotation script asks of a row is "which of these is still on the
+    old build, and what is it moving to" (the same question
+    ``server._refresh_if_idle`` answers with ``retiring to <label>``). "" for a
+    phase this build cannot place, which renders as no cell at all rather than as
+    another phase's words.
+
+    A PAIR THIS BUILD CANNOT PARSE NAMES NO BUILD. The phase alone is the cell then,
+    for the reason the failed phase gives below and because the alternative —
+    ``"updating → the build on disk"`` — was 28 cells into a 26-cell column, i.e. a
+    silent cut of the one string whose job is to say the destination is unknown
+    (design review round 1, D3).
+    """
+    to = pair.split("→", 1)[1].strip() if "→" in pair else ""
+    if phase == UPDATING:
+        return f"updating → {to}" if to else "updating"
+    if phase == UPDATING_DONE:
+        return f"updated → {to}" if to else "updated"
+    if phase == UPDATE_FAILED:
+        # PHASE ONLY, and the missing pair is the point rather than an omission: the
+        # move this names did NOT happen, so the build pair belongs to the failure
+        # notice ("could not move to X"), never to a fleet cell that would read as
+        # "went to X". Which build the row is actually on is the neighbouring version
+        # column's job, and it is already there.
+        return "update failed"
+    return ""
+
+
 #: The CAUSE token the SIGNAL drain commits with: ``process._drain_for_signal``
 #: passes it to ``begin_drain``, ``_drain_for`` re-passes it to the exit rung that
 #: finally disposes the runtime, and
@@ -788,6 +963,41 @@ class SessionRecord:
     #: #1141). ``busy`` cannot carry it — that is the picker's spinner bit and is
     #: ``None`` of the fact that a signal has already been received and acted on.
     leaving: str = ""
+    #: An UPDATE WINDOW is open: this IDLE runtime has committed to moving to the
+    #: build on disk, holds the admission lock while it announces and exits, and is
+    #: QUEUEING admissions for the successor (``inbox.jsonl``, drained at boot)
+    #: rather than refusing them. The value is the build PAIR it is moving to —
+    #: ``"0.59.9 → 0.59.11@ead71b6"`` — and ``""`` means no window is open.
+    #:
+    #: WHY A PAIR AND NOT A SENTENCE, which is what :data:`UPDATING` explains at
+    #: length: the sentence carries a pair, so the field has to carry the data and
+    #: the surfaces compose their own copy (``types.update_phrase`` for prose,
+    #: ``types.update_short`` for the fleet cell). A field that held the sentence
+    #: could not be enumerated for the vocabulary pin and could not be compared by
+    #: a reader that wants "which build is it moving to".
+    #:
+    #: CLEARED WHEN THE WINDOW CLOSES, unlike :attr:`leaving`, and the asymmetry is
+    #: the point: a leave always ends in an exit (the field is a one-way door), while
+    #: a window can ABORT — the bound expired, the runtime kept the build it loaded,
+    #: and it is serving again. A window that stayed published after that would tell
+    #: every front end the session is mid-move when it is not.
+    updating: str = ""
+    #: The one-shot terminal facts of a window, each carrying the pair it is about.
+    #:
+    #: ``updated`` is written by the SUCCESSOR's record — the fact that this
+    #: process exists because an update applied, which is the only place it can be
+    #: known (the predecessor is gone by the time the spool is drained). Set once at
+    #: boot from the handover marker the outgoing runtime left, and never cleared:
+    #: it is true for the whole life of this process, and a surface that showed it
+    #: for a moment and then dropped it would be racing the reader it exists for.
+    #:
+    #: ``update_failed`` is written by a runtime that STAYED — its window ran out
+    #: of bound — and names the pair it failed to move to. Together the two make the
+    #: outcome of the move legible on every surface that reads a record, including
+    #: the ones that never saw the window itself (a fleet listing taken afterwards,
+    #: the phone's projection, the desktop feed).
+    updated: str = ""
+    update_failed: str = ""
 
     # -- build stamp --------------------------------------------------------
     # Same additive contract as the live-state block above, and for the same

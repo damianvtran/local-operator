@@ -161,6 +161,28 @@ def render_report(report: Mapping[str, Any]) -> str:
             f"{int(entry.get('concurrency', 0)):>4}  {columns}"
         )
 
+    admit_rows = [entry for entry in sorted(cells, key=_order) if entry.get("admission")]
+    if admit_rows:
+        lines.append("")
+        lines.append(
+            "ADMISSION — submit -> the acknowledgement the viewer's stream carries, before "
+            "any engage (the ack-before-engage frame)"
+        )
+        admit_header = f"{'channel':<9} {'arm':<5} {'conc':>4}  {'p50':>8}  {'p95':>8}  verdict"
+        lines.append(admit_header)
+        lines.append("-" * len(admit_header))
+        for entry in admit_rows:
+            stats = entry.get("stats") or {}
+            admitted = stats.get(M.ADMITTED) or {}
+            p50 = "-" if not admitted.get("n") else f"{admitted['p50']:.0f}"
+            p95 = "-" if not admitted.get("n") else f"{admitted.get('p95', M.UNAVAILABLE):.0f}"
+            admission = entry["admission"]
+            lines.append(
+                f"{str(entry.get('channel')):<9} {str(entry.get('arm')):<5} "
+                f"{int(entry.get('concurrency', 0)):>4}  {p50:>8}  {p95:>8}  "
+                f"{admission.get('status', '?')}"
+            )
+
     lines.append("")
     lines.append("VERDICTS")
     for entry in sorted(cells, key=_order):
@@ -169,6 +191,12 @@ def render_report(report: Mapping[str, Any]) -> str:
             f"  {str(verdict.get('status', '?')):<8} {entry.get('channel')}/"
             f"{entry.get('arm')}@{entry.get('concurrency')}: {verdict.get('reason', '')}"
         )
+        admission = entry.get("admission") or {}
+        if admission:
+            lines.append(
+                f"  ACK/{str(admission.get('status', '?')):<8} {entry.get('channel')}/"
+                f"{entry.get('arm')}@{entry.get('concurrency')}: {admission.get('reason', '')}"
+            )
         for warning in entry.get("warnings") or []:
             lines.append(f"           ! {warning}")
     notes = report.get("notes") or []

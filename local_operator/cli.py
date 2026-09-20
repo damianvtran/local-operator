@@ -662,7 +662,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "sessions",
         help=(
             "List active lop sessions and their resource usage; "
-            "`sessions cleanup` previews or runs the session cleanup policy"
+            "`sessions cleanup` previews or runs the session cleanup policy; "
+            "`sessions reclaim` previews or ends runtimes nothing can reach"
         ),
         parents=[parent_parser],
     )
@@ -747,6 +748,56 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="remove directories that never got a transcript (overrides config)",
     )
     cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # `lop sessions reclaim`: the external door to the residency sweep — the
+    # same pass the wake supervisor runs on its own cadence, for the case where
+    # the thing an operator wants ended is not one session but the RESIDENCY
+    # itself. A runtime that published no record cannot be listed here, cannot
+    # be stopped with `lop stop`, and cannot be reached by any client; before
+    # this command the only way to find one was `ps`. A sub-subcommand of
+    # `sessions` rather than a top-level verb because it is the third question
+    # about the fleet (`sessions` lists it, `send` talks to it, `reclaim`
+    # bounds it) and it reads the same discovery namespaces.
+    #
+    # IT IS A DRY RUN UNLESS THE CALLER SAYS OTHERWISE, and the confirmation
+    # that a real run asks for is not a formality: it is the same process-
+    # table question the sweep asks twice before it signals anything.
+    reclaim_parser = sessions_subparsers.add_parser(
+        "reclaim",
+        help="End session runtimes nothing can reach (dry run; --yes to act)",
+        description=(
+            "Find live session runtimes that no discovery record, no viewer, no "
+            "attach and no existing config root can reach, and ask them to leave "
+            "with SIGTERM. The runtime finishes any turn in flight first (its own "
+            "signal drain, bounded by SIGNAL_DRAIN_S) — this command never sends "
+            "SIGKILL. Any runtime with a record, an attached interface, a live root "
+            "it does not own, or CPU spent inside the confirm window is refused."
+        ),
+        parents=[parent_parser],
+    )
+    reclaim_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="list what would be reclaimed, without signalling anything",
+    )
+    reclaim_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="do not ask for confirmation before signalling",
+    )
+    reclaim_parser.add_argument(
+        "--confirm-s",
+        type=_confirm_window,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "how long to watch before signalling (default: 60, minimum: 50). The "
+            "window is the safety property: a runtime that gains a record, an attach "
+            "or CPU inside it is dropped from the pass, and a window too short to "
+            "measure CPU would drop one of the four refusals"
+        ),
+    )
+    reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
@@ -3313,6 +3364,32 @@ def _non_negative_int(text: str) -> int:
     return value
 
 
+def _confirm_window(text: str) -> int:
+    """argparse type for ``sessions reclaim --confirm-s``: seconds, with a floor.
+
+    A SHORTER WINDOW IS A SWEEP WITH NO CPU RUNG, not a faster sweep: the CPU
+    budget is ``max(BUSY_CPU_FLOOR_S, BUSY_CPU_FRACTION * elapsed)``, so below
+    ``MIN_ACTIONABLE_CONFIRM_S`` the floor dominates and no measurement can
+    exceed it. ``0`` was the worst case and it was reachable — ``--confirm-s 0``
+    parsed (the type was a non-negative int) and skipped the watch entirely, and
+    QA round 1 (Q2) measured a process with 90.4 s of cumulative CPU being
+    admitted and SIGTERMed at that window, having been correctly refused at the
+    default one (6.30 s spent per 60 s against a 1.2 s budget). The floor is
+    derived from those two constants rather than restated, so it moves with them.
+    ``--dry-run`` remains available for looking without a window at all.
+    """
+    from local_operator.session.runtime.reclaim import MIN_ACTIONABLE_CONFIRM_S
+
+    value = int(text)
+    if value < MIN_ACTIONABLE_CONFIRM_S:
+        raise argparse.ArgumentTypeError(
+            f"the confirm window must be at least {MIN_ACTIONABLE_CONFIRM_S:.0f}s, "
+            f"got {value}: a shorter window cannot measure CPU, so the sweep would "
+            "act on two sightings with no separation and no CPU refusal in between"
+        )
+    return value
+
+
 def _cleanup_row(candidate: Any, verb: str) -> str:
     """One decision, with what a user needs to judge it: name, age, size."""
     # Budgeted to 100 columns with a 12-hex id, the origin column and the
@@ -3506,6 +3583,117 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
     return 3 if result.errors else 0
 
 
+def sessions_reclaim_command(args: argparse.Namespace) -> int:
+    """``lop sessions reclaim [--dry-run] [--yes] [--confirm-s N]``.
+
+    The operator's door to the external residency sweep
+    (:mod:`local_operator.session.runtime.reclaim`) — the same pass the wake
+    supervisor runs on its own cadence, exposed because the supervisor retires
+    when nothing is fireable and because a person asking "what is still holding
+    memory" should not have to wait for a wake to be due.
+
+    Order of operations is LIST, WAIT, CONFIRM, SIGNAL. The wait is the point: the
+    sweep's decision is taken from TWO sightings of the process table, so this
+    command watches for ``--confirm-s`` seconds (default ``reclaim.CONFIRM_S``)
+    between them and drops anything that gained a record, an attach or CPU in
+    between. A runtime whose record appears while the operator is reading the
+    listing is therefore never signalled.
+
+    Exit codes: 0 looked (dry run, or nothing to reclaim) or reclaimed; 2 refused
+    (confirmation declined, or no terminal and no ``--yes``); 3 signalled but at
+    least one runtime had not gone within the wait.
+    """
+    import json as _json
+
+    from local_operator.session.runtime.reclaim import (
+        CONFIRM_S,
+        EXIT_WAIT_S,
+        Sightings,
+        reclaim_runtimes,
+    )
+
+    root = config_dir()
+    confirm_s = CONFIRM_S if args.confirm_s is None else float(args.confirm_s)
+    sightings = Sightings()
+
+    # PASS 1 — the listing. Same call, same rule, nothing signalled: what the
+    # operator reads here is produced by the code that later acts, so the two
+    # cannot disagree about which runtimes are candidates.
+    preview = reclaim_runtimes(root, apply=False, sightings=sightings, confirm_s=confirm_s)
+    candidates = preview.reclaimed + preview.pending
+
+    def row(item: Any, verb: str) -> str:
+        return (
+            f"  {verb} pid {item.process.pid:<7} session {item.session_id or '<unknown>':<24} "
+            f"root {item.config_root or '<unknown>':<40} "
+            f"alive {item.process.age_s / 3600.0:.1f}h cpu {item.process.cpu_s:.1f}s"
+        )
+
+    if args.json:
+        print(_json.dumps(preview.to_json(), indent=2))
+        return 0
+
+    print(preview.summary())
+    if args.dry_run:
+        for item in candidates:
+            print(row(item, "would reclaim"))
+        print(
+            f"nothing was signalled (dry run); a real run watches {confirm_s:.0f}s before it acts, "
+            "and drops anything that gains a record, an attach or CPU in that window"
+        )
+        return 0
+
+    if not candidates:
+        print("nothing to reclaim: every live session runtime is either recorded or refused")
+        return 0
+
+    for item in candidates:
+        print(row(item, "will reclaim"))
+    confirmed: bool | None = None
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "refusing: not a terminal and --yes was not given, so nothing was signalled",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            answer = input(f"end {len(candidates)} unreachable runtime(s)? type 'yes' to confirm: ")
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        confirmed = answer.strip().lower() == "yes"
+        if not confirmed:
+            print("not confirmed; nothing was signalled")
+            return 2
+
+    # PASS 2 — the confirm window elapses, then the SAME memory is asked to act.
+    # The decision is not re-derived from this listing: the second pass re-censuses
+    # and re-reads the records, so a runtime that became reachable in between is
+    # refused by the same rungs that refused the others, and the CPU delta the pass
+    # measures is over the window the operator just waited out.
+    if confirm_s > 0:
+        print(f"watching {confirm_s:.0f}s for a record, an attach or CPU before signalling...")
+        time.sleep(confirm_s)
+    report = reclaim_runtimes(
+        root, apply=True, sightings=sightings, confirm_s=confirm_s, wait_s=EXIT_WAIT_S
+    )
+    print(
+        f"signalled {len(report.signalled)} runtime(s); {len(report.exited)} gone within "
+        f"{EXIT_WAIT_S:.0f}s"
+    )
+    for item in report.exited:
+        print(row(item, "gone    "))
+    for item in report.signalled:
+        if item in report.exited:
+            continue
+        # A signalled runtime that is still there is NOT a failure: its own drain is
+        # bounded by SIGNAL_DRAIN_S and finishing a turn can take that long. Reported
+        # as still-leaving rather than as an error, because "it did not die" is what
+        # the drain is for.
+        print(row(item, "leaving "))
+    return 3 if len(report.exited) < len(report.signalled) else 0
+
+
 def _positive_int(value: str) -> int:
     """Argparse type for counts where 0 or negative is a typo, not a request.
 
@@ -3537,6 +3725,9 @@ def sessions_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
+
+    if getattr(args, "sessions_command", None) == "reclaim":
+        return sessions_reclaim_command(args)
 
     # The row shape lives in ``info.collect`` and is shared with ``/info``,
     # which needs the same "which sessions exist and what do they cost" answer
@@ -3608,6 +3799,17 @@ def sessions_command(args: argparse.Namespace) -> int:
     # the turn the drain is finishing (U1/U2, PR #1141).
     leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
     show_leaving = any(leaving.values())
+    # The same rule as LEAVING and WHY above, and the same reason it must be a
+    # SEPARATE column rather than part of that one: a session mid-update is alive,
+    # accepting messages, and about to run them (``types.UPDATING``) — the operator
+    # reading that row must not be told to re-send what is already queued.
+    updating = {row["session_id"]: (row.get("updating") or "") for row in rows}
+    failed = {row["session_id"]: (row.get("update_failed") or "") for row in rows}
+    # THE COLUMN PRINTS WHENEVER ANY ROW HAS SOMETHING TO SAY ABOUT A MOVE, and a
+    # FAILED one counts. A fleet whose only news is an abandoned update used to drop
+    # the column entirely and list that session exactly as an ordinary idle one — the
+    # defect design review round 1 (D1) measured against this renderer.
+    show_updating = any(updating.values()) or any(failed.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3620,6 +3822,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
+    if show_updating:
+        header += f" {'UPDATING':<{UPDATING_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3664,11 +3868,47 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
+        if show_updating:
+            # The cell is RENDERED from the row's pair through the ONE phase reader
+            # (``types.update_phase``/``update_short``), so the copy here, the info
+            # panel and the phone cannot drift into three vocabularies for one state —
+            # and so the FAILED phase reaches this surface at all (design review round
+            # 1, D1, where the row rendered blank).
+            cell = _updating_cell(
+                updating.get(row["session_id"]) or "", failed.get(row["session_id"]) or ""
+            )
+            # MARKED, unlike the cells above: the value here is a BUILD LABEL, so a
+            # silent cut hands the reader a plausible version for a session that is on
+            # a different one (design review round 1, D3 — ``updating →
+            # 0.59.11.dev3+g1`` cut to a real-looking ``0.59.11``). ``_clamp_reason_cell``
+            # already carries that argument for WHY; this is the same mark applied to
+            # the one column whose text is an identifier rather than prose.
+            said = _clamp_reason_cell(cell, UPDATING_COLUMN_WIDTH)
+            line += f" {_pad_cell(said, UPDATING_COLUMN_WIDTH)}"
         print(line)
     return 0
 
 
-def _clamp_reason_cell(summary: str) -> str:
+def _updating_cell(updating: str, failed: str = "") -> str:
+    """The fleet cell for a row's update fields. ``""`` when it carries no move.
+
+    The IMPORT IS FUNCTION-LOCAL on purpose, for the reason the column widths are
+    not imported at all: this module keeps session internals out of its module
+    scope so ``lop``'s CLI can start without paying for the runtime (see the
+    header). One string formatter reached only on the arm that has a moving session
+    is the whole cost of that here.
+
+    THE PHASE IS READ, NOT ASSUMED. Both fields go through ``types.update_phase``, so
+    a FAILED window renders its own cell instead of a blank one and the precedence
+    between an open window, a failed one and an applied one lives in one place.
+    """
+    from local_operator.session.runtime.types import update_phase, update_short
+
+    phase, pair = update_phase(updating, "", failed)
+    return update_short(phase, pair) if phase else ""
+
+
+def _clamp_reason_cell(summary: str, width: int | None = None) -> str:
     """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
 
     A silent slice is indistinguishable from a complete sentence, and this
@@ -3716,13 +3956,23 @@ def _clamp_reason_cell(summary: str) -> str:
     and a value nothing had to cut is not edited at all (review round 2, N2 —
     recorded as the rule, not changed, because trimming it would be a second,
     invisible edit on a cell that is already correct).
+
+    ``width`` IS A PARAMETER because a second column needs the same mark (design
+    review round 1, D3): the UPDATING cell is a BUILD LABEL, and a silent cut of
+    ``updating → 0.59.11.dev3+g1`` hands the reader a real-looking ``0.59.11`` for a
+    session that is on a different build. Everything above is about the WHY column,
+    which is where the mark was first argued; the arithmetic is the same one, which
+    is why this is a parameter rather than a second function. It defaults to
+    ``WHY_COLUMN_WIDTH`` at CALL time rather than in the signature, because this
+    function is defined above that constant.
     """
-    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
+    if _cell_len(summary) <= (WHY_COLUMN_WIDTH if width is None else width):
         return summary
     # The marker's OWN measured width, not a hard-coded 1: the budget is
     # arithmetic, so a future marker must not be able to push the cell over.
     marker = "…"
-    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+    budget = WHY_COLUMN_WIDTH if width is None else width
+    return _cut_to_cells(summary, budget - _cell_len(marker)) + marker
 
 
 def _cut_to_cells(text: str, budget: int) -> str:
@@ -5023,6 +5273,31 @@ WHY_COLUMN_WIDTH = 48
 #: header) — so a reword of the phrase fails loudly there instead of silently
 #: cutting the new clause off the row.
 LEAVING_COLUMN_WIDTH = 51
+
+#: Width of `lop sessions`' trailing UPDATING column, in display CELLS.
+#:
+#: A SECOND COLUMN RATHER THAN A WORD IN ``LEAVING``, and that is the feature rather
+#: than a layout choice: the two fields are opposite promises. A ``leaving`` row says
+#: this runtime will not take a message ("send it again once the new build is up");
+#: an ``updating`` row says it ALREADY HAS it and runs it when the successor
+#: boots. Folding them into one cell would make the operator re-send a message that
+#: is queued — the exact harm the window exists to prevent (``types.UPDATING``).
+#:
+#: Sized from ``types.update_short``, whose pair is the wide part and which is why
+#: the cell names only the NEW build: 26 is ``"updating → "`` (11 cells) plus the
+#: longest label ``BuildStamp.label()`` can produce — ``0.59.11`` and ``@`` and the
+#: 7-character ref git itself abbreviates to, so 15. The failed phase's cell is
+#: shorter and carries no pair on purpose (see that function): its move did not
+#: happen, so naming a build there would read as one that did.
+#:
+#: Like ``LEAVING_COLUMN_WIDTH`` the number is written out rather than imported
+#: (this module keeps session internals out of its module scope on purpose, see the
+#: header) and is pinned against the vocabulary by
+#: ``tests/unit/session/runtime/test_updating_vocabulary.py``.
+#:
+#: Appears only when some row carries one, exactly like LEAVING and WHY: a listing
+#: with no runtime mid-update is byte-for-byte what it was before.
+UPDATING_COLUMN_WIDTH = 26
 
 
 #: Widths of `lop sessions`' three TEXT columns, in display CELLS.

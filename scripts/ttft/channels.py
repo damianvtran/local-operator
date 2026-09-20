@@ -415,6 +415,31 @@ def desktop_paint(frame: Mapping[str, Any]) -> tuple[bool, bool, bool]:
     return False, False, False
 
 
+def is_admission_ack(frame: Mapping[str, Any], request_id: str) -> bool:
+    """Is this frame THIS submit's admission acknowledgement?
+
+    Matched on the caller's own ``request_id`` and not on the frame name alone: the
+    stream is per session and carries every turn's frames, so a previous turn's
+    acknowledgement arriving late would otherwise be read as this one's. The name is
+    taken from the product's own constant rather than re-spelled, so a rename cannot
+    silently un-gate the acknowledgement.
+    """
+    if not request_id:
+        return False
+    from local_operator.server.utils.desktop_sessions import ADMISSION_ACCEPTED_FRAME
+
+    payload = frame.get("payload")
+    kind = str(frame.get("type") or "")
+    if kind != ADMISSION_ACCEPTED_FRAME:
+        if not isinstance(payload, Mapping):
+            return False
+        if str(payload.get("type") or "") != ADMISSION_ACCEPTED_FRAME:
+            return False
+    if not isinstance(payload, Mapping):
+        return False
+    return str(payload.get("request_id") or "") == request_id
+
+
 def classify_agent_event(event: Any) -> tuple[bool, bool]:
     """(carries_text, carries_reasoning) for one agent event at the front end.
 
@@ -460,13 +485,14 @@ async def drive_desktop(
 ) -> list[dict[str, Any]]:
     """The desktop channel: N sessions on a real daemon, over real HTTP + SSE.
 
-    WHAT THIS CANNOT SEE YET, STATED PLAINLY: the admission ACK frame that the
-    ack-before-engage change introduces does not exist on this tree, so the first
-    event measured here is the first ASSISTANT CONTENT frame. ``admitted_ms`` —
-    when the submit POST returned — is recorded alongside, because that is the
-    number a reader needs to see that change's effect before its frame name
-    exists. When the ack frame lands, add its name to :func:`desktop_paint` and the
-    desktop/cold budget moves onto it.
+    THE ACKNOWLEDGEMENT IS READ OFF THE WIRE. This driver used to say that the
+    admission ACK frame did not exist on this tree and that ``admitted_ms`` (the
+    submit POST's return) was the stand-in until it did. It exists now — the
+    ack-before-engage change landed it (``ADMISSION_ACCEPTED_FRAME``, emitted by the
+    host while the engage is still starting) — so the ack mark comes from that frame,
+    correlated on the submit's own request id, and the POST's return is only the
+    fallback for a daemon that does not send one. On the cold arm those two are
+    seconds apart, which is the whole point of the change.
     """
     import httpx
 
@@ -566,8 +592,25 @@ async def _desktop_submit(
     token = new_token()
     turn = TurnMarks(token=token, submit_monotonic=time.monotonic(), submit_epoch=time.time())
     seen: list[str] = []
+    # ONE request id, used by the POST and matched on the wire: the acknowledgement
+    # frame carries the caller's own id, so an id generated separately for the
+    # request would leave the frame unattributable.
+    request_id = str(uuid.uuid4())
 
     def predicate(frame: Mapping[str, Any]) -> bool:
+        # THE ACKNOWLEDGEMENT FRAME IS THE ACK, NOW THAT IT EXISTS. It is emitted by
+        # the host while the engage is still starting
+        # (``server/utils/desktop_sessions.py::ADMISSION_ACCEPTED_FRAME``), which is
+        # what the ack-before-engage change added; the POST's return is the fallback
+        # for a daemon that does not send it (``note_admitted`` keeps the first
+        # stamp, so the frame wins when both arrive). This is the mark the merged
+        # ack gate is scored on, and reading the POST instead would date the ack to
+        # the HTTP receipt — seconds away on the cold arm, and not the frame the
+        # operator's renderer paints.
+        if is_admission_ack(frame, request_id):
+            turn.note_admitted()
+            seen.append("admission.accepted")
+            return False
         paints, carries_text, carries_reasoning = desktop_paint(frame)
         seen.append(
             f"{frame.get('type')}/{(frame.get('payload') or {}).get('type')}"
@@ -588,7 +631,7 @@ async def _desktop_submit(
     post_task = asyncio.create_task(
         client.post(
             target + "/messages",
-            json={"request_id": str(uuid.uuid4()), "text": prompt_for(token)},
+            json={"request_id": request_id, "text": prompt_for(token)},
         )
     )
     await frame_task

@@ -48,6 +48,7 @@ from local_operator.server.routes import (
     desktop_lifecycle,
     desktop_profiles,
     desktop_radient,
+    desktop_runtimes,
     desktop_sessions,
     desktop_wakes,
     health,
@@ -630,6 +631,12 @@ app.include_router(desktop_radient.router)
 # templates (`/v1/desktop/wakes`, `/v1/desktop/wakes/{a}/{b}`) collide with
 # nothing registered above.
 app.include_router(desktop_wakes.router)
+# The machine-wide RUNTIME roster: which runtime PROCESSES are live, where each is
+# listening and whether it answered. Registered after the wake surface for the same
+# reason the wake surface is after the lifecycle routes — `/v1/desktop/runtimes`
+# collides with no template above it, and declaration order is what decides a
+# collision if one is ever introduced.
+app.include_router(desktop_runtimes.router)
 
 # Add CORS middleware
 app.add_middleware(

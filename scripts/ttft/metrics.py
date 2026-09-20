@@ -212,6 +212,27 @@ BUDGET_LOAD_PER_CPU_MAX = 20.0
 #: so the two cannot drift into a gate that fails in the table and exits 0.
 FAILURE_STATUSES: frozenset[str] = frozenset({"FAIL", "FAILED"})
 
+#: The submission ACKNOWLEDGEMENT ceilings, carried here rather than dropped with the
+#: file they lived in. The ack-before-engage branch (PR #1343) asserted these on its
+#: own desktop scenario; this instrument measures the same mark off the same frame
+#: (``admission.accepted``, correlated on the submit's request id), so the gate moves
+#: with the work instead of disappearing when that file was superseded.
+#:
+#: TWO CEILINGS, AND THE SECOND IS NOT A LOOSENED FIRST. The operator's requirement is
+#: 300 ms and it is met where it is measured — the MEDIAN, 60-75 ms on this box even
+#: under load. The tail does not stay inside 300 ms, and asserting that it does would
+#: be this harness asserting a bound its own measurement contradicts: on that branch's
+#: passes the ack's p95 was 148 ms, 219 ms and 326 ms at load 100-220, and QA's
+#: independent matrix saw one cold submit of 333 ms in seven at load 140-190. 500 ms
+#: is the bound those numbers support, stated with the load they were taken at.
+ADMISSION_CEILING_MS = 300.0
+ADMISSION_P95_CEILING_MS = 500.0
+
+#: The channels whose admission acknowledgement is enforced. The frame is
+#: session-scoped and delivered to an attached viewer, which is the desktop plane;
+#: the other channels have no acknowledgement frame to score.
+ADMISSION_CELLS: frozenset[str] = frozenset({"desktop"})
+
 #: Verdicts that are neither a pass nor a failure, and the exit code they produce.
 #: ``OUT-OF-BAND`` is the box's fault and ``NO-DATA`` is the gate having nothing to
 #: judge (QA round 1, minor: an enforced cell with ``n=0`` used to read REPORTED,
@@ -439,3 +460,82 @@ def judge(
             "the measured numbers that fixed it)",
         )
     return Verdict(cell, "REPORTED", "no budget — measured for the record")
+
+
+def judge_admission(
+    cell: tuple[str, str],
+    stats: Mapping[str, Mapping[str, Any]],
+    *,
+    concurrency: int = 1,
+    provider_kind: str = "",
+    load_per_cpu: float | None = None,
+    errors: int = 0,
+) -> Verdict | None:
+    """The ADMISSION verdict for a cell, or ``None`` where it is not scored.
+
+    Same three scope rules as :func:`judge` — the channel must acknowledge at all, the
+    concurrency must be the asserted one, the arm must be the one whose window this
+    repository owns, and the box must be inside the calibrated band — applied to
+    :data:`ADMITTED` instead of :data:`FIRST_PAINT`. ``None`` rather than a REPORTED
+    verdict for a channel with no acknowledgement frame: a table where every row says
+    "not scored" for a thing that does not exist on that channel is noise, and the
+    absence is a property of the channel rather than a reading of it.
+
+    The p50 is held to :data:`ADMISSION_CEILING_MS` and the p95 to
+    :data:`ADMISSION_P95_CEILING_MS`; BOTH are failures, because that is what the
+    branch that measured them asserted. See those constants for why there are two.
+    """
+    channel, _warmth = cell
+    if channel not in ADMISSION_CELLS:
+        return None
+    if concurrency not in ASSERTED_CONCURRENCY:
+        return None
+    if provider_kind != ENFORCED_PROVIDER:
+        return None
+    stats_for_metric = stats.get(ADMITTED) or {}
+    sample_count = int(stats_for_metric.get("n") or 0)
+    if not sample_count:
+        if errors:
+            return Verdict(
+                cell,
+                "FAILED",
+                f"every one of {errors} acknowledgement sample(s) died instead of "
+                "being measured",
+            )
+        return Verdict(
+            cell,
+            "NO-DATA",
+            "no acknowledgement samples: the frame was never observed. On the desktop "
+            "channel that means either the daemon does not emit it or the reader never "
+            "matched this submit's request id — the gate has nothing to judge (exit 3)",
+        )
+    if load_per_cpu is not None and load_per_cpu > BUDGET_LOAD_PER_CPU_MAX:
+        return Verdict(
+            cell,
+            "OUT-OF-BAND",
+            f"acknowledgement p50 {float(stats_for_metric['p50']):.0f} ms measured at "
+            f"load {load_per_cpu:.1f}/CPU, outside the {BUDGET_LOAD_PER_CPU_MAX:.1f}/CPU "
+            "band: not judged (exit 3)",
+        )
+    median = float(stats_for_metric["p50"])
+    p95 = float(stats_for_metric.get("p95", UNAVAILABLE))
+    if median >= ADMISSION_CEILING_MS:
+        return Verdict(
+            cell,
+            "FAIL",
+            f"acknowledgement p50 {median:.0f} ms >= {ADMISSION_CEILING_MS:.0f} ms over "
+            f"{sample_count} samples",
+        )
+    if p95 != UNAVAILABLE and p95 >= ADMISSION_P95_CEILING_MS:
+        return Verdict(
+            cell,
+            "FAIL",
+            f"acknowledgement p95 {p95:.0f} ms >= {ADMISSION_P95_CEILING_MS:.0f} ms "
+            f"(tail bound) over {sample_count} samples; p50 {median:.0f} ms",
+        )
+    return Verdict(
+        cell,
+        "PASS",
+        f"acknowledgement p50 {median:.0f} ms < {ADMISSION_CEILING_MS:.0f} ms and p95 "
+        f"{p95:.0f} ms < {ADMISSION_P95_CEILING_MS:.0f} ms over {sample_count}",
+    )
