@@ -32,18 +32,24 @@ request (a Radient grant died twice in ~17 hours on this machine):
 
 * :data:`REFRESH_SEND_UNCONFIRMED_KEY` — a write-ahead marker, armed before
   the POST, recording that this row's refresh token was presented by an
-  exchange whose outcome never arrived. A token whose send is unconfirmed is
-  never presented again until the marker expires.
-* :data:`AUTH_REFRESH_LEASE_MS` outliving ``PROVIDER_REFRESH_HTTP_TIMEOUT_S``,
-  so a peer's lease cannot expire inside the window where the holder's request
-  may still be in flight.
+  exchange whose outcome is not settled. A token whose send is unconfirmed is
+  never presented again while that lasts: the full hour for an outcome that
+  never arrived, one block window for an answer that proved nothing, and not at
+  all for a failure httpx reports as provably pre-send.
+* :data:`AUTH_REFRESH_LEASE_MS` outliving
+  :data:`PROVIDER_REFRESH_TOTAL_BUDGET_S` — the wall-clock cap this store puts
+  on one exchange, which is NOT the providers' per-operation httpx timeout — so
+  a peer's lease cannot expire inside the window where the holder's request may
+  still be in flight.
 * :data:`GRANT_DEAD_AT_KEY` — the IdP's own refusal, persisted on the row, so
   every row-reading surface says "sign-in expired" instead of "logged in", and
   only an interactive login clears it.
 
-A caller that loses the lease is never served an access token past its expiry:
-the refusal is a classified error the cascade rotates on, not a stale bearer
-spent upstream.
+A caller that loses the lease is served the stored row, as it always was: a
+peer's refresh is not a verdict about the credential, and the consumers that
+must not spend a due bearer refuse it themselves after waiting for the peer.
+What a marked row gets instead is a deferred, classified refusal
+(:class:`RefreshUnconfirmedError`) rather than a presented token.
 """
 
 from __future__ import annotations
@@ -81,39 +87,68 @@ logger = logging.getLogger("local_operator.providers.auth_store")
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
 DEFAULT_BLOCK_MS = 60_000  # rate-limit / 401 backoff
 
-#: The connect/read budget a provider's refresh POST runs under. Every refresh
+#: The per-operation budget a provider's refresh POST runs under. Every refresh
 #: in ``providers/oauth/`` passes ``timeout=30.0`` (anthropic, kimi, openai,
 #: xai, zai, qwencloud, radient all name the same number), and it is named here
-#: rather than inline in each of them because :data:`AUTH_REFRESH_LEASE_MS` is
-#: derived from it: the two drifting apart is the defect that derivation exists
-#: to prevent, not a style question.
+#: rather than inline in each of them because it is the FLOOR for
+#: :data:`PROVIDER_REFRESH_TOTAL_BUDGET_S`, and the two drifting apart is the
+#: defect that derivation exists to prevent, not a style question.
+#:
+#: It is PER OPERATION and not a wall-clock budget: httpx applies it to connect,
+#: to write and to each socket read separately, so a drippling endpoint can hold
+#: one POST open for connect + write + read worth of it. That is not theory — see
+#: :data:`PROVIDER_REFRESH_TOTAL_BUDGET_S`, where the measurement is recorded.
 PROVIDER_REFRESH_HTTP_TIMEOUT_S = 30.0
+
+#: The WALL-CLOCK budget the store itself imposes on one refresh exchange, the
+#: number :data:`AUTH_REFRESH_LEASE_MS` is derived from.
+#:
+#: Why it has to exist at all: the providers' own ``timeout=30.0`` bounds each
+#: OPERATION, not the request, so the pathological single POST is not 30 s. Two
+#: measurements on this machine with the production client configuration against
+#: an endpoint that stalls once and then dribbles: **41.4 s** (each read gap
+#: under the per-op timeout) and **114.5 s** (three gaps). A lease sized from the
+#: per-op number therefore does not outlive the request it guards — defect #2,
+#: only harder to reach. ``mcp/auth.py`` carries the same lesson with its own
+#: figure (a nominal 10 s timeout that produced a 140.7 s POST) and its answer is
+#: the same shape: name the phases AND cap the total.
+#:
+#: 2x the per-op number: enough for connect + write + first read on a slow but
+#: honest endpoint (the dripple case above is pathological, not slow), and small
+#: enough that a stalled endpoint costs this account seconds rather than minutes.
+PROVIDER_REFRESH_TOTAL_BUDGET_S = 60.0
 
 #: How long a process may hold the cross-process refresh lease.
 #:
 #: The lease MUST outlive the request it guards, plus a margin. It used to be
-#: 30 s — exactly the holder's HTTP timeout — so a peer's lease expired at the
-#: same instant the holder's POST would time out, and the peer then took the
-#: lease and re-presented the SAME rotating refresh token while the holder's
-#: request could still be on the wire. Against a provider that rotates and runs
-#: refresh-token reuse detection (Radient), that is the POST that revokes the
-#: whole token family: the operator's grant died twice in ~17 hours this way.
+#: 30 s — exactly the holder's per-operation HTTP timeout — so a peer's lease
+#: expired at the same instant the holder's POST would time out, and the peer
+#: then took the lease and re-presented the SAME rotating refresh token while the
+#: holder's request could still be on the wire. Against a provider that rotates
+#: and runs refresh-token reuse detection (Radient), that is the POST that
+#: revokes the whole token family: the operator's grant died twice in ~17 hours
+#: this way.
 #:
-#: 2.5x the request budget. The FLOOR is PROVIDER_REFRESH_HTTP_TIMEOUT_S plus
-#: whatever the holder does around the POST (the row re-read, the guarded
-#: UPDATE, the commit — sub-100 ms here, but a process can be descheduled for
-#: long stretches on a loaded host, which is what the margin buys). The CEILING
-#: is what a CRASHED holder leaves behind: a peer that loses the lease is never
-#: served a stale bearer any more (see ``_served_while_contended``), so a long
-#: TTL is not free, and 75 s keeps the stranded window inside the roughly one
-#: minute a caller already tolerates from ``DEFAULT_BLOCK_MS``.
-AUTH_REFRESH_LEASE_MS = 75_000
+#: Derived from :data:`PROVIDER_REFRESH_TOTAL_BUDGET_S` — the number the store
+#: actually enforces on the exchange — plus one per-operation timeout of margin
+#: for what the holder does around the POST (the row re-read, the guarded UPDATE,
+#: the commit: sub-100 ms here, but a process can be descheduled for long
+#: stretches on a loaded host). 90 s, not a multiple of the per-op number, which
+#: is what the first revision of this change got wrong (review round 1, R4).
+#:
+#: The CEILING is what a CRASHED holder leaves behind. A peer that loses the
+#: lease is handed the stored row — the behaviour every consumer's own join is
+#: built on, see ``_served_while_contended`` — so a long TTL costs it a bounded
+#: wait rather than a refusal, and 90 s stays inside what a caller already
+#: tolerates from ``DEFAULT_BLOCK_MS`` plus one join.
+AUTH_REFRESH_LEASE_MS = 90_000
 
 #: Payload key recording that THIS row's refresh token was PRESENTED by an
-#: exchange whose outcome never arrived — the request may have reached the IdP
+#: exchange whose outcome is not settled — the request may have reached the IdP
 #: and spent the token, and re-presenting a spent token is the reuse-detection
 #: POST that revokes the family. Value is ``{"digest": <short digest of the
-#: presented token>, "at": <epoch milliseconds>}``.
+#: presented token>, "at": <epoch milliseconds>, "shape": <one of the
+#: SEND_SHAPE_* constants>}``.
 #:
 #: Why a DIGEST rather than the token: the marker only ever answers "is the
 #: token in this row the one an exchange is unsure about?", and a digest keeps
@@ -124,8 +159,10 @@ AUTH_REFRESH_LEASE_MS = 75_000
 #: its in-memory knowledge with it, and the next boot would present a token that
 #: may already be spent. The write-ahead marker is the only channel that
 #: survives that death. The price is a false positive in the narrow window
-#: between the arm and the wire, which is why the marker EXPIRES
-#: (:data:`UNCONFIRMED_SEND_TTL_S`).
+#: between the arm and the wire, which is why the marker EXPIRES — and why the
+#: SHAPE it stores decides for how long (:data:`UNCONFIRMED_SEND_TTL_S` for an
+#: outcome that never arrived, :data:`ANSWERED_SEND_TTL_S` for one that did and
+#: proved nothing).
 #:
 #: The same defence, for the same reason, already protects MCP OAuth grants
 #: (``mcp.auth.GRANT_UNCONFIRMED_SEND_KEY``). Deliberately a DIFFERENT key from
@@ -164,29 +201,50 @@ REFRESH_SEND_UNCONFIRMED_KEY = "refresh_send_unconfirmed"
 #: them) and the unit follows its writer's clock helper, ``_now_ms``.
 GRANT_DEAD_AT_KEY = "grant_dead_at"
 
-#: How long a "presented but unacknowledged" send marker stays live (see
-#: :data:`REFRESH_SEND_UNCONFIRMED_KEY`).
+#: How long an IN-DOUBT "presented but unacknowledged" send marker stays live
+#: (see :data:`REFRESH_SEND_UNCONFIRMED_KEY` and :data:`SEND_SHAPE_UNKNOWN`).
 #:
 #: The marker exists to stop us re-presenting a token an exchange may already
 #: have spent, and the price of believing it is one interactive sign-in, so it
-#: must be BOUNDED. A marker armed in the window between this write and the
-#: request reaching the wire (a crash, a refused connection) describes a token
-#: nothing ever presented, and a marker that never expired would suppress that
-#: account's refresh until the user happened to re-authenticate — the "bricked
-#: account" failure mode. An hour covers a restart, a slow session or a user who
+#: must be BOUNDED. An hour covers a restart, a slow session or a user who
 #: stepped away, and after it lapses we present the stored token again, which is
 #: exactly the behaviour every boot had BEFORE this marker existed. So the
 #: expiry can only degrade to the status quo ante, never to something worse.
 #:
-#: What this store CANNOT do, stated because the MCP twin does it: it has no
-#: httpx request event hook, so it cannot tell a connect-phase failure (the
-#: request was never handed to the transport, nothing was spent) from a request
-#: that went out and was never answered. Both keep the marker. The cost is that
-#: a token endpoint which is briefly unreachable can cost this account ONE
-#: interactive sign-in rather than a silent retry, which is the trade taken on
-#: purpose: an arm a tick too early costs a browser visit, one a tick too late
-#: risks the whole family.
+#: THIS IS THE COST, stated as a number rather than as "at most one sign-in"
+#: (review round 1, R3): for the in-doubt shape the account is suppressed for up
+#: to an hour. It is reserved for the shape where the exchange's outcome truly
+#: never arrived — a transport stall, a process death mid-POST — because that is
+#: the shape this PR exists for and the only one whose evidence is
+#: "the token may have been spent and there is no way to know".
 UNCONFIRMED_SEND_TTL_S = 3600.0
+
+#: How long an ANSWERED send marker stays live — :data:`SEND_SHAPE_ANSWERED`.
+#:
+#: An endpoint that ANSWERED (a 5xx, a 429, a non-terminal 4xx) failed to prove
+#: anything about our token, so the marker is kept — a provider that commits the
+#: rotation and THEN fails the response leaves the row holding a spent token, and
+#: re-presenting that is the family-revoking POST. But its evidence is much
+#: weaker than the in-doubt shape's: the endpoint was reachable and its own code
+#: decided what to say, which is the ordinary "the provider had a bad minute"
+#: shape this repo's own merged e2e test calls "not the account's fault: retry,
+#: do not re-sign-in". Believing the marker for an hour turned that into a
+#: suppressed account until the user signed in again (review round 1, R3).
+#:
+#: ``DEFAULT_BLOCK_MS`` — the window the cascade ALREADY refuses a credential
+#: whose refresh failed for, in every process sharing the DB. So the observable
+#: healing cadence for a transient fault is the one it always had: the account
+#: is out for a block window, then the next attempt may present the token again.
+#: What changes is only that the diagnosis does not re-POST inside that window.
+ANSWERED_SEND_TTL_S = DEFAULT_BLOCK_MS / 1000
+
+#: Marker shapes, stored IN the marker so the two bounds above cannot be
+#: confused at read time. ``SEND_SHAPE_UNKNOWN`` is the exchange's outcome never
+#: arriving; ``SEND_SHAPE_ANSWERED`` is an answer that proves nothing about our
+#: token. A THIRD shape — provably never sent — is not stored at all: it is
+#: resolved on the spot by clearing the marker (see ``_refresh_request_never_sent``).
+SEND_SHAPE_UNKNOWN = "unknown"
+SEND_SHAPE_ANSWERED = "answered"
 
 #: Hard ceiling on ANY credential block, whatever computed it (a usage
 #: reset estimate, a provider Retry-After header, a caller's block_ms). A
@@ -289,6 +347,36 @@ class CredentialInvalidError(AuthStoreError):
     """
 
 
+class RefreshUnconfirmedError(AuthStoreError):
+    """A refresh was NOT attempted this time because the token is in doubt.
+
+    Raised instead of presenting a refresh token whose LAST exchange is not
+    settled — either its outcome never arrived (:data:`SEND_SHAPE_UNKNOWN`) or an
+    answer arrived that proved nothing about it (:data:`SEND_SHAPE_ANSWERED`).
+    Presenting it again is the reuse-detection POST that revokes the whole token
+    family, so it is deferred instead.
+
+    Deliberately NOT a :class:`CredentialInvalidError`: nothing here says the
+    credential is bad, and the remedy is not "sign in again" even though that is
+    the only way to recover *immediately* — the state also self-heals at the
+    marker's expiry (:data:`UNCONFIRMED_SEND_TTL_S` / :data:`ANSWERED_SEND_TTL_S`),
+    which is why the message names both. A caller that switches on the class
+    (``list_oauth_accesses`` does, to log the state rather than debug-swallow it)
+    can tell "retry shortly" from "this credential is unusable", which is the same
+    distinction the MCP sibling draws with ``McpRefreshContendedError``.
+
+    ``_resolve`` treats it as an ordinary failed refresh — a ``DEFAULT_BLOCK_MS``
+    block and move on — and that is deliberate after review round 1. The state it
+    describes IS a credential that cannot mint a bearer right now, which is
+    exactly what the block is for, and the merged failover test
+    (``test_its_credential_read_neither_blocks_nor_repoints_the_turn``) needs an
+    ordinary request to still block, or its control stops discriminating. What a
+    peer's IN-FLIGHT refresh gets is different and is not this: it is served the
+    stored row, because a peer working is not a verdict about anything (see
+    ``_served_while_contended``).
+    """
+
+
 @dataclasses.dataclass
 class StoredCredential:
     """One row of ``auth_credentials`` with its parsed payload."""
@@ -375,6 +463,22 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     return None
 
 
+def _send_marker_owner(marker: Any) -> tuple[Any, Any, Any] | None:
+    """The identity of the exchange that owns ``marker``, or ``None`` if unreadable.
+
+    ``(holder, at, digest)`` — and deliberately NOT the whole dict. ``shape`` is
+    the one field the owning exchange is allowed to rewrite when its send lands,
+    so an ownership test that compared whole dicts would refuse the very rebind
+    the arm authorised: the marker it wrote comes back carrying a different shape
+    and an equal check would stop calling it "its own". The three fields that do
+    identify the exchange are the write-ahead stamp, the token it names, and the
+    ``pid:uuid`` the lease rows already carry.
+    """
+    if not isinstance(marker, dict):
+        return None
+    return (marker.get("holder"), marker.get("at"), marker.get("digest"))
+
+
 def _refresh_token_digest(refresh_token: str) -> str:
     """Short stable digest of one refresh token, for the send marker.
 
@@ -404,20 +508,101 @@ def _send_marker_is_live(marker: Any, refresh_token: str | None, *, now_ms: int)
       rotated the row since — and suppressing a healthy, newly rotated token
       because of an unrelated send is a false positive the user pays for with a
       browser visit;
-    * expiry (see :data:`UNCONFIRMED_SEND_TTL_S`) is what stops a marker that
-      never resolved from suppressing an account's refresh indefinitely;
-    * a malformed marker cannot be compared against anything, so it can never be
-      believed.
+    * expiry is what stops a marker that never resolved from suppressing an
+      account's refresh indefinitely, and the BOUND DEPENDS ON THE SHAPE the
+      marker stores: a full :data:`UNCONFIRMED_SEND_TTL_S` for an outcome that
+      never arrived, :data:`ANSWERED_SEND_TTL_S` for an answer that proved
+      nothing (review round 1, R3);
+    * a malformed marker — or one whose ``shape`` is not a known value, which can
+      only come from a hand-edited or future payload — cannot be judged, so it is
+      NOT believed. Unknown has to fall on the side that keeps trying.
     """
     if not isinstance(marker, dict):
         return False
     at = marker.get("at")
     digest = marker.get("digest")
+    shape = marker.get("shape")
     if not isinstance(at, (int, float)) or isinstance(at, bool):
         return False
-    if not 0 <= now_ms - at <= UNCONFIRMED_SEND_TTL_S * 1000:
+    if shape == SEND_SHAPE_ANSWERED:
+        ttl_ms = ANSWERED_SEND_TTL_S * 1000
+    elif shape == SEND_SHAPE_UNKNOWN:
+        ttl_ms = UNCONFIRMED_SEND_TTL_S * 1000
+    else:
+        return False
+    if not 0 <= now_ms - at <= ttl_ms:
         return False
     return bool(refresh_token) and digest == _refresh_token_digest(refresh_token)
+
+
+def _refresh_request_never_sent(exc: BaseException) -> bool:
+    """Whether an ``httpx`` failure happened BEFORE the request reached the wire.
+
+    The distinction is httpx's own, not a guess, and it is load-bearing here for
+    the same reason it is in ``mcp/auth.py``, which owns this rule: a refresh
+    token presented to a rotating provider is spent by the REQUEST, so a failure
+    that happened before the request was written leaves the token untouched and
+    is an ordinary transient retry, while one that happened after may have spent
+    it and must not be re-presented without an interactive sign-in.
+
+    Pre-send, per httpx's taxonomy: ``ConnectError`` (refused, DNS, TLS
+    handshake), ``ConnectTimeout`` / ``PoolTimeout`` (waiting for a connection or
+    a pool slot), ``UnsupportedProtocol`` and ``LocalProtocolError`` (the request
+    was never even formatted for a socket). Everything else — ``ReadTimeout``,
+    ``ReadError``, ``WriteError``, ``WriteTimeout``, ``RemoteProtocolError``, and
+    the builtin ``TimeoutError`` the store's own total budget raises — can have
+    been written, so it is treated as suspect. The asymmetry is deliberate and is
+    the marker's whole trade: a wrongly-suspect failure costs a bounded wait, a
+    wrongly-trusted one costs the whole token family.
+
+    The first revision of this change omitted this rule entirely, which made a
+    token endpoint on a CLOSED PORT suppress the account for an hour over a
+    request nothing ever received (review round 1, R2). The annotation is
+    ``BaseException`` because the predicate is TOTAL over exceptions by
+    construction: it answers "was this demonstrably pre-send?", and anything it
+    does not recognise — including ``asyncio.CancelledError`` — answers ``False``,
+    i.e. suspect, the conservative answer. That is why the caller needs no special
+    case for cancellation: the store's own handler cannot catch a
+    ``CancelledError``, so a cancelled send keeps the marker by PROPAGATION, while
+    this predicate — were it ever asked — would keep it too. This paragraph must
+    not claim a classification the caller never requests: it is the sibling's own
+    round-2 correction, mirrored rather than re-derived, because the first draft of
+    this docstring copied the wording that correction struck (review round 2, N1).
+    """
+    import httpx
+
+    return isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.PoolTimeout,
+            httpx.UnsupportedProtocol,
+            httpx.LocalProtocolError,
+        ),
+    )
+
+
+def _caused_by_never_sent(exc: BaseException) -> bool:
+    """``_refresh_request_never_sent`` over the whole ``__cause__``/``__context__``
+    chain.
+
+    A provider's refresh fn may wrap the transport failure in its own error
+    (``LoginError``), and the chain is the only place the httpx type survives.
+    Bounded at a handful of links so a self-referential chain cannot spin, and it
+    reports ``False`` the moment it cannot see a pre-send cause — the
+    conservative direction, matching the predicate it wraps.
+    """
+    seen: set[int] = set()
+    node: BaseException | None = exc
+    for _ in range(8):
+        if node is None or id(node) in seen:
+            return False
+        seen.add(id(node))
+        if _refresh_request_never_sent(node):
+            return True
+        node = node.__cause__ or node.__context__
+    return False
 
 
 class _SerializedConnection:
@@ -1113,7 +1298,13 @@ class AuthStore:
         except (TypeError, ValueError):
             return False
 
-    def _update_payload(self, credential_id: int, mutate: Callable[[dict[str, Any]], bool]) -> bool:
+    def _update_payload(
+        self,
+        credential_id: int,
+        mutate: Callable[[dict[str, Any]], bool],
+        *,
+        moves_write_stamp: bool = False,
+    ) -> bool:
         """Read-modify-write one row's payload under ``mutate``.
 
         The single write primitive for both durability markers. It re-reads the
@@ -1123,6 +1314,24 @@ class AuthStore:
         convention the refresh path's cross-process guard already uses, rather
         than a second one. ``mutate`` returns whether the row still wants the
         write at all.
+
+        ``moves_write_stamp`` is why this is not simply an UPDATE: a SEND marker
+        write must NOT move ``auth_credentials.updated_at``, and two memos in this
+        codebase are keyed on that stamp with that premise written down —
+        ``tunnels/report.py`` :func:`_verdict_key` and
+        ``server/routes/desktop_radient._diagnosis_key``, both of which say "a
+        FAILED refresh writes nothing, which is what lets a verdict hold across
+        the very failures it describes". Arming and clearing a send marker is a
+        failed refresh writing something, so bumping the stamp here would
+        invalidation-memoise the verdict those caches exist to stop re-earning:
+        one extra token-endpoint POST per poll, for a verdict the store had
+        already computed. The MCP sibling documents the identical trap from the
+        other side (``mcp/manager._grant_marker``: keying on ``updated_at`` "would
+        make this session retry on its OWN writes, every tick, forever").
+        A tombstone DOES pass ``True``: a grant the IdP has refused for good is a
+        change to the credential, and a memo still holding the pre-refusal verdict
+        would be holding a fact the row no longer supports. A login or a landed
+        rotation moves the stamp through their own writes, as they always did.
 
         Returns whether the write happened. A row that is GONE (a racing logout)
         is ``False`` and never a re-created row: an explicitly removed credential
@@ -1137,17 +1346,25 @@ class AuthStore:
         if not mutate(data):
             return False
         try:
-            self._conn.execute(
-                "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(data), self._now_ms(), credential_id),
-            )
+            if moves_write_stamp:
+                self._conn.execute(
+                    "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(data), self._now_ms(), credential_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE auth_credentials SET data = ? WHERE id = ?",
+                    (json.dumps(data), credential_id),
+                )
             self._conn.commit()
         except sqlite3.Error:
             logger.debug("auth payload marker write failed", exc_info=True)
             return False
         return True
 
-    def _arm_send_marker(self, credential_id: int, presented_refresh_token: str) -> None:
+    def _arm_send_marker(
+        self, credential_id: int, presented_refresh_token: str, shape: str = SEND_SHAPE_UNKNOWN
+    ) -> dict[str, Any] | None:
         """Arm the write-ahead marker for a token an exchange is about to present.
 
         Called while the refresh lock AND the cross-process lease are held, and
@@ -1157,43 +1374,149 @@ class AuthStore:
         the reuse-detection POST that revokes the family. The marker is the only
         channel that survives that death.
 
-        Best-effort: a store failure must not stop the POST.
+        ``shape`` starts at :data:`SEND_SHAPE_UNKNOWN` — the state a process that
+        dies mid-request leaves behind, and the only one there is no way to
+        narrow. The exception arms update it to :data:`SEND_SHAPE_ANSWERED`, whose
+        bound is much shorter (see :func:`_send_marker_is_live`), and a failure
+        proven to be pre-send clears the marker instead of re-arming it.
+
+        RETURNS THE MARKER IT WROTE, and ``None`` when the write failed — that
+        return value is the OWNERSHIP TOKEN for everything the exchange does to
+        the marker afterwards, not a convenience. A marker is a claim about a
+        token ANOTHER PROCESS may still be exchanging: ours can outlive its own
+        TTL (a suspended laptop ages the wall clock the marker is stamped on while
+        the exchange's own cap runs on asyncio's loop clock, which cannot fire
+        while the loop is not running), and the peer that takes the resulting
+        expired lease arms a marker of its own for the SAME token. Rewriting that
+        peer's marker from here — which the first version of this method permitted
+        by checking only that a dict was present — re-bounds an outcome that is
+        still unknown from an hour to a minute, and 61 s later the store presents
+        a token the peer's exchange may already have spent. That is review round
+        2's M1, and the reuse-detection POST this whole change exists to prevent.
+        ``holder`` is the same ``pid:uuid`` the lease rows carry, compared the same
+        way :meth:`_release_refresh_lease` compares it, so "this marker is mine"
+        has one definition in this module rather than two.
+
+        Best-effort: a store failure must not stop the POST, and an exchange that
+        could not arm anything simply owns nothing to re-bound or clear.
         """
-        marker = {"digest": _refresh_token_digest(presented_refresh_token), "at": self._now_ms()}
+        marker = {
+            "digest": _refresh_token_digest(presented_refresh_token),
+            "at": self._now_ms(),
+            "shape": shape,
+            "holder": self._refresh_holder,
+        }
 
         def write(data: dict[str, Any]) -> bool:
             data[REFRESH_SEND_UNCONFIRMED_KEY] = marker
             return True
 
-        self._update_payload(credential_id, write)
+        return marker if self._update_payload(credential_id, write) else None
 
-    def _clear_send_marker(self, credential_id: int) -> None:
-        """Resolve the send marker: the exchange reached a DEFINITIVE answer.
+    def _rebound_send_marker(
+        self, credential_id: int, armed: dict[str, Any] | None, shape: str
+    ) -> bool:
+        """Re-bound a marker to ``shape`` after its exchange answered — OURS only.
+
+        The arm happens before the POST, so the marker is always born
+        :data:`SEND_SHAPE_UNKNOWN`. The exchange's own failure then says more than
+        the arm could: an answer arrived (:data:`SEND_SHAPE_ANSWERED`, a much
+        shorter bound) or the request provably never went out (handled by the
+        caller, which clears it).
+
+        ``armed`` is what :meth:`_arm_send_marker` returned, and the write happens
+        only while the row's marker is STILL THAT EXACT MARKER. A marker a peer has
+        armed since — the handoff review round 2 reproduced — is left untouched,
+        because re-bounding it would truncate the peer's bound for a token this
+        exchange is no longer the one unsure about. An exchange that never armed
+        anything (``None``) writes nothing.
+
+        Returns whether the marker was re-bound.
+        """
+        if armed is None:
+            return False
+        owner = _send_marker_owner(armed)
+        if owner is None:
+            return False
+
+        def rebind(data: dict[str, Any]) -> bool:
+            if _send_marker_owner(data.get(REFRESH_SEND_UNCONFIRMED_KEY)) != owner:
+                return False
+            data[REFRESH_SEND_UNCONFIRMED_KEY] = {**armed, "shape": shape}
+            return True
+
+        return self._update_payload(credential_id, rebind)
+
+    def _clear_send_marker(self, credential_id: int, armed: dict[str, Any] | None) -> bool:
+        """Resolve the send marker THIS exchange armed: a definitive answer landed.
 
         Called for a 2xx whose rotation was persisted, for an ``invalid_grant``
-        refusal, and for a marker that turned out to be stale (expired, or about
-        a token the row no longer holds). Deliberately NOT called for anything
-        else, which is the whole point of the marker:
+        refusal, and for a failure PROVEN to have happened before the request
+        reached the wire (:func:`_refresh_request_never_sent` — nothing was
+        presented, so there is nothing to be unsure about). ``armed`` is what
+        :meth:`_arm_send_marker` returned, and the marker is removed only while it
+        is STILL THAT MARKER: a peer that took the expired lease mid-exchange owns
+        the row's marker now, and this exchange resolving its own send says nothing
+        about the peer's (review round 2's M1 carries both halves).
+
+        Deliberately NOT called for the two remaining shapes, which is the whole
+        point of the marker:
 
         * the request was written and no answer arrived — the state the marker
-          describes;
+          describes, kept for the full :data:`UNCONFIRMED_SEND_TTL_S`;
         * an answer that proves nothing about our token, such as a ``5xx`` or a
           ``429``. A provider that commits a rotation and THEN fails the response
           leaves the row holding a spent token, so clearing the marker there
           would let the next attempt re-present it: the reuse-detection POST that
-          revokes the whole family. Keeping it costs this account at most one
-          interactive sign-in — and since a marked token is never presented
-          again, it can also never be double-spent, which is the property that
-          matters more.
+          revokes the whole family. That shape is re-BOUND instead
+          (:data:`SEND_SHAPE_ANSWERED`), which keeps the token un-presented while
+          the failure is fresh and lets the account heal on the window the
+          cascade already refuses it for, rather than for the in-doubt shape's
+          full hour.
+
+        Returns whether the marker was removed.
         """
+        if armed is None:
+            return False
+        owner = _send_marker_owner(armed)
+        if owner is None:
+            return False
 
         def drop(data: dict[str, Any]) -> bool:
-            if REFRESH_SEND_UNCONFIRMED_KEY not in data:
+            if _send_marker_owner(data.get(REFRESH_SEND_UNCONFIRMED_KEY)) != owner:
                 return False
             data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
             return True
 
-        self._update_payload(credential_id, drop)
+        return self._update_payload(credential_id, drop)
+
+    def _drop_dead_send_marker(self, credential_id: int, target: str | None) -> bool:
+        """Remove a marker that can no longer be believed, WHOEVER armed it.
+
+        The ownership condition :meth:`_rebound_send_marker` and
+        :meth:`_clear_send_marker` enforce exists so one exchange cannot rewrite
+        another's LIVE marker. This is the other side of it: a marker that has
+        already stopped meaning anything — expired, or about a token the row no
+        longer holds — is inert, so removing it changes no answer for any process,
+        and not removing it means re-deciding the same dead marker on every later
+        attempt. Re-checked under the write, because the row can move between the
+        read that called it dead and the write.
+
+        ``target`` is the token the caller asked about (the row's current one);
+        ``None`` means the row holds no refresh token at all. Returns whether a
+        marker was removed.
+        """
+
+        def drop(data: dict[str, Any]) -> bool:
+            marker = data.get(REFRESH_SEND_UNCONFIRMED_KEY)
+            if marker is None:
+                return False
+            if _send_marker_is_live(marker, target, now_ms=self._now_ms()):
+                return False
+            data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+            return True
+
+        return self._update_payload(credential_id, drop)
 
     def send_unconfirmed(self, credential_id: int, refresh_token: str | None = None) -> bool:
         """Whether a LIVE marker says ``refresh_token`` may already be spent.
@@ -1203,7 +1526,9 @@ class AuthStore:
         about a different token — is CLEARED on the way past rather than
         believed, because the answer already decided it is not this row's
         business; leaving it in place would re-evaluate (and re-clear) it on
-        every later attempt. See :func:`_send_marker_is_live` for the rule.
+        every later attempt. See :func:`_send_marker_is_live` for the rule, and
+        :meth:`_drop_dead_send_marker` for why that one removal is safe for a
+        marker this process did not arm.
         """
         row = self.get_credential(credential_id)
         if row is None or not isinstance(row.data, dict):
@@ -1215,7 +1540,7 @@ class AuthStore:
         target = refresh_token if refresh_token is not None else self._presented_refresh_token(data)
         if _send_marker_is_live(marker, target, now_ms=self._now_ms()):
             return True
-        self._clear_send_marker(credential_id)
+        self._drop_dead_send_marker(credential_id, target)
         return False
 
     @staticmethod
@@ -1282,58 +1607,51 @@ class AuthStore:
             data[GRANT_DEAD_AT_KEY] = self._now_ms()
             # The refusal IS the definitive answer to the send marker: the IdP
             # told us what happened to the presented token, so there is nothing
-            # left for the marker to protect.
+            # left for the marker to protect. This pop is deliberately NOT
+            # ownership-gated like the rebind/clear pair: the row is going DEAD,
+            # a dead row is never refreshed again, and the guard above has already
+            # established the marker can only be about the token just refused — so
+            # removing it costs a peer nothing it was still protecting.
             data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
             return True
 
-        return self._update_payload(credential_id, write)
+        return self._update_payload(credential_id, write, moves_write_stamp=True)
 
     def _served_while_contended(
         self, row: StoredCredential, now_data: dict[str, Any]
     ) -> dict[str, Any]:
         """What a caller may be served when it did NOT win the refresh lease.
 
-        One place for the rule, because every leakage here is a stale bearer
-        spent upstream: PR #1340 fixed the CONSUMER half of that (a stale bearer
-        is no longer treated as a live one by the tunnel), and this is the store
-        half.
+        THE ANSWER IS THE STORED ROW, and getting this wrong is what the first
+        revision of this change did (review round 1, R1, BLOCKER). It refused an
+        expired bearer here with a bare :class:`AuthStoreError`, which reads as
+        *this credential is bad* one call up: ``_resolve`` blocks the row for
+        ``DEFAULT_BLOCK_MS`` in every process sharing the DB, and the stale-bearer
+        return that the desktop proxy's bounded join is built on disappeared —
+        two merged e2e tests went from 200 to 502 for the whole duration of a
+        legitimately refreshing peer. A PEER'S REFRESH IS NOT A VERDICT ABOUT THE
+        CREDENTIAL, so it must not be reported as one; the consumers that must not
+        spend a due bearer already say so themselves, after waiting for the peer
+        (``server/routes/desktop_radient.py``, ``_await_peer_refresh`` and
+        ``_is_due``). PR #1340 put that refusal in the CONSUMER, which is where the
+        information about whether a stale bearer is usable actually lives.
 
-        A peer holding the lease means its POST is in flight and may rotate the
-        row at any moment, so the honest answers are ordered by what is KNOWN:
+        What DOES belong here is the one state a return would leak: a grant the
+        IdP has refused for good is served nothing, with the same
+        :class:`CredentialInvalidError` the row produces with the lease free.
 
-        * a tombstoned grant is served nothing — :class:`CredentialInvalidError`,
-          the same verdict the row would produce with the lease free;
-        * a bearer still inside its own lifetime is served as before. It is a
-          different secret from the refresh token the peer is rotating, and this
-          row only needed a refresh because of the pre-emptive skew, so refusing
-          it would fail requests that would have worked. This is the narrow,
-          deliberate exception, and it is narrow because ``_needs_refresh``
-          triggers at most ``OAUTH_REFRESH_SKEW_MS`` before expiry;
-        * anything else is refused with a CLASSIFIED error rather than served.
-          The old code returned whatever the row held — an access token that was
-          past its expiry, which the peer session measured being spent upstream
-          as though it were live. An honest failure lets the cascade rotate to a
-          sibling (``_resolve`` blocks this row and moves on) instead of sending
-          a request that cannot authenticate.
-
-        The send marker is deliberately NOT consulted here. A live marker in this
-        branch means the peer's exchange armed it moments ago and is on the wire,
-        which is the mechanism working; refusing on it would fail every request
-        that races a healthy refresh. The marker is consulted where it protects
-        something — in the leased branch, by the only writer, before a POST.
+        The send marker is deliberately NOT consulted. A live marker in this
+        branch means the PEER's exchange armed it moments ago and is on the wire —
+        the mechanism working — so refusing on it would fail every request that
+        races a healthy refresh. The marker is consulted where it protects
+        something: in the leased branch, by the only writer, before a POST.
         """
         if self._grant_dead_at(now_data) is not None:
             raise CredentialInvalidError(
                 f"OAuth grant for '{row.provider}' was refused by the identity provider; "
                 f"run /login {row.provider} to sign in again"
             )
-        if self._holds_live_bearer(now_data, now_ms=self._now_ms()):
-            return now_data
-        raise AuthStoreError(
-            f"OAuth credential {row.id} for '{row.provider}' is being refreshed by another "
-            "process and holds no usable access token; retry in a moment, or run "
-            f"/login {row.provider} if it does not clear"
-        )
+        return now_data
 
     @staticmethod
     def _needs_refresh(creds: dict[str, Any], *, force: bool = False) -> bool:
@@ -1424,7 +1742,10 @@ class AuthStore:
             # separate comments in this codebase exist to stop anyone
             # re-adding it as a top-level import. This is a refresh path that
             # has already paid for the module, so the cost is zero here.
-            from local_operator.providers.oauth.callback_server import InvalidGrantError
+            from local_operator.providers.oauth.callback_server import (
+                InvalidGrantError,
+                LoginError,
+            )
 
             presented = self._presented_refresh_token(fresh)
             # Everything from here to the return runs holding the cross-process
@@ -1436,36 +1757,56 @@ class AuthStore:
             try:
                 if presented and self.send_unconfirmed(row.id, presented):
                     # This row's refresh token was presented by an exchange whose
-                    # answer never arrived, so it MAY already be spent, and
+                    # outcome is not settled, so it MAY already be spent, and
                     # re-presenting a spent token is the reuse-detection POST that
-                    # revokes the whole family. Refuse, and say so at WARNING: the
-                    # state costs the operator an interactive sign-in and has to
-                    # be readable in a log rather than inferred from an
-                    # unexplained failure. Bounded on purpose — the marker expires
-                    # (UNCONFIRMED_SEND_TTL_S), so this can never be permanent.
+                    # revokes the whole family. Defer instead of presenting.
+                    #
+                    # Unless the row's ACCESS token is still inside its own
+                    # lifetime: that is a different secret, unaffected by the
+                    # refresh exchange, and refusing it would fail requests that
+                    # would have worked. The marker is about the refresh token, so
+                    # it only decides against presenting one — never against
+                    # serving a bearer that still works.
+                    if self._holds_live_bearer(fresh, now_ms=self._now_ms()):
+                        return fresh
                     logger.warning(
                         "refresh for credential %s (%s) was NOT attempted: its stored "
-                        "refresh token was presented by an exchange that was never "
-                        "acknowledged, and presenting it again may revoke the whole "
-                        "token family — run /login %s to sign in again",
+                        "refresh token was presented by an exchange whose outcome is not "
+                        "settled, and presenting it again may revoke the whole token "
+                        "family — retry shortly, or run /login %s to sign in again now",
                         row.id,
                         row.provider,
                         row.provider,
                     )
-                    raise AuthStoreError(
+                    raise RefreshUnconfirmedError(
                         f"OAuth refresh for '{row.provider}' was deferred: the stored "
-                        "refresh token was presented by an exchange that was never "
-                        f"acknowledged, so it is not presented again; run /login "
-                        f"{row.provider} to sign in again"
+                        "refresh token was presented by an exchange whose outcome is not "
+                        "settled, so it is not presented again while that lasts "
+                        "(presenting it may revoke the whole token family); retry "
+                        f"shortly, or run /login {row.provider} to sign in again now"
                     )
+                armed: dict[str, Any] | None = None
                 if presented:
                     # WRITE-AHEAD, and before the request can be on the wire: a
                     # process that dies mid-POST takes all in-memory knowledge
                     # with it, and the next boot would present a token this
-                    # exchange may already have spent.
-                    self._arm_send_marker(row.id, presented)
+                    # exchange may already have spent. What comes back is this
+                    # exchange's claim on the marker it wrote: every later write to
+                    # it is gated on that identity, because a peer can own the row's
+                    # marker by the time our answer arrives (review round 2, M1).
+                    armed = self._arm_send_marker(row.id, presented)
                 try:
-                    refreshed = await refresh(fresh)
+                    # WALL-CLOCK cap on the exchange. The providers pass a
+                    # per-OPERATION httpx timeout, which does not bound a request:
+                    # connect, write and each read get it separately, so a
+                    # stalling endpoint held one POST open for 41.4 s and 114.5 s
+                    # in measurements on this machine — which is why the lease is
+                    # derived from THIS number and not from the per-op one (review
+                    # round 1, R4). A fired cap lands in the generic arm below with
+                    # the marker left armed, which is right: the request was handed
+                    # over, so the outcome is in doubt.
+                    async with asyncio.timeout(PROVIDER_REFRESH_TOTAL_BUDGET_S):
+                        refreshed = await refresh(fresh)
                 except AuthStoreError:
                     # The refresh fn's OWN refusal. Nothing about it says what
                     # happened to the token on the wire, so the marker is left
@@ -1492,8 +1833,9 @@ class AuthStore:
                     # another process refreshed successfully and our rejection is
                     # about a superseded token, not about the account.
                     now_row = self.get_credential(row.id)
-                    if now_row is not None and dict(now_row.data).get("refresh") != fresh.get(
-                        "refresh"
+                    if (
+                        now_row is not None
+                        and self._presented_refresh_token(dict(now_row.data)) != presented
                     ):
                         logger.warning(
                             "refresh race on %s: our token was already rotated by another "
@@ -1513,8 +1855,48 @@ class AuthStore:
                         f"OAuth grant for '{row.provider}' is no longer valid: {exc}"
                     ) from exc
                 except Exception as exc:
+                    if _caused_by_never_sent(exc):
+                        # PROVABLY PRE-SEND: httpx's own taxonomy says the request
+                        # was never written — a refused connection, a DNS failure,
+                        # a dead TLS handshake, a pool timeout, a URL it could not
+                        # even format — so the token was NOT presented and there is
+                        # nothing to be unsure about. Clearing the marker is what
+                        # keeps a token endpoint on a closed port from suppressing
+                        # the account for the marker's window over a request nothing
+                        # ever received, while the message stops asserting that a
+                        # presentation happened (review round 1, R2). The sibling
+                        # rule (`mcp/auth.py:_refresh_request_never_sent`) is
+                        # adopted rather than re-derived, including its asymmetry:
+                        # everything it does not recognise stays suspect.
+                        self._clear_send_marker(row.id, armed)
+                        logger.info(
+                            "refresh for credential %s (%s) could not reach the token "
+                            "endpoint (%s); the refresh token was never presented",
+                            row.id,
+                            row.provider,
+                            type(exc).__name__,
+                        )
+                        raise AuthStoreError(
+                            f"OAuth refresh for '{row.provider}' could not reach the token "
+                            f"endpoint ({type(exc).__name__}); the refresh token was never "
+                            "presented, so this is an ordinary transient failure"
+                        ) from exc
+                    if isinstance(exc, LoginError):
+                        # The endpoint ANSWERED and its answer proves nothing about
+                        # our token, so the marker is kept but re-bounded: the
+                        # failure is fresh evidence of a provider having a bad
+                        # minute, not of an exchange whose outcome never arrived.
+                        # The shorter bound is what keeps a 5xx from costing the
+                        # account the in-doubt shape's hour (review round 1, R3).
+                        self._rebound_send_marker(row.id, armed, SEND_SHAPE_ANSWERED)
+                    # ``{exc}`` alone renders an empty tail for the httpx transport
+                    # errors whose str() is empty, which is how a timed-out refresh
+                    # came back as "OAuth refresh failed for 'radient': " with no
+                    # remedy to read (review round 1, Q-4). The type name is the
+                    # part that is always there.
+                    detail = str(exc) or type(exc).__name__
                     raise AuthStoreError(
-                        f"OAuth refresh failed for '{row.provider}': {exc}"
+                        f"OAuth refresh failed for '{row.provider}': {detail}"
                     ) from exc
                 merged = dict(fresh)
                 merged.update(refreshed)
@@ -1528,7 +1910,11 @@ class AuthStore:
                 # The response IS the acknowledgement the marker was waiting for:
                 # the exchange ran, so the token it presented is consumed and the
                 # row holds its replacement. Skipped here rather than trusted from
-                # ``fresh``, which was read BEFORE the arm.
+                # ``fresh``, which was read BEFORE the arm — and this write is not
+                # ownership-gated for the same reason the tombstone's pop is not:
+                # it replaces the very token any marker in this payload was about,
+                # after the guard below has established that token, so what it drops
+                # is dead for every process rather than live for a peer.
                 merged.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
                 # Cross-process guard: the server's job processes each build their
                 # own AuthStore, so the per-process refresh lock does not cover
@@ -1538,8 +1924,9 @@ class AuthStore:
                 # process won), skip our write — overwriting would clobber the
                 # winner's live token with our dead one and soft-delete the row.
                 now_row = self.get_credential(row.id)
-                if now_row is not None and dict(now_row.data).get("refresh") != fresh.get(
-                    "refresh"
+                if (
+                    now_row is not None
+                    and self._presented_refresh_token(dict(now_row.data)) != presented
                 ):
                     logger.warning(
                         "refresh race on %s: another process refreshed first; " "keeping its token",
@@ -2403,6 +2790,24 @@ class AuthStore:
                         raw=data,
                         credential_invalid=True,
                     )
+                )
+                continue
+            except RefreshUnconfirmedError as error:
+                # R5: the marker state is the one the operator hits after a lost
+                # response, and it was invisible here — a bare ``AuthStoreError``
+                # is a debug line and an OMITTED row, so the panel said nothing
+                # about an account that needs a sign-in or a moment's patience.
+                # Logged at INFO with the store's own sentence, which names both
+                # remedies. NOT reported as ``credential_invalid``: that flag means
+                # "only a re-login clears it" and this state clears itself at the
+                # marker's expiry, so publishing it as a dead grant would put
+                # wrong copy in front of the user (and make the model picker drop
+                # a credential that is about to work again).
+                logger.info(
+                    "usage: credential %s for %s has a deferred refresh; omitting (%s)",
+                    row.id,
+                    provider,
+                    error,
                 )
                 continue
             except AuthStoreError:

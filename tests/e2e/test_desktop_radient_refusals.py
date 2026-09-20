@@ -211,15 +211,17 @@ async def test_a_dead_grant_answers_the_sign_in_class_and_spends_nothing(
         assert batch.status_code == 401
         assert batch.json()["detail"]["code"] == "radient_credential_refused"
         # Six sequential refusals, the shape QA measured the cost in (R31): the base spent
-        # ONE refresh on this, the first cut of this change spent one per REQUEST — seven
-        # for six — against a token endpoint already known to refuse this grant. Two is
-        # the floor: the first request's cascade spends one and the diagnosis spends one
-        # naming it, and the rest are answered from the memoised verdict.
+        # ONE refresh per FAILING REQUEST — seven for six — and the memo brought that to one
+        # per block window. It is now ONE FOR THE WHOLE RUN, because the store records the
+        # refusal ON THE ROW: the diagnosis that names it reads the persisted verdict
+        # instead of re-earning it with a token-endpoint POST against a grant the endpoint
+        # had already refused (review round 1: the tombstone saves a POST). The count still
+        # discriminates — a regression that went back to one POST per request would be 6.
         for _ in range(4):
             again = await client.post("/v1/desktop/radient", json={"operation": "account"})
             assert again.status_code == 401
             assert again.json()["detail"]["details"]["reason"] == "grant_invalid"
-        assert stub.token_posts() == 2, stub.calls
+        assert stub.token_posts() == 1, stub.calls
 
 
 async def test_a_transient_refresh_failure_answers_the_retry_class(
@@ -233,11 +235,17 @@ async def test_a_transient_refresh_failure_answers_the_retry_class(
             assert response.json()["detail"]["code"] == "radient_upstream_failed"
             assert response.json()["detail"]["details"]["reason"] == "credential_unavailable"
         assert "GET /v1/me" not in stub.paths()
-        # The second request is answered from the diagnosis the first one paid for —
-        # the block the cascade wrote is the window in which re-asking learns nothing,
-        # and against an endpoint that HANGS rather than fails that is the difference
-        # between one page load's timeout and one per page load.
-        assert stub.token_posts() == 2, stub.calls
+        # ONE POST FOR THE PAIR OF REQUESTS. The base paid two: the first request's
+        # cascade spent one and the diagnosis that named the failure spent another. This
+        # change arms a write-ahead send marker before the POST, and a failure that came
+        # back with an ANSWER (a 5xx proves nothing about our token, so the marker is kept)
+        # defers the deferred token instead of re-presenting it — so the diagnosis pays
+        # nothing. The cost is stated rather than implied: the marker is re-bounded to
+        # ``ANSWERED_SEND_TTL_S`` (one ``DEFAULT_BLOCK_MS``), the window the cascade ALREADY
+        # refuses this credential for, so the account heals on the cadence it always had —
+        # and the token is not re-presented inside that window, which is what a provider
+        # that committed a rotation and then failed the response needs (review round 1, R3).
+        assert stub.token_posts() == 1, stub.calls
 
 
 async def test_a_peer_leased_refresh_never_spends_the_stale_bearer(
