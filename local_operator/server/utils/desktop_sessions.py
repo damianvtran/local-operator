@@ -2786,6 +2786,14 @@ class DesktopSessions:
         the id gone and answers 404 — which is the truth, because the deletion is
         requested by explicit id and removing an already-removed conversation is
         the same end state the caller asked for.
+
+        THE DAEMON FORGETS THE SESSION on the way out, and that is a consistency
+        requirement rather than tidiness: this pool serves a conversation it has
+        already opened from a resident bridge without re-reading the directory, so
+        without the drop this process would keep answering 200 for an id a fresh
+        daemon 404s (desktop QA round 2, PR #390). Only after the removal landed,
+        never before — a bridge whose directory still exists is what serves its
+        readers.
         """
 
         def apply() -> dict[str, Any]:
@@ -2796,7 +2804,9 @@ class DesktopSessions:
                 raise SessionDeletionRefused(outcome.refusal)
             return {"session_id": session_id, "deleted": True}
 
-        return await asyncio.to_thread(apply)
+        result = await asyncio.to_thread(apply)
+        await self.forget(session_id)
+        return result
 
     async def acknowledge_attention_many(self, items: Sequence[tuple[str, str]]) -> dict[str, Any]:
         """Clear the unread completion marks a CLIENT enumerated, in one write.
@@ -3678,6 +3688,40 @@ class DesktopSessions:
         finally:
             with CancelScope(shield=True):
                 await bridge.release()
+
+    async def forget(self, session_id: str) -> bool:
+        """Drop a removed conversation's resident bridge; True if one existed.
+
+        WHY A SESSION EVER HAS TO BE FORGOTTEN (desktop QA round 2, PR #390):
+        ``session()`` hands out a RESIDENT bridge without re-checking the
+        directory — that lookup is the expensive half of every read (see
+        ``docs/evidence/session-load-central-cache``) — so a conversation this
+        process had already opened kept answering ``sessions.get``, ``/history``
+        and ``/mcp`` with 200 after its directory was deleted. Measured: the
+        deleting daemon answered 200 where a FRESH one answered 404 for the same
+        store, so a client that reloaded onto the removed id never saw the 404 its
+        tombstone is written against. The delete is the only event that makes
+        residency wrong, so it is the only caller.
+
+        CLOSED AS WELL AS DROPPED, and the order matters: dropping the reference
+        alone would leave the bridge's facade, subscribers and (after a watch
+        beat) its lease running with nothing able to reach them — an orphan that
+        this pool's own ``close()`` would no longer find, which is the leak this
+        method exists to avoid as much as the wrong 200. The close is awaited
+        AFTER the pool lock, because it takes the BRIDGE's lock and this pool's
+        lock is held for frames only.
+
+        The single-flight lookup is dropped with the bridge: a locate still in
+        flight was started for a directory that is now gone, and leaving it in
+        place would hand its answer to a later caller.
+        """
+        async with self.lock:
+            bridge = self.bridges.pop(session_id, None)
+            self._locate_flights.pop(session_id, None)
+        if bridge is None:
+            return False
+        await bridge.close()
+        return True
 
     async def close(self) -> None:
         await asyncio.gather(*(bridge.close() for bridge in self.bridges.values()))
