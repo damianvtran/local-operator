@@ -69,6 +69,13 @@ rendering is not a contract.
    `{"ok": false, "error": "the relay is not running"}` when this device's relay
    is down — fix that (`lop network start --json`) before reading anything into
    an empty list.
+   MEMBERSHIP CONVERGES ON CONTACT, so a device does not have to have been
+   present when someone joined: `ls`, `show` and `peers` each contact the members
+   before answering, a link formed for any other reason does the same, and the
+   admitting device contacts the rest of the network when it admits. A device
+   that has been switched off still shows the table it had when it went down
+   until its next contact, and a member that IS reachable is never hidden by
+   that: run any of those three commands rather than restarting the relay.
 6. Tell the user what they now have: a relay this device supervises, an identity
    keypair other networks will address it by, and a member list they can inspect.
    The next section says what the session plane can and cannot do across the mesh.
@@ -102,11 +109,16 @@ whichever side can dial forms the link, and the link is then bidirectional. So a
 peer's listing works from the dial-only side, and a session on the dial-only
 device is best created from there. `lop network peers --json` says which kind each
 member is, with the reason in `reason`: `no_endpoint` means that member never
-declared an address (admitted by an older build), `connect_failed:*` means nothing
-answered at the address it declared, and `not probed: the listing budget ran out`
-means the listing gave up waiting rather than claiming anything. `lop network
-doctor --json` reports the same per link, and its top-level `ok` is FALSE whenever
-any check in its own array is false.
+declared an address (admitted by an older build), a single `connect_failed:*`
+means nothing answered at any address it declared, `unreachable: <address>
+<why>; …` names every address it declared and what each one did (a member often
+has one address that is a black hole from where you are and one that answers),
+and `not_attempted:` means nothing was dialled at all — the listing gave up
+before this member's turn rather than claiming anything about it. A device with
+several addresses is probed at ALL of them at once, so the order its row happens
+to list them in cannot decide whether it looks reachable. `lop network doctor
+--json` reports the same per link, one row per address plus the handshake, and
+its top-level `ok` is FALSE whenever any check in its own array is false.
 
 The rule the design fixes: a session with a strong local dependency (a repository
 that exists only on this machine, an attached browser, a terminal the user is
@@ -128,13 +140,14 @@ Diagnose in this order, and stop at the first answer that explains it:
 
 1. `lop network doctor --json` — identity present, records healthy, endpoints
    present, and (with the relay up) each endpoint actually dialled: latency,
-   `epoch_skew`, and the failure name (`connect_timeout`, `connection_refused`,
-   or a refusal code). Without a relay it says `not probed (the relay is not
-   running)` rather than guessing.
+   `epoch_skew`, and the failure name (`connect_failed:*`, `no_answer`, a refusal
+   code). A row that was not dialled says so and is `ok: false` rather than
+   passing unchecked. The `relay` field is read from the relay itself — replied
+   to, `running (pid N)` and, if its control socket did not answer, that too.
 2. `lop network log --since 1h --json` — what actually happened: `member_admitted`,
-   `member_removed`, `invite_minted`, `panic_raised`, `trust_changed`,
-   `pairing_refused`, each with `ts_iso`, `event`, `outcome`, `network_id` and a
-   `detail` object.
+   `member_removed`, `membership_learned`, `invite_minted`, `panic_raised`,
+   `trust_changed`, `pairing_refused`, each with `ts_iso`, `event`, `outcome`,
+   `network_id` and a `detail` object.
 3. `lop network peers --json` — reachability right now, per peer: `device_id`,
    `name`, `network_id`, `reachable`, `reason`, `endpoints`.
 4. `lop network status --json` — install and health: `relay_running`, `relay`,

@@ -210,6 +210,288 @@ class NetworkSettings:
 #: on a couple of endpoints, not to wait out an unreachable fleet.
 LISTING_PROBE_BUDGET_S = 12.0
 
+#: How long ONE candidate address may take to ACCEPT a connection before it is
+#: written off. Sized for the question a probe asks — "does anything answer at
+#: this address?" — not for the handshake that follows it: a healthy path connects
+#: in one round trip (a loopback peer in 0.03 s, measured; a transatlantic one in
+#: ~0.15 s), so the only dial that spends this whole budget is an address that is a
+#: black hole, where the answer is already known and the cost is what it is. It is
+#: a CAP, not a share: see :func:`probe_candidates`.
+PROBE_CONNECT_TIMEOUT_S = 3.0
+
+#: The one reason a member row carries when nothing was even attempted. Its own
+#: spelling because "we could not try" and "we tried and nothing answered" are
+#: different operator actions, and a budget that ran out must never be reported as
+#: a reachability result (QA round 2, Q-R2-2).
+NOT_ATTEMPTED_REASON = "not_attempted: the listing budget ran out before this member was probed"
+
+
+@dataclass(frozen=True)
+class CandidateAttempt:
+    """What ONE declared address did, so a report can say which address and why.
+
+    ``detail`` is the same vocabulary a peer row's ``reason`` uses (``ok``,
+    ``connect_failed:<ExceptionClass>``, ``bad_endpoint``), plus the two answers
+    that exist only here: ``not_attempted`` (the deadline had already passed when
+    this candidate's turn came) and ``no_answer`` (it was dialled and did not
+    answer before the budget ran out).
+    """
+
+    endpoint: str
+    connected: bool
+    detail: str
+    latency_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class CandidateProbe:
+    """The result of dialling every address one member declared, all at once."""
+
+    #: The first socket that connected, still open and unclaimed — the caller owns
+    #: it and MUST either hand it to :meth:`RelayServer.dial` or close it.
+    sock: socket.socket | None
+    #: The endpoint that socket is connected to (``""`` when none did).
+    winner: str
+    #: One entry per declared endpoint, in the order the row declares them. An
+    #: endpoint whose attempt was still in flight when the budget ran out is named
+    #: ``no_answer`` rather than dropped: a missing row reads as "fine".
+    attempts: list[CandidateAttempt]
+    #: The one line a peer row carries, and EMPTY when an address answered: the
+    #: caller's success signal is the socket, and a "reason" beside it would be a
+    #: sentence about a link that exists. See :func:`probe_reason`.
+    reason: str
+
+
+@dataclass
+class _AttemptOutcome:
+    """One attempt's result, as it crosses from a probe thread to the collector."""
+
+    endpoint: str
+    sock: socket.socket | None
+    detail: str
+    latency_ms: float
+
+
+def probe_candidates(
+    endpoints: Sequence[str],
+    *,
+    deadline: float | None,
+    connect_cap: float,
+    wait_all: bool = False,
+) -> CandidateProbe:
+    """Dial every address a member declared, ALL of them at once, and take the first
+    that answers.
+
+    WHY PARALLEL, and not "walk the row under one shared deadline". A member row
+    lists every address its declaring device believes it can be reached at, and
+    which of them is a black hole depends on WHO IS DIALING: a public address is
+    unroutable from inside the same VPC and a private one from outside it, so for
+    any given dialler one entry of the row is usually dead — and the row's order is
+    the DECLARER's, which no receiver can fix unilaterally. Walking the row in
+    order under one deadline therefore spends the WHOLE budget on whichever entry
+    happens to be first and reports the member unreachable while its reachable
+    address sits untouched in the same row; in a mesh of three, the budget spent on
+    that black hole is a THIRD member never probed at all (QA round 2, Q-R2-2:
+    `connect_failed:TimeoutError` for a peer whose private socket connected in
+    0.00 s in the same second, and the next member reported `not probed`).
+
+    Dividing the budget between candidates instead (candidate *i* gets
+    ``remaining / candidates_left``) only trades one lost member for a shrunken
+    timeout: the entries later in the row get a smaller and smaller share of the
+    same clock, so a slow-but-good address is written off for the accident of being
+    declared last. All attempts in flight at once costs one connect per candidate,
+    gives every candidate the FULL cap rather than a shrinking share, and bounds
+    the whole probe by ``deadline`` — which is the property the caller needs.
+
+    The handshake is deliberately NOT run here: exactly one candidate wins, and the
+    caller runs ONE handshake on the winning socket (``dial(..., connected=...)``).
+    N handshakes would be N links to one device. ``wait_all`` keeps collecting after
+    the winner so a diagnostic (``doctor``) can report every address; a listing does
+    not need that and returns at the winner.
+
+    Losing connections are closed here, under the same lock that admits them, so a
+    probe that returns early cannot leak a socket that connected a moment later.
+    """
+    results: queue.Queue[_AttemptOutcome] = queue.Queue()
+    #: Sockets this probe opened that the collector has not claimed or closed.
+    opened: list[socket.socket] = []
+    opened_lock = threading.Lock()
+    stop = threading.Event()
+    started_at = time.monotonic()
+
+    def attempt(endpoint: str) -> None:
+        budget = connect_cap
+        if deadline is not None:
+            budget = min(connect_cap, max(0.0, deadline - time.monotonic()))
+        if budget <= 0:
+            results.put(_AttemptOutcome(endpoint, None, "not_attempted", 0.0))
+            return
+        address, _, port_text = endpoint.rpartition(":")
+        try:
+            port = int(port_text)
+        except ValueError:
+            results.put(_AttemptOutcome(endpoint, None, "bad_endpoint", 0.0))
+            return
+        started = time.monotonic()
+        try:
+            sock = socket.create_connection((address or endpoint, port), timeout=budget)
+        except OSError as exc:
+            results.put(
+                _AttemptOutcome(endpoint, None, f"connect_failed:{exc.__class__.__name__}", 0.0)
+            )
+            return
+        latency = round((time.monotonic() - started) * 1000, 1)
+        with opened_lock:
+            if stop.is_set():
+                # The probe already has its winner. A connection landing now is not
+                # a second answer, it is a socket nobody will ever read.
+                _close_quietly(sock)
+                return
+            opened.append(sock)
+        results.put(_AttemptOutcome(endpoint, sock, "ok", latency))
+
+    threads = [
+        threading.Thread(target=attempt, args=(endpoint,), name="mesh-probe", daemon=True)
+        for endpoint in endpoints
+    ]
+    for thread in threads:
+        thread.start()
+
+    attempts: list[CandidateAttempt] = []
+    winner_sock: socket.socket | None = None
+    winner = ""
+    settled = 0
+    while settled < len(threads):
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            break
+        try:
+            outcome = results.get(timeout=remaining)
+        except queue.Empty:
+            break
+        settled += 1
+        attempts.append(
+            CandidateAttempt(
+                endpoint=outcome.endpoint,
+                connected=outcome.sock is not None,
+                detail=outcome.detail,
+                latency_ms=outcome.latency_ms or None,
+            )
+        )
+        if outcome.sock is not None and winner_sock is None:
+            winner_sock, winner = outcome.sock, outcome.endpoint
+            if not wait_all:
+                break
+
+    stop.set()
+    with opened_lock:
+        for sock in opened:
+            if sock is not winner_sock:
+                _close_quietly(sock)
+        opened.clear()
+
+    # An attempt still in flight when the budget ran out never reported. Name it:
+    # every declared endpoint appears in the result, so a caller reading the rows
+    # cannot mistake "we stopped waiting" for "this address is fine". WHICH name
+    # depends on whether anything was tried at all — a probe handed a deadline that
+    # had already passed has not dialled anything and must say so, rather than
+    # report a reachability result it never established.
+    starved = deadline is not None and deadline <= started_at
+    reported = {row.endpoint for row in attempts}
+    for endpoint in endpoints:
+        if endpoint not in reported:
+            attempts.append(
+                CandidateAttempt(endpoint, False, "not_attempted" if starved else "no_answer", None)
+            )
+
+    return CandidateProbe(
+        sock=winner_sock,
+        winner=winner,
+        attempts=attempts,
+        reason="" if winner_sock is not None else probe_reason(attempts),
+    )
+
+
+def probe_reason(attempts: Sequence[CandidateAttempt]) -> str:
+    """The one line a peer row carries when NO candidate produced a link.
+
+    ``no_endpoint`` and ``not_a_member`` are decided by the caller: they are facts
+    about the record, not about a dial. Everything here is about the dial, and the
+    distinction a reader needs is "nothing answered" versus "nothing was tried".
+    A row whose candidates all failed the SAME way reports that one code — which is
+    what round 1's F-2 fix documented, and for the ordinary single-address row
+    (a NAT-bound device declares one address) it is byte-identical to it. A row
+    where they failed DIFFERENTLY names every address with its own answer, so a
+    dead lease and a wrong port do not read as one failure; and a candidate that
+    was never dialled says so instead of being folded in with the ones that were.
+
+    A candidate that ANSWERED is dropped rather than reported: a probe with a
+    winner has no reason, and a caller that asks anyway must not be handed
+    ``unreachable: ... ok`` — a sentence that contradicts itself.
+    """
+    codes = [row.detail for row in attempts if row.detail != "ok"]
+    if not codes:
+        return ""
+    if len(set(codes)) == 1:
+        return codes[0]
+    return "unreachable: " + "; ".join(f"{row.endpoint} {row.detail}" for row in attempts)
+
+
+def adopt_members(
+    record: NetworkRecord, rows: Sequence[Any]
+) -> tuple[bool, list[str]]:
+    """Take a peer's member rows into this device's record. Returns (changed, added).
+
+    THE SAME TRUST DECISION THE JOIN ALREADY MAKES, made again where it is needed.
+    A joiner adopts the inviter's full member list verbatim when it pairs
+    (``network/cli.py:_persist_join``); this is that list, read again from a member
+    that holds it — not a second source of truth. The wire has exactly one
+    membership read (``net_member_list``, §6.4) and this is its merge.
+
+    THE RULES, and each one is a refusal to guess:
+
+    * A device this record has TOMBSTONED, or one named in ``removed_ids``, is
+      never revived. Removal is the epoch path's decision (§8.1) and a peer's
+      stale snapshot must not be able to undo it — the frame that carries a
+      removal is a rotation, and it is the only one that can.
+    * A row this device already holds keeps its LOCAL role, capabilities and
+      public key. Authority is not something a peer gets to assert about a third
+      device; the row's own declaration is the only thing a peer can relay.
+    * A row this device does NOT hold is adopted as the frame carries it, exactly
+      as an admission frame's rows are, because without it the member is invisible
+      to every surface here — listings, dialling, and the authoriser that has to
+      recognise its frames.
+    * Nothing is ever REMOVED here. A peer with an older table (a device that
+      joined later than we did, or one that has not seen a newcomer) is the normal
+      case, and shrinking the table on the weaker evidence is how a mesh loses
+      members that are still members.
+    """
+    changed = False
+    added: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            incoming = MemberRecord.from_json(row)
+        except (TypeError, ValueError):
+            continue
+        device_id = incoming.device_id
+        if not device_id or device_id in record.removed_ids:
+            continue
+        existing = record.member(device_id)
+        if existing is None:
+            record.members.append(incoming)
+            added.append(device_id)
+            changed = True
+            continue
+        # The address list is the declaring device's OWN answer, relayed: it is
+        # the only thing a third party can pass on that this device cannot see for
+        # itself, and the row it lands on is the only place `_ensure_link` dials.
+        if incoming.endpoints and list(existing.endpoints) != list(incoming.endpoints):
+            existing.endpoints = list(incoming.endpoints)
+            changed = True
+    return changed, added
+
 
 def advertise_endpoints(
     settings: NetworkSettings, *, declared: Sequence[str] = ()
@@ -1035,12 +1317,25 @@ class PeerLink:
         result: Any,
         codec: wire.LinkCrypto,
         settings: NetworkSettings,
+        reader: wire.FrameReader | None = None,
     ) -> None:
+        """``reader`` is the HANDSHAKE's reader, when it still holds bytes.
+
+        A link takes over the socket the handshake just finished on, and the
+        handshake reader may already own bytes of the first record (see
+        ``wire.FrameReader.__init__``). Passing it here carries that buffer into
+        the record phase; leaving it out starts a fresh reader and silently loses
+        whatever the peer sent in the gap — the shape of a link that dies with a
+        crypto error moments after a good handshake.
+        """
         self.server = server
         self.sock = sock
         self.result = result
         self.codec = codec
         self.settings = settings
+        #: The handshake's reader, when it had one: it may already own bytes of the
+        #: first record, and the read loop below prefers it over a fresh reader.
+        self._handshake_reader = reader
         self.link_id = result.link_id
         self.device_id = result.peer_device_id
         self.instance_id = result.peer_instance_id
@@ -1159,7 +1454,13 @@ class PeerLink:
     # -- threads ------------------------------------------------------------
 
     def _read_loop(self) -> None:
-        reader = wire.FrameReader(self.sock)
+        # The reader the handshake left behind, when it left one: its buffer may
+        # already hold the first record, and a fresh reader here would lose it.
+        reader = (
+            self._handshake_reader
+            if self._handshake_reader is not None
+            else wire.FrameReader(self.sock)
+        )
         try:
             while not self._closed.is_set():
                 deadline = time.monotonic() + self.settings.link_idle_s
@@ -1633,6 +1934,118 @@ class RelayServer:
         member.endpoints = list(endpoints)
         store.save(record, self.root)
 
+    # -- membership at rest, and the one read that keeps it current ---------
+
+    def _pull_members(self, link: "PeerLink") -> bool:
+        """Learn the member table from a peer, WITHOUT ever failing the caller.
+
+        This runs inside ``dial`` and ``register_link`` — the two places a link is
+        established — so an exception escaping it would be reported as "the link
+        failed" while the link is, in fact, up and started. A stale table is the
+        state this exists to improve on; it is not a reason to drop a good link.
+        """
+        try:
+            return self._learn_members_from(link)
+        except Exception:  # noqa: BLE001 — see the docstring: never fails its caller
+            return False
+
+    def _learn_members_from(self, link: "PeerLink") -> bool:
+        """The pull itself: ask, merge, persist, audit. See :meth:`_pull_members`.
+
+        THE WIRE HAS EXACTLY ONE MEMBERSHIP READ (``net_member_list``, §6.4) and
+        this is its client half. It exists because the record is a SNAPSHOT taken
+        when the member joined: a joiner is handed the full list in its admission
+        frame (``pair_result_frame``), and every device already in the network is
+        told NOTHING — so a member admitted afterwards is invisible to them
+        forever, across restarts, and ``--all-peers`` silently under-reports on
+        the normal history of a mesh (QA round 2, Q-R2-1: `members: 2` on the
+        device that had joined first against `3` on both others).
+
+        Contact is what re-evaluates membership (§8.4), and a link IS contact, so
+        this runs at link establishment on BOTH ends: whichever side dialled,
+        each side learns the other's table. It is best effort by construction —
+        an older peer answers ``unknown op``, a peer that has gone quiet costs
+        one op wait and nothing else — because a membership refresh that could
+        fail a link would be a worse bug than the stale table it fixes.
+        """
+        if not link.alive:
+            return False
+        reply = link.request(
+            {"op": "net_member_list", "req": self._next_relay_req(), "locality": "remote"},
+            timeout=self.settings.op_wait_s,
+        )
+        if reply is None or reply.get("op") != "ack":
+            return False
+        detail = reply.get("detail")
+        if not isinstance(detail, dict):
+            return False
+        rows = detail.get("members")
+        if not isinstance(rows, list):
+            return False
+        record = next(
+            (
+                item
+                for item in store.list_networks(self.root)
+                if item.network_id == link.network_id
+            ),
+            None,
+        )
+        if record is None:
+            return False
+        changed, added = adopt_members(record, rows)
+        if not changed:
+            return False
+        store.save(record, self.root)
+        self.audit.record(
+            AuditEvent(
+                event="membership_learned",
+                actor=link.device_id,
+                subject=record.network_id,
+                outcome="ok",
+                network_id=record.network_id,
+                epoch=record.epoch,
+                detail={
+                    "source": link.device_id,
+                    "added": added,
+                    "members": len(record.active_members()),
+                    "members_digest": members_digest_of(record),
+                },
+            )
+        )
+        return True
+
+    def contact_peers(self, *, budget_s: float | None = LISTING_PROBE_BUDGET_S) -> None:
+        """Contact every peer once, within ``budget_s``, to refresh the member table.
+
+        Called before a surface REPORTS membership (``net_show``, ``net_ls``). A
+        member table is a distributed fact, and a report built from the local
+        snapshot alone is how a device that joined earlier never learns about a
+        newcomer (Q-R2-1). The refresh itself happens in ``_pull_members`` at link
+        establishment — this only forces the contact, so a command that reports
+        membership is never answered from a snapshot that another member has
+        already made stale.
+
+        Best effort and bounded: an unreachable peer costs its probe budget and
+        contributes nothing, exactly as it does in ``peer_status``. It CANNOT raise:
+        it runs inside the admit path (where an exception would be reported as a
+        pairing refusal for a pairing that succeeded) and inside a listing (where it
+        would replace the answer with an error), so a member that fails is skipped
+        rather than propagated — a refresh that can fail its caller is a worse bug
+        than the stale table it exists to fix.
+        """
+        deadline = None if budget_s is None else time.monotonic() + budget_s
+        for record in store.list_networks(self.root):
+            for member in record.active_members():
+                if member.device_id == record.self_device_id:
+                    continue
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return
+                try:
+                    self._ensure_link_with_reason(member.device_id, probe_timeout_s=remaining)
+                except Exception:  # noqa: BLE001 — see the docstring: never fails its caller
+                    continue
+
     def peer_record(self) -> PeerRecord:
         networks = []
         for record in store.list_networks(self.root):
@@ -1814,7 +2227,7 @@ class RelayServer:
         if result.phase == "pair":
             self._run_pair_listener(sock, handshake, result, peer_addr)
             return
-        self.register_link(sock, handshake, result, peer_addr)
+        self.register_link(sock, handshake, result, peer_addr, reader=reader)
 
     def _audit_handshake_refusal(
         self, refusal: MeshRefusal, network_id: str, peer_addr: str, mode: str
@@ -1860,15 +2273,28 @@ class RelayServer:
         )
 
     def register_link(
-        self, sock: socket.socket, handshake: Handshake, result: Any, peer_addr: str
+        self,
+        sock: socket.socket,
+        handshake: Handshake,
+        result: Any,
+        peer_addr: str,
+        *,
+        reader: wire.FrameReader | None = None,
     ) -> PeerLink:
-        """Admit a fully-authenticated link, applying the duplicate-identity fence."""
+        """Admit a fully-authenticated link, applying the duplicate-identity fence.
+
+        ``reader`` is the handshake's own reader: it may hold the first bytes of the
+        record phase already (``wire.FrameReader`` explains why), and handing it on
+        is what keeps a peer that speaks immediately after its handshake from
+        having that frame decrypted out of sequence.
+        """
         link = PeerLink(
             server=self,
             sock=sock,
             result=result,
             codec=handshake.codec(),
             settings=self.settings,
+            reader=reader,
         )
         link.peer_addr = peer_addr
         verdict = self.identity_use.observe(
@@ -1934,6 +2360,15 @@ class RelayServer:
                 detail={"role": "listener", "epoch": result.epoch, "phase": result.phase},
             )
         )
+        if result.phase == "member":
+            # CONTACT RE-EVALUATES MEMBERSHIP (§8.4) — and the LISTENER is the side
+            # that would otherwise never hear: this device was dialled, so nothing
+            # here asked for the other end's table, and the pull in `dial` only
+            # runs on the side that dialled. Gated on the phase because a
+            # reconcile-phase link may dispatch `ping` and `net_reconcile` and
+            # nothing else (§8.4), so `net_member_list` there is a refusal by
+            # design rather than a peer that cannot answer.
+            self._pull_members(link)
         return link
 
     def _note_duplicate(self, device_id: str, instance_id: str) -> None:
@@ -3160,12 +3595,27 @@ class RelayServer:
         ``probe_timeout_s`` bounds the WHOLE probe, across every endpoint: a
         listing must return even when a member's address is a black hole, and a
         surface that hung for one dead peer would be worse than one that says it
-        could not reach it.
+        could not reach it. Every declared endpoint is dialled WITHIN that bound —
+        all of them at once, so the row's order stops deciding who is reachable
+        (:func:`probe_candidates`) — and a member the budget ran out before is
+        reported as ``not_attempted`` rather than as unreachable.
         """
         found = self._link_for(device_id)
         if found is not None:
             return found, ""
+        if probe_timeout_s is not None and probe_timeout_s <= 0:
+            return None, NOT_ATTEMPTED_REASON
         deadline = None if probe_timeout_s is None else time.monotonic() + probe_timeout_s
+        # A probe with a deadline is a listing's probe: cap one address at
+        # PROBE_CONNECT_TIMEOUT_S so a black hole costs its own cap and not the
+        # whole budget. A probe WITHOUT one is a real session op's dial (stream
+        # open, session create) and keeps the full handshake budget per attempt,
+        # which is what it had before this and what a slow WAN leg needs.
+        cap = (
+            PROBE_CONNECT_TIMEOUT_S
+            if deadline is not None
+            else self.settings.handshake_timeout_s
+        )
         reason = "not_a_member"
         for record in store.list_networks(self.root):
             member = record.member(device_id)
@@ -3174,18 +3624,30 @@ class RelayServer:
             if not member.endpoints:
                 reason = "no_endpoint"
                 continue
-            for endpoint in member.endpoints:
-                budget = None
-                if deadline is not None:
-                    budget = deadline - time.monotonic()
-                    if budget <= 0:
-                        return None, reason if reason != "not_a_member" else "unreachable"
-                link, dial_reason = self.dial(
-                    record.network_id, host=endpoint, epoch=record.epoch, timeout_s=budget
+            probe = probe_candidates(member.endpoints, deadline=deadline, connect_cap=cap)
+            if probe.sock is None:
+                reason = probe.reason
+                continue
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                # The address answered and the budget ran out before the
+                # handshake: "unreachable" would be a claim about the peer when
+                # the truth is a claim about our clock.
+                _close_quietly(probe.sock)
+                return None, (
+                    f"handshake_not_attempted: {probe.winner} answered and the listing "
+                    "budget ran out before the handshake"
                 )
-                if link is not None:
-                    return link, ""
-                reason = dial_reason or "unreachable"
+            link, dial_reason = self.dial(
+                record.network_id,
+                host=probe.winner,
+                epoch=record.epoch,
+                timeout_s=remaining,
+                connected=probe.sock,
+            )
+            if link is not None:
+                return link, ""
+            reason = dial_reason or probe.reason
         return None, reason
 
     def _open_viewer_stream(self, frame: dict[str, Any]) -> tuple[dict[str, Any], _Stream | None]:
@@ -3603,12 +4065,29 @@ class RelayServer:
             # secret but is not yet a member.
             result.phase = "member"
             link = PeerLink(
-                server=self, sock=sock, result=result, codec=codec, settings=self.settings
+                server=self,
+                sock=sock,
+                result=result,
+                codec=codec,
+                settings=self.settings,
+                reader=reader,
             )
             link.peer_addr = peer_addr
             with self._links_lock:
                 self.links[result.link_id] = link
             link.start()
+            # THE ADMITTING DEVICE OWES THE REST OF THE NETWORK THIS NEWS. The
+            # joiner was handed the full member list in its admission frame; the
+            # devices already in the network were told nothing, so a member
+            # admitted later stays invisible to them forever (Q-R2-1). There is no
+            # membership PUSH on the wire (§6.4 has one membership read,
+            # `net_member_list`), so the delivery is a contact: this device dials
+            # each peer it can reach, and the peer's own end of that link pulls
+            # the current table from here (`_pull_members`, called by
+            # `register_link` on their side). Bounded and best effort — a peer
+            # this device cannot dial is one that will pull when it next
+            # contacts, which is the honest limit of a dial-only member.
+            self.contact_peers()
         except (MeshRefusal, wire.LinkCryptoError, OSError) as exc:
             reason = getattr(exc, "code", "error")
             try:
@@ -3719,6 +4198,7 @@ class RelayServer:
         invite_material: str = "",
         joiner_name: str = "",
         timeout_s: float | None = None,
+        connected: socket.socket | None = None,
     ) -> tuple[PeerLink | None, str]:
         """Dial a peer and complete the handshake. Returns the link and a reason.
 
@@ -3734,19 +4214,30 @@ class RelayServer:
         listing asking "is this peer reachable?") needs a bound shorter than the
         budget a real session op should get, and it must be able to say "could
         not reach it" rather than hang.
+
+        ``connected`` is a socket ALREADY dialled by :func:`probe_candidates`,
+        whose job was to choose WHICH of a member's declared addresses to use.
+        Re-dialling here would throw that choice away — and, on the row this
+        exists for, re-open the race where the first declared address is a black
+        hole (QA round 2, Q-R2-2). ``host`` is still required: it names the
+        address the probe settled on, and it is what the audit record and
+        ``link.peer_addr`` report.
         """
         budget = self.settings.handshake_timeout_s if timeout_s is None else float(timeout_s)
         record = store.load(network_id, self.root)
         state = store.require_secrets(network_id, self.root)
-        address, _, port_text = host.rpartition(":")
-        try:
-            port = int(port_text)
-        except ValueError:
-            return None, "bad_endpoint"
-        try:
-            sock = socket.create_connection((address or host, port), timeout=budget)
-        except OSError as exc:
-            return None, f"connect_failed:{exc.__class__.__name__}"
+        if connected is not None:
+            sock = connected
+        else:
+            address, _, port_text = host.rpartition(":")
+            try:
+                port = int(port_text)
+            except ValueError:
+                return None, "bad_endpoint"
+            try:
+                sock = socket.create_connection((address or host, port), timeout=budget)
+            except OSError as exc:
+                return None, f"connect_failed:{exc.__class__.__name__}"
         deadline = wire.deadline_in(budget)
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -3788,6 +4279,12 @@ class RelayServer:
             result = handshake.establish()
             result.phase = str(frame.get("phase") or result.phase)
             if result.phase == "pair":
+                # Ownership of the socket belongs to whichever call opened it: here
+                # that is this method, so the early return closes it. A caller that
+                # handed in a `connected` socket relies on exactly that — a dial
+                # that returns without a link must not leave the caller owning a
+                # connection it was told nothing about.
+                _close_quietly(sock)
                 return None, "pair_phase_requires_the_ceremony"
             link = PeerLink(
                 server=self,
@@ -3795,6 +4292,7 @@ class RelayServer:
                 result=result,
                 codec=handshake.codec(),
                 settings=self.settings,
+                reader=reader,
             )
             link.peer_addr = host
             with self._links_lock:
@@ -3803,6 +4301,10 @@ class RelayServer:
             # The listener's endpoints arrive in its ``welcome``; they are how this
             # device will re-open the link without being told the address again.
             self._note_peer_endpoints(record, result.peer_device_id, handshake.peer_endpoints)
+            # CONTACT RE-EVALUATES MEMBERSHIP (§8.4). A link is the one moment both
+            # ends are known to be up, and the member table is a distributed fact
+            # the local record can hold a stale snapshot of (Q-R2-1).
+            self._pull_members(link)
             return link, "ok"
         except MeshRefusal as refusal:
             _close_quietly(sock)
@@ -3955,9 +4457,7 @@ class RelayServer:
     def _control_handlers(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
         return {
             "net_status": lambda frame: self.status(),
-            "net_ls": lambda frame: [
-                self.network_summary(record) for record in store.list_networks(self.root)
-            ],
+            "net_ls": self._ctl_ls,
             "net_show": lambda frame: self.network_detail(str(frame.get("network") or "")),
             "net_peer_ls": lambda frame: self.peer_status(),
             "net_invite": self._ctl_invite,
@@ -3991,6 +4491,16 @@ class RelayServer:
             "peer_session_engage": self._ctl_peer_engage,
             "peer_session_stop": self._ctl_peer_stop,
         }
+
+    def _ctl_ls(self, frame: dict[str, Any]) -> list[dict[str, Any]]:
+        """``lop network ls``: every network this device is in, with its table.
+
+        Contacts peers first, for the same reason ``network_detail`` does: "how
+        many members" is a distributed fact and the local record is only a
+        snapshot of it, taken when this device joined (Q-R2-1).
+        """
+        self.contact_peers()
+        return [self.network_summary(record) for record in store.list_networks(self.root)]
 
     def _ctl_invite(self, frame: dict[str, Any]) -> dict[str, Any]:
         record = self._require_network(str(frame.get("network") or ""))
@@ -4382,7 +4892,7 @@ class RelayServer:
                 # endpoints, so a dial-only install lists like any other.
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    link, unreachable_reason = None, "not probed: the listing budget ran out"
+                    link, unreachable_reason = None, NOT_ATTEMPTED_REASON
                 else:
                     link, unreachable_reason = self._ensure_link_with_reason(
                         member.device_id, probe_timeout_s=remaining
@@ -4503,7 +5013,16 @@ class RelayServer:
 
     def network_detail(self, target: str) -> dict[str, Any]:
         record = self._require_network(target)
+        # MEMBERSHIP IS A DISTRIBUTED FACT, so a report about it contacts the other
+        # members first (Q-R2-1). This command is where the stale snapshot was
+        # measured, and answering it from the local record alone is what made a
+        # third member invisible to a device that had joined earlier.
+        self.contact_peers()
         base = self.network_summary(record)
+        # ONE DIGEST PER TABLE, and the SAME one the wire carries: `net_member_list`
+        # and the admission frame both send `members_digest`, so two devices
+        # comparing their `show` output can tell "same members" from "same count".
+        base["members_digest"] = members_digest_of(record)
         base["members_detail"] = [
             {
                 "device_id": member.device_id,
@@ -4554,7 +5073,7 @@ class RelayServer:
                     continue
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    link, reason = None, "not probed: the listing budget ran out"
+                    link, reason = None, NOT_ATTEMPTED_REASON
                 else:
                     link, reason = self._ensure_link_with_reason(
                         member.device_id, probe_timeout_s=remaining
@@ -4603,7 +5122,9 @@ class RelayServer:
             "uptime_s": round(time.time() - self.started_at, 1),
         }
 
-    def doctor(self, *, peer: str = "") -> dict[str, Any]:
+    def doctor(
+        self, *, peer: str = "", budget_s: float | None = LISTING_PROBE_BUDGET_S
+    ) -> dict[str, Any]:
         """Diagnose a link: reachability, handshake, epoch skew, clock skew.
 
         It never claims reachability it has not just proven: every endpoint it
@@ -4612,8 +5133,18 @@ class RelayServer:
         skew is REPORTED and never enforced — nothing in the design compares clocks
         across hosts, and a diagnostic that refused on skew would reintroduce the
         dependency the design removed.
+
+        A PROBE DIALS, SO IT IS BOUNDED. ``budget_s`` is the whole run's budget and
+        every dial inside it is capped (``PROBE_CONNECT_TIMEOUT_S``), because a
+        diagnostic that can outlast its caller is a diagnostic whose answer is
+        never read: the CLI gives the control call its own timeout, and a doctor
+        whose reply arrives after it is a doctor whose output the operator never
+        sees — which is exactly how this command came to report a relay state it
+        had not checked (QA round 2, Q-R2-6). An endpoint the budget did not reach
+        is reported as ``not_attempted``, never as unreachable.
         """
         findings: list[dict[str, Any]] = []
+        deadline = None if budget_s is None else time.monotonic() + budget_s
         identity = store.network_root(self.root)
         if self.identity is None or not self.identity.device_id:
             findings.append({"check": "identity", "ok": False, "detail": "identity_missing"})
@@ -4632,62 +5163,138 @@ class RelayServer:
                     continue
                 if peer and member.device_id != peer:
                     continue
-                for endpoint in member.endpoints or ["<no endpoint>"]:
-                    result = self._probe_endpoint(record, member, endpoint)
-                    findings.append(result)
+                findings.extend(self._probe_member(record, member, deadline=deadline))
         return {
             "checks": findings,
             "identity_dir": str(identity),
             "listen": self.peer_record().listen,
+            # THIS RELAY IS RUNNING: it is the process answering this call, so this
+            # is a fact it holds rather than a claim about another machine. The
+            # local fallback reports the same key with the same three states, and
+            # it used to hardcode "not running" next to a machine whose relay was
+            # demonstrably up (QA round 2, Q-R2-6).
+            "relay": f"running, pid {os.getpid()}",
             "epochs": {row.network_id: row.epoch for row in store.list_networks(self.root)},
         }
 
-    def _probe_endpoint(
-        self, record: NetworkRecord, member: MemberRecord, endpoint: str
+    def _probe_member(
+        self, record: NetworkRecord, member: MemberRecord, *, deadline: float | None
+    ) -> list[dict[str, Any]]:
+        """Every check row for ONE member: one per declared address, then the handshake.
+
+        ALL ADDRESSES AT ONCE, and the handshake on whichever answered first — the
+        same rule the listings follow, for the same reason (Q-R2-2): a member whose
+        row leads with a black hole must be diagnosed, not written off, and the
+        diagnostic owes that twice over because its whole purpose is to be the
+        instrument that tells the difference. A SECOND address that also answers is
+        reported as reachable — it connected, which is a fact about it — without a
+        second handshake: two links to one device is not a diagnosis, it is a leak.
+        """
+        if not member.endpoints:
+            return [
+                {
+                    "check": "reachability",
+                    "device_id": member.device_id,
+                    "endpoint": "",
+                    "ok": False,
+                    "detail": "no_endpoint",
+                }
+            ]
+        probe = probe_candidates(
+            member.endpoints,
+            deadline=deadline,
+            connect_cap=PROBE_CONNECT_TIMEOUT_S,
+            wait_all=True,
+        )
+        winner_row: dict[str, Any] | None = None
+        if probe.sock is not None:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                _close_quietly(probe.sock)
+                winner_row = self._handshake_row(
+                    member,
+                    probe.winner,
+                    ok=False,
+                    detail=(
+                        f"not_attempted: {probe.winner} answered and the doctor budget "
+                        "ran out before the handshake"
+                    ),
+                )
+            else:
+                winner_row = self._handshake(record, member, probe.winner, probe.sock, remaining)
+        rows: list[dict[str, Any]] = []
+        for attempt in probe.attempts:
+            if attempt.endpoint == probe.winner and winner_row is not None:
+                rows.append(winner_row)
+            elif attempt.connected:
+                rows.append(
+                    {
+                        "check": "reachability",
+                        "device_id": member.device_id,
+                        "endpoint": attempt.endpoint,
+                        "ok": True,
+                        "latency_ms": attempt.latency_ms,
+                        "detail": f"connected; the link was established at {probe.winner}",
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "check": "reachability",
+                        "device_id": member.device_id,
+                        "endpoint": attempt.endpoint,
+                        "ok": False,
+                        "latency_ms": attempt.latency_ms,
+                        "detail": attempt.detail,
+                    }
+                )
+        return rows
+
+    def _handshake_row(
+        self, member: MemberRecord, endpoint: str, *, ok: bool, detail: str, **extra: Any
     ) -> dict[str, Any]:
-        if endpoint == "<no endpoint>":
-            return {
-                "check": "reachability",
-                "device_id": member.device_id,
-                "endpoint": "",
-                "ok": False,
-                "detail": "no_endpoint",
-            }
-        address, _, port_text = endpoint.rpartition(":")
-        started = time.monotonic()
-        try:
-            link, reason = self.dial(record.network_id, host=endpoint, epoch=record.epoch)
-        except MeshRefusal as refusal:
-            return {
-                "check": "handshake",
-                "device_id": member.device_id,
-                "endpoint": endpoint,
-                "ok": False,
-                "detail": refusal.code,
-            }
-        latency_ms = round((time.monotonic() - started) * 1000, 1)
-        if link is None:
-            return {
-                "check": "handshake",
-                "device_id": member.device_id,
-                "endpoint": endpoint,
-                "latency_ms": latency_ms,
-                "ok": False,
-                "detail": reason,
-            }
-        skew = None
-        if link.epoch != record.epoch:
-            skew = link.epoch - record.epoch
-        link.close("we-closed")
+        """One ``check: handshake`` row, the shape this command has always emitted."""
         return {
             "check": "handshake",
             "device_id": member.device_id,
             "endpoint": endpoint,
-            "latency_ms": latency_ms,
-            "ok": True,
-            "detail": "ok",
-            "epoch_skew": skew,
+            "ok": ok,
+            "detail": detail,
+            **extra,
         }
+
+    def _handshake(
+        self,
+        record: NetworkRecord,
+        member: MemberRecord,
+        endpoint: str,
+        sock: socket.socket,
+        remaining: float | None,
+    ) -> dict[str, Any]:
+        """Run the one handshake a member's probe earns, and close the link again."""
+        started = time.monotonic()
+        try:
+            link, reason = self.dial(
+                record.network_id,
+                host=endpoint,
+                epoch=record.epoch,
+                timeout_s=remaining,
+                connected=sock,
+            )
+        except MeshRefusal as refusal:
+            return self._handshake_row(member, endpoint, ok=False, detail=refusal.code)
+        latency_ms = round((time.monotonic() - started) * 1000, 1)
+        if link is None:
+            return self._handshake_row(
+                member, endpoint, ok=False, detail=reason or "unreachable", latency_ms=latency_ms
+            )
+        skew = None
+        if link.epoch != record.epoch:
+            skew = link.epoch - record.epoch
+        link.close("we-closed")
+        return self._handshake_row(
+            member, endpoint, ok=True, detail="ok", latency_ms=latency_ms, epoch_skew=skew
+        )
 
     # -- pair phase, listener-side helpers ---------------------------------
 

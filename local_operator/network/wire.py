@@ -515,9 +515,22 @@ class FrameReader:
     with forgetting that.
     """
 
-    def __init__(self, sock: socket.socket) -> None:
+    def __init__(self, sock: socket.socket, *, buffered: bytes = b"") -> None:
+        """``buffered`` is a PREVIOUS reader's leftover, handed over rather than lost.
+
+        ONE SOCKET HAS TWO PHASES — the JSON-line handshake and the sealed record
+        stream after it — and the reader that finishes the first may have pulled
+        bytes of the second off the socket already (``_fill`` reads in 64 KiB
+        chunks). Dropping that object therefore drops those bytes, and the frame
+        they belong to is then decrypted out of sequence: the receiver sees a
+        ``LinkCryptoError`` on a link whose handshake was perfectly good, seconds
+        after it was established. That is a real hazard for ANY peer that speaks
+        immediately after the handshake — a pull, a rotation, a session op — and it
+        is why this constructor takes the buffer instead of a fresh reader silently
+        starting empty.
+        """
         self._sock = sock
-        self._buffer = bytearray()
+        self._buffer = bytearray(buffered)
 
     def read_line(self, deadline: float | None) -> dict[str, Any]:
         """One JSON-lines frame, bounded by :data:`MAX_HANDSHAKE_LINE`."""
