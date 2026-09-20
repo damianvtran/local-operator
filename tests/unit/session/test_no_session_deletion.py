@@ -1317,6 +1317,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "our recorded copy of the Windows task definition FILE",
     ),
+    # The phone web bundle's rejected build (2026-09-19). Both calls remove
+    # `<web>/dist`, and nothing else: `web_dir` is `Path(__file__).parent /
+    # "web"` for this install, or the snapshot tree the updater is about to
+    # install, and the removed path is always that tree's `dist/` — a vite
+    # artifact the build itself just wrote, dropped when the bundle guard
+    # refuses it so a utility-less stylesheet cannot be served as "built".
+    # Never derived from a session id, the config dir, or caller input, and the
+    # argument always ends in "dist" (`_dist_dir`).
+    (
+        "local_operator/mobile/install.py::_build_bundle",
+        "shutil.rmtree",
+        "Drops <web>/dist after the bundle guard refuses it; web_dir is package/snapshot-derived",
+        2,
+    ),
+    (
+        "local_operator/mobile/install.py::ensure_bundle",
+        "shutil.rmtree",
+        "Same <web>/dist, for a bundle that was already there and fails the guard",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
