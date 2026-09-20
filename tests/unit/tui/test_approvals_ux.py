@@ -518,54 +518,52 @@ async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> N
         block = [
             item for item in app.query_one(TranscriptView).blocks() if isinstance(item, NoticeBlock)
         ][-1]
-        # The card's own sentence is EXACTLY 6 rows at 44 columns measured on this
-        # widget (162 characters + the receipt correction, at a 40-cell content
-        # width). An exact bound rather than a comfortable one: a one-row growth
-        # is the regression this pin exists for (agent review round 4, R4-2/R4-3
-        # — the previous `<= 8` and `<= 13` let a row slip through).
-        assert block.size.height == 6, _block_shape(block)
+        # The card's own sentence is EXACTLY 8 rows at 44 columns measured on this
+        # widget, in the revision-2 copy (228 characters of copy plus the
+        # "not applied — " receipt correction, at a 40-cell content width; the
+        # rendered block text is 242 characters). It was 6 rows at 176 rendered
+        # characters under the revision-1 copy, and the growth is the cost of the
+        # sentence naming the levers that actually work — re-measured and re-pinned
+        # rather than widened to a tolerant bound, because a one-row growth is the
+        # regression this pin exists for (agent review round 4, R4-2/R4-3: the
+        # previous `<= 8` and `<= 13` let a row slip through). Frames:
+        # ``before-card``/``after-card`` in the PR's evidence.
+        assert block.size.height == 8, _block_shape(block)
 
         # The command's copy is NOT what a card reader is told.
-        from local_operator.harness.approval import OPERATOR_CAP_REQUIRED_NOTICE
+        from local_operator.harness.approval import OPERATOR_AUTHORITY_REQUIRED_NOTICE
 
-        assert OPERATOR_CAP_REQUIRED_NOTICE not in shown, shown
+        assert OPERATOR_AUTHORITY_REQUIRED_NOTICE not in shown, shown
 
         # AND THE LONG ONE, measured rather than computed (design round 3, D14;
         # agent R3-5). The block wraps at its OWN content width — 40 cells at a
-        # 44-column terminal, not 44 — so this 345-character copy renders as 12
-        # rows, against a transcript area that is 11 rows in the tightest case
-        # measured here (`region [1,1,42,13] size [41,11] virtual [40,15]
-        # scroll_y=4` — the maximum, so the transcript is at its bottom): EXACTLY
-        # ONE row of the block is above the fold, its first. The other three rows
-        # off the top are the prompt's two and the container's adaptive gap
-        # (design round 5 read them as more of the notice and said two; round 6's
-        # prose check measured one, and the frames support one). What stays on
-        # screen is the rest of the reason and the remedies, which is why the copy
-        # leads with them. A wrap-based pin said "9 rows" and
-        # measured a wrapping the frame does not do; this one measures the widget.
-        # The transcript is given a row of its own first so the two areas are the
-        # same shape.
+        # 44-column terminal, not 44 — so the revision-2 copy's 288 characters
+        # render as 9 rows, against a transcript area that is 13 rows in this
+        # staging (`region [1,1,42,13] size [41,13] virtual [40,21] scroll_y=8`).
+        # It was 12 rows at 345 characters under the revision-1 copy, and the
+        # SHORTER block is not an accident: the retired remedy sentence was the
+        # longest clause in it. What stays on screen is the reason and the
+        # remedies, which is why the copy leads with them. A wrap-based pin once
+        # said "9 rows" and measured a wrapping the frame does not do; this one
+        # measures the widget. The transcript is given a row of its own first so
+        # the two areas are the same shape.
         app._system_notice("a row of its own", "info")
         app._note_gate_refusal_on_app_loop(OperatorAuthorityRequired())
         await pilot.pause()
         tall = [
             item for item in app.query_one(TranscriptView).blocks() if isinstance(item, NoticeBlock)
         ][-1]
-        # 12, measured: the command's 345 characters at the same 40-cell content
+        # 9, measured: the command's 288 characters at the same 40-cell content
         # width. The block is pinned; the AREA is not, because it is a property of
-        # what else is in the transcript — and it does NOT always hold the block:
-        # 13 rows in this staging, 11 in a conversation (where exactly one row of
-        # the block, its first, is above the fold), 2 with the re-armed card
-        # docked, where the
-        # painted rows are the notice's TAIL — its last two, `blocked until
-        # someone does.` / `Denying it works from here.` — not a middle slice
-        # (design rounds 4b/5, D19: the claim that it fits at every height was
-        # wider than the frames, which is the class of defect this PR exists to
-        # fix). The ORDER of the copy is what carries the narrow frames: the
-        # reason and the remedies are what a reader reaches first, and the detail
-        # is recoverable once the card is answered.
-        assert tall.size.height == 12, _block_shape(tall)
-        assert OPERATOR_CAP_REQUIRED_NOTICE in tall._text
+        # what else is in the transcript — 13 rows in this staging, fewer with the
+        # re-armed card docked, where the painted rows are the notice's TAIL rather
+        # than a middle slice (design rounds 4b/5, D19: the claim that it fits at
+        # every height was wider than the frames, which is the class of defect this
+        # PR exists to fix). The ORDER of the copy is what carries the narrow
+        # frames: the reason and the remedies are what a reader reaches first, and
+        # the detail is recoverable once the card is answered.
+        assert tall.size.height == 9, _block_shape(tall)
+        assert OPERATOR_AUTHORITY_REQUIRED_NOTICE in tall._text
 
 
 @pytest.mark.asyncio

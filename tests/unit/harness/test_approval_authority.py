@@ -550,3 +550,63 @@ def test_the_loosening_word_set_matches_both_approvals_handlers(module: str, fun
         f"{set(APPROVALS_LOOSENING_WORDS)} — the two must be the same set, or a "
         "loosening word reaches the sink that the seam read as ordinary."
     )
+
+
+# ---------------------------------------------------------------------------
+# Revision 2: the sources are COMBINED here, and the combination is the policy
+# ---------------------------------------------------------------------------
+
+
+def test_admit_increasing_combines_the_sources_and_never_invents_one() -> None:
+    """The truth table of the seam's whole policy, in one place.
+
+    Four cells, and the third is the one that matters most: a signature that was
+    OFFERED and did not hold must not be a way in. The fourth is its twin and
+    matters for a different reason — a capability holder whose client also
+    attached a stale signature must not be locked out, because the frame could
+    not be replayed into a naked yes anyway (the runtime single-uses the
+    challenge before it asks).
+
+    ``None`` is "this source said nothing", which is why it is not simply False:
+    conflating the two would make a client that predates the field look like one
+    whose signature failed, and the two want different log lines and different
+    follow-ups.
+    """
+    from local_operator.harness.approval import admit_increasing
+
+    # (capability, signature) -> admitted
+    assert admit_increasing(capability=False, signature=None) is False
+    assert admit_increasing(capability=True, signature=None) is True
+    assert admit_increasing(capability=False, signature=True) is True
+    assert admit_increasing(capability=True, signature=True) is True
+    assert admit_increasing(capability=False, signature=False) is False
+    assert admit_increasing(capability=True, signature=False) is True
+
+
+def test_signature_target_is_derived_from_the_frame_not_from_a_field() -> None:
+    """The action and the request id come from the FRAME, so a client cannot choose them.
+
+    A ``request_id`` the caller invents for a loosening is harmless (the command
+    names no card, and it is bound into the message either way), but the ACTION
+    must not be: a signature minted to answer a card would otherwise be
+    presentable as a loosening. It is derived from the same classification the
+    seam already uses, which is why there is exactly one reading of a frame.
+    """
+    from local_operator.harness.approval import signature_target
+
+    assert signature_target({"op": "slash_result", "command": "approvals", "args": "auto"}) == (
+        "loosen",
+        "",
+    )
+    assert signature_target(
+        {"op": "slash", "command": "approvals", "args": "auto", "request_id": "r1"}
+    ) == ("loosen", "r1")
+    assert signature_target({"op": "approval_answer", "approved": True, "request_id": "ab"}) == (
+        "approve",
+        "ab",
+    )
+    # Ordinary frames have no target at all: a signature on one would be a
+    # signature the runtime never checks, which is a place for state to rot.
+    assert signature_target({"op": "approval_answer", "approved": False}) is None
+    assert signature_target({"op": "ping"}) is None
+    assert signature_target({"op": "slash_result", "command": "approvals", "args": "ask"}) is None

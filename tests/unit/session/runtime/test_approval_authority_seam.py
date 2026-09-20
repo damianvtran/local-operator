@@ -40,8 +40,9 @@ import pytest
 from local_operator.config import ConfigManager
 from local_operator.harness.approval import (
     AUTHORITY_OPS,
-    OPERATOR_CAP_REQUIRED_NOTICE,
+    OPERATOR_AUTHORITY_REQUIRED_NOTICE,
     handshake_proof_ok,
+    is_wire_hex,
     mint_operator_cap,
     operator_cap_for,
     operator_nonce,
@@ -88,7 +89,9 @@ class _Live:
         registry.scan(scratch)
 
 
-async def _serve(tmp_path: Path, *, operator_cap: bytes | None) -> _Live:
+async def _serve(
+    tmp_path: Path, *, operator_cap: bytes | None, operator_anchor: Any | None = None
+) -> _Live:
     """Start a real ``RuntimeServer`` over a real ``ServingSessionHandle``.
 
     The handle is the PRODUCTION sink (``_approvals_slash`` writing
@@ -102,7 +105,9 @@ async def _serve(tmp_path: Path, *, operator_cap: bytes | None) -> _Live:
     handle = ServingSessionHandle(
         session, asyncio.get_running_loop(), cwd=str(tmp_path), auto_approve=False
     )
-    runtime = RuntimeServer(handle, kind="tui", operator_cap=operator_cap)
+    runtime = RuntimeServer(
+        handle, kind="tui", operator_cap=operator_cap, operator_anchor=operator_anchor
+    )
     # ``start_in_process``, not ``start``: the handle validates that it is used
     # from the loop it was built on (``_check_loop_thread``), and a thread-hosted
     # runtime would dispatch on its own loop and be refused by the handle itself.
@@ -861,22 +866,35 @@ def test_the_refusal_copy_names_the_remedies_and_not_a_rule() -> None:
 
     Following #1291's precedent: it names the one-step remedy rather than the
     rule, and it must NOT promise a boundary (the residual section of the design
-    doc is the honest statement of what this does not cover). Three clauses are
-    load-bearing: where to type it, how to make it true for new sessions, and
-    that tightening still works here.
+    doc is the honest statement of what this does not cover). Four clauses are
+    load-bearing after revision 2: WHO has the authority (the operator, not a
+    window), how the local reader exercises it (a presence gesture), where the
+    other lever is (a paired phone), and that tightening still works here. The
+    retired third clause — retiring the runtime so this window could own the next
+    one — is asserted ABSENT, because it is the capability loss this revision
+    exists to remove.
     """
-    copy = OPERATOR_CAP_REQUIRED_NOTICE
-    # Where to type it, in words the operator can resolve (design round 1 D4:
-    # "the session's console" was vocabulary to nobody).
-    assert "the window that started this session" in copy
-    # The mechanism that works when there IS no such window: let the runtime
-    # retire and re-open the session here, which makes THIS window the one that
-    # starts the next runtime (UX round 1 U2; the wording names the EVENT and the
-    # LEVER the reader has — no unconditional command retires a live runtime, and
-    # design round 2's D13 is answered in the design doc's §4 rather than by a
-    # promise here).
-    assert "let its runtime retire and reopen it here" in copy
-    assert "the window that opens a runtime owns its gate" in copy
+    copy = OPERATOR_AUTHORITY_REQUIRED_NOTICE
+    # WHAT CHANGED IN REVISION 2, and this first assertion is the change: the
+    # copy used to answer "who may loosen?" with a WINDOW ("the window that
+    # started this session") and send the reader to make their own window the
+    # right one. Authority is now a fact about the operator, verifiable from any
+    # surface, so the copy names the OPERATOR and the two places a person can
+    # answer a prompt for them.
+    assert "the operator's own consent" in copy
+    assert "Touch ID" in copy, "the local remedy must name the gesture"
+    assert "paired phone" in copy
+    # THE REMEDY REVISION 2 DELETES, asserted ABSENT rather than merely not
+    # asserted present. "Let its runtime retire and reopen it here — the window
+    # that opens a runtime owns its gate" was true under the spawn-capability
+    # model and is the capability loss this revision exists to remove: it made the
+    # reader chase a window instead of authorising, and a background-started
+    # runtime has no window to reopen it from at all. Pinning the absence is what
+    # stops it creeping back as a "helpful" extra sentence.
+    assert "retire" not in copy
+    assert "reopen it here" not in copy
+    assert "the window that opens a runtime owns its gate" not in copy
+    assert "the window that started this session" not in copy
     # The remedies that are true for the NEXT session, and where they live.
     assert "--yolo" in copy
     assert "tool_approval_mode: auto" in copy
@@ -886,8 +904,10 @@ def test_the_refusal_copy_names_the_remedies_and_not_a_rule() -> None:
     # very pane this notice is printed in (UX round 1 U1), so a remedy that
     # cannot work where it is read must not be in it.
     assert "/approvals default" not in copy
-    # No promise of a boundary this host may not have (see the design doc's
-    # residual section — the copy must not overclaim).
+    # No promise of a boundary this host may not have. The residual is that a
+    # HOST with no presence store (Linux today) signs without a gesture, and
+    # that is `lop operator status`'s job to say — a refusal copy that claimed a
+    # boundary everywhere would be wrong on exactly that host.
     assert re.search(r"safe|secure|protected|cannot be read", copy) is None
     # Not a visual twin of #1291's notice, which is about a config write
     # arriving from outside this session rather than a command typed where the
@@ -926,11 +946,11 @@ def test_the_card_refusal_is_its_own_sentence() -> None:
     """
     from local_operator.harness.approval import (
         CARD_APPROVAL_REFUSED_NOTICE,
-        OPERATOR_CAP_REQUIRED_NOTICE,
+        OPERATOR_AUTHORITY_REQUIRED_NOTICE,
     )
     from local_operator.session.errors import OperatorAuthorityRequired, admission_error
 
-    assert CARD_APPROVAL_REFUSED_NOTICE != OPERATOR_CAP_REQUIRED_NOTICE
+    assert CARD_APPROVAL_REFUSED_NOTICE != OPERATOR_AUTHORITY_REQUIRED_NOTICE
     # The card's reader is told the question SURVIVED and that a deny works from
     # where they are — the one action that does.
     assert "still waiting" in CARD_APPROVAL_REFUSED_NOTICE
@@ -949,9 +969,9 @@ def test_the_card_refusal_is_its_own_sentence() -> None:
     assert str(rebuilt) == CARD_APPROVAL_REFUSED_NOTICE
     # An unknown token is not prose either: it falls back to the command's copy.
     assert str(OperatorAuthorityRequired(trigger="../../etc/passwd")) == (
-        OPERATOR_CAP_REQUIRED_NOTICE
+        OPERATOR_AUTHORITY_REQUIRED_NOTICE
     )
-    assert str(admission_error("operator_authority_required")) == OPERATOR_CAP_REQUIRED_NOTICE
+    assert str(admission_error("operator_authority_required")) == OPERATOR_AUTHORITY_REQUIRED_NOTICE
 
 
 # ---------------------------------------------------------------------------
@@ -1103,9 +1123,12 @@ async def test_a_real_detached_runtime_gets_the_capability_and_refuses_a_peer(
         assert "tool approvals: ask" in json.dumps(report), report
         conn.close()
 
-        # (3) THE GUARANTEE IS REPORTED IN THE CHILD'S OWN LOG.
+        # (3) THE LEVEL IS REPORTED IN THE CHILD'S OWN LOG. The phrase is pinned
+        # as a STEM because the level itself is a property of the host: the child
+        # reports whatever this machine is, and the assertion is that it reported
+        # SOMETHING, which is what makes the not-at-rest claims below meaningful.
         text = detachment._log_text(config_dir)
-        assert "operator capability boundary on this host" in text, text[-2000:]
+        assert "operator authority:" in text, text[-2000:]
     finally:
         if child is not None:
             detachment._reap(child, config_dir)
@@ -1206,7 +1229,7 @@ async def test_the_desktop_route_cannot_loosen_a_runtime_this_backend_did_not_st
         with pytest.raises(OperatorAuthorityRequired) as refused:
             await remote.route_shared_slash("approvals", "auto")
         assert refused.value.code == "operator_authority_required"
-        assert OPERATOR_CAP_REQUIRED_NOTICE in str(refused.value)
+        assert OPERATOR_AUTHORITY_REQUIRED_NOTICE in str(refused.value)
         assert live.handle._auto_approve is False
     finally:
         if remote is not None:
@@ -1251,12 +1274,22 @@ _CAPABILITY_MODULES = frozenset(
         "local_operator/mobile/attach_client.py",
         "local_operator/mobile/daemon.py",
         "local_operator/mobile/types.py",
+        "local_operator/operator/__init__.py",
         "local_operator/session/runtime/launch.py",
         "local_operator/session/runtime/process.py",
         "local_operator/session/runtime/server.py",
         "local_operator/tui/app.py",
     }
 )
+
+#: Why ``local_operator/operator/__init__.py`` is on that list, stated rather
+#: than assumed: revision 2 made ``operator_authority_level()`` ABSORB the
+#: capability guarantee, so the level report quotes it (``capability_guarantee``)
+#: beside the anchor facts. That module asks the host-level question and never
+#: receives the VALUE — it is the reporter, not a carrier, and the pin's concern
+#: (a serializer, an export, or a log path learning the capability) does not apply
+#: to it. Recorded here so the next reader can check the claim instead of
+#: re-deriving it.
 
 
 def test_the_capability_name_appears_only_where_it_has_to() -> None:
@@ -1336,9 +1369,11 @@ async def test_a_real_runtime_writes_the_capability_nowhere_it_could_be_read(
         log_text = detachment._log_text(config_dir)
         assert "session runtime started" in log_text, log_text[-2000:]
         assert needle not in log_text
-        # ...and the guarantee level IS reported there, so the file is a real
-        # artifact of this child rather than an empty one this assertion passes on.
-        assert "operator capability boundary on this host" in log_text, log_text[-2000:]
+        # ...and the level IS reported there, so the file is a real artifact of
+        # this child rather than an empty one this assertion passes on. Pinned as
+        # a stem for the reason the sibling test records: the level is a property
+        # of the host, not a constant.
+        assert "operator authority:" in log_text, log_text[-2000:]
 
         capture = getattr(child, "lop_capture_path", None)
         if capture is not None and Path(capture).exists():
@@ -1800,3 +1835,399 @@ async def test_the_routed_report_speaks_for_the_connection_that_asks(tmp_path: P
             if conn is not None:
                 conn.close()
         await live.close(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Revision 2: the OPERATOR source, on the real socket
+# ---------------------------------------------------------------------------
+
+#: The domain the revision-2 source is exercised in. Everything here drives the
+#: production seams — the real runtime, the real ``operator_challenge`` op, the
+#: real signer — because the claim is about what a surface that did NOT spawn the
+#: runtime can do over the wire, and a fabricated frame would prove nothing about
+#: the challenge binding.
+
+
+def _install_operator_key(config_root: Path) -> Any:
+    """A real operator key in this process's store, plus the anchor for it.
+
+    The ``file-only`` backend, deliberately: it is a real ES256 backend rather
+    than a double, and it is the only one a test may use — the Secure Enclave
+    cannot even be CREATED in a throwaway keychain (measured: every attribute
+    shape returns ``errSecParam``; see ``operator/keychain.py``), and writing the
+    operator's login keychain is forbidden. The staged anchor is written exactly
+    as ``lop operator init`` leaves it, which is what the signer resolves its
+    backend from.
+    """
+    from local_operator.operator.keychain import FILE_ONLY
+    from local_operator.operator.sign import anchor_for_handle, create_key
+    from local_operator.operator.trust import anchor_bytes, staging_path
+
+    handle = create_key(config_root=config_root, preference=FILE_ONLY)
+    anchor = anchor_for_handle(handle, label="seam-test")
+    staged = staging_path(config_root)
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(anchor_bytes(anchor))
+    return anchor
+
+
+def _sign_for(config_root: Path, challenge: str, purpose: str, session_id: str) -> dict[str, str]:
+    from local_operator.operator.sign import sign_challenge
+
+    return sign_challenge(
+        challenge=challenge,
+        purpose=purpose,
+        config_root=config_root,
+        session_id=session_id,
+    ).as_json()
+
+
+async def _challenge(conn: _Conn, *, action: str, request_id: str = "") -> str:
+    reply = await _send(
+        conn, None, {"op": "operator_challenge", "action": action, "request_id": request_id}
+    )
+    # AN ``ack`` FRAME, and the op name is asserted because it is load-bearing:
+    # the client's reader routes replies only for ``ack``/``error``/``result``, so
+    # a novel op name here would tear down the whole connection and take the
+    # caller's in-flight request with it.
+    assert reply["op"] == "ack", reply
+    assert reply["expires_s"] == 30, reply
+    challenge = reply["challenge"]
+    assert is_wire_hex(challenge), reply
+    return challenge
+
+
+@pytest.mark.asyncio
+async def test_the_record_advertises_the_operator_signature_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negotiation string a client gates its challenge request on.
+
+    Advertised UNCONDITIONALLY, including on a host with no anchor installed:
+    verification needs only the anchor's public half, so the honest answer to
+    "can you check a signature" is yes everywhere, and an owner that answered
+    "unsupported" would send a reader to a remedy that does not exist.
+    """
+    from local_operator.session.runtime.types import OPERATOR_SIGNATURE_CAPABILITY
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap())
+    try:
+        assert OPERATOR_SIGNATURE_CAPABILITY in live.record.capabilities
+    finally:
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_an_operator_signature_loosens_a_runtime_this_process_never_spawned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE CAPABILITY RESTORATION, at the seam.
+
+    A connection with NO spawn capability — the state an attached pane, the
+    desktop backend for a session it did not engage, the CLI on a
+    background-started run and (stage D) the phone are all in — loosens the gate
+    by signing the runtime's own per-action challenge. The gate really moves: the
+    assertion is on the next decision parking nothing, not on the flag alone.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()  # nobody here spawned this runtime
+    anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    try:
+        conn = await _dial(live.record)  # no capability, no handshake
+        challenge = await _challenge(conn, action="loosen")
+        signature = _sign_for(config_dir(), challenge, "loosen", live.record.session_id)
+        reply = await _send(
+            conn,
+            None,
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "operator_sig": signature["sig"],
+                "operator_key_id": signature["key_id"],
+            },
+        )
+        assert reply["op"] == "result", reply
+        assert live.handle._auto_approve is True, "the signature did not loosen the gate"
+        assert await live.handle._approval_gate("bash", "rm -rf build/") is True
+        assert live.handle._fold.projection.pending is None
+        conn.close()
+    finally:
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_signature_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A captured signature has exactly ONE use, because its challenge is spent.
+
+    Replay is refused as a category rather than case by case: the challenge entry
+    is popped by the first frame that presents a signature for it, before the
+    signature is even checked, so the second presentation finds nothing to verify
+    against and is refused. The gate must be UNMOVED afterwards — a refusal that
+    still loosened would be the worst of both.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()
+    anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    try:
+        conn = await _dial(live.record)
+        challenge = await _challenge(conn, action="loosen")
+        signature = _sign_for(config_dir(), challenge, "loosen", live.record.session_id)
+        frame = {
+            "op": "slash_result",
+            "command": "approvals",
+            "args": "auto",
+            "images": [],
+            "operator_sig": signature["sig"],
+            "operator_key_id": signature["key_id"],
+        }
+        first = await _send(conn, None, dict(frame))
+        assert first["op"] == "result", first
+        assert live.handle._auto_approve is True
+
+        # Put the gate back so the SECOND frame has something to change: if the
+        # replay were honoured, this assertion below would catch it rather than
+        # being masked by the state the first frame left.
+        live.handle._auto_approve = False
+        second = await _send(conn, None, dict(frame))
+        assert second["op"] == "error", second
+        assert second.get("error_code") == "operator_authority_required", second
+        assert live.handle._auto_approve is False, "a replayed signature moved the gate"
+        conn.close()
+    finally:
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_signature_is_bound_to_the_action_it_was_minted_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A challenge asked for one action cannot authorise the other.
+
+    The ``action`` is derived from the FRAME by the runtime and bound into the
+    signed message, so a client cannot ask for an ``approve`` challenge and
+    present it on a loosening command — and the challenge is keyed by
+    ``(action, request_id)``, so there is not even an entry to find.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()
+    anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    try:
+        conn = await _dial(live.record)
+        challenge = await _challenge(conn, action="approve")
+        signature = _sign_for(config_dir(), challenge, "approve", live.record.session_id)
+        reply = await _send(
+            conn,
+            None,
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "operator_sig": signature["sig"],
+                "operator_key_id": signature["key_id"],
+            },
+        )
+        assert reply["op"] == "error", reply
+        assert live.handle._auto_approve is False, "an approve signature loosened the gate"
+        conn.close()
+    finally:
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_forged_device_certificate_cannot_approve_a_card(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The device tier's forgery case, end to end: a certificate with no operator signature.
+
+    The attacker's certificate is not malformed — it is a correct envelope over
+    their OWN real P-256 key — and it dies where it must: ``verify_device_cert``
+    checks an operator signature the attacker cannot produce, so the card stays
+    parked and the next gated call parks again.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()
+    from local_operator.operator.keychain import FileKeyBackend
+    from local_operator.operator.verify import DeviceCert
+
+    anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    try:
+        parked = await _park_a_card(live.handle)
+        pending = live.handle._fold.projection.pending
+        assert pending is not None
+        attacker = FileKeyBackend(config_dir() / "attacker.pem").create()
+        forged = DeviceCert(
+            device_id="stolen-phone",
+            spki=attacker.spki,
+            label="not the operator's device",
+            issued_at=int(time.time()) - 5,
+            not_after=int(time.time()) + 3600,
+        ).encode(signature=b"\x30\x06\x02\x01\x01\x02\x01\x01")
+
+        conn = await _dial(live.record)
+        challenge = await _challenge(conn, action="approve", request_id=pending.request_id)
+        signature = _sign_for(config_dir(), challenge, "approve", live.record.session_id)
+        reply = await _send(
+            conn,
+            None,
+            {
+                "op": "approval_answer",
+                "request_id": pending.request_id,
+                "approved": True,
+                "operator_sig": signature["sig"],
+                "operator_key_id": signature["key_id"],
+                "operator_cert": forged,
+            },
+        )
+        assert reply["op"] == "error", reply
+        assert reply.get("error_code") == "operator_authority_required", reply
+        assert live.handle._fold.projection.pending is not None, "the forged card was answered"
+        assert not parked.done()
+        conn.close()
+    finally:
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_challenge_cannot_be_spent_on_another_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-CONNECTION, like the capability proof it sits beside.
+
+    A relay — or an attacker who merely read the record and dialled its own
+    socket — can have a challenge minted for ITSELF, but the signature harvested
+    on one connection is presented on another with no challenge behind it. That is
+    what stops the relay becoming a minting service even before stage D narrows
+    its body scrub.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()
+    anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    try:
+        # ATTACH, not the default daemon kind: the runtime keeps exactly ONE
+        # daemon connection and REPLACES it on a second dial (measured: the first
+        # dial is dropped with reason "daemon replaced"), which would make this
+        # test read a torn-down socket rather than a cross-connection refusal.
+        # Attach connections multiplex up to ``ATTACH_MAX_CLIENTS``, which is the
+        # shape a second surface actually has.
+        first = await _dial(live.record, client="attach")
+        second = await _dial(live.record, client="attach")
+        challenge = await _challenge(first, action="loosen")
+        signature = _sign_for(config_dir(), challenge, "loosen", live.record.session_id)
+        reply = await _send(
+            second,
+            None,
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "operator_sig": signature["sig"],
+                "operator_key_id": signature["key_id"],
+            },
+        )
+        assert reply["op"] == "error", reply
+        assert live.handle._auto_approve is False
+        first.close()
+        second.close()
+    finally:
+        await live.close(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_a_connection_to_a_runtime_with_no_anchor_is_refused_with_the_typed_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No anchor means no operator source, and the refusal is the typed one.
+
+    The runtime must keep serving a host that has not run ``lop operator
+    install`` — that is a fresh install — and the answer to a signature offered
+    there is a refusal, not a crash and not a silent pass.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()
+    anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=None)
+    try:
+        conn = await _dial(live.record)
+        challenge = await _challenge(conn, action="loosen")
+        signature = _sign_for(config_dir(), challenge, "loosen", live.record.session_id)
+        reply = await _send(
+            conn,
+            None,
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "operator_sig": signature["sig"],
+                "operator_key_id": signature["key_id"],
+            },
+        )
+        assert reply["op"] == "error", reply
+        assert reply.get("error_code") == "operator_authority_required", reply
+        assert live.handle._auto_approve is False
+        conn.close()
+    finally:
+        await live.close(tmp_path)
+        del anchor
+
+
+@pytest.mark.asyncio
+async def test_the_report_offers_loosening_to_a_local_connection_that_can_sign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sentence half of the capability restoration (revision 2, §3).
+
+    ``_connection_may_loosen`` decides which remedy a report may name, and under
+    revision 1 it answered from the spawn capability alone — so a pane attached
+    to a runtime another process started was told loosening "has to come from the
+    window that started it" while the revision-2 client was, at that very moment,
+    about to loosen it with a signature. With an anchor installed and a LOCAL
+    connection, the report must offer the loosening route; without one it must
+    keep the conservative sentence, because there is genuinely nothing to sign
+    with and naming a route that cannot work is the dead end UX round 2 removed.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()
+    anchor = _install_operator_key(config_dir())
+    lived = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    bare = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=None)
+    try:
+        for live, expect_offer in ((lived, True), (bare, False)):
+            conn = await _dial(live.record, client="attach")
+            try:
+                reply = await _send(
+                    conn,
+                    None,
+                    {
+                        "op": "slash_result",
+                        "command": "approvals",
+                        "args": "default auto",
+                        "images": [],
+                    },
+                )
+                text = str(reply.get("data", {}).get("text", ""))
+                offered = "has to come from the window that started it" not in text
+                assert offered is expect_offer, (expect_offer, text)
+                # And the one remedy that is true on BOTH is named either way. The
+                # sentence is spelled differently in the two cases — `ask|auto`
+                # when auto is offered, `ask` alone when it is not — so the pin is
+                # on the part that does not move, plus the presence of `auto`.
+                assert "/approvals ask" in text, text
+                assert ("ask|auto switches this session now" in text) is expect_offer, text
+            finally:
+                conn.close()
+    finally:
+        await bare.close(tmp_path)
+        await lived.close(tmp_path)

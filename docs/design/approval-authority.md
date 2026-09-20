@@ -1,6 +1,7 @@
 # Design: operator authority for gate-loosening control requests
 
-Status: implemented (Stage 1 + 1b). Issue:
+Status: revision 2 implemented through stage C (the authority is the OPERATOR,
+verified against a root-owned anchor); stages D/E/F outstanding. Issue:
 `damianvtran/local-operator#1310`. Predecessor: #1282 / PR #1291, which closed
 the *settings-write* half of the same invariant.
 
@@ -69,147 +70,284 @@ an explicit acceptance requirement: the predicate is a pure function, and the
 seam's op table is re-derived from `session/runtime/server.py`'s own dispatch
 source by `tests/unit/session/runtime/test_approval_authority_seam.py`.
 
-## 2. The mechanism: one seam, one in-memory capability
+## 2. The mechanism (revision 2): the operator, verified offline
 
-**One seam.** `RuntimeServer._on_request` already holds both the connection and
-the frame, and every route in the tree — the desktop
-`POST /v1/desktop/sessions/{id}/commands` surface, the phone relay, a peer send,
-a follower terminal, the CLI — reaches the handle through it, or through
-`TuiSessionHandle` in the TUI's own process. So the guard lives there, before
-dispatch: `harness/approval.AUTHORITY_OPS` names the ops in the class, and an
-increasing frame is refused unless it presents the capability. The refusal
-reuses the existing `{"op": "error"}` reply, carrying
-`OPERATOR_CAP_REQUIRED_NOTICE` — or `CARD_APPROVAL_REFUSED_NOTICE` when the
-refused frame was an `approval_answer`, because a person whose card was refused
-needs a different sentence from a person whose command was (UX round 2, U8). The
-op travels as a TOKEN and the sentence is rebuilt on the far side, exactly as the
-typed category is.
+**The mechanism changed; nothing else did.** The class (§1), the seam, the op set,
+the typed refusal and the proof machinery are all as they were. What changed is
+what "authorised" MEANS: revision 1 asked "did the process that spawned this
+runtime say so?", and revision 2 asks "did the OPERATOR, or the operator's
+device, say so — offline, with a human gesture?"
 
-**One sentence, both hosts, and the reader's machine.** `/approvals default …`
-is answered by whichever host was asked, and the two handles had drifted into
-two wordings of the same clause; it is now one shared builder
-(`harness/approval.approvals_default_notice`). It also stopped saying "this
-machine's `config.yml`": read from a phone, "this machine" is the phone (design
-round 3, D16).
+Why the change was forced is recorded in §2.5 rather than here, because it is a
+capability argument and the mechanism only makes sense on top of it.
 
-**The reports are told, not guessing.** A report (`/approvals` with a
-divergence, `/approvals default …`) names remedies, and the same connection's
-`/approvals auto` may be refused — so the seam passes `may_loosen`, judged by
-its own predicate on the connection that asked, into the handle that builds the
-sentence (design round 2 D10, UX round 2 U7/U9). A handle serves every
-connection alike and cannot infer this; a report that offers a refused command
-is how a follower was sent to a dead end twice.
+### 2.1 The trust anchor — decided by measurement, not assumption
 
-**One capability.** 32 random bytes (`secrets.token_bytes(32)`), hex on the
-wire, present in exactly two places: the memory of the gate-owning process (a
-`RuntimeServer` field) and the memory of the console that started it (a
-process-local pid → capability table in `harness/approval.py`). It is **never**
-written to the record, the environment, argv, a log file, or `lop info` — and,
-since the record is same-uid writable, it never crosses the wire either: what
-crosses is a per-connection proof (see **Handoff** below).
+Authority is verified against an **operator ES256 (P-256) key** whose public half
+is pinned in a file the gated subject cannot write:
 
-**Handoff.** `session/runtime/launch._spawn_runtime` mints it, opens a
-`socketpair`, passes the child's end with `pass_fds` and its *number* (not a
-secret) in a new argv flag `--operator-fd`, writes the 32 bytes and closes both
-ends immediately. `process.main` reads the descriptor, closes it, and hands the
-value to the `RuntimeServer`. Tool subprocesses are spawned later with
-`close_fds=True` and `start_new_session=True`, by which time the descriptor is
-gone from this process's table too.
+| platform | anchor path | ownership |
+| --- | --- | --- |
+| macOS | `/Library/Application Support/local-operator/operators/<uid>.json` | `root:wheel`, dir 0755, file 0644 |
+| Linux | `/etc/local-operator/operators/<uid>.json` | `root:root`, same modes |
+| Windows | `%PROGRAMDATA%\local-operator\operators\<sid>.json` | Administrators |
 
-The console half is a **pid → capability** table rather than a field threaded
-through every console object, because the question is a property of the process,
-not of any one object: "did I start the runtime behind this record?".
-`AttachClient.connect` resolves it from `record.pid`. The VALUE NEVER CROSSES
-THE WIRE, and that is the second half of the design rather than a detail: the
-record is same-uid WRITABLE, so `control_port` is not a trusted pointer and an
-endpoint that receives a credential can replay it at the real runtime — measured
-end to end with production clients before this was fixed (agent review round 1,
-R1-1). What rides a frame is a per-connection HMAC **proof** of the capability
-(`harness/approval._proof`), the runtime proves possession FIRST in its welcome
-(`operator_proof` over the client's `operator_nonce` and a salt it mints for that
-connection), and the client presents nothing at all to an endpoint that cannot
-prove it holds the same value. `_request_frame` / `_request_payload` attach the
-proof to exactly the frames `frame_authority` classes as increasing; the phone
-relay's own writer does the same (`mobile/daemon._operator_request_proof`). That
-is what makes the surface table below fall out of *one* rule instead of five
-special cases.
+The file holds PUBLIC data only (`{key_id, alg, spki, backend, presence, label,
+created_at, devices}`), costs **one `sudo`/admin step at onboarding** (and again on
+rotation), and is written by an explicit `lop operator install`. The code works
+without it: a host with no anchor reports a lower level and refuses loosening
+rather than failing to start.
 
-**Windows.** `pass_fds` is POSIX-only, so the Windows path uses an inheritable
-anonymous pipe with `close_fds=False`. The boundary is weaker there regardless
-(any same-user process may read another's memory), so the runtime **reports the
-level it can detect** rather than implying one
-(`harness/approval.operator_cap_guarantee`): macOS `strong`, Linux `strong`
-unless `/proc/sys/kernel/yama/ptrace_scope` is `0` (`not-a-boundary`), Windows
-`weak`, Linux without `yama` `unreported`. The refusal copy names remedies; it
-never claims a boundary the host does not have.
+The probe measured, in a throwaway keychain so nothing touched the operator's
+(measured 2026-09-19, macOS 26.6.2, uid 501, SIP on):
 
-**Wire.** Three optional fields, all additive, so `PROTOCOL_VERSION` does not
-move: `operator_nonce` on the auth frame (the client's half of the handshake),
-`operator_proof`/`operator_salt` on the welcome (the runtime's half), and
-`operator_cap` — the proof, never the value — on the increasing ops only.
-`mobile/types.py` validates their shape; `AttachClient`'s request helper and the
-relay's writer attach the request proof, and ordinary ops never carry it. A **rolling
-upgrade fails closed** — an old console cannot loosen a new runtime (it sends no
-capability) and a new console cannot loosen an old runtime's gate any more than
-it could before (the old runtime simply ignores the field). The daemon's HTTP
-boundary drops the field from request bodies outright: the relay is a local
-process that attaches the capability itself, so a value arriving over HTTP can
-only be a forgery.
+- **a keychain item is silently substitutable**: `delete-generic-password` then
+  `add-generic-password` with a different value both return 0, the readback shows
+  the substituted value, and **no prompt and no privilege** are involved;
+- two items with the same service+account cannot coexist inside ONE keychain
+  (`errSecDuplicateItem`, rc=45) — the attacker must *replace*; but **shadowing
+  across keychains works**, and **search order is rewritable with no
+  authentication** (`security list-keychains -s`, rc=0);
+- **`/Library/*` is not writable by this admin user at all**.
 
+Two consequences the implementation respects, stated because they bound the
+claim:
+
+- **the enforcement point matters as much as the anchor.** A verifier inside a
+  user-writable tree can be replaced or bypassed by the same subject. The harness
+  install (`~/.local/share/uv/tools/local-operator`) is user-writable today; that
+  is the pre-existing Stage-2 confining epic (§4), not something this change
+  fixes;
+- **the anchor path must not be redirectable** by anything the uid can write. It
+  is built from constants only — no environment variable, no config value, no
+  `PATH` lookup — every component is `lstat`-checked for symlinks, and the file is
+  opened `O_NOFOLLOW` with owner and mode validated **from the descriptor**, not
+  from a second `stat` of the path. The test seam for the anchor is a
+  module-level global a test patches, never an environment lookup, and
+  `test_the_anchor_path_cannot_be_redirected` pins that.
+
+### 2.2 The private half: what a signature costs, per platform
+
+| platform | private half | presence per signature | guarantee |
+| --- | --- | --- | --- |
+| macOS | Secure Enclave P-256, `SecAccessControlCreateWithFlags(… kSecAccessControlPrivateKeyUsage \| kSecAccessControlUserPresence)` via `ctypes` on Security.framework | every `SecKeyCreateSignature` raises Touch ID / login-password | strong |
+| Windows | CNG key in the Microsoft Software KSP with `NCRYPT_UI_POLICY` / `NCRYPT_UI_PROTECT_KEY_FLAG` | per-use consent dialog | strong; a DPAPI file alone is **not** a presence gate and is reported as such |
+| Linux | no presence store implemented yet — see below | none | **`file-only`, which is NOT a boundary** |
+
+macOS reachability was verified separately from the key itself: `ctypes` loads
+Security.framework with all 13 needed symbols resolved
+(`SecKeyCreateRandomKey`, `SecAccessControlCreateWithFlags`, `SecItemAdd`,
+`SecItemCopyMatching`, `SecKeyCreateSignature`, …), `CFDictionaryCreate` accepts
+the attribute shapes below, and the framework's own errors are readable through
+`CFErrorCopyDescription`.
+
+**MEASURED, and it shapes the whole backend: a Secure Enclave key cannot be
+created in a legacy file keychain at all.** Every attribute shape tried against a
+throwaway keychain — with and without `kSecUseKeychain`, with each of
+`kSecAttrAccessibleWhenUnlocked`, `WhenUnlockedThisDeviceOnly` and
+`WhenPasscodeSetThisDeviceOnly`, and with each of the `privateKeyUsage` and
+`userPresence` flags — returns `errSecParam` ("inconsistent private key
+parameters for key generation"). Secure Enclave keys live in the
+**data-protection keychain**, i.e. the user's login keychain, and that placement
+is the OS's choice rather than ours. Two things follow, both recorded rather than
+worked around:
+
+- the private half's own substitutability is **irrelevant here**, and it is worth
+  saying why: replacing the key does not help an attacker, because the ANCHOR
+  pins the public half. A substituted private key produces signatures that fail
+  verification. The measured substitutability above matters for the ANCHOR, which
+  is why the anchor is a root-owned file;
+- a test can never exercise this backend, because doing so writes an item to the
+  operator's login keychain — which the design forbids and which would be a
+  prompt on the operator's screen. The backend's contract is therefore exercised
+  through the `file-only` implementation (same interface, real ES256 through
+  `cryptography`), and the Secure Enclave path is exercised by the operator's own
+  `lop operator init` / `lop operator sign` runs. The level report keeps the
+  difference visible instead of implying the strong path was measured.
+
+**Linux has no presence backend in this change.** `file-only` — a 0600 PKCS#8
+P-256 key — is what this build creates there, and it is **not a boundary**: the
+same uid can read it and sign for the operator with no human act. TPM+PIN sealing
+is named as stage F work rather than shipped untested, because an unverified
+sealing implementation would make the level report claim a guarantee nothing
+demonstrates. `operator_authority_level()` returns `operator-file-only` there and
+`lop operator status` prints what it means.
+
+### 2.3 The wire (additive — no `PROTOCOL_VERSION` bump)
+
+- new **ordinary** op `{"op":"operator_challenge","action":"loosen"|"approve","request_id":…}`
+  answered by `{"op":"ack","req":…,"challenge":"<64 hex>","expires_s":30}`.
+  Ordinary **by construction** — it grants nothing on its own; the signature it
+  is used to produce is what carries authority — so it rides the record key like
+  every other control op. The reply rides the existing **`ack`** shape rather
+  than a frame with its own op name, and that is a protocol requirement rather
+  than style: `AttachClient`'s reader routes replies only for `ack`/`error`/
+  `result`, so a reply carrying a novel op name would fall through every branch
+  and tear down the whole connection — taking the caller's in-flight request
+  with it, which is exactly the "an old front end must keep working" guarantee
+  this additive design exists to keep (found by measurement; see
+  `test_an_operator_signature_loosens_a_runtime_this_process_never_spawned`);
+- the runtime binds the challenge to `(connection, session_id, action,
+  request_id, expiry)` and **single-uses** it: the entry is `pop`ped by the first
+  frame that presents a signature for that `(action, request_id)`, before
+  verification, so a captured signature has exactly one use. A missing or expired
+  challenge is a REFUSAL rather than "not offered";
+- an increasing frame may carry `operator_sig`, `operator_key_id` and (for a
+  device) `operator_cert`. The signed message is domain-separated and
+  length-prefixed:
+
+  ```text
+  b"lop-operator-v1\x00" + lp(action) + lp(session_id) + lp(request_id or "") + lp(challenge)
+  ```
+
+  The length prefixes are not decoration: without them an attacker who controls
+  one field can shift bytes between adjacent fields and produce a valid-looking
+  message for a different action. The domain tag stops a signature from any other
+  protocol this key signs from being replayed here;
+- verification is offline ES256 against the pinned anchor, or against a device
+  public key taken from a certificate that verifies under the anchored operator
+  key and has not expired;
+- `operator-signature-v1` is advertised in the record's `capabilities`, and
+  **unconditionally** — the runtime can always verify (the public half is all
+  verification needs), and gating the advertisement on an installed anchor would
+  make a host mid-onboarding answer "unsupported" where the truthful answer is
+  "not yet installed";
+- an OLD runtime answers the unknown op with its generic error frame, which the
+  client reads as "predates the feature" and handles by not being able to loosen
+  — exactly what that runtime could do before. The engine has no
+  `PROTOCOL_VERSION` bump because nothing *must* be understood for ordinary
+  control to keep working, which is the test the bump exists for.
+
+**Two sources, one predicate, in one stdlib-only module.**
+`harness/approval.admit_increasing(*, capability, signature)` is the whole policy:
+an increasing frame is admitted by a proven spawn capability, or by a signature
+that VERIFIES, and a signature that was offered and failed admits nothing on its
+own (presenting a bad signature must not be a way in — nor a way to lock out a
+capability holder whose client also attached a stale one). The crypto that
+produces the verdict lives in `local_operator.operator.verify` behind a lazily
+imported `cryptography`, so `harness/approval.py` keeps its stdlib-only import
+graph and gains one function that takes a **verdict**.
+
+### 2.4 The sources at the seam
+
+`_authority_admitted` admits any of:
+
+1. the **spawn capability** — unchanged, no prompt (the common interactive case);
+2. an **operator signature** (presence-gated), obtained through the one signing
+   entry point — `lop operator sign --challenge … --purpose … [--session …]` →
+   `{sig, key_id}`. In-process use is allowed for the TUI and the desktop backend
+   because the presence enforcement is in the OS call, so a caller in this process
+   gets the same prompt a subprocess would;
+3. a **device signature** under an operator-signed certificate (the phone —
+   stage D);
+4. the **run-scoped supervisor credential** (stage E).
+
+**One signing entry point, and the prompt names the session and the effect.**
+Anything on the machine may invoke it, including a model's tool child — and it
+always prompts. That is the boundary: not the caller's identity but "only a human
+can answer this". The OS dialog cannot carry custom copy, so the copy is built
+once (`operator/sign.py::effect_copy`, e.g. *"Authorise the operator key to
+LOOSEN the approval gate of `<session>`"*) and every in-process surface is handed
+it through `AttachClient`'s `on_operator_prompt`; with no host callback it still
+reaches the log rather than nowhere. Prompts are rate-limited by construction:
+one signature per action, because the memo is **popped** by the frame that uses it.
+
+### 2.5 Why the spawn capability was not enough
+
+The measured defect (#1310) was a same-uid tool child reading the session record,
+dialling the loopback control socket and setting its own gate to `auto`. Revision
+1 closed it by making the spawner the authority — and cost capability the
+operator will not accept:
+
+- **the phone can never loosen in any session.** Its spawn path
+  (`mobile/daemon.py`) never passes `--operator-fd`, and `remember_operator_cap`
+  has exactly one production call site (`session/runtime/launch.py`), so
+  `entry.operator_cap` is always `None`. The unit test that appeared to cover the
+  relay case fabricated the spawn;
+- a pane attached to a runtime **another process started** (wake supervisor, peer
+  send, `lop refresh`) cannot loosen;
+- the desktop app can loosen only for sessions its own backend spawned;
+- a supervised `lop exec --control` run can be **denied** but not **approved** by
+  its supervisor;
+- background-engaged runs (wake/peer) park a card nobody can answer, for up to
+  `runtime.unattended_gate_timeout` — 24 h by default.
+
+Revision 2 restores every one of those while keeping the invariant, because the
+authority is no longer the spawner: it is a fact about the operator that a
+constrained subject cannot mint, verified against a root-owned anchor.
 ## 3. Surface by surface
 
-| surface | ordinary ops | authority-increasing |
-| --- | --- | --- |
-| TUI pane that OWNS the session (in-process gate) | unchanged | works, one step (the operator's own keyboard; not routed) |
-| TUI pane viewing a runtime IT spawned | unchanged | works (presents the capability) |
-| TUI pane viewing a runtime spawned by ANOTHER process (wake supervisor, peer send, `lop refresh`) | unchanged | refused; the copy names the remedies |
-| TUI-hosted app reached by a follower (phone) | unchanged | refused |
-| Desktop app | unchanged | works iff its backend spawned that runtime; else refused |
-| Phone relay | unchanged | works iff the relay spawned that runtime; else refused |
-| `lop` CLI / one-shot front ends | unchanged | only if this process spawned the runtime |
-| `lop exec --control` (supervised one-shot), supervisor answering from another process | unchanged | **refused** — deny works, approve does not. The run's runtime is started by the `lop exec` process, which has exited or is backgrounded, so no live console holds the capability. Remedy for the next run: `--yolo`, or `tool_approval_mode: auto`; for an interactively approved run, start it where the approver is |
-| `--yolo` | unchanged | n/a (the gate is born `auto`) |
-| headless (non-TTY) | unchanged | **nothing may loosen it**: the gate is born **denying** (`session_factory.py`'s non-TTY default, `cli.py`'s one-shot path) and no console exists to hand it a capability, so `/approvals auto` is refused from every route. `--yolo` or `tool_approval_mode: auto` is the lever, at launch (agent review round 2, R2-3) |
-| tightening `auto → ask`, any route | unchanged | unchanged |
+| surface | loosens? | approves a card? | how it proves it is the operator |
+| --- | --- | --- | --- |
+| TUI pane that OWNS the session (gate in-process) | yes, unchanged | yes | the human's keystroke; nothing crosses the wire |
+| pane / CLI / desktop that SPAWNED the runtime | yes, unchanged, **no prompt** | yes | the spawn capability |
+| pane ATTACHED to a runtime another process started | **yes — one presence prompt** | yes | `lop operator sign`, forwarded by `AttachClient` |
+| desktop app, **any** session | **yes — one presence prompt** | yes | operator signature via the backend |
+| phone / relay, **any** session (spawn-independent) | **yes** (stage D) | **yes** (stage D) | device signature under an operator-signed certificate |
+| `lop exec --control` supervisor | **yes** with `--supervisor-fd N` (stage E) | **yes** (stage E) | run-scoped supervisor credential |
+| `lop exec --background --control` (launcher gone) | from a human surface only | yes | operator/device signature |
+| CLI one-shot run by a script | yes, with a prompt or a paired device | yes | operator/device signature |
+| tightening / deny / report / read / status / stop / prompt / model / rename / peer_message / ask_answer | n/a — ordinary | n/a | the record key, unchanged, on every surface including the phone |
+| `--yolo` / headless non-TTY | n/a (born `auto` / born denying) | n/a | a launch-time human act |
+| wake/peer-engaged background run | yes | **yes — the card is answerable** from phone/desktop/pane for a runtime none of them spawned | operator/device signature, plus the policy levers `--yolo`, `tool_approval_mode: auto` |
+| old front end (before `operator-signature-v1`) | refused until it updates — bounded to one release, and **loosening only** | same | n/a |
 
-Operator-visible regressions, stated plainly: a phone loses `/approvals auto`
-**and card approval** for sessions whose runtime another live process started; a
-pane attached to a background-started runtime cannot loosen it; and **a
-supervised `lop exec --control` run cannot be APPROVED by a supervisor in
-another process** — only denied — because its runtime is started by the `lop
-exec` process and no live console holds the capability. Tightening, reporting
-and everything else are untouched: the routes that may loosen are a proper
-subset of the routes that may tighten.
+The rows that changed are the four the operator named as unacceptable: the phone
+row no longer depends on the spawn path, an attached pane loosens, the desktop
+app works for sessions its backend did not start, and a background-engaged run's
+card is answerable. **No row regressed**: the owning pane and the spawning
+console are untouched (the latter deliberately prompt-free), and every ordinary,
+tightening and deny route is byte-identical to what it was.
+
+Two rows are narrower than the design document can honestly make them *today*,
+and the reason is a staging boundary rather than a mechanism limit: the phone row
+and the supervisor row are stages D and E. Until they land, a phone or an exec
+supervisor gets the refusal and the copy that names the levers that do work. The
+relay's HTTP boundary deliberately drops `operator_sig`/`operator_key_id`/
+`operator_cert` from request BODIES as it already drops `operator_cap` — a
+signature arriving over HTTP from a local process can only be a forgery — and
+admitting them is part of stage D, together with the device certificate it needs
+to be meaningful. That narrowing is what the operator's "restore all of it"
+means in sequence, and it is pinned per stage rather than claimed as done.
 
 ### 4.1 The remedies, with their conditions
 
-The refusal copy names only what the person reading it can do from where they
-are, and this table is the fuller statement — several of these are CONDITIONAL,
-which is why the copy names the event and the lever rather than promising one
-total fix (design round 2, D11/D13; UX round 2, U9):
-
 | remedy | what it does | when it works | in the refusal copy? |
 | --- | --- | --- | --- |
-| type `/approvals auto` in the window that started the runtime | loosens THIS session, in one step | that window is still live and still attached | yes, as the primary remedy |
-| let the runtime retire, then reopen the session here | makes this window the one that starts the next runtime, so it owns the gate | always, but only when the runtime leaves — retirement is readiness-judged (`cli.refresh_command`), never forced | yes, as the background case |
-| `lop refresh` | asks a live runtime to move to the install on disk and leave at its next boundary | the install on disk has MOVED (an update). Without a move a runtime answers "already current" and stays | **no** — conditional on a move, and the copy has no room to state the condition without pushing the reason off a narrow screen. It is here because a reader who HAS just updated should know it |
+| authorise from this machine | one presence gesture (Touch ID / CNG consent) signs a per-action challenge; the gate loosens or the card resolves | a local surface (pane, CLI, desktop backend) and an anchor installed. On a host whose private half is `file-only` the same command works **without** a gesture, and `lop operator status` is where that is said | yes, as the primary remedy |
+| authorise from your paired phone | the phone signs the challenge with its own key | after pairing (stage D) | yes |
 | `/approvals ask` | tightens | everywhere, including a follower, the phone and the desktop | yes |
 | `--yolo`, or `tool_approval_mode: auto` in `config.yml` | the NEXT session starts loosened | at launch; the config write is a file edit (or the desktop app's settings), not a session command — no control connection may write it | yes |
-| `lop stop <session>`, then reopen | ends this session so this window can own the next one | always, and it ENDS the running turn: named here for completeness, never as a remedy | **no** — it is not a remedy this change is willing to recommend |
+| `lop refresh` | asks a live runtime to move to the install on disk and leave at its next boundary | the install on disk has MOVED (an update). Without a move a runtime answers "already current" and stays | **no** — conditional on a move, and the copy has no room to state the condition without pushing the reason off a narrow screen |
+| `lop stop <session>`, then reopen | ends this session so a new runtime starts under a console that owns it | always, and it ENDS the running turn: named here for completeness, never as a remedy | **no** |
 
-Note the one the product does not have: an unconditional command that retires a
-live runtime so a viewer can take over.
-
+**The remedy that is gone, and why that is the point of this revision.** Revision
+1's copy ended with *"let its runtime retire and reopen it here — the window that
+opens a runtime owns its gate"*. That remedy was true and useless at the same
+time: it made the next runtime the reader's, which is a workaround for an
+authority model that should never have required one, and it was unavailable
+exactly where it was most needed — a background-started runtime has no window to
+reopen it from. It is **deleted**, and a test asserts the phrase is absent rather
+than merely that the new phrases are present, so it cannot creep back as a
+"harmless" sentence.
 ### 4.2 What the refusal looks like on a narrow screen
 
-The copy is 345 characters (the card's is 162) and both are under the runtime's
+The copy is 288 characters (the card's is 228) and both are under the runtime's
 400-character error-frame cap, which is asserted as a number
 (`test_the_refusal_copy_names_the_remedies_and_not_a_rule`) so a longer copy
 fails a test rather than a phone.
 
+The revision-2 copy is SHORTER for the command (288 against 345) and longer for
+the card (228 against 162): the retired remedy sentence was the longest clause in
+the command's, and naming the operator's levers honestly costs the card a line.
+Both are re-measured rather than assumed, and the row pins moved with them.
+
 Rows are a property of the RENDERER, not of the characters: the notice block
 wraps at its own content width — measured **40 cells** at a 44-column terminal,
-not 44 — where the command's copy renders as **12 rows** and the card's as **6**.
+not 44 — where the command's copy renders as **9 rows** (was 12) and the card's
+as **8** (was 6). Both measured on the real widget at 44×20 with the production
+CSS, with an SVG frame either side of the change; the pins live in
+`tests/unit/tui/test_approvals_ux.py::test_the_refused_card_notice_reaches_the_screen`.
 
 **The block does not fit at every height, and the copy's order is the reason it
 matters.** Measured at 44x20 on this head, the transcript's content area is
@@ -266,16 +404,21 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   a device-bound credential;
 - **the desktop `claim` handshake and the serve record's `claim_key`** are a
   different plane (governing a *daemon*, not a session gate) and are unchanged;
-- **nothing identifies WHICH window owns a session when several are live.** The
-  copy says "the window that started this session" and that referent is
-  resolvable by the operator only by elimination: no `lop info` field, no band
-  marker names the owner. This was raised in round 2 (UX U9) and answered with a
-  route rather than an identity, and it is recorded here as still open;
+- **nothing identifies WHICH window owns a session when several are live.** Under
+  revision 1 the copy said "the window that started this session" and that
+  referent was resolvable only by elimination: no `lop info` field, no band
+  marker named the owner. Revision 2 removes the question from the refusal (no
+  remedy depends on owning a window any more) and answers the part that remains
+  in the PROMPT: `effect_copy` names the session and the effect, so the person
+  answering a Touch ID dialog is told which gate their gesture is about to
+  loosen (raised round 2 UX U9);
 - **the phone's card component renders the refusal body raw.** The sentence it
   now receives is the CARD's — the question survived, and a deny works from there
   — but `pending-card.tsx`'s `humanizeError` has no arm for it, so the copy is
-  shown as sent rather than as a card-shaped message. That file is in another
-  repository (UX review round 3, U11's remainder);
+  shown as sent rather than as a card-shaped message. That file is in THIS
+  repository — the portal is `local_operator/mobile/web` (`src/pending-card.tsx`)
+  — so the remainder is in scope for stage D rather than a cross-repo errand
+  (UX review round 3, U11's remainder);
 - **a relay dial that has ENDED leaves ``SessionEntry.authority_bearing`` set**
   until the next dial replaces the connection. Pre-existing and outside this
   delta, and no user-visible consequence has been produced from it — the next
@@ -287,15 +430,76 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   behind one tint, distinguishable only by spending the keystroke. The refusal
   explains each; the list has no room at 60 or 44 columns (UX review round 3,
   U15).
+- **REVISION 2, and the two that matter most:**
+  - **`file-only` hosts have no presence gate.** Linux (and any macOS host whose
+    Secure Enclave refuses) stores the private half as a 0600 file, so ANY process
+    running as the operator — including the model's own `bash` child — can sign
+    for them without a gesture, and the invariant is not enforced there. The
+    level is reported (`operator-file-only`) and `lop operator status` prints what
+    it means; it is not papered over with a claimed boundary. TPM+PIN sealing is
+    the named follow-up;
+  - **the prompt itself is an attack surface.** A model can TRIGGER a presence
+    prompt; only a human can answer it, but prompts can be spammed and misread.
+    Mitigations that ARE in place: one signature per action (the memo is popped by
+    the frame that uses it), copy that names the session and the effect, and a
+    per-connection challenge cap. Prompt-rate limiting beyond that is not
+    implemented;
+  - **`root`/`sudo` defeats any userland scheme**, exactly as it did before;
+  - **the harness install tree stays user-writable**
+    (`~/.local/share/uv/tools/local-operator`). The anchor is root-owned, but the
+    VERIFIER lives in a tree the same uid can write, so a subject that can rewrite
+    the installed package can bypass verification entirely. Pre-existing, and the
+    Stage-2 confining epic is where it is fixed — recorded here because the anchor
+    work makes the claim look stronger than the install does;
+  - **availability is not protected**: an attacker can delete the operator's key,
+    delete device certificates, or flood prompts. That is denial rather than
+    escalation, and it is stated rather than implied;
+  - **a tool child CAN shell out to `lop operator sign`.** It gets a real prompt
+    naming the session and the effect, and a signature only if a human answers —
+    which is the boundary working as designed, recorded because it looks alarming
+    and is not;
+  - **the phone's ordinary login is still a password this machine stores**
+    (`mobile/auth.py`). Moving it to a device challenge-response is the natural
+    next ticket, and stage D's device certificate is the groundwork for it rather
+    than a replacement for it.
 
 ## 5. Staged plan
 
-- **Stage 1 (this change)** — the class, the seam, the in-memory capability, the
-  handoff, the surface table above.
-- **Stage 1b (this change)** — the guarantee-level report, the daemon's
-  HTTP-boundary drop, and the not-at-rest probes.
-- **Stage 2** — an OS boundary confining the model-code spawn sites, so the
-  residual above stops being reachable by construction: macOS `sandbox-exec`,
-  Linux Landlock/`bwrap`, Windows restricted token plus a deny ACE.
-- **Stage 3** — a device-bound credential for the phone, replacing the relay's
-  password as the authority for the remote path.
+- **Stage 1** — the class, the seam, the in-memory capability, the handoff.
+- **Stage 1b** — the guarantee-level report, the daemon's
+  HTTP-boundary drop, and the not-at-rest probes. **Superseded by revision 2 for
+  the AUTHORITY model** — the class, the seam, the op set, the typed refusal and
+  the proof machinery all survive it; what revision 2 replaces is what
+  "authorised" means (the spawner becomes the operator).
+- **Revision 2, stage A (this change)** — `local_operator/operator/`
+  (`__init__`, `trust`, `keychain`, `verify`, `sign`), `lop operator
+  init|trust|install|sign|status`, `operator_authority_level()` absorbing
+  `operator_cap_guarantee()`, and §2 of this document.
+- **Revision 2, stage B (this change)** — the wire and the seam: the
+  `operator_challenge` op, the three optional fields, the domain-separated
+  length-prefixed message, `admit_increasing` consulting every source,
+  `operator-signature-v1` in the record's `capabilities`, and the refusal copy
+  that stops offering the retire-and-reopen remedy.
+- **Revision 2, stage C (this change)** — the local surfaces: the one signing
+  entry point, and `AttachClient` presenting a signature for an
+  authority-increasing frame when it holds no spawn capability — which is the
+  path the TUI's attached pane and the desktop backend both take.
+- **Revision 2, stage D (next)** — the phone: pairing, device certificates,
+  challenge pass-through on the relay (including narrowing the body scrub to
+  admit signature fields while still dropping machine-held ones), and the
+  portal's signing UI in `local_operator/mobile/web`. Clean extension points are
+  in place: `verify_device_cert` + `issue_device_cert` are the certificate
+  format, `signature_verdict` already resolves a device point, and the seam
+  already accepts `operator_cert`.
+- **Revision 2, stage E (next)** — the exec supervisor: `--supervisor-fd`, the
+  argv serialization, and the supervisor-side `remember_operator_cap`, which is
+  the fourth source the seam is written to accept.
+- **Revision 2, stage F (next)** — TPM+PIN sealing on Linux, prompt rate
+  limiting, the docs/copy/QA matrix, and the design/UX rounds the operator's
+  standing rules require for the user-visible copy change.
+- **Stage 2 (unchanged)** — an OS boundary confining the model-code spawn sites,
+  so the residuals above stop being reachable by construction: macOS
+  `sandbox-exec`, Linux Landlock/`bwrap`, Windows restricted token plus a deny
+  ACE. It is also where the user-writable install tree stops being a bypass.
+- **Stage 3 (unchanged)** — a device-bound credential for the phone's ordinary
+  login, retiring the stored portal password.

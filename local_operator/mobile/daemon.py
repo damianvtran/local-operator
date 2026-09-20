@@ -1066,6 +1066,13 @@ async def _dial(daemon: "MobileDaemon", entry: SessionEntry) -> None:
         # true rather than aspirational: this frame carried no nonce before, so
         # NO phone command could ever loosen a gate its own relay owned.
         entry.operator_cap = operator_cap_for(record.pid)
+        # STAGE D also resolves the DEVICE tier here: whether this relay has an
+        # operator-signed certificate for the phone answering right now, and which
+        # challenge the runtime minted for it. The capability above stays as it is
+        # — it is still the no-prompt path for a relay that spawned the runtime —
+        # and it is exactly the path that was always ``None`` on this surface
+        # (`mobile/daemon.py` never passes `--operator-fd`), which is why the
+        # phone could not loosen before revision 2.
         entry.operator_nonce = operator_nonce() if entry.operator_cap is not None else ""
         entry.operator_salt = ""
         entry.authority_bearing = False
@@ -2002,6 +2009,15 @@ class MobileDaemon:
         proof = _operator_request_proof(entry, op, fields)
         if proof is not None:
             frame["operator_cap"] = proof
+        # STAGE D'S SEAM, marked rather than left to be found (revision 2, §5).
+        # This is the relay's hand-written writer, and it is the ONE place a phone
+        # signature has to be attached: the phone signs a challenge the runtime
+        # minted for it, the relay forwards `operator_sig`/`operator_key_id`/
+        # `operator_cert` here, and it must do so WITHOUT being able to mint any of
+        # them — the certificate is operator-signed and the challenge is spent on
+        # use. Nothing in this block may become a place where the relay computes a
+        # signature of its own: the relay holds the portal password, and the whole
+        # point of the device tier is that the password stops being authority.
         handshake = _operator_handshake(entry, op)
         if handshake is not None:
             frame["operator_handshake"] = handshake
@@ -2896,6 +2912,16 @@ def build_app(daemon: MobileDaemon):
         # sends one learns nothing about the field's shape — and so the
         # endpoint's error surface is unchanged for every ordinary request.
         body.pop("operator_cap", None)
+        # AND THE SIGNATURE FIELDS, for the reason above and against the direction
+        # the design eventually wants (revision 2, §2.3): a signature arriving in
+        # an HTTP body from a local process can only be a forgery attempt while
+        # the relay has no way to MINT a challenge for a phone to sign. Stage D
+        # narrows this — machine-held proof fields stay dropped, signature fields
+        # are admitted, because an operator signature is unforgeable and its
+        # challenge is single-use — and this comment is the marker for that
+        # change so it is made deliberately rather than by deleting a line.
+        for field in ("operator_sig", "operator_key_id", "operator_cert"):
+            body.pop(field, None)
         op = body.pop("op", None)
         if not isinstance(op, str) or not op:
             return JSONResponse({"error": "op must be a non-empty string"}, status_code=422)

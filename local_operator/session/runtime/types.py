@@ -111,6 +111,28 @@ EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
 #: client gates the send on this string being present in the record).
 EVENT_MUTE_CAPABILITY = "event-mute-v1"
 
+#: Additive attach capability: this owner accepts the ``operator_challenge`` op
+#: and will admit an authority-increasing frame that carries a valid
+#: ``operator_sig`` (with ``operator_key_id``, and ``operator_cert`` for a
+#: device) against the operator anchor it has pinned.
+#:
+#: WHY A CAPABILITY AND NOT A PROTOCOL BUMP (revision 2, §2.3). The whole change
+#: is ADDITIVE: a new ordinary op that grants nothing, and three optional fields
+#: on frames that already exist. An older owner answers the new op with its
+#: generic unknown-op error frame, which the client reads as "this runtime
+#: predates the feature" and handles by... not being able to loosen, which is
+#: exactly what that runtime could do before. Bumping ``PROTOCOL_VERSION`` would
+#: instead refuse the CONNECTION, breaking ordinary control (a phone could not
+#: even read a session) for a capability it can live without — the OPPOSITE of
+#: what this revision is for.
+#:
+#: Advertised by every runtime that can verify a signature, which is every
+#: runtime of this build: verification needs only the anchor's public half, so an
+#: owner with no anchor installed is still a correct answer to "can you check
+#: one" (it checks and refuses). See the record's capability list for why it is
+#: not conditioned on the anchor's presence.
+OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
+
 #: Event types a MUTED attach connection stops receiving: the wire half of
 #: ``EVENT_MUTE_CAPABILITY``, and deliberately THE SAME SET the parked
 #: ``EventController`` discards app-side (``tui/events.py`` assigns its

@@ -336,6 +336,33 @@ def frame_authority(frame: dict[str, Any]) -> Authority | None:
     return transition_authority(str(frame.get("command", "")), str(frame.get("args", "")))
 
 
+def signature_target(frame: dict[str, Any]) -> tuple[str, str] | None:
+    """The ``(action, request_id)`` an authority-increasing frame's signature covers.
+
+    DERIVED FROM THE FRAME, never read off it. Two things depend on that:
+
+    * the ``action`` is the CLASS of the frame, so a signature minted for
+      answering a card cannot be presented on a ``slash_result`` that loosens
+      the gate (and the reverse) — the client chooses the purpose when it asks
+      for a challenge, but only the frame's own class decides which purpose the
+      runtime will accept;
+    * the ``request_id`` is what the frame carries, and for a loosening command
+      that is whatever the CLIENT put in it (the command names no card). It is
+      bound into the signed message either way, which is what stops a signature
+      harvested on one request from answering another under the same action.
+
+    ``None`` for an ordinary frame, matching :func:`frame_authority`: an
+    ordinary frame needs no authority and therefore has no signature target.
+    """
+    if frame.get("op") not in AUTHORITY_OPS:
+        return None
+    if frame_authority(frame) != "authority-increasing":
+        return None
+    request_id = frame.get("request_id")
+    action = "approve" if frame.get("op") == "approval_answer" else "loosen"
+    return action, request_id if isinstance(request_id, str) else ""
+
+
 def operator_nonce() -> str:
     """A fresh per-connection nonce/salt, hex. NOT a secret, and not reusable.
 
@@ -482,8 +509,45 @@ def request_proof_ok(
     )
 
 
+def admit_increasing(*, capability: bool, signature: bool | None) -> bool:
+    """Whether an authority-INCREASING frame is admitted, from ALL its sources.
+
+    THE ONE PLACE THE POLICY LIVES (issue #1310, revision 2). The runtime is a
+    decider, not an authority: it maps a frame to the two facts this predicate
+    needs — did the frame prove it holds the spawn capability, and did it present
+    a signature that verifies — and this function answers. Keeping the rule here,
+    in the stdlib-only module, is what lets the seam stay readable: the crypto
+    that produces the verdict lives in :mod:`local_operator.operator.verify`
+    (which imports ``cryptography`` lazily), and this module never learns how a
+    signature is checked — it takes the VERDICT.
+
+    THE THREE CASES, and why they are not interchangeable:
+
+    * ``signature is None`` — nobody offered one. Admitted iff the capability
+      proof holds. This is the interactive console that spawned the runtime, and
+      it must stay prompt-free (design §3, "no prompt").
+    * ``signature is True`` — an operator or device signature verified. Admitted
+      regardless of the capability: this is the whole capability restoration,
+      and it costs the signer a human gesture they already made.
+    * ``signature is False`` — one was offered and did not hold. Also admitted iff
+      the capability proof holds, and never on its own: presenting a bad
+      signature must not be a way IN, and it must not be a way to LOCK OUT a
+      legitimate capability holder whose client also attached a stale signature.
+      (The frame cannot be replayed to a naked yes: the runtime single-uses the
+      challenge before it calls this, so a second presentation finds no
+      challenge and never reaches ``True``.)
+
+    A boolean rather than an enum because there is no fourth state a caller could
+    usefully act on: an unresolvable signature IS a failed one, and the runtime
+    logs which source admitted the frame at its call site.
+    """
+    if signature is True:
+        return True
+    return bool(capability)
+
+
 #: The ONE sentence a host hands back when a control-plane request tried to
-#: loosen a running gate without the capability (see
+#: loosen a running gate without presenting any authority the host accepts (see
 #: :func:`transition_authority`).
 #:
 #: Lives here for the same reason :data:`LOOSENING_REFUSED_NOTICE` does — the
@@ -512,19 +576,35 @@ def request_proof_ok(
 #: survive an 11-row viewport at 44 columns (design round 2, D8: the previous
 #: copy was 537 characters, 18 rows there).
 #:
-#: Where the full truth about the background case lives: this copy names the
-#: EVENT (the runtime retires) and the LEVER the reader has (reopen the session
-#: here), because no unconditional command retires a live runtime — retirement
-#: is readiness-judged by design (``cli.refresh_command``) and ``lop refresh``
-#: only moves runtimes whose install changed. ``docs/design/approval-authority.md``
-#: §4 lists the levers with their conditions rather than pretending one is
-#: total (UX round 2, U9 / design round 2, D13).
-OPERATOR_CAP_REQUIRED_NOTICE = (
-    "this session's gate is still at ask: /approvals auto removes it, and only the window "
-    "that started this session can do that. /approvals ask still tightens it here. If no "
-    "window owns this session, let its runtime retire and reopen it here — the window that "
-    "opens a runtime owns its gate. --yolo or tool_approval_mode: auto loosen the next "
-    "session."
+#: WHAT IT NAMES CHANGED WITH THE AUTHORITY MODEL (revision 2, §5). The earlier
+#: copy's last resort was "let its runtime retire and reopen it here — the window
+#: that opens a runtime owns its gate", because the spawner WAS the authority. The
+#: whole point of revision 2 is that this is no longer the only way (and, for a
+#: background-started runtime, was never a usable way at all: the reader had no
+#: window to reopen it from). That remedy is therefore DELETED — it is the
+#: capability loss this change exists to remove — and the copy names the three
+#: levers that are true from anywhere:
+#:
+#: * authorise from THIS machine, which is one presence gesture (Touch ID on
+#:   macOS, the CNG consent dialog on Windows; on a host with no presence store
+#:   the same command works without a gesture, and
+#:   ``operator_authority_level`` is where the product says so rather than the
+#:   refusal copy, which cannot know which host the reader is on);
+#: * authorise from a paired phone (stage D);
+#: * make a NEW session start loosened, with ``--yolo`` or the config key.
+#:
+#: ``/approvals ask`` is still named, because tightening never needed authority
+#: and a reader whose command was refused is the one person most likely to want
+#: it.
+#:
+#: ``docs/design/approval-authority.md`` §3 lists the levers per surface with
+#: their conditions rather than pretending one is total (UX round 2, U9 / design
+#: round 2, D13).
+OPERATOR_AUTHORITY_REQUIRED_NOTICE = (
+    "this session's gate is still at ask: /approvals auto removes it and now needs the "
+    "operator's own consent — authorise it from this machine (Touch ID) or from your paired "
+    "phone. /approvals ask still tightens it here. A new session can start loosened with "
+    "--yolo or tool_approval_mode: auto."
 )
 
 #: The same refusal for the CARD, which is a different situation for the person
@@ -535,9 +615,15 @@ OPERATOR_CAP_REQUIRED_NOTICE = (
 #: that started this session" — advice they cannot take — and nothing said the
 #: card was still waiting. The one action that DOES work from there is named,
 #: because a deny is ordinary and settles the card in the safe direction.
+#:
+#: Revision 2 keeps the shape and replaces the authority clause: the reader is
+#: told the card survives, that only the operator can allow it, and where the
+#: operator can do that from — never "the window that started this session",
+#: which a phone or an attached pane is not and cannot become.
 CARD_APPROVAL_REFUSED_NOTICE = (
-    "this approval is still waiting: only the window that started this session can allow it, "
-    "and the tool stays blocked until someone does. Denying it works from here."
+    "this approval is still waiting: only the operator can allow it — authorise it from the "
+    "machine running the session (Touch ID) or from your paired phone — and the tool stays "
+    "blocked until someone does. Denying it works from here."
 )
 
 
@@ -846,10 +932,6 @@ def read_operator_cap_from_argv(argv: Sequence[str]) -> bytes | None:
     return bytes(buffer)
 
 
-#: Reported once per process, at the first runtime that mounts a capability.
-_GUARANTEE_REPORTED = False
-
-
 def operator_cap_guarantee() -> str:
     """How strong the capability's boundary is ON THIS HOST, as far as we can tell.
 
@@ -881,19 +963,24 @@ def operator_cap_guarantee() -> str:
     return "unreported"
 
 
-def report_operator_cap_guarantee() -> str:
-    """Log the guarantee level once per process and return it.
+def report_operator_authority() -> str:
+    """The level report, and the ONE place it is logged once per process.
 
-    Once, not per runtime: the answer is a property of the host, and a
-    long-lived daemon spawning twenty runtimes would otherwise write the same
-    line twenty times into a bounded log file.
+    Deliberately the only reporter: the previous revision had
+    ``report_operator_cap_guarantee``, which reported the spawn capability alone,
+    and revision 2 moved the answer to
+    :func:`local_operator.operator.operator_authority_level` — which ABSORBS the
+    capability guarantee (it still appears in the report, as
+    ``capability_guarantee``) rather than sitting beside it. Two reporters would
+    be two answers to one question, and one of them would go stale.
+
+    The function-local import is deliberate: this module's import graph stays
+    stdlib-only (see the module docstring), and the operator package is the only
+    thing here that reaches for the OS keychain or ``cryptography``.
     """
-    global _GUARANTEE_REPORTED
-    level = operator_cap_guarantee()
-    if not _GUARANTEE_REPORTED:
-        _GUARANTEE_REPORTED = True
-        logger.info("operator capability boundary on this host: %s (%s)", level, sys.platform)
-    return level
+    from local_operator.operator import report_operator_authority as report
+
+    return report()
 
 
 __all__ = [
@@ -901,11 +988,12 @@ __all__ = [
     "AUTHORITY_OPS",
     "ApprovalGate",
     "Authority",
+    "admit_increasing",
     "LOOSENING_KEPT_BY_ASK_NOTICE",
     "LOOSENING_REFUSED_NOTICE",
     "OPERATOR_CAP_BYTES",
     "CARD_APPROVAL_REFUSED_NOTICE",
-    "OPERATOR_CAP_REQUIRED_NOTICE",
+    "OPERATOR_AUTHORITY_REQUIRED_NOTICE",
     "OPERATOR_FD_FLAG",
     "approvals_default_notice",
     "OperatorCapHandoff",
@@ -923,8 +1011,9 @@ __all__ = [
     "read_operator_cap_from_argv",
     "request_proof",
     "request_proof_ok",
+    "signature_target",
     "remember_operator_cap",
-    "report_operator_cap_guarantee",
+    "report_operator_authority",
     "reset_operator_caps_for_tests",
     "transition_authority",
 ]
