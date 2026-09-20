@@ -113,12 +113,13 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes <venv>/bin/.'Local Operator'.<dead-pid>.tmp orphans only; glob is venv-scoped",
     ),
     # -- operator/device pairing store (stage D, issue #1310) ----------------
-    # Every path in these three is built from `config_dir()/operator/...` plus a
+    # Every path in these FOUR is built from `config_dir()/operator/...` plus a
     # device id validated by `_safe_name` (alphanumerics, '-' and '_', at most 128
     # chars) — no session id, no caller-chosen directory component, and nothing
     # that can name a path under `sessions/`. The VALUES they unlink are the
-    # pairing code, a pending pairing request, and one device certificate: three
-    # single files this module itself wrote, never a directory.
+    # pairing code, a pending pairing request, one device certificate, and the
+    # revocation record itself: four single files this module itself wrote, never a
+    # directory.
     (
         "local_operator/operator/devices.py::clear_pairing",
         "<path>.unlink",
@@ -133,6 +134,18 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "local_operator/operator/devices.py::record_revocation",
         "<path>.unlink",
         "Drops one <config>/operator/devices/<device-id>.json on revocation",
+    ),
+    (
+        "local_operator/operator/devices.py::forget_revocation",
+        "<path>.unlink",
+        # The inverse verb's last step (agent review round 10, R10-1). The path is
+        # `revoked_path(config_root)` = `operator_root(config_root)/"revoked.json"`
+        # — a LITERAL basename joined onto the literal segment "operator" under the
+        # config root, so it is a fixed sibling of `sessions/` and no input reaches
+        # it: there is no device id, session id or caller path in the expression,
+        # and nothing here can name a directory at all. Reached only when the last
+        # entry goes, which is why the record does not survive as an empty list.
+        "Drops <config>/operator/revoked.json when its last entry is lifted",
     ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
