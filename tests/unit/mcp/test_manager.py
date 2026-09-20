@@ -2991,13 +2991,13 @@ class TestTheManagerDerivesTheAuthRemedy:
 
 
 class TestMcpRecoveryNotice:
-    """The RECOVERY half of the model-visible MCP incident pair.
+    """The RECOVERY half of the model-visible MCP pair.
 
     The failure half has always reached the model (``on_incident`` ->
-    ``Session._on_mcp_incident`` -> a ``session_incident`` message). The
-    recovery half did not, so an operator who ran ``/mcp login <server>``
+    ``Session._on_mcp_incident`` -> a ``session_mcp_unavailable`` WARNING row).
+    The recovery half did not, so an operator who ran ``/mcp login <server>``
     mid-session left the model holding a death notice — and its "do not call
-    its tools" hint — for a server that had been usable for the rest of the
+    its tools" advice — for a server that had been usable for the rest of the
     session. Observed live against ``minerva-qa``.
 
     Two properties are load-bearing and each has its own tests below:

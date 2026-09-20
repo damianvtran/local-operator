@@ -3382,16 +3382,20 @@ class McpManager:
             logger.warning("MCP server %r failed to connect after the gate: %s", name, exc)
             # An OAuth grant requirement that lands AFTER the startup gate (the
             # common case for HTTP servers, which are slow) never reaches the
-            # startup toast. Fire the incident sink so the failure is recorded
+            # startup toast. Fire the notice sink so the failure is recorded
             # durably and the agent knows the tools are gone until a login.
             auth_exc = _unwrap_auth_required(exc)
             if isinstance(auth_exc, (McpAuthRequiredError, McpAuthChallengeError)):
                 sink = getattr(self, "on_incident", None)
                 if sink is not None:
                     try:
-                        # The model-visible incident carries the SAME actionable
+                        # The model-visible WARNING carries the SAME actionable
                         # command the user is shown, so the agent stops calling
-                        # the server's tools and can name the fix if asked.
+                        # the server's tools and can name the fix if asked. It
+                        # reaches the model as a `session_mcp_unavailable`
+                        # warning row, not as a session incident: a missing
+                        # capability is not a failed turn (see
+                        # ``incidents.format_mcp_unavailable_message``).
                         sink(
                             name,
                             "MCP authorization failed; "
@@ -4156,7 +4160,7 @@ class McpManager:
                 RECONNECT_BURST_LIMIT,
                 int(RECONNECT_BURST_WINDOW_S),
             )
-            # Model-visible incident (session installs the sink): the agent
+            # Model-visible WARNING (session installs the sink): the agent
             # must know the server's tools are GONE, or it hammers them in a
             # tight loop. Fire-and-forget so a raising sink cannot stall the
             # reconnect machinery.
@@ -4173,7 +4177,7 @@ class McpManager:
                     # None`` branch, deliberately. The gate records that the
                     # MODEL heard about this failure; a host with no incident
                     # sink heard nothing and must get no recovery. This is the
-                    # route the incident text itself promises a recovery for
+                    # route the warning text itself promises a recovery for
                     # ("unavailable until a reconnect succeeds").
                     self._incident_announced.add(name)
                 except Exception:  # noqa: BLE001 — incidents must never break the manager
@@ -4227,7 +4231,7 @@ class McpManager:
             # breaker window. Abandon with an actionable reason; the login
             # command (which resets the breaker) is the recovery path.
             logger.info("MCP reconnect needs authorization for %r", name)
-            # Model-visible incident: the agent must know the server's tools are
+            # Model-visible WARNING: the agent must know the server's tools are
             # gone until a login, or it hammers them. Same fire-and-forget guard
             # as the breaker path.
             sink = getattr(self, "on_incident", None)
@@ -4241,7 +4245,9 @@ class McpManager:
                     # None`` branch, deliberately: the gate means "the MODEL
                     # was told", not "a failure happened". Moving it out arms
                     # hosts that were never told, which is the defect that
-                    # rules out reusing ``_auth_toasted``.
+                    # rules out reusing ``_auth_toasted``. The gate tracks the
+                    # ``session_mcp_unavailable`` row, so a host whose sink
+                    # wrote nothing must not be armed.
                     self._incident_announced.add(name)
                 except Exception:  # noqa: BLE001 — incidents must never break the manager
                     logger.debug("mcp incident sink raised", exc_info=True)

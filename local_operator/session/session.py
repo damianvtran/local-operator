@@ -90,6 +90,7 @@ from local_operator.harness.message_types import (
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
     SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+    SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
@@ -774,6 +775,18 @@ _PERSISTABLE_CUSTOM_TYPES: frozenset[str] = frozenset(
         "session_state",
         SESSION_INCIDENT_MESSAGE_TYPE,
         SESSION_MODEL_SWITCH_MESSAGE_TYPE,
+        # SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE IS persisted, unlike the
+        # recovery record below: an MCP server going away is a historical fact
+        # about the session, and every surface already renders the row, so a
+        # resumed transcript that dropped it would narrate a conversation the
+        # operator can still see in the picker. The two stale directions are
+        # not symmetric — a resumed session that reconnected contradicts
+        # "unavailable" with a live tool inventory, which the operator can see
+        # and the recovery record clears, where a stale "its tools are usable"
+        # sends the model at tools that are not there. The accepted
+        # consequence is the one ``journal_mcp_recovery``'s docstring already
+        # documents: the un-superseded warning does still persist.
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         # SESSION_CREDENTIAL_MESSAGE_TYPE is deliberately absent: a credential
         # announcement asserts a LIVE capability ("$KEY is injected into every
         # bash command") against a store that is process-memory-only. A
@@ -832,11 +845,12 @@ def _pair_spliced_tool_results(messages: list[Message]) -> list[Message]:
 
     Relative order among several interlopers is preserved, and moving them is
     safe ONLY because everything that can land in that window is a
-    harness-authored notice (``session_model_switch``, ``session_incident``):
-    reordering advisory chrome against a tool batch changes nothing the user
-    wrote. **If a custom type is ever added that carries user-authored text,
-    this assumption needs revisiting** — moving a user's words past a tool
-    batch would silently reorder the conversation they see.
+    harness-authored notice (``session_model_switch``, ``session_incident``,
+    ``session_mcp_unavailable``): reordering advisory chrome against a tool
+    batch changes nothing the user wrote. **If a custom type is ever added that
+    carries user-authored text, this assumption needs revisiting** — moving a
+    user's words past a tool batch would silently reorder the conversation they
+    see.
 
     Linear in ``len(messages)``, and that has to stay true because this sits on
     every provider call. Each batch's inner scan stops at the next assistant
@@ -956,14 +970,14 @@ def _paired_prefix(messages: Sequence[AgentMessage], *, strict: bool = False) ->
     Only the TAIL is trimmed, and "tail" means *up to the last real answer*.
     A ``CustomMessage`` in the tail does NOT prove the list is legal: it is not
     a ``Message``, and one can land on the live context while a tool batch is
-    still in flight. ``journal_incident`` appends straight to
-    ``_context.messages``, and ``_on_mcp_incident`` fires it through
-    ``_spawn_background`` — so an MCP breaker tripping mid-batch leaves
-    ``[..., assistant(tool_calls), session_incident]``. A scan that stopped at
-    the first non-assistant entry would see the incident, declare the tail
-    clean, and persist the unanswered assistant beneath it — the very row this
-    function exists to refuse (review round 2, R5; reproduced as
-    ``DANGLING: ['c2']``).
+    still in flight. ``journal_incident`` and ``journal_mcp_unavailable``
+    append through ``_append_or_park_journal``, and ``_on_mcp_incident`` fires
+    the latter through ``_spawn_background`` — so an MCP breaker tripping
+    mid-batch can leave ``[..., assistant(tool_calls),
+    session_mcp_unavailable]`` in the tail. A scan that stopped at the first
+    non-assistant entry would see that row, declare the tail clean, and persist
+    the unanswered assistant beneath it — the very row this function exists to
+    refuse (review round 2, R5; reproduced as ``DANGLING: ['c2']``).
 
     Customs are stepped over and kept. Every call in a batch needs its own
     result: the first tool result alone does not make a multi-call tail legal.
@@ -9057,9 +9071,11 @@ class Session:
         reach the UI, but without this the MODEL never learned the
         difference between "quota exhausted" and "my own bug" — the next
         prompt (and a resumed session) resumed blind. The incident is
-        classified (rate-limit / auth / provider / network / context / MCP),
-        appended to the LIVE context so the very next turn sees it, and
-        persisted so ``--resume`` replays it.
+        classified (rate-limit / auth / provider / network / context), appended
+        to the LIVE context so the very next turn sees it, and persisted so
+        ``--resume`` replays it. NOT the place for a notice that is not about a
+        failed turn: an MCP server going unavailable is
+        :meth:`journal_mcp_unavailable`.
 
         ``rendered`` overrides the classifier's own text for the one caller
         whose incident is harness-authored rather than provider-derived: a
@@ -9077,10 +9093,13 @@ class Session:
         incident is bookkeeping ABOUT a session, never work done IN it. It is
         journalled at boot, or in the wake of a turn that failed or was cut off
         — never as work a turn carried. Every non-boot caller is that shape:
-        :meth:`_on_mcp_incident` fires from the MCP breaker at any point in a
-        session, the pending-incident flush in :meth:`_run_turn` reports a
-        provider failure during a turn, and :meth:`_journal_cut_off_once`
-        narrates a cut-off. A turn that DID carry work has already advanced the
+        :meth:`_journal_cut_off_once` narrates a cut-off and the
+        pending-incident flush in :meth:`_run_turn` reports a provider failure
+        during a turn. (The MCP breaker used to be the third, firing from any
+        point in a session; it now writes
+        :meth:`journal_mcp_unavailable`, whose record is bookkeeping for the
+        same reason and carries its own, mirrored clock note.) A turn that DID
+        carry work has already advanced the
         clock through its own persisted rows, so an incident landing after it
         can only restamp the transcript with a lie — telling the ``/resume``
         picker the session was just worked in when nothing was. Measured before
@@ -9392,17 +9411,84 @@ class Session:
         except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
             logger.debug("could not emit the shape-incident receipt", exc_info=True)
 
-    async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
-        """Tell the MODEL an MCP server it was told was broken is usable again.
+    async def journal_mcp_unavailable(self, server: str, reason: str) -> None:
+        """Tell the MODEL an MCP server's tools are gone — a WARNING, not a failure.
 
-        The symmetric counterpart to :meth:`journal_incident`'s ``mcp``
-        category. Without it, an operator who fixed a server mid-session —
-        ``/mcp login minerva-qa``, or simply waiting for the backoff reconnect
-        the incident text itself promises — left the model holding a death
-        notice, and its hint "its tools are gone ... Do not call its tools",
-        for the rest of the session. The tools were genuinely back
-        (``refresh_tools`` swaps the inventory mid-turn) but the model had been
-        told not to use them and had no reason to re-check.
+        The record exists because the model keeps calling tools it believes are
+        there, and because the OPERATOR is the one who has to act: the reason
+        line carries the remedy (``/mcp reauth <server>``, a suspended
+        reconnect breaker), which is what lets the model name the server and
+        the fix instead of retrying in a tight loop.
+
+        NOT a ``session_incident``, and that is the whole point of the dedicated
+        type. An MCP server going away does not end a turn, and the incident
+        shape says it did — ``Incident.render`` tails every message with "This
+        is why the previous turn ended." Measured live on 2026-09-20 against
+        ``minerva-qa``, whose expired grant told the operator a turn had died
+        that had not. The text comes from
+        :func:`~local_operator.incidents.format_mcp_unavailable_message` for the
+        reason the credential, session-shape and model-switch records carry
+        their own formatter: a message that is not about a failure must not be
+        pushed through the classifier, which would also stamp it with a
+        ``suggested action:`` line written for a failed turn.
+
+        PERSISTED, unlike :meth:`journal_mcp_recovery`, and the asymmetry is
+        deliberate rather than an oversight. The row is a historical fact every
+        surface already renders, and the two stale directions do not cost the
+        same: a resumed session that reconnects contradicts "unavailable" with a
+        live tool inventory the operator can see, and the recovery record clears
+        it, where a stale "its tools are usable" sends the model at tools that
+        are not there. The accepted consequence — the un-superseded warning
+        replays with no recovery after it — is the one :meth:`journal_mcp_recovery`
+        already documents; it is not re-argued here.
+
+        ``preserve_mtime`` so an unavailable server does not restamp the
+        session's activity clock: this is bookkeeping ABOUT a session, never
+        work done in it, and the ON-DISK effect depends on the type being in
+        ``transcript.BOOKKEEPING_CUSTOM_TYPES`` — the writer honours the request
+        only for a batch of those (see ``Transcript._write_entries``). The
+        boot-time case is the one that was measured:
+        ``FINDING-resume-clock.md`` caught expired MCP grants moving a session's
+        displayed age by 5.1 h, and those grants arrive through this method now.
+
+        Parked, never spliced: ``_append_or_park_journal`` is what keeps a
+        notice arriving mid-tool-batch from producing
+        ``assistant(tool_use) -> user -> tool_result`` and bricking the session.
+        Delivery is therefore at the next tool boundary of the running turn.
+
+        Takes ``_journal_lock`` so a recovery fired straight after cannot
+        overtake this row: this method awaits a transcript write and
+        :meth:`journal_mcp_recovery` awaits nothing, so without the lock the
+        superseding notice lands FIRST and leaves the warning as the last word.
+        """
+        from local_operator.incidents import format_mcp_unavailable_message
+
+        if self._disposed or not server:
+            return
+        text = format_mcp_unavailable_message(server, reason)
+        message = CustomMessage(
+            custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": text, "server": server, "reason": reason},
+        )
+        try:
+            async with self._journal_lock:
+                await self._transcript.append_message(message, preserve_mtime=True)
+                self._append_or_park_journal(message)
+        except OSError:
+            logger.warning("could not journal MCP unavailability", exc_info=True)
+
+    async def journal_mcp_recovery(self, server: str, tool_count: int) -> None:
+        """Tell the MODEL an MCP server it was told was unavailable is usable again.
+
+        The symmetric counterpart to :meth:`journal_mcp_unavailable`. Without
+        it, an operator who fixed a server mid-session — ``/mcp login
+        minerva-qa``, or simply waiting for the backoff reconnect the warning
+        text itself promises — left the model holding a death notice, and its
+        advice "its tools are gone ... Do not call its tools", for the rest of
+        the session. The tools were genuinely back (``refresh_tools`` swaps the
+        inventory mid-turn) but the model had been told not to use them and had
+        no reason to re-check.
 
         LIVE CONTEXT ONLY, deliberately: there is no
         ``_transcript.append_message`` here and the type is absent from
@@ -9413,11 +9499,13 @@ class Session:
         for servers whose grants expire. The comment at
         ``_PERSISTABLE_CUSTOM_TYPES`` carries the full argument.
 
-        Known and accepted consequence: the un-superseded INCIDENT does still
-        persist, so a resumed session replays "authorization failed" with no
-        recovery after it. That is today's behaviour, not a regression, and the
-        live tool inventory is the honest correction. Deleting the persisted
-        incident was rejected — the transcript is append-only by design.
+        Known and accepted consequence: the un-superseded WARNING does still
+        persist, so a resumed session replays "is unavailable: its tools are
+        gone" with no recovery after it. That is the same trade
+        :meth:`journal_mcp_unavailable` makes from the other side, and it is
+        deliberate rather than overlooked — the live tool inventory is the
+        honest correction. Deleting the persisted warning was rejected — the
+        transcript is append-only by design.
 
         Parked, never spliced: ``_append_or_park_journal`` is what keeps a
         notice arriving mid-tool-batch from producing
@@ -9447,9 +9535,21 @@ class Session:
             self._append_or_park_journal(message)
 
     def _on_mcp_incident(self, server: str, reason: str) -> None:
-        """MCP manager hook (breaker trips): journal without blocking the
-        manager's reconnect loop."""
-        self._spawn_background(self.journal_incident(f"MCP server '{server}': {reason}"))
+        """MCP manager hook (breaker trips, grant expires): journal without
+        blocking the manager's reconnect loop.
+
+        The NAME is kept even though what it journals is now a warning rather
+        than an incident: it is the ``on_incident`` hook the manager installs
+        (``session_factory.py``), and renaming the sink would be a change to the
+        manager's contract for a vocabulary fix.
+
+        Fire-and-forget, and that is the manager's requirement rather than a
+        preference: every call site fires this from inside the connect/reconnect
+        machinery (``_register_connection``'s settle path, the breaker, the
+        post-gate auth failure) and a raising sink there would stall the
+        reconnect loops. ``_spawn_background`` logs and drops instead.
+        """
+        self._spawn_background(self.journal_mcp_unavailable(server, reason))
 
     def _on_mcp_recovery(self, server: str, tool_count: int) -> None:
         """MCP manager hook (a previously-announced server reconnected).

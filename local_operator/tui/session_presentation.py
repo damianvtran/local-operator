@@ -821,6 +821,7 @@ def project_settled_rows(
     from local_operator.harness.message_types import (
         PEER_MESSAGE_MESSAGE_TYPE,
         SESSION_INCIDENT_MESSAGE_TYPE,
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     )
 
     # The row DECISIONS this fold shares with the phone's. Held outside both
@@ -1052,6 +1053,29 @@ def project_settled_rows(
                 text = str(details.get("text", "")).strip()
                 if text:
                     self._append_block(NoticeBlock(text, kind="warning", fold_width=fold_width))
+                    appended = True
+                continue
+            # An MCP server's tools going away (its grant expired, its
+            # reconnect breaker suspended). Its own branch, and `note` rather
+            # than the incident branch above it, because the difference is the
+            # whole point of the record: nothing FAILED — the session's
+            # inventory shrank — and the `warning` ink it used to wear is the
+            # `!` that told the operator something had gone wrong when nothing
+            # had. Measured live on 2026-09-20, where an expired grant painted
+            # the failure indicator and the model was told a turn had died.
+            #
+            # `note`, not `info`, and both halves are the decision: this row is
+            # news the reader has to act on eventually (the tools are gone until
+            # someone runs `/mcp reauth <server>`), and a row nobody can readily
+            # read is the wrong claim about it — `info` maps to `dim`, which
+            # measures below the AA contrast floor on the light theme, the same
+            # reason `COMPACTION_MARKER_NOTICE` below is `note`. What it must not
+            # claim is alarm, which is exactly what `warning` says.
+            if getattr(message, "custom_type", None) == SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE:
+                details = getattr(message, "details", None) or {}
+                text = str(details.get("text", "")).strip()
+                if text:
+                    self._append_block(NoticeBlock(text, kind="note", fold_width=fold_width))
                     appended = True
                 continue
             # The compaction boundary itself. The replay layer has always
