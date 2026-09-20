@@ -395,9 +395,17 @@ async def chat_async_endpoint(
         # recorded and its runtime is not up.
         #
         # PUBLISHED BEFORE THE SPAWN, so the frame is ordered ahead of every
-        # frame the child can produce, and RETAINED BY THE BROKER, so a client
-        # that attaches after this route returns still receives it in replay
-        # rather than opening a stream that looks silent.
+        # frame the child can produce, and RETAINED BY THE BROKER — which is
+        # worth exactly what a cursor makes it worth, and no more, so the
+        # comment should not promise more than that: the channel's backlog is
+        # replayed to a subscriber that SUPPLIES a cursor (``after_seq=0`` is how
+        # a client asks for the channel from its beginning), while a cursor-less
+        # attach subscribes LIVE and therefore sees only what is published after
+        # it attaches — this frame, already in the buffer and already superseded,
+        # is not among them. Measured on the two shapes: 15.9 ms from attach to
+        # this frame with the cursor (QA's matrix; this benchmark's own
+        # ``response_to_job_event_ms`` agrees in the tens of milliseconds) against
+        # seconds for the cursor-less attach, which waits on the child instead.
         publish_job_status(event_broker, job.id, job.status, None)
 
         # Create and start a process for the job using the utility function

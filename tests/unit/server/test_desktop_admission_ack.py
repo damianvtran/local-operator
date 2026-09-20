@@ -7,7 +7,7 @@ p50 2,622 ms on a quiet box (``scripts/bench_ttft.py``, scenario
 because ``DesktopSessionBridge.acquire`` waits on the bind lock behind whatever
 speculative warm the visible ``/watch`` lease armed
 (``session/attached.py``'s ``_BACKGROUND_YIELD_BUDGET_S``). So the frame is now
-published BEFORE the door, by ``DesktopSessions.announce``, on the bridge that is
+published BEFORE the door, by ``DesktopSessions.announce_admission``, on the bridge that is
 already resident (``routes/desktop_sessions.py::ADMISSION_ACCEPTED_FRAME``).
 
 WHY THE ASSERTIONS ARE STRUCTURAL AND NOT TIMING-BASED (AGENTS.md, "Wait on the
@@ -44,8 +44,11 @@ from local_operator.server.routes import (
     desktop_lifecycle,
     desktop_sessions,
 )
-from local_operator.server.routes.desktop_sessions import ADMISSION_ACCEPTED_FRAME
-from local_operator.server.utils.desktop_sessions import DesktopSessions
+from local_operator.server.utils.desktop_sessions import (
+    ADMISSION_ACCEPTED_FRAME,
+    ADMISSION_FAILED_FRAME,
+    DesktopSessions,
+)
 from tests.unit.session.test_ownerless_read import _FakeOwner, _publish_live, _seed
 
 TOKEN = "synthetic-admission-ack-token"
@@ -107,7 +110,7 @@ class _Attached:
     """A mounted viewer: one subscription holding the session's bridge.
 
     THE BRIDGE IS ONLY RESIDENT WHILE SOMETHING HOLDS IT, which is exactly the
-    condition ``DesktopSessions.announce`` documents and the reason a mounted
+    condition ``DesktopSessions.announce_admission`` documents and the reason a mounted
     viewer is the one it can reach. This holds it through the pool and reads the
     bridge's own event generator — the shape the sibling route tests use, and the
     same frames the ``/events`` route serves, without putting a never-ending ASGI
@@ -144,6 +147,9 @@ class _Attached:
 
     def acked(self) -> list[dict[str, Any]]:
         return [f for f in self.frames if f.get("type") == ADMISSION_ACCEPTED_FRAME]
+
+    def failed(self) -> list[dict[str, Any]]:
+        return [f for f in self.frames if f.get("type") == ADMISSION_FAILED_FRAME]
 
     async def __aexit__(self, *_: Any) -> None:
         if self._task is not None:
@@ -298,6 +304,98 @@ async def test_a_reconnect_receives_the_acknowledgement_exactly_once(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_a_refused_admission_resolves_the_acknowledgement(tmp_path: Path) -> None:
+    """An owner that leaves mid-admission leaves NO acknowledgement hanging.
+
+    THE CELL WHOSE ABSENCE MADE CI GREEN ON A DEFECT (review round 1, R1 / QA Q1).
+    The acknowledgement is published before the door, so the refusal that follows
+    it — here a runtime whose socket closes under the admission, which is the
+    ``runtime_unreachable`` 503 a caller sees — must be published on the same
+    stream, carrying the same ``request_id``, or every viewer of that stream
+    (including a second one reading the replay) holds a promise that never
+    resolves. Asserted on the wire in both directions: the caller's 503 and the
+    viewer's outcome frame, and the fact that they name the SAME request.
+    """
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(
+            harness.session_id,
+            tmp_path,
+            sync_on_connect=True,
+            stand_down_on_prompt=True,
+        )
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        try:
+            async with _Attached(harness) as viewer:
+                request_id = str(uuid.uuid4())
+                response = await _post(harness, request_id=request_id)
+
+                assert response.status_code == 503, response.text
+                assert response.json()["detail"]["code"] == "runtime_unreachable"
+                assert owner.stand_downs == 1, "the owner must have refused, not been absent"
+
+                await viewer.wait_for(lambda: bool(viewer.failed()))
+                acked = viewer.acked()
+                failed = viewer.failed()
+                assert len(acked) == 1, "the acknowledgement precedes the refusal"
+                assert len(failed) == 1, "and the refusal resolves it exactly once"
+                assert failed[0]["payload"]["request_id"] == request_id
+                assert failed[0]["payload"]["request_id"] == acked[0]["payload"]["request_id"]
+                assert failed[0]["payload"]["status"] == "failed"
+                assert failed[0]["payload"]["detail"] == (
+                    "failed; the session owner could not be reached"
+                ), "the vetted sentence, never the transport's own text"
+                assert acked[0]["seq"] < failed[0]["seq"], "and it arrives after the ack"
+
+                replayed = await _replay_until_snapshot(viewer.bridge, after_seq=0)
+                kinds = [f.get("type") for f in replayed]
+                assert kinds.count(ADMISSION_ACCEPTED_FRAME) == 1
+                assert (
+                    kinds.count(ADMISSION_FAILED_FRAME) == 1
+                ), "a viewer that reconnects mid-refusal reads BOTH frames"
+        finally:
+            await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_submit_nobody_was_told_about_reports_no_outcome(tmp_path: Path) -> None:
+    """No acknowledgement, no outcome frame — the pair is all-or-nothing.
+
+    The refusal path publishes only what it ANNOUNCED (``announced``), because
+    inventing an outcome for a submit no viewer was told about would show a
+    failure for a request this host never took — an unknown session here, a
+    latched daemon in production. Asserted as an absence on the stream, which is
+    the only place it could appear.
+    """
+    async with _Harness(tmp_path) as harness:
+        owner = _FakeOwner(
+            harness.session_id,
+            tmp_path,
+            sync_on_connect=True,
+            stand_down_on_prompt=True,
+        )
+        await owner.start()
+        _publish_live(tmp_path, owner, session_id=harness.session_id)
+        try:
+            # NO VIEWER IS ATTACHED, so there is no bridge to publish on and
+            # nothing to acknowledge: the submit is refused (the owner stands
+            # down) with no frame anywhere, which is the honest state — nobody was
+            # told the request was taken.
+            assert harness.pool.bridges == {}
+            response = await _post(harness, request_id=str(uuid.uuid4()))
+            assert response.status_code == 503, response.text
+
+            # And the viewer that arrives afterwards reads a FRESH bridge: the
+            # stream the failing submit could have written to never existed, so
+            # neither frame can be read back from it.
+            async with _Attached(harness) as viewer:
+                assert viewer.acked() == []
+                assert viewer.failed() == [], "nothing was acknowledged, so nothing resolves"
+        finally:
+            await owner.stop()
+
+
+@pytest.mark.asyncio
 async def test_a_duplicate_submit_is_announced_once_and_replays_its_receipt(
     tmp_path: Path,
 ) -> None:
@@ -345,13 +443,10 @@ async def test_announcing_takes_no_reference_and_starts_nothing(tmp_path: Path) 
     line.
     """
     async with _Harness(tmp_path) as harness:
-        payload = {"request_id": "no-viewer", "mode": "prompt"}
-        assert (
-            await harness.pool.announce(
-                harness.session_id, ADMISSION_ACCEPTED_FRAME, payload, dedupe_key="no-viewer"
-            )
-            is False
+        announced = harness.pool.announce_admission(
+            harness.session_id, request_id="no-viewer", mode="prompt"
         )
+        assert await announced is False
         assert harness.pool.bridges == {}, "announcing built a bridge nobody asked for"
 
         owner = _FakeOwner(harness.session_id, tmp_path, sync_on_connect=True)
@@ -363,22 +458,16 @@ async def test_announcing_takes_no_reference_and_starts_nothing(tmp_path: Path) 
                 before_remote = bridge.remote
                 users_before = bridge.users
                 assert (
-                    await harness.pool.announce(
-                        harness.session_id,
-                        ADMISSION_ACCEPTED_FRAME,
-                        payload,
-                        dedupe_key="no-viewer",
+                    await harness.pool.announce_admission(
+                        harness.session_id, request_id="no-viewer", mode="prompt"
                     )
                     is True
                 )
                 assert bridge.users == users_before, "announcing took a reference"
                 assert bridge.remote is before_remote, "announcing engaged a facade"
                 assert (
-                    await harness.pool.announce(
-                        harness.session_id,
-                        ADMISSION_ACCEPTED_FRAME,
-                        payload,
-                        dedupe_key="no-viewer",
+                    await harness.pool.announce_admission(
+                        harness.session_id, request_id="no-viewer", mode="prompt"
                     )
                     is False
                 ), "a repeated correlation id is announced once"
@@ -404,11 +493,8 @@ async def test_a_latched_daemon_announces_nothing(tmp_path: Path) -> None:
             async with _Attached(harness) as viewer:
                 harness.pool.retiring_probe = lambda: True
                 assert (
-                    await harness.pool.announce(
-                        harness.session_id,
-                        ADMISSION_ACCEPTED_FRAME,
-                        {"request_id": "latched", "mode": "prompt"},
-                        dedupe_key="latched",
+                    await harness.pool.announce_admission(
+                        harness.session_id, request_id="latched", mode="prompt"
                     )
                     is False
                 )

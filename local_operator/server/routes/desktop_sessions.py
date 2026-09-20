@@ -57,7 +57,9 @@ from local_operator.server.utils.desktop_receipts import (
     ReceiptConflict,
 )
 from local_operator.server.utils.desktop_sessions import (
+    ADMISSION_FAILED_FRAME,
     CHILD_PAGE_LIMIT,
+    FAILED_ADMISSION_STATUS,
     SUBSCRIBER_COUNT,
     DesktopSessionBridge,
     DesktopSessions,
@@ -152,7 +154,12 @@ RUNTIME_UNREACHABLE_MESSAGE = (
 #: caller, review round 3, NIT-2).
 ADMITTED_ADMISSION_STATUS: AdmissionStatus = "admitted"
 PENDING_ADMISSION_STATUS: AdmissionStatus = "pending"
-FAILED_ADMISSION_STATUS: AdmissionStatus = "failed"
+#: The failure status and the two admission frames it bookends are IMPORTED
+#: from ``server/utils/desktop_sessions.py``, where the frames are composed: the
+#: names are re-exported here because this module is where the contract is
+#: documented and where callers (and the UI's own mirror of it) look for them.
+#: One definition, so the pool's purpose-named announcements cannot publish a
+#: name this module has drifted away from.
 
 #: The phrases this host ADDS to ``admission.detail``, one per pending shape.
 #: Two rather than one because the caller must still be able to tell a text
@@ -165,61 +172,6 @@ PENDING_STEER_ADMISSION_DETAIL = (
     "pending; the steer into the turn already running is not acknowledged yet"
 )
 
-#: The session-stream frame that tells a submitting viewer its request was TAKEN,
-#: emitted BEFORE the runtime is engaged. Session-scoped for the same reason as
-#: the failure frame below, and additive in the same way (``DESKTOP_API.md``,
-#: "Stream ordering and lifecycle": a renderer that does not know the type
-#: ignores it).
-#:
-#: WHY IT EXISTS. On a session with no runtime yet, the cold engage (spawn a
-#: child, import the composition root, construct the session, bind) happens
-#: INSIDE this route's POST, and until it finishes the client is told NOTHING —
-#: measured at p50 2,622 ms and up to 4,850 ms on the quiet box the redesign was
-#: diagnosed on, and at p50 7.0-9.5 s for the same scenario under load 200
-#: (``scripts/bench_ttft.py``, scenario ``desktop-cold``) — against 28 ms warm.
-#: The user's own
-#: keystroke is the last acknowledgement they get; everything after it is the
-#: model, seconds later. Nothing in the engage can be made to emit first — it is
-#: local work in another process — so the acknowledgement is composed here, by
-#: the host that already holds the request and is about to pay for it.
-#:
-#: WHAT IT CLAIMS, EXACTLY, because a frame a renderer paints as success must not
-#: overstate: this host has RECORDED the request and has started engaging a
-#: runtime for it. It is NOT the runtime's acknowledgement — that is the HTTP
-#: receipt (``status: admitted``) and it may not arrive for seconds — and it does
-#: not promise the turn ran: a later refusal is published as
-#: :data:`ADMISSION_FAILED_FRAME`, which is why the two names are siblings.
-#: ``request_id`` is the caller's own id, the same one the receipt and the failure
-#: frame carry, so a renderer correlates all three.
-#:
-#: EMITTED ONCE, BEFORE THE DOOR IS ENTERED (``prompt`` below), and both halves
-#: of that are load-bearing:
-#:
-#: * BEFORE ``host(request).session(...)``, because that is what acquires a
-#:   bridge, and on a cold session the acquire waits on the bind lock behind any
-#:   speculative warm a visible ``/watch`` lease armed — measured at ~1.0 s
-#:   (``_BACKGROUND_YIELD_BUDGET_S``). A user whose window is mounted is exactly
-#:   the user that lease belongs to, so the acknowledgement must not queue behind
-#:   the spawn it exists to cover. ``DesktopSessions.announce`` does the publish
-#:   on the RESIDENT bridge, taking no reference and starting nothing.
-#: * ONCE per request id, because that position puts it ahead of the receipt
-#:   journal which otherwise supplies at-most-once: ``publish_once`` remembers the
-#:   ids it has announced (bounded), so a retried submit announces once, and a
-#:   request the door then refuses on a latched daemon is not announced at all.
-#:
-#: THROUGH THE BRIDGE rather than a bespoke write, because that is what makes it
-#: idempotent on reconnect: the frame takes the bridge's own monotone ``seq`` and
-#: enters its replay buffer, so a viewer that reconnects with the epoch and
-#: cursor of the connection it lost receives it exactly once instead of not at
-#: all. (A FRESH attach replays nothing by design — ``events`` gaps a subscriber
-#: that supplies no epoch — and gets the snapshot instead; the acknowledgement is
-#: about a reconnect mid-engage, which is exactly the case the replay covers.)
-#:
-#: THE SPECULATIVE WARM DOES NOT PUBLISH IT. A visible ``/watch`` lease arms a
-#: warm of its own, and that spawn races this route's engage; only the submit
-#: path owns the request and therefore only it acks, which is what keeps this
-#: frame to one per submit rather than one per racing path.
-ADMISSION_ACCEPTED_FRAME = "admission.accepted"
 
 #: The session-stream frame that carries a DETACHED admission's failure to the
 #: UI. Session-scoped because the failure concerns one session's text, and the
@@ -232,7 +184,6 @@ ADMISSION_ACCEPTED_FRAME = "admission.accepted"
 #: replay — the reconnect that comes to read the frame is what discards it
 #: (review round 3, F2). A client that must know reconciles against the durable
 #: transcript and the receipt instead.
-ADMISSION_FAILED_FRAME = "admission.failed"
 
 
 class AdmissionOutcome(NamedTuple):
@@ -276,6 +227,59 @@ def _admission_failure_detail(error: BaseException) -> str:
     if isinstance(error, ConnectionError):
         return "failed; the session owner could not be reached"
     return "failed; the owner did not admit the request"
+
+
+def _admission_failure_payload(
+    request_id: str,
+    detail: str,
+    *,
+    mode: str | None = None,
+    command: str | None = None,
+) -> dict[str, Any]:
+    """The outcome frame's body — ONE spelling for both submission surfaces.
+
+    The inline ``/messages`` route and the detached receipt path both resolve an
+    acknowledgement, and a viewer must be able to read either frame the same way:
+    ``request_id`` is the correlation, ``status`` the named condition and
+    ``detail`` the vetted sentence. Built here rather than written twice so the
+    two call sites cannot drift into two shapes for one contract.
+
+    Each surface adds the name IT knows the request by — the inline route the mode
+    it submitted with, the receipt path the slash command it dispatched. Those are
+    additive; a renderer that reads only the frame's contract needs neither.
+    """
+    payload: dict[str, Any] = {
+        "request_id": request_id,
+        "status": FAILED_ADMISSION_STATUS,
+        "detail": detail,
+    }
+    if mode is not None:
+        payload["mode"] = mode
+    if command is not None:
+        payload["command"] = command
+    return payload
+
+
+def _refusal_resolves_the_acknowledgement(error: BaseException) -> bool:
+    """Whether THIS attempt's failure is the outcome its viewers are waiting for.
+
+    Two failures are deliberately NOT published, and both would be wrong DATA
+    rather than a missing frame:
+
+    * ``ReceiptConflict`` — another attempt at the same request id is already
+      running. Its outcome is that attempt's to report; publishing a failure here
+      would resolve an acknowledgement whose work is still in flight.
+    * Cancellation — the caller went away. There is nobody left to tell, and
+      awaiting the publish inside a cancelled task is precisely where it would not
+      happen.
+
+    Everything else — an owner that cannot be reached or that leaves mid-admission,
+    an acknowledgement that lapses, a daemon that latches, an attachment that is
+    unavailable — IS this request's outcome, and the viewer holding its
+    acknowledgement must be told rather than left with a promise that never
+    resolves.
+    """
+    return not isinstance(error, (asyncio.CancelledError, ReceiptConflict))
 
 
 async def _give_the_bridge_back(bridge: DesktopSessionBridge) -> None:
@@ -330,12 +334,7 @@ async def _settle_detached_admission(
         logger.warning("a receipt's request failed after admission: %s", error)
         bridge.publish(
             ADMISSION_FAILED_FRAME,
-            {
-                "request_id": command_id,
-                "command": command,
-                "status": FAILED_ADMISSION_STATUS,
-                "detail": detail,
-            },
+            _admission_failure_payload(command_id, detail, command=command),
         )
     finally:
         await _give_the_bridge_back(bridge)
@@ -1867,51 +1866,94 @@ async def prompt(session_id: str, body: Prompt, request: Request):
     on the latch and not on the record: an announced daemon is still the only
     place its client can work (``server/retire.py``).
     """
-    # THE ACKNOWLEDGEMENT GOES OUT BEFORE THE DOOR, and that position is the
-    # whole point: the door acquires a bridge, and a cold acquire waits on the
-    # bind lock behind any speculative warm the visible ``/watch`` lease armed —
-    # measured at ~1.0 s (``_BACKGROUND_YIELD_BUDGET_S``), which is exactly the
-    # case where a mounted viewer is waiting to be told something. Publishing
-    # here costs no reference, builds nothing and can start nothing; see
-    # ``DesktopSessions.announce`` for the mechanism and the one condition
-    # (a resident bridge) under which it has an audience. It is idempotent per
-    # request id, so the retry this route already tolerates cannot announce
-    # twice, and it declines on a latched daemon rather than contradicting the
-    # door's refusal.
-    await host(request).announce(
-        session_id,
-        ADMISSION_ACCEPTED_FRAME,
-        {"request_id": body.request_id, "mode": body.mode},
-        dedupe_key=body.request_id,
-    )
-    async with errors(request), host(request).session(session_id) as bridge:
-
-        async def admit():
-            assert bridge.remote is not None
-            detail, duplicate = await bridge.remote.admit_prompt(
-                body.text,
-                command_id=body.request_id,
-                images=[image.model_dump() for image in body.images],
-                steer=body.mode == "steer",
-            )
-            # Admission can bind a cold viewer while an event subscription is
-            # already open. Apply only its still-live lease, never resurrect one.
-            await bridge.refresh_watch()
-            return {
-                "status": "admitted",
-                "command_id": body.request_id,
-                "duplicate": duplicate,
-                "detail": detail,
-            }
-
-        return reply(
-            await receipts(request).run(
-                session_id + ":" + body.request_id,
-                body.model_dump(),
-                admit,
-                retry_safe=True,
-            )
+    # THE ACKNOWLEDGEMENT GOES OUT BEFORE THE DOOR, AND THE OUTCOME FOLLOWS IT.
+    # Both positions are the whole point of this handler:
+    #
+    # * BEFORE ``host(request).session(...)``, because that is what acquires a
+    #   bridge, and a cold acquire waits on the bind lock behind any speculative
+    #   warm the visible ``/watch`` lease armed — measured at ~1.0 s
+    #   (``_BACKGROUND_YIELD_BUDGET_S``), which is exactly the case where a
+    #   mounted viewer is waiting to be told something. The announcement takes no
+    #   reference, builds nothing and can start nothing
+    #   (``DesktopSessions.announce_admission``), is idempotent per request id, so
+    #   the retry this route tolerates cannot announce twice, and declines on a
+    #   latched daemon rather than contradicting the door's refusal.
+    # * AND A REFUSAL RESOLVES IT, through the same reference-free path, because
+    #   everything that can refuse this request — the door's dial, the owner's
+    #   answer, the receipt journal's own conflicts — happens AFTER the
+    #   acknowledgement is on the wire. Without the outcome frame the viewer (and
+    #   every later viewer reading it from the replay) is left holding a promise
+    #   that never resolves, while the caller learns what happened from a 5xx it
+    #   may not even surface. The frame carries this request id, so the pair
+    #   reads as one submit.
+    #
+    # THE SPECULATIVE WARM PUBLISHES NEITHER. A visible ``/watch`` lease arms a
+    # warm of its own, and that spawn races this route's engage; only the submit
+    # path owns the request, so only it acknowledges and only it resolves — which
+    # is what keeps each frame to one per submit rather than one per racing path.
+    #
+    # THE WHOLE BODY SITS INSIDE ``errors(request)`` so a store failure on the
+    # way in is classified by the same ladder as one on the way through: the
+    # announcement is the first thing the handler does, and it must not be the
+    # one step that answers a bare 500 (review round 1, R6-note).
+    async with errors(request):
+        announced = await host(request).announce_admission(
+            session_id, request_id=body.request_id, mode=body.mode
         )
+        #: Whether the owner ADMITTED the turn. From that moment the request is
+        #: the owner's: a later failure in this same request — recording the
+        #: receipt, refreshing the watch lease — is not a refusal of the
+        #: admission, and publishing one as ``admission.failed`` would tell every
+        #: viewer the text was dropped while the turn is running. The
+        #: acknowledgement resolves through the turn's own frames instead.
+        admitted = False
+        try:
+            async with host(request).session(session_id) as bridge:
+
+                async def admit():
+                    nonlocal admitted
+                    assert bridge.remote is not None
+                    detail, duplicate = await bridge.remote.admit_prompt(
+                        body.text,
+                        command_id=body.request_id,
+                        images=[image.model_dump() for image in body.images],
+                        steer=body.mode == "steer",
+                    )
+                    admitted = True
+                    # Admission can bind a cold viewer while an event
+                    # subscription is already open. Apply only its still-live
+                    # lease, never resurrect one.
+                    await bridge.refresh_watch()
+                    return {
+                        "status": "admitted",
+                        "command_id": body.request_id,
+                        "duplicate": duplicate,
+                        "detail": detail,
+                    }
+
+                return reply(
+                    await receipts(request).run(
+                        session_id + ":" + body.request_id,
+                        body.model_dump(),
+                        admit,
+                        retry_safe=True,
+                    )
+                )
+        except BaseException as error:
+            # ``announced`` rather than an unconditional publish: a request this
+            # host never acknowledged (no resident viewer, a latched daemon, an
+            # unknown session) owes no outcome, and publishing one would invent a
+            # failure for a submit nobody was told about. ``not admitted`` for the
+            # mirror-image reason: a request the owner DID take is the turn's, and
+            # the turn is what resolves it.
+            if announced and not admitted and _refusal_resolves_the_acknowledgement(error):
+                await host(request).announce_admission_failure(
+                    session_id,
+                    request_id=body.request_id,
+                    mode=body.mode,
+                    detail=_admission_failure_detail(error),
+                )
+            raise
 
 
 def desktop_viewer_must_submit(receipt_type: Any) -> bool:
