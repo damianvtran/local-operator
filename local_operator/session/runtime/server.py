@@ -869,6 +869,25 @@ _CHALLENGE_TTL_S = 30.0
 #: one per action, signs it, and consumes it).
 _MAX_CHALLENGES_PER_CONN = 8
 
+#: Bound on unspent challenges for the WHOLE runtime, not per connection.
+#:
+#: The per-connection cap alone is not a bound on a subject that can dial freely:
+#: the session record's ``control_key`` — which is what the very predicate this op
+#: exists for refuses to accept as authority — is readable by the subject, so it
+#: can open as many connections as it likes and hold the per-connection maximum on
+#: each (agent review round 6, R6-4). The design already accepts denial rather than
+#: escalation from that subject, so this is not an escalation either; it is the
+#: difference between a bounded and an unbounded one. Set well above any real
+#: surface's need — one human gesture is one challenge — and expired entries are
+#: pruned before it is consulted, so an idle runtime never refuses a real caller.
+_MAX_LIVE_CHALLENGES = 64
+
+#: How long a runtime may keep trusting the revocation list it read at first need.
+#: The cache's own default (``trust.ANCHOR_REFRESH_S``) with the runtime's name on
+#: it, so a test can shrink the window to zero by patching ONE constant here rather
+#: than poking the value the cache already holds.
+_ANCHOR_REFRESH_S = 30.0
+
 #: How long a verified device certificate is remembered. The certificate is
 #: checked lazily and per certificate string; a TTL rather than a permanent cache
 #: because the anchor's revocation list can change under a long-running session.
@@ -1284,11 +1303,16 @@ class RuntimeServer:
                 )
             )
             if operator_anchor is not None
-            else AnchorCache()
+            else AnchorCache(refresh_s=_ANCHOR_REFRESH_S)
         )
         #: Verified device certificates, by certificate string, with a TTL — see
         #: ``_device_cert_point`` for why this is lazy, bounded and short-lived.
         self._device_certs: dict[str, tuple[bytes | None, float]] = {}
+        #: Every unspent operator challenge in this runtime, by challenge string,
+        #: with its deadline — the AGGREGATE bound the per-connection maximum
+        #: cannot be (see ``_MAX_LIVE_CHALLENGES``). Pruned on mint and on
+        #: consume, so it never needs a timer and never outlives what it counts.
+        self._live_challenges: dict[str, float] = {}
         #: Live state mirrored into the discovery record. Held here rather
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
@@ -3656,6 +3680,11 @@ class RuntimeServer:
         challenge, expires_at = entry
         if time.monotonic() > expires_at:
             return False
+        # The runtime-wide count follows the CONSUME as well as the mint: a
+        # challenge handed back here is spent, and leaving it in the aggregate
+        # would let a subject that never signs slowly fill the runtime's budget
+        # with dead entries it minted itself.
+        self._live_challenges.pop(challenge, None)
         loaded = self._anchor_cache.get()
         anchor = loaded.anchor if loaded.usable else None
         device_spki = self._device_cert_point(frame.get("operator_cert"), anchor)
@@ -3741,12 +3770,13 @@ class RuntimeServer:
         pane that loosening has to come from the window that started the session
         while the pane is about to do it successfully.
 
-        ``local`` is the whole of the condition, deliberately. A remote
-        connection cannot sign YET: the phone's device signature is stage D, and
-        the relay cannot mint one today. Answering ``True`` for a phone would put
-        ``/approvals auto`` in a report on a surface that cannot carry it out —
-        the exact dead end UX round 2 (U7/U9) was raised to remove. When stage D
-        lands, this is the single line that widens.
+        ``local`` was once the whole of the condition, and the paragraph that said so
+        described stage D as unlanded (it was read by exactly the person reasoning
+        about a phone's refusal, so it is corrected rather than left: UX round 6,
+        U8). Stage D IS on this branch, and what widened is one call down: see
+        ``_local_operator_available``, which answers ``True`` for a REMOTE
+        connection whose device certificate verifies under the anchor — the phone,
+        whose authority does not depend on who spawned the runtime.
         """
         if self._local_operator_available(frame, conn):
             return True
@@ -3819,10 +3849,23 @@ class RuntimeServer:
         would be paying for every idle viewer), and the failure mode pruning
         prevents — a client that asks and never signs — is bounded by
         ``_MAX_CHALLENGES_PER_CONN`` in any case.
+
+        The runtime-wide map is pruned on the same two events (a mint and a
+        consume), and it needs no timer for the same reason: every entry it holds
+        is one of the entries in some connection's map, so anything it can forget
+        has already been forgotten here, and any VALUABLE entry has a deadline.
         """
         stale = [key for key, (_, deadline) in conn.operator_challenges.items() if deadline < now]
         for key in stale:
             conn.operator_challenges.pop(key, None)
+        for challenge, deadline in [
+            (value[0], value[1]) for value in conn.operator_challenges.values()
+        ]:
+            self._live_challenges[challenge] = deadline
+        for challenge in [
+            challenge for challenge, deadline in self._live_challenges.items() if deadline < now
+        ]:
+            self._live_challenges.pop(challenge, None)
 
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         # A FRAME THAT IS NOT AN OBJECT MUST NOT REACH `.get`, and the guard is
@@ -3944,14 +3987,29 @@ class RuntimeServer:
                     conn.kind,
                     conn.writer.get_extra_info("peername"),
                 )
-                from local_operator.session.errors import OperatorAuthorityRequired
+                from local_operator.session.errors import (
+                    OperatorAuthorityRequired,
+                    OperatorAuthorityUnconfigured,
+                )
 
                 # WHICH REFUSAL, from the op rather than from prose: a card
                 # answer is refused as a card (the question is still parked, and
                 # a deny works from here), a slash is refused as a command. The
                 # far side rebuilds the same sentence from this token, so the
                 # copy never travels as text (UX round 2, U8).
-                raise OperatorAuthorityRequired(trigger=op)
+                #
+                # AND WHICH HOST, from the anchor rather than from a guess (UX
+                # round 6, U1/U2): with no USABLE anchor the two named remedies
+                # cannot run, so the refusal has to name the command that lands
+                # one. ``usable`` is exactly the predicate the seam above used to
+                # decide this caller could not be admitted, read from the same
+                # cached load, so the sentence and the decision cannot disagree.
+                anchored = self._anchor_cache.get().usable
+                raise (
+                    OperatorAuthorityRequired(trigger=op)
+                    if anchored
+                    else OperatorAuthorityUnconfigured(trigger=op)
+                )
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
             # owner. The error frame is the reply — the attach screen surfaces
@@ -4235,11 +4293,20 @@ class RuntimeServer:
                 self._expire_challenges(conn, now)
                 if len(conn.operator_challenges) >= _MAX_CHALLENGES_PER_CONN:
                     raise ValueError("too many unspent operator challenges on this connection")
+                if len(self._live_challenges) >= _MAX_LIVE_CHALLENGES:
+                    # THE AGGREGATE BOUND (agent review round 6, R6-4). The
+                    # per-connection maximum alone bounds a socket, and the
+                    # subject this predicate gates can dial as many as it likes;
+                    # this is the term that makes the volume bounded rather than
+                    # merely denied. A real surface raises one prompt per human
+                    # gesture, so reaching this is the abuse it exists for.
+                    raise ValueError("too many unspent operator challenges on this runtime")
                 challenge = secrets.token_hex(32)
                 conn.operator_challenges[(action, request_id)] = (
                     challenge,
                     now + _CHALLENGE_TTL_S,
                 )
+                self._live_challenges[challenge] = now + _CHALLENGE_TTL_S
                 await self._send_to(
                     conn,
                     {

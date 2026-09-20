@@ -202,13 +202,33 @@ def _pair(args: argparse.Namespace) -> int:
     devices.drop_pending(root, device_id)
     devices.clear_pairing(root)
 
+    # THE RECEIPT IS QUALIFIED BY THE HOST'S OWN STATE (UX round 6, U2). It used to
+    # promise authority unconditionally, and on a host between `lop operator init`
+    # (which only STAGES the anchor) and `lop operator install` — the default state
+    # for anyone following the pairing instructions — that promise was false: the
+    # runtime has no key to verify the device's signatures against, and refuses every
+    # one of them (U1). The refusal now names the install step; the surface that
+    # hands out the device has to as well, or the two disagree about the same fact.
+    from local_operator.operator import operator_authority_unusable
+
+    if operator_authority_unusable():
+        promise = (
+            "It can act once this machine's operator authority is installed: run\n"
+            "  `lop operator install` here (one privileged step). Until then the runtime has\n"
+            "  no key to verify this device's signatures against, and refuses every one of\n"
+            "  them. Revoke it with `lop operator devices --revoke <device id>`.\n"
+        )
+    else:
+        promise = (
+            "The phone can now approve parked cards and loosen a running gate. Revoke it "
+            "with `lop operator devices --revoke <device id>`.\n"
+        )
+
     sys.stdout.write(
         f"\nPaired {stored.name or stored.device_id}.\n"
         f"  device id : {stored.device_id}\n"
         f"  scopes    : {', '.join(stored.scope)}\n"
-        f"  expires   : {time.strftime('%Y-%m-%d', time.localtime(stored.not_after))}\n"
-        "The phone can now approve parked cards and loosen a running gate. Revoke it "
-        "with `lop operator devices --revoke <device id>`.\n"
+        f"  expires   : {time.strftime('%Y-%m-%d', time.localtime(stored.not_after))}\n" + promise
     )
     return 0
 
@@ -254,9 +274,19 @@ def describe_devices(args: argparse.Namespace) -> int:
         code = install_anchor(root, print_only=bool(getattr(args, "print_only", False)))
         if code != 0:
             return code
+        # WHAT THIS NOW SAYS, and why it changed with R6-1. The old sentence left the
+        # operator with the impression that the install step alone was the whole
+        # story, and it was: `AnchorCache` pinned the anchor and its revocation list
+        # at first need, so a device revoked after a runtime started stayed honoured
+        # by that runtime for as long as it lived. The cache now re-reads the anchor
+        # under a bound (`trust.ANCHOR_REFRESH_S`), so the sentence can state the
+        # window instead of implying a runtime restart is needed.
+        from local_operator.operator.trust import ANCHOR_REFRESH_S
+
         print(
             f"revoked {revoke}. Revocation lives in the anchor; until the install step "
-            "above completes it has not taken effect."
+            "above completes it has not taken effect. Once installed, a session already "
+            f"running picks it up within {int(ANCHOR_REFRESH_S)}s and a new one at once."
         )
 
     if not paired and not pending:

@@ -146,6 +146,25 @@ def operator_authority_level(*, uid: int | str | None = None) -> str:
     return level
 
 
+def operator_authority_unusable() -> bool:
+    """Whether THIS host has no usable anchor, for the copy that has to say so.
+
+    The question is narrower than :func:`operator_authority_level` and exists for a
+    different reader: the copy that names the remedies a refusal leaves has to know
+    which of them can RUN here, and on a host whose anchor is absent, staged but not
+    installed, or not root-owned, the answer is none of them — the one command that
+    changes that is ``lop operator install`` (UX round 6, U1/U2).
+
+    Read from the file rather than from a runtime's cached view on purpose: this is
+    a property of the HOST, and the callers that need it (the report builders in
+    ``session/runtime/serving`` and ``tui/app``) are not the runtime's admission
+    seam and have no cached load of their own. It is called when a sentence is
+    built — a typed command, never a frame — so the file read is not on any path a
+    remote subject can make hot.
+    """
+    return not load_anchor().usable
+
+
 def operator_authority_report(*, uid: int | str | None = None) -> dict[str, Any]:
     """The level with everything a report line needs, including the residual.
 

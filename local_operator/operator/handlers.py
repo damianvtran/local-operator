@@ -239,6 +239,26 @@ def _print_paired_devices() -> None:
 
 def _sign(args: argparse.Namespace) -> int:
     root = config_dir()
+    # THE SHEET A PERSON ANSWERS NAMES THE SESSION AND THE EFFECT — on the channel
+    # this verb has for a human (UX round 6, U3 = design round 6, D3). stdout is the
+    # value and nothing else (see the module docstring), so this goes to stderr.
+    #
+    # This is also where the design's mitigation for its prompt-misread residual
+    # actually lands for a CLI caller: the OS sheet raised by the presence backend
+    # carries the OS's own wording, because `SecKeyCreateSignature` takes no
+    # parameters dictionary and `kSecUseOperationPrompt` was deprecated in macOS 11
+    # (see `operator/keychain.SecureEnclaveBackend.sign`). Printing the sentence
+    # before the gesture is what makes the human's decision an informed one.
+    from local_operator.operator.sign import effect_copy
+
+    print(
+        effect_copy(
+            purpose=args.purpose,
+            session_id=getattr(args, "session", "") or "",
+            request_id=getattr(args, "request_id", "") or "",
+        ),
+        file=sys.stderr,
+    )
     try:
         signature = sign_challenge(
             challenge=args.challenge,

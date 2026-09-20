@@ -495,6 +495,19 @@ class _SecureEnclaveSigner(Signer):
         self._cf = cf
 
     def sign(self, message: bytes) -> bytes:
+        """Sign through the Secure Enclave. EVERY call raises the presence prompt.
+
+        THE PROMPT CANNOT CARRY OUR COPY, and that is a measured property of the
+        API rather than an omission (agent review round 6, D3/U3).
+        ``SecKeyCreateSignature`` takes no parameters dictionary, so there is
+        nowhere to pass a reason; ``kSecUseOperationPrompt`` was the key that
+        would have carried one, and Apple deprecated it in macOS 11
+        (availability 10.10-11.0). The human's information therefore comes from
+        the surface that can speak: ``effect_copy`` on stderr for the CLI, the
+        pane notice for an attached viewer, the log line otherwise — each wired
+        at its own call site, and ``docs/design/approval-authority.md`` records
+        the bound rather than claiming the sheet itself says it.
+        """
         cf = self._cf
         err = ctypes.c_void_p()
         signature = cf.S.SecKeyCreateSignature(
@@ -529,13 +542,33 @@ class CngBackend:  # pragma: no cover — Windows only; CI runs POSIX
     because no CI runner here is Windows; the level report is what keeps that
     honest — a host where this backend fails reports ``file-only`` rather than
     claiming a prompt it cannot raise.
+
+    IT IS NOT IMPLEMENTED ON THIS BUILD, and both halves of that are enforced
+    rather than described (agent review round 6, R6-2/R6-8 = UX round 6, U7):
+    ``create`` raises, so ``supported`` must not answer "this host has one", and
+    the ladder must not return this object, or ``lop operator init`` dies with an
+    internal backend name on a host whose honest level is ``file-only``. Windows
+    is therefore a ``file-only`` host HERE, and ``lop operator status`` says so.
     """
 
     def supported(self) -> bool:
-        return os.name == "nt"
+        """Whether this BUILD can create the key — not whether the host is Windows.
+
+        The conflation was the defect: ``os.name == "nt"`` is a fact about the
+        host, and the caller of this predicate (``choose_backend``) promises "the
+        first backend this host both HAS and can USE". A build that cannot make
+        the key answers ``False`` for both, which is what sends ``auto`` down the
+        ladder to ``file-only`` — the level the operator is actually getting.
+        """
+        return False
 
     def create(self) -> KeyHandle:  # pragma: no cover
-        raise KeyBackendError("the CNG presence backend is not implemented on this build")
+        raise KeyBackendError(
+            "the Windows presence backend (CNG) is not implemented on this build; "
+            "run `lop operator init --backend file-only` — and note that a file-backed "
+            "operator key raises no consent prompt, which `lop operator status` reports "
+            "as the level `operator-file-only`"
+        )
 
     def load(self) -> Signer | None:  # pragma: no cover
         return None
@@ -562,7 +595,19 @@ def choose_backend(preference: str, *, config_root: Path) -> Any:
     """
     if preference in (SECURE_ENCLAVE, CNG_PRESENCE, FILE_ONLY):
         return _named_backend(preference, config_root=config_root)
-    if os.name == "nt":
+    if not CngBackend().supported() and os.name == "nt":
+        # WINDOWS IS NOT A PRESENCE TIER ON THIS BUILD (agent review round 6,
+        # R6-2 = UX round 6, U7). `auto` promises "the first backend this host
+        # both HAS and can USE"; returning `CngBackend` on `os.name == "nt"`
+        # ignored the second half, so `lop operator init` exited 1 with an
+        # internal backend name instead of creating the key it could have
+        # created — and instead of reporting the `file-only` level that host
+        # actually has. Asking `supported()` rather than hardcoding a second
+        # opinion about Windows is what makes this self-correcting: when a build
+        # implements CNG, `supported()` becomes True and this branch stops
+        # applying without a second edit here.
+        return FileKeyBackend(default_file_path(config_root))
+    if os.name == "nt":  # pragma: no cover — Windows only; CI runs POSIX
         return CngBackend()
     if os.uname().sysname == "Darwin":  # pragma: no branch — POSIX always has uname
         return SecureEnclaveBackend()

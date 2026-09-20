@@ -463,14 +463,39 @@ def paired_certificate(config_root: Path) -> str | None:
     return None
 
 
-def is_revoked_here(config_root: Path, device_id: str) -> bool:
-    """Whether a locally recorded revocation names this device.
+def is_revoked(config_root: Path, device_id: str) -> bool:
+    """Whether this device is revoked ANYWHERE — the record, or the anchor.
 
-    The AUTHORITATIVE revocation list is the root-owned anchor's (see
-    :func:`local_operator.operator.trust.device_is_revoked`, which the runtime
-    consults). This is the relay's own copy for the pairing flow, where
-    answering "this device was revoked" from the config root is enough to
-    refuse a re-pair without reading the anchor.
+    THE TWO LISTS DISAGREEING WAS A REAL GAP (UX round 6, U5). ``revoked.json``
+    under the config root is the relay's own belt-and-braces copy, written by
+    ``lop operator devices --revoke``; the ROOT-OWNED ANCHOR is the authoritative
+    list the runtime consults, and an operator who edits the anchor directly (the
+    documented way to revoke a device whose certificate the relay still holds)
+    leaves the local copy saying nothing. Measured: in exactly that state a
+    revoked device re-paired on a fresh code (HTTP 200). So the guard asks BOTH,
+    in the order that costs the least when the answer is yes.
+
+    The anchor read is a plain file read here rather than the runtime's cached
+    view: this is the setup path, on a human's action, not a frame.
+    """
+    if is_revoked_here(config_root, device_id):
+        return True
+    from local_operator.operator.trust import device_is_revoked, load_anchor
+
+    loaded = load_anchor()
+    if not loaded.usable or loaded.anchor is None:
+        return False
+    return device_is_revoked(loaded.anchor, device_id)
+
+
+def is_revoked_here(config_root: Path, device_id: str) -> bool:
+    """Whether a LOCALLY RECORDED revocation names this device.
+
+    One half of :func:`is_revoked`, which is what a caller deciding whether to
+    accept a device should use: the authoritative list is the root-owned anchor's
+    (:func:`local_operator.operator.trust.device_is_revoked`, which the runtime
+    consults), and this copy exists so the common case does not need a privileged
+    read. Asking only this one was the gap ``is_revoked`` closes.
     """
     body = _read_json(operator_root(config_root) / "revoked.json")
     if body is None:
@@ -520,6 +545,7 @@ __all__ = [
     "devices_dir",
     "drop_pending",
     "encode_spki",
+    "is_revoked",
     "is_revoked_here",
     "list_devices",
     "list_pending",

@@ -638,6 +638,11 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
 
     from local_operator.mobile.attach_client import AttachClient
 
+    # NO `on_operator_prompt`: this client exists to deliver one dequeued errand and
+    # has no operator-facing surface at all — an errand that needed a signature
+    # would be answered by the runtime's own refusal, and `AttachClient`'s fallback
+    # logs the effect sentence rather than losing it (UX round 6, U3 = design round
+    # 6, D3, which is about the surfaces a human is actually looking at).
     client = AttachClient(lambda _projection: None, lambda _reason: None)
     try:
         await client.connect(record, session_id)

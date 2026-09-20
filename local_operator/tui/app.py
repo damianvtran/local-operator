@@ -9415,6 +9415,18 @@ class OperatorApp(App[None]):
             set_recall_resolution = getattr(session, "set_recall_resolution", None)
             if callable(set_recall_resolution):
                 set_recall_resolution(partial(self._on_recall_rejected, session))
+            # THE PROMPT'S OWN COPY, on the surface that has a human at it (UX
+            # round 6, U3 = design round 6, D3). `AttachClient` fires `effect_copy`
+            # — "Authorise the operator key to LOOSEN the approval gate of
+            # <session>" — the instant before it signs, and nothing in production
+            # was listening, so the sentence that makes a presence prompt
+            # answerable existed only as a log line. Armed HERE, bound to this
+            # session for the same reason the recall handler is: the prompt can
+            # outlive an adopt, and a copy about one conversation must not paint on
+            # another the user has since opened.
+            set_operator_prompt_notice = getattr(session, "set_operator_prompt_notice", None)
+            if callable(set_operator_prompt_notice):
+                set_operator_prompt_notice(partial(self._on_operator_prompt, session))
             # THE THIRD ASYNCHRONOUS REFUSAL, and the one with no sender to
             # report it: a queued steer whose bind was refused after the give-up
             # released it. `steer_message` spawns a task nobody awaits, so before
@@ -21752,11 +21764,39 @@ class OperatorApp(App[None]):
         remedy = f"/approvals {saved} adopts it in this session"
         loosens = transition_authority("approvals", saved) == "authority-increasing"
         if loosens and not here:
+            # THE SPAWNER CLAUSE IS GONE, and it is the same deletion the runtime's
+            # handle makes (revision 2 §5; agent review round 6 R6-3 = design round 6
+            # D1 = UX round 6 U4). "typed in the terminal or app window that started
+            # this session" described spawner authority; §3 instead gives this pane,
+            # the desktop app for any session, and the phone the same
+            # one-presence-gesture loosening, so the sentence withheld a capability
+            # the same build ships while naming a window a background-started
+            # runtime does not have.
             return (
-                f"/approvals {saved} adopts it, typed in the terminal or app window that "
-                "started this session"
+                f"/approvals {saved} adopts it with the operator's own consent — authorise it "
+                "from this machine (Touch ID) or from a paired phone"
             )
         return remedy
+
+    @staticmethod
+    def _uninstalled_anchor_clause() -> str:
+        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+
+        The mirror of ``ServingSessionHandle._uninstalled_anchor_clause``, in the
+        same words, for the reason the two reports are written to match: one
+        reader must not meet two rules. It replaces the deleted "retire and reopen
+        the session here" clause with the state that made that clause look
+        necessary — on a host with no usable anchor, the two levers the report
+        names cannot run yet (UX round 6, U1/U2).
+        """
+        from local_operator.operator import operator_authority_unusable
+
+        if not operator_authority_unusable():
+            return ""
+        return (
+            "; but operator authority is not installed on this machine yet: neither can run "
+            "until `lop operator install` has (one privileged step)"
+        )
 
     def _configured_approvals_mode(self) -> str | None:
         """``tool_approval_mode`` as the WATCHER last read it, or ``None``.
@@ -39221,10 +39261,13 @@ class OperatorApp(App[None]):
             # reads as the reader's own filesystem from a phone (design round 2
             # D10 = UX round 2 U7; design round 3, D16).
             from local_operator.harness.approval import approvals_default_notice
+            from local_operator.operator import operator_authority_unusable
 
             return SlashResult(
                 kind="notice",
-                text=approvals_default_notice(may_loosen=may_loosen),
+                text=approvals_default_notice(
+                    may_loosen=may_loosen, anchor_unusable=operator_authority_unusable()
+                ),
                 style="warning",
             )
         if mode in ("ask", "on", "prompt"):
@@ -39263,13 +39306,13 @@ class OperatorApp(App[None]):
             remedy = self._adopt_remedy(saved, may_loosen=here)
             if transition_authority("approvals", saved) == "authority-increasing" and not here:
                 # The route that DOES work belongs in the report too, not only in
-                # the refusal that arrives after the operator has tried and
-                # failed (UX round 2, U9) — and on the background-started case no
-                # owning window exists, which is exactly when they need it.
-                remedy += (
-                    "; or let this session's runtime retire and reopen the session here — "
-                    "the window that opens a runtime owns its gate"
-                )
+                # the refusal that arrives after the operator has tried and failed
+                # (UX round 2, U9). WHAT IT NAMES changed with the authority model
+                # (revision 2 §5; agent review round 6 R6-3 = design round 6 D1 =
+                # UX round 6 U4): the clause here was "or let this session's runtime
+                # retire and reopen the session here", which is the deleted remedy
+                # on the surface a reader consults BEFORE being refused.
+                remedy += self._uninstalled_anchor_clause()
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
@@ -42472,6 +42515,26 @@ class OperatorApp(App[None]):
             return
         logger.debug("session runtime refused the recall of steer %s", command_id)
         self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
+
+    def _on_operator_prompt(self, session: Any, copy: str) -> None:
+        """Paint what a signature is about to authorise, while the prompt is up.
+
+        A ``NoticeBlock`` in the transcript rather than a transient banner: the
+        prompt it accompanies is answered by a human some seconds later, and the
+        sentence has to survive the wait — the same reason the recall-refusal
+        warning is appended rather than slotted (see `_on_recall_rejected`).
+
+        Scoped to the session that asked, and dropped when it is no longer current:
+        the prompt is raised by THIS machine's key for THIS session, so a copy
+        landing on the conversation the user has since switched to would describe a
+        gesture they are not about to make.
+        """
+        if session is not self._session:
+            logger.debug(
+                "dropped an operator-prompt notice for a session that is no longer current"
+            )
+            return
+        self._append_block(NoticeBlock(copy, "warning"))
 
     def _on_steer_undeliverable(self, session: Any, command_id: str) -> None:
         """A queued steer's bind was refused, so give the text back and say so.
