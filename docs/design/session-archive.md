@@ -159,20 +159,20 @@ rather than routed to the session's runtime owner — `/stop`'s classification, 
 `/notifications`' machine-boundary reason plus one of its own:
 
 * The store they write is `config_dir()/archived-sessions.json` and the session
-they remove is a directory in `config_dir()/sessions/`. Both are THIS machine's,
-and so is the sidebar and picker that render the result. Routed, a follower
-attached to a runtime on another host would archive a conversation on the
-runtime's machine while the receipt promised the sidebar on screen.
+  they remove is a directory in `config_dir()/sessions/`. Both are THIS machine's,
+  and so is the sidebar and picker that render the result. Routed, a follower
+  attached to a runtime on another host would archive a conversation on the
+  runtime's machine while the receipt promised the sidebar on screen.
 * **The conversation a user wants to delete is the one they are in, and by
   construction it has a live owner.** An attached viewer's owner holds both
   `.session.pid` and `.execution-lease`, so the owner-side delete is refused by
-the same guard it applies to every other session. The reachable flow is
-`/stop` — which releases both markers — then `/delete`, and that only works if
-`/delete` is answered here: a stopped facade's pre-route answer ("this session
-was stopped; /resume …") intercepts every *routed* command, so the remedy the
-refusal sentence names could not be carried out in the terminal that printed it
-(review round 1, MAJOR-1). The refusal sentence is unchanged and still accurate;
-what changed is that carrying it out now works.
+  the same guard it applies to every other session. The reachable flow is
+  `/stop` — which releases both markers — then `/delete`, and that only works if
+  `/delete` is answered here: a stopped facade's pre-route answer ("this session
+  was stopped; /resume …") intercepts every *routed* command, so the remedy the
+  refusal sentence names could not be carried out in the terminal that printed it
+  (review round 1, MAJOR-1). The refusal sentence is unchanged and still accurate;
+  what changed is that carrying it out now works.
 
 * **TUI.** `/archive` (acts on the current session, receipt names the way back),
   `/unarchive` (offered ONLY while the current session is archived, filtered out
@@ -184,10 +184,12 @@ what changed is that carrying it out now works.
   conversation, because the one it was standing on no longer exists — reachable
   from an attached viewer as `/stop` then `/delete yes`, and from any viewer whose
   session is not held by a live owner directly. A viewer attached to an owner
-  running OLDER code advertises these three as `authoritative_session` from a
-  capability snapshot taken when the socket opened; the frontend's own
-  classification wins over that advertisement, so the local answer runs either
-  way.
+  running OLDER code advertises these three as `authoritative_session` from the
+  capability snapshot taken when the socket opened, so `tui/app.py` pulls them
+  back from that advertisement in both the routing decision and the
+  stopped-facade pre-route (`_LOCAL_WORK_SLASHES` — deliberately narrower than the
+  frontend-local set, because `/btw` and `/loop` are in that set for their overlay
+  while their work still crosses the authoritative seam).
 * **`/resume` picker.** Archived rows are excluded from the list and from search;
   an `Archived (N)` toggle at the top of the list pane reveals them, is
   **clickable** as well as reachable by `ctrl+a`, and is drawn **only when the
