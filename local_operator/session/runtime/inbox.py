@@ -451,7 +451,7 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
         return False
     path = inbox_path(session_dir)
     try:
-        fd = os.open(path, os.O_RDWR | os.O_APPEND)
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | O_BINARY)
     except FileNotFoundError:
         return False
     except OSError:
