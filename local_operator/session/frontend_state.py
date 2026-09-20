@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import logging
 import os
 import time
 import uuid
@@ -75,6 +76,8 @@ from local_operator.session.spend import (
     serving_identity,
     usage_prices_known,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     #: The duck-typed session members this store calls when a real session is
@@ -1232,6 +1235,41 @@ def _trajectory_row_seq(row: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _last_trajectory_seq(rows: Any) -> int | None:
+    """One retained window's newest relay stamp, or ``None`` when it has none.
+
+    THE APPEND DISCRIMINATOR THAT SURVIVES THE CAP. Once a window is full an
+    append evicts the oldest row, so ``len()`` alone does not move and a length
+    key would serve a stale released row — the same at-cap rotation
+    :func:`_capped_overlap_tail` exists for. O(1): a length and one index.
+    """
+    try:
+        return _trajectory_row_seq(rows[-1]) if len(rows) else None
+    except Exception:  # noqa: BLE001 — an unindexable window is "no stamp"
+        return None
+
+
+def _plan_shape(node: Any) -> tuple[bool, int] | None:
+    """The SHAPE of a child's plan, cheaply, for ``_ReleasedRows._fingerprint``.
+
+    ``todos`` is stamped onto the row by :func:`_with_lineage` out of
+    ``TODO_STORE``, not read off the node, so no node field covers it. The phase
+    count is what changes when the plan moves; the contents are left to the row,
+    because dumping every phase per tick is the cost the memo exists to remove.
+    """
+    if node is None:
+        return None
+    session_id = getattr(node, "session_id", None)
+    if not session_id:
+        return None
+    try:
+        from local_operator.tools.builtin import TODO_STORE
+
+        return (bool(getattr(node, "live", False)), len(TODO_STORE.get(session_id) or ()))
+    except Exception:  # noqa: BLE001 — an unreadable store is "no plan"
+        return None
+
+
 def _freeze_row(row: Any) -> Any:
     """Freeze ONE retained trajectory row into canonical immutable containers.
 
@@ -1562,6 +1600,23 @@ def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
     a row of an unexpected shape answers "not released". Failing closed here
     only costs the old per-tick work; failing OPEN would stamp a live child as
     released and stop publishing its trajectory, which is a correctness bug.
+
+    WHICH CLOCK, AND WHY THIS ONE. The rule is the dock's — it is the same
+    :func:`roster_expired` call — but the STAMP is not, and the difference is
+    deliberate rather than an oversight (review round 1, S2). ``tui/app.py``'s
+    ``_within_roster_window`` passes ``settled_at=_bucketed_stamp_of(job,
+    window)`` because it coalesces a display: rounding a stamp UP makes a batch
+    that settled together leave the dock in one repaint. This publisher applies
+    the TRUE stamp, which is the clock the execution ledger sweeps on, so the
+    canonical roster and the ledger agree and only the dock's presentation is
+    quantised. The observable consequence is bounded and one-directional: the
+    dock keeps a row for up to one bucket (15 s at the default window) after
+    this flag turns true, never the other way, so no consumer is shown a row
+    the dock has already dropped. A follower that FILTERS on
+    ``roster_released`` therefore hides such a row up to one bucket before the
+    owner's own dock does; that is the price of the publisher staying on the
+    exact clock, and adopting the reader's rounded one here would move the
+    canonical roster OFF the ledger's clock to fix a cosmetic disagreement.
     """
     retention_ms = getattr(manager, "retention_ms", None)
     if isinstance(retention_ms, bool) or not isinstance(retention_ms, (int, float)):
@@ -1581,8 +1636,18 @@ def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
         for node in rows if isinstance(rows, Iterable) else ():
             if str(getattr(node, "status", "")) == "paused":
                 paused_ids.add(str(getattr(node, "job_id", "") or ""))
-    except Exception:  # noqa: BLE001 — presentation must not fail on a lookup
-        paused_ids = set()
+    except Exception:  # noqa: BLE001 — see below; this arm must fail CLOSED
+        # NOT ``paused_ids = set()``, which is the OPEN direction and the
+        # opposite of what the docstring promises (review round 1, S5): an
+        # empty paused set removes ``roster_expired``'s pause exemption, so a
+        # child the user paused precisely to come back to — the row
+        # ``harness/jobs.py`` calls load-bearing — becomes releasable and stops
+        # publishing its trajectory. Releasing nothing this tick costs the old
+        # per-tick work and nothing else. Logged rather than silent: a
+        # permanent failure that says nothing is undiagnosable (the dock's own
+        # equivalent logs for the same reason).
+        logger.warning("subagent roster: node statuses unreadable; releasing nothing this tick")
+        return lambda _job: False
 
     def released(job: Any) -> bool:
         try:
@@ -1600,10 +1665,31 @@ def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
 
 #: Fields a RELEASED row keeps. Identity, lineage, terminal outcome and
 #: accounting — everything a viewer needs to resolve the child's page, price it
-#: and say how it ended. Deliberately no ``trajectory``: a released child is
-#: settled, its rows are on disk in its own transcript (which is what the
-#: subagent page reads), and the in-memory window is the whole cost this
-#: projection exists to stop paying on every tick.
+#: and say how it ended.
+#:
+#: WHAT IS SHED, and each for its own reason (review round 1, S4 — the drop is
+#: named here rather than left implicit, because ``JobState.roster_released``
+#: promises a viewer loses nothing it could see before):
+#:
+#: * ``trajectory`` — a released child is settled and its rows are on disk in
+#:   its own transcript, which is what the subagent page reads. The in-memory
+#:   window is the whole cost this projection exists to stop paying per tick.
+#: * ``output_tail`` / ``output_seq`` — the live-output window and its cursor,
+#:   the same class of per-tick cost as ``trajectory``.
+#: * ``cut_off_cause`` — unreachable on a released row rather than dropped: its
+#:   only writer stamps ``restored=True`` rows, and ``retention_expired``
+#:   exempts those permanently, so such a row is never released.
+#:
+#: ``latest_details`` is NOT shed, deliberately: the last progress payload has
+#: live consumers (``tui/widgets/subagent_panel.py``, ``tui/app.py``,
+#: ``mobile/projection.py``) and dropping it would be exactly the silent
+#: regression the docstring above rules out.
+#:
+#: ``registrant_id`` / ``agent_id`` were in an earlier revision and are gone:
+#: they are not declared on ``JobState``, so they landed in ``model_extra`` on
+#: released rows ONLY — a wire shape that differed by membership state, carrying
+#: an execution-ledger fact into a presentation DTO, at 61 bytes per row on the
+#: very rows whose saving this change is about, and read by nothing.
 _RELEASED_ROW_FIELDS = (
     "id",
     "type",
@@ -1614,6 +1700,7 @@ _RELEASED_ROW_FIELDS = (
     "intent",
     "error_text",
     "result_text",
+    "latest_details",
     "model_label",
     "context_window",
     "start_time",
@@ -1621,8 +1708,6 @@ _RELEASED_ROW_FIELDS = (
     "settled_at",
     "session_id",
     "parent_job_id",
-    "registrant_id",
-    "agent_id",
     "agent_role",
     "effort",
     "prompt",
@@ -1734,19 +1819,40 @@ class _ReleasedRows:
     def _fingerprint(job: Any, comms: Any) -> tuple[Any, ...]:
         """Everything a released row is built FROM, so a change cannot be missed.
 
-        The job half is the terminal facts :data:`_RELEASED_ROW_FIELDS` projects.
-        The comms half is what :func:`_with_lineage` stamps on top — it reads the
-        NODE, not the job, so a fingerprint over the job alone would serve a
-        stale row when the graph moves (a resume folding attempts, a child's
-        plan appearing). ``todos`` rides along as a length rather than a value:
-        it is derived from ``TODO_STORE`` per tick, and the count is what
-        changes when the plan does.
+        The job half is the terminal facts :data:`_RELEASED_ROW_FIELDS` projects
+        that HAVE A WRITER, plus a cheap change discriminator for each
+        projection the row DERIVES rather than copies. The comms half is what
+        :func:`_with_lineage` stamps on top — it reads the NODE, not the job, so
+        a fingerprint over the job alone would serve a stale row when the graph
+        moves (a resume folding attempts, a child's plan appearing).
+
+        WHY THE DERIVED PROJECTIONS ARE KEYED AT ALL (review round 1, S1). An
+        earlier revision keyed status/stamps/terminal text and the node half
+        only, and rested the rest on "a released row is settled, so no writer
+        will touch it again". That is an assumption about ANOTHER subsystem's
+        writers, and the guard that would have caught it going wrong was exactly
+        the one omitting the fields: :func:`_released_row` derives ``usage``,
+        ``descendant_usage``, ``direct_cost``, ``trajectory_length`` and
+        ``model_label``, so a tick after any of them moved served the SAME object
+        for ever — no later tick can repair it, because the mark never moves
+        again. Every element added below is O(1) (a ``len``, a tuple of counters,
+        a monotone stamp), so closing the gap does not put the per-tick cost
+        back.
+
+        ``latest_details`` is the one projection still outside the key, and that
+        is a stated boundary rather than an oversight: nothing in this repo
+        writes it after a row settles, and keying a progress payload means
+        hashing it on every tick, which is the cost this class exists to remove.
+        Everything a writer CAN reach is keyed.
         """
         node = None
         try:
             node = comms.node(job_id) if (job_id := str(getattr(job, "id", "") or "")) else None
         except Exception:  # noqa: BLE001 — a graph that cannot answer is "no lineage"
             node = None
+        trajectory = getattr(job, "trajectory", None)
+        usage = getattr(job, "usage", None)
+        descendants = getattr(job, "descendant_usage", None)
         return (
             str(getattr(job, "status", "") or ""),
             getattr(job, "settled_at", None),
@@ -1755,6 +1861,27 @@ class _ReleasedRows:
             str(getattr(job, "error_text", "") or ""),
             str(getattr(job, "result_text", "") or ""),
             bool(getattr(job, "restored", False)),
+            getattr(job, "model_label", None),
+            # The retained window: ``len`` catches an append or a truncation, and
+            # the newest relay stamp catches the at-cap rotation where an append
+            # evicts the front and the length does not move.
+            len(trajectory) if isinstance(trajectory, Sized) else 0,
+            _last_trajectory_seq(trajectory),
+            # Accounting, as the counters the row prices from. ``usage`` is
+            # accumulated IN PLACE, so an identity check on it would never fire.
+            (
+                None
+                if usage is None
+                else (
+                    getattr(usage, "input_tokens", 0),
+                    getattr(usage, "output_tokens", 0),
+                    getattr(usage, "cache_read_tokens", 0),
+                    getattr(usage, "cache_write_tokens", 0),
+                    getattr(usage, "context_tokens", None),
+                    len(getattr(usage, "cost_components", ()) or ()),
+                )
+            ),
+            len(descendants) if isinstance(descendants, Sized) else 0,
             getattr(node, "parent_job_id", None),
             getattr(node, "session_id", None),
             str(getattr(node, "session_dir", "") or ""),
@@ -1762,6 +1889,9 @@ class _ReleasedRows:
             tuple(getattr(node, "attempt_aliases", ()) or ()),
             bool(getattr(node, "live", False)),
             len(getattr(node, "launch_prompts", ()) or ()),
+            # The plan rides onto the row from ``TODO_STORE`` inside
+            # ``_with_lineage``, so the node half above cannot cover it.
+            _plan_shape(node),
         )
 
     def adopt_from(self, jobs: Iterable[Any]) -> None:
@@ -2043,8 +2173,17 @@ class JobState(BaseModel):
     #: So the row keeps travelling and says what it is instead. A consumer that
     #: needs MEMBERSHIP ("what is on the roster right now") filters on this
     #: flag; a consumer that needs IDENTITY ("resolve this child's page")
-    #: ignores it and still finds the row. Nothing is hidden from a viewer that
-    #: could see it before.
+    #: ignores it and still finds the row.
+    #:
+    #: WHAT A VIEWER LOSES, exhaustively, because "nothing is hidden" would be
+    #: the easier sentence and it is not true (review round 1, S4). Identity,
+    #: lineage, terminal outcome, the last progress payload and the accounting
+    #: all still travel. What does NOT is the retained window itself
+    #: (``trajectory``, keeping only its ``trajectory_length``) and the
+    #: live-output tail and its cursor (``output_tail``/``output_seq``) — the
+    #: per-tick cost this projection exists to stop paying for a child that is
+    #: settled and whose rows are on disk in its own transcript. The signed
+    #: ``_RELEASED_ROW_FIELDS`` comment is the authoritative list.
     #:
     #: It is also what makes a long session's tick cost bounded: a released row
     #: is settled and can never emit again, so ``_jobs`` stops rebuilding and
@@ -5987,9 +6126,19 @@ class FrontendStateStore:
                     seen.add(job_id)
                     released_seen.add(job_id)
                     values.append(
-                        _with_lineage(_released_row(job), comms)
-                        if released is None
-                        else released.row(job_id, job, comms)
+                        # FROZEN on both arms. ``_with_lineage`` re-stamps
+                        # ``launch_prompts``/``attempt_aliases``/``todos`` off
+                        # the comms node as RAW containers, so an unfrozen
+                        # result is a row whose containers are mutable and
+                        # unhashable (review round 1, N1). Both production
+                        # callers pass the memo, so the ``None`` arm is a
+                        # one-off reader — it still may not hand out a shape
+                        # the tick path is forbidden to.
+                        _freeze_job(
+                            released.row(job_id, job, comms)
+                            if released is not None
+                            else _with_lineage(_released_row(job), comms)
+                        )
                     )
                     continue
                 value = JobState.from_job(

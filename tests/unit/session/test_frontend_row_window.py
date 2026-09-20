@@ -38,6 +38,7 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
+    Usage,
 )
 from local_operator.session import frontend_state as module
 from local_operator.session.frontend_state import (
@@ -1182,14 +1183,75 @@ def test_a_released_row_is_rebuilt_when_its_terminal_facts_move(
     session = _released_session([done])
     store = _store([done])
     store.refresh_jobs(session)
-    first = store.state.jobs[0]
+    # CANONICAL state, not the `state` property: that one runs every row through
+    # `_public_job`, which `model_copy`s unconditionally, so two `state` reads
+    # are never the same object and an identity assertion across them is
+    # vacuously true. The value assertion below is what carried this test; the
+    # identity one now means something too.
+    first = store._state.jobs[0]
 
     done.result_text = "the answer the child came back with"
     store.refresh_jobs(session)
-    second = store.state.jobs[0]
+    second = store._state.jobs[0]
 
     assert second is not first, "a released row was served from a stale memo"
     assert second.result_text == "the answer the child came back with"
+
+
+def test_a_released_row_is_rebuilt_when_its_derived_inputs_move() -> None:
+    """The key covers what ``_released_row`` DERIVES, not only terminal text.
+
+    AGENT REVIEW ROUND 1, S1. ``_released_row`` prices the row from ``job.usage``
+    and ``job.descendant_usage``, carries ``trajectory_length`` off the retained
+    window and reads ``model_label`` -- and the fingerprint covered none of
+    them. A released row whose accounting moved was therefore served the SAME
+    object for ever, with no later tick able to repair it, because the mark
+    never moves again. Each leg below moves exactly one derived input and
+    asserts a REBUILD, which is the only observable a memo can offer.
+
+    Read CANONICAL state for the identity legs (``_public_job`` copies on every
+    ``state`` read, so an identity assertion across two of those is vacuous).
+    """
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    store = _store([done])
+    store.refresh_jobs(session)
+    current = store._state.jobs[0]
+    assert current.roster_released is True, "the premise is unmet: the row was not released"
+    assert current.trajectory_length == ROWS
+
+    # EACH LEG RE-BASELINES AND CARRIES BOTH ASSERTIONS, deliberately. Comparing
+    # every leg back to the FIRST row would let an earlier leg's rebuild satisfy
+    # a later leg's identity check, and an identity check with no value check
+    # says nothing about what the row actually holds -- both were true of the
+    # first draft of this test, and a per-element sabotage sweep is what showed
+    # it (each element below must be able to fail the file ON ITS OWN).
+
+    # (a) accounting is accumulated IN PLACE on the job, so an identity check on
+    # the usage object would never fire -- the counters have to be keyed.
+    done.usage = Usage(input_tokens=11, output_tokens=22)
+    store.refresh_jobs(session)
+    after_usage = store._state.jobs[0]
+    assert after_usage is not current, "a released row priced from a moved usage was reused"
+    assert after_usage.usage is not None and after_usage.usage.output_tokens == 22
+    current = after_usage
+
+    # (b) the retained window: the length is the cheap discriminator, and it is
+    # what ``trajectory_length`` on the row is built from.
+    _trajectory(done).append(_row(ROWS))
+    store.refresh_jobs(session)
+    after_window = store._state.jobs[0]
+    assert after_window is not current, "a released row's trajectory_length moved unnoticed"
+    assert after_window.trajectory_length == ROWS + 1
+    current = after_window
+
+    # (c) settled-descendant accounting, replaced wholesale at the ownership
+    # boundary by ``detach_child_manager``.
+    done.descendant_usage = [Usage(input_tokens=3, output_tokens=4)]
+    store.refresh_jobs(session)
+    after_descendants = store._state.jobs[0]
+    assert after_descendants is not current, "a released row's descendants moved unnoticed"
+    assert len(after_descendants.descendant_usage) == 1
 
 
 def test_a_released_row_keeps_the_lineage_its_transcript_page_needs() -> None:
