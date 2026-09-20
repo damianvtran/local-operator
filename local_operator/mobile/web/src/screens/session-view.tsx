@@ -25,6 +25,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ModelSheet } from "../components/model-sheet";
 import { Composer } from "../components/composer";
+import { GateSheet } from "../components/gate-sheet";
 import { PendingCard } from "../components/pending-card";
 import { SubagentsPanel } from "../components/subagents-panel";
 import { TodosPanel } from "../components/todos-panel";
@@ -42,9 +43,12 @@ import type { SessionProjection } from "../types";
 
 function Header({
 	projection,
+	sessionId,
 }: {
 	projection: SessionProjection;
+	sessionId: string;
 }) {
+	const [gateOpen, setGateOpen] = useState(false);
 	return (
 		<header className="flex items-center gap-2 border-b border-hairline px-1 py-1 pt-[max(env(safe-area-inset-top),0.25rem)]">
 			<button
@@ -58,6 +62,22 @@ function Header({
 			<span className="min-w-0 flex-1 truncate text-body-sm font-medium">
 				{projection.conversation_name || "untitled"}
 			</span>
+			{/* THE GATE CONTROL (stage D). On the phone this is the LOOSEN surface:
+			    `/approvals auto` is authority-increasing, so it asks the runtime for a
+			    per-action challenge and signs it with this phone's non-extractable key.
+			    Before the redesign a phone could not loosen in ANY session, and the
+			    refusal told the reader to find "the window that started this session" —
+			    a window a phone cannot become. The label says what the control is about
+			    (approvals) rather than naming the command; the sheet names the command. */}
+			<button
+				type="button"
+				onClick={() => setGateOpen(true)}
+				aria-label="approvals in this session"
+				className="flex min-h-8 items-center justify-center rounded-sm px-2 text-meta text-ink-muted active:bg-elevated"
+			>
+				{projection.pending ? "needs you" : "approvals"}
+			</button>
+			<GateSheet open={gateOpen} onClose={() => setGateOpen(false)} sessionId={sessionId} />
 		</header>
 	);
 }
@@ -153,7 +173,7 @@ export function SessionScreen({
 					connected={connected}
 				/>
 			) : <>
-			<Header projection={projection} />
+			<Header projection={projection} sessionId={sessionId} />
 
 			{projection.transcript.length === 0 && !projection.streaming ? (
 				/* A just-started session has no messages yet. An empty scroll
