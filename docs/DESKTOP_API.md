@@ -678,11 +678,48 @@ that. Retrying under the SAME id replays this receipt rather than re-delivering
 the text, in every disposition: `pending` and `failed` are honest answers for
 THIS id, and a re-issue therefore takes a NEW one.
 
-**A `pending` admission that fails LATER is announced, not logged.** The receipt
-has been sent by then, so the failure has no caller left to reach; the host
-publishes an `admission.failed` frame on the SESSION's stream
-(`{request_id,command,status,detail}`, the same vetted `detail`) where the
-mounted viewer reads it.
+**A submit is ACKNOWLEDGED on the stream before the runtime is engaged.** The
+receipt above is the authority on whether the owner took the text, and on a
+session with no runtime it is seconds away — the submit POST carries the cold
+engage (spawn, import, construct, bind), measured at p50 2.6-9.5 s — so until it
+lands the viewer has nothing to paint and the user is told nothing. The host
+therefore publishes an `admission.accepted` frame on the SESSION's stream
+(`{request_id,mode}`) BEFORE it acquires the bridge, i.e. before anything can be
+engaged, and the viewer treats it as "the host has this request and is starting
+the runtime for it" — never as the owner's acknowledgement, and never as the
+turn having run. It is not emitted at all by a daemon that has latched against
+new work, and a retry under the same id replays its receipt without a second
+frame.
+
+**And it is RESOLVED, on the same stream, by whatever follows it.** Because the
+acknowledgement precedes everything that can refuse the request, an
+`admission.failed` frame with the SAME `request_id` is published when the inline
+admission is refused — an unreachable runtime, an owner that leaves
+mid-admission, a daemon that latches after the acknowledgement. A viewer reads
+the pair as one submit; a caller that only reads HTTP sees the same outcome as
+the 5xx it was answered with. Without the outcome a mounted viewer — and every
+later viewer that replayed the acknowledgement — would hold a promise that never
+resolves, which is a defect rather than an omission (review round 1, R1).
+
+**"At most once" is per ATTACHMENT and bounded, not a global guarantee**, and the
+qualifier is the honest half of it: the dedupe memory lives on the bridge
+(`ANNOUNCED_ADMISSION_HISTORY`, 64 ids), it is cleared when the epoch rolls, and
+a session with no attached viewer has no bridge to publish on at all — so a
+client must treat both frames as notices about the connection it is reading, the
+same way it treats everything else on the session stream. What a client can rely
+on is the pair's ORDER and its correlation: same `request_id`, and the outcome
+never before the acknowledgement.
+
+**An admission that fails is ANNOUNCED, not logged.** Two paths reach the same
+frame. The DETACHED one (`/commands`) has already sent its receipt — `pending` —
+so the failure has no caller left to reach. The INLINE one (`/messages`) has
+already acknowledged the submit on the stream (see "A submit is ACKNOWLEDGED"
+above) even though its caller is still on the line. Either way the host publishes
+an `admission.failed` frame on the SESSION's stream — `{request_id,mode,status,`
+`detail}` where this host submitted the turn itself, `{request_id,command,status,`
+`detail}` for a dispatched `/commands` receipt, with the same vetted `detail` in
+both — where the mounted viewer reads it, and the log line stays for an operator
+looking at the process.
 
 The frame is LIVE AND RETAINED **for the life of the attachment**, and that
 qualifier is the whole of what it promises. A viewer already connected reads it,
@@ -851,9 +888,22 @@ cursor**, independent of the inner canonical frontend `{epoch,sequence}`.
    `focus_policy}`. It is NOT an `AgentEvent` and must not be painted into the
    transcript; a renderer that does not know the type ignores it and still
    advances its receipt cursor.
-6. `admission.failed` carries `{request_id,command,status,detail}` for a
-   `/commands` admission whose receipt answered `pending` and which then failed
-   (see "Every action receipt..." above). It is published LIVE AND RETAINED for
+6. `admission.accepted` carries `{request_id,mode}` and is published the instant
+the host takes a `/messages` submit — BEFORE the session's bridge is acquired and
+before any runtime is engaged (see "A submit is ACKNOWLEDGED on the stream"
+above). It is NOT an `AgentEvent` and must not be painted into the transcript: it
+is a notice about a request, not a turn, and a renderer that does not know the
+type ignores it and still advances its receipt cursor. Never emitted by a daemon
+that has latched against new work, and emitted at most once per `request_id` PER
+ATTACHMENT (bounded memory on the bridge, cleared when the epoch rolls) — see the
+qualifier under "A submit is ACKNOWLEDGED" for what that is worth.
+7. `admission.failed` carries `{request_id,mode,status,detail}` when the INLINE
+   `/messages` admission it acknowledged is refused, and
+   `{request_id,command,status,detail}` for a `/commands` admission whose receipt
+   answered `pending` and which then failed (see "Every action receipt..." and
+   "An admission that fails is ANNOUNCED" above). The `request_id` is the one the
+   acknowledgement carried, so a renderer resolves the pair rather than matching
+   prose. It is published LIVE AND RETAINED for
    the life of the ATTACHMENT: a viewer already connected reads it, but a cold
    session — the case where nothing else holds it — is detached by that same
    admission's release, so the next attach starts a new epoch with an empty
