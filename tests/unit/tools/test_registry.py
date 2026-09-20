@@ -80,8 +80,15 @@ def _engine_context(**kwargs) -> ToolContext:
 def _force_browser_available(monkeypatch):
     """The default-surface assertions include ``browser``, whose builder is
     environment-gated on a reachable CMUX browser. CI has none, so force the
-    capability predicate to keep these tests deterministic everywhere."""
+    capability predicate to keep these tests deterministic everywhere.
+
+    ``console`` is gated the same way and on the same machine (the desktop app's
+    discovery record), so it is forced here too: a test whose answer depends on
+    whether the developer happens to be running the app is not a test of the
+    registry.
+    """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
 
 
 def test_default_set_builds_all_builtin_tools() -> None:
@@ -284,6 +291,34 @@ def test_enabled_empty_list_gives_no_tools() -> None:
 def test_default_names_cover_builder_table() -> None:
     """The default surface is the whole table today; drift is deliberate."""
     assert set(DEFAULT_TOOL_NAMES) == set(TOOL_BUILDERS)
+
+
+def test_the_console_tool_is_absent_without_the_app(monkeypatch) -> None:
+    """createIf: no app record, no tool — and never a tool that can only error.
+
+    The gate is one file-only predicate, the same shape the browser's has, and
+    the two states that must both yield no tool are worth pinning separately:
+    "there is no app" and "the app says its console is off". The second is the
+    one a predicate written as a bare liveness check would get wrong, because a
+    running app IS live.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: False)
+    names = [tool.name for tool in create_tools(_engine_context())]
+    assert "console" not in names
+    assert names == [name for name in DEFAULT_TOOL_NAMES if name != "console"]
+
+
+def test_the_console_tool_is_not_hidden(monkeypatch) -> None:
+    """A concealed tool cannot be discouraged, only missing (design §14.2).
+
+    `hidden=True` means "not listed in the prompt inventory"; the only shipped
+    user of it is the structured-reply transport. This tool must be listed,
+    because an agent asked to test a TUI has to be able to see that it exists.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    tools = {tool.name: tool for tool in create_tools(_engine_context())}
+    assert tools["console"].hidden is False
+    assert tools["console"].label == "Console"
 
 
 # --- write/edit diff counters (the TUI's +N/-N indicators) -------------------

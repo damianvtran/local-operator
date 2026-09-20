@@ -576,6 +576,20 @@ def main() -> int:
     parser.set_defaults(assert_budget=True)
     args = parser.parse_args()
 
+    # THE PROCESS HALF OF THE NOTIFICATION GATE, and it is here rather than only on
+    # the children because this process drives sessions itself: the desktop and
+    # sse-jobs arms run their daemon in-process and the phone arm runs the mobile
+    # daemon in-process, so the switch ``child_env`` puts on spawned children never
+    # reaches them. A bench is a throwaway driver whose sessions nobody is watching,
+    # and an ungated turn in it can put a session's own reply on the operator's lock
+    # screen — the failure this repository has recorded 17 times from drive-by rigs.
+    # Function-local import on purpose: ``tui.notify`` pulls the terminal and
+    # settings modules in with it, and the shape is the one ``agent_shell`` uses for
+    # the same reason.
+    from local_operator.tui.notify import suppress_notifications_for_process
+
+    suppress_notifications_for_process()
+
     if args.render_json:
         return _render_only(
             [path.strip() for path in args.render_json.split(",") if path.strip()], args.table

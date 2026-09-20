@@ -10,11 +10,13 @@ and per-session kernel isolation.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 import pytest
 import pytest_asyncio
 
+from local_operator import procstate
 from local_operator.harness.types import (
     AbortSignal,
     AgentToolUpdate,
@@ -903,7 +905,12 @@ async def test_windows_spawn_assigns_kill_on_close_job_before_use(tmp_path, monk
         spawn_options.update(kwargs)
         return process
 
-    monkeypatch.setattr(eval_tool.sys, "platform", "win32")
+    # ``procstate._PLATFORM`` rather than this module's ``sys``: it is the ONE
+    # name every platform branch now reads (``_spawn`` asks
+    # ``detached_popen_kwargs()``/``is_windows()`` rather than reading
+    # ``sys.platform`` itself), and it is what ``tests/unit/test_procstate_platform``
+    # patches for the same reason.
+    monkeypatch.setattr(procstate, "_PLATFORM", "win32")
     monkeypatch.setattr(eval_tool.asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(eval_tool, "_create_windows_kill_job", lambda pid: 77)
     monkeypatch.setattr(eval_tool, "_close_windows_job", closed.append)
@@ -917,6 +924,24 @@ async def test_windows_spawn_assigns_kill_on_close_job_before_use(tmp_path, monk
     assert closed == [77]
     assert kernel.windows_job is None
     assert process._transport.closed is True
+
+
+@pytest.mark.asyncio
+async def test_posix_spawn_still_leads_its_own_process_group(tmp_path) -> None:
+    """The POSIX arm is unchanged: the worker is a session/group leader.
+
+    Asserted against the REAL worker rather than against the kwargs, because
+    ``setsid`` is the property the rest of the tool depends on —
+    ``_close_kernel`` kills ``pgid`` to reach the descendants user code
+    spawned, and it uses the leader's pid as the group id. A helper that
+    returned the same NAME without the same effect would pass a kwargs
+    assertion and fail this one.
+    """
+    kernel = await eval_tool._spawn(str(tmp_path))
+    try:
+        assert os.getpgid(kernel.process.pid) == kernel.process.pid
+    finally:
+        await eval_tool._close_kernel(kernel)
 
 
 # ---------------------------------------------------------------------------

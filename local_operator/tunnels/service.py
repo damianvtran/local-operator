@@ -19,6 +19,7 @@ from urllib.parse import quote
 import httpx
 
 from local_operator.mobile.auth import load_password
+from local_operator.procstate import install_loop_signal_handlers
 from local_operator.tunnels import config
 from local_operator.tunnels.api import RadientTunnels
 from local_operator.tunnels.gateway import REFUSED, UNREACHABLE, Gateway
@@ -310,13 +311,13 @@ async def run() -> int:
             )
             stop = asyncio.Event()
             loop = asyncio.get_running_loop()
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                try:
-                    loop.add_signal_handler(sig, stop.set)
-                except NotImplementedError:
-                    # Windows event loops do not implement add_signal_handler.
-                    # The synchronous handler only schedules work on the loop.
-                    signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
+            # ONE helper for every server boot path: `add_signal_handler` is
+            # Unix-only and the Windows Proactor loop's inherited stub raises
+            # NotImplementedError, so this block existed here, in the mobile
+            # relay and in the session runtime — three copies of one platform
+            # fact, two of which were missing the guard. See
+            # procstate.install_loop_signal_handlers.
+            install_loop_signal_handlers(loop, {signal.SIGTERM: stop.set, signal.SIGINT: stop.set})
 
             async def poll() -> None:
                 nonlocal restart

@@ -46,6 +46,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 REPO = Path(__file__).resolve().parent.parent
 
 # The repo root first, as `bench_task_cost.py` does: this script imports the
@@ -222,13 +224,17 @@ def _child_env(config_dir: Path) -> dict[str, str]:
     that warmup discard and run #1 becomes cold while the rest are warm, which
     skews min and median in opposite directions."""
     env = dict(os.environ)
+    # This child imports ``local_operator`` and builds a real session (see the
+    # probe code above), and every probe drives the real CLI (`exec`) — so the
+    # child is a harness child, and ``harness_child_env`` is where a harness
+    # both declares itself (run from an agent's shell the child would otherwise
+    # inherit the agent-shell marker and each sample would fail instead of being
+    # measured) and gets the notification gate that keeps a mock completion off
+    # the operator's desktop. One helper, one place, so a new bench cannot
+    # remember half of it (`agent_shell.harness_child_env`).
     env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
     env["LO_BENCH_CONFIG_DIR"] = str(config_dir)
     env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
-    # Every probe drives the real CLI (`exec`), and this script is a harness, so
-    # it declares itself one: run from an agent's shell the child inherits the
-    # agent-shell marker and each sample would fail instead of being measured
-    # (`agent_shell.harness_child_env`).
     return harness_child_env(env)
 
 

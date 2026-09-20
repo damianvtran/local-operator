@@ -31,6 +31,7 @@ from local_operator.session.session import Session
 from local_operator.session.transcript import Transcript
 from local_operator.session_lease import acquire_session_lease
 from local_operator.tools.builtin import execute_browser
+from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.e2e.watchdog import bounded
 
 EXTENSION = Path(__file__).resolve().parents[2] / "extension"
@@ -64,7 +65,7 @@ def protocol_peer(
             "run pnpm install in extension/ for disposable protocol E2E (no browser needed)"
         )
     key = secrets.token_urlsafe(32)
-    env = {**os.environ, "BROWSER_FIXTURE_KEY": key}
+    env = {**os.environ, "BROWSER_FIXTURE_KEY": key, **NO_NOTIFY_ENV}
     process = subprocess.Popen(
         [node, "tests/fixtures/ownership-server.mjs"],
         cwd=EXTENSION,

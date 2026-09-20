@@ -37,7 +37,7 @@ import pytest
 from local_operator.session.attached import COLD_FALLBACK_S
 from local_operator.session.runtime import registry
 from local_operator.session.transcript import Transcript
-from tests.e2e.harness import ScriptedStream, build_session, text_turn
+from tests.e2e.harness import NO_NOTIFY_ENV, ScriptedStream, build_session, text_turn
 from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
@@ -93,7 +93,13 @@ def _child_env(config_dir: Path, session_id: str) -> dict[str, str]:
     # one here: both consumers test it with ``startswith``, which matches it
     # exactly and every longer name under it. The values this cell needs are set
     # explicitly below, so nothing legitimate is lost.
+    # ``**NO_NOTIFY_ENV`` after the strip, not before: this mapping is built
+    # from ``os.environ`` MINUS the pane families, and it is handed to a real
+    # runtime child. Re-asserting the gate last means no inherited value can
+    # put it back, which is the one thing the strip cannot promise here (the
+    # kill switch is not in ``CHILD_ENV_FAMILIES``).
     env = {k: v for k, v in os.environ.items() if not k.startswith(CHILD_ENV_FAMILIES)}
+    env.update(NO_NOTIFY_ENV)
     env.update(
         {
             "LOCAL_OPERATOR_CONFIG_DIR": str(config_dir),

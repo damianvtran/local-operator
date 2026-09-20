@@ -96,6 +96,14 @@ NERD_TOOL_ICONS: dict[str, str] = {
     "list_variables": "\uf0ca",  # nf-fa-list_ul
     "read_variable": "\uf02b",  # nf-fa-tag
     "browser": "\uf0ac",  # nf-fa-globe
+    # nf-fa-desktop, and a DIFFERENT noun from `bash`'s terminal glyph on
+    # purpose: `bash` is the shell this process runs, while this is a terminal
+    # running INSIDE the app — a screen in a frame rather than the command line
+    # itself. `write`/`edit` sharing a pencil is the case where two entries mean
+    # the same thing; these two do not, and a row that could not tell "the app's
+    # console" from "a shell" would be the one distinction this table exists to
+    # keep.
+    "console": "\uf108",
     "web_search": "\uf0ac",  # nf-fa-globe
     "web_fetch": "\uf019",  # nf-fa-download — a page pulled down over the wire
     "task": "\uf0c0",  # nf-fa-users — work handed to another agent
@@ -136,6 +144,10 @@ PLAIN_TOOL_ICONS: dict[str, str] = {
     "list_variables": "=",
     "read_variable": "=",
     "browser": "@",  # the URL sigil
+    # `>`, the prompt sigil, against `bash`'s `$` — the same distinction the Nerd
+    # table draws above (a terminal in the app vs the shell), told with two
+    # characters that are each one cell in every repertoire this table targets.
+    "console": ">",
     "web_search": "?",  # a search query, in the verified ASCII fallback repertoire
     "web_fetch": "\u2193",  # a downward arrow: content pulled down from a URL
     "task": "»",  # work passed onward
@@ -220,8 +232,19 @@ def _nerd_capable_terminal(env: EnvMap | None = None) -> bool:
     # tofu there. A patched-font iTerm user opts in via the explicit
     # ``display.nerd_icons`` config flag rather than being auto-enabled into
     # replacement boxes.
+    #
+    # - A Local Operator console surface (``local_operator.terminals``) is the
+    #   app's own terminal, and the app bundles a Nerd-patched face that its pane
+    #   renders, so the glyphs resolve there exactly as they do in ghostty. This
+    #   is the one entry that is not an emulator predicate, and it has to be a
+    #   MARKER rather than an impersonation: exporting ghostty's own variables to
+    #   reach this branch would also flip the notification protocol for every
+    #   process in the surface (design ui-console-tab §6.6).
     return (
-        terminals.is_ghostty(source) or terminals.is_kitty(source) or terminals.is_wezterm(source)
+        terminals.is_ghostty(source)
+        or terminals.is_kitty(source)
+        or terminals.is_wezterm(source)
+        or terminals.is_local_operator_console(source)
     )
 
 

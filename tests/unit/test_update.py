@@ -1125,7 +1125,16 @@ class TestServiceDaemonRefresh:
     what the summary says it did.
     """
 
-    def test_nothing_installed_means_no_child_at_all(self) -> None:
+    def test_nothing_installed_means_no_child_at_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An empty scan on a host the scan CAN address is silence.
+
+        The platform is pinned to the launchd shape deliberately: since audit A24
+        an empty scan on a host whose daemons are systemd units or scheduled
+        tasks announces that it did not refresh them, which is the neighbouring
+        case and has its own test. Without the pin this test would be asserting
+        the macOS answer on a Linux runner, where the answer differs by design.
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
         with (
             patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
             patch("subprocess.run") as run,
@@ -1134,6 +1143,60 @@ class TestServiceDaemonRefresh:
         assert refresh == update_mod.DaemonRefresh("service daemons")
         assert refresh.lines == () and refresh.warnings == ()
         run.assert_not_called()
+
+    def test_a_platform_without_launchd_says_so_instead_of_saying_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Silence reads as success, so a platform the scan cannot address speaks.
+
+        The scan is ``~/Library/LaunchAgents``, so on Linux and Windows it finds
+        nothing and the empty ``DaemonRefresh`` printed nothing at all — in the
+        upgrade summary that is indistinguishable from "there was nothing to
+        do", while a systemd unit or a scheduled task is still running the
+        previous interpreter. Re-registering those units is a follow-up; what is
+        pinned here is that the step reports what it did NOT do (audit A24).
+
+        The scan is still CONSULTED (``return_value=[]`` is the real host's
+        answer, not a bypass), because that is the function's own contract and
+        the sibling macOS tests below patch the same seam to prove the child
+        runs; what changes on this host is only the conclusion.
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False)
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
+            patch("subprocess.run") as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_not_called()
+        assert refresh.warnings == ()
+        assert len(refresh.lines) == 1
+        assert "not refreshed" in refresh.lines[0]
+        assert sys.platform in refresh.lines[0], "the line names this host's platform"
+        assert "installer" in refresh.lines[0], "and the way to fix it"
+        # The upgrade summary is read by tests that keep each step's own lines
+        # apart (``test_update_command_upgrades`` pins that a skipped mobile
+        # refresh prints nothing), so this sentence must not name a daemon.
+        assert "mobile" not in refresh.lines[0]
+
+    def test_an_installed_agent_is_repaired_whatever_the_platform_says(self, branded_image) -> None:
+        """The platform branch decides the empty-scan answer, not whether to work.
+
+        Gating the scan on macOS made the function's contract untestable off it:
+        a host that HAS an agent to repair must reach the child, and that is what
+        the four tests below assert. This one pins the boundary between them.
+        """
+        plist = Path("/tmp/Library/LaunchAgents/com.local-operator.tunnel.plist")
+        completed = subprocess.CompletedProcess([], 0, stdout="tunnel daemon: refreshed\n")
+        with (
+            patch.object(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False),
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[plist]),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_called_once()
+        assert refresh.lines, "the repaired agent is reported"
 
     def test_the_child_is_the_new_wheel_and_is_named(self, branded_image) -> None:
         plist = Path("/tmp/Library/LaunchAgents/com.local-operator.tunnel.plist")
@@ -1361,8 +1424,17 @@ class TestServiceDaemonRefresh:
 
 
 def test_update_command_no_plist_prints_only_install_lines(
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The step under test is the MOBILE one, so the daemons step is pinned quiet.
+
+    Since audit A24 a host whose supervised daemons are not launchd agents adds
+    its own "not refreshed" line to the same summary, which would make this
+    assertion about an unrelated step. Pinning the daemons branch keeps the exit
+    code, the child invocation and the exact output all decided by the mobile
+    refresh, which is what the test is named for.
+    """
+    monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
     with (
         _upgrade_cmd(),
         patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(False)),

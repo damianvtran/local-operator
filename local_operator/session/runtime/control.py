@@ -82,6 +82,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
+from local_operator import procstate
 from local_operator.buildwatch import KEPT_MATCHES, KEPT_UNSETTLED, moved_and_unsettled
 from local_operator.paths import config_dir
 from local_operator.session.runtime import registry
@@ -979,7 +980,7 @@ async def _graceful_stop(
     return await _await_stopped(record, timeout_s, root)
 
 
-async def _signal_and_confirm(record: SessionRecord, sig: "signal.Signals", grace_s: float) -> bool:
+async def _signal_and_confirm(record: SessionRecord, sig: int | None, grace_s: float) -> bool:
     """Rungs 2–3: signal the confirmed pid and wait out its grace window.
 
     Called only AFTER identity confirmation — this is the rung that can hit
@@ -994,9 +995,30 @@ async def _signal_and_confirm(record: SessionRecord, sig: "signal.Signals", grac
     recovered by the stale-record reap plus the lease's dead-owner recovery,
     which is exactly what those mechanisms exist for.
     """
+    if sig is None:
+        # NO SIGNAL TO SEND. ``signal.SIGKILL`` is documented "Availability:
+        # Unix", so naming it on the rung reached exactly when a runtime is
+        # wedged raised ``AttributeError`` before anything was killed — the
+        # ladder's last resort failing on the platform that needs one most.
+        # Windows offers no signal here at all (a runtime is spawned detached,
+        # so it has no console to receive ``CTRL_BREAK_EVENT``):
+        # ``TerminateProcess`` is the stop the kernel has, and
+        # :func:`procstate.terminate_process_tree` walks the tree with
+        # ``taskkill /T /F``. The rung is unchanged by intent — the marker this
+        # rung writes still names it — only the mechanism differs per platform,
+        # which is what :func:`procstate.hard_kill_signal` reports.
+        delivered = await asyncio.to_thread(
+            procstate.terminate_process_tree, record.pid, force=True
+        )
+        if not delivered:
+            return not registry.pid_alive(record.pid)
+        return await _await_pid_exit(record.pid, grace_s)
     try:
         os.kill(record.pid, sig)
-    except (ProcessLookupError, PermissionError):
+    except OSError:
+        # Covers ProcessLookupError, PermissionError, AND Windows' OSError for
+        # a pid that is already gone (``os.kill`` there reports a WinError, not
+        # ``ESRCH``); all three mean "ask the record instead of assuming".
         return not registry.pid_alive(record.pid)
     return await _await_pid_exit(record.pid, grace_s)
 
@@ -1350,7 +1372,10 @@ async def stop_session(
     # and names sigkill, so the next reader learns which rung killed it, that
     # it was deliberate, and who did it.
     _write_stop_marker(record, root, "sigkill", command=_command)
-    await _signal_and_confirm(record, signal.SIGKILL, SIGKILL_CONFIRM_S)
+    # ``hard_kill_signal()`` is SIGKILL on POSIX — the identical value this rung
+    # has always sent there — and None on Windows, where it selects the
+    # terminate-the-tree path above instead of raising AttributeError.
+    await _signal_and_confirm(record, procstate.hard_kill_signal(), SIGKILL_CONFIRM_S)
     wakes = await _park_wakes(record, root)
     _recover_record(record, root)
     method = "sigkill"

@@ -61,6 +61,7 @@ import pytest
 
 from local_operator.session.runtime import control, registry
 from local_operator.session.runtime.process import SIGNAL_DRAIN_S
+from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.e2e.test_cut_off_turns_e2e import (
     _attach,
     _child_env,
@@ -645,6 +646,11 @@ async def test_refresh_moves_the_idle_stale_runtime_and_queues_the_busy_one(
         "LOP_BUILD_SETTLE_S": "0.5",
         "LOP_BUILD_STAGGER_S": "30",
     }
+    # The rig spawns real runtime children on the ``test``/mock hosting and ends
+    # their turns; gated so a completion cannot banner from this cell (the
+    # shared constant, so this file cannot disagree with the other builders
+    # about which switches it means).
+    env.update(NO_NOTIFY_ENV)
     rig = _Rig(config)
     try:
         with bounded(300, "signal drain: refresh reports moved and busy"):

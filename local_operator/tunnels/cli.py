@@ -25,7 +25,18 @@ from local_operator.tunnels.service import (
 
 
 def _read_origin_auth(path: Path) -> dict[str, str]:
-    if path.stat().st_mode & 0o077:
+    """Read the OpenCode harness credentials, refusing a world-readable file.
+
+    The mode check is a POSIX-ONLY heuristic, and gating it on ``os.name`` is
+    the fix for a real defect rather than tidiness: on Windows every ordinary
+    file reports ``st_mode & 0o077 == 0o066``, so this gate rejected THE CORRECT
+    FILE every time — the OpenCode harness on a Radient tunnel was unusable, and
+    the remedy the message named (``chmod 600``) does not exist on that
+    platform. Windows protects the file with its profile ACL instead; the
+    guarantee that still holds everywhere is the content check below, which runs
+    on every read regardless of platform.
+    """
+    if os.name != "nt" and path.stat().st_mode & 0o077:
         raise ValueError("The OpenCode auth file must be private (chmod 600).")
     data = json.loads(path.read_text())
     if not isinstance(data, dict) or set(data) != {"username", "password"}:

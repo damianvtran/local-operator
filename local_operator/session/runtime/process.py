@@ -66,6 +66,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from local_operator import buildwatch as _buildwatch
+from local_operator import procstate
+from local_operator.procstate import install_loop_signal_handlers
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_OVERDUE_CAUSE,
     BUILD_DRAIN_PROGRESS_S,
@@ -2525,9 +2527,34 @@ async def amain() -> int:
         trigger.setdefault("why", "socket-stop")
         loop.call_soon_threadsafe(stop.set)
 
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _on_signal, sig)
-    if os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1":
+    # WINDOWS CANNOT INSTALL LOOP SIGNAL HANDLERS AT ALL (cross-platform work,
+    # 2026-09-18): `add_signal_handler` is overridden only by the UNIX selector
+    # loop, so the call raised NotImplementedError out of `amain` — the owner
+    # process every attach dials never bound a socket on Windows. The shared
+    # helper branches (see procstate.install_loop_signal_handlers). NOTHING IS
+    # LOST where it degrades: the socket `stop` op below already converges on
+    # the same event, and it is the rung the kill switch uses first.
+    install_loop_signal_handlers(
+        loop,
+        {
+            signal.SIGTERM: lambda: _on_signal(signal.SIGTERM),
+            signal.SIGINT: lambda: _on_signal(signal.SIGINT),
+        },
+    )
+    # `SIGUSR1` is POSIX-only, so the debug dump is installed only where the
+    # constant exists — an unguarded `signal.SIGUSR1` is an AttributeError that
+    # would take the whole boot down over an opt-in diagnostic. `is_windows()`
+    # is named alongside it because `loop.add_signal_handler` is UNIX-ONLY too
+    # (the Windows default Proactor loop takes `BaseEventLoop`'s stub, which
+    # raises `NotImplementedError`), so the two absences are one condition: this
+    # block is safe to reach on any platform rather than merely skipped because
+    # the constant happens to be missing.
+    debug_stacks = getattr(signal, "SIGUSR1", None)
+    if (
+        not procstate.is_windows()
+        and os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1"
+        and debug_stacks is not None
+    ):
         # SIGUSR1 prints every asyncio task's stack to the child log. The
         # child has no terminal and no attached debugger, and a wedged turn
         # (round 2, U6) is exactly the state whose cause is "which await is
@@ -2577,7 +2604,7 @@ async def amain() -> int:
                     obj = getattr(obj, "cr_await", None) or getattr(obj, "gi_yieldfrom", None)
                 logger.info("task %r await-chain:\n%s", task.get_name(), "\n".join(lines))
 
-        loop.add_signal_handler(signal.SIGUSR1, _dump_task_stacks)
+        loop.add_signal_handler(debug_stacks, _dump_task_stacks)
     # The socket ``stop`` op (the kill switch's graceful rung) and SIGTERM
     # converge on the same event, so the deny → dispose → aclose ordering
     # below runs once, identically, for both triggers.
