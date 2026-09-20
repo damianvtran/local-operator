@@ -2050,7 +2050,10 @@ async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
             # for — read about a command its user never typed, on a question that
             # had survived. The trigger is forwarded now, and this is the
             # assertion that keeps it.
-            from local_operator.harness.approval import CARD_APPROVAL_REFUSED_NOTICE
+            from local_operator.harness.approval import (
+                CARD_APPROVAL_REFUSED_NOTICE,
+                CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE,
+            )
 
             with pytest.raises(OperatorAuthorityRequired) as card_refusal:
                 await daemon.request(
@@ -2059,7 +2062,13 @@ async def test_the_relay_presents_the_capability_for_a_runtime_it_started(
                     request_id="deadbeefdeadbeef",
                     approved=True,
                 )
-            assert str(card_refusal.value) == CARD_APPROVAL_REFUSED_NOTICE
+            # Either card sentence: which one a host sends depends on whether its
+            # anchor is installed (UX round 6, U1/U2), and both are the same refusal
+            # to a caller keying on the code.
+            assert str(card_refusal.value) in (
+                CARD_APPROVAL_REFUSED_NOTICE,
+                CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE,
+            ), str(card_refusal.value)
             # An ORDINARY op is unaffected on the same connection: the seam
             # guards one class, and the phone keeps everything else.
             reply = await daemon.request(record.pid, "prompt", text="hello")
