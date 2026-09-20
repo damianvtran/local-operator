@@ -385,3 +385,55 @@ def _absent_anchor(trust: Any, uid: Any) -> Any:
         reason="pinned absent by the test",
         exists=False,
     )
+
+
+def test_the_revoke_receipt_states_the_window_it_actually_honours(
+    paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """N-1 and M-5: the two copy facts the revoke verb owes an operator.
+
+    N-1 — the receipt ("a session already running picks it up within 30s") is the
+    ONE place the propagation window is stated to a human, and it was asserted by
+    nothing. It is also the sentence a reader can check against behaviour, so the
+    assertion is against the CONSTANT the runtime enforces rather than the digit
+    30: the runtime used to carry its own literal (agent round 7, M-2), which is
+    exactly how a product ends up quoting a window it does not honour.
+
+    M-5 — the pre-install path (the default state) said only "no operator anchor on
+    this machine to record a revocation in" and named no remedy, two lines below a
+    sentence that had just gained one. Measured on the real CLI: rc 1 on a
+    staged-but-not-installed host, i.e. the state every reader of the pairing docs
+    is in.
+    """
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import trust
+    from local_operator.operator.pair_handlers import describe_devices
+    from local_operator.operator.trust import ANCHOR_REFRESH_S
+    from local_operator.session.runtime import server as server_module
+
+    root = _config()
+    _, point = _phone_point()
+    device_id = devices.new_device_id(point)
+
+    def installed(uid: Any = None) -> Any:
+        return _installed_anchor(trust, root, uid)
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+
+    # M-2's binding, asserted where both names are in hand: the window the receipt
+    # quotes is the window the runtime enforces, because it is the same object.
+    assert server_module._ANCHOR_REFRESH_S == ANCHOR_REFRESH_S
+
+    assert describe_devices(_args(revoke=device_id, print_only=True)) == 0
+    receipt = capsys.readouterr().out
+    assert f"within {int(ANCHOR_REFRESH_S)}s" in receipt, receipt
+    assert "Revocation lives in the anchor" in receipt, receipt
+
+    # (b) NO USABLE ANCHOR: the message names the step that ends that state.
+    monkeypatch.setattr(trust, "load_anchor", lambda uid=None: _absent_anchor(trust, uid))
+    monkeypatch.setattr(operator_pkg, "load_anchor", lambda uid=None: _absent_anchor(trust, uid))
+    assert describe_devices(_args(revoke=device_id, print_only=True)) == 1
+    refusal = capsys.readouterr().err
+    assert "lop operator install" in refusal, refusal
+    assert "no installed operator anchor" in refusal, refusal

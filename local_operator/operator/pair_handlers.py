@@ -268,7 +268,12 @@ def describe_devices(args: argparse.Namespace) -> int:
 
     if revoke:
         if not _stage_anchor_with_revocation(root, revoke):
-            print("no operator anchor on this machine to record a revocation in", file=sys.stderr)
+            print(
+                "no installed operator anchor to record a revocation in — run "
+                "`lop operator install` on this machine first (the anchor `lop operator "
+                "init` staged is not trusted until it is installed)",
+                file=sys.stderr,
+            )
             return 1
         devices.record_revocation(root, revoke)
         code = install_anchor(root, print_only=bool(getattr(args, "print_only", False)))

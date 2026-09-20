@@ -187,11 +187,24 @@ def loosening_is_authorised(*, source: str, gate_is_here: bool) -> bool:
 #: write from outside this session") rather than the author, because the
 #: emitting process cannot know who wrote the file, and in the attached-pane
 #: case the person reading it is the one who just clicked the row (design round
-#: 1, D3). ``/approvals auto`` is the route that does loosen the gate.
+#: 1, D3).
+#:
+#: ...AND ITS LAST CLAUSE HAD SURVIVED THE REVISION THAT DELETED THAT REMEDY FROM
+#: EVERY OTHER SENTENCE (QA round 7, Q7-1). It sent the reader to "the terminal or
+#: app window that started this session", which is wrong twice under revision 2: an
+#: attached pane, the desktop app and a paired phone all loosen a live gate with one
+#: gesture, and for a background-started runtime the named window does not exist at
+#: all. `/approvals auto` typed in the session whose gate this is does adopt the file
+#: without a prompt; anything else needs the operator, and the sentence now names the
+#: same levers the refusal family does. The class is pinned shut by
+#: ``tests/unit/harness/test_approval_authority.py::test_no_shipped_notice_names_a_
+#: window_remedy``, which inventories every notice constant rather than this
+#: sentence — a fourth one cannot slip through.
 LOOSENING_REFUSED_NOTICE = (
     "keeping tool approvals: ask — config.yml now says auto, but a write from outside "
-    "this session cannot loosen it; type /approvals auto in the terminal or app window "
-    "that started this session"
+    "this session cannot loosen it; /approvals auto adopts it here, or needs the "
+    "operator's consent from this machine (Touch ID), your paired phone, or an app "
+    "window attached to it"
 )
 
 
@@ -680,9 +693,10 @@ CARD_APPROVAL_REFUSED_NOTICE = (
 #: The one action that DOES work from wherever the reader is (deny) stays named, because it
 #: is the same fact on both hosts; what changes is that the remedy is not reachable yet.
 CARD_APPROVAL_REFUSED_UNCONFIGURED_NOTICE = (
-    "this approval is still waiting: only the operator can allow it, and operator authority "
-    "is not installed on the machine running the session, so this cannot be signed yet — run "
-    "`lop operator install` there (one privileged step). Denying it works from here."
+    "this approval is still waiting: only the operator can allow it, but operator authority "
+    "is not installed on the machine running the session yet, so nothing there can check a "
+    "signature — run `lop operator install` on it (one privileged step). Denying it works "
+    "from here."
 )
 
 
