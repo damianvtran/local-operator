@@ -785,7 +785,14 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         return
     for line in sessions.lines:
         if line.state == "wedged":
-            glyph, ink = WEDGED_MARKER, "danger"
+            # The glyph follows ``WEDGED_MARKER`` (imported at the top) and the
+            # ink is ``warning``, not ``danger``: the state is "the owner has not
+            # reported", not "something broke". This is the same row the sidebar
+            # draws, so the two surfaces must not disagree about it — and this
+            # panel's own header already words it "not answering", with the
+            # caveat below it spelling out that the counts are as of the last
+            # heartbeat.
+            glyph, ink = WEDGED_MARKER, "warning"
         elif line.is_self:
             glyph, ink = ATTACHED_MARKER, "muted"
         elif line.busy or line.leaving:
