@@ -381,8 +381,8 @@ uv pip install -e ".[all,dev]" --python .venv/bin/python
 ### Scoping the inner loop, and the whole-tree triggers that stop it
 
 `scripts/ci_scope.py --run` decides at JOB granularity; the fourth section of
-that module narrows the *local* commands of three of those jobs at FILE
-granularity. What each one becomes for a diff of one changed module:
+that module narrows the *local* commands of FOUR of those jobs — `lint`,
+`type-check`, `test`, `tui-e2e` — at FILE granularity. What each one becomes for a diff of one changed module:
 
 | job | whole tree | scoped |
 |---|---|---|
@@ -432,8 +432,13 @@ reads. Named barriers:
 * the trees the GRAPH parses are wider than the trees the suite imports: a gate reads
   `benchmarks/osworld_v2_adapter/**`, so those files are parsed too (they are
   `ANALYZED_TREES`, and a change inside the covered trees can break them). Leaving
-  them out made "complete for what this change can break" false for 20 files, 8 of
-  them importers of `local_operator.*` (#1322 QA round 1, Q-1).
+  them out made "complete for what this change can break" false for 20 files, 9 of
+  them importers of `local_operator.*` (9 files across 8 modules; #1322 QA round 1,
+  Q-1; re-derived here — the round-1 grep did not descend into `providers/`). The list is
+  literal, not derived from pyright's own file set, and one analyzer file is still
+  outside it (`extension/scripts/generate-icons.py`, which imports nothing of ours) —
+  a new top-level tree that imports `local_operator` reopens the class until it is
+  named in `ANALYZED_TREES`.
 * a selection over **25% of the suite's measured weight** or **50% of its test
   files** (`tests/durations.json` supplies the weights; an unreadable manifest
   holds the file arm to the weight fraction rather than loosening it), or a
@@ -450,7 +455,7 @@ rather than quoting them forward.
 
 **Where it pays, and what the fail-closed rule costs — measured, not assumed.**
 This suite's tests import the assembled app, so **88% of `local_operator/**` is
-inside the boot closure** (443 of its 503 modules) and a change there is a barrier
+inside the boot closure** (452 of its 512 modules) and a change there is a barrier
 by construction. What is left, and what survives the unresolved-reference rule:
 
 | job | narrows for | whole-tree when |
@@ -478,8 +483,12 @@ the whole gate's file count (measured on this fleet: flake8 49 s + black 137 s +
 isort 25 s whole-tree against 1 s + 14 s + 1 s over a two-file change). The realised
 `type-check` win is the large one and it is measured end to end: **838.5 s whole-tree
 against 16.0 s scoped** on a change whose file list is 14 files (QA round 1's
-measurement, on this fleet). The graph build is the price of admission for any
-non-barrier diff — **55-93 s** here for ~1600 files, which is why `lint` is decided
+measurement, on this fleet — load-affected, as every wall time here is: the host sat at
+200-373 during it, and the same round's whole-tree pyright read 269 s against the 508 s
+recorded elsewhere in this section). The graph build is the price of admission for any
+non-barrier diff — an envelope rather than a number, because the same tree reads
+**37.9 s** on one run and **52.7 s** on another here at load average 370, with earlier
+readings up to 93 s, which is why `lint` is decided
 before the graph is built at all and why the report prints the graph's own timing. Do
 not read the class table below as a claim that pytest narrows here.
 
@@ -521,7 +530,7 @@ subtree is selected instead, which is the scope pytest itself gives it.
 **A glob is a reader, and reads have the same edge.**
 `tests/unit/tui/test_visual_gallery.py` iterates `(ROOT / "scripts").glob("*.py")`
 and `tests/unit/tui/test_visual_capture.py` the same directory through a
-variable, so in the REFERENCE MODEL a one-token change to any of the 197 covered
+variable, so in the REFERENCE MODEL a one-token change to any of the 201 covered
 `scripts/*.py` selects both — before the scan edge it selected NOTHING and the
 local run printed `all selected gates passed` while CI's `test` job failed (QA
 round 2, Q-1; the variable-held reader was round 3's blocker, printed but not
