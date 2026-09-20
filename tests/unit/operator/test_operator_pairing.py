@@ -19,6 +19,7 @@ anchor root, and ``--yes`` rather than a terminal prompt.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from collections.abc import Iterator
@@ -287,3 +288,100 @@ def test_devices_lists_paired_and_pending_and_stages_a_revocation(
     # ...and the certificate is gone from the store immediately, so the refusal is
     # true even on a host whose anchor has not caught up.
     assert devices.read_device(root, paired_id) is None
+
+
+def test_the_pairing_receipt_does_not_promise_authority_this_host_lacks(
+    paired_machine: OperatorAnchor, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """UX round 6, U2: the receipt has to agree with the refusal about the same fact.
+
+    Measured before this fix, in the default state between `lop operator init`
+    (which only STAGES the anchor) and `lop operator install` (the privileged step
+    that lands it): `lop pair` printed "The phone can now approve parked cards and
+    loosen a running gate" — and every signature that phone then sent was refused,
+    because the runtime has no key to verify against. Two surfaces, one fact, two
+    answers, and the optimistic one came first.
+
+    Both halves are asserted, because a receipt that hedged on a host WITH an anchor
+    would be the same defect mirrored.
+    """
+    from local_operator.operator import operator_authority_unusable, trust
+    from local_operator.operator.pair_handlers import dispatch
+
+    root = _config()
+    assert dispatch(_args(code_only=True)) == 0
+    _, point = _phone_point()
+    device_id = _claim(root, point)
+    capsys.readouterr()
+
+    # (1) NO USABLE ANCHOR: the receipt names the step that would change that.
+    import local_operator.operator as operator_pkg
+
+    # BOTH NAMES, and the reason is worth stating: the runtime's cache reads
+    # `trust.load_anchor` (its own module global), while `operator_authority_unusable`
+    # — the predicate the receipts consult — reads the name `local_operator.operator`
+    # imported from it. Patching one and not the other is how a test ends up
+    # asserting the two ends of the same question in different worlds.
+    def absent(uid: Any = None) -> Any:
+        return _absent_anchor(trust, uid)
+
+    monkeypatch.setattr(trust, "load_anchor", absent)
+    monkeypatch.setattr(operator_pkg, "load_anchor", absent)
+    assert operator_authority_unusable() is True
+    assert dispatch(_args(device=device_id)) == 0
+    captured = capsys.readouterr().out
+    assert "lop operator install" in captured, captured
+    assert "The phone can now approve parked cards" not in captured, captured
+    # The certificate is still installed: the receipt is about what the phone can
+    # DO, not about whether the machine recorded it (which the refusal's copy and
+    # `lop operator status` both handle).
+    assert devices.read_device(root, device_id) is not None
+
+    # (2) A SECOND DEVICE ON A HOST WITH ITS ANCHOR USABLE: the promise is true,
+    # and made. The root-owned fact is supplied at the same read seam, because the
+    # real anchor is a root-owned file this suite cannot create — the fixture's
+    # staged one is the real anchor the product writes, reported as installed.
+    def installed(uid: Any = None) -> Any:
+        return _installed_anchor(trust, root, uid)
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+    assert operator_authority_unusable() is False
+    _, second = _phone_point()
+    second_id = _claim(root, second, name="second")
+    capsys.readouterr()
+    assert dispatch(_args(device=second_id)) == 0
+    captured = capsys.readouterr().out
+    assert "The phone can now approve parked cards" in captured, captured
+    assert "lop operator install" not in captured, captured
+
+
+def _installed_anchor(trust: Any, root: Path, uid: Any) -> Any:
+    """The staged anchor, reported the way an INSTALLED one is.
+
+    The same seam ``_absent_anchor`` uses, in the other direction: the file is the
+    one ``lop operator init`` really stages, parsed by the real parser, and only the
+    root-owned INSTALL fact is supplied — which is the one thing a test cannot
+    create without ``sudo`` and a password prompt on the operator's screen.
+    """
+    body = json.loads(trust.staging_path(root).read_text())
+    parsed = trust.OperatorAnchor.from_json(body)
+    assert parsed is not None
+    return trust.AnchorLoad(
+        anchor=parsed,
+        path=trust.anchor_path(uid),
+        root_owned=True,
+        reason="ok",
+        exists=True,
+    )
+
+
+def _absent_anchor(trust: Any, uid: Any) -> Any:
+    """An ``AnchorLoad`` for a host that has no usable anchor, without touching disk."""
+    return trust.AnchorLoad(
+        anchor=None,
+        path=trust.anchor_path(uid),
+        root_owned=False,
+        reason="pinned absent by the test",
+        exists=False,
+    )
