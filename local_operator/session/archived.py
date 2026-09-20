@@ -205,7 +205,11 @@ def archive_change(config_dir: Path, session_id: str, archived: bool) -> tuple[b
             return False, []
         entries = [item for item in current if item != session_id]
     evicted = entries[ARCHIVED_LIMIT:]
-    _write_archived(directory, entries)
+    if not _write_archived(directory, entries):
+        # Nothing changed on disk, so nothing was evicted EITHER — reporting the
+        # ids the slice computed would promise a revocation of the archive that
+        # did not happen (review round 2, NIT-2).
+        return archived, []
     return archived, evicted
 
 
@@ -235,8 +239,16 @@ def eviction_clause(evicted: Sequence[str]) -> str:
     )
 
 
-def _write_archived(directory: Path, entries: list[str]) -> None:
+def _write_archived(directory: Path, entries: list[str]) -> bool:
     """Replace the archive file with ``entries``, capped, atomically, best-effort.
+
+    RETURNS WHETHER THE REPLACE LANDED, so a caller that reports a CONSEQUENCE of
+    the write can stay honest about it (review round 2, NIT-2): the eviction
+    clause promised the oldest conversation "is listed again" on a config root
+    this process cannot write, where the file never changed. The STATE echo stays
+    the caller's desired state — that is the pin route's contract and a client
+    re-reads the listing — but a sentence about what happened to the FILE has to
+    be conditional on the file having happened.
 
     THE SINGLE WRITE PATH, so the cap and the atomic replace cannot be lost by a
     verb that prepared its own list — the defect ``sidebar_pins._write_pins``
@@ -263,3 +275,5 @@ def _write_archived(directory: Path, entries: list[str]) -> None:
             raise
     except OSError:
         logger.debug("could not record the archived session", exc_info=True)
+        return False
+    return True

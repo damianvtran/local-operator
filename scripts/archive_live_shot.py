@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -80,19 +79,27 @@ def _seed(root: Path) -> list[subprocess.Popen[bytes]]:
     ONE LIVE RECORD PER PID, because the registry is keyed by pid (``publish``
     writes ``<pid>.json``): two records from one process overwrite each other and
     the second live row silently vanishes, which is a fixture that would have
-    "proved" the fix by never rendering the defect. This process supplies one
-    record; a helper ``sleep`` supplies the other, and its pid is alive for the
-    whole capture, which is what ``registry.classify`` reads as ``live``. A
-    synthetic pid would classify ``stale`` and ``decorate_rows`` drops those as
-    "no record".
+    "proved" the fix by never rendering the defect.
+
+    **EVERY LIVE ROW GETS ITS OWN HELPER, never this process's pid** (review
+    round 2, MINOR-1). The first version used ``os.getpid()`` for one row, and
+    that is the pid the app it drives publishes its OWN discovery record under
+    during boot (``RecordPublisher``), so the row the frame exists to show was
+    overwritten and a re-run of this script reproduced the AFTER list on a
+    pre-fix tree — an evidence artifact that cannot reproduce what the PR quotes,
+    which is the same defect class as the empty-commit probe. Helper pids are
+    alive for the whole capture (which is what ``registry.classify`` reads as
+    ``live``) and nothing else in the run publishes under them; a synthetic pid
+    would classify ``stale``, and ``decorate_rows`` drops those as "no record".
+    Both helpers are reaped by :func:`main`.
     """
     helpers: list[subprocess.Popen[bytes]] = []
     mark_store(root / "sessions")
     from local_operator.session.runtime.registry import publish
     from local_operator.session.runtime.types import SessionRecord
 
-    live_pids = [os.getpid()]
-    for _ in range(sum(1 for row in ROWS if row[3]) - 1):
+    live_pids: list[int] = []
+    for _ in range(sum(1 for row in ROWS if row[3])):
         helpers.append(
             subprocess.Popen(["sleep", "120"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         )
@@ -121,7 +128,7 @@ def _seed(root: Path) -> list[subprocess.Popen[bytes]]:
             # A real discovery record: ``publish`` stamps the heartbeat and the
             # pid is a live process, so ``registry.classify`` reads it as
             # ``live`` — nothing here is a hand-set field.
-            publish(
+            record = publish(
                 SessionRecord(
                     pid=live_pids[live_index],
                     kind="tui",
@@ -135,6 +142,7 @@ def _seed(root: Path) -> list[subprocess.Popen[bytes]]:
                 ),
                 root,
             )
+            print(f"  record {session_id} -> {record.name} (pid {live_pids[live_index]})")
             live_index += 1
     return helpers
 

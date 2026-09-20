@@ -203,6 +203,28 @@ def _wake(tmp_path: Path, session_id: str) -> Path:
     return path
 
 
+def _dormant_wake(tmp_path: Path, session_id: str) -> Path:
+    """The entry ``/stop`` leaves: schedules kept, ``stopped_at`` stamped.
+
+    Written through the same call the stop path makes — ``write_entry`` with
+    ``preserve`` carrying the marker (see ``control._mark_wakes_dormant``) — so
+    the fixture is the shape the product writes rather than a hand-built file
+    that could agree with a wrong idea of what dormancy is.
+    """
+    from local_operator.wakes.store import write_entry
+
+    schedule = {"id": "w1", "message": "check the parser fix", "next_due_at": 4_102_444_800_000}
+    path = write_entry(
+        tmp_path,
+        session_id,
+        cwd=str(tmp_path),
+        schedules=[schedule],
+        preserve={"stopped_at": 1_700_000_000_000},
+    )
+    assert path is not None
+    return path
+
+
 def _mail(directory: Path) -> None:
     (directory / "inbox.jsonl").write_text('{"from":"peer"}\n', encoding="utf-8")
 
@@ -366,24 +388,19 @@ def test_the_pin_and_archive_stores_report_nothing_for_a_deleted_session(
 
 
 def test_the_wake_entry_is_pruned_when_the_deletion_happens(tmp_path: Path) -> None:
-    """Unreachable while the wake guard holds, and still done.
+    """A deleted session's wake entry goes with it.
 
-    The guard is one config write away from being bypassed by hand, and a wake
-    entry whose session is gone is an index pointing at nothing. Stubbed at the
-    guard so the prune is what is under test rather than the refusal above it.
+    REACHABLE since UX round 1 (U2), and that is why this no longer stubs the
+    guard: a DORMANT entry (the ``stopped_at`` marker ``/stop`` leaves) does not
+    refuse, so the real path removes the directory AND drops the index entry. An
+    entry whose session is gone is an index pointing at nothing — the `lop wake`
+    ghost row.
     """
-    from local_operator.session import cleanup
-
     _store(tmp_path)
     _session(tmp_path, A)
-    entry = _wake(tmp_path, A)
+    entry = _dormant_wake(tmp_path, A)
 
-    original = cleanup._has_wake
-    cleanup._has_wake = lambda config_dir, session: False
-    try:
-        assert delete_session(tmp_path, A, actor="test").deleted is True
-    finally:
-        cleanup._has_wake = original
+    assert delete_session(tmp_path, A, actor="test").deleted is True
 
     assert not entry.exists()
 
@@ -399,3 +416,134 @@ def test_a_stale_search_cache_entry_is_inert_after_a_deletion(tmp_path: Path) ->
 
     assert A not in build_index(tmp_path, [A, B])
     assert build_index(tmp_path, [A]) == {}
+
+
+# ---------------------------------------------------------------------------
+# The wake guard asks whether a wake can FIRE (UX round 1, U1 and U2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dormant_wake_does_not_block_the_delete(tmp_path: Path) -> None:
+    """A wake the product has put to sleep is not pending work (UX U2).
+
+    The guard used to ask whether the entry FILE exists, and `/stop` never deletes
+    one — it stamps ``stopped_at``, which the supervisor skips in every path it
+    has. So a conversation in which the user had ever set a reminder became
+    permanently undeletable from the moment they stopped it: `/delete` was refused
+    with a sentence about a wake that cannot fire, and the two-step flow the design
+    record documents as reachable (`/stop`, then `/delete`) was refused too.
+
+    On the head this test was written against, this call returns
+    ``deleted=False`` with "That conversation has a wake armed for it." — the
+    marker is what discriminates, and the armed case below is the control.
+    """
+    _store(tmp_path)
+    _session(tmp_path, A)
+    _dormant_wake(tmp_path, A)
+
+    outcome = delete_session(tmp_path, A, actor="test")
+
+    assert outcome.deleted is True, outcome.refusal
+    assert not (tmp_path / "sessions" / A).exists()
+
+
+def test_an_armed_wake_still_refuses_and_names_a_remedy_that_exists(tmp_path: Path) -> None:
+    """The other half of U2, plus U1's copy.
+
+    An ARMED entry is a schedule that will fire, so it is genuinely pending work
+    and the delete stays refused. What UX round 1 (U1) found is that the sentence
+    named an action with no door: the composer offers no wake command, the wake
+    band has no cancel, and `lop wake`'s own copy says there is no cancel. The
+    sentence must name the two actions that DO exist — ask the conversation, or
+    delete the index entry file, the same remedy the CLI's ghost row names.
+    """
+    _store(tmp_path)
+    _session(tmp_path, A)
+    _wake(tmp_path, A)
+
+    outcome = delete_session(tmp_path, A, actor="test")
+
+    assert outcome.deleted is False
+    assert "has a wake armed for it" in outcome.refusal
+    assert "wakes/<session-id>.json" in outcome.refusal, outcome.refusal
+    assert "Cancel the wake" not in outcome.refusal, (
+        "that action has no surface reachable from the terminal that printed the "
+        "sentence: " + outcome.refusal
+    )
+    assert (tmp_path / "sessions" / A).is_dir()
+
+
+def test_an_unreadable_wake_entry_keeps_the_session(tmp_path: Path) -> None:
+    """FAIL CLOSED, which is the property the rename could have lost.
+
+    The dormancy check reads and parses the entry, so a file that cannot be parsed
+    is a file whose state is unknown — and a guard that answered "not armed" there
+    would delete a conversation that may have a live schedule. ``store.read_entry``
+    is deliberately not used for this: it treats an unreadable file as absent for
+    display's sake.
+    """
+    _store(tmp_path)
+    _session(tmp_path, A)
+    _wake(tmp_path, A).write_text("{not json at all", encoding="utf-8")
+
+    outcome = delete_session(tmp_path, A, actor="test")
+
+    assert outcome.found is True
+    assert outcome.deleted is False
+    assert "has a wake armed for it" in outcome.refusal, outcome.refusal
+    assert (tmp_path / "sessions" / A).is_dir()
+
+
+def test_the_unread_mail_refusal_names_how_to_read_them(tmp_path: Path) -> None:
+    """UX U4: "read them" named no way to read them.
+
+    The spool drains once, at open (``inbox.drain_inbox``), and no command reads
+    another conversation's inbox — so reopening that conversation IS the action,
+    and the sentence has to say so.
+    """
+    _store(tmp_path)
+    victim = _session(tmp_path, A)
+    _mail(victim)
+
+    outcome = delete_session(tmp_path, A, actor="test")
+
+    assert outcome.deleted is False
+    assert "Reopen it to read them" in outcome.refusal, outcome.refusal
+
+
+def test_the_delete_sentence_names_the_conversation_by_title(tmp_path: Path) -> None:
+    """Design round 1 (D2): the rehearsal named a handle that is not on screen.
+
+    The id resolves, but the screen the rehearsal is typed into shows the model and
+    the cwd — the id appears only as a dim column inside ``/resume``. So the one
+    check a rehearsal exists to enable ("is this the conversation I mean?") had
+    nothing to check against, and in the round-1 frame the fixture's id rendered as
+    the word ``sess``, reading as a truncation. The label leads with the title.
+    """
+    from local_operator.resume import write_session_title
+    from local_operator.session.cleanup import session_label
+
+    _store(tmp_path)
+    directory = _session(tmp_path, A)
+    write_session_title(
+        directory, "Parser crash on nested frontmatter", user_set=True, past_names=[]
+    )
+
+    assert session_label(directory) == f"“Parser crash on nested frontmatter” ({A})"
+
+    outcome = delete_session(tmp_path, A, actor="test", dry_run=True)
+    assert outcome.label == f"“Parser crash on nested frontmatter” ({A})"
+
+
+def test_a_conversation_with_no_title_is_named_as_this_conversation(tmp_path: Path) -> None:
+    """No title means no guessed title — the lists name it nothing either.
+
+    ``Untitled conversation`` would be a name the user never chose and cannot
+    search for; the id is the only handle that exists, so it stays.
+    """
+    from local_operator.session.cleanup import session_label
+
+    _store(tmp_path)
+    directory = _session(tmp_path, A)
+
+    assert session_label(directory) == f"this conversation ({A})"

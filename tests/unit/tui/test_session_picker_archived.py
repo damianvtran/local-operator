@@ -24,6 +24,9 @@ the flag is pinned in ``tests/unit/session/test_archive_listings.py``.
 from __future__ import annotations
 
 import pytest
+from rich.color import Color
+from rich.style import Style
+from rich.text import Text
 
 from local_operator.resume import SessionRow
 from local_operator.tui.widgets.session_picker import (
@@ -208,3 +211,84 @@ async def test_the_revealed_rows_are_searchable_by_name_like_any_other() -> None
             await pilot.press(char)
         await pilot.pause()
         assert [row.id for row in screen.visible_rows] == ["second"]
+
+
+# ---------------------------------------------------------------------------
+# The two treatments design round 1 asked for (D3 ink, D5 hover)
+# ---------------------------------------------------------------------------
+
+
+def _as_style(value: str | Style | None) -> Style:
+    """Normalise a ``Text.style`` / span style, which may be a str or a Style."""
+    return Style.parse(value) if isinstance(value, str) else (value or Style())
+
+
+def _span_style(text: Text, needle: str) -> Style:
+    """The style actually painted on ``needle`` inside a composed ``Text``."""
+    index = text.plain.index(needle)
+    span = next(s for s in text.spans if s.start <= index < s.end)
+    return _as_style(text.style) + _as_style(span.style)
+
+
+def _painted_hex(colour: Color | None) -> str | None:
+    """A rich ``Color`` as the hex string this suite compares against."""
+    return None if colour is None or colour.triplet is None else colour.triplet.hex
+
+
+@pytest.mark.asyncio
+async def test_the_marker_is_painted_in_the_ink_that_explains_a_row() -> None:
+    """D3: `dim` measures 3.43:1 dark / 2.72:1 light on the row ground — under AA.
+
+    This file's own body-match note rejects those numbers for a mark that explains
+    a row, and the archive mark is exactly that: while the toggle is on it is the
+    only thing saying a row is not offered by default. So it takes `muted` (6.51:1
+    / 5.18:1) while the age and the id keep `dim` as lookup keys.
+    """
+    from local_operator.tui import theme as theme_mod
+
+    app = _PickerHost(_rows())
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        await pilot.press("ctrl+a")
+        await pilot.pause()
+
+        # Compared as the painted hex, the way this suite's other colour checks
+        # are (`test_analytics_mouse`): a `Color` never equals a hex string.
+        style = _span_style(screen._results_text(), ARCHIVE_MARKER.strip())
+        assert _painted_hex(style.color) == theme_mod.semantic_color("muted")
+        assert _painted_hex(style.color) != theme_mod.semantic_color("dim")
+
+
+@pytest.mark.asyncio
+async def test_hovering_the_toggle_line_paints_it_like_a_hovered_row() -> None:
+    """D5: the whole line is the hit box, so the whole line has to say so.
+
+    Rows get a `tint-select` ground under the pointer; the toggle is a control with
+    the same hit box and had no hover state at all, so the mouse path was invisible
+    until it was used. The ground is padded to the pane for the reason the rows are
+    — a highlight that stops at the last word reads as emphasis on the text rather
+    than as "this line is the target".
+    """
+    from local_operator.tui import theme as theme_mod
+
+    app = _PickerHost(_rows())
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await app.open_picker()
+        await pilot.pause()
+        body = screen.query_one(RESULTS)
+
+        await pilot.hover(body, offset=(4, 0))
+        await pilot.pause()
+        assert screen._toggle_hovered is True
+        hovered = screen._toggle_line_text()
+        assert _painted_hex(_as_style(hovered.style).bgcolor) == theme_mod.semantic_color(
+            "tint-select"
+        )
+        assert len(hovered.plain) == screen._usable(), "the ground covers the line"
+
+        # A row below it is not the toggle, and the ground goes with the pointer.
+        await pilot.hover(body, offset=(4, 1))
+        await pilot.pause()
+        assert screen._toggle_hovered is False
+        assert _as_style(screen._toggle_line_text().style).bgcolor is None

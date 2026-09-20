@@ -32,7 +32,8 @@ new durable flag on a session that was not previously addressable cross-surface.
   in the confirmation a user reads BEFORE the act, because a receipt is the wrong
   place to learn the blast radius of something irreversible.
 * **A delete is refused for a session that is in use**, with a sentence naming
-  the guard (a live claim or lease, an armed wake, unread spooled mail, or a
+  the guard (a live claim or lease, an ARMED wake — a dormant one does not
+  guard, see below — unread spooled mail, or a
   guard that could not be read), because each has a different remedy.
 
 ## 2. Storage
@@ -135,7 +136,7 @@ same call the automatic path makes). The pin store, the archive store and the
 search cache need nothing: the first two prune at read, and the cache is keyed by
 ids a caller lists.
 
-**The LIVE row is the second place the predicate is asked.** A session directory
+**The LIVE row is the place the REGISTRY path asks the predicate.** A session directory
 the scan cannot rank (no transcript, no inbox — a conversation whose owner is
 running but which has not been written to yet) is re-added to the catalogue from
 the RUNTIME REGISTRY by `catalog.decorate_rows(include_live=True)`. That walk
@@ -149,6 +150,38 @@ just archived from inside it (QA round 1, Q1).
 `{"code": "session_delete_refused", "message": "<the sentence>"}` — the code is
 the machine contract, the sentence names the remedy, and a client that rendered
 only the code would have to invent four remedies itself.
+
+**Every sentence names an action the user can actually take.** UX round 1 found
+two that did not, and the correction is recorded here because it is a rule and not
+a copy edit:
+
+* The ARMED-WAKE sentence said "cancel the wake before deleting it", and there is
+  no cancel surface in the terminal that prints it — the composer has no wake
+  command, the wake band has no cancel action, and `lop wake`'s own copy says
+  there is no cancel (the CLI's ghost row names the entry FILE for the same
+  reason, round 3 D20). It now names the two doors that exist: ask the
+  conversation (the model-facing `wake` tool cancels by schedule id) or delete
+  `wakes/<session-id>.json`, in the relative form the CLI already uses.
+* The UNREAD-MAIL sentence said "read them" without saying where. The spool drains
+  once, at open (`inbox.drain_inbox`), and no command reads another conversation's
+  inbox, so reopening that conversation IS the action and the sentence says so.
+
+**A DORMANT wake does not guard (UX round 1, U2).** The guard asks whether a wake
+can FIRE, not whether the entry file exists. `/stop` deliberately keeps the
+schedules — it stamps `stopped_at` on the derived index entry, and the supervisor
+skips those entries in every path it has (the due scan, the delivery
+reconciliation, `_next_wake_ms`) with its own comment that the wakes "stay armed
+but do not fire until the user reopens it". A guard that read existence therefore
+made any conversation with a reminder permanently undeletable from the moment the
+user stopped it, including through the two-step flow this record documents as the
+reachable one — a marker that cannot fire is not pending live work, and the
+invariant this guard protects is that nothing which can STILL happen is silently
+destroyed. Reopening clears `stopped_at` (`wakes/store.write_entry`'s `clear`
+argument), so a later delete of that same conversation is refused again while the
+schedule is armed: nothing the user can still receive is lost without a refusal.
+An entry that cannot be PARSED still refuses — the dormancy read fails closed, and
+`store.read_entry` is deliberately not used for it (it treats an unreadable file
+as absent for display's sake).
 
 ## 5. Surfaces
 
@@ -174,13 +207,22 @@ rather than routed to the session's runtime owner — `/stop`'s classification, 
   (review round 1, MAJOR-1). The refusal sentence is unchanged and still accurate;
   what changed is that carrying it out now works.
 
-* **TUI.** `/archive` (acts on the current session, receipt names the way back),
+* **TUI.** `/archive` (acts on the current session, receipt names the way back,
+  and that receipt is PLAIN TEXT naming the picker's chord — no markdown backticks,
+  the only sentence in the family that had them, and `(ctrl+a)` beside the toggle
+  it names so a keyboard user need not open the picker to learn the key: design
+  round 1 D4, UX U3/U5),
   `/unarchive` (offered ONLY while the current session is archived, filtered out
   of the suggestion list; typed when it does not apply it answers with a sentence
   rather than silence), `/delete` (typed confirmation: bare `/delete` is a
   rehearsal that reports exactly what the real one would remove, `/delete yes`
   performs it; the picker paints the row as dangerous and one Enter only fills
-  the word). A successful delete of the current session lands the app on a fresh
+  the word). The rehearsal names the conversation the way the lists do — the
+  TITLE first, the id in parentheses — because the id alone is not on the screen
+  the sentence is typed into (the band carries the model and the cwd; the id is a
+  dim column inside `/resume`), and the question a rehearsal exists to answer is
+  "is this the conversation I mean?" (design round 1, D2). A successful delete of
+  the current session lands the app on a fresh
   conversation, because the one it was standing on no longer exists — reachable
   from an attached viewer as `/stop` then `/delete yes`, and from any viewer whose
   session is not held by a live owner directly. A viewer attached to an owner
@@ -193,9 +235,15 @@ rather than routed to the session's runtime owner — `/stop`'s classification, 
 * **`/resume` picker.** Archived rows are excluded from the list and from search;
   an `Archived (N)` toggle at the top of the list pane reveals them, is
   **clickable** as well as reachable by `ctrl+a`, and is drawn **only when the
-  store actually holds an archived conversation**. Revealed rows carry an
-  `[archived]` mark, and the column's cells are reserved for the whole result set
-  so the mark does not rag the name column. The reveal filters on the row's NAME
+  store actually holds an archived conversation**. The line takes the same
+  `tint-select` hover ground a row does — the whole line is the hit box, so the
+  whole line says so before it is clicked (design round 1, D5). Revealed rows carry
+  an `[archived]` mark painted `muted`, not the `dim` the age and the id use: `dim`
+  measures 3.43:1 dark / 2.72:1 light on this card's row ground, under AA, and
+  this widget's own body-match note rejects those numbers for a mark that EXPLAINS
+  a row — which is what the marker is while the toggle is on (design round 1, D3).
+  The column's cells are reserved for the whole result set so the mark does not rag
+  the name column. The reveal filters on the row's NAME
   and ID only, never its body — the picker's filter was never a body search for
   any session (the body digest index is built for the search surfaces), so the
   toggle reveals a POPULATION rather than changing how filtering works. The
@@ -232,6 +280,15 @@ rather than routed to the session's runtime owner — `/stop`'s classification, 
   accept is not a conversation the store can hide.
 * **No undo for delete.** It is a removal; the guards and the confirmation are the
   whole of the protection, and nothing is kept on the side.
+* **The picker's OPENING TRANSIENT is a pre-existing defect and is NOT fixed
+  here.** The list pane is composed once, against the box it has at that moment,
+  and only a keystroke recomposes it (`_repaint` is the only caller of
+  `_results.update`), so the first frame after `/resume` paints names truncated to
+  a narrower pane than the one that settles and stays that way until the user
+  presses a key. Reproduced on the base commit as well as here, so it is not this
+  feature's blocker — but the frames in this PR are captured AFTER two cursor moves
+  for exactly this reason (design round 1, D1), and the defect is recorded in the
+  PR as its own finding rather than absorbed into this one.
 * **The archive is capped at 200 conversations, and reaching the cap puts the
   OLDEST one back in every list.** `ARCHIVED_LIMIT` bounds the file by dropping
   its oldest entry, so archiving a 201st conversation makes the first one

@@ -580,10 +580,11 @@ def decorate_rows(
     ADDS: a live record the scan did not carry is skipped when the archive store
     holds its id, unless the caller asked for archived rows — and when it is
     added it carries the store's own ``archived`` answer. It is not a filter over
-    ``rows``, which the caller has already filtered; this is the second place the
-    predicate has to be asked, because the registry knows nothing about archives
-    (QA round 1, Q1 — see the ``if include_live`` block for the failure that
-    motivated it).
+    ``rows``, which the caller has already filtered; this is the site the
+    REGISTRY path reaches, and the caller's own filters (the scan's predicate,
+    the desktop-marker loop, the hidden layer) are the others — the registry
+    knows nothing about archives, which is why one predicate in the scan was not
+    enough (QA round 1, Q1; see the ``if include_live`` block).
 
     Two reads for the whole list: the discovery records say which sessions
     are running, working, attached or not answering, and the wake index says
@@ -661,9 +662,9 @@ def decorate_rows(
         from local_operator.resume import is_user_session
         from local_operator.session.archived import archived_ids
 
-        # THE ARCHIVE PREDICATE APPLIES TO THE LIVE ROWS TOO, and this is the
-        # second place it has to be asked rather than the one place it is
-        # documented (QA round 1, Q1). A live record the scan did not carry is
+        # THE ARCHIVE PREDICATE APPLIES TO THE LIVE ROWS TOO, and this is one of
+        # the places it has to be asked — not the one place it is documented
+        # (QA round 1, Q1). A live record the scan did not carry is
         # appended from the REGISTRY, which knows nothing about archives — so an
         # archived conversation that happens to be running was re-added here with
         # `archived` left at the dataclass default, and both listings that go

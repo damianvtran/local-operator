@@ -16,7 +16,9 @@ on:
   previous release has: no toggle row at all.
 
 `ARCHIVED=0` in the environment produces that last state from the same script, so
-the three frames are the same code path with one input changed.
+the three frames are the same code path with one input changed, and
+``THEME=<palette>`` renders any of them in another palette (``THEME=light`` for
+the paper ramp).
 
 THE SCRIPT RUNS ON THE PRE-FEATURE TREE TOO, which is what makes the before/after
 pair honest: ``set_archived`` is imported tolerantly, so a worktree checked out at
@@ -89,6 +91,11 @@ async def main() -> None:
         cols, rows = sys.argv[2].split("x")
         size = (int(cols), int(rows))
     reveal = "reveal" in sys.argv[2:]
+    #: ``THEME=<palette name>`` renders the same store in that palette (``light``
+    #: is the paper ramp). Every frame this PR shipped was dark, and the archive
+    #: mark's ink is exactly the kind of choice that has to be looked at on paper
+    #: too — D3 was measured in both themes before it was fixed.
+    theme = os.environ.get("THEME", "")
 
     root = Path(config_dir())
     _seed(root)
@@ -115,9 +122,26 @@ async def main() -> None:
             if app.screen.__class__.__name__ == "SessionPickerScreen":
                 break
         await pilot.pause()
+        if theme:
+            from local_operator.tui import theme as theme_mod
+
+            theme_mod.set_theme(theme)
+            app.refresh_css()
+            await pilot.pause()
         if reveal:
             await pilot.press("ctrl+a")
             await pilot.pause()
+        # SETTLE THE LIST BEFORE CAPTURING (design round 1, D1). The pane is
+        # composed once, against the box it has at that moment, and a keystroke is
+        # what recomposes it (`_repaint` is the only caller of `_results.update`).
+        # Without this, the frame under test is the picker's OPENING TRANSIENT —
+        # names truncated to the transient pane width — and a hidden/revealed pair
+        # is not comparable, because the reveal frame was settled only by accident
+        # (`ctrl+a` is itself a keypress). Two cursor moves, net zero, recompose at
+        # the settled width and leave the selection where it was.
+        await pilot.press("down")
+        await pilot.pause()
+        await pilot.press("up")
         await pilot.pause()
         save_capture(app, out)
 

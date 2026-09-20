@@ -30,7 +30,7 @@ import pytest
 
 from local_operator.session.archived import ARCHIVED_LIMIT, read_archived
 from local_operator.tui.app import OperatorApp
-from local_operator.tui.widgets.command_picker import PickerMode
+from local_operator.tui.widgets.command_picker import ArgumentChoice, PickerMode
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
 from tests.unit.tui.test_app_pilot import (
@@ -427,3 +427,88 @@ async def test_reaching_the_cap_names_the_conversation_put_back_in_the_lists(
         assert f"at most {ARCHIVED_LIMIT}" in receipt, receipt
         assert read_archived(root)[0] == SESSION
         assert filled[-1] not in read_archived(root)
+
+
+# ---------------------------------------------------------------------------
+# What the sentences say (design round 1 D2/D4/D6, UX round 1 U3/U5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_rehearsal_names_the_conversation_by_title(root: Path) -> None:
+    """Design round 1 (D2): the id is not the handle that is on the screen.
+
+    The rehearsal is typed into a screen whose status band carries the model and
+    the cwd; the id appears only as a dim right-hand column inside ``/resume``. So
+    a rehearsal that named only the id asked the user to confirm the destruction of
+    something they could not see — and in the round-1 frame the fixture's id
+    rendered as the word ``sess``, reading like a truncation. The title leads, the
+    id stays in parentheses because it is what resolves.
+    """
+    from local_operator.resume import write_session_title
+
+    write_session_title(
+        root / "sessions" / SESSION,
+        "Parser crash on nested frontmatter",
+        user_set=True,
+        past_names=[],
+    )
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/delete")
+
+        rehearsal = _notices(app)
+        assert "Parser crash on nested frontmatter" in rehearsal, rehearsal
+        assert f"({SESSION})" in rehearsal, rehearsal
+        assert (root / "sessions" / SESSION).is_dir(), "still a rehearsal"
+
+
+@pytest.mark.asyncio
+async def test_the_archive_receipt_is_plain_text_and_names_the_chord(root: Path) -> None:
+    """UX U3 / design D4 (backticks) and UX U5 (the chord).
+
+    The receipt was the only sentence in the family that printed markdown — two
+    cells of punctuation that mean nothing in a terminal — and it is the one a user
+    reads when a conversation leaves every list, so it is the last place to spend
+    them. It also names the picker's control by a chord the picker's own first line
+    has always shown, so a keyboard user does not have to open the picker to learn
+    the key.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/archive")
+
+        receipt = _notices(app)
+        assert "`" not in receipt, receipt
+        assert "(ctrl+a)" in receipt, receipt
+
+
+@pytest.mark.asyncio
+async def test_the_delete_confirmation_row_fits_its_warning_whole(root: Path) -> None:
+    """Design round 1 (D6): the row cut the operative noun mid-word.
+
+    ``yes | delete this conversation and its tran… | cannot be undone`` truncates
+    the word that names what is destroyed — the transcript — on the row whose whole
+    job is to slow a finger down. The replacement is short enough to paint whole at
+    the standard width, which is what this asserts rather than its spelling.
+    """
+    from tests.unit.tui.test_command_picker import _argument_picker
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        editor = app.query_one(Editor)
+        editor.text = "/delete"
+        editor.cursor_location = (0, len("/delete"))
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+
+        [suggestion] = editor._picker.suggestions()
+        choice = suggestion[1]
+        assert isinstance(choice, ArgumentChoice), choice
+        painted = _argument_picker([choice]).render_rows(100)[0].plain
+        assert "…" not in painted, painted
+        assert choice.description in painted, painted
