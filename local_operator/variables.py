@@ -64,8 +64,10 @@ from typing import Literal
 # dragging a session or a provider layer in behind it.
 from local_operator.redaction_shapes import (
     ShapeHit,
+    ShapeReport,
     is_registerable_component,
     scrub_secrets_with_hits,
+    shape_report,
 )
 
 #: Environment variables only surface to the agent when opted in with this
@@ -520,8 +522,17 @@ class VariableStore:
         scrubbed, _ = self.redact_with_hits(text)
         return scrubbed
 
-    def redact_with_hits(self, text: str) -> tuple[str, list[str]]:
-        """:meth:`redact`, plus the LABELS of the shapes that fired.
+    def redact_with_report(self, text: str) -> tuple[str, ShapeReport]:
+        """:meth:`redact`, plus the CLASSIFICATION of everything the shape pass found.
+
+        The richer sibling of :meth:`redact_with_hits`, and the reason it exists:
+        the session's incident path has to say whether the value reached the
+        model's context or was contained before it, and a bare list of labels
+        cannot express that — it names the shapes whose mask was whole, which is
+        precisely the CONTAINED set, while the compromise is the hit that left
+        readable material behind. Two views of one pass, so they cannot disagree:
+        the notice's wording comes from ``labels``, its severity from
+        ``reached_model``.
 
         Labels only, never values: the caller of this is the session's incident
         path, which puts what happened in the transcript, and a notice that
@@ -533,18 +544,26 @@ class VariableStore:
         """
         scrubbed, hits = scrub_secrets_with_hits(text, self.redaction_values())
         if not hits:
-            return scrubbed, []
+            return scrubbed, ShapeReport()
         self._register_shape_hits(hits)
-        # Containment takes EVERY hit; the NOTICE takes only the complete ones.
-        # A hit whose credential is still partly readable is a rotation ticket the
-        # operator would act on by NOT rotating — the fault `_only_fully_masked`
-        # exists to prevent — while the value it matched is exactly what the
-        # session should still contain.
-        ordered: dict[str, None] = {}
-        for hit in hits:
-            if hit.complete:
-                ordered.setdefault(hit.label, None)
-        return scrubbed, list(ordered)
+        # Containment takes EVERY hit (above, unconditionally); the REPORT takes
+        # only the complete ones as nameable labels, plus the exposure flag that
+        # separates "masked whole" from "part of it is in the model's context".
+        # ``shape_report`` is the one place that judgement is made, so this view
+        # and the escalated one can never disagree about what fired.
+        return scrubbed, shape_report(hits)
+
+    def redact_with_hits(self, text: str) -> tuple[str, list[str]]:
+        """:meth:`redact`, plus the LABELS of the shapes that were contained whole.
+
+        The narrower view, kept for the surfaces that only need to name what was
+        masked — and for a store whose caller is older than
+        :meth:`redact_with_report`. A caller that has to classify the hit reads
+        that one instead: this list is exactly the contained set, so treating it
+        as "what was found" would silently drop the compromise case.
+        """
+        scrubbed, report = self.redact_with_report(text)
+        return scrubbed, list(report.labels)
 
     #: How many DETECTED components one session may register. A bound, not a
     #: budget: every registration is a value the exact-value pass scans for in

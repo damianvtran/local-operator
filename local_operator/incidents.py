@@ -929,44 +929,97 @@ def format_credential_message(
     )
 
 
-def format_shape_incident_message(tool: str, labels: "list[str]", summary: str = "") -> str:
+def format_shape_incident_message(
+    tool: str,
+    labels: "list[str]",
+    summary: str = "",
+    *,
+    reached_model: bool = True,
+) -> str:
     """Render the credential-SHAPE notice injected into the model's context.
 
     The counterpart to the shape pass in :mod:`local_operator.redaction_shapes`,
     and the reason it is its own formatter rather than a
-    :func:`classify_incident` category: nothing FAILED. A tool returned a
-    credential in a shape the table recognises, the harness masked it before the
-    model could read it, and the only jobs this text has are to say so (so the
-    model does not reason about a value it cannot see, or re-run the command
-    hoping for a different result) and to make the event visible to the operator.
+    :func:`classify_incident` category: nothing FAILED. A tool carried a
+    credential in a shape the table recognises, the harness handled it, and the
+    jobs this text has are to say what happened (so the model does not reason
+    about a value it cannot see, or re-run the command hoping for a different
+    result) and to make the event visible to the operator.
+
+    **Two classifications, and only one of them is an emergency.**
+
+    A credential is COMPROMISED when a value reaches the model's context window:
+    that text is journaled in plaintext, replays into later requests, and may end
+    up in training data, and none of that can be undone by anyone here — so the
+    operator has to rotate the credential, and that is the escalated text. That
+    case is the one where readable credential material survives in the text the
+    model reads — which is NOT always a mask that fell short, because a rule can
+    preserve a run by design (the DSN rule keeps its userinfo username, so
+    ``amqp://guest:guest@…`` reads back the password as the username) — and it is
+    carried in by ``reached_model``.
+
+    Everything else is CONTAINED. A value that reached `bash` (in a command's
+    ``argv``, in a child's environment), that lived in this process's memory, or
+    that was written to a file in plaintext is NOT compromised: the model never
+    saw it, so there is nothing to rotate. The event is still reported — a
+    credential in a tool's arguments is how it gets written to a file, and an
+    operator who is never told cannot tidy up — but what the notice asks for is
+    cleanup, not rotation: delete any plaintext copy, and do it WITHOUT reading
+    it, because reading it is what would turn the contained case into the
+    escalated one. The wording is deliberately SURFACE-NEUTRAL about where the
+    masking happened: the same notice serves a credential in a tool's OUTPUT, one
+    TYPED INTO a call's arguments — where the tool did run with the real value and
+    the containment is in the copy this session stores and replays — and one found
+    by the history-scrub path, and a claim that named the wrong surface would be
+    false in two of the three (agent review R1, finding 2).
+
+    Whether a plaintext copy exists at all is not knowable from here — the value can
+    reach this notice from a command's own text, which the history-scrub path masks
+    through the same formatter — so the cleanup obligation is stated conditionally
+    rather than dropped: it is the one action this path has.
 
     ``labels`` are shape NAMES, never values — a notice that carried the
     credential would be the leak it exists to report. The summary is the one the
     harness built, already scrubbed and bounded.
 
-    The last sentence is the point of the whole path: the operator has to rotate
-    the credential. Today a miss is discovered by accident, from a transcript,
-    weeks later; this row is what turns it into a ticket.
+    ``reached_model`` defaults to True — the escalated reading — because a caller
+    that cannot classify must not make the quieter claim.
     """
     shapes = ", ".join(labels) if labels else "credential-shaped content"
     tool_name = tool or "a tool"
     where = f" The call was: {summary}." if summary else ""
-    # "was about to reach you ... and was masked" rather than "the result
-    # carried": the same notice serves a credential in a tool's OUTPUT and one
-    # TYPED INTO a call's arguments, and only the first of those is a result.
-    # A notice that misnamed the surface would send an operator looking in the
-    # wrong place.
-    # The FIRST row carries the action. The row is six lines in the card and the
-    # head is all most readers take: it used to open with the mechanism (``a
-    # credential in a shape the harness recognises (dsn-password)``), which put
-    # "rotate it" in the fourth line. The bracketed head stays — the harness's
-    # notice-row rules key on it, and a row that paints as the user's own words
-    # would be worse than a jargon-first one.
+    # "reached you ... and was masked" rather than "the result carried": the same
+    # notice serves a credential in a tool's OUTPUT and one TYPED INTO a call's
+    # arguments, and only the first of those is a result. A notice that misnamed
+    # the surface would send an operator looking in the wrong place.
+    # The bracketed head stays in both texts — the harness's notice-row rules key
+    # on "[credential redaction] " (``harness/rows.py``), and a row that painted as
+    # the user's own words would be worse than a jargon-first one.
+    if reached_model:
+        # The CAUSE has to be true in both directions the escalation covers. The
+        # `amqp` DSN case masks its password whole and still escalates, because the
+        # DSN rule keeps the userinfo username by design and an operator who used
+        # one string for both leaves the value readable there — so "could not be
+        # fully masked" named a mechanism this notice cannot prove, and this
+        # module's doctrine is that an unprovable claim is worse than silence
+        # (agent review R2, finding 1). What the check measured is stated instead:
+        # the value is readable in the text the model gets, by either route, and
+        # the notice does not pick one it cannot distinguish. The rotate
+        # instruction is untouched — it is the reason the wording exists.
+        return (
+            f"[credential redaction] rotate it — a credential ({shapes}) reached "
+            f"{tool_name} and its value is readable in this session's context: "
+            f"either the mask did not cover it fully, or it survives in the text "
+            f"another way.{where} A value that reached the model may be in "
+            "training data, so treat it as compromised: the operator has to rotate "
+            "it. Do not re-run the command to read the value."
+        )
     return (
-        f"[credential redaction] rotate it — a credential ({shapes}) reached "
-        f"{tool_name} and was masked before you saw it.{where} Treat it as "
-        "compromised: the operator has to rotate it. Do not re-run the command to "
-        "read the value; it is contained for the rest of this session."
+        f"[credential redaction] a credential ({shapes}) reached {tool_name} and "
+        f"was masked before you saw it.{where} Nothing entered your context — the "
+        "value was masked before it reached you, so there is no exposure. If the "
+        "call wrote it to a file in plaintext, delete that file without reading it "
+        "(rm -f): reading it is not needed and is not to be done."
     )
 
 
