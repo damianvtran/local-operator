@@ -175,6 +175,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Renames one landed file WITHIN that same quarantine directory to its "
         "content-corrected name; both sides are direct children of it",
     ),
+    # The same quarantine, reached from `browser_files` itself — the two additions
+    # the operator's decision needs and PR A did not have. The proof is a BRANCH,
+    # not an assumption: `intake_landed` refuses `is_within(source, config_dir())`
+    # BEFORE any of these calls, so a source can never be a session directory (or
+    # anything else under the config root), and the destination is composed by
+    # `session_dir()` as `<config_dir>/browser/downloads/<stamp>-<session8>/`, a
+    # SIBLING of `sessions/`. Same reasoning, one level down: the unlink removes
+    # the ENTRY the host named (never a resolved target — review round 1's R1) and
+    # the move relocates the file the browser wrote into the user's own download
+    # directory, which is outside the config root by definition.
+    (
+        "local_operator/browser_files.py::_unlink_entry",
+        "os.unlink",
+        "Removes the single entry intake refused; every caller runs after the "
+        "config-root refusal, so the path cannot be under sessions/",
+    ),
+    (
+        "local_operator/browser_files.py::intake_landed",
+        "shutil.move",
+        "Relocates one landed file into <config_dir>/browser/downloads/<stamp>-<session8>/ "
+        "(a sibling of sessions/); the source is outside the config root by the same branch",
+    ),
     (
         "local_operator/tui/session_drafts.py::SessionDraftStore._write",
         "os.replace",

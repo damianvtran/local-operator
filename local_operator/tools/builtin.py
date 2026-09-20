@@ -8914,10 +8914,17 @@ BROWSER_ACTIONS = (
     "tabs",
     # File transfer. `upload` is served by BOTH non-cmux hosts (it needs only the
     # tab-scoped CDP session they already hold); `download` is served by the
-    # desktop app's host only, because Chrome refuses an extension the
-    # browser-level commands that would let it choose a destination — see
-    # EXTENSION_CANNOT_SERVE, and the extension host answers with a typed
-    # capability refusal that names where to go instead of failing obscurely.
+    # desktop app's host and, from extension 0.1.19, by the extension itself
+    # through `chrome.downloads` — Chrome refuses a tab-scoped debugger session
+    # the CDP primitives that would let an extension choose a destination
+    # (design §17.1), so the extension's file lands in the user's own download
+    # directory and the harness moves it into quarantine afterwards (§11.5 R7).
+    # On an extension host BOTH methods additionally need the operator's own
+    # switch (protocol.CAPABILITY_SWITCH_LABEL): `download` also needs the
+    # optional `downloads` permission, and `upload` has no permission at all, so
+    # its switch is the only control that direction has. A switched-off
+    # capability is refused with copy that names the switch, a build that cannot
+    # serve it with copy that names the update.
     # Both are ACTIONS so they ride the same schema, approval tier and dispatch as
     # everything else, and both are in CMUX_UNSUPPORTED_BROWSER_ACTIONS below.
     "download",
@@ -11532,8 +11539,44 @@ async def _browser_download(
         for item in (result.get("files") or [])
         if isinstance(item, dict) and item.get("name")
     }
+    # The extension host cannot write into `directory` (Chrome refuses it a
+    # download path outside the user's own download directory — §17.5), so what it
+    # landed is relocated HERE, before the before/after diff below runs: every
+    # later step (classification, the content-earned rename, the 0600 mode, the
+    # audit rows) then treats an extension download exactly like an app-host one,
+    # which is the point — the harness is the judge on both hosts.
+    intake = files.intake_landed(result.get("files") or [], directory, page_origin=origin)
+    refused_intake: list[str] = []
+    for entry in intake.refused:
+        # The same two words every other refusal uses, from the same function: a
+        # cancelled transfer, an uncorroborated path and a name already in the
+        # session all have to say what happened to the entry (review round 2, N7).
+        word, trail = _disposition_outcome(entry.disposition)
+        refused_intake.append(f"{entry.name}: {word} — {entry.reason}")
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name=entry.name,
+            path="",
+            verdict="deny",
+            reason=f"{entry.reason}; {trail}",
+            redact=True,
+        )
     landed = files.snapshot(directory)
     candidates = sorted(name for name in landed if name not in before)
+    if not candidates and refused_intake:
+        # Nothing is in the quarantine directory and the reason is known, so the
+        # generic "nothing started" sentence would be a lie about a call that
+        # watched a transfer fail. The refusals are the answer, and they are what
+        # the audit rows above already recorded.
+        return _error(
+            tool_call_id,
+            "browser",
+            "nothing was saved: " + "; ".join(refused_intake) + ".",
+        )
     if not candidates:
         wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
         _download_audit(
@@ -11555,7 +11598,7 @@ async def _browser_download(
         )
 
     kept: list[dict[str, Any]] = []
-    refused: list[str] = []
+    refused: list[str] = list(refused_intake)
     # Artifacts whose 0600 mode could not be set (Linux has no `lchmod`, so a
     # symlink ENTRY is never settable there). Reported rather than implied.
     unhardened: list[str] = []
@@ -12010,6 +12053,35 @@ def _delete_outcome(removed: bool) -> tuple[str, str]:
     if removed:
         return "refused and deleted", "the entry was removed"
     return "refused, NOT deleted", "the entry could NOT be removed — it is still on disk"
+
+
+def _disposition_outcome(disposition: str) -> tuple[str, str]:
+    """What happened to a refused ENTRY, for every outcome intake can report.
+
+    FOUR outcomes, not two (round-1 Q2). "We could not remove it" and "we chose
+    to leave it" are different facts, and a third is that there was nothing to
+    remove — which the two-word vocabulary spelled as "could NOT be removed — it is
+    still on disk", in the same sentence as "already gone", about an entry that had
+    never been there. A deliberate decision read as a failure, too: the file was
+    left because it was never ours to delete.
+
+    Keyed on the VALUE `browser_files` reports rather than on a boolean, so a later
+    outcome cannot be silently collapsed into one of these four.
+    """
+    # Imported here rather than at module scope, matching every other
+    # `browser_files` use in this module: the alias is what keeps this file's import
+    # graph from dragging the browser layer into a process that only wants tools.
+    from local_operator import browser_files as files
+
+    return {
+        files.DELETED: ("refused and deleted", "the entry was removed"),
+        files.KEPT: ("refused, left in place", "the entry was left where it is, on purpose"),
+        files.FAILED: (
+            "refused, NOT deleted",
+            "the entry could NOT be removed — it is still on disk",
+        ),
+        files.ABSENT: ("refused, nothing to remove", "there was no entry to remove"),
+    }.get(disposition, ("refused", "the outcome of that entry is unknown"))
 
 
 def _unlink_quietly(path: Path) -> bool:

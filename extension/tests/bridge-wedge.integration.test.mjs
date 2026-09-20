@@ -451,9 +451,10 @@ test("X1 an undrivable page is a typed, actionable failure AND prunes the surfac
 // --- Worker-level rows: E6, E8, X2 ----------------------------------------
 
 /** Load worker.ts against a fake socket the test can drive. */
-async function loadWorker({ sendMessage, aliasTabGroups = null } = {}) {
+async function loadWorker({ sendMessage, aliasTabGroups = null, extraOverrides = {} } = {}) {
   const handles = installChrome({
     overrides: {
+      ...extraOverrides,
       runtime: {
         getURL: (path) => `chrome-extension://test/${path}`,
         getManifest: () => ({ version: "0.1.12" }),
@@ -1045,5 +1046,65 @@ test("a dropped cosmetic write is followed by one reconcile from the queue as it
     release(); await flushPerformance();
     t.mock.timers.reset();
     await module.close();
+  }
+});
+
+/* A REJECTED RE-ANNOUNCE MUST NOT SURFACE AS AN UNHANDLED REJECTION (round-3 m5).
+ *
+ * The two `chrome.permissions` listeners call `announceCapabilities()`, which awaits
+ * `storedSwitch` — a call that goes through the API deadline, so it can REJECT. A
+ * bare `void announceCapabilities()` hands that rejection to the runtime, where a
+ * Chrome event handler turns it into `Uncaught (in promise)` in the extension's
+ * console: exactly the defect `fireAndForget`'s own docstring records, and one this
+ * PR re-introduced and then fixed.
+ *
+ * Pinned rather than trusted, because the fix is one word: reverting it to the bare
+ * form leaves the rest of this suite green, and this test is the only thing that goes
+ * red (verified by doing exactly that before committing).
+ */
+test("a rejected capability re-announce does not escape as an unhandled rejection", async () => {
+  const rejections = [];
+  const onRejection = (reason) => rejections.push(reason);
+  process.on("unhandledRejection", onRejection);
+  try {
+    const listeners = { removed: [], added: [] };
+    const worker = await loadWorker({
+      extraOverrides: {
+        permissions: {
+          onRemoved: { addListener: (fn) => listeners.removed.push(fn) },
+          onAdded: { addListener: (fn) => listeners.added.push(fn) },
+        },
+        // The shape that makes the rejection, and NARROWED to the one key: a
+        // storage read that fails for the switch makes `storedSwitch` reject, which
+        // is what the announce inherits — while port and token still read normally,
+        // because a worker that cannot read those never opens a socket and this test
+        // would then be measuring the wrong thing (it did, first run).
+        storage: {
+          local: {
+            get: async (keys) => {
+              const list = Array.isArray(keys) ? keys : [keys];
+              if (list.includes("allowDownloads")) throw new Error("storage unavailable");
+              return {};
+            },
+            set: async () => {},
+          },
+        },
+      },
+    });
+    assert.equal(listeners.removed.length, 1, "the worker registered an onRemoved listener");
+    assert.equal(listeners.added.length, 1, "the worker registered an onAdded listener");
+
+    listeners.removed.forEach((fn) => fn({ permissions: ["downloads"] }));
+    listeners.added.forEach((fn) => fn({ permissions: ["downloads"] }));
+    await tick(30);
+
+    assert.deepEqual(
+      rejections.map((reason) => String(reason)),
+      [],
+      "a rejected announce must be contained by `fireAndForget`, not handed to the runtime",
+    );
+    assert.ok(worker.socket, "the worker still holds its socket after the rejection");
+  } finally {
+    process.removeListener("unhandledRejection", onRejection);
   }
 });
