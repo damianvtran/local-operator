@@ -58,9 +58,19 @@ bounding only ``arguments`` would leave the large string on the wire untouched.
 Both fields are rewritten together so the two views cannot disagree.
 
 Left alone: images (bounded by ``imaging.py`` and the compaction frame shed),
-``is_error`` results (an error's text is its signal, and it is short in
-practice), and the message list's shape — no message is ever removed or
-reordered, because every provider rejects a tool call whose result is missing.
+and the message list's shape — no message is ever removed or reordered,
+because every provider rejects a tool call whose result is missing.
+
+An ``is_error`` result IS bounded, and an earlier revision of this docstring
+claimed the opposite ("an error's text is its signal, and it is short in
+practice"). That claim contradicts both the code — ``_bound_result`` has no
+``is_error`` arm — and this module's own test, which pins the bounded
+behaviour. The decision is to keep the bound and say so here: a clipped error
+still carries its ``is_error`` flag and the elision marker, so the signal
+survives, and an error result is not privileged over any other replay payload
+when the whole point is to bound what one turn re-sends. It is rare in
+practice (measured: 1 of 821 error rows exceeded the bound), which is why the
+wrong sentence went unnoticed rather than why it was right.
 """
 
 from __future__ import annotations
@@ -270,7 +280,11 @@ def _elided_copy(message: Message, **update: Any) -> Message:
 
     See the module docstring for why the id must differ. The rest of the message
     — role, tool pairing fields, usage, ``provider_payload`` — rides along
-    untouched, so the wire sees the same call/result structure it saw before.
+    untouched, so the wire still sees a well-formed call/result pair. The
+    PAYLOAD does not: the fields this module rewrites (a result's ``content``, a
+    call's ``arguments`` and ``raw_arguments``) are exactly the ones the wire
+    reads, so a bounded assistant row deliberately loses the provider-native
+    argument continuation. Pairing survives; content does not.
     """
     update["id"] = f"{message.id}{_ELIDED_ID_SUFFIX}"
     return message.model_copy(update=update)

@@ -105,6 +105,7 @@ from local_operator.harness.redaction import current_tool_source, set_shape_hit_
 # the renderer calls it and nothing outside needs it — so it is deliberately NOT
 # reachable from ``local_operator.session.session``.
 from local_operator.harness.render import _default_convert_to_llm, _is_todo_reminder
+from local_operator.harness.replay_bound import bound_replay_payloads
 from local_operator.harness.subagent import (
     SubagentModelUnavailable,
     read_effort_tier_selectors,
@@ -3653,7 +3654,18 @@ class Session:
         changes, _ = self._system_state_delta(desired)
         if changes:
             history.append(self._system_state_message(changes))
-        return blocks, self._render_history([*history, *turns])
+        # The ASIDE must be bounded by the same rule as the turn it runs beside,
+        # for two reasons that are really one. A helper or the compaction
+        # advisor is a second conversation request over the same transcript, so
+        # leaving it unbounded re-sends exactly the payload the turn just
+        # elided (measured: the same tool row was 8,190 chars on the turn and
+        # 123,780 here). And ``complete_aside`` is deliberately byte-identical
+        # to the turn so it READS THE TURN'S PROVIDER CACHE -- a bound applied
+        # at one site and not the other diverges them at the turn's LAST
+        # message, which is precisely where the cached prefix ends. Applying
+        # the same deterministic function to the same messages is what keeps
+        # the two identical; the turn's own seam is ``harness/loop.py``.
+        return blocks, bound_replay_payloads(self._render_history([*history, *turns]))
 
     @property
     def model(self) -> ModelSpec:

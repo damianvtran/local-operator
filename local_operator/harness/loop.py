@@ -2159,10 +2159,16 @@ class AgentLoop:
             # two reasons that are both correctness rather than taste. The
             # renderer hands out the transcript's own Message objects, so
             # eliding there would edit the durable record (see
-            # ``harness/replay_bound.py``); and this is the ONE site that builds
+            # ``harness/replay_bound.py``); and this is the main site that builds
             # the conversation request for every channel — TUI, desktop, exec,
             # mobile, SSE — so a bound placed here cannot be forgotten by a new
-            # front end. It deliberately does not touch compaction's own render
+            # front end. It is NOT the only such site, and the comment used to
+            # claim it was: a session's aside and its compaction advisor build
+            # their own ``ChatRequest`` from ``Session._read_only_prompt``, which
+            # applies the same bound for the same reason (see the note there —
+            # those two requests must stay byte-identical to this one so they
+            # read its provider cache). It deliberately does not touch
+            # compaction's own render
             # or the token estimators, which must keep seeing the transcript as
             # it is: the bound is a property of the request, not of the session.
             converted = bound_replay_payloads(converted)
