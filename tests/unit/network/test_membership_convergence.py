@@ -180,22 +180,33 @@ def _type_the_code(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _answer_confirmation(server: relay.RelayServer, *, timeout: float = 20.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+def _answer_confirmation(
+    server: relay.RelayServer, stop: threading.Event, answered: list[str], *, interval: float = 0.05
+) -> None:
+    """Answer the inviter's parked prompt for as long as the ceremony is running.
+
+    EVENT-DRIVEN, NOT CLOCK-DRIVEN, and that is the fix for a real failure rather than
+    a test convenience: this used to give up silently after 20 s, and when it did — a
+    loaded host starving the thread — the invite's human step ran on to its own expiry
+    and the ceremony ended with ``timeout``. A CORRECT REFUSAL REPORTED AS THE WRONG
+    ONE is worse than a slow test: the round-4 review measured it as
+    ``assert 'timeout' == 'device_id_conflict'`` in 2 runs of 5. Polling until the
+    caller says the ceremony is over means a slow host costs latency and nothing else.
+    """
+    while not stop.is_set():
         rows = server._ctl_pair_pending({})  # noqa: SLF001 — the CLI's own control op
-        if rows:
+        for row in rows:
             server._ctl_pair_confirm(  # noqa: SLF001
                 {
-                    "invite_id": rows[0]["invite_id"],
+                    "invite_id": row["invite_id"],
                     "decision": "admit",
                     "matched": True,
                     "reason": "",
                     "answered_by": "harness",
                 }
             )
-            return
-        time.sleep(0.05)
+            answered.append(str(row["invite_id"]))
+        stop.wait(interval)
 
 
 def _join(
@@ -204,13 +215,19 @@ def _join(
     inviter: Device,
     monkeypatch: pytest.MonkeyPatch,
     settings: relay.NetworkSettings | None = None,
+    confirm: bool = True,
 ) -> dict[str, Any]:
-    """The whole pairing: the inviter's human answered, the joiner's code typed.
+    """The whole pairing: the joiner's code typed, and optionally the inviter's human.
 
     ``LOCAL_OPERATOR_CONFIG_DIR`` is pointed at the JOINER's root for the call,
     because the joining half of the CLI resolves its config root from the ambient
     environment (that is how a user runs it) and would otherwise write the record
     into the isolated HOME instead of the device's own store.
+
+    ``confirm=False`` runs it with NOBODY at the inviting device at all. That is how a
+    refusal the inviter can decide LOCALLY is tested: it must arrive without a human
+    being asked, so a host that starves this process cannot turn it into the window's
+    expiry instead of the reason.
     """
     record = store.load(
         store.list_networks(inviter.root)[0].network_id, inviter.root
@@ -218,8 +235,15 @@ def _join(
     token, envelope = _mint_invite(inviter.server, record)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(device.root))
     _type_the_code(monkeypatch)
-    thread = threading.Thread(target=_answer_confirmation, args=(inviter.server,), daemon=True)
-    thread.start()
+    stop = threading.Event()
+    answered: list[str] = []
+    thread = threading.Thread(
+        target=_answer_confirmation,
+        args=(inviter.server, stop, answered),
+        daemon=True,
+    )
+    if confirm:
+        thread.start()
     try:
         args = Namespace(sas_stdin=True, verify=False, emit_sas=True, name=device.name, json=True)
         answer = net_cli._join_one(  # noqa: SLF001 — the CLI's own driver
@@ -240,7 +264,15 @@ def _join(
             relay_mod=relay,
         )
     finally:
-        thread.join(20)
+        stop.set()
+        if confirm:
+            thread.join(30)
+    # AN ADMITTED PAIRING WENT THROUGH THE HUMAN STEP: the local refusals bypass a
+    # question nobody needs to answer, and a legitimate join must not.
+    if confirm and isinstance(answer, tuple):
+        assert answered, "the pairing was admitted without a confirmation ever being parked"
+    # A join that failed at the transport gives back a SENTENCE, not a payload: fail
+    # with that sentence rather than with a KeyError on a dict that was never built.
     assert isinstance(answer, tuple), answer
     _lines, payload = answer
     return payload
@@ -556,12 +588,30 @@ def test_a_pairing_refusal_carries_the_sentence_and_the_remedy(
     assert store.load(record.network_id, a.root).is_burned(b.device_id)
 
     with pytest.raises(types.PairingRefusal) as excinfo:
-        _join(b, inviter=a, monkeypatch=monkeypatch)
+        # NO HUMAN ON THE INVITING DEVICE AT ALL, and no clock to outlive: whether this
+        # id is burned is a LOCAL fact the admitting device holds, so the refusal must
+        # arrive on its own. This is what makes the case robust under load — the round-4
+        # review measured `assert 'timeout' == 'device_id_conflict'` in 2 runs of 5 when
+        # the refusal waited behind a confirmation window (and it is why the listener now
+        # decides it before it asks: nobody should compare six digits for a pairing that
+        # cannot succeed).
+        started = time.monotonic()
+        _join(b, inviter=a, monkeypatch=monkeypatch, confirm=False)
+    elapsed = time.monotonic() - started
     sentence = excinfo.value.sentence
     assert excinfo.value.code == "device_id_conflict"
     assert b.device_id in sentence, sentence
     assert "identity rotate" in sentence, sentence
     assert "does not restore a removed member" in sentence, sentence
+    # The refusal did not wait on the invite's confirmation window (180 s here).
+    assert elapsed < 60.0, f"the refusal took {elapsed:.1f}s, which is a window expiring"
+    # AND NOBODY WAS ASKED: the inviter parked no prompt for this refusal. Exactly one
+    # confirmation was parked in this test — the admitted pairing above — so a burned
+    # joiner reaching the human step (which is what the round-4 review caught, via its
+    # expiry) shows up here as a second one.
+    events = _events(a)
+    assert events.count("pairing_awaiting_confirmation") == 1, events
+    assert "pairing_refused" in events, events
 
     # AND THE REMEDY WORKS: a fresh identity is admitted, with a fresh invite.
     new_identity, _old = identity.rotate(b.root)

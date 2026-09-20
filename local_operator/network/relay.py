@@ -682,6 +682,44 @@ def members_digest_of(record: NetworkRecord) -> str:
     return wire.hex64(wire.sha256(wire.canonical_json(payload)))
 
 
+def membership_conflict(record: NetworkRecord, device_id: str, public_key: str = "") -> str:
+    """The sentence a member list refuses with, or ``""`` when it would not refuse.
+
+    ONE OWNER, because this refusal is raised from TWO places now: the pair listener
+    decides it before it asks a human (see ``_run_pair_listener``), and :func:`admit`
+    is the last line of defence for every other path that can reach an admission
+    (a rotation's member list, a test harness, a future caller). Two copies of the
+    sentence would be free to drift, and the sentence is the operator's remedy —
+    `device_id_conflict` alone names nothing (QA round 3, Q-R3-3).
+
+    Two refusals, and the reasons they are refusals and not merges:
+
+    * **A burned id.** ``removed_ids`` is forever (R5): re-admitting a removed device
+      would make revocation a temporary state an attacker can wait out.
+    * **A conflicting id.** The same ``device_id`` presented with a DIFFERENT public
+      key: an id is a name, and two keys claiming one name is either a collision or
+      an attack, and neither may be absorbed silently. This is also why the id is not
+      authority — the key is.
+    """
+    if record.is_burned(device_id):
+        return (
+            f"{device_id} was removed from this network; a burned id is never admitted "
+            "again, however the invite is minted"
+        )
+    existing = record.member(device_id)
+    if (
+        existing is not None
+        and public_key
+        and existing.public_key
+        and existing.public_key != public_key
+    ):
+        return (
+            f"{device_id} is already a member with a different public key; the member "
+            "list refuses to reinterpret an id"
+        )
+    return ""
+
+
 def admit(
     record: NetworkRecord,
     *,
@@ -700,27 +738,17 @@ def admit(
 ) -> MemberRecord:
     """Write a member row, refusing the two cases a member list must never absorb.
 
-    * **A burned id.** ``removed_ids`` is forever (R5): re-admitting a removed
-      device would make revocation a temporary state an attacker can wait out.
-    * **A conflicting id.** The same ``device_id`` presented with a DIFFERENT
-      public key (``device_id_conflict``): an id is a name, and two keys claiming
-      one name is either a collision or an attack, and neither may be absorbed
-      silently. This is also why the id is not authority — the key is.
+    The refusals themselves live in :func:`membership_conflict` — one owner for the
+    sentence, because the pair listener applies the same rule before it asks a human.
+    This function is the last line of defence: every admission path that is not the
+    pair ceremony (a rotation's member list, a harness, a future caller) still has to
+    pass through here.
     """
     moment = time.time() if now is None else now
-    if record.is_burned(device_id):
-        raise MeshRefusal(
-            "device_id_conflict",
-            f"{device_id} was removed from this network; a burned id is never admitted "
-            "again, however the invite is minted",
-        )
+    conflict = membership_conflict(record, device_id, public_key)
+    if conflict:
+        raise MeshRefusal("device_id_conflict", conflict)
     existing = record.member(device_id)
-    if existing is not None and existing.public_key and existing.public_key != public_key:
-        raise MeshRefusal(
-            "device_id_conflict",
-            f"{device_id} is already a member with a different public key; the member list "
-            "refuses to reinterpret an id",
-        )
     if existing is None:
         existing = MemberRecord(device_id=device_id)
         record.members.append(existing)
@@ -4473,6 +4501,24 @@ class RelayServer:
                 raise PairingRefusal("sas_mismatch", "the transcribed code did not match")
             # The SAS check is mutual and local: this device's own derivation is the
             # only thing it compares against, which is why a peer cannot echo it.
+            #
+            # A REFUSAL THIS DEVICE CAN ALREADY DECIDE IS DECIDED HERE, BEFORE A HUMAN
+            # IS ASKED. Whether this joiner's id is burned, and whether it is claiming
+            # an id this record already holds under another key, are LOCAL facts: the
+            # record is in hand and the joiner has been named since the handshake.
+            #
+            # WHY THE POSITION MATTERS (measured, round-4 review): discovering it after
+            # the human step made a CORRECT refusal depend on the confirmation window —
+            # on a loaded host the same burned-joiner test came back as `timeout` in 2
+            # runs of 5, because no confirmation landed inside the window and the
+            # listener then refused with the window's expiry instead of with the reason
+            # it was always going to refuse with. It also asked an operator to compare
+            # six digits for a pairing that could not succeed. The sentence is
+            # :func:`admit`'s (one owner), and this branch consumes the invite exactly
+            # as every other refusal does.
+            conflict = membership_conflict(record, joiner_id, joiner_key)
+            if conflict:
+                raise PairingRefusal("device_id_conflict", conflict)
             decision = self._inviter_human_step(
                 record=record,
                 invite_id=invite_id,
