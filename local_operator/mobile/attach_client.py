@@ -106,7 +106,16 @@ RETIRING_REASON = "owner retired for a newer build"
 #: session untouched, and one connection unbound. The frame that carries it
 #: (``bind_failed``) is additive — an older client ignores an unknown op and
 #: reports exactly what it reported before.
-BIND_FAILED_REASON = "owner could not prepare the session's interface"
+#:
+#: THE SENTENCE CARRIES THE TWO THINGS THE OTHER REASONS LEAVE IMPLICIT, and it
+#: has to, because this one is the only reason whose truth is the OPPOSITE of
+#: what the neighbouring string says: ``"owner exited"`` is the default this
+#: replaces, so a reader who has learned that class of sentence will assume the
+#: session is gone unless told otherwise. Hence the liveness clause, and hence a
+#: remedy in the shape this module's refusal copy uses (``"owner returned no
+#: fork; retry /fork"``): a bare cause leaves the person with a dead socket and
+#: nothing to do. Review round 3, UX U3.
+BIND_FAILED_REASON = "owner could not prepare this view; the session is alive — reconnect to retry"
 
 #: Maximum bytes in one frame. Must equal the server's ``_MAX_LINE_BYTES``:
 #: the writer refuses to exceed it and the reader refuses to read past it, so
