@@ -20,6 +20,8 @@ from local_operator.harness.message_types import (
     HUB_MESSAGE_TYPE,
     SESSION_CREDENTIAL_MESSAGE_TYPE,
     SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+    SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
     SESSION_MODEL_SWITCH_MESSAGE_TYPE,
     TODO_REMINDER_MESSAGE_TYPE,
 )
@@ -3999,15 +4001,16 @@ async def test_dispose_does_not_suppress_the_turns_own_flush(tmp_path):
 def test_paired_prefix_is_not_defeated_by_a_custom_message_in_the_tail():
     """A persistable ``CustomMessage`` must not shield an unanswered assistant.
 
-    ``journal_incident`` appends straight to the live context and
+    ``journal_mcp_unavailable`` appends through ``_append_or_park_journal`` and
     ``_on_mcp_incident`` fires it from a background task, so an MCP breaker
-    tripping mid-batch leaves ``[..., assistant(tool_calls), session_incident]``.
-    A tail scan that stopped at the first non-assistant entry declared that
-    legal and persisted the dangling ``tool_use`` beneath it — R1's corruption
-    through a narrower door (review round 2, R5).
+    tripping mid-batch can leave
+    ``[..., assistant(tool_calls), session_mcp_unavailable]``. A tail scan that
+    stopped at the first non-assistant entry declared that legal and persisted
+    the dangling ``tool_use`` beneath it — R1's corruption through a narrower
+    door (review round 2, R5).
 
     The custom itself is KEPT: it is real history, and dropping it would lose
-    the incident the model needs to see on resume.
+    the warning the model needs to see on resume.
     """
     answered = Message(role="assistant", content=[TextContent(text="A1")])
     answered.tool_calls = [ToolCall(id="c1", name="work", arguments={})]
@@ -4913,7 +4916,7 @@ async def test_mcp_recovery_renders_as_a_user_message(tmp_path):
     texts = "\n".join(getattr(m, "text", "") for m in rendered)
     assert "[mcp recovery] MCP server 'minerva-qa'" in texts
     assert "41 tools are available again" in texts
-    assert "supersedes the earlier session incident" in texts
+    assert "supersedes the earlier warning about this server" in texts
     await session.dispose()
 
 
@@ -4961,16 +4964,17 @@ async def _drain_journal_tasks(session: Session) -> None:
 
 @pytest.mark.asyncio
 async def test_incident_then_recovery_reaches_the_context_in_that_order(tmp_path):
-    """A recovery must never overtake the incident it exists to supersede.
+    """A recovery must never overtake the warning it exists to supersede.
 
     Both hooks are fire-and-forget through ``_spawn_background``, and they do
-    different amounts of work: ``journal_incident`` awaits a transcript write
-    before its live append, ``journal_mcp_recovery`` persists nothing. Without
-    the shared ``_journal_lock`` the recovery therefore finishes on its FIRST
-    scheduling step and lands ahead of the incident, leaving the model reading
-    "its tools are gone ... Do not call its tools" as the LAST word on the
-    server — precisely the state this notice exists to clear, now with a
-    superseding message that arrived too early to supersede anything.
+    different amounts of work: ``journal_mcp_unavailable`` awaits a transcript
+    write before its live append, ``journal_mcp_recovery`` persists nothing.
+    Without the shared ``_journal_lock`` the recovery therefore finishes on its
+    FIRST scheduling step and lands ahead of the warning, leaving the model
+    reading "its tools are gone ... tell the user which server is down" as the
+    LAST word on the server — precisely the state this notice exists to clear,
+    now with a superseding message that arrived too early to supersede
+    anything.
 
     Fired with ZERO separation deliberately (review round 1, R1). The old code
     inverted at 0, 1, 2, 3 and 5 loop ticks and only came right at 10; a test
@@ -4989,10 +4993,121 @@ async def test_incident_then_recovery_reaches_the_context_in_that_order(tmp_path
         m.custom_type
         for m in session._context.messages
         if isinstance(m, CustomMessage)
-        and m.custom_type in (SESSION_INCIDENT_MESSAGE_TYPE, "session_mcp_recovery")
+        and m.custom_type in (SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE, "session_mcp_recovery")
     ]
     assert journal == [
-        SESSION_INCIDENT_MESSAGE_TYPE,
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
         "session_mcp_recovery",
-    ], f"the recovery overtook its own incident: {journal}"
+    ], f"the recovery overtook its own warning: {journal}"
     await session.dispose()
+
+
+#: The wire value, asserted as a LITERAL on both sides of the pair.
+#:
+#: ``session_mcp_unavailable`` is written by this repo and read by the desktop
+#: renderer in ``local-operator-ui``, which keys its row's ``level`` on
+#: ``customType === "session_incident"`` and would otherwise fall through to
+#: its default. A comparison against the constant would pass whatever the
+#: constant became, so the two implementations' shared contract is pinned here.
+_MCP_UNAVAILABLE_WIRE = "session_mcp_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_mcp_unavailability_is_journalled_as_a_warning_not_an_incident(tmp_path):
+    """The measured defect, at the hook that fired it.
+
+    Live on 2026-09-20, ``_on_mcp_incident`` journalled a ``session_incident``
+    for an expired ``minerva-qa`` grant, so the model and every UI were told
+    "mcp: MCP authorization failed" plus "This is why the previous turn ended."
+    — about an event that ended no turn. This drives the REAL hook (not
+    ``journal_mcp_unavailable`` directly) because the hook is what the manager
+    is wired to, and asserts the row that comes out the other end.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    session._on_mcp_incident("minerva-qa", "MCP authorization failed; /mcp reauth minerva-qa")
+    await _drain_journal_tasks(session)
+
+    assert SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE == _MCP_UNAVAILABLE_WIRE
+    journalled = [m for m in session._context.messages if isinstance(m, CustomMessage)]
+    assert [m.custom_type for m in journalled] == [SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE], (
+        f"the hook journalled {[m.custom_type for m in journalled]}; an MCP server "
+        f"going away must not reach the model as a session incident"
+    )
+    row = journalled[0]
+    assert row.details["server"] == "minerva-qa"
+    assert row.details["reason"] == "MCP authorization failed; /mcp reauth minerva-qa"
+    text = row.details["text"]
+    assert text.startswith("[session warning] ")
+    assert "MCP server 'minerva-qa' is unavailable" in text
+    assert "previous turn ended" not in text
+    assert "suggested action:" not in text
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mcp_unavailability_is_persisted_and_reaches_the_model_as_a_user_turn(tmp_path):
+    """Both halves of the decision, on the WIRE rather than in the live list.
+
+    Persisted, unlike the recovery: the row is a historical fact, and the two
+    stale directions do not cost the same (see ``journal_mcp_unavailable``).
+    And rendered into the model's next request — a warning that only changed
+    the UI would leave the model calling tools that are gone.
+    """
+    stream = ScriptedStream(
+        [
+            [StreamTextDelta(delta="one"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="two"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream)
+    await session.prompt("go")
+    await session.journal_mcp_unavailable("files", "MCP authorization failed")
+    await session.prompt("continue")
+
+    rendered = [m for m in stream.requests[1].messages if getattr(m, "role", "") == "user"]
+    texts = "\n".join(getattr(m, "text", "") for m in rendered)
+    assert "[session warning] MCP server 'files' is unavailable" in texts
+    assert "Do not call that server's tools in a tight loop" in texts
+    assert "previous turn ended" not in texts
+
+    dumped = "\n".join(
+        __import__("json").dumps(e.payload, default=str) for e in session._transcript.entries()
+    )
+    assert _MCP_UNAVAILABLE_WIRE in dumped, (
+        "the warning was not persisted; a resumed session would replay a "
+        "conversation with the row the operator can still see missing from it"
+    )
+    await session.dispose()
+
+
+def test_mcp_unavailable_is_persistable_and_the_recovery_is_not() -> None:
+    """The asymmetry, pinned as membership rather than left to the comment.
+
+    An allow-list decides both: the warning is IN ``_PERSISTABLE_CUSTOM_TYPES``
+    so a resumed transcript keeps a row every surface already renders, and the
+    recovery is OUT because it asserts a process-scoped capability. Swapping
+    either one silently flips which of the two stale directions the replay
+    risks — the model hammering tools that are gone, or the model trusting
+    tools that are.
+    """
+    from local_operator.session.session import (
+        _PERSISTABLE_CUSTOM_TYPES,
+        _is_persistable_message,
+    )
+
+    assert SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE in _PERSISTABLE_CUSTOM_TYPES
+    assert SESSION_MCP_RECOVERY_MESSAGE_TYPE not in _PERSISTABLE_CUSTOM_TYPES
+    warning = CustomMessage(
+        custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "…", "server": "files", "reason": ""},
+    )
+    recovery = CustomMessage(
+        custom_type=SESSION_MCP_RECOVERY_MESSAGE_TYPE,
+        attribution="system",
+        details={"text": "…", "server": "files", "tool_count": 3},
+    )
+    assert _is_persistable_message(warning) is True
+    assert _is_persistable_message(recovery) is False

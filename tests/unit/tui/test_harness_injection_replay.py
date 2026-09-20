@@ -155,3 +155,79 @@ async def test_a_harness_injected_row_mounts_no_user_bubble() -> None:
     # …and the notice the user never typed mounts nothing at all.
     assert "[model switch]" not in shown
     assert "You are now running as zai/glm-5.3" not in shown
+
+
+@pytest.mark.asyncio
+async def test_the_mcp_unavailable_row_replays_as_a_note_not_a_warning() -> None:
+    """The replay tier the operator complained about, asserted as PIXELS.
+
+    ``session_mcp_unavailable`` is persisted, so a resumed session folds it
+    through ``project_settled_rows`` — and the tier is the whole change: the row
+    used to be a ``session_incident`` and so wore ``warning``, whose ``!`` glyph
+    and warning ink said a failure had happened when only the server's
+    inventory had shrunk. BOTH branches are folded in one app so the assertion
+    is a contrast rather than a value: the genuine incident keeps its alarm and
+    the capability warning does not.
+
+    Asserted on the token and glyph rather than on the class name, because those
+    two are what the reader sees.
+    """
+    from local_operator.harness.message_types import (
+        SESSION_INCIDENT_MESSAGE_TYPE,
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+    )
+    from local_operator.harness.types import CustomMessage
+    from local_operator.incidents import (
+        format_incident_message,
+        format_mcp_unavailable_message,
+    )
+    from local_operator.tui.widgets.transcript import (
+        NOTICE_GLYPHS,
+        NoticeBlock,
+        TranscriptView,
+    )
+
+    session = FakeSession()
+    session._history = [
+        CustomMessage(
+            custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+            attribution="system",
+            details={
+                "text": format_mcp_unavailable_message(
+                    "minerva-qa", "MCP authorization failed; /mcp reauth minerva-qa"
+                )
+            },
+        ),
+        CustomMessage(
+            custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
+            attribution="system",
+            details={"text": format_incident_message("429 too many requests", "test", "m")},
+        ),
+    ]
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        # No manual fold: the app's own boot replays ``settled_rows()``, and
+        # calling ``_project_settled_rows`` here as well would fold the same two
+        # rows twice (the duplicate is the fixture's, not the product's).
+        await pilot.pause()
+        notices = [
+            block
+            for block in app.query_one(TranscriptView).blocks()
+            if isinstance(block, NoticeBlock)
+        ]
+        shown = _transcript_text(app)
+
+    assert len(notices) == 2, f"the fold dropped a notice row: {[b._text for b in notices]}"
+    warning, incident = notices
+    assert warning._text.startswith("[session warning] ")
+    assert (
+        warning._token == "muted" and warning._glyph == NOTICE_GLYPHS["note"]
+    ), "the MCP-unavailable row is not on the note tier"
+    assert warning._glyph == "·" and warning._glyph != NOTICE_GLYPHS["warning"]
+    assert incident._token == "warning" and incident._glyph == "!"
+    assert "MCP server 'minerva-qa' is unavailable" in shown
+    # The frame carries the incident's false tail — for the row that IS a failed
+    # turn. The capability warning must not, which is asserted on its own text
+    # rather than on the frame, because both rows are painted here on purpose.
+    assert "previous turn ended" not in warning._text
+    assert "previous turn ended" in incident._text

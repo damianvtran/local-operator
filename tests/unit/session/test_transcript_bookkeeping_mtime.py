@@ -23,7 +23,10 @@ import os
 
 import pytest
 
-from local_operator.harness.message_types import SESSION_INCIDENT_MESSAGE_TYPE
+from local_operator.harness.message_types import (
+    SESSION_INCIDENT_MESSAGE_TYPE,
+    SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+)
 from local_operator.harness.types import CustomMessage, Message
 from local_operator.session.transcript import TranscriptEntry
 
@@ -38,6 +41,28 @@ def _incident() -> CustomMessage:
         custom_type=SESSION_INCIDENT_MESSAGE_TYPE,
         attribution="system",
         details={"text": "provider returned 401 unauthorized", "raw": "401"},
+    )
+
+
+def _mcp_unavailable() -> CustomMessage:
+    """The MCP-unavailability row, the second bookkeeping type.
+
+    Added here rather than left to the incident's coverage because it is the
+    type whose exemption a reader is most likely to assume: its writer passes
+    ``preserve_mtime=True`` exactly as ``journal_incident`` does, and the flag
+    alone buys nothing — the writer honours it only for a whole batch of
+    :data:`BOOKKEEPING_CUSTOM_TYPES`. On 2026-09-20 the same expired-grant event
+    was the one that measured a 5.1 h age lie (``FINDING-resume-clock.md``),
+    and it now arrives through this type.
+    """
+    return CustomMessage(
+        custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
+        attribution="system",
+        details={
+            "text": "[session warning] MCP server 'files' is unavailable: its tools are gone",
+            "server": "files",
+            "reason": "MCP authorization failed",
+        },
     )
 
 
@@ -171,9 +196,11 @@ async def test_the_flag_refuses_a_batch_carrying_real_work(tmp_path):
     shared with ``session.cleanup``, leaving the session ranked older than it
     is on the picker AND ageing toward deletion.
 
-    ``Session.journal_incident`` is still the only caller that passes the
-    flag, so the defect was never reachable in production — it was one
-    careless caller away. This keeps it that way.
+    ``Session.journal_incident`` and ``Session.journal_mcp_unavailable`` are the
+    only two callers that pass the flag — both journalling bookkeeping about a
+    session — so the defect was never reachable in production. It was one
+    careless caller away, and a third (an append that carries a turn) would be
+    exactly that caller. This keeps it that way.
     """
     from local_operator.session.retention import session_activity
     from local_operator.session.transcript import Transcript
@@ -251,3 +278,52 @@ async def test_a_failed_bookkeeping_append_does_not_move_the_clock_either(tmp_pa
 
     assert transcript.path.stat().st_size == size_before
     assert session_activity(transcript.directory) == pytest.approx(before, abs=1e-6)
+
+
+def test_the_mcp_unavailable_warning_is_a_bookkeeping_type() -> None:
+    """Pinned as membership, because the flag alone is not the mechanism.
+
+    ``Session.journal_mcp_unavailable`` asks for the mtime restore; only this
+    set grants it. A type that passes the flag while missing here loses the
+    exemption SILENTLY — the append still looks correct at every call site, and
+    the visible symptom is a wrong age on one picker row days later. The MCP
+    unavailability warning is the second type to need this and the first whose
+    event (an expired grant at boot) was measured moving a session's displayed
+    age by 5.1 h.
+    """
+    from local_operator.session.transcript import (
+        BOOKKEEPING_CUSTOM_TYPES,
+        _is_bookkeeping_batch,
+    )
+
+    assert SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE in BOOKKEEPING_CUSTOM_TYPES
+    entry = TranscriptEntry(
+        "mcp-warning",
+        PAST,
+        "message",
+        {"kind": "custom", "custom_type": SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE},
+    )
+    assert _is_bookkeeping_batch([entry]) is True
+
+
+@pytest.mark.asyncio
+async def test_an_mcp_unavailable_append_leaves_the_transcript_mtime_where_it_was(tmp_path):
+    """The same seam as the incident's, for the row that used to be one.
+
+    Before this change the event was journalled as ``session_incident`` and rode
+    that type's exemption; the exemption has to travel with the record, or
+    fixing the wording would have reintroduced the clock lie the wording fix
+    was made in the shadow of.
+    """
+    from local_operator.session.transcript import Transcript
+
+    transcript = Transcript(tmp_path / "sess")
+    await _seeded(transcript)
+
+    await transcript.append_message(_mcp_unavailable(), preserve_mtime=True)
+
+    assert transcript.path.stat().st_mtime == pytest.approx(PAST, abs=1e-6)
+    lines = transcript.path.read_text(encoding="utf-8").splitlines()
+    entry = TranscriptEntry.from_json(lines[-1])
+    assert entry is not None
+    assert entry.payload["custom_type"] == SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE
