@@ -420,6 +420,36 @@ refusal genuinely is a decision with a payload (what was refused, why, what is o
 disk), and returning it as a result lets the extension say more than
 `{code, message}` permits.
 
+**The refusal mark is a CONTRACT, and the tool layer reads it.** Nothing on the
+wire says "this is a refusal": a refusal is a `reason` like any other account, and
+the *copy* is what tells the two apart. Every refusal this feature composes starts
+with `refused:` — `browser_files` composes its name refusals that way, the
+extension its upload refusals, and the app host its own download refusals
+(`downloads.ts`'s `refuse`/`refuseLive`: "refused: `x` is an executable/script
+type; nothing was saved"). `builtin.py`'s `REFUSAL_PREFIX` is that mark, and the
+three rules that follow from keying on it are the whole of the contract:
+
+* **Both hosts must keep composing it** for the refusals they send. Reword
+  `refuse()`/`refuseLive()` away from it and the harness has no other signal — but
+  the degradation is SAFE rather than silent, because of the next rule.
+* **The app host is the host that reaches it today.** Its `download` action always
+  arms and reports `armed: true`, so its refusals arrive as `reason`, which makes
+  the armed-then-refused state app-host-only. The extension's `download` command
+  sends **no `reason` at all** (`{armed: true, url, files}`; the cancellation
+  account beside it is a top-level `note` the harness does not read), so an
+  extension download refusal cannot reach the mark. The extension's *upload*
+  refusals are the ones that carry it, on a different result payload.
+* **An unrecognised non-empty `reason` is RELAYED, never replaced.** On the armed
+  path, with nothing landed and a reason that is not the refusal shape — the app
+  host's own no-op sentence ("no download started within 120s; if the page needs a
+  click first, pass a selector, or `click` it and retry") is one of these — the
+  model gets the host's sentence in the host's own words, audited as
+  `armed_reason`. That is the false-negative half of keying on copy, and the
+  answer is to make it visible to both readers rather than to widen the parse: the
+  canned "no download started … click its Download control" sentence is exactly
+  what a reworded refusal must never be answered with again, since a remedy that
+  cannot work reads as fact.
+
 Exactly **one** new `ErrorCode` is added, emitted only by the **daemon**
 (daemon→session is the safe direction per `protocol.py:327-332`):
 
@@ -597,6 +627,8 @@ told to use the browser and was not told why reached for playwright anyway
 | host predates the feature | typed `capability_unsupported` + version + "update the extension / the app" |
 | host is current but wedged | the existing wedge copy, naming the extension toggle (`guide://browser`) |
 | no download started | "no download started within N s; if the page needs a click first, `click` it and retry, or the file may be behind a login" |
+| the host ARMED, then refused (the shape the app host uses, §6.2) | the host's own refusal, under the mark the design composes refusals with: "refused: …", the prefix once |
+| the host armed, nothing landed, and its `reason` is not a refusal (§6.2) | the host's own sentence, RELAYED verbatim, never the "no download started …" remedy above; the audit row reads `armed_reason` |
 | cancelled by the name policy | "refused and deleted — `<name>` is an executable/script type (`<why>`); nothing was saved" |
 | sniff disagrees with the name | kept, renamed, and said so: "saved as `x.pdf` (the name said `zip`; the server said `application/zip`; the content is a PDF document)" — the declared type is quoted only when there is one to quote, and it never changes the verdict |
 | executable content | "refused and deleted — the file at `<path>` is a `<type>`; nothing executable is ever kept" |
@@ -952,6 +984,21 @@ line are separate records sharing a `call_id`, so a liar is visible). Fields:
 `host` (`extension` | `app` | `cmux`), `direction` (`in` | `out`), `name`
 (redacted for refusals, §9.4), `bytes`, `sha256`, `declared_mime`, `sniffed`,
 `verdict`, `reason`, `path`.
+
+The **`verdict` values this path writes**, and what each one claims — the list is
+documentation rather than a schema (`verdict` is a free-form string and no reader
+parses it today: `lop browser status` prints the directory and names
+`audit.jsonl`), which is also why the values are named here rather than left to
+the diff that introduced them:
+
+| value | what it claims |
+|---|---|
+| `armed_false` | the host refused to ARM the capture: state (a). Its `reason` is the host's clause |
+| `armed_refused` | the host armed and then refused the transfer: state (b). Its `reason` is the host's clause, with the copy's mark (`§6.2`) removed — every occurrence of it |
+| `armed_reason` | the host armed and accounted for the call in words the harness did not classify (§6.2). Its `reason` is that sentence; the verdict claims nothing about policy |
+| `no_download` | nothing landed and the host said nothing: state (c). `reason` is `nothing started` |
+| `deny` | a candidate LANDED and the harness refused it (containment, the per-call cap, the content policy). The row names the entry and what became of it |
+| `allow`, and `classify_download`'s kinds | per-file verdicts for files that exist on disk |
 
 **Why not `analytics.db`.** The ledger exists for token/cost accounting and its
 readers aggregate columns for that purpose; a file audit has different
@@ -2416,3 +2463,32 @@ and `revealNotice` now notes that near the threshold the gap is **best-effort** 
 after the notice's and can claw part of it back. Below the threshold something has to give
 and it is the gap, not the control.
 
+
+### 17.19 The armed-refusal seam: what PR #1359 changed, and what its round 1 found
+
+The follow-up PR (`damianvtran/local-operator#1359`) fixed a seam §6.2 always
+implied and the tool layer never implemented: the app host answers a refusal it
+makes *after arming* as `{armed: true, files: [], reason: "refused: …"}`, and
+`_browser_download` read only its own landing diff — so a policy refusal reached
+the model as *"no download started within N s … click its Download control and
+retry"*, a remedy that could never have worked, and the audit row said
+`no_download` / `nothing started` about a call a policy had already decided. Only
+the pre-arm arm (`armed: false`) rendered refusals. §6.2 now carries the contract
+that came out of the review, §7.4 the two rows this state adds to the copy table,
+and §10.5 names the verdict values.
+
+| finding | what changed |
+|---|---|
+| **R1 (major)** — the discriminator parses another repository's prose, and nothing recorded the coupling or the failure mode | §6.2 states the contract: which host composes the mark, that the extension's armed download answers carry no `reason` at all so state (b) is app-host-only, and what happens when a host is reworded. The unrecognised case is no longer silent: a non-empty `reason` that is not the refusal shape is RELAYED in the host's own words and audited as `armed_reason`, so neither the model nor the trail can read a reworded refusal as a no-op |
+| **R2** — the pre-arm arm had no empty-clause guard, so a bare `refused:` rendered `"refused: "` with an empty row reason (and a whitespace-only reason rendered its spaces) | both arms now compose through one guard: an empty clause falls back to the sentence this arm already used for a host that said nothing. The disclosed behaviour change is that a whitespace-only pre-arm `reason` renders the default sentence rather than the spaces |
+| **R3** — a host sentence joining two refusals with `"; "` kept its inner `refused:`, so the row's `reason` was not the bare clause the code and tests define | `_refusal_clause` removes the mark at every clause boundary, not only at the head: the sentence the model reads carries it once, at its head, and the row carries no mark at all |
+| **R4 (nit)** — the `REFUSAL_PREFIX` comment named a host that cannot reach the branch | the comment now names the app host as the one that reaches it and states why the extension's download answers cannot (no `reason`; its cancellation account is a `note` the harness never reads) |
+
+QA's round 1 was a PASS on 13 matrix items with three findings, none a
+regression (each byte-identical on the base revision): Q2 — a refusal without the
+mark on the armed path read as a no-op — is closed by R1's relay; Q1 (a refusal
+arriving *alongside* landed files is dropped, not merely unlabelled) and Q3 (its
+variant, where the intake branch wins over the host's refusal when anything at all
+was reported) remain open and are recorded as deferred on the PR: both need a
+per-call account of the host's refusals rather than the single `reason` field, and
+Q3 is a second consumer of it.

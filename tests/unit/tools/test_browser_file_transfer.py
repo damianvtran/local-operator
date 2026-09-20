@@ -425,6 +425,12 @@ def test_download_fails_when_the_host_reports_a_file_that_never_landed() -> None
 # `armed: true` with no files AND a reason (§6.2 — a refusal is a result, not an
 # error), and it used to be read as the third: the model was told no download had
 # started and sent to click a Download control the host had already refused.
+#
+# A fourth shape needs its own answer rather than being folded into either: an
+# armed answer whose `reason` is NOT the refusal shape (the app host's own no-op
+# sentence, or a refusal whose wording changed). It is relayed in the host's own
+# words and recorded as `armed_reason`, so neither reader is told a call was a
+# no-op when the host had something to say about it.
 
 #: The app host's own refusal sentence, verbatim (`downloads.ts`'s `refuse`).
 _APP_HOST_REFUSAL = "refused: `evil.exe` is an executable/script type; nothing was saved"
@@ -435,6 +441,12 @@ _APP_HOST_NO_OP = (
     "no download started within 120s; if the page needs a click first, pass a "
     "selector, or `click` it and retry"
 )
+
+
+#: The app host's own account of a call it refused for a reason the harness's
+#: refusal shape does not match — the false-negative case, and the one whose copy
+#: must never be replaced by the harness's canned click remedy (§6.2, review R1).
+_UNRECOGNISED_HOST_REASON = "download blocked by the host's executable policy"
 
 
 def _download_rows() -> list[dict[str, Any]]:
@@ -485,15 +497,15 @@ def test_a_refusal_the_host_made_after_arming_is_reported_as_a_refusal() -> None
     assert rows[0]["name"] == "" and rows[0]["action"] == "download"
 
 
-def test_the_hosts_own_no_op_sentence_keeps_the_no_op_answer() -> None:
-    """State (c), the shape the APP HOST sends it in: a reason, but not a refusal.
+def test_the_hosts_own_no_op_sentence_is_relayed_rather_than_replaced() -> None:
+    """A non-refusal `reason` on the armed path is the host's account, RELAYED.
 
     This is the case a "a reason is present, so it was a refusal" reading gets
     wrong, and it is not hypothetical: the app host always reports `armed: true`
-    and pushes its own no-op sentence into the same `reason` field. Reporting a
-    call where nothing started as a refusal would trade the defect this change
-    fixes for its mirror image — and the audit row must not claim a policy
-    decision that was never made.
+    and pushes its own no-op sentence into the same `reason` field. It must not
+    be labelled a refusal — and it must not be thrown away and answered with the
+    harness's canned sentence either, because that is how a host's own words get
+    replaced by a remedy that may not apply (§6.2, review R1).
     """
     host = FakeHost(
         methods=("download",),
@@ -501,10 +513,61 @@ def test_the_hosts_own_no_op_sentence_keeps_the_no_op_answer() -> None:
     )
     result = _download(host)
     assert result.is_error
-    assert result.text.startswith("no download started within 120 s.")
-    assert "refused" not in result.text
+    assert result.text == _APP_HOST_NO_OP, result.text
     rows = _download_rows()
-    assert [(row["verdict"], row["reason"]) for row in rows] == [("no_download", "nothing started")]
+    assert [(row["verdict"], row["reason"]) for row in rows] == [("armed_reason", _APP_HOST_NO_OP)]
+
+
+def test_an_unrecognised_refusal_is_relayed_not_answered_with_the_click_remedy() -> None:
+    """The false-negative half: a reworded refusal must not read as a timeout.
+
+    The harness decides "refusal" from the mark the design composes refusals
+    with, so a host that rewords them is not recognised. Before this branch that
+    meant the model got "no download started within N s … click its Download
+    control and retry" — the exact answer this feature's work exists to remove —
+    about a call the host had already refused. The answer is to relay what the
+    host said and to record that it was not classified.
+    """
+    host = FakeHost(
+        methods=("download",),
+        result={"files": [], "armed": True, "reason": _UNRECOGNISED_HOST_REASON},
+    )
+    result = _download(host)
+    assert result.is_error
+    assert result.text == _UNRECOGNISED_HOST_REASON, result.text
+    assert "no download started" not in result.text
+    rows = _download_rows()
+    # NOT a refusal claim (`armed_refused`) and not the no-op claim either: the
+    # verdict says the host accounted for the call and the harness did not
+    # classify its words, so both readers see what the host actually said.
+    assert [(row["verdict"], row["reason"]) for row in rows] == [
+        ("armed_reason", _UNRECOGNISED_HOST_REASON)
+    ]
+
+
+def test_two_refusals_joined_by_the_host_keep_one_prefix_and_no_mark_in_the_row() -> None:
+    """R3: the app host joins every refusal of one armed call with `"; "`.
+
+    Each joined clause carries the mark, so stripping only the head left a
+    `refused:` inside the field §10.5 calls the clause. The sentence the model
+    reads carries the mark once, at its head, and the row carries the clauses
+    without it.
+    """
+    two = (
+        "refused: `a.exe` is an executable/script type; nothing was saved; "
+        "refused: `b.exe` is an executable/script type; nothing was saved"
+    )
+    host = FakeHost(methods=("download",), result={"files": [], "armed": True, "reason": two})
+    result = _download(host)
+    assert result.is_error
+    assert result.text.count("refused:") == 1, result.text
+    assert result.text == (
+        "refused: `a.exe` is an executable/script type; nothing was saved; "
+        "`b.exe` is an executable/script type; nothing was saved"
+    ), result.text
+    rows = _download_rows()
+    assert rows[0]["verdict"] == "armed_refused"
+    assert "refused:" not in rows[0]["reason"]
 
 
 def test_a_no_op_with_no_reason_keeps_todays_answer_exactly() -> None:
@@ -571,6 +634,28 @@ def test_a_pre_arm_refusal_reads_the_same_whether_the_host_prefixed_it() -> None
         rows = _download_rows()
         assert rows[-1]["verdict"] == "armed_false"
         assert rows[-1]["reason"] == expected
+
+
+def test_a_pre_arm_refusal_with_no_clause_renders_the_default_sentence() -> None:
+    """R2: the armed arm's empty-clause guard, one arm up.
+
+    The pre-arm arm had no guard at all, so `refused:` (a mark with nothing after
+    it) rendered "refused: " with an empty row, and a whitespace-only reason
+    rendered its spaces — the same defect the armed arm's guard exists to
+    prevent, on the older copy. Both now fall back to the sentence this arm has
+    always used for a host that said nothing: a `reason` that is absent.
+    """
+    for reason in ("refused:", "   ", ""):
+        host = FakeHost(
+            methods=("download",),
+            result={"files": [], "armed": False, "reason": reason},
+        )
+        result = _download(host)
+        assert result.is_error
+        assert result.text == "refused: the host refused to arm a download", result.text
+        rows = _download_rows()
+        assert rows[-1]["verdict"] == "armed_false"
+        assert rows[-1]["reason"] == "the host refused to arm a download"
 
 
 def test_download_deletes_executable_content_even_when_the_host_calls_it_a_pdf(
