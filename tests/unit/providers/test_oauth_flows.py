@@ -592,6 +592,35 @@ class TestATerminalGrantIsToldFromAnOutage:
     @pytest.mark.parametrize(
         "error_field",
         [
+            # The PLURAL, which is the shape a policy sentence takes: the grant
+            # is fine, and the tokens are rotated. Neither half of the
+            # verdict-first alternative was anchored to a word end, so this read
+            # as a dead grant (review round 2, m4 — measured on the round-2 head).
+            "the session expired; refresh tokens are rotated per use",
+            "expired refresh tokens are pruned nightly",
+        ],
+    )
+    def test_a_plural_refresh_token_is_not_the_dead_singular(self, error_field: str) -> None:
+        """`\b` after `token`, on the verdict-first alternative only.
+
+        The FIRST alternative deliberately has no boundary there —
+        `refresh[-_ ]?token` has to reach the joined camel spelling, which has no
+        boundary after `token` — but the second one matches both halves as WORDS,
+        so nothing stopped it matching a longer word — and a false PERMANENT
+        verdict is the expensive direction, as the class docstring below prices
+        it: `CredentialInvalidError` deprioritises a LIVE account in `/usage`, the
+        routing cascade and `model/configure.py` until the operator re-logs in.
+        The singular form of the same sentence is asserted right beside it, so
+        the boundary is pinned as a boundary rather than as a narrower rule.
+        """
+        body = json.dumps({"error": error_field})
+        assert is_terminal_grant_response(401, body) is False
+        singular = error_field.replace("tokens", "token")
+        assert is_terminal_grant_response(401, json.dumps({"error": singular})) is True
+
+    @pytest.mark.parametrize(
+        "error_field",
+        [
             "refresh token is not expired yet",
             "the refresh token isn't expired",
             # ...and the typographic apostrophe, which is what a UI copy-paste

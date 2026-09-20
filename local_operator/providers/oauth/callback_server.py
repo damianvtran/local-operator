@@ -341,13 +341,22 @@ _NEGATION_FREE_GAP = r"(?:(?!\bnot\b|n['\u2019]t\b)[^.])"
 
 _DEAD_REFRESH_TOKEN = re.compile(
     # "refresh token is expired", "RefreshTokenExpired", "refresh-token-invalid",
-    # "refresh_token no longer valid". No `\b` after `token`: the joined camel
-    # form has no boundary there, and the verdict word has to follow either way.
+    # "refresh_token no longer valid". No `\b` after `token` HERE: the joined
+    # camel form has no boundary there, and the verdict word has to follow either
+    # way.
     r"refresh[-_ ]?token"
     + _NEGATION_FREE_GAP
     + r"{0,48}?(?:expired|revoked|invalid|no longer valid)"
     # ...or the verdict first: "Invalid refresh token", "expired refresh_token".
-    + r"|\b(?:invalid|expired|revoked)\b" + _NEGATION_FREE_GAP + r"{0,24}?refresh[-_ ]?token",
+    # `\b` after `token` on THIS alternative, unlike the one above: here both
+    # halves are matched as WORDS, so nothing stops the phrase matching part of a
+    # longer one, and a plural is the expensive direction — measured on the
+    # round-2 head, prose DESCRIBING a working grant was read as a dead one
+    # (`{"error": "the session expired; refresh tokens are rotated per use"}` →
+    # True), which is the false permanent verdict the docstring above prices as
+    # the costly one. The joined spellings are unaffected: they come through the
+    # first alternative, which is where the boundary cannot be asserted.
+    + r"|\b(?:invalid|expired|revoked)\b" + _NEGATION_FREE_GAP + r"{0,24}?refresh[-_ ]?token\b",
     re.IGNORECASE,
 )
 
