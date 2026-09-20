@@ -20,10 +20,37 @@ import type {
 } from "./types";
 
 export class HttpError extends Error {
-	constructor(readonly status: number, message: string) {
+	/** The refusal's CATEGORY, when the far side sent one.
+
+	    A refusal crosses as a typed code plus the copy, and callers that have to
+	    DECIDE something (re-sign? offer pairing? name the install step?) key on the
+	    code rather than on prose this repo has rewritten twice already. Absent for
+	    every ordinary failure and for a runtime built before the field existed, so
+	    a caller that needs it must have a copy-based fallback. */
+	constructor(
+		readonly status: number,
+		message: string,
+		readonly code = "",
+	) {
 		super(message);
 		this.name = "HttpError";
 	}
+}
+
+/** The two authority refusals, as the enumerated codes the wire carries.
+
+    ONE definition, imported by everything that has to distinguish them from an
+    ordinary failure — the card's re-sign decision, the gate sheet's copy, a test.
+    Two lists would be two rules, and the whole reason the code exists is that the
+    copy it rides beside has already been rewritten twice (UX round 6, U6). */
+export const AUTHORITY_REFUSAL_CODES = [
+	"operator_authority_required",
+	"operator_authority_unconfigured",
+] as const;
+
+/** Whether a typed code names an authority refusal. */
+export function isAuthorityRefusalCode(code: string): boolean {
+	return (AUTHORITY_REFUSAL_CODES as readonly string[]).includes(code);
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -41,13 +68,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	}
 	if (!res.ok) {
 		let detail = `${res.status}`;
+		let code = "";
 		try {
-			const body = (await res.json()) as { error?: string };
+			const body = (await res.json()) as { error?: string; code?: string };
 			if (body.error) detail = body.error;
+			if (typeof body.code === "string") code = body.code;
 		} catch {
 			/* A non-JSON error body carries no more than the status did. */
 		}
-		throw new HttpError(res.status, detail);
+		throw new HttpError(res.status, detail, code);
 	}
 	return (await res.json()) as T;
 }
@@ -212,6 +241,10 @@ export function pairingStatus(deviceId: string): Promise<{
 	scope?: string[];
 	exp?: number;
 	name?: string;
+	/** Whether the MACHINE can verify this device's signatures yet — see
+	    `GateSheet`/`PairScreen`: false between `lop operator init` and
+	    `lop operator install`, which is the state the old success box lied about. */
+	authority_ready?: boolean;
 }> {
 	return request(`/api/pair/${encodeURIComponent(deviceId)}`);
 }
