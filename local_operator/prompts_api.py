@@ -181,10 +181,46 @@ def _load_template(name: str) -> list[Node]:
     return nodes
 
 
-def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
-    """Complete ``system.md``'s browser flag pair, or refuse an impossible one.
+def _complete_flag_pair(
+    data: dict[str, Any], *, has_key: str, no_key: str, both_message: str
+) -> dict[str, Any]:
+    """Fill in the missing member of one ``has_*``/``no_*`` template pair.
 
-    ``{{#if}}`` has no ``else`` and no negation, so the browser sections are
+    The pair mechanism is shared by two capabilities now (browser and console)
+    because it is one problem: ``{{#if}}`` has no ``else`` and no negation, a
+    missing key renders as falsy and drops its body with no marker, and a
+    half-supplied pair therefore fails silently in both directions. The three
+    legitimate states — tool present, host has no backend, role restricted — are
+    the caller's to state; this only refuses the impossible one and derives an
+    absent member from the member the caller DID state, because deriving cannot
+    contradict them.
+    """
+    has = data.get(has_key)
+    missing = data.get(no_key)
+    if has and missing:
+        raise ValueError(both_message)
+    if has is None and missing is None:
+        # Neither stated: the backendless arm, which is what `main` shipped
+        # unconditionally and so is the safe thing for a probe or a test that
+        # never had an opinion.
+        return {has_key: False, no_key: True}
+    if missing is None:
+        # Only tool presence stated. A session that HAS the tool is on a host
+        # with a backend, so the playbook is wrong; one that lacks it has said
+        # nothing about the host, and the playbook is the conservative arm.
+        return {no_key: not has}
+    if has is None:
+        # Only host capability stated. Never infer that a tool is present from
+        # a working host — that is the M2 error in reverse, and it would put
+        # usage prose in front of a session with no tool to use.
+        return {has_key: False}
+    return {}
+
+
+def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
+    """Complete ``system.md``'s capability flag pairs, or refuse an impossible one.
+
+    ``{{#if}}`` has no ``else`` and no negation, so each capability's sections are
     gated by a PAIR of flags — and a pair is easy to half-supply. A missing key
     renders as falsy and drops its body with no marker in the output, so the
     mistake is silent in both directions:
@@ -200,49 +236,48 @@ def _resolve_system_md_flags(data: dict[str, Any]) -> dict[str, Any]:
     the conservative claim for a half-supplied one. Deriving the missing member
     from the one the caller actually stated cannot contradict them.
 
-    THREE states are legitimate, so the pair is NOT a plain negation and must
-    not be collapsed into one flag (see ``build_system_blocks``):
+    THREE states are legitimate, so a pair is NOT a plain negation and must not
+    be collapsed into one flag (see ``build_system_blocks``):
 
-    ==================  ==========  ===========  ===========================
-    state               has_browser no_browser   meaning
-    ==================  ==========  ===========  ===========================
-    tool present        True        False        usage prose
-    host has no backend False       True         setup playbook
-    role restricted     False       False        neither; host is fine
-    ==================  ==========  ===========  ===========================
+    ==================  ===========  ============  ===========================
+    state               has_browser  no_browser    meaning
+    ==================  ===========  ============  ===========================
+    tool present        True         False         usage prose
+    host has no backend False        True          setup playbook
+    role restricted     False        False         neither; host is fine
+    ==================  ===========  ============  ===========================
 
-    ``(True, True)`` is the one combination with no meaning — a session cannot
-    hold the browser tool on a host with no browser backend — so it raises
-    instead of rendering. Loud, for the same reason a malformed template raises
-    in :func:`_parse`: these callers are all in this repo, so an impossible
-    prompt is a build bug, not input to tolerate.
+    The console pair has the same three states and its own copy; it is completed
+    here so ONE call site cannot ship one pair and forget the other, which is
+    exactly the failure the browser pair's history records.
     """
-    has = data.get("has_browser")
-    no_browser = data.get("no_browser")
-
-    if has and no_browser:
-        raise ValueError(
-            "system.md: has_browser and no_browser cannot both be true — that "
-            "ships the browser usage prose and the browserless setup playbook "
-            "together. Pass the pair from build_system_blocks, or pass just "
-            "one and let it derive."
-        )
-    if has is None and no_browser is None:
-        # Neither stated: the browserless arm, which is what `main` shipped
-        # unconditionally and so is the safe thing for a probe or a test that
-        # never had an opinion.
-        return {**data, "has_browser": False, "no_browser": True}
-    if no_browser is None:
-        # Only tool presence stated. A session that HAS the tool is on a host
-        # with a backend, so the playbook is wrong; one that lacks it has said
-        # nothing about the host, and the playbook is the conservative arm.
-        return {**data, "no_browser": not has}
-    if has is None:
-        # Only host capability stated. Never infer that a tool is present from
-        # a working host — that is the M2 error in reverse, and it would put
-        # usage prose in front of a session with no browser tool to use.
-        return {**data, "has_browser": False}
-    return data
+    resolved = {
+        **data,
+        **_complete_flag_pair(
+            data,
+            has_key="has_browser",
+            no_key="no_browser",
+            both_message=(
+                "system.md: has_browser and no_browser cannot both be true — that "
+                "ships the browser usage prose and the browserless setup playbook "
+                "together. Pass the pair from build_system_blocks, or pass just "
+                "one and let it derive."
+            ),
+        ),
+        **_complete_flag_pair(
+            data,
+            has_key="has_console",
+            no_key="no_console",
+            both_message=(
+                "system.md: has_console and no_console cannot both be true — that "
+                "ships the console usage prose and the consoleless prohibition "
+                "together, so the prompt would describe a tool it has just said "
+                "does not exist. Pass the pair from build_system_blocks, or pass "
+                "just one and let it derive."
+            ),
+        ),
+    }
+    return resolved
 
 
 def render_template(name: str, data: dict[str, Any]) -> str:
@@ -301,7 +336,10 @@ TOOL_INVENTORY_HEADING = "## Available tools"
 
 
 def render_tool_inventory_block(
-    tools: Sequence[AgentTool], *, host_has_browser: bool | None = None
+    tools: Sequence[AgentTool],
+    *,
+    host_has_browser: bool | None = None,
+    host_has_console: bool | None = None,
 ) -> str:
     """The complete "## Available tools" block for ``tools``.
 
@@ -319,18 +357,26 @@ def render_tool_inventory_block(
     state 2 (the HOST has no backend, so the setup playbook applies) from
     state 3 (the host is fine and only this ROLE lacks the tool), and
     conflating them tells a subagent to install a backend its host already has.
+
+    ``host_has_console`` is the same argument for the console, whose pair of
+    notes has the same two absence diagnoses. Both probes are MEMBERSHIP
+    questions about the tool list, never about visibility: a hidden tool is
+    still callable, and telling the model a capability does not exist while one
+    answers would be worse than saying nothing.
     """
     block = f"{TOOL_INVENTORY_HEADING}\n\n{_render_tool_inventory(tools)}"
-    # Membership, not visibility: a hidden tool is still callable, and telling
-    # the model a browser does not exist while one answers would be worse than
-    # saying nothing.
-    if any(tool.name == "browser" for tool in tools):
-        return block
+    # Membership, not visibility, for both capabilities; see the docstring.
     if host_has_browser is None:
         host_has_browser = _host_browser_backend_available()
     # Same prohibition either way; only the DIAGNOSIS differs. See the
     # three-state comment in build_system_blocks and _ROLE_HAS_NO_BROWSER_NOTE.
-    return block + (_ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _NO_BROWSER_NOTE)
+    if not any(tool.name == "browser" for tool in tools):
+        block += _ROLE_HAS_NO_BROWSER_NOTE if host_has_browser else _NO_BROWSER_NOTE
+    if not any(tool.name == "console" for tool in tools):
+        if host_has_console is None:
+            host_has_console = _host_console_available()
+        block += _ROLE_HAS_NO_CONSOLE_NOTE if host_has_console else _NO_CONSOLE_NOTE
+    return block
 
 
 def _render_tool_inventory(tools: Sequence[AgentTool]) -> str:
@@ -407,6 +453,41 @@ _ROLE_HAS_NO_BROWSER_NOTE = (
     "screenshot, say so and let the delegating session take it."
 )
 
+#: Appended to the tool inventory when the session has no console tool and the
+#: APP cannot serve one either. A three-line prohibition rather than a setup
+#: playbook, and deliberately NOT a copy of the browser's shape: the browser is
+#: installable in a minute, while the console needs the desktop app — telling the
+#: model to go and arrange it would be an invitation to the dead end the
+#: playwright incident was (design ui-console-tab §14.5).
+_NO_CONSOLE_NOTE = (
+    "\n\nThis session has no `console` tool: the console runs inside the Local "
+    "Operator desktop app and is not something this host can start or install. "
+    "Do not try to arrange a terminal another way — never install or script a "
+    "terminal emulator to stand in for it, and never treat another window's "
+    "terminal (Terminal.app, iTerm, cmux, ssh) as though it were the Local "
+    "Operator console. Use `bash` for commands; if a task genuinely needs a "
+    "full-screen TUI or a process that outlives the call, say that is "
+    "unavailable and why."
+)
+
+#: The same prohibition for a session whose ROLE was not given the console tool
+#: on a host whose app DOES have one — the ``reviewer``/``scout``/``manager``/
+#: ``architect`` seeds, whose allowlists omit it exactly as they omit the
+#: browser. A separate string for the reason the browser's pair needed one:
+#: :data:`_NO_CONSOLE_NOTE` asserts a fact about the HOST that is false here, and
+#: a child told its app has no console would answer a user's question about a
+#: console surface with a wrong diagnosis — the defect ``prompts_api`` already
+#: records for the browser.
+_ROLE_HAS_NO_CONSOLE_NOTE = (
+    "\n\nThis session was not given the `console` tool. The Local Operator "
+    "desktop app's console IS available on this host — it is simply not part of "
+    "this role's tool set — so never install or script a terminal emulator to "
+    "stand in for it, and never treat another window's terminal as though it "
+    "were this one. Use `bash` for ordinary commands, and when a task genuinely "
+    "needs an interactive terminal, say so and let the delegating session take "
+    "it."
+)
+
 
 def _host_browser_backend_available() -> bool:
     """Whether THIS HOST could drive a browser at all, ignoring tool lists.
@@ -436,6 +517,31 @@ def _host_browser_backend_available() -> bool:
         return bool(
             cmux_browser_available() or bridge_browser_advertisable() or ui_browser_advertisable()
         )
+    except Exception:  # noqa: BLE001 — prompt rendering must never break
+        return False
+
+
+def _host_console_available() -> bool:
+    """Whether THIS HOST's app could serve a console at all, ignoring tool lists.
+
+    The exact counterpart of :func:`_host_browser_backend_available`, and it
+    exists for the same defect: a restricted-role child (``reviewer``,
+    ``scout``, ``manager``, ``architect`` — whose seed allowlists omit
+    ``console`` just as they omit ``browser``) must be told that the capability
+    EXISTS but was not granted, not that the app has none. The two diagnoses
+    lead to opposite actions, and the wrong one is the one a user's question
+    about a console surface gets answered with.
+
+    ONE probe, because the console has exactly one host: the desktop app's
+    console capability bit in its discovery record. Same lazy, defensive import
+    as the browser's probe, and the same conservative degradation — a probe that
+    raises ships the absence note, which is the honest arm when nothing can be
+    confirmed.
+    """
+    try:
+        from local_operator.tools.builtin import ui_console_advertisable
+
+        return bool(ui_console_advertisable())
     except Exception:  # noqa: BLE001 — prompt rendering must never break
         return False
 
@@ -494,6 +600,15 @@ def build_system_blocks(
     # The host probe is what separates 2 from 3.
     has_browser = any(tool.name == "browser" for tool in tools)
     host_has_browser = has_browser or _host_browser_backend_available()
+    # The console is the same three-state story with the same consequence for a
+    # restricted child, and it is computed HERE rather than left to the template
+    # so both capability pairs are decided by one function. Note the console's
+    # `no_console` arm is a PROHIBITION rather than a setup playbook: the browser
+    # can be installed by a user in a minute, the console needs the desktop app,
+    # and telling the model to arrange one would be the playwright mistake again
+    # (design ui-console-tab §14.5).
+    has_console = any(tool.name == "console" for tool in tools)
+    host_has_console = has_console or _host_console_available()
     # The browser prose is conditional rather than unconditional because it is
     # ~1,500 characters of instruction for a tool that is createIf-gated: a
     # host with no cmux and no extension paid for three paragraphs about a
@@ -510,7 +625,15 @@ def build_system_blocks(
     instructions = render_template(
         "system.md",
         # The setup playbook is gated on the HOST, never on this role's list.
-        {"has_browser": has_browser, "no_browser": not host_has_browser},
+        # Both capability pairs go in ONE call so a future capability cannot be
+        # added to the template and forgotten at this call site — the failure
+        # `_resolve_system_md_flags` exists to make loud.
+        {
+            "has_browser": has_browser,
+            "no_browser": not host_has_browser,
+            "has_console": has_console,
+            "no_console": not host_has_console,
+        },
     )
     instructions += (
         "\n\n## Session state updates\n\n"
@@ -545,7 +668,9 @@ def build_system_blocks(
             "direct instruction in the conversation still wins.\n\n"
             f"<user_instructions>\n{safe}\n</user_instructions>"
         )
-    inventory = render_tool_inventory_block(tools, host_has_browser=host_has_browser)
+    inventory = render_tool_inventory_block(
+        tools, host_has_browser=host_has_browser, host_has_console=host_has_console
+    )
     env_block = f"Today is {date_str}."
     if env_details:
         env_block = f"{env_block}\n\n{env_details}"
