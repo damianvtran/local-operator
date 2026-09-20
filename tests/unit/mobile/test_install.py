@@ -6,6 +6,7 @@ actually in — a plist can exist while the agent was never bootstrapped, and
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -539,3 +540,261 @@ def test_the_windows_launcher_goes_through_the_command_interpreter(
         "call",
         shim,
     ]
+
+
+def test_build_failure_reports_the_compiler_error_not_the_script_echo() -> None:
+    """The failure message has to carry what an operator can act on.
+
+    pnpm writes its `$ tsc -b && vite build` script echo to stderr and `tsc`
+    writes the reason to ITS stdout, so the old "last line of stderr" reported
+    the echo — measured on a source-snapshot install, where the phone showed
+    503 and the only clue was a line naming the script that had just run.
+    """
+    result: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+        ["pnpm", "build"],
+        2,
+        stdout=(
+            "src/model-sheet.order.test.tsx(31,20): error TS2307: Cannot find module "
+            "'./fixtures/models.ranked.json' or its corresponding type declarations.\n"
+        ),
+        stderr="$ tsc -b && vite build\n[ELIFECYCLE] Command failed with exit code 2.\n",
+    )
+
+    detail = install._failure_detail(result)
+
+    assert "TS2307" in detail
+    assert "./fixtures/models.ranked.json" in detail
+    # The echo and the lifecycle summary are what made the old message
+    # useless; neither survives when a real error was printed.
+    assert "$ tsc -b" not in detail
+    assert "Command failed with exit code" not in detail
+
+
+def test_failure_detail_is_bounded_and_falls_back_to_the_tail() -> None:
+    """A tool that fails without printing an error still gets quoted, and no
+    amount of output makes the message unbounded."""
+    noisy: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+        ["pnpm", "install"], 1, stdout="\n".join(f"line {n}" for n in range(200)), stderr=""
+    )
+
+    detail = install._failure_detail(noisy)
+
+    assert detail == "line 197 | line 198 | line 199"
+
+    many_errors: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
+        ["pnpm", "build"],
+        2,
+        stdout="\n".join(f"error TS{n}: detail {n}" for n in range(20)),
+        stderr="",
+    )
+    bounded = install._failure_detail(many_errors)
+    assert bounded.count(" | ") == 2
+    assert len(bounded) <= install._BUILD_DETAIL_CHARS
+
+
+def test_build_bundle_returns_the_compiler_error_on_one_line() -> None:
+    """The wiring, not just the helper: what `_build_bundle` hands `install`."""
+
+    def run(cmd: list[str], **kwargs: object) -> FakeProc:
+        if cmd[1] == "install":
+            return FakeProc(returncode=0)
+        return FakeProc(
+            returncode=2,
+            stdout=(
+                "src/fixture.test.ts(1,1): error TS2307: Cannot find module './fixtures/x.json'.\n"
+            ),
+            stderr="$ tsc -b && vite build\n",
+        )
+
+    with (
+        patch.object(install.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
+        patch.object(install.subprocess, "run", side_effect=run),
+    ):
+        error = install._build_bundle()
+
+    assert error is not None
+    assert "pnpm build failed: " in error
+    assert "TS2307" in error
+    assert "\n" not in error
+
+
+def _snapshot_web(tmp_path: Path, *, dist: bool = False) -> Path:
+    """A snapshot tree's web dir: package.json always, dist/ only if asked."""
+    web = tmp_path / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    if dist:
+        (web / "dist").mkdir()
+        (web / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+    return web
+
+
+def test_snapshot_bundle_builds_sources_that_have_no_dist(tmp_path: Path) -> None:
+    """The gap that left a phone on 503: a snapshot carries the web SOURCES,
+    dist/ is gitignored, and nothing built it — so the installed generation
+    had no UI and every authed GET answered "bundle not built"."""
+    web = _snapshot_web(tmp_path)
+
+    with (
+        patch.object(install.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
+        patch.object(install, "_build_bundle", return_value=None) as build,
+    ):
+        status = install.snapshot_bundle(web)
+
+    assert status == "built"
+    assert build.call_args.args[0] == web
+
+
+def test_snapshot_bundle_leaves_an_already_built_snapshot_alone(tmp_path: Path) -> None:
+    web = _snapshot_web(tmp_path, dist=True)
+
+    with patch.object(install, "_build_bundle") as build:
+        status = install.snapshot_bundle(web)
+
+    assert status == "already built"
+    build.assert_not_called()
+
+
+def test_snapshot_bundle_skips_without_node_and_does_not_fail(tmp_path: Path) -> None:
+    """No Node is a documented skip, not an update failure: the daemon heals
+    itself at `lop mobile install` on any host that has it."""
+    web = _snapshot_web(tmp_path)
+
+    with patch.object(install.shutil, "which", return_value=None):
+        status = install.snapshot_bundle(web)
+
+    assert status == "skipped (node not installed; build at `lop mobile install`)"
+
+
+def test_snapshot_bundle_reports_a_failed_build_without_raising(tmp_path: Path) -> None:
+    web = _snapshot_web(tmp_path)
+
+    with (
+        patch.object(install.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
+        patch.object(install, "_build_bundle", return_value="pnpm build failed: boom"),
+    ):
+        status = install.snapshot_bundle(web)
+
+    assert status == "FAILED (pnpm build failed: boom)"
+
+
+def test_snapshot_bundle_skips_a_tree_with_no_web_sources(tmp_path: Path) -> None:
+    assert install.snapshot_bundle(tmp_path) == "skipped (no web sources in snapshot)"
+
+
+def _guard_script(web: Path) -> None:
+    (web / "scripts").mkdir(parents=True, exist_ok=True)
+    (web / "scripts" / "check-bundle.mjs").write_text("", encoding="utf-8")
+
+
+def test_verify_bundle_reports_the_guard_message(tmp_path: Path) -> None:
+    web = tmp_path / "web"
+    _guard_script(web)
+    failed = FakeProc(
+        returncode=1,
+        stderr="error: the stylesheet names 19 classes; this bundle has 235.\n",
+    )
+
+    with (
+        patch.object(install.shutil, "which", return_value="/usr/bin/node"),
+        patch.object(install.subprocess, "run", return_value=failed),
+    ):
+        detail = install._verify_bundle(web)
+
+    assert detail is not None
+    assert detail.startswith("bundle check failed: ")
+    assert "19 classes" in detail
+
+
+def test_verify_bundle_is_optional_without_node_or_the_script(tmp_path: Path) -> None:
+    """Nothing to run is not an error: refusing to install would be worse than
+    the blind spot, and an older tree simply has no guard script."""
+    assert install._verify_bundle(tmp_path) is None
+
+    web = tmp_path / "web"
+    _guard_script(web)
+    with patch.object(install.shutil, "which", return_value=None):
+        assert install._verify_bundle(web) is None
+
+
+def test_build_bundle_reports_what_its_guard_rejects(tmp_path: Path) -> None:
+    """Exit 0 is not proof the bundle is servable, and this is the wiring that
+    makes a degenerate one loud instead of serving an unstyled phone."""
+    web = tmp_path / "web"
+    (web / "dist").mkdir(parents=True)
+    (web / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    with (
+        patch.object(install.subprocess, "run", return_value=FakeProc(returncode=0)),
+        patch.object(install, "_verify_bundle", return_value="bundle check failed: nope"),
+    ):
+        error = install._build_bundle(web, ["pnpm"])
+
+    assert error == "bundle check failed: nope"
+    # And the refused bundle is not left where `_bundle_state` would read it as
+    # "built" and keep serving it.
+    assert not (web / "dist").exists()
+
+
+def test_ensure_bundle_rebuilds_a_present_bundle_its_guard_rejects(tmp_path: Path) -> None:
+    """The state a FAILED build leaves: vite writes dist/, the guard fails,
+    the installer removed nothing, and `_bundle_state` reads the leftover
+    index.html as "built" — so every later install says "bundle present" while
+    the phone renders unstyled."""
+    web = _snapshot_web(tmp_path, dist=True)
+
+    with (
+        patch.object(install, "_verify_bundle", return_value="bundle check failed: 62 classes"),
+        patch.object(install, "_build_bundle", return_value=None) as build,
+    ):
+        ok, detail = install.ensure_bundle(web_dir=web)
+
+    assert (ok, detail) == (True, "built the web bundle")
+    build.assert_called_once()
+    # The rejected bundle is gone, so a later `_bundle_state` cannot read it as
+    # "built" while the rebuild is what actually produced the bundle.
+    assert not (web / "dist").exists()
+
+
+def test_ensure_bundle_trusts_a_bundle_its_guard_accepts(tmp_path: Path) -> None:
+    web = _snapshot_web(tmp_path, dist=True)
+
+    with (
+        patch.object(install, "_verify_bundle", return_value=None),
+        patch.object(install, "_build_bundle") as build,
+    ):
+        ok, detail = install.ensure_bundle(web_dir=web)
+
+    assert (ok, detail) == (True, "bundle present")
+    build.assert_not_called()
+
+
+def test_ensure_bundle_reports_a_rejected_bundle_when_it_may_not_build(tmp_path: Path) -> None:
+    web = _snapshot_web(tmp_path, dist=True)
+
+    with (
+        patch.object(install, "_verify_bundle", return_value="bundle check failed: 62 classes"),
+        patch.object(install, "_build_bundle") as build,
+    ):
+        ok, detail = install.ensure_bundle(build=False, web_dir=web)
+
+    assert ok is False
+    assert detail == "bundle check failed: 62 classes"
+    build.assert_not_called()
+
+
+def test_ensure_bundle_uses_the_installs_own_tree_by_default(tmp_path: Path) -> None:
+    """The default path, which is the one `lop mobile install` takes: `web_dir`
+    is None there, and a helper that cannot take None crashes the CLI instead
+    of rebuilding (measured on the real command, not in a test)."""
+    web = _snapshot_web(tmp_path, dist=True)
+
+    with (
+        patch.object(install, "_WEB_DIR", web),
+        patch.object(install, "_verify_bundle", return_value="bundle check failed: 62 classes"),
+        patch.object(install, "_build_bundle", return_value=None) as build,
+    ):
+        ok, _ = install.ensure_bundle()
+
+    assert ok is True
+    build.assert_called_once_with(web)

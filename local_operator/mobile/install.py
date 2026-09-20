@@ -60,15 +60,57 @@ NO_SUPERVISOR_ERROR = supervisors.no_supervisor_error("lop mobile serve")
 #: checkout has no bundle until something builds it; a pip/uv wheel ships it
 #: via package-data but an in-place source install never does. Install must
 #: be able to make it, or every such machine shows "bundle not built".
+#: Functions below take an optional ``web_dir`` for a tree that is not this
+#: one — the snapshot updater builds the tree it is about to install.
 _WEB_DIR = Path(__file__).parent / "web"
-_DIST_INDEX = _WEB_DIR / "dist" / "index.html"
+
+#: What a failed build's output is scanned for, and how much of it is quoted
+#: back. A bound rather than a formality: the string lands in `lop mobile
+#: install`'s step list and in whatever bug report copies it.
+_BUILD_ERROR_HINT = re.compile(r"error|ERR_|cannot|not found|failed", re.IGNORECASE)
+#: pnpm's own wrapper lines — the `$ <script>` echo it writes to stderr before
+#: running a script, and the lifecycle/exit-code summary it writes after one
+#: fails. "The last line of stderr" WAS one of these, which is how the operator
+#: and every bug report saw `pnpm build failed: $ tsc -b && vite build` while
+#: the compiler's actual reason sat unread one stream away.
+_BUILD_WRAPPER_NOISE = re.compile(
+    r"^(\$ |Progress: |WARN )|\[ELIFECYCLE\]|Command failed with exit code", re.IGNORECASE
+)
+_BUILD_DETAIL_LINES = 3
+_BUILD_DETAIL_CHARS = 500
 
 
-def _bundle_state() -> str:
+def _failure_detail(result: subprocess.CompletedProcess[str]) -> str:
+    """The actionable part of a failed command's output, on one bounded line.
+
+    BOTH streams, because the reason is not always on stderr: `tsc -b` writes
+    `error TS2307: …` to ITS stdout while pnpm writes the script echo to
+    stderr, so reading ``stderr or stdout`` and keeping the final line reported
+    the echo and nothing an operator could act on. Prefer lines that name an
+    error, fall back to the tail when the tool failed without printing one, and
+    never raise — a diagnostic must not become the failure.
+    """
+    lines = [
+        line.strip()
+        for stream in (result.stdout, result.stderr)
+        for line in (stream or "").splitlines()
+        if line.strip()
+    ]
+    errors = [
+        line
+        for line in lines
+        if _BUILD_ERROR_HINT.search(line) and not _BUILD_WRAPPER_NOISE.match(line)
+    ]
+    detail = " | ".join((errors or lines)[-_BUILD_DETAIL_LINES:])
+    return detail[:_BUILD_DETAIL_CHARS] if detail else "no output"
+
+
+def _bundle_state(web_dir: Path | None = None) -> str:
     """built / buildable / missing-sources — what install can do about dist."""
-    if _DIST_INDEX.exists():
+    web_dir = _WEB_DIR if web_dir is None else web_dir
+    if _dist_index(web_dir).exists():
         return "built"
-    if (_WEB_DIR / "package.json").exists():
+    if (web_dir / "package.json").exists():
         return "buildable"
     return "missing-sources"
 
@@ -121,7 +163,42 @@ def _shim_argv(name: str) -> list[str] | None:
     return [name]
 
 
-def _build_bundle() -> str | None:
+def _dist_index(web_dir: Path) -> Path:
+    """The file whose presence means "there is a UI to serve"."""
+    return _dist_dir(web_dir) / "index.html"
+
+
+def _dist_dir(web_dir: Path) -> Path:
+    return web_dir / "dist"
+
+
+def _package_runner(web_dir: Path) -> tuple[list[str] | None, str | None]:
+    """pnpm (or corepack's pnpm) for this tree, or the tool that is missing.
+
+    ``(runner, None)`` when a build can run, else ``(None, "node"|"pnpm")``.
+    The missing TOOL rather than a sentence, because two callers word the same
+    absence differently — an install step explains what to do, an updater
+    status line has to stay one line — and one shared sentence reads wrong in
+    one of them. Both arms go through :func:`_shim_argv`, so the Windows
+    spelling of each launcher comes from the ONE place that owns it (audit
+    C10); ``corepack enable`` runs against ``web_dir`` because the snapshot
+    updater prepares a tree that is not this install's.
+    """
+    if shutil.which("node") is None:
+        return None, "node"
+    runner = _shim_argv("pnpm")
+    if runner is not None:
+        return runner, None
+    corepack = _shim_argv("corepack")
+    if corepack is None:
+        return None, "pnpm"
+    subprocess.run([*corepack, "enable"], cwd=web_dir, capture_output=True, timeout=30)
+    return [*corepack, "pnpm"], None
+
+
+def _build_bundle(
+    web_dir: Path | None = None, runner: list[str] | None = None
+) -> str | None:
     """Build the SPA in place. Returns an error string, or None on success.
 
     pnpm only — the lockfile and packageManager pin are pnpm's, and mixing
@@ -129,44 +206,51 @@ def _build_bundle() -> str | None:
     first so a machine with only Node (no global pnpm) still self-heals;
     the packageManager field pins the exact pnpm corepack fetches.
 
-    Both candidates are launched through :func:`_shim_argv`, which is what makes
-    this work on Windows at all: there the resolvable ``pnpm`` is a ``.CMD``
-    batch file that a bare argv never reaches (audit C10).
+    Both candidates are launched through :func:`_shim_argv` (see
+    :func:`_package_runner`), which is what makes this work on Windows at all:
+    there the resolvable ``pnpm`` is a ``.CMD`` batch file that a bare argv
+    never reaches (audit C10).
+
+    ``web_dir`` defaults to this install's tree; the snapshot updater passes
+    the tree it is about to install (see :func:`snapshot_bundle`), so both
+    paths share this one builder rather than carrying a second copy of the
+    pnpm invocation. ``runner`` is passed by a caller that already resolved it
+    (so ``corepack enable`` runs once, not twice).
     """
-    if shutil.which("node") is None:
-        # Named with its REMEDY rather than with its mechanism. This is the one
-        # refusal an operator meets on a fresh Linux or Windows box, and the
-        # previous text ("the bundle needs a one-time `pnpm build`") named a
-        # command that cannot be run without the thing that is missing —
-        # measured in the Ubuntu and Mint containers, where `mobile.install`
-        # failed with exactly that and the container reading could not say what
-        # to install. The wheel ships the built bundle, so this is a source
-        # checkout (a container, a dev machine), and Node is a one-time cost
-        # there rather than a runtime dependency of the daemon.
-        # THE REMEDY HAS TO BE ONE THE READER CAN ACTUALLY RUN (design round 2,
-        # D7). This sentence used to lead with `apt install nodejs`, which was
-        # measured wrong on the very host this branch's own leg runs on: Ubuntu
-        # 24.04's archive package is `nodejs 18.19.1`, and Debian freezes it at
-        # the distro release, so the operator runs the remedy and gets this
-        # identical refusal back. What the reader needs is the version check and
-        # the routes that give them a current Node.
-        return (
-            # The remedy leads, because the reader's premise is that they have
-            # no node: telling them to run `node --version` first is telling
-            # them to run a command this arm exists because it is missing
-            # (design round 4, D18). The version requirement follows the
-            # instruction it constrains rather than preceding it.
-            "node is not installed, and the portal bundle is built once with "
-            "it: install a current Node from https://nodejs.org (or, if you "
-            "use nvm, `nvm install 22`), then re-run `lop mobile install`. "
-            "Node >=22 is required -- a distro package is often older, and "
-            "Ubuntu 24.04 ships 18"
-        )
+    web_dir = _WEB_DIR if web_dir is None else web_dir
     try:
-        runner = _shim_argv("pnpm")
         if runner is None:
-            corepack = _shim_argv("corepack")
-            if corepack is None:
+            runner, missing = _package_runner(web_dir)
+            if missing == "node":
+                # Named with its REMEDY rather than with its mechanism. This is the one
+                # refusal an operator meets on a fresh Linux or Windows box, and the
+                # previous text ("the bundle needs a one-time `pnpm build`") named a
+                # command that cannot be run without the thing that is missing —
+                # measured in the Ubuntu and Mint containers, where `mobile.install`
+                # failed with exactly that and the container reading could not say what
+                # to install. The wheel ships the built bundle, so this is a source
+                # checkout (a container, a dev machine), and Node is a one-time cost
+                # there rather than a runtime dependency of the daemon.
+                # THE REMEDY HAS TO BE ONE THE READER CAN ACTUALLY RUN (design round 2,
+                # D7). This sentence used to lead with `apt install nodejs`, which was
+                # measured wrong on the very host this branch's own leg runs on: Ubuntu
+                # 24.04's archive package is `nodejs 18.19.1`, and Debian freezes it at
+                # the distro release, so the operator runs the remedy and gets this
+                # identical refusal back. What the reader needs is the version check and
+                # the routes that give them a current Node.
+                return (
+                    # The remedy leads, because the reader's premise is that they have
+                    # no node: telling them to run `node --version` first is telling
+                    # them to run a command this arm exists because it is missing
+                    # (design round 4, D18). The version requirement follows the
+                    # instruction it constrains rather than preceding it.
+                    "node is not installed, and the portal bundle is built once with "
+                    "it: install a current Node from https://nodejs.org (or, if you "
+                    "use nvm, `nvm install 22`), then re-run `lop mobile install`. "
+                    "Node >=22 is required -- a distro package is often older, and "
+                    "Ubuntu 24.04 ships 18"
+                )
+            if runner is None:
                 # SAME DEFECT AS THE NODE ARM ABOVE (design round 2, D8), and this
                 # sentence then repeated it in its own replacement (design round
                 # 3, D14). The old text offered only `pnpm build` -- the command
@@ -188,41 +272,139 @@ def _build_bundle() -> str | None:
                     "(https://pnpm.io/installation), then re-run "
                     "`lop mobile install`"
                 )
-            subprocess.run(
-                [*corepack, "enable"],
-                cwd=_WEB_DIR,
-                capture_output=True,
-                timeout=30,
-            )
-            runner = [*corepack, "pnpm"]
         for args in (["install", "--frozen-lockfile"], ["build"]):
             result = subprocess.run(
-                [*runner, *args], cwd=_WEB_DIR, capture_output=True, text=True, timeout=600
+                [*runner, *args], cwd=web_dir, capture_output=True, text=True, timeout=600
             )
             if result.returncode != 0:
-                tail = (result.stderr or result.stdout).strip().splitlines()
-                return f"pnpm {' '.join(args)} failed: {tail[-1][:200] if tail else 'unknown'}"
+                # A failed `build` can leave a dist/ behind: vite writes it
+                # before npm's `postbuild` guard judges it, and the guard
+                # failing is the common case here. Any index.html is enough
+                # for `_bundle_state` to call the install "built" and serve an
+                # unstyled phone with no error, so a bundle that does not pass
+                # the guard is removed rather than left reading as servable.
+                # Only one that FAILS the guard is removed, though: a failure
+                # in `tsc -b` happens before vite writes anything, and the
+                # previous dist is still a good bundle.
+                if _dist_index(web_dir).exists() and _verify_bundle(web_dir) is not None:
+                    shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
+                return f"pnpm {' '.join(args)} failed: {_failure_detail(result)}"
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"bundle build failed: {exc}"
-    return None if _DIST_INDEX.exists() else "build ran but dist/index.html is still missing"
+    if not _dist_index(web_dir).exists():
+        return "build ran but dist/index.html is still missing"
+    # Exit 0 is not proof the bundle is servable — see ``_verify_bundle``.
+    error = _verify_bundle(web_dir)
+    if error is not None:
+        # vite writes dist/ BEFORE `postbuild` judges it, so a rejected build
+        # still leaves a directory behind — and `_bundle_state` reads any
+        # index.html as "built", which would keep serving the very bundle the
+        # guard just refused, silently, on every later install. Take it out of
+        # play; the next build regenerates it.
+        shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
+        return error
+    return None
 
 
-def ensure_bundle(*, build: bool = True) -> tuple[bool, str]:
+def _verify_bundle(web_dir: Path | None = None) -> str | None:
+    """Run the bundle's own guard over a freshly built ``dist``.
+
+    The guard ships with the web tree (``scripts/check-bundle.mjs``) and runs
+    as npm's ``postbuild``, so ``pnpm build`` already fails on a degenerate
+    bundle. The installer runs it AGAIN because it cannot assume the
+    package.json it just used carries that hook: a source snapshot taken
+    before the hook existed builds green and installs a stylesheet carrying no
+    utilities at all — the silent half of this defect, where the phone renders
+    unstyled, vite exits 0, and nothing in any log says why.
+
+    No node, or an older tree without the script, is not an error here: there
+    is nothing to run, and refusing to install would be worse than the blind
+    spot. Returns an error string, or None.
+    """
+    web_dir = _WEB_DIR if web_dir is None else web_dir
+    script = web_dir / "scripts" / "check-bundle.mjs"
+    if not script.exists() or shutil.which("node") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["node", str(script)],
+            cwd=web_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"bundle check failed: {exc}"
+    if result.returncode == 0:
+        return None
+    return f"bundle check failed: {_failure_detail(result)}"
+
+
+def snapshot_bundle(web_dir: Path) -> str:
+    """Build a snapshot's web bundle in place, before it is installed.
+
+    Returns the one-line status both updaters print. The host script
+    ``~/.local/bin/lop-update`` has always done this for the trees it prepares;
+    the in-package updater (``lop update --from-snapshot``) did NOT, so the
+    snapshot it installed carried the web SOURCES and no ``dist/`` — the
+    bundle globs matched nothing, every authed GET answered 503 "bundle not
+    built", and the only repair was ``lop mobile install`` on that machine.
+
+    Never raises and never fails the update. No Node is a documented skip:
+    the daemon self-heals at ``lop mobile install`` on a host that has it, and
+    the wording matches the host script's so the two paths read as one log.
+    """
+    state = _bundle_state(web_dir)
+    if state == "built":
+        return "already built"
+    if state == "missing-sources":
+        return "skipped (no web sources in snapshot)"
+    try:
+        runner, missing = _package_runner(web_dir)
+    except (OSError, subprocess.TimeoutExpired):
+        return "skipped (pnpm could not be prepared; build at `lop mobile install`)"
+    if missing == "node":
+        return "skipped (node not installed; build at `lop mobile install`)"
+    if runner is None:
+        return "skipped (neither pnpm nor corepack; build at `lop mobile install`)"
+    error = _build_bundle(web_dir, runner)
+    return "built" if error is None else f"FAILED ({error})"
+
+
+def ensure_bundle(*, build: bool = True, web_dir: Path | None = None) -> tuple[bool, str]:
     """Guarantee the daemon has a UI to serve. (ok, detail-for-status).
 
     The three states, in the order a fresh machine hits them: a wheel ships
     dist and this is a no-op; a source checkout is buildable and we build
     it; a broken install has neither and we say so rather than serving the
     503 the daemon would show every authed GET.
+
+    A dist that is PRESENT and fails the guard is not one of those three: it
+    is what a failed build leaves behind (vite writes dist/ before npm's
+    postbuild judges it), and ``_bundle_state`` reads any index.html as
+    "built" — so trusting it here would report "bundle present" on every later
+    install while the phone rendered unstyled. It is dropped and rebuilt
+    instead.
     """
-    state = _bundle_state()
+    state = _bundle_state(web_dir)
+    # Defaulted HERE rather than in each helper: the helpers below take a real
+    # path, and one that silently tolerates None is one that crashes on the
+    # default install path instead — measured on the real CLI (TypeError on
+    # ``_dist_dir(None)``), which only a run through `lop mobile install` sees.
+    web_dir = _WEB_DIR if web_dir is None else web_dir
     if state == "built":
-        return True, "bundle present"
+        rejected = _verify_bundle(web_dir)
+        if rejected is None:
+            return True, "bundle present"
+        if not build:
+            return False, rejected
+        shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
+        state = "buildable"
     if state == "missing-sources":
         return False, "bundle and web sources both missing from the install"
     if not build:
         return False, "bundle missing (web sources present; build skipped)"
-    error = _build_bundle()
+    error = _build_bundle(web_dir)
     if error is not None:
         return False, error
     return True, "built the web bundle"

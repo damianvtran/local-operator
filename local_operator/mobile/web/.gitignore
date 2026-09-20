@@ -5,3 +5,30 @@ dist/
 # it is a local artifact, never source (A16: 6,955 files / 125 MB leaked into
 # the relay branch and had to be rewritten out).
 .pnpm-store/
+
+# ---------------------------------------------------------------------------
+# Source resolution, not version control. Tailwind decides which files can hold
+# class names with gitignore semantics, and a DEEPER .gitignore's `!` patterns
+# override a shallower file's. uv writes an ALLOW-LIST .gitignore — the single
+# line `*` — at the root of every venv it creates and of every tool generation
+# it installs, so in an installed tree (site-packages, or a `lop-update`
+# generation under ~/.local/share/uv/tools or /var/folders) the whole web tree
+# sits under a `*` and is invisible to the scanner: `pnpm build` then emits a
+# stylesheet with no utilities, EXITS 0 (measured: 31 kB against 50 kB for
+# these sources), and the phone renders unstyled with nothing in any log to
+# say why. Upstream: tailwindlabs/tailwindcss#19844, #15452.
+#
+# So this file ships via package-data — an installed tree has no .gitignore of
+# its own otherwise — and its `!` lines re-include the paths the build scans
+# (the `@source` globs in src/styles/index.css). `!src/**` is what the scanner
+# honours; `!src/**/*.ts` was measured and does not re-include on its own.
+#
+# Only `!src/**` is broad enough to touch a git rule, so `*.tsbuildinfo` is
+# re-imposed below it (last match wins): the tsc build cache under src/ stays
+# out of git exactly as it was. Do not "tidy" these lines away — the failure
+# they prevent is a silent one.
+!index.html
+!scripts/
+!src/
+!src/**
+*.tsbuildinfo
