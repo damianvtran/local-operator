@@ -5,6 +5,7 @@ actually in — a plist can exist while the agent was never bootstrapped, and
 
 from __future__ import annotations
 
+import plistlib
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -832,3 +833,121 @@ def test_snapshot_bundle_trusts_a_present_bundle_its_guard_accepts(tmp_path: Pat
 
     assert status == "already built"
     build.assert_not_called()
+# --------------------------------------------------------------------------
+# An install that would change nothing must do nothing.
+#
+# `install` rewrote the plist and bootout+bootstrapped unconditionally, and
+# with the generation shim the plist path is stable — so the common re-run
+# wrote IDENTICAL bytes and churned launchd behind them, which is precisely the
+# pair of signals an EDR reads as "Persistence: launchd job / plist file
+# modification" (MITRE T1543.001). Both directions are pinned below, with the
+# launchctl call log asserted directly rather than inferred from the steps.
+# --------------------------------------------------------------------------
+
+
+class _InstallRig:
+    """Everything ``install()`` reaches outside itself, faked and recorded.
+
+    The password store is faked rather than read: this test has no business
+    touching the operator's live portal password, and reading it would make the
+    result depend on the host.
+    """
+
+    def __init__(self, monkeypatch, plist) -> None:  # noqa: ANN001
+        self.plist = plist
+        self.calls: list[list[str]] = []
+        self.serving = True
+        monkeypatch.setattr(install, "plist_path", lambda: plist)
+        monkeypatch.setattr(install, "load_password", lambda: "a-password")
+        monkeypatch.setattr(install, "ensure_bundle", lambda build=True: (True, "bundle present"))
+        monkeypatch.setattr(install, "store_description", lambda: "test store")
+        monkeypatch.setattr(install, "_launchctl", self._launchctl)
+        monkeypatch.setattr(install, "_our_daemon_listening", lambda _port: self.serving)
+        monkeypatch.setattr(install, "health", lambda port=4098, timeout=3.0: {"ok": True})
+        monkeypatch.setattr(install, "gate_closed", lambda port=4098, timeout=3.0: True)
+
+    def _launchctl(self, *cmd: str) -> FakeProc:
+        self.calls.append(list(cmd))
+        if cmd[:2] == ("kickstart", "-k"):
+            self.serving = True  # the repair worked
+        return FakeProc(returncode=0, stdout="pid = 4242")
+
+    def write_current_plist(self, port: int = install.DEFAULT_PORT) -> None:
+        self.plist.parent.mkdir(parents=True, exist_ok=True)
+        self.plist.write_bytes(plistlib.dumps(install.render_plist(port)))
+
+
+def test_an_install_that_changes_nothing_does_not_write_or_reload(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """Equal content ⇒ no write, NO launchctl call, and no false claim.
+
+    The two assertions a mutation cannot survive: the file's mtime must not
+    move (a rewrite is the EDR signal) and the call log must be EMPTY (a
+    bootout/bootstrap is the other one).
+    """
+    rig = _InstallRig(monkeypatch, tmp_path / "com.local-operator.mobile.plist")
+    rig.write_current_plist()
+    before = rig.plist.stat().st_mtime_ns
+
+    result = install.install()
+
+    assert result["ok"] is True
+    steps = _steps(result)
+    assert rig.plist.stat().st_mtime_ns == before, "the plist was rewritten"
+    assert rig.calls == [], f"install reached launchctl for no reason: {rig.calls}"
+    assert any("already current" in step for step in steps), steps
+    assert not any(
+        "loaded the LaunchAgent" in step for step in steps
+    ), "an install that skipped the load must not report one"
+
+
+def test_an_install_that_changes_the_plist_still_writes_and_reloads(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """Changed content ⇒ today's write + reload, unchanged."""
+    from local_operator import launchd
+
+    rig = _InstallRig(monkeypatch, tmp_path / "com.local-operator.mobile.plist")
+    rig.write_current_plist(port=install.DEFAULT_PORT + 1)
+    reloads: list[object] = []
+
+    def fake_reload(**kwargs) -> "launchd.JobReload":  # noqa: ANN003
+        reloads.append(kwargs["path"])
+        return launchd.JobReload(label=str(kwargs["label"]), outcome="reloaded")
+
+    monkeypatch.setattr(install.launchd, "reload_job", fake_reload)
+
+    result = install.install()
+
+    assert result["ok"] is True
+    assert plistlib.loads(rig.plist.read_bytes()) == install.render_plist(install.DEFAULT_PORT)
+    assert reloads == [rig.plist], "a changed plist must still be reloaded"
+    assert not any("already current" in step for step in _steps(result))
+
+
+def test_a_loaded_but_dead_job_is_restarted_without_rewriting_the_plist(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """The state the old unconditional rewrite repaired, still repaired.
+
+    A stopped-but-loaded job is exactly what a compare-then-skip could leave
+    dead if it only looked at the file. It is restarted with `kickstart -k` —
+    the narrower operation, which does not briefly unregister the label — and
+    the file is left untouched.
+    """
+    from local_operator import launchd
+
+    rig = _InstallRig(monkeypatch, tmp_path / "com.local-operator.mobile.plist")
+    rig.write_current_plist()
+    rig.serving = False
+    before = rig.plist.stat().st_mtime_ns
+
+    result = install.install()
+
+    assert result["ok"] is True
+    assert rig.plist.stat().st_mtime_ns == before, "the file was already correct"
+    assert rig.calls == [["kickstart", "-k", f"{launchd.job_domain()}/{install.LABEL}"]]
+    assert not any(
+        "loaded the LaunchAgent" in step for step in _steps(result)
+    ), "a kickstart is not a reload and must not be reported as one"

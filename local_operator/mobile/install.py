@@ -777,6 +777,32 @@ def gate_closed(port: int = DEFAULT_PORT, timeout: float = 3.0) -> bool:
         return False
 
 
+def _serving(port: int) -> bool:
+    """The supervised daemon is up, answering, and still gating the API.
+
+    The triple rather than ``health`` alone, because a leftover FOREGROUND
+    daemon on the same port passes a health probe while the supervised one
+    fails to bind — see :func:`_our_daemon_listening`. Spelled once so the
+    install's skip decision and its verification loop cannot drift apart.
+    """
+    return _our_daemon_listening(port) and health(port) is not None and gate_closed(port)
+
+
+def _plist_is_current(path: Path, wanted: dict[str, object]) -> bool:
+    """Whether the file already says exactly what ``wanted`` says.
+
+    Content, not existence: a plist from an older build names a different
+    interpreter and must still be replaced. An unreadable or unparseable file
+    answers ``False``, which is the rewrite direction — see
+    :func:`local_operator.wakes.install.ensure_supervisor_installed`, which
+    repairs by content for the same reason.
+    """
+    try:
+        return plistlib.loads(path.read_bytes()) == wanted
+    except (OSError, ValueError):
+        return False
+
+
 def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, object]:
     """Idempotent one-shot: bundle, password (kept if present), unit, load, verify.
 
@@ -821,19 +847,49 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
 
     if kind == supervisors.LAUNCHCTL:
         plist_path().parent.mkdir(parents=True, exist_ok=True)
-        if not dry_run:
+        # WRITE ONLY WHEN IT WOULD SAY SOMETHING NEW, and reload only when the
+        # file changed or the daemon is not serving. THE REASON IS AN EDR, not
+        # tidiness: this daemon is a LaunchAgent, and "Persistence: launchd job
+        # / plist file modification" (MITRE T1543.001) is dominated by exactly
+        # the two signals an unconditional rewrite emits — a plist whose bytes
+        # did not change, written again, followed by a bootout/bootstrap churn.
+        # With the generation shim the plist path is stable, so in the common
+        # case the bytes are IDENTICAL and there is nothing to fix.
+        # `wakes.install` has compared-then-skipped for this reason since it
+        # shipped; this is the same shape.
+        current = _plist_is_current(plist_path(), render_plist(port))
+        if not dry_run and not current:
             plist_path().write_bytes(plistlib.dumps(render_plist(port)))
-        steps.append(f"wrote {plist_path()}")
+        steps.append(f"wrote {plist_path()}" if not current else "LaunchAgent already current")
         if not dry_run:
             # The reload, not a bare pair: it tolerates an absent job, waits for
             # launchd to release the label, retries the bootstrap past the
             # measured teardown race, and verifies the job is registered
             # afterwards — so the steps below are reporting a daemon that really
             # is loaded. See :mod:`local_operator.launchd`.
-            reloaded = launchd.reload_job(label=LABEL, path=plist_path(), runner=_launchctl)
-            if not reloaded.ok:
-                return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
-            steps.append("loaded the LaunchAgent")
+            #
+            # SKIPPED WHEN THERE IS NOTHING TO LOAD: the file is already current
+            # AND the supervised daemon is serving, which is the common case for
+            # a re-run (see the write above for why that churn is an EDR signal,
+            # not tidiness). A loaded-but-DEAD job is the state the old
+            # unconditional reload used to repair, and it is still repaired
+            # here: `kickstart` is the narrower operation, and it does not
+            # briefly unregister the label — the precedent is
+            # `wakes.install.ensure_supervisor_installed`. If the label is not
+            # registered at all, kickstart fails and the full reload below runs,
+            # which is exactly today's behaviour.
+            reload_needed = True
+            if current and _serving(port):
+                reload_needed = False
+                steps.append("LaunchAgent already current and serving; left it loaded")
+            elif current and launchd.kickstart(label=LABEL, run=_launchctl):
+                reload_needed = False
+                steps.append("restarted the loaded LaunchAgent (its file was already current)")
+            if reload_needed:
+                reloaded = launchd.reload_job(label=LABEL, path=plist_path(), runner=_launchctl)
+                if not reloaded.ok:
+                    return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
+                steps.append("loaded the LaunchAgent")
     elif kind == supervisors.SYSTEMCTL:
         loaded, detail = _install_systemd(port, dry_run=dry_run, steps=steps)
         if not loaded:
@@ -852,7 +908,7 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, obj
     # AND the auth gate must be closed — never installed-but-unauthenticated.
     deadline = time.time() + 20
     while time.time() < deadline:
-        if _our_daemon_listening(port) and health(port) and gate_closed(port):
+        if _serving(port):
             steps.append("health check passed and the auth gate is closed")
             return {"ok": True, "steps": steps}
         time.sleep(0.5)

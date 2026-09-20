@@ -146,6 +146,21 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _plist_is_current(path: Path, wanted: bytes) -> bool:
+    """Whether the installed plist is already exactly ``wanted``, at 0600.
+
+    Bytes AND mode: this installer owns both, so a file whose content matches
+    while its mode drifted is still repaired rather than skipped. An
+    unreadable file answers ``False`` — the rewrite direction.
+    """
+    try:
+        if path.read_bytes() != wanted:
+            return False
+        return (path.stat().st_mode & 0o777) == 0o600
+    except OSError:
+        return False
+
+
 def render_plist(config_base: Path | None = None) -> dict[str, object]:
     """The whole supervised-unit plan, for the store ``config_base`` names.
 
@@ -365,23 +380,47 @@ def install() -> None:
     if kind == supervisors.LAUNCHCTL:
         log = config.directory() / "service.log"
         config.private_write(log, "")
-        value = render_plist()
-        path.write_bytes(plistlib.dumps(value))
-        path.chmod(0o600)
-        # Reload through the shared helper, and REPORT what launchd said. This
-        # used to issue bootout+bootstrap and raise a generic "check your user
-        # service manager" that discarded launchd's stderr while the CLI went on
-        # to print "Tunnel service started." — a false success over a daemon
-        # that had just been booted out and never loaded back. See
-        # :mod:`local_operator.launchd` for the measurement.
-        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
-        if not reloaded.ok:
-            # The same sentence the upgrade path prints, because the state is
-            # the same one it describes: the plist is written and the job is
-            # not loaded. `lop tunnel install` is the working recovery.
-            raise ValueError(
-                launchd.reload_failure("tunnel", path, "lop tunnel install", reloaded.detail).detail
-            )
+        # WRITE AND RELOAD ONLY WHEN SOMETHING WOULD CHANGE, for the reason
+        # recorded on the other two installers: this plist is what an EDR reads
+        # as "Persistence: launchd job / plist file modification" (MITRE
+        # T1543.001), and re-writing identical bytes followed by a
+        # bootout/bootstrap is that signal with no functional change behind it.
+        # `wakes.install` has skipped on equal content since it shipped.
+        wanted = plistlib.dumps(render_plist())
+        # The MODE is part of "current": this installer is the one that sets
+        # 0600, so a file whose bytes match but whose mode drifted is still
+        # repaired rather than skipped.
+        current = _plist_is_current(path, wanted)
+        if not current:
+            path.write_bytes(wanted)
+            path.chmod(0o600)
+        # A DEAD JOB IS STILL REPAIRED: skip only while launchd holds a live pid
+        # for the label, `kickstart` the loaded-but-stopped case (the narrower
+        # repair, which does not briefly unregister the label), and fall through
+        # to the shared reload for anything else — including a label launchd has
+        # forgotten, which is what registers it.
+        reload_needed = True
+        if current and launchd.job_running(label=LABEL, run=_launchctl):
+            reload_needed = False
+        elif current and launchd.kickstart(label=LABEL, run=_launchctl):
+            reload_needed = False
+        if reload_needed:
+            # Reload through the shared helper, and REPORT what launchd said. This
+            # used to issue bootout+bootstrap and raise a generic "check your user
+            # service manager" that discarded launchd's stderr while the CLI went on
+            # to print "Tunnel service started." — a false success over a daemon
+            # that had just been booted out and never loaded back. See
+            # :mod:`local_operator.launchd` for the measurement.
+            reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+            if not reloaded.ok:
+                # The same sentence the upgrade path prints, because the state is
+                # the same one it describes: the plist is written and the job is
+                # not loaded. `lop tunnel install` is the working recovery.
+                raise ValueError(
+                    launchd.reload_failure(
+                        "tunnel", path, "lop tunnel install", reloaded.detail
+                    ).detail
+                )
     elif kind == supervisors.SYSTEMCTL:
         path.write_text(render_systemd())
         path.chmod(0o600)

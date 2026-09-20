@@ -1262,3 +1262,83 @@ def test_the_legacy_registration_is_empty_on_windows(
     monkeypatch.setattr(install.sys, "platform", "win32")
 
     assert install._legacy_path() is None
+
+
+# --------------------------------------------------------------------------
+# An install that would change nothing must do nothing.
+#
+# See the mobile installer's twin cells for the full rationale: an
+# unconditional plist rewrite plus a bootout/bootstrap is exactly the pair of
+# signals an EDR reads as "Persistence: launchd job / plist file modification"
+# (MITRE T1543.001), and the bridge's plist path is stable, so a re-run usually
+# renders identical bytes.
+# --------------------------------------------------------------------------
+
+
+class _LaunchctlRig:
+    """`install()` with everything outside itself faked, and the calls recorded."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        self.plist = tmp_path / "com.local-operator.browser.plist"
+        self.calls: list[list[str]] = []
+        self.running = True
+        monkeypatch.setattr(install, "plist_path", lambda: self.plist)
+        monkeypatch.setattr(install, "log_path", lambda: tmp_path / "log" / "browser.log")
+        monkeypatch.setattr(install, "_supervisor", lambda: "launchctl")
+        monkeypatch.setattr(install, "legacy_registration", lambda: None)
+        monkeypatch.setattr(install, "health", lambda *a, **k: {"ok": True})
+        monkeypatch.setattr(install, "_launchctl", self._launchctl)
+        monkeypatch.setattr(install.launchd, "job_running", lambda **kwargs: self.running)
+
+    def _launchctl(self, *cmd: str) -> subprocess.CompletedProcess[str]:
+        self.calls.append(list(cmd))
+        return subprocess.CompletedProcess(list(cmd), 0, "pid = 4242", "")
+
+    def write_current_plist(self, port: int) -> None:
+        self.plist.parent.mkdir(parents=True, exist_ok=True)
+        self.plist.write_bytes(plistlib.dumps(install.render_plist(port)))
+
+
+def test_install_skips_a_plist_that_already_says_what_it_would_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Equal content and a live job: no write, NO launchctl call, no false claim."""
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4099)
+    before = rig.plist.stat().st_mtime_ns
+
+    result = install.install(4099)
+
+    assert result["ok"] is True
+    assert rig.plist.stat().st_mtime_ns == before, "the plist was rewritten"
+    assert rig.calls == [], f"install reached launchctl for no reason: {rig.calls}"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert any("already current" in step for step in steps), steps
+    assert not any(
+        "loaded the LaunchAgent" in step for step in steps
+    ), "an install that skipped the load must not report one"
+
+
+def test_install_still_writes_and_reloads_a_changed_plist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A plist from an older build is still replaced and reloaded."""
+    rig = _LaunchctlRig(monkeypatch, tmp_path)
+    rig.write_current_plist(4098)
+    reloads: list[Path] = []
+
+    def fake_reload(**kwargs: object) -> install.launchd.JobReload:
+        reloads.append(kwargs["path"])  # type: ignore[arg-type]
+        return install.launchd.JobReload(label=str(kwargs["label"]), outcome="reloaded")
+
+    monkeypatch.setattr(install.launchd, "reload_job", fake_reload)
+
+    result = install.install(4099)
+
+    assert result["ok"] is True
+    assert plistlib.loads(rig.plist.read_bytes()) == install.render_plist(4099)
+    assert reloads == [rig.plist], "a changed plist must still be reloaded"
+    steps = result["steps"]
+    assert isinstance(steps, list)
+    assert not any("already current" in step for step in steps), steps
