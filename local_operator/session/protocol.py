@@ -597,7 +597,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     paint path.
 
     It is deliberately not used for dispatch, and the reason is measured rather
-    than stylistic. This protocol carries 125 public members and a POSITIVE
+    than stylistic. This protocol carries 126 public members and a POSITIVE
     ``isinstance`` walks every one of them; measured on an arm64 host, CPython
     3.12.13, min-of-seven over 2,000 iterations:
 
@@ -628,7 +628,8 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
     WHY it served cold — ``cold_reason`` and ``attaching``, one rung that adds
     two members because the wire tells a renderer both the fact and the
     in-flight state, 125 once a refused gate reply needed a surface to reach the
-    pane that pressed APPROVE), so recompute it rather
+    pane that pressed APPROVE, 126 once the operator-prompt notice gave that pane
+    the sentence naming what a signature is about to authorise), so recompute it rather
     than adjusting it by the size of your own change.
 
     ====================================================  ==================
@@ -1399,6 +1400,28 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
 
     def set_recall_resolution(self, resolver: Callable[[str], None] | None) -> None:
         """The recall twin of :meth:`set_cancel_resolution`."""
+        ...
+
+    def set_operator_prompt_notice(self, handler: Callable[[str], None] | None) -> None:
+        """Arm the sink that paints "what this signature is about to authorise".
+
+        Viewer-only for the same reason the three above are, and one more: the
+        sentence describes a PRESENCE PROMPT this machine's key is about to raise,
+        and the only surface with a human standing at it is an attached pane. An
+        owner ``Session`` runs the loop where the prompt is raised and has no host
+        above it to paint on.
+        """
+        ...
+
+    def set_operator_prompt_notice(self, handler: Callable[[str], None] | None) -> None:
+        """Arm the sink that paints "what this signature is about to authorise".
+
+        Viewer-only for the same reason the three above are, and one more: the
+        sentence describes a PRESENCE PROMPT this machine's key is about to raise,
+        and the only surface with a human standing at it is an attached pane. An
+        owner ``Session`` runs the loop where the prompt is raised and has no host
+        above it to paint on.
+        """
         ...
 
     def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
