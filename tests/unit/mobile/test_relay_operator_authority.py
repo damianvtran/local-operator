@@ -610,3 +610,63 @@ def test_a_refused_command_carries_the_TYPED_code_to_the_phone(tmp_path: Path, m
     # ...and the CATEGORY rides beside it, for a client that has to decide what to
     # offer next rather than reword a sentence it does not own.
     assert body["code"] == "operator_authority_unconfigured", body
+
+
+def test_a_new_anchor_lifts_a_revocation_recorded_on_this_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q9-1's exact dead end, through the relay's own HTTP surface.
+
+    The round-8 copy told a revoked phone's operator to create and install a new
+    anchor. Measured on this head before the fix: the phone was STILL refused, because
+    the relay's local record was honoured unconditionally and `lop operator init`
+    does not touch it. A revocation is a statement by the operator key that signed the
+    certificate, so a record stamped with a key that is no longer installed no longer
+    names this device — which is the property this cell pins, at the guard a phone
+    actually meets.
+    """
+    from local_operator.operator import trust
+    from local_operator.operator.keychain import FILE_ONLY
+    from local_operator.operator.sign import anchor_for_handle, create_key
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    anchor = _install_operator_key(tmp_path, monkeypatch)
+
+    def load(which: Any) -> Any:
+        return lambda uid=None: trust.AnchorLoad(
+            anchor=which, path=trust.anchor_path(uid), root_owned=True, reason="ok", exists=True
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", load(anchor))
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = _logged_in(daemon)
+    point = _point()
+    device_id = devices.new_device_id(point)
+
+    def claim() -> Any:
+        code = devices.begin_pairing(tmp_path)
+        return client.post(
+            "/api/pair",
+            json={
+                "code": code,
+                "spki": base64.urlsafe_b64encode(point).decode().rstrip("="),
+                "name": "my phone",
+            },
+        )
+
+    assert claim().status_code == 200, "the fixture's own pairing did not work"
+    devices.record_revocation(tmp_path, device_id)
+    assert claim().status_code == 403
+    assert json.loads(devices.revoked_path(tmp_path).read_text())["operator_key_id"] == (
+        anchor.key_id
+    ), "the record was not stamped with the anchor it belongs to"
+
+    # A GENUINELY NEW ANCHOR, and nothing runs `lop operator init` for it here: the
+    # key is real and so is the statement, and only the root-owned INSTALL fact is
+    # supplied, which is the one thing a test may not create.
+    fresh = anchor_for_handle(
+        create_key(config_root=tmp_path / "fresh", preference=FILE_ONLY), label="second"
+    )
+    assert fresh.key_id != anchor.key_id
+    monkeypatch.setattr(trust, "load_anchor", load(fresh))
+    assert claim().status_code == 200, "a superseded anchor's record still bricked the phone"

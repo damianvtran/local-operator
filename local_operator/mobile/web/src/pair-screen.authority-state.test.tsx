@@ -108,10 +108,14 @@ describe("the pairing screen's failure copy", () => {
 		);
 		await pairAway();
 		const said = await screen.findByText(/revoked on the machine/, undefined, { timeout: 5000 });
-		expect(said.textContent).toContain("lop operator init");
+		/* The route, as the CLI actually spells it (agent review round 9, R9-2: the
+		   first version of this copy sent the operator to create a new anchor, which
+		   the local record then defeated — measured 403 either way). */
+		expect(said.textContent).toContain("lop operator devices --authorise");
 		expect(said.textContent).toContain("lop operator install");
 		expect(said.textContent).toContain("only there");
 		expect(said.textContent).not.toContain("Pair it again");
+		expect(said.textContent).not.toContain("create a new operator anchor");
 	});
 
 	it("turns a relay fault into a sentence rather than a status code (U8-4)", async () => {

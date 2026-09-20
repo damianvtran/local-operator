@@ -726,6 +726,92 @@ def _js_copy(path: Path) -> str:
     return re.sub(r"^\s*//.*$", " ", text, flags=re.MULTILINE)
 
 
+#: The subjects the class sweep covers, declared here so the list is a LIST rather
+#: than prose in three docstrings (agent review round 9, R9-3). Each round of this
+#: class' life found a subject the sweep did not have: the notice constants, then
+#: the Python literals, then the portal sources, then the documentation. Naming them
+#: together is what makes "the sweep" answerable, and
+#: :func:`test_the_class_sweep_covers_every_subject_it_declares` fails if one of
+#: them stops being read.
+_CLASS_SUBJECTS = {
+    "notice constants": "the copy the runtime raises, read through _shipped_notices()",
+    "python literals": "every non-docstring string literal under local_operator/",
+    "portal sources": "local_operator/mobile/web/src/*.ts*, JS comments stripped",
+    "documentation": "docs/**/*.md, whitespace-normalised and read sentence by sentence",
+}
+
+#: The ONE exemption, and why it is one: the design record has to be able to quote
+#: revision 1's text in order to say what was deleted — the class' whole point. The
+#: exemption is CHECKED rather than trusted: a mention inside an exempt file must sit
+#: beside a word that makes it history (see ``test_no_shipped_document_promises_a_
+#: window_remedy``), so the exemption cannot become a second home for the claim.
+_CLASS_EXEMPTIONS = {"docs/design/approval-authority.md": "the design record quotes revision 1"}
+
+#: A window-ish noun and a gate-loosening verb in one SENTENCE is not enough on its
+#: own to convict documentation: "`/approvals auto` typed in the console that owns
+#: the gate" is the repaired, TRUE sentence, and it matches the shape. What made the
+#: deleted rule false was the SPAWNER relation — the window was named as the process
+#: that started this session's runtime — so the docs arm requires that relation too.
+#: "owns the gate" is deliberately not a relation; "started/launched/spawned/opened
+#: it" is (agent review round 9, R9-3, which warned this widening is what flags the
+#: branch's own repaired sentence if it is done naively). Measured against the
+#: tree: the verb alone still missed, because "`/approvals default ...` opens the
+#: default editor" sat in the same long sentence as the (true) "console that owns
+#: the gate" clause — so the relation takes an OBJECT (a session, a runtime, "it")
+#: as well, which is the difference between opening a session and opening an editor.
+_SPAWNER_RELATION = re.compile(
+    r"\b(?:start(?:ed|s|ing)?|launch(?:ed|es|ing)?|spawn(?:ed|s|ing)?|open(?:ed|s|ing)?|ran)\b"
+    r"[^.\n]{0,30}?\b(?:session|runtime|it|this one|that one)\b",
+    re.IGNORECASE,
+)
+
+
+#: THE RULE ITSELF, worded with no window at all (agent review round 9, R9-1's
+#: second exhibit): "Loosening a RUNNING gate is refused unless this backend started
+#: that runtime" asserts the deleted model and names no window, so neither the
+#: phrase list nor the window shape can see it. A sentence that BOTH names the gate
+#: action AND says who started the runtime is the claim, whatever nouns it uses —
+#: and the repaired sentences survive it because they either deny the relation
+#: ("Who started the runtime has nothing to do with it.") or never mention it.
+_SPAWNER_CLAIM = re.compile(
+    r"\b(?:loosen\w*|approvals|retire and reopen)\b[^.\n]{0,90}?"
+    r"\b(?:start(?:ed|s)|launch(?:ed|es)|spawn(?:ed|s)|open(?:ed|s))\b[^.\n]{0,40}?"
+    r"\b(?:session|runtime|it)\b"
+    r"|\b(?:start(?:ed|s)|launch(?:ed|es)|spawn(?:ed|s)|open(?:ed|s))\b[^.\n]{0,40}?"
+    r"\b(?:session|runtime|it)\b[^.\n]{0,90}?\b(?:loosen\w*|approvals|retire and reopen)\b",
+    re.IGNORECASE,
+)
+
+#: The one ALLOWANCE, and it is keyed to a file AND the exact string, so it cannot
+#: excuse a copy of the sentence somewhere else. Why it is allowed at all: with NO
+#: operator anchor on the host, the spawn capability IS the only source a running
+#: runtime accepts, so `lop operator status` stating that is the level being
+#: reported rather than the rule being asserted — and the line goes on to name the
+#: way out. :func:`test_the_class_sweep_covers_every_subject_it_declares` asserts the
+#: string is still in that file, so an allowance cannot outlive the sentence it
+#: excuses.
+_CLASS_ALLOWANCES = {
+    (
+        "local_operator/operator/handlers.py",
+        "only the process that",
+    ): "the spawn-only level's own report: with no anchor installed this is the state",
+}
+
+
+def _allowed(relative: str, copy: str) -> bool:
+    """Whether ``copy`` sits in the allowance list, for THIS file.
+
+    Keyed on the file as well as the text so an allowance cannot be inherited by a
+    copy of the sentence elsewhere, which is the failure mode an exemption list has.
+    """
+    return any(file == relative and text in copy for (file, text) in _CLASS_ALLOWANCES)
+
+
+def _sentences(text: str) -> list[str]:
+    """A document split at sentence ends — the unit the docs shape arm judges."""
+    return [part for part in re.split(r"(?<=[.;])\s+", text) if part.strip()]
+
+
 #: A WINDOW NAMED AS THE PLACE TO LOOSEN FROM, in any wording (agent review round
 #: 8, R8-2). The phrase list above is precise and hand-maintained, so a fourth
 #: sentence saying the same thing in different words would pass it; this is the
@@ -735,11 +821,11 @@ def _js_copy(path: Path) -> str:
 #: session" — is still the phrase list's job.
 _WINDOW_REMEDY_SHAPE = (
     re.compile(
-        r"\b(window|console|terminal)\b[^.\n]{0,80}?\b(approvals|adopt|retire and reopen)\b",
+        r"\b(window|console|terminal)\b[^.\n]{0,80}?\b(approvals|retire and reopen)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\b(approvals|adopt|retire and reopen)\b[^.\n]{0,80}?\b(window|console|terminal)\b",
+        r"\b(approvals|retire and reopen)\b[^.\n]{0,80}?\b(window|console|terminal)\b",
         re.IGNORECASE,
     ),
 )
@@ -778,12 +864,16 @@ def test_no_shipped_copy_offers_a_window_as_the_place_to_loosen() -> None:
                 continue
             if id(node) in docstrings:
                 continue
-            if any(shape.search(node.value) for shape in _WINDOW_REMEDY_SHAPE):
-                offenders.setdefault(node.value[:60], []).append(
-                    f"{module.relative_to(_REPO_ROOT).as_posix()}:{node.lineno}"
-                )
+            relative = module.relative_to(_REPO_ROOT).as_posix()
+            if _allowed(relative, node.value):
+                continue
+            if any(shape.search(node.value) for shape in _WINDOW_REMEDY_SHAPE) or (
+                _SPAWNER_CLAIM.search(node.value)
+            ):
+                offenders.setdefault(node.value[:60], []).append(f"{relative}:{node.lineno}")
     for source in sorted((_REPO_ROOT / "local_operator" / "mobile" / "web" / "src").rglob("*.ts*")):
-        if any(shape.search(_js_copy(source)) for shape in _WINDOW_REMEDY_SHAPE):
+        copy = _js_copy(source)
+        if any(shape.search(copy) for shape in _WINDOW_REMEDY_SHAPE) or _SPAWNER_CLAIM.search(copy):
             offenders.setdefault(source.name, []).append(source.relative_to(_REPO_ROOT).as_posix())
     assert not offenders, f"shipped copy offers a window as the place to loosen: {offenders}"
 
@@ -794,6 +884,43 @@ def test_no_shipped_copy_offers_a_window_as_the_place_to_loosen() -> None:
 #: value equalled the default — a budget that could never change a verdict (agent
 #: review round 8, R8-3).
 _ERROR_FRAME_CHARS = 400
+
+
+def test_the_class_sweep_covers_every_subject_it_declares() -> None:
+    """The subject list is a claim, so it is measured (agent review round 9, R9-3).
+
+    Every round of this class' life found a subject the sweep had grown around:
+    the portal sources in round 8, the documentation in the same round, this cell's
+    own list in round 9. A declared subject that stops being read is exactly how the
+    next one survives, so each count is asserted non-zero and the exemption set is
+    asserted to be the only thing skipped — a sweep that quietly stopped visiting
+    `docs/` would fail here rather than pass silently.
+    """
+    counts = {
+        "notice constants": len(_shipped_notices()),
+        "python literals": sum(
+            1
+            for module in (_REPO_ROOT / "local_operator").rglob("*.py")
+            for node in ast.walk(ast.parse(module.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ),
+        "portal sources": len(
+            list((_REPO_ROOT / "local_operator" / "mobile" / "web" / "src").rglob("*.ts*"))
+        ),
+        "documentation": len(list((_REPO_ROOT / "docs").rglob("*.md"))),
+    }
+    assert set(counts) == set(_CLASS_SUBJECTS), (sorted(counts), sorted(_CLASS_SUBJECTS))
+    empty = {name: count for name, count in counts.items() if count == 0}
+    assert not empty, f"a declared subject of the class sweep is empty: {empty}"
+    assert all((_REPO_ROOT / path).exists() for path in _CLASS_EXEMPTIONS)
+    # An allowance that has outlived the sentence it excuses is a hole: each one is
+    # asserted to still be in ITS file.
+    stale = [
+        (file, text)
+        for (file, text) in _CLASS_ALLOWANCES
+        if text not in (_REPO_ROOT / file).read_text(encoding="utf-8")
+    ]
+    assert not stale, f"an allowance outlived the copy it excuses: {stale}"
 
 
 def test_every_notice_fits_the_error_frame_slice() -> None:
@@ -835,15 +962,29 @@ def test_no_shipped_document_promises_a_window_remedy() -> None:
     exempt file whose mentions stop being explanatory fails here, which is what
     keeps the exemption from becoming a second home for the claim.
     """
-    phrases = _WINDOW_REMEDIES + ("the console that started it", "the window that started it")
-    exempt = "docs/design/approval-authority.md"
+    phrases = _WINDOW_REMEDIES + (
+        "the console that started it",
+        "the window that started it",
+        "that started this session",
+        "that started the session",
+    )
     offenders: dict[str, list[str]] = {}
     for doc in sorted((_REPO_ROOT / "docs").rglob("*.md")):
         relative = doc.relative_to(_REPO_ROOT).as_posix()
         normalised = " ".join(doc.read_text(encoding="utf-8").split())
-        for phrase in phrases:
-            if phrase in normalised and relative != exempt:
-                offenders.setdefault(relative, []).append(phrase)
+        for sentence in _sentences(normalised):
+            phrase_hit = next((phrase for phrase in phrases if phrase in sentence), "")
+            # THE SHAPE, scoped by the spawner relation: see _SPAWNER_RELATION for
+            # why a bare shape arm would convict this PR's own repaired sentence.
+            shape_hit = bool(
+                any(shape.search(sentence) for shape in _WINDOW_REMEDY_SHAPE)
+                and _SPAWNER_RELATION.search(sentence)
+            ) or bool(_SPAWNER_CLAIM.search(sentence))
+            if not (phrase_hit or shape_hit):
+                continue
+            if relative in _CLASS_EXEMPTIONS:
+                continue
+            offenders.setdefault(relative, []).append(phrase_hit or sentence[:80])
     assert not offenders, f"shipped documentation still promises a window remedy: {offenders}"
 
     history = (
@@ -859,18 +1000,28 @@ def test_no_shipped_document_promises_a_window_remedy() -> None:
         "stopped naming",
         "deletes",
     )
-    record = " ".join((_REPO_ROOT / exempt).read_text(encoding="utf-8").split())
-    unguarded = [
-        phrase
-        for phrase in phrases
-        if any(
-            not any(word in record[max(0, at - 600) : at + 600] for word in history)
-            for at in _occurrences(record, phrase)
-        )
-    ]
-    assert (
-        not unguarded
-    ), f"{exempt} mentions a window remedy as something other than history: {unguarded}"
+    unguarded: list[str] = []
+    for relative in _CLASS_EXEMPTIONS:
+        record = " ".join((_REPO_ROOT / relative).read_text(encoding="utf-8").split())
+        sentences = _sentences(record)
+        for index, sentence in enumerate(sentences):
+            phrase_hit = any(phrase in sentence for phrase in phrases)
+            shape_hit = bool(
+                any(shape.search(sentence) for shape in _WINDOW_REMEDY_SHAPE)
+                and _SPAWNER_RELATION.search(sentence)
+            ) or bool(_SPAWNER_CLAIM.search(sentence))
+            if not (phrase_hit or shape_hit):
+                continue
+            # The word can sit in the sentence beside it: this document's prose runs
+            # long, and "the model that was wrong" is often introduced one clause
+            # earlier than the quotation (round 9's own citation is written that way).
+            around = " ".join(sentences[max(0, index - 1) : index + 2])
+            if not any(word in around for word in history):
+                unguarded.append(sentence[:120])
+    assert not unguarded, (
+        f"an exempt document mentions a window remedy as something other than history: "
+        f"{unguarded}"
+    )
 
 
 def _occurrences(text: str, phrase: str) -> list[int]:

@@ -97,10 +97,13 @@ from any other surface (an attached pane, this backend, a paired phone) it needs
 a signature — see below. The file still tightens every running session at once,
 which is the safe direction.
 
-**The command route can tighten a running gate but cannot loosen one** (issue
-#1310). `/approvals auto` over
-`POST /v1/desktop/sessions/{id}/commands` is refused unless this backend is the
-process that started the session's runtime; the refusal is **422** with
+**The command route can tighten a running gate; loosening one needs the
+operator's consent** (issue #1310). `/approvals auto` over
+`POST /v1/desktop/sessions/{id}/commands` reaches the runtime through the same
+client an attached pane uses, so it applies for any session the operator can sign
+for — a presence gesture on this machine (Touch ID), or a paired phone's
+signature. Who started the runtime has nothing to do with it. The refusal, when no
+signature can be obtained at all, is **422** with
 `{"code": "operator_authority_required", "message": <copy>}`, and the copy names
 the levers the operator can actually use: the presence gesture on this machine
 (Touch ID), a paired phone, or `--yolo` / `tool_approval_mode: auto` for a NEW
@@ -151,7 +154,7 @@ and rendered verification.
 | btw | Runtime completion, off-record panels, explicit adoption | Aside panel and adoption confirmation |
 | compact | Existing runtime compact control/events | Pending/completed/error from canonical events |
 | stop | Explicit target list/confirmation, canonical stop protocol | Current/selected/all picker; submit exact IDs |
-| approvals | Runtime mode; explicit default editor writes the file, which loosens no running session but tightens every one. Loosening a RUNNING gate (`auto`) is refused unless this backend started that runtime — `/approvals ask` and the report always work | Session/default scope and confirmation; render the cell as-is, never as a failed command. Never surface the copy as "not supported" — it is a rule, not a gap |
+| approvals | Runtime mode; explicit default editor writes the file, which loosens no running session but tightens every one. Loosening a RUNNING gate (`auto`) needs the operator's signature (Touch ID on this machine, or a paired phone) — not the spawner — and is refused 422 when none can be obtained; `/approvals ask` and the report always work | Session/default scope and confirmation; render the cell as-is, never as a failed command. Never surface the copy as "not supported" — it is a rule, not a gap |
 | skills | Effective discovered catalogue and closed skill:// detail resolver | Catalogue/details; distinguish discoverable from selected |
 | mcp | Effective source ownership, configuration, connections and grants | Server panel, forms, transport/downstream auth distinction |
 | login | Central provider/method action and existing auth operation | Browser/input/cancel flow without renderer secrets |

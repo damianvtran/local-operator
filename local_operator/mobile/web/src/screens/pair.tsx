@@ -218,19 +218,24 @@ function humanizePairingError(error: unknown): string {
 		return "That code is not valid — run `lop pair` on the machine again for a fresh one.";
 	}
 	if (message.includes("revoked")) {
-		/* THE ONLY WAY BACK, and why the old sentence was a LOOP (UX round 8, U8-1):
-		   it read "Pair it again from `lop pair`", which is the step the machine
-		   refuses for ever. Nothing in the product lifts a revocation —
-		   `_stage_anchor_with_revocation` only ever writes `revoked: true`, and the
-		   anchor it writes into is root-owned — so the state is cleared by a NEW
-		   anchor, which invalidates every device paired to the old one. Naming that
-		   is the difference between a loop and a route; naming it WRONGLY (a verb
-		   that does not exist) would be worse than the loop. */
+		/* THE ROUTE, and it has to be a route that EXISTS (UX round 8 U8-1, then
+		   round 9's Q9-1/R9-2 which measured that the first attempt did not: the
+		   sentence sent the operator to `lop operator init` + `install`, and the
+		   phone stayed refused, because the relay records a revocation in TWO
+		   places and nothing removed the local one).
+
+		   The inverse verb now exists (`lop operator devices --authorise <id>`): it
+		   clears the local record and drops the anchor's entry, through the same
+		   privileged install step `--revoke` uses, and it is host-side only, so the
+		   phone cannot un-revoke itself. The install clause stays because on a host
+		   where the anchor half has not been installed the lift is not in force yet —
+		   the receipt `--authorise` prints says the same thing in the same words. */
 		return (
 			"This device has been revoked on the machine, and a revocation is lifted only " +
-			"there — pairing again will be refused. On the machine, create a new operator " +
-			"anchor (`lop operator init`, then `lop operator install`) and pair this phone " +
-			"again; every phone paired to the old anchor has to pair again too."
+			"there — pairing again will be refused. On the machine, run " +
+			"`lop operator devices --authorise <this phone's device id>` (then " +
+			"`lop operator install`, if the anchor is not installed yet), and pair this " +
+			"phone again."
 		);
 	}
 	if (message.toLowerCase().includes("subtle")) {

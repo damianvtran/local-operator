@@ -479,3 +479,63 @@ def test_the_pairing_prompt_qualifies_its_promise_on_this_host(
     unready = capsys.readouterr().out
     assert "once this machine's operator authority is installed" in unready, unready
     assert "lop operator install" in unready, unready
+
+
+def test_authorising_a_device_lifts_both_halves_of_its_revocation(
+    paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-2/Q9-1: the route the phone's refusal names has to actually lift the state.
+
+    Measured before the fix: the relay records a revocation in TWO places — its own
+    ``revoked.json`` under the config root and the root-owned anchor — and nothing in
+    the product removed an entry from either, so the sentence that sent the operator
+    to `lop operator init` + `install` left the phone refused (403 on a genuinely new
+    anchor, too; the anchor's own half is asserted in
+    ``test_operator_devices.py``). This drives the inverse verb through the same CLI
+    entry point ``lop operator devices`` uses and asserts every surface it touches:
+    the local record, the anchor's list, and the guard that decides the re-pair.
+    """
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import trust
+    from local_operator.operator.pair_handlers import (
+        _stage_anchor_revocation,
+        describe_devices,
+    )
+
+    root = _config()
+    _, point = _phone_point()
+    device_id = devices.new_device_id(point)
+    _, other_point = _phone_point()
+    other_id = devices.new_device_id(other_point)
+
+    def installed(uid: Any = None) -> Any:
+        return _installed_anchor(trust, root, uid)
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+
+    # The state `lop operator devices --revoke` leaves: both halves, plus the card.
+    devices.record_revocation(root, device_id)
+    devices.record_revocation(root, other_id)
+    assert _stage_anchor_revocation(root, device_id, revoked=True) is True
+    assert _stage_anchor_revocation(root, other_id, revoked=True) is True
+    assert devices.is_revoked(root, device_id) is True
+
+    # `print_only` for the same reason every cell here uses it: the real install step
+    # is a sudo call, and an agent's test may not raise a password prompt.
+    assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
+    receipt = capsys.readouterr().out
+    assert f"authorised {device_id}" in receipt, receipt
+    assert "lop pair" in receipt, receipt
+    # `print_only` PRINTS the privileged step rather than taking it — the assertion
+    # is that the step was offered, which is what makes the lift above real on a host
+    # where the anchor half has not been installed yet.
+    assert "sudo" in receipt, receipt
+
+    assert devices.is_revoked_here(root, device_id) is False, "the local record survived"
+    assert devices.is_revoked(root, device_id) is False, "the guard still refuses it"
+    assert devices.is_revoked(root, other_id) is True, "another device was released with it"
+
+    # Idempotent: a second run on an unrevoked device says so rather than pretending.
+    assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
+    assert "nothing recorded a revocation" in capsys.readouterr().out

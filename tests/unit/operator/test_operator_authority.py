@@ -31,6 +31,7 @@ module docstring for the measurement that makes the Secure Enclave untestable.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import time
@@ -585,3 +586,49 @@ def test_no_private_key_material_is_in_the_anchor(keyed: Any) -> None:
     private = (keyed.root / "operator" / "operator-key.pem").read_text()
     assert "PRIVATE" in private  # the file really does hold one...
     assert private.strip().splitlines()[-2] not in blob.decode()  # ...and none of it is here
+
+
+def test_lop_operator_init_is_idempotent_and_never_replaces_a_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """R9-2/Q9-2: the first step of every route has to survive being run twice.
+
+    Measured: `lop operator init --backend file-only` on a machine that already had
+    an operator key raised an uncaught ``FileExistsError`` from the ``O_EXCL`` create
+    and printed a traceback, and on a presence host the same run is a duplicate-item
+    create. Neither may REPLACE the key — a new anchor invalidates every paired
+    phone — so the verb reports what it found and completes only what is missing.
+    The private half is compared byte for byte, because "nothing was replaced" is the
+    claim that matters and a key id alone would not catch a re-created key.
+    """
+    from local_operator.operator import handlers, trust
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        "local_operator.operator.trust._ANCHOR_ROOT_OVERRIDE",
+        tmp_path / "anchor-root",
+        raising=False,
+    )
+    args = argparse.Namespace(operator_command="init", backend="file-only", label="idem")
+
+    assert handlers.dispatch(args) == 0
+    key_path = tmp_path / "operator" / "operator-key.pem"
+    first_key = key_path.read_bytes()
+    first_anchor = json.loads(trust.staging_path(tmp_path).read_text())
+    capsys.readouterr()
+
+    # (a) the second run reports and exits 0, with nothing replaced
+    assert handlers.dispatch(args) == 0
+    said = capsys.readouterr().out
+    assert "already exists" in said, said
+    assert "nothing replaced" in said, said
+    assert key_path.read_bytes() == first_key, "the private key was rewritten"
+    assert json.loads(trust.staging_path(tmp_path).read_text()) == first_anchor
+
+    # (b) and it completes the half that is missing rather than refusing to help
+    trust.staging_path(tmp_path).unlink()
+    assert handlers.dispatch(args) == 0
+    said = capsys.readouterr().out
+    assert "the anchor statement was missing, so it was written" in said, said
+    assert json.loads(trust.staging_path(tmp_path).read_text())["key_id"] == first_anchor["key_id"]
+    assert key_path.read_bytes() == first_key

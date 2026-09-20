@@ -61,7 +61,7 @@ def add_parser(subparsers: Any) -> None:
 
     devices_parser = actions.add_parser(
         "devices",
-        help="List paired phones, pending pairing requests, and revoke a device",
+        help="List paired phones, pending pairing requests, and revoke/authorise a device",
     )
     devices_parser.add_argument(
         "--revoke",
@@ -73,9 +73,21 @@ def add_parser(subparsers: Any) -> None:
         ),
     )
     devices_parser.add_argument(
+        "--authorise",
+        default="",
+        metavar="DEVICE_ID",
+        help=(
+            "Lift a revocation for this device on this machine: clears the local "
+            "record and the anchor's entry (needs the same ONE privileged step as "
+            "--revoke). Host-side only — a phone cannot un-revoke itself"
+        ),
+    )
+    devices_parser.add_argument(
         "--print-only",
         action="store_true",
-        help="With --revoke, print the privileged command instead of running it",
+        help=(
+            "With --revoke or --authorise, print the privileged command instead of " "running it"
+        ),
     )
 
     sign_parser = actions.add_parser(

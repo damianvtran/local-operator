@@ -143,12 +143,72 @@ def install_anchor(root: Path, *, print_only: bool = False) -> int:
     return 0
 
 
+def _existing_key(root: Path, preference: str) -> Any:
+    """The operator key already in this host's store, or ``None``.
+
+    BEST EFFORT, deliberately: a store that raises on a probe (a locked presence
+    store, a platform whose load path is unimplemented) reports ``None`` here and
+    lets ``create`` produce its own diagnosis, which is the message an operator can
+    act on. Swallowing the probe's error into a sentence of its own would be a
+    second, worse explanation of the same state (R9-2/Q9-2).
+    """
+    from local_operator.operator.keychain import choose_backend
+
+    try:
+        backend = choose_backend(preference, config_root=root)
+        return backend.load()
+    except (OSError, KeyBackendError):
+        return None
+
+
 def _init(args: argparse.Namespace) -> int:
     root = config_dir()
+    existing = _existing_key(root, args.backend)
+    if existing is not None:
+        # IDEMPOTENT RATHER THAN FATAL (R9-2/Q9-2). Measured: a second `init` on a
+        # file-only host died on an uncaught FileExistsError from the O_EXCL
+        # create, printing a traceback and nothing an operator could act on — and on
+        # a presence host the same second run is a duplicate-item create. Neither
+        # the key nor the anchor may be silently replaced (a new anchor invalidates
+        # every device certificate signed under the old one), so `init` reports the
+        # state it found and completes only the part that is missing.
+        handle = existing.handle
+        staged = staging_path(root)
+        loaded = load_anchor()
+        staged_now = False
+        if not staged.exists() and not loaded.exists:
+            staged = stage_anchor(root, anchor_for_handle(handle, label=args.label))
+            staged_now = True
+        print(f"operator key already exists in the {handle.backend} store; nothing replaced")
+        print(f"  key id : {handle.key_id}")
+        print(f"  level  : {describe_level(handle)}")
+        if staged_now:
+            print(f"  staged : {staged} (the anchor statement was missing, so it was written)")
+        elif staged.exists():
+            print(f"  staged : {staged}")
+        if loaded.exists:
+            print(f"  anchor : {loaded.path} (installed: {loaded.usable})")
+        print()
+        print("To replace this key, remove it from that store yourself first — a new")
+        print("anchor invalidates every paired phone. To lift a revocation instead:")
+        print("  lop operator devices --authorise <device id>")
+        existing.close()
+        return 0
     try:
         handle = create_key(config_root=root, preference=args.backend)
     except KeyBackendError as exc:
         print(f"could not create the operator key: {exc}", file=sys.stderr)
+        return 1
+    except FileExistsError as exc:
+        # The race the probe above cannot close: something created the key between
+        # the check and the create. Named rather than raised, because the operator's
+        # next step is the same either way (R9-2/Q9-2).
+        print(
+            f"an operator key already exists at {exc.filename or root} — nothing was "
+            "replaced. `lop operator init` is idempotent: run it again to see what is "
+            "there, and `lop operator trust` to see whether the runtime honours it.",
+            file=sys.stderr,
+        )
         return 1
     anchor = anchor_for_handle(handle, label=args.label)
     staged = stage_anchor(root, anchor)
@@ -215,7 +275,16 @@ def _status() -> int:
     elif report["level"] == LEVEL_ANCHOR_UNPINNED:
         print("loosening: refused — a file sits where the anchor belongs and is not root-owned")
     elif report["level"] == LEVEL_SPAWN_ONLY:
-        print("loosening: only the process that started the session may loosen it")
+        # TRUE OF THIS LEVEL AND ONLY THIS LEVEL, which is why it is worded as the
+        # state rather than the rule (agent review round 9, R9-1): with no operator
+        # authority on the host, the spawn capability really is the only source a
+        # running runtime will accept. The line names the way out, because a reader
+        # in this state meets no working lever anywhere else.
+        print(
+            "loosening: no operator authority on this host — only the process that\n"
+            "           started the session can loosen it; `lop operator init` adds the\n"
+            "           operator key that lets a gesture or a paired phone do it"
+        )
     _print_paired_devices()
     return 0
 
