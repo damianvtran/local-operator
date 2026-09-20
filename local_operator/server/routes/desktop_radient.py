@@ -102,13 +102,13 @@ MAX_UPSTREAM_BYTES = 2_000_000
 #:
 #: The credential is refreshed single-flight behind a CROSS-PROCESS lease, and the
 #: store's own peer path waits one 0.05 s slice before handing back the stored row
-#: (``auth_store.py``, the ``if not force: return now_data`` branch). That is right
+#: (``auth_store.py``, ``_served_while_contended``). That is right
 #: for a model request, which a stale bearer may still serve, and too short here:
 #: measured (review round 1; QA R2/R29) a peer with a 500 ms token endpoint turned a
 #: request issued 50 ms into its refresh into a 502 for the whole window, where the
 #: base answered 200 off the stale bearer. A peer that is going to land at all does
 #: so well inside a second, so this is a BOUNDED join and not a wait on the lease:
-#: the lease itself lives ``AUTH_REFRESH_LEASE_MS`` (30 s) and a holder that died must
+#: the lease itself lives ``AUTH_REFRESH_LEASE_MS`` (90 s) and a holder that died must
 #: not hold a renderer's page open for it. Past the bound the answer is the retryable
 #: ``refresh_did_not_land`` refusal — the same class as before this join, now paid
 #: only when the peer really did not land.
@@ -581,12 +581,15 @@ def _diagnosis_key(
 ) -> tuple[str, tuple[tuple[int, int], ...]]:
     """What a remembered verdict is ABOUT: one store's rows, as they stand now.
 
-    ``updated_at`` is what the store writes on every change to a row, so a re-login
-    or a refresh another process landed composes a different key and the verdict is
-    computed again; a FAILED refresh writes nothing, which is what lets the verdict
-    hold across the very failures it describes. The store's own database path is in
-    the key because this memo outlives one request while two daemons can share this
-    process: credential ids restart at 1 in every config dir.
+    ``updated_at`` moves on every change to the CREDENTIAL in a row — a re-login, a
+    rotation another process landed, a tombstone — and deliberately NOT on the
+    provider store's send-marker writes, so a re-login composes a different key
+    while a FAILED refresh leaves it alone; that is what lets the verdict hold
+    across the very failures it describes, and it is why the marker write is done
+    without touching the stamp (local_operator/providers/auth_store.py
+    ``_update_payload(..., moves_write_stamp=False)``). The store's own database
+    path is in the key because this memo outlives one request while two daemons
+    can share this process: credential ids restart at 1 in every config dir.
     """
     return (str(store.db_path), tuple(sorted((row.id, row.updated_at) for row in rows)))
 
@@ -679,7 +682,7 @@ async def _await_peer_refresh(auth: DesktopAuth, access: OAuthAccess) -> str | N
     attempt of our own that did not raise, which cross-process means the refresh
     lease is held by another runtime: the store's peer path re-reads once, finds the
     row still due, and returns it rather than waiting for its peer to finish
-    (``auth_store.py``, the ``if not force: return now_data`` branch). For a model
+    (``auth_store.py``, ``_served_while_contended``). For a model
     request that is right — the stale bearer may still serve. For this route it was
     a measured 502 for the whole duration of a legitimately refreshing peer, where
     the base answered 200, so the wait happens here, where the caller's alternative
@@ -723,8 +726,9 @@ async def radient_bearer(auth: DesktopAuth, *, classify: bool = True, join: bool
     WHY A ROUTE ASKS THE STORE A SECOND QUESTION. ``get_oauth_access`` answers
     with the cascade's pick, and the cascade's last resort is deliberately to
     hand back a token whose refresh did not happen (``AuthStore._ensure_oauth_fresh``
-    returns the stored row when a peer holds the refresh lease and the re-read is
-    still due). That is right for a model request, which the stale bearer may
+    returns the stored row through ``_served_while_contended`` when a peer holds the
+    refresh lease and the re-read is still due). That is right for a model request,
+    which the stale bearer may
     still serve; it is wrong here, because the proxy's only possible report is
     Radient's own 401 — a failure that names no remedy, costs a round trip it
     cannot win, and (measured 2026-09-19) left the operator's account row
@@ -733,17 +737,17 @@ async def radient_bearer(auth: DesktopAuth, *, classify: bool = True, join: bool
     carry — is the bearer I was just handed one the store already considers due a
     refresh — and answers the refusal when the store cannot produce a live one.
 
-    IT USES THE STORE'S OWN MACHINERY, NOT A SECOND READING OF IT. The refresh
-    goes through ``AuthStore.ensure_oauth_fresh_or_raise``, the public per-row
-    entry point that keeps the store's own types on the way out: single-flight
-    through the same lease every other caller uses, so two processes cannot POST
-    one rotating refresh token and earn a real ``invalid_grant`` against a live
-    grant (see the race guard in ``_ensure_oauth_fresh``). JOINED, THOUGH, ONLY
-    INSIDE THIS PROCESS: the lock that single-flight is built on is an ``asyncio``
-    one, so a PEER runtime holding the cross-process lease is not joined by that
-    call — the store's peer path re-reads once and returns the stored row — and this
-    function waits for the peer itself, bounded, in :func:`_await_peer_refresh`,
-    before it refuses.
+    WITH THE STORE'S OWN MACHINERY, NOT A SECOND READING OF IT. The refresh goes
+    through ``AuthStore.ensure_oauth_fresh_or_raise``, the public per-row entry point
+    that keeps the store's own types on the way out: single-flight through the same
+    lease every other caller uses, so two processes cannot POST one rotating refresh
+    token and earn a real ``invalid_grant`` against a live grant (see the race guard
+    in ``_ensure_oauth_fresh``). JOINED, THOUGH, ONLY INSIDE THIS PROCESS: the lock
+    that single-flight is built on is an ``asyncio`` one, so a PEER runtime holding
+    the cross-process lease is not joined by that call — the store's peer path
+    re-reads once and returns the stored row
+    (``_served_while_contended``) — and this function waits for the peer itself,
+    bounded, in :func:`_await_peer_refresh`, before it refuses.
 
     WHO TAKES THE ACCOUNT OUT OF ROTATION. Not this function: the row is blocked one
     call up, where ``_resolve`` catches a failed refresh as ``AuthStoreError`` and
