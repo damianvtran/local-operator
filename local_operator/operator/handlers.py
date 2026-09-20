@@ -189,9 +189,11 @@ def _init(args: argparse.Namespace) -> int:
         if loaded.exists:
             print(f"  anchor : {loaded.path} (installed: {loaded.usable})")
         print()
+        from local_operator.operator.devices import AUTHORISE_COMMAND
+
         print("To replace this key, remove it from that store yourself first — a new")
         print("anchor invalidates every paired phone. To lift a revocation instead:")
-        print("  lop operator devices --authorise <device id>")
+        print(f"  {AUTHORISE_COMMAND.format(device_id='<device id>')}")
         existing.close()
         return 0
     try:
@@ -278,32 +280,55 @@ def _status() -> int:
         # TRUE OF THIS LEVEL AND ONLY THIS LEVEL, which is why it is worded as the
         # state rather than the rule (agent review round 9, R9-1): with no operator
         # authority on the host, the spawn capability really is the only source a
-        # running runtime will accept. The line names the way out, because a reader
-        # in this state meets no working lever anywhere else.
+        # running runtime will accept. The second sentence names the way out, because a
+        # reader in this state meets no working lever anywhere else.
+        #
+        # ONE SENTENCE PER print(), NO MANUAL INDENT (design round 10, D3). The first
+        # version hand-wrapped inside a single string with an 11-space continuation
+        # indent, and below ~79 columns the terminal soft-wrapped those lines AGAIN,
+        # stranding the indent mid-answer and breaking words across lines — visible at
+        # 60 and 44 columns. Every other field in this report is one physical line and
+        # lets the terminal do the wrapping; this one now behaves the same way.
+        print("loosening: no operator authority on this host.")
         print(
-            "loosening: no operator authority on this host — only the process that\n"
-            "           started the session can loosen it; `lop operator init` adds the\n"
-            "           operator key that lets a gesture or a paired phone do it"
+            "Only the process that started the session can loosen it; `lop operator init` "
+            "adds the operator key that lets a gesture or a paired phone do it."
         )
     _print_paired_devices()
     return 0
 
 
 def _print_paired_devices() -> None:
-    """The paired phones, from the same store ``lop operator devices`` reads.
+    """The phones this machine knows, from the store ``lop operator devices`` reads.
 
     On ``status`` because the level ABOVE says how strong authority is on this
     host and says nothing about WHICH devices hold it. An operator deciding
     whether to revoke a phone should not have to know a second verb exists.
+
+    REVOKED DEVICES ARE PRINTED TOO (UX round 10, U1). They were dropped from both
+    listings: the revocation clears the certificate, so `paired` cannot hold one, and
+    nothing printed the anchor-only revocations — which left the id the remedy names
+    unreadable anywhere but a receipt from an earlier day.
     """
-    from local_operator.operator.devices import list_devices
+    from local_operator.operator.devices import (
+        AUTHORISE_COMMAND,
+        list_devices,
+        revoked_ids,
+    )
 
     paired = list_devices(config_dir())
-    if not paired:
-        return
-    print(f"paired devices         : {len(paired)}")
-    for device in paired:
-        print(f"  - {device.device_id}  {device.name or '(unnamed)'}")
+    revoked = revoked_ids(config_dir())
+    if paired:
+        print(f"paired devices         : {len(paired)}")
+        for device in paired:
+            print(f"  - {device.device_id}  {device.name or '(unnamed)'}")
+    if revoked:
+        print(f"revoked devices        : {len(revoked)}")
+        for device_id in revoked:
+            print(
+                f"  - {device_id}  (revoked — "
+                f"`{AUTHORISE_COMMAND.format(device_id=device_id)}` brings it back)"
+            )
 
 
 def _sign(args: argparse.Namespace) -> int:

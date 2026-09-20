@@ -319,33 +319,70 @@ def describe_devices(args: argparse.Namespace) -> int:
             f"revoked {revoke}. Revocation lives in the anchor; until the install step "
             "above completes it has not taken effect. Once installed, a session already "
             f"running picks it up within {int(ANCHOR_REFRESH_S)}s and a new one at once. "
-            "To bring this device back, run `lop operator devices --authorise "
-            f"{revoke}` (needs the same install step)."
+            "To bring this device back, run "
+            f"`{devices.AUTHORISE_COMMAND.format(device_id=revoke)}` (needs the same "
+            "install step)."
         )
 
     if authorise:
-        # THE TWO HALVES, and both FACTS are read before either is changed, so the
+        # THE TWO HALVES, and every FACT is read before either is changed, so the
         # receipt can say what was true rather than what the code just did: running
-        # `--authorise` twice would otherwise report the same lift twice. Local
-        # record first, then the anchor's entry through the same privileged install
-        # step `--revoke` uses (host-side only, like every other half of this).
+        # `--authorise` twice would otherwise report the same lift twice. Local record
+        # first, then the anchor's entry through the same privileged install step
+        # `--revoke` uses (host-side only, like every other half of this).
         recorded_here = devices.is_revoked_here(root, authorise)
         recorded_in_anchor = _anchor_revokes(root, authorise)
-        devices.forget_revocation(root, authorise)
+        cleared = devices.forget_revocation(root, authorise)
+        print_only = bool(getattr(args, "print_only", False))
+        if recorded_here and not cleared:
+            # The record named this device and its entry is still there: say the clear
+            # did not happen instead of printing the receipt for one that did not
+            # (agent review round 10, NIT-1).
+            print(
+                f"the local revocation record still names {authorise} — it could not be "
+                "rewritten. Check the permissions on the operator directory under your "
+                "config root and run this again.",
+                file=sys.stderr,
+            )
         staged = _stage_anchor_revocation(root, authorise, revoked=False)
         if not recorded_here and not recorded_in_anchor:
-            print(f"nothing recorded a revocation of {authorise} on this machine.")
+            if cleared:
+                # The record was there but did not APPLY (it is stamped with a key that
+                # is no longer installed) and it has now gone: "nothing recorded a
+                # revocation" would be wrong about a record that did exist (NIT-2).
+                print(
+                    f"a record naming {authorise} was on disk but did not apply under the "
+                    "installed anchor; it is now removed, and nothing was refusing this "
+                    "device."
+                )
+            else:
+                print(f"nothing recorded a revocation of {authorise} on this machine.")
         elif staged:
-            code = install_anchor(root, print_only=bool(getattr(args, "print_only", False)))
+            code = install_anchor(root, print_only=print_only)
             if code != 0:
                 return code
             from local_operator.operator.trust import ANCHOR_REFRESH_S
 
-            print(
-                f"authorised {authorise}. A session already running picks this up within "
-                f"{int(ANCHOR_REFRESH_S)}s; a new pairing request is accepted at once. "
-                "Pair the phone again with `lop pair`."
-            )
+            if print_only:
+                # THE DRY RUN HAS NOT LIFTED ANYTHING (UX round 10, U2). Measured:
+                # immediately after `--authorise --print-only`, `is_revoked` was still
+                # True — the anchor is the list the runtime reads and the install step
+                # that carries the change had only been printed. `--revoke --print-only`
+                # carried this caveat; this sentence claimed the opposite of the state
+                # and sent the operator to `lop pair` to be refused again, which is the
+                # loop this verb exists to end.
+                print(
+                    f"the lift for {authorise} is prepared and NOT in force: the install "
+                    "step printed above has not run, so the anchor still refuses this "
+                    "device. Run this again without --print-only (one privileged step), "
+                    "then pair the phone again with `lop pair`."
+                )
+            else:
+                print(
+                    f"authorised {authorise}. A session already running picks this up within "
+                    f"{int(ANCHOR_REFRESH_S)}s; a new pairing request is accepted at once. "
+                    "Pair the phone again with `lop pair`."
+                )
         else:
             print(
                 "no installed operator anchor to lift a revocation from, so only the "
@@ -353,8 +390,6 @@ def describe_devices(args: argparse.Namespace) -> int:
                 "if you expected an anchor here",
                 file=sys.stderr,
             )
-        # The list below is about to print the same device as active, which is the
-        # receipt for the work above rather than a second sentence about it.
 
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))
@@ -362,6 +397,19 @@ def describe_devices(args: argparse.Namespace) -> int:
         print(
             f"  {device.device_id}  {device.name or '(unnamed)':<20} "
             f"{state:<8} expires {expires}  scopes {','.join(device.scope)}"
+        )
+    # A REVOKED DEVICE KEEPS ITS ROW (UX round 10, U1). It had none: the revocation
+    # clears the certificate, so it cannot be in `paired`, and nothing printed the
+    # anchor-only revocations — which left the id every remedy names readable nowhere
+    # but a receipt from an earlier day. The row carries the command, because being
+    # brought back is the reason the device is listed at all.
+    listed = {device.device_id for device in paired}
+    for device_id in devices.revoked_ids(root):
+        if device_id in listed:
+            continue
+        print(
+            f"  {device_id}  {'':<20} {'revoked':<8} certificate cleared — "
+            f"`{devices.AUTHORISE_COMMAND.format(device_id=device_id)}` brings it back"
         )
     for row in pending:
         print(

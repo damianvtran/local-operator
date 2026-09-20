@@ -793,18 +793,24 @@ _SPAWNER_CLAIM = re.compile(
 _CLASS_ALLOWANCES = {
     (
         "local_operator/operator/handlers.py",
-        "only the process that",
+        "Only the process that started the session can loosen it; `lop operator init` "
+        "adds the operator key that lets a gesture or a paired phone do it.",
     ): "the spawn-only level's own report: with no anchor installed this is the state",
 }
 
 
 def _allowed(relative: str, copy: str) -> bool:
-    """Whether ``copy`` sits in the allowance list, for THIS file.
+    """Whether ``copy`` IS an allowed literal, in THIS file.
 
-    Keyed on the file as well as the text so an allowance cannot be inherited by a
-    copy of the sentence elsewhere, which is the failure mode an exemption list has.
+    EXACTLY that literal, and that is a correction (agent review round 10, MINOR-2):
+    the allowance was keyed on a substring ("only the process that"), so a NEW
+    literal in `handlers.py` carrying those words — asserting the spawner rule in
+    fresh words, which is exactly the sentence this class exists to stop — was waved
+    through. Measured by the reviewer (M7: green). The file key stays, so an
+    allowance cannot be inherited by a copy elsewhere either; between the two, an
+    allowance excuses one sentence and nothing that resembles it.
     """
-    return any(file == relative and text in copy for (file, text) in _CLASS_ALLOWANCES)
+    return any(file == relative and copy.strip() == text for (file, text) in _CLASS_ALLOWANCES)
 
 
 def _sentences(text: str) -> list[str]:
@@ -829,6 +835,30 @@ _WINDOW_REMEDY_SHAPE = (
         re.IGNORECASE,
     ),
 )
+
+
+def test_the_allowance_is_exact_and_not_a_substring() -> None:
+    """MINOR-2 (agent review round 10): an allowance keyed on a substring excuses a family.
+
+    The allowance existed for one sentence — the spawn-only level's own status line —
+    and was keyed on the words "only the process that", so a NEW literal in the same
+    file carrying those words was waved through. The reviewer measured exactly that
+    (their M7: green), which is the shape of hole an exemption list acquires. It is
+    keyed on the literal's own text now, and this cell asserts both directions: the
+    real sentence is excused, and a longer sentence that CONTAINS it is not.
+    """
+    file, text = next(iter(_CLASS_ALLOWANCES))
+    assert _allowed(file, text) is True
+    assert _allowed(file, f"{text} Only the console that owns the gate may loosen it.") is False
+    assert _allowed("some/other/module.py", text) is False
+    # The concrete counterexample the design record points at, recorded where it can
+    # be checked rather than quoted in the document: a Python literal pairing a surface
+    # noun with "loosen" is in-class copy that NEITHER shape catches, because "loosen"
+    # is not one of the two remedy names the shipped phrasings carried. Stated so the
+    # bound is explicit; the phrase list is what would have to grow to close it.
+    counterexample = "Only the console that owns the gate may loosen a running session."
+    assert not any(shape.search(counterexample) for shape in _WINDOW_REMEDY_SHAPE)
+    assert _SPAWNER_CLAIM.search(counterexample) is None
 
 
 def test_no_shipped_copy_offers_a_window_as_the_place_to_loosen() -> None:
@@ -914,12 +944,16 @@ def test_the_class_sweep_covers_every_subject_it_declares() -> None:
     assert not empty, f"a declared subject of the class sweep is empty: {empty}"
     assert all((_REPO_ROOT / path).exists() for path in _CLASS_EXEMPTIONS)
     # An allowance that has outlived the sentence it excuses is a hole: each one is
-    # asserted to still be in ITS file.
-    stale = [
-        (file, text)
-        for (file, text) in _CLASS_ALLOWANCES
-        if text not in (_REPO_ROOT / file).read_text(encoding="utf-8")
-    ]
+    # asserted to still be a LITERAL in ITS file. Checked through the AST rather than
+    # against the raw text, because the allowance is an exact literal and the source
+    # may write it as two adjacent strings (which is how this one is written).
+    stale: list[tuple[str, str]] = []
+    for file, text in _CLASS_ALLOWANCES:
+        tree = ast.parse((_REPO_ROOT / file).read_text(encoding="utf-8"))
+        if not any(
+            isinstance(node, ast.Constant) and node.value == text for node in ast.walk(tree)
+        ):
+            stale.append((file, text))
     assert not stale, f"an allowance outlived the copy it excuses: {stale}"
 
 

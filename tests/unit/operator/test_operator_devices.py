@@ -490,3 +490,32 @@ def test_forget_revocation_lifts_the_record_and_takes_the_file_with_it(tmp_path:
     assert devices.revoked_path(tmp_path).exists() is False
     # Idempotent: lifting a revocation that is not recorded is False, not an error.
     assert devices.forget_revocation(tmp_path, second) is False
+
+
+def test_a_record_that_cannot_be_removed_is_reported_rather_than_swallowed(
+    tmp_path: Path,
+) -> None:
+    """Agent review round 10, NIT-1: the receipt for a clear that did not happen.
+
+    `forget_revocation` swallowed an `OSError` around the unlink and returned `True`,
+    so with the operator root unwritable the verb printed "only the local record was
+    cleared" while `revoked.json` still named the device and `is_revoked_here` was
+    still `True` — on the one message a refused phone's operator is sent to follow.
+    (``record_revocation`` swallows the same error for the CERTIFICATE, which is a file
+    nothing reads for authority; this file is read, so the two are not the same case.)
+    """
+    import os as _os
+
+    _, point = _new_point()
+    device_id = devices.new_device_id(point)
+    devices.record_revocation(tmp_path, device_id)
+    assert devices.is_revoked_here(tmp_path, device_id) is True
+
+    operator_dir = devices.operator_root(tmp_path)
+    _os.chmod(operator_dir, 0o500)
+    try:
+        assert devices.forget_revocation(tmp_path, device_id) is False
+        assert devices.is_revoked_here(tmp_path, device_id) is True, "the record went anyway"
+        assert devices.revoked_path(tmp_path).exists() is True
+    finally:
+        _os.chmod(operator_dir, 0o700)

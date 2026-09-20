@@ -511,8 +511,19 @@ def test_authorising_a_device_lifts_both_halves_of_its_revocation(
     def installed(uid: Any = None) -> Any:
         return _installed_anchor(trust, root, uid)
 
+    def fake_install(config_root: Path, *, print_only: bool = False) -> int:
+        """The privileged step, stubbed: this rig's anchor IS the staged file.
+
+        Needed since round 10 (UX U2) because the SUCCESS receipt now belongs to the
+        run that actually lands the change: a `--print-only` run reports the state it
+        left, which is the subject of its own cell. The real install is a sudo call and
+        no cell here may raise a password prompt.
+        """
+        return 0
+
     monkeypatch.setattr(trust, "load_anchor", installed)
     monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+    monkeypatch.setattr("local_operator.operator.handlers.install_anchor", fake_install)
 
     # The state `lop operator devices --revoke` leaves: both halves, plus the card.
     devices.record_revocation(root, device_id)
@@ -521,21 +532,170 @@ def test_authorising_a_device_lifts_both_halves_of_its_revocation(
     assert _stage_anchor_revocation(root, other_id, revoked=True) is True
     assert devices.is_revoked(root, device_id) is True
 
-    # `print_only` for the same reason every cell here uses it: the real install step
-    # is a sudo call, and an agent's test may not raise a password prompt.
-    assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
+    assert describe_devices(_args(authorise=device_id, print_only=False)) == 0
     receipt = capsys.readouterr().out
     assert f"authorised {device_id}" in receipt, receipt
     assert "lop pair" in receipt, receipt
-    # `print_only` PRINTS the privileged step rather than taking it — the assertion
-    # is that the step was offered, which is what makes the lift above real on a host
-    # where the anchor half has not been installed yet.
-    assert "sudo" in receipt, receipt
 
     assert devices.is_revoked_here(root, device_id) is False, "the local record survived"
     assert devices.is_revoked(root, device_id) is False, "the guard still refuses it"
     assert devices.is_revoked(root, other_id) is True, "another device was released with it"
 
     # Idempotent: a second run on an unrevoked device says so rather than pretending.
-    assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
+    assert describe_devices(_args(authorise=device_id, print_only=False)) == 0
     assert "nothing recorded a revocation" in capsys.readouterr().out
+
+
+def test_a_revoked_device_keeps_a_row_and_the_command_that_brings_it_back(
+    paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 10, U1: the operand every remedy names has to be readable somewhere.
+
+    Measured before: after a revocation the device appeared in NO listing — the
+    revocation clears its certificate, so `paired` cannot hold it, and nothing printed
+    the anchor-only revocations — which left the 32-hex id readable only in a receipt
+    from an earlier day, and left the phone's own user unable to name their device at
+    all. The row is asserted where a person looks for it, WITH the command, because
+    being brought back is the reason the row exists.
+    """
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import trust
+    from local_operator.operator.pair_handlers import (
+        _stage_anchor_revocation,
+        describe_devices,
+    )
+
+    root = _config()
+    _, point = _phone_point()
+    device_id = devices.new_device_id(point)
+
+    def installed(uid: Any = None) -> Any:
+        return _installed_anchor(trust, root, uid)
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+
+    # The state `--revoke` leaves behind: named in the anchor, certificate gone.
+    assert _stage_anchor_revocation(root, device_id, revoked=True) is True
+    devices.record_revocation(root, device_id)
+    assert devices.list_devices(root) == []
+
+    assert describe_devices(_args(print_only=True)) == 0
+    listing = capsys.readouterr().out
+    assert device_id in listing, listing
+    assert f"lop operator devices --authorise {device_id}" in listing, listing
+    assert "revoked" in listing, listing
+
+
+def test_authorise_print_only_reports_the_state_it_left_not_the_one_it_aimed_at(
+    paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 10, U2, pinned as a PROPERTY rather than as wording.
+
+    Measured on the round-10 head: `--authorise --print-only` printed the unconditional
+    success sentence ("a new pairing request is accepted at once") and left
+    `is_revoked` **True**, because the anchor is the list the runtime reads and the
+    install step that carries the change had only been printed. The operator followed
+    the receipt to `lop pair` and was refused again — the loop this verb exists to end,
+    on the one path the new help text advertises for it.
+
+    THE RIG HAS TO SEPARATE STAGED FROM INSTALLED, which the neighbouring cells do not
+    need to: they read the staged file as the anchor, so a staged lift looks applied.
+    Here the installed statement is its own file, and only the (stubbed) privileged step
+    moves one to the other — which is what makes the dry run measurably a dry run. The
+    assertion is the STATE after it, not the sentence, because the sentence is what the
+    last round pinned while the defect shipped.
+    """
+    import json
+
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import handlers, trust
+    from local_operator.operator.pair_handlers import (
+        _stage_anchor_revocation,
+        describe_devices,
+    )
+
+    root = _config()
+    _, point = _phone_point()
+    device_id = devices.new_device_id(point)
+    installed_path = root / "installed-anchor.json"
+
+    def installed(uid: Any = None) -> Any:
+        body = json.loads(installed_path.read_text())
+        return trust.AnchorLoad(
+            anchor=trust.OperatorAnchor.from_json(body),
+            path=trust.anchor_path(uid),
+            root_owned=True,
+            reason="ok",
+            exists=True,
+        )
+
+    def fake_install(config_root: Path, *, print_only: bool = False) -> int:
+        """Models the ONE privileged step: the staged statement lands, or it does not."""
+        if print_only:
+            print("sudo install … (the privileged command, printed rather than run)")
+        else:
+            installed_path.write_bytes(trust.staging_path(config_root).read_bytes())
+        return 0
+
+    # The fixture's own anchor becomes the INSTALLED one, before the seam is wired:
+    # nothing else here has to invent a statement.
+    installed_path.write_bytes(trust.staging_path(root).read_bytes())
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+    monkeypatch.setattr(handlers, "install_anchor", fake_install)
+
+    assert _stage_anchor_revocation(root, device_id, revoked=True) is True
+    installed_path.write_bytes(trust.staging_path(root).read_bytes())
+    devices.record_revocation(root, device_id)
+    assert devices.is_revoked(root, device_id) is True
+
+    # (a) the dry run: the installed anchor still refuses the device, and the receipt
+    # says exactly that rather than sending the operator to `lop pair` to be refused.
+    assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
+    dry_run = capsys.readouterr().out
+    assert devices.is_revoked(root, device_id) is True, "the dry run lifted something"
+    assert "NOT in force" in dry_run, dry_run
+    assert "accepted at once" not in dry_run, dry_run
+
+    # (b) and the real run does lift it, so the caveat is a caveat and not a shrug.
+    assert describe_devices(_args(authorise=device_id, print_only=False)) == 0
+    capsys.readouterr()
+    assert devices.is_revoked(root, device_id) is False
+
+
+def test_a_record_that_did_not_apply_is_not_reported_as_never_recorded(
+    paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Agent review round 10, NIT-2: the wording, about a record that DID exist.
+
+    A record stamped with a key that is no longer installed does not apply
+    (`is_revoked_here`'s scoping, round 9) while still being a record on disk. The verb
+    said "nothing recorded a revocation of X" about it — accurate about the guard,
+    wrong about the file — while the same run cleared it.
+    """
+    import json
+
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import trust
+    from local_operator.operator.pair_handlers import describe_devices
+
+    root = _config()
+    _, point = _phone_point()
+    device_id = devices.new_device_id(point)
+
+    def installed(uid: Any = None) -> Any:
+        return _installed_anchor(trust, root, uid)
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+    devices.revoked_path(root).write_text(
+        json.dumps({"v": 1, "devices": [device_id], "operator_key_id": "not-the-installed-key"})
+    )
+    assert devices.is_revoked(root, device_id) is False, "the fixture's record does apply"
+
+    assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
+    said = capsys.readouterr().out
+    assert "did not apply under the installed anchor" in said, said
+    assert "nothing recorded a revocation" not in said, said
+    assert devices.revoked_path(root).exists() is False

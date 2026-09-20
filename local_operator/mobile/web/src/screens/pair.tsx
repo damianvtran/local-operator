@@ -50,7 +50,12 @@ type Status =
 	| { kind: "idle" }
 	| { kind: "waiting"; deviceId: string }
 	| { kind: "paired"; deviceId: string; name: string; authorityReady: boolean }
-	| { kind: "failed"; message: string };
+	| { kind: "failed"; message: string }
+	/* A REVOKED REFUSAL IS ITS OWN STATE (UX round 10, U1). The generic `failed` arm
+	   renders a sentence, and the sentence needs this phone's OWN device id to name a
+	   command anyone can run — the id is computed a few lines above and was thrown
+	   away, so the reader was shown a `<this phone's device id>` placeholder. */
+	| { kind: "revoked"; deviceId: string };
 
 export function PairScreen() {
 	const [code, setCode] = useState("");
@@ -67,9 +72,13 @@ export function PairScreen() {
 
 	async function claim() {
 		setStatus({ kind: "idle" });
+		/* Declared OUTSIDE the try so the refusal can print it: the id is derived from
+		   this phone's own key, which is the same string the machine derived, so the
+		   command in the refusal is one the reader can actually paste (UX round 10, U1). */
+		let deviceId = "";
 		try {
 			const key = await loadOrCreateDeviceKey();
-			const deviceId = await deviceIdFor(key.point);
+			deviceId = await deviceIdFor(key.point);
 			await claimPairingCode({
 				code: code.trim(),
 				spki: encodePoint(key.point),
@@ -114,7 +123,11 @@ export function PairScreen() {
 				});
 			}
 		} catch (error) {
-			setStatus({ kind: "failed", message: humanizePairingError(error) });
+			if (revokedRefusal(error) && deviceId) {
+				setStatus({ kind: "revoked", deviceId });
+			} else {
+				setStatus({ kind: "failed", message: humanizePairingError(error) });
+			}
 		}
 	}
 
@@ -196,6 +209,26 @@ export function PairScreen() {
 				</div>
 			) : null}
 
+			{status.kind === "revoked" ? (
+				/* D1 and D2 (design round 10): the command is marked up as the command it
+				   is — the paragraph above renders `lop pair` as <code>, and this one is
+				   the sentence a reader must ACT on — and the machine-side condition the
+				   old parenthetical asked a phone reader to evaluate is now its own
+				   sentence, gated on a check they can run (`lop operator status`). */
+				<div className="flex flex-col gap-1">
+					<p className="text-body-sm text-danger">
+						This device has been revoked on the machine, and a revocation is lifted
+						only there — pairing again will be refused.
+					</p>
+					<p className="text-body-sm text-danger">
+						On the machine, run <code>{AUTHORISE_COMMAND} {status.deviceId}</code>, then
+						pair this phone again. If <code>lop operator status</code> there reports the
+						anchor as not installed, run <code>lop operator install</code> first (one
+						privileged step).
+					</p>
+				</div>
+			) : null}
+
 			{status.kind === "failed" ? (
 				<p className="text-body-sm text-danger">{status.message}</p>
 			) : null}
@@ -212,30 +245,35 @@ function defaultDeviceName(): string {
 	return `${label} (${new Date().toISOString().slice(0, 10)})`;
 }
 
+/* The phone's spelling of the one command (design round 10, D4). TypeScript cannot
+   import the CLI's own constant (`operator/devices.py::AUTHORISE_COMMAND`), so this
+   is a second copy by necessity rather than by accident; `pair-screen.authority-state
+   .test.tsx` pins the shared words, which is the bound. */
+const AUTHORISE_COMMAND = "lop operator devices --authorise";
+
+/** Whether the machine refused this device as revoked, rather than failing another way. */
+function revokedRefusal(error: unknown): boolean {
+	return String((error as Error)?.message ?? error).includes("revoked");
+}
+
 function humanizePairingError(error: unknown): string {
 	const message = String((error as Error)?.message ?? error);
 	if (message.includes("not valid")) {
 		return "That code is not valid — run `lop pair` on the machine again for a fresh one.";
 	}
 	if (message.includes("revoked")) {
-		/* THE ROUTE, and it has to be a route that EXISTS (UX round 8 U8-1, then
-		   round 9's Q9-1/R9-2 which measured that the first attempt did not: the
-		   sentence sent the operator to `lop operator init` + `install`, and the
-		   phone stayed refused, because the relay records a revocation in TWO
-		   places and nothing removed the local one).
-
-		   The inverse verb now exists (`lop operator devices --authorise <id>`): it
-		   clears the local record and drops the anchor's entry, through the same
-		   privileged install step `--revoke` uses, and it is host-side only, so the
-		   phone cannot un-revoke itself. The install clause stays because on a host
-		   where the anchor half has not been installed the lift is not in force yet —
-		   the receipt `--authorise` prints says the same thing in the same words. */
+		/* THE FALLBACK FOR A REVOKED REFUSAL WITH NO ID IN HAND (a failure raised
+		   before this phone derived one). The rendered path is the `revoked` state
+		   above, which substitutes this phone's real id — the run that produced the
+		   `<this phone's device id>` placeholder came through here (UX round 10, U1),
+		   so this arm no longer promises an operand it cannot supply. The verb itself
+		   is the route the machine really honours (rounds 8 and 9 measured the earlier
+		   answer — `lop operator init` + `install` — leaving the phone refused). */
 		return (
 			"This device has been revoked on the machine, and a revocation is lifted only " +
-			"there — pairing again will be refused. On the machine, run " +
-			"`lop operator devices --authorise <this phone's device id>` (then " +
-			"`lop operator install`, if the anchor is not installed yet), and pair this " +
-			"phone again."
+			"there — pairing again will be refused. On the machine, run `" +
+			AUTHORISE_COMMAND +
+			" <device id>` (the id is in `lop operator devices`), then pair this phone again."
 		);
 	}
 	if (message.toLowerCase().includes("subtle")) {

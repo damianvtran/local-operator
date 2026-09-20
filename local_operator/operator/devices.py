@@ -467,6 +467,15 @@ def paired_certificate(config_root: Path) -> str | None:
     return None
 
 
+#: THE ONE SPELLING OF THE INVERSE INSTRUCTION (design round 10, D4). Three
+#: hand-written copies of this command existed — `--revoke`'s receipt, the
+#: `--authorise` receipts, and `init`'s pointer — which is the drift the notice
+#: constants in ``harness/approval.py`` exist to prevent, on the very sentence this
+#: issue's history is about. The portal's copy is TypeScript and cannot import a
+#: Python constant; its test pins the shared words instead, which is the bound.
+AUTHORISE_COMMAND = "lop operator devices --authorise {device_id}"
+
+
 def revoked_path(config_root: Path) -> Path:
     """The relay's own record of revocations, ``revoked.json`` under the operator root.
 
@@ -552,6 +561,34 @@ def is_revoked_here(config_root: Path, device_id: str) -> bool:
     return stamped == _installed_key_id()
 
 
+def revoked_ids(config_root: Path) -> list[str]:
+    """Every device id on a revocation list this machine honours, local record first.
+
+    THE LISTING NEEDS THIS BECAUSE ``record_revocation`` CLEARS THE CERTIFICATE
+    (UX round 10, U1): after a revocation the device is in no ``paired`` list, so the
+    32-hex id the remedy names appeared on no surface at all — the operator had to
+    still hold a receipt printed days earlier, and the phone's own user could not name
+    their device anywhere. Union of both lists rather than either: the local record
+    can name a device the anchor has not caught up with (``--revoke --print-only``),
+    and the anchor is the half the runtime actually reads. Members of the anchor's
+    list whose entry says ``"revoked": False`` are not revocations.
+    """
+    from local_operator.operator.trust import load_anchor
+
+    found: list[str] = []
+    body = _read_json(revoked_path(config_root))
+    listed = body.get("devices") if body else None
+    if isinstance(listed, list):
+        found.extend(str(entry) for entry in listed)
+    loaded = load_anchor()
+    if loaded.usable and loaded.anchor is not None:
+        for entry in loaded.anchor.devices:
+            device_id = str(entry.get("device_id") or "")
+            if device_id and entry.get("revoked") and device_id not in found:
+                found.append(device_id)
+    return found
+
+
 def record_revocation(config_root: Path, device_id: str) -> None:
     """Note a revocation in the operator root, and drop the certificate.
 
@@ -607,7 +644,14 @@ def forget_revocation(config_root: Path, device_id: str) -> bool:
     try:
         path.unlink()
     except OSError:
-        pass
+        # REPORT THE FAILURE RATHER THAN THE INTENT (agent review round 10, NIT-1).
+        # This is the last entry, so the record is only gone when the file is: with the
+        # operator root unwritable the device is STILL named there, and a `True` here
+        # would let the verb's receipt say "only the local record was cleared" about a
+        # clear that did not happen — on the one message a refused phone's operator is
+        # now sent to follow. `record_revocation` swallows the same error for the
+        # CERTIFICATE, which is a file nothing reads for authority; this file is read.
+        return False
     return True
 
 
@@ -617,6 +661,7 @@ def device_certificate_mode(path: Path) -> int:
 
 
 __all__ = [
+    "AUTHORISE_COMMAND",
     "DEVICE_RECORD_VERSION",
     "DEVICE_SCOPES",
     "PAIRING_TTL_S",
@@ -643,6 +688,7 @@ __all__ = [
     "read_device",
     "read_pairing",
     "read_pending",
+    "revoked_ids",
     "revoked_path",
     "record_revocation",
     "write_device_cert",
