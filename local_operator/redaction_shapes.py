@@ -1829,32 +1829,117 @@ def _make_hit(shape: Shape, match: Match[str], value: str) -> ShapeHit:
     return ShapeHit(label=shape.label, value=value, window=region)
 
 
-def _credential_fragments_survive(hit: ShapeHit, text: str) -> bool:
-    """Whether a readable piece of the matched credential survived in ``text``.
+#: The shortest run of a credential worth calling a leak. Short enough that a
+#: partial mask cannot hide behind it, long enough not to fire on ordinary text.
+_FRAGMENT_WINDOW = 6
 
-    The check is against the CREDENTIAL, not the matched fragment: a DSN password
-    containing ``@`` used to be masked to the first ``@`` while the password
-    group's value disappeared, so a value-only check reported success while the
-    rest of the credential sat in the transcript. Six characters is the shortest
-    run worth calling a leak and short enough that a partial mask cannot hide
-    behind it.
+
+class _GramIndex:
+    """The six-character runs of one model-visible text, built on FIRST use.
+
+    **Why an index rather than a substring search per fragment.** The check that
+    came before this one spells it ``fragment in text`` for every offset of the
+    credential, so it scans the whole text once per offset and its price is linear
+    in the text for EVERY credential in it. Building the text's six-character runs
+    ONCE turns each fragment test into a set lookup instead.
+
+    **It is a trade, not a win, and the numbers below are the whole of the claim.**
+    Measured on this host (CPython 3.12.13, best of three runs, against a 1 MB
+    high-entropy tool result built from 32-hex-character lines; the scan column is
+    ``_credential_fragments_survive`` at ``91d70791``):
+
+    * one hit, 64-character value — scan **8 ms**, this index **224 ms**;
+    * one hit, 512-character value — scan **102 ms**, this index **221 ms**;
+    * one hit, 4 KB PEM body — scan **823 ms**, this index **278 ms**;
+    * 20 hits of 512 characters over one text — scan **2729 ms**, this index **241 ms**.
+
+    So the index pays a fixed one-pass build — **224 ms** and a peak of **76 MB** of
+    transient set for a 1 MB text (708,574 distinct runs) — and only earns it back
+    where the scan it replaces is longer than that build: a value of a couple of KB
+    or more, several hits sharing one text, or a text large enough that one scan is
+    already the expensive half. For a single short credential in a large result it
+    is genuinely SLOWER than the loop it replaces, and the memory is proportional to
+    the text. Both facts are why it stays lazy and why most results never touch it.
+
+    LAZY, because most results contain no hit at all: nothing is built unless a hit
+    needs a fragment tested, so the ordinary-text path is untouched. Most results
+    are also far too small for either side to matter — every text in the credential
+    corpus is under 200 characters, where the whole question is moot.
+
+    The redaction MARKER is stripped before the runs are taken: it is what a mask
+    writes, never material a mask left behind, and a run straddling one would
+    otherwise match a credential whose own value IS the marker — the two ``.npmrc``
+    cases and the cookie-header case QA round 1 found escalating on nothing readable
+    at all. The seam the strip creates is harmless (a credential's
+    own characters are never joined by it, and a seam match would require the value
+    to spell the joined run contiguously, which is a real survivor anyway); what it
+    does cost is stated in :func:`_credential_fragments_survive`.
     """
-    if not hit.value:
+
+    __slots__ = ("_text", "_grams")
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._grams: set[str] | None = None
+
+    def __contains__(self, gram: str) -> bool:
+        if self._grams is None:
+            readable = self._text.replace(REDACTION_MARKER, "")
+            self._grams = {
+                readable[start : start + _FRAGMENT_WINDOW]
+                for start in range(len(readable) - _FRAGMENT_WINDOW + 1)
+            }
+        return gram in self._grams
+
+
+def _credential_fragments_survive(
+    hit: ShapeHit, text: str, grams: "_GramIndex | None" = None
+) -> bool:
+    """Whether a readable piece of the CREDENTIAL survived in the masked ``text``.
+
+    **Anchored on the credential's own characters, never on the matched region**,
+    and that is the whole of the judgement (QA round 1, Q1). The region is not all
+    secret: a DSN rule keeps ``amqp://user:`` and ``@host`` readable BY DESIGN, so a
+    region-wide window search graded a fully-masked ``amqp://guest:guest@host`` as
+    exposed — the surviving window was the USERNAME — and filed a rotation demand
+    for a value that never left the tool. Four corpus hits were affected, three of
+    the four because the "survivor" was the redaction MARKER itself. So:
+
+    * the marker is not material (``_GramIndex`` strips it, and a value that IS the
+      marker is never a survivor);
+    * the whole VALUE present in the text is a leak: the rule's group was narrower
+      than the credential, or this copy was never masked;
+    * a window OF THE VALUE present is a partial leak — the mask stopped inside the
+      credential, which is the case the floor exists for and what a truncating rule
+      (a PEM without its END line, a base64 body) produces.
+
+    Reading the VALUE rather than the region means material a rule deliberately
+    preserves can never be counted as a survivor.
+
+    **A stated limit, not an oversight.** Because ``_GramIndex`` strips the marker
+    before taking its runs, a credential whose own value literally contains
+    ``[redacted]`` and survives only PARTIALLY is unrepresentable: the fragment
+    still in the text is spelled exactly like the marker a mask would have written,
+    and no reading of the text can tell them apart. That identity is what makes the
+    ``.npmrc`` and cookie false positives above impossible to grade correctly by
+    inspection, so it is not closable here — only the wholly-surviving copy of such
+    a value is still caught, by the ``value in text`` test above. Reaching it needs
+    an operator secret that itself contains the harness's marker string, which is
+    why the limit is recorded rather than paid for.
+    """
+    value = hit.value
+    if not value or value == REDACTION_MARKER:
         return False
-    if hit.value == text:
+    if value in text:
         return True
-    window = hit.window or hit.value
-    if window == text:
-        # The whole matched REGION is the text (an isolated dump of the
-        # credential itself, or the field of a JSON envelope). That is an
-        # exposure, not a survivor: the value is elsewhere in the text.
-        return True
-    if len(window) <= 6:
-        return window in text
-    for start in range(0, len(window) - 5, 3):
-        if window[start : start + 6] in text:
-            return True
-    return False
+    if len(value) < _FRAGMENT_WINDOW:
+        return False
+    if grams is None:
+        grams = _GramIndex(text)
+    return any(
+        value[start : start + _FRAGMENT_WINDOW] in grams
+        for start in range(len(value) - _FRAGMENT_WINDOW + 1)
+    )
 
 
 def _is_truncated_pem(hit: ShapeHit) -> bool:
@@ -1912,11 +1997,14 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
     false claim if one slips through again.
     """
     marked: list[ShapeHit] = []
+    # One index for the text, shared by every hit and built on first need: the
+    # fragment test is per-credential and the text is the same for all of them.
+    grams = _GramIndex(text)
     for hit in hits:
         # Readable material is checked FIRST, so the truncated-PEM branch below
         # cannot swallow an exposure: a block that was masked is contained, and
         # one that left a fragment readable is not.
-        exposed = _credential_fragments_survive(hit, text)
+        exposed = _credential_fragments_survive(hit, text, grams)
         if _is_truncated_pem(hit) or exposed:
             # A BEGIN with no END is a key whose LENGTH we cannot see: everything
             # visible is masked, and the claim is still withheld, because nothing
