@@ -511,6 +511,10 @@ class AnchorCache:
         pinned = self.load
         if pinned is None:  # pragma: no cover - the caller reads None first
             return True
-        if not fresh.usable:
+        # A load that is no longer USABLE is adopted unconditionally (the stricter
+        # direction), and the ``is None`` half is written out rather than left to the
+        # ``usable`` property: `usable` is a property, so a reader of this line — a
+        # type checker included — cannot narrow ``fresh.anchor`` from it.
+        if not fresh.usable or fresh.anchor is None:
             return True
         return pinned.anchor is not None and pinned.anchor.key_id == fresh.anchor.key_id
