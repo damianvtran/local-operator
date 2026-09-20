@@ -716,3 +716,70 @@ def test_every_notice_fits_the_error_frame_slice() -> None:
     for name, copy in sorted(_shipped_notices().items()):
         limit = limits.get(name, 400)
         assert len(copy) <= limit, f"{name} is {len(copy)} characters (cap {limit}): {copy!r}"
+
+
+def test_no_shipped_document_promises_a_window_remedy() -> None:
+    """The class cell's DOCUMENT arm (QA round 8, Q8-1).
+
+    The Python sweep above closes the class for copy the product can emit. It
+    structurally cannot see a `.md`, and the very next pass found the same clause
+    asserted as current in ``docs/DESKTOP_CONTROLS.md`` — this PR's own text, in a
+    document that tells the desktop team what the gate rule IS. Two sentences that
+    the rest of this round's evidence (a phone loosening a session the relay never
+    spawned, an attached pane with no spawn capability, the shipped copy naming the
+    operator's levers) falsifies directly.
+
+    The sweep normalises whitespace before matching, because both hits were wrapped
+    across lines and a line-oriented grep is what let them survive a review round.
+    ``docs/design/approval-authority.md`` is EXEMPT and that exemption is itself
+    checked: its mentions are the record of the deletion, so each one must sit
+    within 600 characters of a word that makes it history rather than a promise. An
+    exempt file whose mentions stop being explanatory fails here, which is what
+    keeps the exemption from becoming a second home for the claim.
+    """
+    phrases = _WINDOW_REMEDIES + ("the console that started it", "the window that started it")
+    exempt = "docs/design/approval-authority.md"
+    offenders: dict[str, list[str]] = {}
+    for doc in sorted((_REPO_ROOT / "docs").rglob("*.md")):
+        relative = doc.relative_to(_REPO_ROOT).as_posix()
+        normalised = " ".join(doc.read_text(encoding="utf-8").split())
+        for phrase in phrases:
+            if phrase in normalised and relative != exempt:
+                offenders.setdefault(relative, []).append(phrase)
+    assert not offenders, f"shipped documentation still promises a window remedy: {offenders}"
+
+    history = (
+        "deleted",
+        "DELETED",
+        "removed",
+        "gone",
+        "no longer",
+        "used to",
+        "retired",
+        "revision 1",
+        "Revision 1",
+        "stopped naming",
+        "deletes",
+    )
+    record = " ".join((_REPO_ROOT / exempt).read_text(encoding="utf-8").split())
+    unguarded = [
+        phrase
+        for phrase in phrases
+        if any(
+            not any(word in record[max(0, at - 600) : at + 600] for word in history)
+            for at in _occurrences(record, phrase)
+        )
+    ]
+    assert (
+        not unguarded
+    ), f"{exempt} mentions a window remedy as something other than history: {unguarded}"
+
+
+def _occurrences(text: str, phrase: str) -> list[int]:
+    """Every index ``phrase`` appears at — a scan, because ``str.find`` cannot say."""
+    found: list[int] = []
+    start = 0
+    while (at := text.find(phrase, start)) != -1:
+        found.append(at)
+        start = at + 1
+    return found

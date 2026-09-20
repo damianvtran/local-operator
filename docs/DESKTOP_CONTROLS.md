@@ -91,19 +91,24 @@ Defaults use the existing typed settings API; session model, effort and approval
 mutations do not silently persist. `/approvals default ...` opens the default
 editor for `tool_approval_mode` and explicitly leaves the current session alone:
 that editor writes the file, which is where every NEW session reads the mode, so
-a running session's gate is loosened only by `/approvals auto` typed in the
-console that started it — see below. The file still tightens every running
-session at once, which is the safe direction.
+a running session's gate is loosened only with the OPERATOR'S own consent —
+`/approvals auto` typed in the console that owns the gate applies at once, and
+from any other surface (an attached pane, this backend, a paired phone) it needs
+a signature — see below. The file still tightens every running session at once,
+which is the safe direction.
 
 **The command route can tighten a running gate but cannot loosen one** (issue
 #1310). `/approvals auto` over
 `POST /v1/desktop/sessions/{id}/commands` is refused unless this backend is the
 process that started the session's runtime; the refusal is **422** with
 `{"code": "operator_authority_required", "message": <copy>}`, and the copy names
-the remedies (`--yolo` or `tool_approval_mode: auto` for the next session, or
-typing it in the terminal or app window that started this one). `/approvals ask`,
-a bare `/approvals`, every other command and every non-approval op are
-unaffected. The CARD route answers the same 422 with `still_pending: true`,
+the levers the operator can actually use: the presence gesture on this machine
+(Touch ID), a paired phone, or `--yolo` / `tool_approval_mode: auto` for a NEW
+session. On a host whose anchor has not been installed yet the code is
+`operator_authority_unconfigured` (a subclass, so a client keying on the base
+code keeps working) and the copy names `lop operator install` instead of offering
+remedies that cannot run. `/approvals ask`, a bare `/approvals`, every other
+command and every non-approval op are unaffected. The CARD route answers the same 422 with `still_pending: true`,
 because the card is still parked — it is not `409 no longer pending`, which
 would say the question expired. The app must present the refusal as an ordinary
 command error rather than retrying, and must not imply the mode changed.
