@@ -190,3 +190,35 @@ def test_the_checks_still_see_the_shape_that_broke() -> None:
         "no shipped source imports a non-source asset any more; if the fixtures moved, "
         "these checks are now vacuous and need to follow them"
     )
+
+
+def _gitignore_patterns(path: Path) -> list[str]:
+    """The active patterns in a .gitignore, in file order."""
+    lines = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    return lines
+
+
+def test_the_web_tree_mirrors_every_root_ignore_rule_it_can_defeat() -> None:
+    """`!src/**/` un-ignores src's DIRECTORIES — the scanner needs the walk —
+    and a directory rule is exactly what that defeats: without the mirror at the
+    bottom of `mobile/web/.gitignore`, `mobile/web/src/build/` becomes visible
+    again. The mirror is defined mechanically (every unanchored, non-negated
+    root pattern), so this test is a comparison rather than a maintained list:
+    add a rule to the root and this fails until the mirror matches."""
+    root = _gitignore_patterns(REPO / ".gitignore")
+    mirrored = set(_gitignore_patterns(WEB / ".gitignore"))
+    # An unanchored pattern matches at any depth; a leading `/` or `!` changes
+    # the meaning, and both are excluded here (the mirror is of the plain ones).
+    unanchored = [p for p in root if not p.startswith(("/", "!"))]
+    missing = [p for p in unanchored if p not in mirrored]
+
+    assert not missing, (
+        "mobile/web/.gitignore re-includes directories under src/ for Tailwind's scanner, so "
+        "every unanchored rule from the repository root has to be restated after that (last "
+        "match wins), or a path the root ignores becomes visible here. Missing: "
+        + ", ".join(missing)
+    )

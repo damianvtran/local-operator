@@ -798,3 +798,37 @@ def test_ensure_bundle_uses_the_installs_own_tree_by_default(tmp_path: Path) -> 
 
     assert ok is True
     build.assert_called_once_with(web)
+
+
+def test_snapshot_bundle_rebuilds_a_bundle_its_guard_rejects(tmp_path: Path) -> None:
+    """A snapshot that ARRIVES with a `dist/` is not thereby a snapshot with a
+    usable one: a tree packed with a pre-fix (utility-less) bundle would install
+    unstyled and report success — the silent half of the defect this path
+    exists to close. Same standard as `ensure_bundle`: verify, then drop and
+    rebuild."""
+    web = _snapshot_web(tmp_path, dist=True)
+
+    with (
+        patch.object(install, "_verify_bundle", return_value="bundle check failed: 62 classes"),
+        patch.object(install, "_build_bundle", return_value=None) as build,
+    ):
+        status = install.snapshot_bundle(web)
+
+    assert status == "built"
+    build.assert_called_once()
+    # The refused bundle is gone before the rebuild, so nothing can read it as
+    # "built" in the meantime.
+    assert not (web / "dist").exists()
+
+
+def test_snapshot_bundle_trusts_a_present_bundle_its_guard_accepts(tmp_path: Path) -> None:
+    web = _snapshot_web(tmp_path, dist=True)
+
+    with (
+        patch.object(install, "_verify_bundle", return_value=None),
+        patch.object(install, "_build_bundle") as build,
+    ):
+        status = install.snapshot_bundle(web)
+
+    assert status == "already built"
+    build.assert_not_called()

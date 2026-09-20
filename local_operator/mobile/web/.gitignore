@@ -8,27 +8,61 @@ dist/
 
 # ---------------------------------------------------------------------------
 # Source resolution, not version control. Tailwind decides which files can hold
-# class names with gitignore semantics, and a DEEPER .gitignore's `!` patterns
-# override a shallower file's. uv writes an ALLOW-LIST .gitignore — the single
-# line `*` — at the root of every venv it creates and of every tool generation
-# it installs, so in an installed tree (site-packages, or a `lop-update`
-# generation under ~/.local/share/uv/tools or /var/folders) the whole web tree
-# sits under a `*` and is invisible to the scanner: `pnpm build` then emits a
-# stylesheet with no utilities, EXITS 0 (measured: 31 kB against 50 kB for
-# these sources), and the phone renders unstyled with nothing in any log to
-# say why. Upstream: tailwindlabs/tailwindcss#19844, #15452.
+# class names with GITIGNORE semantics — `@source` globs included — and a
+# DEEPER .gitignore's `!` patterns override a shallower file's. uv writes an
+# ALLOW-LIST .gitignore (the single line `*`) at the root of every venv it
+# creates and of every tool generation it installs, so in an installed tree
+# (site-packages, or a `lop-update` generation under ~/.local/share/uv/tools or
+# /var/folders) the whole web tree sits under a `*` and is invisible to the
+# scanner: `pnpm build` then emits a stylesheet missing the classes the app
+# renders with, and EXITS 0, so the phone renders unstyled with nothing in any
+# log to say why. How much is lost is LAYOUT-DEPENDENT — measured from 62 of
+# 235 selectors in one tree to a polluted 852 that still carried all 235 in
+# another — so no size or count is the property to check. The invariants that
+# do not depend on layout are `pnpm build`'s own guard (scripts/check-bundle.mjs)
+# and byte-identity of the built bundle with the published one for unchanged
+# sources. Upstream: tailwindlabs/tailwindcss#19844, #15452.
 #
 # So this file ships via package-data — an installed tree has no .gitignore of
-# its own otherwise — and its `!` lines re-include the paths the build scans
-# (the `@source` globs in src/styles/index.css). `!src/**` is what the scanner
-# honours; `!src/**/*.ts` was measured and does not re-include on its own.
+# its own otherwise — and the `!` lines below are its fix. They are deliberately
+# NARROW: the directory structure (the scanner must be able to WALK src) plus
+# only the two extensions the build compiles. `!src/**/` is load-bearing and was
+# measured — without it the build emits the same 62-class stylesheet the defect
+# did, because an ignored DIRECTORY is never entered.
 #
-# Only `!src/**` is broad enough to touch a git rule, so `*.tsbuildinfo` is
-# re-imposed below it (last match wins): the tsc build cache under src/ stays
-# out of git exactly as it was. Do not "tidy" these lines away — the failure
-# they prevent is a silent one.
+# That walk is why the root's rules are mirrored at the bottom of this file: any
+# rule that hides a directory (`build/`, `__pycache__/`) is defeated by
+# `!src/**/`, so without the mirror `mobile/web/src/build/` would become visible
+# again. The mirror repeats some lines from the top of this file on purpose — it
+# is a mirror — and tests/unit/mobile/test_web_package_data.py fails when it
+# drifts from the root .gitignore, rather than leaving that to a reviewer.
+# Do not "tidy" any of this away: the failure it prevents is a silent one.
 !index.html
 !scripts/
+!scripts/*.mjs
 !src/
-!src/**
-*.tsbuildinfo
+!src/**/
+!src/**/*.ts
+!src/**/*.tsx
+
+# --- mirror of the repository root's .gitignore (see above) -----------------
+*.pyc
+__pycache__/
+.env
+.venv
+.DS_Store
+dist/
+node_modules/
+.pnpm-store/
+local-operator-extension.zip
+gha-creds-*.json
+*.egg-info/
+.pytest_cache/
+.vscode/
+.coverage*
+htmlcov/
+build/
+snapshot_report.html
+uv.lock
+scratch/
+bench/
