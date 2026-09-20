@@ -153,9 +153,10 @@ enabled and active.
   capability probe (`hasattr`); a platform question that TERMINATES its block and
   so guards the rest of it; and a branch on a NAME the module itself computed
   from the platform is a platform branch (`_platform_guards`). Those rules are
-  spread across two docstrings and one code comment rather than gathered in one
-  place, which is part of why the reasoning below was wrong twice before this
-  revision.
+  spread across several docstrings and code comments rather than gathered in one
+  place -- and this sentence deliberately no longer says HOW MANY, because an
+  earlier revision asserted a count of them and got it wrong, which is the same
+  failure as the rest of this bullet's history.
 
   Three ways that over-credits, each reproduced rather than reasoned:
 
