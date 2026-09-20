@@ -288,16 +288,32 @@ A freshly written Mach-O that is then executed out of the config directory is
 precisely the kind of item §3 is about, which is why it is in §4's exclusion
 list as well.
 
-### Installs rewrite and restart their own job at upgrade time
+### Installs compare before they rewrite, and restart only when something needs it
 
 Every installer treats an existing plist as a stale artefact rather than as
 state to trust, because the plist embeds an **absolute interpreter path** that
-an upgrade invalidates:
+an upgrade invalidates. What they do about it changed with this branch:
 
-- mobile and browser write the plist unconditionally and then
-  `launchctl bootout` + `launchctl bootstrap` it, so the old registration is
-  replaced rather than left running against a path that no longer exists.
-- tunnel does the same (`bootout` then `bootstrap`, tolerating a missing unit).
+- mobile, browser bridge and tunnel now compare the rendering with the file on
+disk (the tunnel also compares its mode — 0600 is that installer's own) and,
+when they are equal, neither write nor reload. The generation shim made the
+plist path stable, so a re-install is normally a no-op: it used to rewrite
+identical bytes and then `bootout` + `bootstrap` the job, which is two signals
+an EDR reads as "Persistence: launchd job / plist file modification".
+- When the bytes differ they write and reload exactly as before. A job that is
+loaded but not running is repaired with `launchctl kickstart -k` rather than by
+rewriting the file, and the reload is also taken when the daemon is not
+answering — `health` for mobile and the bridge, the connector's own
+`/_lop_tunnel/health` on `127.0.0.1:<gateway_port>` for the tunnel — so an
+install that reports success means a daemon that is up.
+- Before this branch the write and the `bootout` + `bootstrap` were
+unconditional in all three, and a **fresh** install still writes and loads,
+which is the state this section describes for an admin reading a newly
+installed machine.
+- What this does **not** claim: the 2026-09-19 incident's plist-modification
+indicators came from `lop update --refresh-daemons`, whose repair path
+(`launchd.rewrite_if_stale`) already compared content before writing, and from a
+plist that was genuinely stale — a real repair, not an identical write.
 - wakes compares the rendered plist with the file it finds; if they differ it
   rewrites and re-bootstraps, and if the plist matches but launchd has the
   label stopped it repairs with `launchctl kickstart -k` rather than leaving a
@@ -597,11 +613,13 @@ and it is why the fix in §4 is an allow-list rather than an argument.
 
 Exclusions for this product must be **path-scoped**, and the reason is not
 convenience: what the exclusion would have to identify changes on every
-release. The plists are rewritten by every installer run, they embed an
-absolute path to an interpreter that an upgrade replaces, and the desktop app
-provisions its managed Python environment under a new path when it updates. A
-hash-based exclusion would break at each upgrade and the install would be
-quarantined again — which is the failure this document is trying to stop.
+release. The plists embed an absolute path to an interpreter that an upgrade
+replaces (and an upgrade rewrites the plist when that path changed — a re-install
+that would change nothing now writes nothing, but the rewrite case is real), and
+the desktop app provisions its managed Python environment under a new path when
+it updates. A hash-based exclusion would break at each upgrade and the install
+would be quarantined again — which is the failure this document is trying to
+stop.
 
 Scope the exclusion to:
 

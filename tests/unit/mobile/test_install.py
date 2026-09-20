@@ -14,11 +14,6 @@ import pytest
 
 from local_operator.mobile import install
 
-#: The REAL identity guard, kept because the rigs below replace it with a
-#: constant (their plist lives under ``tmp_path``) and the sandbox-refusal cell
-#: has to put the real one back to prove the refusal still exists.
-_REAL_IS_OWN_PLIST = install.launchd.is_own_plist
-
 
 def _steps(result: dict[str, object]) -> list[str]:
     """A result's ``steps`` as text — the declared shape, asserted here.
@@ -54,7 +49,15 @@ class FakePlistPath:
 
     ``service_action`` bootstraps only when the plist exists; pointing the
     mock at a real path couples the test to whatever happens to be in
-    ~/Library/LaunchAgents, so the fake stands in for the file."""
+    ~/Library/LaunchAgents, so the fake stands in for the file — and its path is
+    SHAPED like a home's, because the verbs now pass the pair they address
+    through ``launchd.is_own_plist`` (round 2, R-8). A placeholder path would be
+    refused before any call, which would make bootstrap-on-demand untestable
+    rather than guarded; ``owned_plist_home`` below names the home it stands
+    for."""
+
+    #: The home this fake plist belongs to; the identity test is asked about it.
+    HOME = Path("/tmp/lop-fake-home")
 
     def __init__(self, exists: bool = True) -> None:
         self._exists = exists
@@ -63,10 +66,22 @@ class FakePlistPath:
         return self._exists
 
     def __str__(self) -> str:
-        return "/tmp/fake.plist"
+        return str(self.HOME / "Library" / "LaunchAgents" / f"{install.LABEL}.plist")
 
     def __fspath__(self) -> str:
         return str(self)
+
+
+@pytest.fixture
+def owned_plist_home(monkeypatch) -> Path:  # noqa: ANN001
+    """Pin the launchd-level home to the fake plist's, so the guard passes.
+
+    The same seam ``_InstallRig(own=True)`` uses, one level down: without it the
+    identity test refuses before any call and the cells below would assert the
+    refusal instead of the bootstrap they exist for.
+    """
+    monkeypatch.setattr(install.launchd, "real_home", lambda: FakePlistPath.HOME)
+    return FakePlistPath.HOME
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +98,7 @@ def _driving_launchd(monkeypatch) -> None:  # noqa: ANN001
     monkeypatch.setattr(supervisors, "supervisor", lambda: "launchctl")
 
 
-def test_restart_bootstraps_when_the_agent_is_missing() -> None:
+def test_restart_bootstraps_when_the_agent_is_missing(owned_plist_home: Path) -> None:
     calls: list[list[str]] = []
 
     def run(*cmd: str) -> subprocess.CompletedProcess[str]:
@@ -110,7 +125,7 @@ def test_restart_bootstraps_when_the_agent_is_missing() -> None:
     assert verbs == ["print", "bootstrap", "kickstart"]
 
 
-def test_restart_does_not_bootstrap_a_live_agent() -> None:
+def test_restart_does_not_bootstrap_a_live_agent(owned_plist_home: Path) -> None:
     calls: list[list[str]] = []
 
     def run(*cmd: str) -> subprocess.CompletedProcess[str]:
@@ -858,7 +873,17 @@ class _InstallRig:
     result depend on the host.
     """
 
-    def __init__(self, monkeypatch, plist, *, own: bool = True) -> None:  # noqa: ANN001
+    def __init__(self, monkeypatch, tmp_path, *, own: bool = True) -> None:  # noqa: ANN001
+        # WHERE A HOME WOULD OWN IT: `<home>/Library/LaunchAgents/<label>.plist`,
+        # so `own` can be spelled by pointing `real_home` at this tmpdir rather
+        # than by stubbing the guard. A stubbed guard restored the ORIGINAL over
+        # a runtime mutation of `is_own_plist` and hid it, which is why the
+        # installer-level sandbox cell could not be mutation-verified (review
+        # round 2, R-10). `own=False` pins nothing, so the real operator home is
+        # compared against and the refusal is the genuine one.
+        home = tmp_path
+        home.joinpath("Library", "LaunchAgents").mkdir(parents=True, exist_ok=True)
+        plist = home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
         self.plist = plist
         self.calls: list[list[str]] = []
         self.serving = True
@@ -870,17 +895,8 @@ class _InstallRig:
         monkeypatch.setattr(install, "_our_daemon_listening", lambda _port: self.serving)
         monkeypatch.setattr(install, "health", lambda port=4098, timeout=3.0: {"ok": True})
         monkeypatch.setattr(install, "gate_closed", lambda port=4098, timeout=3.0: True)
-        # THE PLIST THESE TESTS WRITE IS NOT THE REAL HOME'S, so the identity
-        # guard on the repair helpers (round 1, R-1) would refuse every
-        # kickstart and the rig would silently test the refusal instead of the
-        # repair. `own=True` therefore says "this is the real home's plist", and
-        # `own=False` leaves the REAL test in place — which is what
-        # `test_a_sandboxed_repair_never_reaches_the_real_job` pins.
-        monkeypatch.setattr(
-            install.launchd,
-            "is_own_plist",
-            (lambda path, label: True) if own else _REAL_IS_OWN_PLIST,
-        )
+        if own:
+            monkeypatch.setattr(install.launchd, "real_home", lambda: home)
 
     def _launchctl(self, *cmd: str) -> FakeProc:
         self.calls.append(list(cmd))
@@ -905,7 +921,7 @@ def test_a_sandboxed_repair_never_reaches_the_real_job(
     follows refuses in its own words — so the decline is REPORTED, not silent,
     and no launchctl call is issued at all.
     """
-    rig = _InstallRig(monkeypatch, tmp_path / "com.local-operator.mobile.plist", own=False)
+    rig = _InstallRig(monkeypatch, tmp_path, own=False)
     rig.write_current_plist()
     rig.serving = False
 
@@ -925,7 +941,7 @@ def test_an_install_that_changes_nothing_does_not_write_or_reload(
     move (a rewrite is the EDR signal) and the call log must be EMPTY (a
     bootout/bootstrap is the other one).
     """
-    rig = _InstallRig(monkeypatch, tmp_path / "com.local-operator.mobile.plist")
+    rig = _InstallRig(monkeypatch, tmp_path)
     rig.write_current_plist()
     before = rig.plist.stat().st_mtime_ns
 
@@ -947,7 +963,7 @@ def test_an_install_that_changes_the_plist_still_writes_and_reloads(
     """Changed content ⇒ today's write + reload, unchanged."""
     from local_operator import launchd
 
-    rig = _InstallRig(monkeypatch, tmp_path / "com.local-operator.mobile.plist")
+    rig = _InstallRig(monkeypatch, tmp_path)
     rig.write_current_plist(port=install.DEFAULT_PORT + 1)
     reloads: list[object] = []
 
@@ -977,7 +993,7 @@ def test_a_loaded_but_dead_job_is_restarted_without_rewriting_the_plist(
     """
     from local_operator import launchd
 
-    rig = _InstallRig(monkeypatch, tmp_path / "com.local-operator.mobile.plist")
+    rig = _InstallRig(monkeypatch, tmp_path)
     rig.write_current_plist()
     rig.serving = False
     before = rig.plist.stat().st_mtime_ns
@@ -1043,3 +1059,34 @@ def test_the_probe_still_answers_for_the_job_this_run_owns(
 
     assert install._supervised_pid() == 4242
     assert calls == [["print", f"{install._domain()}/{install.LABEL}"]], calls
+
+
+def test_the_verbs_refuse_a_redirected_home_and_act_for_the_owned_one(
+    monkeypatch, tmp_path  # noqa: ANN001
+) -> None:
+    """R-8: ``service_action``'s launchd arm addressed the label from anywhere.
+
+    ``bootstrap <domain> <plist>`` is resolved by launchd to the Label INSIDE the
+    file, so a redirected home's `lop mobile restart` EVICTED and replaced the
+    operator's daemon rather than merely restarting it — the measurement
+    ``browser_bridge._root_suffix`` records — and ``LABEL`` is a fixed constant
+    here while ``plist_path()`` moves with ``$HOME``. The mirrored half keeps the
+    real-home verb reaching launchd.
+    """
+    sandbox = _InstallRig(monkeypatch, tmp_path / "sandbox", own=False)
+    sandbox.write_current_plist()
+
+    refused = install.service_action("restart")
+
+    assert refused["ok"] is False, refused
+    assert sandbox.calls == [], f"a redirected home reached launchd: {sandbox.calls}"
+    assert "not the LaunchAgent the real home owns" in _error(refused)
+
+    owned = _InstallRig(monkeypatch, tmp_path / "home")
+    owned.write_current_plist()
+
+    assert install.service_action("restart")["ok"] is True
+    assert [call[:2] for call in owned.calls] == [
+        ["print", f"{install._domain()}/{install.LABEL}"],
+        ["kickstart", "-k"],
+    ], owned.calls

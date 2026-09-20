@@ -688,6 +688,12 @@ def inherited_darwin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_r
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(install, "_passwd_home", lambda: home)
+    # THIS TMPDIR IS THE REAL HOME for this fixture, and the launchd-level view
+    # has to agree with the installer's own: the verbs now apply
+    # `launchd.is_own_plist` to the pair they address (round 2, R-8), and a
+    # fixture whose `HOME` is a tmpdir would otherwise be refused before any
+    # call — which would make adoption untestable rather than guarded.
+    monkeypatch.setattr(install.launchd, "real_home", lambda: home)
     legacy = home / "Library" / "LaunchAgents" / f"{install.LABEL}.plist"
     legacy.write_bytes(
         plistlib.dumps({"Label": install.LABEL, "StandardOutPath": str(install.log_path())})
@@ -1386,3 +1392,34 @@ def test_install_still_writes_and_reloads_a_changed_plist(
     steps = result["steps"]
     assert isinstance(steps, list)
     assert not any("already current" in step for step in steps), steps
+
+
+@pytest.mark.parametrize("action", ["start", "stop", "restart"])
+def test_the_verbs_refuse_a_redirected_home(
+    action: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolated_root: Path
+) -> None:
+    """R-8: every launchd verb is guarded, not only the adopted branch.
+
+    ``label()`` already carries a per-root digest, so a redirected ``HOME``
+    cannot NAME the operator's bridge; this pins the half that matters when the
+    name is right anyway — an adopted registration addresses the unsuffixed
+    ``LABEL`` — by leaving the launchd-level passwd home at the operator's while
+    ``Path.home`` is a tmpdir. Nothing may be addressed at all.
+    """
+    home = tmp_path / "redirected"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(install.sys, "platform", "darwin")
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *a: calls.append(a) or subprocess.CompletedProcess(list(a), 0, "", ""),
+    )
+
+    result = install.service_action(action)
+
+    assert result["ok"] is False, result
+    assert calls == [], f"a redirected home reached launchd: {calls}"
+    assert "not the LaunchAgent the real home owns" in str(result["error"])

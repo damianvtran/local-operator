@@ -705,6 +705,29 @@ def is_own_plist(path: Path, label: str) -> bool:
         return False
 
 
+def not_our_job_error(path: Path, label: str) -> str:
+    """Why a verb refused to address a job this run does not own.
+
+    ONE SPELLING, the way :func:`reload_failure` is one spelling for the
+    reload's failure: the identity test now guards four installers AND their
+    operator verbs, and a refusal each site worded for itself would drift into
+    as many accounts of one rule (review round 2, R-8).
+
+    Names the path and the label together, because the whole failure is that
+    they disagree: the label is a fixed module constant in ``mobile``/``tunnel``
+    while the path moves with ``$HOME``, so a redirected home addresses
+    ``gui/<uid>/<label>`` and reaches the OPERATOR's daemon.
+
+    :func:`reload_job`'s ``JobReload.detail`` keeps the bare identity sentence
+    (``is_own_plist``'s own wording) because that is the outcome record rather
+    than a refusal printed to an operator.
+    """
+    return (
+        f"{path} is not the LaunchAgent the real home owns for {label}; "
+        "not addressing launchd from a redirected home"
+    )
+
+
 def config_lives_in_real_home(config_dir: Path) -> bool:
     """Whether a unit supervising ``config_dir`` would outlive this process.
 

@@ -1117,6 +1117,16 @@ def service_action(action: str) -> dict[str, object]:
                 "error": "" if ok else ((started.stderr or started.stdout or "").strip()[:300]),
             }
         return {"ok": True, "error": ""}
+    # THE LAUNCHD ARM BEGINS HERE (every arm above returned). `bootstrap
+    # <domain> <plist>` is resolved by launchd to the Label INSIDE the file, so a
+    # redirected home's `lop mobile restart` EVICTS and replaces the operator's
+    # daemon rather than merely restarting it — the measurement
+    # `browser_bridge._root_suffix` records — and `LABEL` is a fixed constant
+    # here while `plist_path()` moves with `$HOME` (review round 2, R-8). The
+    # same guard `reload_job` applies to this installer's install path, applied
+    # to the verbs; the launchd counterpart of the systemd refusal above.
+    if not launchd.is_own_plist(plist_path(), LABEL):
+        return {"ok": False, "error": launchd.not_our_job_error(plist_path(), LABEL)}
     if action in ("start", "restart") and plist_path().exists():
         printed = _launchctl("print", f"{_domain()}/{LABEL}")
         if printed.returncode != 0:

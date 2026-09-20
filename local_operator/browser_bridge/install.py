@@ -1273,8 +1273,21 @@ def service_action(action: str) -> dict[str, object]:
     orphan = legacy_registration()
     adopted = orphan is not None and not _own_registration_exists()
     if supervisor == "launchctl":
-        target = f"{_domain()}/{LABEL if adopted else label()}"
+        target_label = LABEL if adopted else label()
+        target = f"{_domain()}/{target_label}"
         plist = orphan if adopted and orphan is not None else plist_path()
+        # GUARDED, AND IT IS NOT A NO-OP (review round 2, R-8). This arm is
+        # already the safest of the three: ``_root_suffix`` is anchored on the
+        # passwd home, so a redirected ``HOME`` gets a label carrying a digest of
+        # its own root and can never name the operator's bridge. The ``adopted``
+        # branch is the exception it does not cover — it deliberately addresses
+        # ``LABEL``, the inherited pre-per-root registration, which under a
+        # redirected home IS the operator's — so the guard tests the pair this
+        # call actually addresses. On the real home both branches pass it: the
+        # default root yields the plain label at the plain path, a second root
+        # its own suffixed pair, and an adopted registration the unsuffixed one.
+        if not launchd.is_own_plist(plist, target_label):
+            return {"ok": False, "error": launchd.not_our_job_error(plist, target_label)}
         if action in ("start", "restart") and plist.exists():
             if _launchctl("print", target).returncode:
                 loaded = _launchctl("bootstrap", _domain(), str(plist))
