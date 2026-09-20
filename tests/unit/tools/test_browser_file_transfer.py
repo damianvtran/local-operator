@@ -418,6 +418,143 @@ def test_download_fails_when_the_host_reports_a_file_that_never_landed() -> None
     assert "NOT deleted" not in result.text
 
 
+# --- the three states an `armed` answer can be in ----------------------------
+#
+# The record promises these stay APART: the host refused before arming, the host
+# armed and then refused, and nothing happened at all. The second state arrives as
+# `armed: true` with no files AND a reason (§6.2 — a refusal is a result, not an
+# error), and it used to be read as the third: the model was told no download had
+# started and sent to click a Download control the host had already refused.
+
+#: The app host's own refusal sentence, verbatim (`downloads.ts`'s `refuse`).
+_APP_HOST_REFUSAL = "refused: `evil.exe` is an executable/script type; nothing was saved"
+#: The app host's own no-op sentence, verbatim (`downloads.ts`'s `resultOf`). It
+#: arrives on the SAME shape as the refusal above, which is why the harness has to
+#: tell them apart rather than treating "a reason is present" as "refused".
+_APP_HOST_NO_OP = (
+    "no download started within 120s; if the page needs a click first, pass a "
+    "selector, or `click` it and retry"
+)
+
+
+def _download_rows() -> list[dict[str, Any]]:
+    path = bf.downloads_root() / bf.AUDIT_FILENAME
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _download(host: FakeHost, **kwargs: Any) -> builtin.ToolResult:
+    return _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+        **kwargs,
+    )
+
+
+def test_a_refusal_the_host_made_after_arming_is_reported_as_a_refusal() -> None:
+    """State (b): the host armed, then refused — its reason is what the model reads.
+
+    BOTH halves are asserted, because the defect had two: the model got the
+    generic "no download started …" sentence with a remedy that would never have
+    worked, and the trail got `no_download` / "nothing started" about a call a
+    policy had decided. A row that says nothing started about a refusal is what a
+    later reader answers "how often did the policy stop a download?" from.
+    """
+    host = FakeHost(
+        methods=("download",),
+        result={"files": [], "armed": True, "reason": _APP_HOST_REFUSAL},
+    )
+    result = _download(host)
+    assert result.is_error
+    # The refusal, prefix included exactly once: the host wrote it and the tool
+    # layer composes with the same one, so the sentence a user reads is the same
+    # shape wherever the host stopped.
+    assert result.text == _APP_HOST_REFUSAL, result.text
+    assert "no download started" not in result.text
+    rows = _download_rows()
+    assert [row["verdict"] for row in rows] == ["armed_refused"]
+    # The row carries what was said, without the copy's prefix: the prefix is the
+    # sentence's, the clause is the record's, and the test above pins that the two
+    # compose to the host's own words.
+    assert rows[0]["reason"] == "`evil.exe` is an executable/script type; nothing was saved"
+    assert rows[0]["name"] == "" and rows[0]["action"] == "download"
+
+
+def test_the_hosts_own_no_op_sentence_keeps_the_no_op_answer() -> None:
+    """State (c), the shape the APP HOST sends it in: a reason, but not a refusal.
+
+    This is the case a "a reason is present, so it was a refusal" reading gets
+    wrong, and it is not hypothetical: the app host always reports `armed: true`
+    and pushes its own no-op sentence into the same `reason` field. Reporting a
+    call where nothing started as a refusal would trade the defect this change
+    fixes for its mirror image — and the audit row must not claim a policy
+    decision that was never made.
+    """
+    host = FakeHost(
+        methods=("download",),
+        result={"files": [], "armed": True, "reason": _APP_HOST_NO_OP},
+    )
+    result = _download(host)
+    assert result.is_error
+    assert result.text.startswith("no download started within 120 s.")
+    assert "refused" not in result.text
+    rows = _download_rows()
+    assert [(row["verdict"], row["reason"]) for row in rows] == [("no_download", "nothing started")]
+
+
+def test_a_no_op_with_no_reason_keeps_todays_answer_exactly() -> None:
+    """State (c) with the host saying nothing: the answer must not have moved.
+
+    Pinned byte for byte because it is the only one of the three states the fix
+    was NOT allowed to touch, and "the reason is absent" has to keep meaning "the
+    host told us nothing" rather than becoming a third refusal shape.
+    """
+    host = FakeHost(methods=("download",), result={"files": [], "armed": True, "reason": ""})
+    result = _download(host)
+    assert result.is_error
+    assert result.text == (
+        "no download started within 120 s. If the page needs a click first, "
+        "call 'click' on its Download control and retry with selector=..., or the "
+        "file may be behind a login — ask the user to sign in, then retry."
+    )
+    rows = _download_rows()
+    assert [(row["verdict"], row["reason"]) for row in rows] == [("no_download", "nothing started")]
+
+
+def test_a_pre_arm_refusal_reads_the_same_whether_the_host_prefixed_it() -> None:
+    """State (a): one composer, so the prefix cannot be doubled or dropped.
+
+    The pre-arm path was already right for the reasons the extension sends (a
+    bare clause), and it is the composer both refusal paths now share — a second
+    spelling of the same sentence is how the two drift apart.
+    """
+    for reason, expected in (
+        (
+            "that download was started by a page this session is not driving",
+            "that download was started by a page this session is not driving",
+        ),
+        (
+            "refused: that download was started by a page this session is not driving",
+            "that download was started by a page this session is not driving",
+        ),
+    ):
+        host = FakeHost(
+            methods=("download",),
+            result={"files": [], "armed": False, "reason": reason},
+        )
+        result = _download(host)
+        assert result.is_error
+        assert result.text == f"refused: {expected}", result.text
+        rows = _download_rows()
+        assert rows[-1]["verdict"] == "armed_false"
+        assert rows[-1]["reason"] == expected
+
+
 def test_download_deletes_executable_content_even_when_the_host_calls_it_a_pdf(
     tmp_path: Path,
 ) -> None:
