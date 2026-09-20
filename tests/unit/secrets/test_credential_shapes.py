@@ -1515,6 +1515,132 @@ def test_the_grading_separates_contained_from_exposed() -> None:
     assert not any(h.exposed for h in pem_hits), "a masked truncated key is not an exposure"
 
 
+#: The positives that ESCALATE, named by the case's own reason string.
+#:
+#: An EXACT set, in both directions, like the partial-mask ratchet further down: a
+#: case that joins it is a new false rotation demand, and one that leaves it without
+#: the code change being recorded in the same commit is a fix nobody can see.
+#:
+#: ``amqp DSN`` (``amqp://guest:guest@rabbit.internal:5672/``) is the one that must
+#: STAY. Its username and its password are the same five characters, and the DSN rule
+#: deliberately keeps ``amqp://user:`` readable — so the password's own characters
+#: genuinely sit in the text the model reads, ``value in text`` finds them, and the
+#: hit escalates. That is the CONSERVATIVE direction and it is the point of this
+#: change: base ``4a16dd62`` filed NOTHING here (the silent hole this PR closes), and
+#: a rotation demand on a conceivably-readable secret is recoverable where a missed
+#: leak is not.
+#:
+#: Do NOT silence it by excluding the marker or the mask-kept neighbours before
+#: testing. QA round 1 proposed exactly that, and it suppresses this genuine
+#: survivor along with the three false ones — the two ``.npmrc`` cases and the
+#: cookie-header case, which are the marker-identity false positives pinned below.
+_ESCALATING_POSITIVE_CASES = frozenset({"amqp DSN"})
+
+
+def test_only_the_documented_positive_case_escalates() -> None:
+    """The corpus is the referee: one escalation, NAMED, with 179/179 still masked.
+
+    QA round 1 (Q1) measured four positives escalating at head ``91d70791``, three of
+    them on nothing readable at all. Anchoring the check on the hit's own VALUE —
+    and stripping the redaction marker before taking the text's runs — takes those
+    three out and leaves the one survivor the frozen set above argues for.
+
+    A structural pin rather than three point tests, so a corpus case that starts
+    escalating cannot arrive silently: a rise fails HERE, and a fall fails too until
+    the frozen set is updated in the commit that caused it.
+    """
+    import local_operator.redaction_shapes as rs
+
+    escalating: set[str] = set()
+    unmasked: list[str] = []
+    for case in POSITIVE_CASES:
+        masked, hits = scrub_shapes_with_hits(case.text)
+        if REDACTION_MARKER not in masked:
+            unmasked.append(case.reason)
+        if rs.shape_report(hits).reached_model:
+            escalating.add(case.reason)
+
+    assert not unmasked, f"the mask stopped holding for: {unmasked[:5]}"
+    assert escalating == set(_ESCALATING_POSITIVE_CASES), (
+        f"the escalating positives changed: {sorted(escalating)} — a case that JOINED "
+        "is a new false rotation demand, and one that LEFT has to update this set in "
+        "the same commit as the fix that caused it"
+    )
+
+
+def test_a_marker_valued_hit_no_longer_escalates() -> None:
+    """The half of Q1 QA got right, driven through the shipped path.
+
+    Both ``.npmrc`` ``_authToken`` spellings and the cookie-header case are runs where
+    a SECOND rule matched the marker the first rule had just inserted, so the exposed
+    hit's own value IS (or contains) ``[redacted]``. The old check searched windows of
+    the matched REGION against the masked text, found the literal marker it had just
+    written, and filed a rotation demand for a value that was never readable.
+    """
+    import local_operator.redaction_shapes as rs
+
+    for reason in (
+        "the .npmrc auth token, bare name",
+        "the .npmrc auth token with a registry path",
+        "a cookie header inside a curl invocation",
+    ):
+        case = next(c for c in POSITIVE_CASES if c.reason == reason)
+        masked, hits = scrub_shapes_with_hits(case.text)
+        assert REDACTION_MARKER in masked, f"{reason} is no longer masked"
+        assert (
+            rs.shape_report(hits).reached_model is False
+        ), f"{reason} files a rotation demand again: {masked!r}"
+        # The mechanism the case exists for, pinned rather than inferred: without a
+        # hit whose own value carries the marker this case stops exercising anything.
+        assert any(
+            REDACTION_MARKER in hit.value for hit in hits
+        ), f"{reason} no longer produces a marker-valued hit"
+
+
+def test_a_password_equal_to_its_own_username_still_escalates() -> None:
+    """The ``amqp``/``postgres`` username==password class, which must NOT be silenced.
+
+    Escalating is the conservative direction and this is a real survivor, not a
+    misfire: the DSN mask keeps ``amqp://user:`` readable by design, so the
+    credential's own characters are in the model-visible text. The assertion below is
+    the measurement — the password's value read straight out of the masked output.
+    """
+    import local_operator.redaction_shapes as rs
+
+    case = next(c for c in POSITIVE_CASES if c.reason == "amqp DSN")
+    masked, hits = scrub_shapes_with_hits(case.text)
+    assert REDACTION_MARKER in masked, "the DSN password is no longer masked"
+    (hit,) = [h for h in hits if h.label == "dsn-password"]
+    assert hit.value and hit.value in masked, (
+        "the credential's own characters are no longer readable in the masked text, "
+        "so escalating would be a misfire and this case belongs in the frozen set "
+        "above as a documented false positive instead"
+    )
+    assert hit.exposed is True
+    assert rs.shape_report(hits).reached_model is True
+
+
+def test_a_marker_inside_the_credentials_own_value_is_a_recorded_limit() -> None:
+    """The limit recorded on ``_credential_fragments_survive``, pinned so it is seen.
+
+    A credential that itself contains ``[redacted]`` and survives only PARTIALLY is
+    ungradeable: the surviving fragment is spelled exactly like the marker a mask
+    writes, and no reading of the text can separate the two. That identity is why the
+    marker-identity cases above escalate wrongly under a region search AND why this
+    one cannot be graded by inspection. The wholly-surviving copy is still caught, so
+    only the partial case is given up — recorded here rather than paid for, because
+    reaching it needs an operator secret containing the harness's marker string.
+    """
+    import local_operator.redaction_shapes as rs
+
+    value = f"tok{REDACTION_MARKER}tail"  # an operator secret that contains the marker
+    whole = rs.ShapeHit(label="credential-assignment", value=value, window=value)
+    assert rs._only_fully_masked([whole], f"PASSWORD={value}")[0].exposed is True
+
+    partial = rs.ShapeHit(label="credential-assignment", value=value, window=value)
+    assert rs._only_fully_masked([partial], f"PASSWORD=tok{REDACTION_MARKER}")[0].exposed is False
+
+
 def test_the_contained_notice_names_the_tool_and_carries_no_value() -> None:
     """Contained: it happened, it was handled, there is no exposure, clean up.
 
