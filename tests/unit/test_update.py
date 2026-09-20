@@ -19,10 +19,12 @@ import pytest
 from local_operator import procname
 from local_operator import update as update_mod
 from local_operator.interpreter import SAFE_PATH_FLAG
+from local_operator.mobile import install as install_mod
 from local_operator.update import (
     TTL_S,
     InstallKind,
     MobileRefresh,
+    SnapshotSource,
     UpdateError,
     check_latest,
     install_kind,
@@ -2149,4 +2151,77 @@ def test_cli_version_flag_reports_the_running_build(tmp_path: Path) -> None:
         f"got {printed!r}, expected 'v{marker}'. A raw "
         "importlib.metadata.version() call reports the installed metadata and "
         "cannot see the running checkout's version."
+    )
+
+
+def test_from_snapshot_builds_the_mobile_bundle_before_installing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The two installers used to disagree about whether a snapshot has a UI.
+
+    `~/.local/bin/lop-update` builds the bundle into the tree it prepares; the
+    in-package `--from-snapshot` path did not, so the generation it installed
+    carried the web SOURCES and no `dist/` — the phone answered 503 "bundle not
+    built" until someone ran `lop mobile install` on that machine (2026-09-19).
+    """
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    order: list[str] = []
+
+    def build(web_dir: Path, runner: list[str] | None = None) -> str | None:
+        order.append(f"build{tuple(runner or ())}")
+        (web_dir / "dist").mkdir()
+        (web_dir / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+        return None
+
+    def install(path: Path, **kwargs: Any) -> None:
+        order.append("installed")
+        # Before uv copies the tree, not after: a bundle built afterwards never
+        # reaches the generation.
+        assert (path / web.relative_to(snapshot) / "dist" / "index.html").is_file()
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(install_mod, "_package_runner", return_value=(["pnpm"], None)),
+        patch.object(install_mod, "_build_bundle", side_effect=build),
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0
+
+    assert order == ["build('pnpm',)", "installed"]
+    assert "lop-update: mobile web bundle: built" in capsys.readouterr().out
+
+
+def test_from_snapshot_without_node_still_installs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No Node is a documented skip, never a failed update: the daemon heals
+    itself at `lop mobile install` on a host that has one."""
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(install_mod.shutil, "which", return_value=None),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0
+
+    assert installed == [snapshot]
+    assert (
+        "lop-update: mobile web bundle: skipped (node not installed; build at `lop mobile install`)"
+        in capsys.readouterr().out
     )

@@ -236,14 +236,29 @@ local_operator = [
     # deps) are never packaged.
     "mobile/web/package.json",
     "mobile/web/pnpm-lock.yaml",
+    # Tailwind decides which files may hold class names with GITIGNORE
+    # semantics, and `uv` writes an allow-list `.gitignore` (the single line
+    # `*`) at the root of every venv and every tool generation — so an
+    # installed tree whose web tree lacks this file is invisible to the
+    # scanner, and `pnpm build` there emits a utility-less stylesheet at exit
+    # 0. The `!` lines in it are the fix: see the file's own comment and
+    # tailwindlabs/tailwindcss#19844. A wheel that dropped it would put back
+    # the unstyled-phone bug in the one tree that cannot rebase its way out.
+    "mobile/web/.gitignore",
     "mobile/web/pnpm-workspace.yaml",
     "mobile/web/index.html",
     "mobile/web/tsconfig*.json",
     "mobile/web/vite.config.ts",
     "mobile/web/scripts/*.mjs",
     "mobile/web/public/*",
-    # setuptools package-data does not recurse with `**` here, so the source
-    # tree is enumerated by directory. New src subdirectories need a line.
+    # The source tree is enumerated by directory rather than with `**`: the
+    # `setuptools>=61.0.0` floor in [build-system] admits releases whose
+    # package-data globbing does not recurse (measured on 84.0.0, where it
+    # does), and a `**` that stopped recursing would silently drop the whole
+    # tree — the unrecoverable-503 failure this block exists to prevent. New
+    # src subdirectories need a line, and so does every non-source file the
+    # sources read (see the fixtures glob below);
+    # tests/unit/mobile/test_web_package_data.py fails when either is missing.
     "mobile/web/src/*.ts",
     "mobile/web/src/*.tsx",
     "mobile/web/src/components/*.tsx",
@@ -252,6 +267,20 @@ local_operator = [
     "mobile/web/src/screens/*.tsx",
     "mobile/web/src/styles/*.css",
     "mobile/web/src/themes/*.ts",
+    # Data the sources READ rather than source themselves. `tsc -b` compiles
+    # all of src (tsconfig.app.json includes it, and the *.test.tsx files
+    # ship), so a fixture a test reads is a build input like any other: without
+    # it the shipped tree cannot build at all — TS2307 "Cannot find module
+    # './fixtures/models.ranked.json'", raised by src/model-sheet.order.test.tsx
+    # — and the one documented repair for a source-snapshot install (`lop
+    # mobile install` → pnpm install && pnpm build) fails on every such
+    # install, leaving the phone on 503 "bundle not built" with no way back.
+    "mobile/web/src/fixtures/*.json",
+    # Read with `readFileSync` by src/lib/format.test.ts instead of imported,
+    # so `tsc` never names it: the same missing build input, failing one step
+    # later and only in the shipped tree's own suite. It still ships, because a
+    # source snapshot that is missing files it references is not one.
+    "mobile/web/src/lib/*.json",
     # The login page's LO mark, served unauthenticated at /mark.png from
     # mobile/static/. Missing it shows a broken image on sign-in.
     "mobile/static/*",
