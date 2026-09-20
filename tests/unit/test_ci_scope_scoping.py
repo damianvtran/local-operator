@@ -1181,6 +1181,27 @@ _SCAN_SHAPES: dict[str, tuple[str, dict[str, str], str, tuple[str, ...], tuple[s
         ("tests/unit/test_scan_shape.py",),
         (),
     ),
+    # F.3: `iterdir()`/`listdir()`/`scandir()` read ONE level. The must_not row is
+    # what pins that: before the fix the composed pattern was `"**"`, so a nested
+    # file was modelled as read (816 targets where the truth is the direct children)
+    # and the printed count was wrong.
+    "iterdir-nested": (
+        'SCRIPTS = ROOT / "scripts"\n' "for path in SCRIPTS.iterdir():\n    path.read_text()\n",
+        {"scripts/diag/probe.py": "PROBE = 1\n"},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        ("scripts/diag/probe.py",),
+    ),
+    "listdir-nested": (
+        "import os\n"
+        'SCRIPTS = ROOT / "scripts"\n'
+        "for name in os.listdir(SCRIPTS):\n"
+        "    (SCRIPTS / name).read_text()\n",
+        {"scripts/diag/probe.py": "PROBE = 1\n"},
+        "scripts/tool.py",
+        ("tests/unit/test_scan_shape.py",),
+        ("scripts/diag/probe.py",),
+    ),
     "unplaceable-py": (
         'for path in Path(os.environ.get("SCAN_DIR", "tmp")).glob("*.py"):\n    path.read_text()\n',
         {},
@@ -1403,3 +1424,115 @@ def test_every_unresolved_reference_class_stops_the_test_selection(tmp_path, lab
     assert any("test_unresolved.py" in site for site in plan.unresolved), plan.unresolved
     assert decision.whole_tree, decision.notes
     assert any("cannot place" in note for note in decision.notes), decision.notes
+
+
+# ---------------------------------------------------------------------------
+# A conftest is applied by DIRECTORY, and the universe is whatever pytest collects
+# ---------------------------------------------------------------------------
+
+
+def test_a_conftest_that_imports_the_change_selects_its_subtree(tmp_path):
+    """F.1: a conftest's fixtures govern its subtree, whether it NAMES or IMPORTS.
+
+    The namer road was handled; the importer road was not, and the two differ in a
+    way that matters: a conftest that imports the changed module reaches
+    `dependents()`, but the tests it GOVERNS do not — they are not pytest-visible
+    dependents of anything, because a conftest is not in the test universe and
+    pytest applies it by directory. Left alone that selection is empty, the run
+    prints `nothing to run` and exits 0, and the conftest's own autouse fixture is
+    the thing that fails.
+    """
+    root = _fixture_repo(tmp_path)
+    _write(root, "tests/unit/governed/__init__.py", "")
+    _write(
+        root,
+        "tests/unit/governed/conftest.py",
+        "import pytest\n\nfrom local_operator.alpha import ALPHA\n\n\n"
+        "@pytest.fixture(autouse=True)\ndef _check() -> None:\n    assert ALPHA == 1\n",
+    )
+    # Imports nothing: only the conftest's directory scope can select it.
+    _write(root, "tests/unit/governed/test_inert.py", "def test_it() -> None:\n    assert True\n")
+
+    decision = _plan(root, ["local_operator/alpha.py"])["test"]
+
+    assert not decision.whole_tree, decision.notes
+    assert "tests/unit/governed/test_inert.py" in decision.targets, decision.notes
+    assert any("imports it" in note for note in decision.notes), decision.notes
+
+
+def test_the_universe_follows_the_configured_python_files(tmp_path):
+    """F.2: the universe is what pytest collects, not what we assume it collects."""
+    root = _fixture_repo(tmp_path)
+    assert ci_scope._pytest_python_files(root) == ("test_*.py", "*_test.py")
+
+    _write(root, "pyproject.toml", '[tool.pytest.ini_options]\npython_files = ["check_*.py"]\n')
+    _write(root, "tests/unit/check_extra.py", "def test_it() -> None:\n    assert True\n")
+
+    patterns = ci_scope._pytest_python_files(root)
+    graph = ci_scope.build_import_graph(root)
+    universe = ci_scope._test_universe(graph, "tests/unit", patterns)
+
+    assert patterns == ("check_*.py",)
+    assert "tests/unit/check_extra.py" in universe, "the configured pattern must be collected"
+    assert "tests/unit/test_alpha.py" not in universe, "and the default one must not be assumed"
+
+
+def test_the_default_python_files_collect_both_pytest_patterns(tmp_path):
+    """The other half: with no config, `*_test.py` is collected too."""
+    root = _fixture_repo(tmp_path)
+    _write(root, "tests/unit/suffix_test.py", "def test_it() -> None:\n    assert True\n")
+
+    graph = ci_scope.build_import_graph(root)
+    universe = ci_scope._test_universe(graph, "tests/unit", ci_scope._pytest_python_files(root))
+
+    assert "tests/unit/suffix_test.py" in universe
+
+
+def test_a_tree_only_a_gate_reads_is_parsed_and_type_checked(tmp_path):
+    """Q-1: the graph must cover what `pyright` analyzes, not only what tests import.
+
+    `benchmarks/osworld_v2_adapter/**` is analyzed by the gate and imports
+    `local_operator.*`, so a change inside the covered trees can break it. A
+    `type-check` list built from `GRAPH_TREES` alone omitted those files, and
+    "complete for what this change can break" was false for them.
+    """
+    root = _fixture_repo(tmp_path)
+    _write(
+        root,
+        "benchmarks/osworld_v2_adapter/src/lop_osworld_v2_adapter/adapter.py",
+        "from local_operator.alpha import ALPHA\n\nMARK = ALPHA\n",
+    )
+
+    decision = _plan(root, ["local_operator/alpha.py"], jobs=("type-check",))["type-check"]
+
+    assert not decision.whole_tree, decision.notes
+    assert (
+        "benchmarks/osworld_v2_adapter/src/lop_osworld_v2_adapter/adapter.py" in decision.targets
+    ), decision.targets
+
+
+def test_the_unresolved_reason_names_both_classes(tmp_path):
+    """Q-3: the count is scans AND names, and the reader is told which is which."""
+    root = _fixture_repo(tmp_path)
+    _write(
+        root,
+        "tests/unit/test_two_classes.py",
+        "import importlib\nfrom pathlib import Path\n\n\n"
+        "def load(name):\n    return importlib.import_module(name)\n\n\n"
+        'def test_it(tmp_path):\n    assert list(tmp_path.glob("*.py")) == []\n',
+    )
+
+    plan = ci_scope.scope_plan(["test"], ["local_operator/alpha.py"], root)
+    reason = " ".join(plan.decisions["test"].notes)
+
+    assert "directory scans" in reason and "computed names" in reason, reason
+
+
+def test_a_whole_tree_line_says_armed_out_and_the_section_says_when_none_narrowed(tmp_path):
+    """Q-4: "armed out" is a different fact from "the classifier did not select it"."""
+    root = _fixture_repo(tmp_path)
+    _write(root, "pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-q"\n')
+    report = "\n".join(ci_scope.scope_plan(["test"], ["pyproject.toml"], root).report())
+
+    assert "- `test`: whole tree (armed out) —" in report, report
+    assert "a job the classifier did not select is not in this list at all" in report, report

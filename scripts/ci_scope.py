@@ -77,6 +77,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import json
 import os
 import re
@@ -550,10 +551,17 @@ SCOPE_MAX_CLOSURE_FRACTION = 0.5
 #: a `scope_barriers` trigger rather than something to resolve.
 GRAPH_TREES: tuple[str, ...] = ("local_operator", "tests", "scripts")
 
-#: What black/isort/flake8 read. A changed `.tcss`/`.md`/`.json` under
-#: `local_operator/` is package data no linter reads, but it IS an input to the
-#: tests that exercise it — which is why those paths are barriers below rather
-#: than silently unscoped-and-unrun.
+#: Trees the graph parses IN ADDITION to `GRAPH_TREES`, because a GATE reads them:
+#: `pyright` analyzes these (they are not in its `exclude`) and they import
+#: `local_operator.*`, so a change inside the covered trees can break them. A
+#: scoped `type-check` list that omits them is therefore not "complete for what this
+#: change can break" (#1322 QA round 1, Q-1: measured 20 files pyright analyzes and
+#: the graph did not, 8 of them importers of `local_operator`).
+ANALYZED_TREES: tuple[str, ...] = ("benchmarks/osworld_v2_adapter",)
+
+#: Everything the graph parses: the suite's trees plus the trees a gate analyses.
+PARSED_TREES: tuple[str, ...] = (*GRAPH_TREES, *ANALYZED_TREES)
+
 #: What black/isort/flake8 read. `.pyi` is deliberately absent: a stub change is a
 #: `scope_barriers` trigger (the graph does not parse stubs), so it never reaches
 #: the lint target filter — listing it here would describe an arm no input can
@@ -635,7 +643,8 @@ STRUCTURAL_PREFIXES: tuple[tuple[str, str], ...] = (
 #: process's own entry, which every test that boots the real app inherits.
 #: The files a test reaches by importing the APPLICATION, and the closure behind
 #: them — the one reference class no static analysis can bound. Measured on this
-#: tree: 443 of the 503 `local_operator/**` modules are inside this closure, so a
+#: tree (measured on `b0577cdd`, 2026-09-20): 448 of the 508 `local_operator/**`
+#: modules are inside this closure, so a
 #: change to any of them makes almost every test a candidate and the whole-tree
 #: command is the only honest answer. Restricted to three roots rather than "all
 #: of `local_operator/**`" on purpose: the ~60 modules OUTSIDE the closure are
@@ -1147,10 +1156,16 @@ def _graph_files(root: Path) -> tuple[list[str], list[str]]:
     """
     files: list[str] = []
     unreadable: list[str] = []
-    for tree in GRAPH_TREES:
+    for tree in PARSED_TREES:
         base = root / tree
         if not base.is_dir():
-            unreadable.append(f"{tree}/ (not a directory)")
+            # A missing `GRAPH_TREES` entry is reported: a graph over half the
+            # repository selects too little and must say so. A missing
+            # `ANALYZED_TREES` entry is not — those trees exist for a gate's benefit,
+            # and a checkout without them (as every fixture repository is) has
+            # nothing for the graph to cover.
+            if tree in GRAPH_TREES:
+                unreadable.append(f"{tree}/ (not a directory)")
             continue
         for path in sorted(base.rglob("*.py")):
             files.append(path.relative_to(root).as_posix())
@@ -1282,13 +1297,13 @@ class _Scan:
     `receiver` is the scanned directory's EXPRESSION, evaluated later by
     `_scan_directory` (path literals, `__file__`, `.parent`/`.parents[N]`,
     `.resolve()`, and ONE assignment hop, so `SCRIPTS = ROOT / "scripts"` places
-    too). A receiver the graph cannot evaluate is UNPLACED, and an unplaced scan
-    that spells `.py` is then **armed**: it is treated as reading every covered
-    Python file. Round 3 measured why that is the right split — the population
-    that costs anything is the LOOSE one (`*`, `iterdir()`, a test's tmpdir):
-    arming the `.py` set keeps 55 of 60 outside-closure modules scoping and pushes
-    zero selections over a fraction arm, while arming the loose set (439 sites
-    here) selects 724 of 724 and takes the scoping win to zero.
+    too). A receiver the graph cannot evaluate is UNPLACED, and an unplaced scan of
+    ANY pattern is then RECORDED in `ImportGraph.unplaced_scans`: it is a reference
+    the resolver saw and could not place, so `_test_barriers` refuses to narrow the
+    two pytest jobs for that diff and prints the site. The earlier policy — arm the
+    `.py`-spelling subset as a reader of every covered file, print the rest — was
+    withdrawn after rounds 3 and 4 each found a false green through the cases it
+    left out; what survives is the refusal, not a cheaper guess.
     """
 
     receiver: ast.expr | None
@@ -1380,7 +1395,13 @@ def _directory_scan(node: ast.Call, assignments: Mapping[str, ast.expr]) -> _Sca
         # the reader that drove round 3's blocker spelled its directory, and one
         # hop places it plus six more of the nineteen `.py` sites on this tree.
         receiver = assignments[receiver.id]
-    raw_pattern = "*"
+    # A scan that takes NO pattern still reads a SHAPE, and the shape differs by
+    # API: `iterdir()`/`listdir()`/`scandir()` read the directory's DIRECT children
+    # while `walk()` recurses (its prefix carries that). Defaulting the pattern to
+    # `*` gave the non-recursive three `"**"` — "everything at any depth" — which
+    # over-selected (measured: 816 targets for a `.iterdir()` whose truth is ~25
+    # direct children) and put a wrong number in the note a developer reads.
+    raw_pattern = "*" if takes_pattern else ""
     pattern_hints: tuple[str, ...] = ()
     if takes_pattern and node.args:
         first = node.args[0]
@@ -1411,7 +1432,10 @@ def _directory_scan(node: ast.Call, assignments: Mapping[str, ast.expr]) -> _Sca
         literal_leading.append(path_parts.pop(0))
     return _Scan(
         receiver=receiver,
-        pattern=f"{prefix}{'/'.join(path_parts) or '*'}",
+        # The `or "*"` fallback belongs to the APIs that TAKE a pattern: for the
+        # non-recursive three the prefix already IS the shape, and re-adding the
+        # wildcard here is what turned `iterdir()` into `"**"` (F.3).
+        pattern=f"{prefix}{'/'.join(path_parts) or ('*' if takes_pattern else '')}",
         dir_literals=tuple(pattern_hints) + tuple(literal_leading),
         module_form=module_form,
         lineno=node.lineno,
@@ -1643,15 +1667,13 @@ def _scan_targets(
 
 
 def _looks_like_a_python_scan(pattern: str) -> bool:
-    """Whether a scan's pattern explicitly asks for Python files.
+    """Whether a scan's pattern asks for Python files.
 
-    The discriminator for ARMING an unplaceable scan, and it is the same one that
-    used to justify only printing it: a scan that spells `.py` is asking for
-    source, while a bare `*`/`iterdir()` scan is how every runtime directory is
-    listed (agent homes, session stores, a test's own tmpdir). Measured on this
-    tree: arming the `.py` set keeps 55 of 60 outside-closure modules scoping and
-    pushes zero selections over a fraction arm; arming the loose set selects 724
-    of 724 for ANY change.
+    It no longer decides anything about arming — an unplaceable scan of any pattern
+    is recorded and stops the selection (`_test_barriers`). What it still does is
+    pick the pattern out of a COMPUTED one (`os.path.join("scripts", "*.py")`): the
+    last `.py`-spelling piece is the pattern, and the pieces before it are the
+    directory hints.
     """
     return pattern.split("/")[-1].endswith(".py")
 
@@ -2165,7 +2187,7 @@ def _barrier_reason(rel: str, root: Path) -> str | None:
     if rel.endswith(LINT_SUFFIXES):
         if not (root / rel).is_file():
             return "a deleted module — its importers no longer resolve"
-        if not rel.startswith(tuple(f"{tree}/" for tree in GRAPH_TREES)):
+        if not rel.startswith(tuple(f"{tree}/" for tree in PARSED_TREES)):
             return "Python outside the trees the import graph covers"
         return None
     if rel.endswith(".md") and not rel.startswith(("local_operator/", "tests/")):
@@ -2260,7 +2282,12 @@ class ScopeDecision:
         if not self.whole_tree and not self.commands:
             return f"- `{self.job}`: nothing to run — {'; '.join(self.notes)}"
         if self.whole_tree:
-            return f"- `{self.job}`: whole tree — {'; '.join(self.notes)}"
+            # "armed out" is the word for this: the job RAN its whole-tree command
+            # because a barrier did not clear, which is a different fact from the
+            # classifier never selecting the job (those are absent from this list,
+            # and the flag row above says why). One word, two different reader
+            # questions answered (#1322 QA round 1, Q-4).
+            return f"- `{self.job}`: whole tree (armed out) — {'; '.join(self.notes)}"
         detail = "; ".join(self.notes) if self.notes else ""
         line = f"- `{self.job}`: scoped to {len(self.targets)} file(s)"
         return f"{line} — {detail}" if detail else line
@@ -2310,13 +2337,55 @@ def _fraction_reasons(
     return reasons
 
 
-def _test_universe(graph: ImportGraph, tree: str) -> tuple[str, ...]:
-    """The test files a job could run: what pytest's `test_*.py` default collects."""
+#: pytest's own default for `python_files`, used when the config says nothing.
+_PYTEST_DEFAULT_PYTHON_FILES: tuple[str, ...] = ("test_*.py", "*_test.py")
+
+
+def _pytest_python_files(root: Path) -> tuple[str, ...]:
+    """The `python_files` patterns the gate actually collects with.
+
+    Read from `pyproject.toml` rather than assumed: the universe a selection is
+    taken FROM has to be the set the gate collects, or a diff whose test file the
+    assumed pattern does not match selects nothing and runs green. pytest's own
+    defaults are used when the config is absent or unreadable, which is what pytest
+    itself falls back to and the WIDER of the two readings — a superset selects
+    more, never less, so the failure is a larger run and not a smaller one.
+    """
+    try:
+        import tomllib
+
+        data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return _PYTEST_DEFAULT_PYTHON_FILES
+    configured = data.get("tool", {}).get("pytest", {}).get("ini_options", {}).get("python_files")
+    if isinstance(configured, str):
+        return (configured,)
+    if isinstance(configured, list) and all(isinstance(item, str) for item in configured):
+        return tuple(configured)
+    return _PYTEST_DEFAULT_PYTHON_FILES
+
+
+def _is_collected(rel: str, patterns: Sequence[str]) -> bool:
+    """Whether pytest collects `rel`, matching the way pytest matches.
+
+    A configured pattern may carry directory components, so the basename and the
+    repo-relative path are both tried.
+    """
+    name = Path(rel).name
+    return any(
+        fnmatch.fnmatch(name, pattern) or fnmatch.fnmatch(rel, f"*/{pattern}")
+        for pattern in patterns
+    )
+
+
+def _test_universe(
+    graph: ImportGraph, tree: str, patterns: Sequence[str] | None = None
+) -> tuple[str, ...]:
+    """The test files a job could run: what pytest's `python_files` collects."""
+    wanted = tuple(patterns) if patterns else _PYTEST_DEFAULT_PYTHON_FILES
     prefix = f"{tree}/"
     return tuple(
-        rel
-        for rel in sorted(graph.files)
-        if rel.startswith(prefix) and Path(rel).name.startswith("test_")
+        rel for rel in sorted(graph.files) if rel.startswith(prefix) and _is_collected(rel, wanted)
     )
 
 
@@ -2351,9 +2420,10 @@ def _test_barriers(
     unresolved = graph.unresolved_sites()
     if unresolved:
         reasons.append(
-            f"the graph carries {len(unresolved)} reference(s) it cannot place "
-            f"({_sample([site.split(': ', 1)[0] for site in unresolved])}), so no "
-            f"selection of {len(universe)} test file(s) can be proven complete"
+            f"the graph carries {len(unresolved)} reference(s) it cannot place — "
+            f"{len(graph.unplaced_scans)} directory scans + {len(graph.unnamed)} "
+            f"computed names, at {_sample([site.split(': ', 1)[0] for site in unresolved])} — "
+            f"so no selection of {len(universe)} test file(s) can be proven complete"
         )
     return reasons
 
@@ -2399,8 +2469,20 @@ def _select_tests(
                 for referrer in named_by
                 if Path(referrer).name == "conftest.py" and referrer not in in_universe
             )
+    # The same obligation by the other road: a conftest that IMPORTS the changed
+    # module (or one that imports something which does) does reach `dependents()`,
+    # but the tests it GOVERNS do not — they are not pytest-visible dependents of
+    # anything, because a conftest is not in the test universe and pytest applies
+    # it by DIRECTORY. Left alone that selection is empty and the run is green while
+    # the conftest's own fixtures fail (#1322 review round 1, F.1: a MAJOR for
+    # exactly that reason — it is reachable the moment no unresolved site is left).
+    conftest_importers = {
+        rel
+        for rel in graph.dependents(reachable_seeds)
+        if Path(rel).name == "conftest.py" and rel not in in_universe
+    }
     conftest_tests: set[str] = set()
-    for conftest in sorted(conftest_namers):
+    for conftest in sorted(conftest_namers | conftest_importers):
         parent = Path(conftest).parent.as_posix()
         # The repository-root conftest has parent `.`, and applies to the lot.
         scoped = (
@@ -2410,7 +2492,8 @@ def _select_tests(
         )
         conftest_tests |= scoped
         notes.append(
-            f"{conftest} names it, and pytest runs that conftest for every test "
+            f"{conftest} {'names' if conftest in conftest_namers else 'imports'} it, "
+            "and pytest runs that conftest for every test "
             f"under {parent}, so those {len(scoped)} test file(s) are selected"
         )
     reachable = set(graph.dependents(reachable_seeds)) | reachable_seeds | conftest_tests
@@ -2444,6 +2527,13 @@ class ScopePlan:
             )
         for job in sorted(self.decisions):
             lines.append(self.decisions[job].report())
+        if self.decisions and not any(
+            not decision.whole_tree for decision in self.decisions.values()
+        ):
+            lines.append(
+                "- every job here runs its whole-tree command (each line says why); a job "
+                "the classifier did not select is not in this list at all"
+            )
         test_jobs = ("test", "tui-e2e")
         narrowed_tests = any(
             decision.job in test_jobs and not decision.whole_tree
@@ -2479,6 +2569,9 @@ def scope_plan(jobs: Sequence[str], paths: Sequence[str], root: Path) -> ScopePl
     """
     normalized = [_norm(path) for path in paths]
     barriers = scope_barriers(paths, root)
+    # Read once, from the config the gate itself uses (F.2): the universe a
+    # selection is taken from has to be the set pytest will collect.
+    collected = _pytest_python_files(root)
     weights = test_weights(root)
     decisions: dict[str, ScopeDecision] = {}
     graph: ImportGraph | None = None
@@ -2606,7 +2699,7 @@ def scope_plan(jobs: Sequence[str], paths: Sequence[str], root: Path) -> ScopePl
         assert graph is not None
         seeds = [rel for rel in normalized if rel in graph.files]
         tree = SCOPE_MARKERS[job]
-        universe = _test_universe(graph, tree)
+        universe = _test_universe(graph, tree, collected)
         barriers_here = _test_barriers(graph, seeds, universe)
         if barriers_here:
             decisions[job] = ScopeDecision(job, commands, (), True, tuple(barriers_here))
