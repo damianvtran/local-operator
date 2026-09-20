@@ -81,6 +81,16 @@ _AMBIENT_VARS = (
     # suite would take the allow path while looking like it tested the refusal.
     # Tests that need it set it explicitly.
     "LOCAL_OPERATOR_AGENT_MAY_DELEGATE",
+    # The escape that waives the test-hosting rule, so a suite whose subject is a
+    # notification frame can observe one (it answers "not a test session", and
+    # the process kill switch still wins). An inherited value is the
+    # ALLOW_NESTED_SESSION failure again, one layer down: every cell that asserts
+    # the RULE — that a mock session is never announced by the TUI observer, the
+    # feed or the bridge — would silently take the allow path while looking like
+    # it tested the refusal, and the operator's own shell would be deciding what
+    # the suite observes. Tests that need it set it through
+    # `tests/notification_opt_in.notification_path_opt_in`.
+    "LOCAL_OPERATOR_NOTIFY_TEST_HOSTING",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
