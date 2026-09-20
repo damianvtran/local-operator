@@ -142,6 +142,24 @@ TERMINAL_DETAIL = {
     # that is about billing when there is anything to bill, and a dead grant is
     # not a billing event. The PHONE copy above keeps its link because a phone
     # has no billing block to read it from.
+    #
+    # LENGTH: 138 cells, two rendered rows at 80 columns as the indented
+    # continuation `lop tunnel status` prints (140 cells with that two-cell
+    # indent, which is how QA round 1's Q1 counted it). Deliberately NOT trimmed
+    # on the round-2 pass, and the reason is what the sentence has to carry for
+    # readers that have no other line: the CAUSE (a Radient login that is no
+    # longer valid), the CONSEQUENCE that makes this a park rather than a retry
+    # (it stopped and will not retry by itself — the incident's own shape, and the
+    # one clause a reader cannot recover from any other surface once the
+    # connector has exited), and the REMEDY's shape (signing in again starts it
+    # again on its own, i.e. no restart command is needed). It is also the copy
+    # `state.json` persists and `DESKTOP_API.md` forwards as `connector.detail`,
+    # so a shorter sentence here is a shorter sentence everywhere. What D2 fixed
+    # was the WELDING — this sentence is now its own indented continuation row
+    # under a ONE-ROW state line, wrapping in the terminal the way prose does,
+    # rather than being the third clause of a 317-cell paragraph that buried the
+    # command. A future trim should weigh those three clauses against each other
+    # rather than against the row count.
     LOGIN_REQUIRED: (
         "The connector's Radient login is no longer valid, so it stopped and will not "
         "retry by itself. Signing in again starts it again on its own."

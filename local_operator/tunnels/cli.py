@@ -424,7 +424,14 @@ async def dispatch(args: argparse.Namespace) -> str:
         # surface) should not need a second command. This is the same call the
         # credential-write hook makes, so both paths agree on what re-arms.
         install.rearm_if_parked(provider="radient", credential_id=value["credential_id"])
-        record = value["record"]
+        # The same read `report.local_payload` makes of the same key, because the
+        # same hand is on the same file: a `config.json` that parses but carries
+        # no `record` (hand-edited, or written by a build that stored it
+        # elsewhere) is a configuration this command can still DESCRIBE — every
+        # field `_summary` prints already defaults — not a bare
+        # `KeyError: 'record'` rendered as a stack trace (review round 2, n2).
+        stored = value.get("record")
+        record = stored if isinstance(stored, dict) else {}
         source = "live"
         cloud_reason = ""
         try:
@@ -579,4 +586,7 @@ def mobile_action(action: str, accepted: str | None = None) -> str:
     except ValueError as exc:
         return str(exc)
     except (OSError, httpx.HTTPError):
-        return "Tunnel operation failed; check network access and /login radient."
+        # `lop login radient`: every other line this command prints names the
+        # remedy this shell can run, and this one used to be the exception
+        # (review round 2, m5).
+        return "Tunnel operation failed; check network access and lop login radient."

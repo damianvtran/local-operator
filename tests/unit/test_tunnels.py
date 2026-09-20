@@ -2037,6 +2037,50 @@ def test_rearm_declines_everything_that_is_not_this_tunnel(
 
 
 @pytest.mark.asyncio
+async def test_status_describes_a_config_with_no_record_key(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """A store that parses but carries no `record` is still describable (n2).
+
+    The status path indexed the key directly, so a hand-edited `config.json`
+    raised a bare `KeyError: 'record'` rendered as a stack trace instead of
+    describing the tunnel it could still see — and `_summary` already defaults
+    every field it reads, so there was nothing for the hard index to protect.
+    `report.local_payload` reads the same key off the same file the same way
+    (`value.get("record")`, empty when absent or not a dict), which is what makes
+    this a fix rather than a new opinion.
+
+    The port is free rather than 4099: the status path probes the gateway when
+    nothing is parked, and the fixture's own default is the port the operator's
+    live connector listens on.
+    """
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        free = probe.getsockname()[1]
+    stored = _stored(connection, gateway_port=free)
+    del stored["record"]
+    config.save(stored)
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    out = await dispatch(parser.parse_args(["tunnel", "status"]))
+    assert "Tunnel: not created" in out
+    assert "Status: configured" in out
+
+    # The machine surface agrees, and answers the same shape the desktop route
+    # serves for a store in this state.
+    payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
+    assert payload["tunnel_id"] is None
+    assert payload["cloud"]["status"] == "configured"
+
+
+@pytest.mark.asyncio
 async def test_status_json_reports_the_park_the_login_and_the_remedy(
     tmp_path, monkeypatch, connection
 ) -> None:
