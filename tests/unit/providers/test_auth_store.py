@@ -781,6 +781,42 @@ class TestADeadGrantIsReportedRatherThanOmitted:
             await store._ensure_oauth_fresh(row)
         assert isinstance(caught.value, AuthStoreError)
 
+    async def test_a_prose_refusal_becomes_the_permanent_type_too(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The incident's own body, through the raiser, this type.
+
+        Radient's endpoint answers a revoked refresh token with prose in the
+        `error` field rather than `invalid_grant`, and the code-only rule read
+        that as RETRYABLE — which is how a dead grant kept a supervised
+        connector restarting every 10 seconds for ~9 hours instead of arriving
+        here. The full chain is pinned in this one test: the real body, the
+        shared raiser, this store's own permanent type.
+        """
+        from local_operator.providers.oauth.callback_server import (
+            raise_for_refresh_failure,
+        )
+
+        row = store.upsert_credential(
+            "radient", {**_oauth(refresh="revoked-token", access="stale"), "expires": 0}
+        )
+
+        async def refresh(creds):  # noqa: ANN001
+            raise_for_refresh_failure(
+                "Radient",
+                401,
+                '{"error": "Token refresh failed: refresh token is expired or revoked"}',
+            )
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refresh)
+        stored = store.get_credential(row.id)
+        assert stored is not None
+        with pytest.raises(CredentialInvalidError) as caught:
+            await store._ensure_oauth_fresh(stored)
+        # Still an AuthStoreError, so every existing rotation handler on this
+        # path keeps working.
+        assert isinstance(caught.value, AuthStoreError)
+
     async def test_the_rotation_race_loser_does_not_condemn_a_live_grant(
         self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:

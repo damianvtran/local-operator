@@ -31,6 +31,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import re
 import secrets
 import shutil
 import subprocess
@@ -277,6 +278,45 @@ TERMINAL_GRANT_ERRORS = frozenset(
     }
 )
 
+#: An ``error`` field that is prose rather than a code, and what it must say.
+#:
+#: Some identity providers answer a refused refresh with a sentence instead of
+#: an RFC 6749 code. Measured against Radient's own endpoint:
+#:
+#:     401 {"error": "Token refresh failed: refresh token is expired or revoked"}
+#:
+#: The field parsed fine, but ``token refresh failed: refresh token is expired or
+#: revoked`` is in no error-code set, so the verdict fell through as retryable --
+#: and a dead grant classified retryable is what turned one refused refresh into
+#: a crash loop (870 restarts in `tunnels/service.py`, each writing the same line
+#: to the service log).
+#:
+#: The rule lives HERE, in the one shared classifier, not in each vendor's
+#: refresh: a per-vendor check is how one cause ends up classified two ways, and
+#: the same body would then mean "dead" for Radient and "retry" for anyone else
+#: whose provider worded it the same way.
+#:
+#: It is deliberately narrow, because a FALSE permanent verdict is expensive:
+#: `CredentialInvalidError` deprioritises a LIVE account in `/usage`, the routing
+#: cascade and `model/configure.py` until the operator re-logs-in. So the body
+#: must name a REFRESH TOKEN and call it dead, and it is consulted only when the
+#: `error` field is free text -- a body that names a machine-readable code keeps
+#: that code's meaning exactly (see the exclusions above), which is what stops a
+#: ``{"error":"invalid_request","error_description":"...invalid_grant..."}``
+#: from being read as a verdict about the grant.
+_DEAD_REFRESH_TOKEN = re.compile(
+    r"refresh[_ ]?token\b[^.]{0,48}\b(?:expired|revoked|invalid|no longer valid)\b"
+)
+
+#: The shape of an RFC 6749 ``error`` code: one short lowercase token, no spaces.
+#: Anything else in the field is prose, and prose is the only place
+#: :data:`_DEAD_REFRESH_TOKEN` is allowed to speak.
+_OAUTH_ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{2,39}\Z")
+
+
+def _names_a_dead_refresh_token(text: str) -> bool:
+    return _DEAD_REFRESH_TOKEN.search(text) is not None
+
 
 def _oauth_error_code(body: str) -> str | None:
     """The value of the OAuth2 ``error`` FIELD, or None if the body has none.
@@ -349,11 +389,19 @@ def is_terminal_grant_response(status_code: int, body: str) -> bool:
         return False
     code = _oauth_error_code(body)
     if code is not None:
-        # The body named its verdict: honour it exactly, including when the
-        # verdict is an excluded code that merely MENTIONS a terminal one.
-        return code in TERMINAL_GRANT_ERRORS
+        if code in TERMINAL_GRANT_ERRORS:
+            return True
+        # The field carried something that is not a known code. A CODE we do
+        # not recognise stays retryable, exactly as before; a sentence does not
+        # get that benefit of the doubt, because a sentence is the shape some
+        # providers use to state the verdict (see _DEAD_REFRESH_TOKEN).
+        return _OAUTH_ERROR_CODE.fullmatch(code) is None and _names_a_dead_refresh_token(code)
     lowered = body.lower()
-    return any(candidate in lowered for candidate in TERMINAL_GRANT_ERRORS)
+    return any(candidate in lowered for candidate in TERMINAL_GRANT_ERRORS) or (
+        # An unparseable body is free text by definition (an HTML gateway page,
+        # a form-encoded error), so the same prose rule applies to it.
+        _names_a_dead_refresh_token(lowered)
+    )
 
 
 def raise_for_refresh_failure(
