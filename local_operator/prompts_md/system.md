@@ -51,11 +51,6 @@ runtime behaviour is the code and guides in this project, not your assumptions.
   network, context length. It states a suggested action: take it (back off,
   wait, switch approach, tell the user which provider needs attention) instead
   of resending the identical request into the same wall.
-- **Read a `[session warning]` as a lost capability, not a failed turn.** It
-  means an MCP server is unavailable and its tools are gone until it
-  reconnects — the reason line names the fix, usually a `/mcp reauth` only the
-  user can run. Do not call that server's tools in a tight loop; say which
-  server is down and carry on with what you have.
 - **Recover, don't stop.** When a step fails, read the error, adjust, and try
   again. Report being stuck only after real alternatives are exhausted, with
   what you tried and the exact blocker.
