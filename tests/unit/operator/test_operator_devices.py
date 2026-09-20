@@ -400,3 +400,93 @@ def test_the_spki_decoder_accepts_only_a_p256_point() -> None:
     assert devices.decode_spki(None) is None
     assert devices.decode_spki(b"bytes") is None
     assert devices.decode_spki("A" * 600) is None
+
+
+def test_a_local_record_is_scoped_to_the_anchor_that_stamped_it(
+    tmp_path: Path, operator_key: OperatorAnchor, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R9-2/Q9-1: the local record must not outlive the anchor it was written under.
+
+    Measured defect (round 9): the relay keeps its own revocation copy so the common
+    case needs no privileged read, nothing in the product removed an entry from it,
+    and it was honoured unconditionally — so an operator who followed the ONLY route
+    the product then named (create a genuinely new anchor) had a phone that was still
+    refused, because this file still named it. A revocation is a statement by the
+    operator key that signed the certificate, so a record stamped with a key that is
+    no longer installed describes devices of an anchor that is gone.
+
+    Both directions are asserted, because the wrong way to fail here is to lift a
+    revocation an operator really did make: an UNSTAMPED record (one written before
+    the stamp existed) keeps being honoured.
+    """
+    from local_operator.operator import trust
+    from local_operator.operator.keychain import FILE_ONLY
+    from local_operator.operator.sign import anchor_for_handle, create_key
+
+    anchor_root = tmp_path / "anchor-root"
+    anchor_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(
+        "local_operator.operator.trust._ANCHOR_ROOT_OVERRIDE", anchor_root, raising=False
+    )
+    _, point = _new_point()
+    stored = _store(tmp_path, _operator_signed(tmp_path, point), name="lost phone")
+
+    def stage(anchor: OperatorAnchor) -> None:
+        """The staging half of an install: the file the privileged step would move."""
+        staged = trust.staging_path(tmp_path)
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(trust.anchor_bytes(anchor))
+
+    def installed_from_staged(uid: Any = None) -> Any:
+        body = json.loads(trust.staging_path(tmp_path).read_text())
+        return trust.AnchorLoad(
+            anchor=trust.OperatorAnchor.from_json(body),
+            path=trust.anchor_path(uid),
+            root_owned=True,
+            reason="ok",
+            exists=True,
+        )
+
+    stage(operator_key)
+    monkeypatch.setattr(trust, "load_anchor", installed_from_staged)
+
+    devices.record_revocation(tmp_path, stored.device_id)
+    assert devices.is_revoked_here(tmp_path, stored.device_id) is True
+    assert (
+        json.loads(devices.revoked_path(tmp_path).read_text())["operator_key_id"]
+        == operator_key.key_id
+    ), "the record was written without the key id it belongs to"
+
+    # A GENUINELY NEW ANCHOR: the record is about a key that is no longer installed.
+    fresh = anchor_for_handle(create_key(config_root=tmp_path / "fresh", preference=FILE_ONLY))
+    stage(fresh)
+    assert fresh.key_id != operator_key.key_id
+    assert devices.is_revoked_here(tmp_path, stored.device_id) is False
+
+    # ...and an unstamped record is still honoured, which is the safe direction.
+    devices.revoked_path(tmp_path).write_text(json.dumps({"v": 1, "devices": [stored.device_id]}))
+    assert devices.is_revoked_here(tmp_path, stored.device_id) is True
+
+
+def test_forget_revocation_lifts_the_record_and_takes_the_file_with_it(tmp_path: Path) -> None:
+    """The inverse of ``record_revocation``, host-side, and complete when it is last.
+
+    The file going away matters as much as the entry: a leftover ``{"devices": []}``
+    reads as "nothing is revoked, and there was a list", which is a state a future
+    reader has to reason about for no benefit.
+    """
+    _, point = _new_point()
+    first = devices.new_device_id(point)
+    _, other = _new_point()
+    second = devices.new_device_id(other)
+
+    devices.record_revocation(tmp_path, first)
+    devices.record_revocation(tmp_path, second)
+    assert devices.forget_revocation(tmp_path, first) is True
+    assert devices.is_revoked_here(tmp_path, first) is False
+    assert devices.is_revoked_here(tmp_path, second) is True, "the other device was released"
+
+    assert devices.forget_revocation(tmp_path, second) is True
+    assert devices.revoked_path(tmp_path).exists() is False
+    # Idempotent: lifting a revocation that is not recorded is False, not an error.
+    assert devices.forget_revocation(tmp_path, second) is False

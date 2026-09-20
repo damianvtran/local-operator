@@ -55,11 +55,18 @@ function Header({
 	   nothing. The header is the surface the sheet closes back onto, so the receipt
 	   belongs to it and survives.
 
-	   IT IS CLEARED BY THE NEXT GESTURE THAT CHANGES THE GATE, which is what the
-	   sentence reports: `onReceipt("")` comes from the sheet's tighten path, so a
-	   `keep asking` leaves no header claiming the gate is auto (UX round 8, U8-3 —
-	   the flow the round-7 comment below was wrong about: it asserted there was
-	   nothing stale to clear, and a tighten one tap away is exactly that). The
+	   IT IS CLEARED BY THE NEXT GATE-CHANGING GESTURE ON THIS SCREEN: `onReceipt("")`
+	   comes from the sheet's tighten path, so a `keep asking` from the sheet leaves
+	   no header claiming the gate is auto (UX round 8, U8-3 — the flow the round-7
+	   comment below was wrong about: it asserted there was nothing stale to clear,
+	   and a tighten one tap away is exactly that). THE BOUND, stated rather than
+	   implied (agent review round 9, R9-5): the receipt is component state, not
+	   derived from the projection, so a gate tightened from ANOTHER surface — the
+	   machine's TUI, the desktop app — leaves this header asserting the old state
+	   until this screen's next gate-changing gesture. Deriving it from
+	   `projection.gate` would remove the staleness window entirely and is the
+	   obvious next change if this screen ever shows a gate the phone did not set;
+	   today every path that sets it runs through the sheet below. The
 	   round-7 design note is kept because it is the reason the receipt lives HERE:
 	   an earlier version set it inside the sheet, which unmounted before it could
 	   paint (design round 6, D2). */

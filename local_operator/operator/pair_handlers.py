@@ -274,17 +274,27 @@ def describe_devices(args: argparse.Namespace) -> int:
     Until the staged anchor is installed, the revocation is INERT — the runtime
     keeps checking the anchor it can read — and this says so rather than claiming
     a revocation that has not taken effect.
+
+    ``--authorise`` is the INVERSE VERB and it exists because ``--revoke`` had
+    none (R9-2/Q9-1): the relay records a revocation in two places, and the local
+    half had no shipped way to remove an entry, so a revoked device could not be
+    brought back by any route the product named — following the route it did name
+    (create and install a new anchor) left the phone refused. Both halves are
+    lifted here, and the same privileged install step carries the anchor half, so
+    this verb is exactly as host-side-only as ``--revoke`` is: the phone has no
+    reach into either.
     """
     from local_operator.operator.handlers import install_anchor
 
     root = config_dir()
     revoke = str(getattr(args, "revoke", "") or "")
+    authorise = str(getattr(args, "authorise", "") or "")
 
     paired = devices.list_devices(root)
     pending = devices.list_pending(root)
 
     if revoke:
-        if not _stage_anchor_with_revocation(root, revoke):
+        if not _stage_anchor_revocation(root, revoke, revoked=True):
             print(
                 "no installed operator anchor to record a revocation in — run "
                 "`lop operator install` on this machine first (the anchor `lop operator "
@@ -308,12 +318,44 @@ def describe_devices(args: argparse.Namespace) -> int:
         print(
             f"revoked {revoke}. Revocation lives in the anchor; until the install step "
             "above completes it has not taken effect. Once installed, a session already "
-            f"running picks it up within {int(ANCHOR_REFRESH_S)}s and a new one at once."
+            f"running picks it up within {int(ANCHOR_REFRESH_S)}s and a new one at once. "
+            "To bring this device back, run `lop operator devices --authorise "
+            f"{revoke}` (needs the same install step)."
         )
 
-    if not paired and not pending:
-        print("no paired devices. Run `lop pair` to add one.")
-        return 0
+    if authorise:
+        # THE TWO HALVES, and both FACTS are read before either is changed, so the
+        # receipt can say what was true rather than what the code just did: running
+        # `--authorise` twice would otherwise report the same lift twice. Local
+        # record first, then the anchor's entry through the same privileged install
+        # step `--revoke` uses (host-side only, like every other half of this).
+        recorded_here = devices.is_revoked_here(root, authorise)
+        recorded_in_anchor = _anchor_revokes(root, authorise)
+        devices.forget_revocation(root, authorise)
+        staged = _stage_anchor_revocation(root, authorise, revoked=False)
+        if not recorded_here and not recorded_in_anchor:
+            print(f"nothing recorded a revocation of {authorise} on this machine.")
+        elif staged:
+            code = install_anchor(root, print_only=bool(getattr(args, "print_only", False)))
+            if code != 0:
+                return code
+            from local_operator.operator.trust import ANCHOR_REFRESH_S
+
+            print(
+                f"authorised {authorise}. A session already running picks this up within "
+                f"{int(ANCHOR_REFRESH_S)}s; a new pairing request is accepted at once. "
+                "Pair the phone again with `lop pair`."
+            )
+        else:
+            print(
+                "no installed operator anchor to lift a revocation from, so only the "
+                "local record was cleared — run `lop operator install` on this machine "
+                "if you expected an anchor here",
+                file=sys.stderr,
+            )
+        # The list below is about to print the same device as active, which is the
+        # receipt for the work above rather than a second sentence about it.
+
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))
         state = "revoked" if _anchor_revokes(root, device.device_id) else "active"
@@ -329,13 +371,16 @@ def describe_devices(args: argparse.Namespace) -> int:
     return 0
 
 
-def _stage_anchor_with_revocation(root: Path, device_id: str) -> bool:
-    """Stage the current anchor with ``device_id`` marked revoked. ``False`` when
-    there is no installed anchor to add a revocation to.
+def _stage_anchor_revocation(root: Path, device_id: str, *, revoked: bool) -> bool:
+    """Stage the current anchor with ``device_id`` marked revoked (or un-revoked).
+
+    ``False`` when there is no installed anchor to change the revocation list of.
 
     Rebuilt from the installed anchor rather than from a fresh statement, so the
     operator's key, label and creation time survive; only the revocation list is
-    added to.
+    added to. Un-revoking DROPS the entry rather than writing ``"revoked": False``
+    — the list is a list of things that are revoked, and an entry that says
+    "present, but not revoked" is a shape a future reader has to know to read.
     """
     from dataclasses import replace
 
@@ -346,12 +391,15 @@ def _stage_anchor_with_revocation(root: Path, device_id: str) -> bool:
     if not loaded.usable or loaded.anchor is None:
         return False
     entries = [dict(entry) for entry in loaded.anchor.devices]
-    for entry in entries:
-        if entry.get("device_id") == device_id:
-            entry["revoked"] = True
-            break
+    if revoked:
+        for entry in entries:
+            if entry.get("device_id") == device_id:
+                entry["revoked"] = True
+                break
+        else:
+            entries.append({"device_id": device_id, "revoked": True})
     else:
-        entries.append({"device_id": device_id, "revoked": True})
+        entries = [entry for entry in entries if entry.get("device_id") != device_id]
     stage_anchor(root, replace(loaded.anchor, devices=tuple(entries)))
     return True
 

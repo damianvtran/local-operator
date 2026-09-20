@@ -515,7 +515,14 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   requests, which are denials rather than escalations. The revocation list is the
   opposite case and lives in the ROOT-OWNED anchor (`lop operator devices
   --revoke`, through the same privileged step the anchor install uses), so a
-  revoked device cannot be un-revoked by the device;
+  revoked device cannot be un-revoked by the device. It is written in TWO places,
+  and the second one cost two rounds to notice (round 9's Q9-1/R9-2): the relay
+  keeps its own copy under the config root so the common case needs no privileged
+  read, that copy is SCOPED TO THE ANCHOR'S KEY ID it was stamped with (a record
+  naming a superseded key describes devices of an anchor that is gone, which is
+  what made a genuinely new anchor fail to lift a revocation), and
+  `lop operator devices --authorise <device id>` is the host-side inverse verb
+  that clears both halves — the route the phone's refusal copy names;
 - **a process that proxies the whole session** can relay a connection's proof
   and that connection's requests — which is what a proxy is — but it never
   learns the capability and cannot originate a request of its own: nothing that
@@ -538,11 +545,17 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   REPORT in round 6, and `LOOSENING_REFUSED_NOTICE` — which reaches a reader on
   both hosts — only in round 7 (QA Q7-1), each round having fixed the sentences
   someone had happened to look at. It is now a claim a test can fail on rather
-  than a claim in prose: `tests/unit/harness/test_approval_authority.py::
-  test_no_shipped_notice_names_a_window_remedy` inventories every notice constant
-  AND every non-docstring string literal under `local_operator/` against the
-  phrasings that promise a window, so a fourth sentence cannot slip through
-  unnoticed;
+  than a claim in prose: three cells in
+  `tests/unit/harness/test_approval_authority.py` sweep an explicit subject list —
+  every notice constant, every non-docstring string literal under `local_operator/`,
+  every string in the portal sources (`local_operator/mobile/web/src`, comments
+  stripped) and every `docs/**/*.md` — against both the phrasings that promise a
+  window and a phrase-independent shape (a window-ish noun beside a gate-loosening
+  verb). The one exemption is THIS file, and it is checked rather than asserted: a
+  mention here must sit beside a word that makes it history. What that buys is
+  narrower than "nothing can slip through unnoticed" and is what the cells
+  guarantee: a fifth assertion in a Python literal, a portal string or a document
+  fails, and an un-qualified claim in this file fails too;
 - **the phone's card component renders the refusal body raw.** The sentence it
   now receives is the CARD's — the question survived, and a deny works from there
   — but `pending-card.tsx`'s `humanizeError` has no arm for it, so the copy is

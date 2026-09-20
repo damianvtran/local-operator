@@ -28,7 +28,11 @@ requirement from the certificate for exactly this reason — it lives in the
 ROOT-OWNED anchor (``OperatorAnchor.devices``, written by
 ``lop operator revoke`` through the same privileged install step as the anchor
 itself), so a device the operator has revoked cannot be un-revoked by the
-subject it was revoked from.
+subject it was revoked from. The local record below is SCOPED TO THE ANCHOR it
+was written under (R9-2): a revocation is a statement by the operator key that
+signed the certificate, so a record naming a superseded key no longer applies to
+anything — otherwise rotating the anchor would keep every device it named
+bricked, with no verb able to say why.
 
 THE PAIRING HANDSHAKE lives here too, because every step of it is a fact about
 this directory:
@@ -463,6 +467,34 @@ def paired_certificate(config_root: Path) -> str | None:
     return None
 
 
+def revoked_path(config_root: Path) -> Path:
+    """The relay's own record of revocations, ``revoked.json`` under the operator root.
+
+    Named rather than spelled out at each call site because the READ side (the
+    guard, the scoping check) and the WRITE side (``record_revocation``,
+    ``forget_revocation``) disagreeing about the path is how a state machine ends
+    up with a revocation that cannot be lifted (R9-2).
+    """
+    return operator_root(config_root) / "revoked.json"
+
+
+def _installed_key_id() -> str:
+    """The key id of the installed anchor, or ``""`` when there is none readable.
+
+    Used only to decide whether a LOCAL revocation record still applies; the
+    anchor read is a plain file read on the setup path (a human's action), not a
+    frame, and a failure to read it is reported as "no key id" rather than
+    raising — the anchor's own guard is what refuses a device, and this is the
+    belt beside it.
+    """
+    from local_operator.operator.trust import load_anchor
+
+    loaded = load_anchor()
+    if not loaded.usable or loaded.anchor is None:
+        return ""
+    return str(loaded.anchor.key_id or "")
+
+
 def is_revoked(config_root: Path, device_id: str) -> bool:
     """Whether this device is revoked ANYWHERE — the record, or the anchor.
 
@@ -489,19 +521,35 @@ def is_revoked(config_root: Path, device_id: str) -> bool:
 
 
 def is_revoked_here(config_root: Path, device_id: str) -> bool:
-    """Whether a LOCALLY RECORDED revocation names this device.
+    """Whether a LOCALLY RECORDED revocation names this device **under this anchor**.
 
     One half of :func:`is_revoked`, which is what a caller deciding whether to
     accept a device should use: the authoritative list is the root-owned anchor's
     (:func:`local_operator.operator.trust.device_is_revoked`, which the runtime
     consults), and this copy exists so the common case does not need a privileged
     read. Asking only this one was the gap ``is_revoked`` closes.
+
+    THE RECORD IS SCOPED TO THE KEY THAT WROTE IT (R9-2). Measured defect: the
+    record was honoured unconditionally, so after `lop operator devices --revoke`
+    the operator could follow the only route the product named — create and
+    install a genuinely new anchor — and the phone was STILL refused, because this
+    file still named it and nothing in the product removes an entry from it. A
+    revocation is a statement by the operator key that signed the certificate, so
+    a record stamped with a key id that is no longer installed describes devices
+    of an anchor that is gone. A record with NO stamp (one written before the
+    stamp existed) keeps being honoured: the alternative is silently lifting a
+    revocation an operator really did make, which is the wrong way to fail.
     """
-    body = _read_json(operator_root(config_root) / "revoked.json")
+    body = _read_json(revoked_path(config_root))
     if body is None:
         return False
     listed = body.get("devices")
-    return isinstance(listed, list) and device_id in listed
+    if not (isinstance(listed, list) and device_id in listed):
+        return False
+    stamped = body.get("operator_key_id")
+    if not isinstance(stamped, str) or not stamped:
+        return True
+    return stamped == _installed_key_id()
 
 
 def record_revocation(config_root: Path, device_id: str) -> None:
@@ -511,8 +559,12 @@ def record_revocation(config_root: Path, device_id: str) -> None:
     relay is what decides whether to forward a signature, and it can answer that
     question without a privileged read. Removing the certificate is what makes
     the refusal true even on a host whose anchor has not caught up.
+
+    Stamped with the installed anchor's key id, because that is what the record is
+    about (see :func:`is_revoked_here`); an unstamped record is still honoured, so
+    the stamp only ever NARROWS what the record claims.
     """
-    path = operator_root(config_root) / "revoked.json"
+    path = revoked_path(config_root)
     body = _read_json(path) or {"v": 1, "devices": []}
     listed = body.get("devices")
     if not isinstance(listed, list):
@@ -520,11 +572,43 @@ def record_revocation(config_root: Path, device_id: str) -> None:
     if device_id not in listed:
         listed.append(device_id)
     body["devices"] = listed
+    body["operator_key_id"] = _installed_key_id()
     _write_private(path, json.dumps(body).encode("utf-8"))
     try:
         device_path(config_root, device_id).unlink()
     except OSError:
         pass
+
+
+def forget_revocation(config_root: Path, device_id: str) -> bool:
+    """Lift a LOCALLY RECORDED revocation; ``True`` when one was recorded.
+
+    The inverse of :func:`record_revocation`, and the half the product was missing
+    (R9-2): without it, the only way to clear this record was to delete a file by
+    hand, so `lop operator devices --revoke` was effectively permanent for a device
+    the operator later wanted back. Host-side only by construction — it is a verb
+    on this machine's config root, and the phone can reach none of it.
+
+    When the last entry goes the file goes with it, so a stale record cannot be
+    read as "everything else is still revoked".
+    """
+    path = revoked_path(config_root)
+    body = _read_json(path)
+    if body is None:
+        return False
+    listed = body.get("devices")
+    if not isinstance(listed, list) or device_id not in listed:
+        return False
+    remaining = [entry for entry in listed if entry != device_id]
+    if remaining:
+        body["devices"] = remaining
+        _write_private(path, json.dumps(body).encode("utf-8"))
+        return True
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return True
 
 
 def device_certificate_mode(path: Path) -> int:
@@ -544,6 +628,7 @@ __all__ = [
     "device_path",
     "devices_dir",
     "drop_pending",
+    "forget_revocation",
     "encode_spki",
     "is_revoked",
     "is_revoked_here",
@@ -558,6 +643,7 @@ __all__ = [
     "read_device",
     "read_pairing",
     "read_pending",
+    "revoked_path",
     "record_revocation",
     "write_device_cert",
     "write_pending",
