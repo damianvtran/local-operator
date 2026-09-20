@@ -1492,10 +1492,18 @@ class StoreView(NetworkState):
 ENGAGE_DEADLINE_S = 60.0
 
 #: ``control.StopOutcome.method`` (socket | sigterm | sigkill | gone | refused |
-#: busy) → the coarse word a viewer's receipt uses. The RUNG is reported verbatim
-#: beside it; this map only answers "did it end?", and it lives here rather than
-#: in ``control.py`` because a second caller of that ladder should not force its
-#: vocabulary on the one that already had one.
+#: busy | draining) → the coarse word a viewer's receipt uses. The RUNG is reported
+#: verbatim beside it; this map only answers "did it end?", and it lives here rather
+#: than in ``control.py`` because a second caller of that ladder should not force
+#: its vocabulary on the one that already had one.
+#:
+#: EVERY METHOD THE LADDER CAN RETURN HAS A WORD, and an UNKNOWN one does not fall
+#: back to a word that reads as success: the old ``.get(method, "stopped")`` turned
+#: ``draining`` — the target is alive and already leaving, which
+#: ``control.LEFT_ALONE_METHODS`` groups with ``busy`` — into ``outcome: "stopped"``,
+#: i.e. a receipt claiming this device ended a runtime it never signalled. An
+#: unknown method now reads ``unknown``, which the viewer's own derivation treats
+#: as "did not end" rather than as "ended" (Q-R4-1's class).
 _STOP_OUTCOME_WORD: dict[str, str] = {
     "socket": "stopped",
     "sigterm": "stopped",
@@ -1503,7 +1511,13 @@ _STOP_OUTCOME_WORD: dict[str, str] = {
     "gone": "already-gone",
     "refused": "refused",
     "busy": "skipped",
+    "draining": "skipped",
 }
+
+#: What this device says when the ladder returned a method this map does not know.
+#: NOT a success word, and not silence either: the viewer's derivation is a positive
+#: set of ENDED words, so this lands as a non-zero receipt naming the gap.
+_STOP_OUTCOME_DEFAULT = "unknown"
 
 
 @dataclass
@@ -3741,7 +3755,7 @@ class RelayServer:
         )
         return {
             "rung": outcome.method,
-            "outcome": _STOP_OUTCOME_WORD.get(outcome.method, "stopped"),
+            "outcome": _STOP_OUTCOME_WORD.get(outcome.method, _STOP_OUTCOME_DEFAULT),
             "pid": outcome.pid,
             "session_id": session_id,
             "wakes_dormant": outcome.wakes_dormant,

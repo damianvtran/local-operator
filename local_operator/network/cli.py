@@ -365,29 +365,104 @@ def _listing_timeout() -> float:
     return float(_import_relay().LISTING_PROBE_BUDGET_S) + _LISTING_TIMEOUT_SLACK_S
 
 
-def _relay_call(op: str, *, timeout: float = 5.0, **fields: Any) -> dict[str, Any] | None:
-    """Run one op on the running relay, or ``None`` when there is no relay.
+#: The refusal code the whole `lop network` family carries when this device's own
+#: relay could not be asked. ONE SPELLING, because it is the string a `--json`
+#: consumer branches on (`peers` is the verb the guide documents it on), and a
+#: second spelling of one code is how a family comes to read as two voices.
+CODE_RELAY_UNAVAILABLE = "relay_unavailable"
+
+
+def _relay_call(
+    op: str, *, timeout: float = 5.0, allow_no_answer: bool = False, **fields: Any
+) -> dict[str, Any] | None:
+    """Run one op on the running relay, or REFUSE when no relay answers it.
 
     ``timeout`` is a parameter because the session-plane ops are not all fast:
     a spawn takes seconds and the kill-switch ladder is allowed MINUTES (its
     SIGTERM rung waits out a drain the receiver owns). The default stays the
     original 5 s so every fast status op behaves exactly as it did; the slow
     ones pass their own budget and say why at the call site.
+
+    A MISSING ANSWER IS NOT AN OUTCOME (QA round 4, Q-R4-1). This used to return
+    ``None`` for "the relay did not answer", and every caller read that ``None``
+    for itself: the session family collapsed it to ``{}`` and then DERIVED ``ok``
+    from the absence, so ``sessions --stop`` answered ``{"ok": true}`` with rc 0
+    for a stop that never left this device, ``--engage`` answered a bare
+    ``{"ok": false}`` with no code and no sentence, and ``--all-peers`` presented
+    an empty peer set as a result. So the unavailable condition is a refusal now,
+    raised where the answer is lost rather than re-interpreted at each call site,
+    carrying the family's ``code`` + ``message`` (the same shape ``peers`` ships)
+    with a sentence that names the remedy.
+
+    ``allow_no_answer`` is the deliberate opt-out for a caller that handles a
+    missing answer ITSELF: either because the verb has a LOCAL spelling of the same
+    op (``ls``/``show``/``invite``/``member_rm``/``disconnect``/``panic``/``trust``/
+    ``confirm``/``doctor``/``pending``, each of which does that work here and says so
+    in its own payload), or because it emits the family's refusal document itself
+    (``peers``). Taking it means accepting that no peer was asked. A verb whose whole
+    contract is "did the relay/peer do it" must not take it — inventing an outcome
+    for a thing that never happened is the defect this parameter exists to make
+    visible.
     """
     from local_operator.network import relay, store
 
     record = store.find_own_relay()
-    if record is None:
-        return None
-    reply = relay.control_request(record, op, timeout=timeout, **fields)
+    reply = relay.control_request(record, op, timeout=timeout, **fields) if record else None
     if reply is None:
-        return None
+        if allow_no_answer:
+            return None
+        from local_operator.network.types import MeshRefusal
+
+        raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message())
     if reply.get("op") == "error":
         from local_operator.network.types import MeshRefusal
 
         raise MeshRefusal("relay_refused", str(reply.get("message") or "the relay refused"))
     detail = reply.get("detail")
     return detail if isinstance(detail, dict) else {"value": detail}
+
+
+def _relay_answer(op: str, *, timeout: float = 5.0, **fields: Any) -> dict[str, Any]:
+    """``_relay_call`` for a verb with NO local spelling: the answer, or a refusal.
+
+    The session-piloting verbs (``--stop``/``--engage``/``--create`` and the
+    merged listing) all ask this device's relay to ask a peer, so a missing answer
+    is a refusal and never a result. ``_relay_call`` already raises for it; the
+    ``None`` branch survives so a future caller that flips ``allow_no_answer`` on
+    gets the same refusal instead of a ``TypeError`` on its way to an invented
+    outcome.
+    """
+    detail = _relay_call(op, timeout=timeout, **fields)
+    if detail is None:  # pragma: no cover — ``_relay_call`` refuses before this
+        from local_operator.network.types import MeshRefusal
+
+        raise MeshRefusal(CODE_RELAY_UNAVAILABLE, _relay_unavailable_message())
+    return detail
+
+
+def _reported(detail: dict[str, Any], field: str, *, verb: str) -> Any:
+    """The one field a verb's receipt rests on, or a refusal naming the gap.
+
+    A RECEIPT THAT DOES NOT CARRY THE FACT IT IS A RECEIPT FOR IS NOT A RECEIPT
+    (QA round 4, Q-R4-1). ``--stop`` derived ``ok`` from
+    ``outcome not in ("", "refused")``, which is TRUE for a missing ``outcome``,
+    so any answer that lost the field read as a success; ``--engage`` and
+    ``--create`` read a missing ``engaged``/``session_id`` as a bare
+    ``{"ok": false}`` with nothing an operator could act on. The relay's own ops
+    always send these fields (``relay._op_session_stop`` and its neighbours), so an
+    answer without one is a relay that is not this build's — named, rather than
+    guessed at.
+    """
+    from local_operator.network.types import MeshRefusal
+
+    if not isinstance(detail, dict) or field not in detail:
+        raise MeshRefusal(
+            f"{verb}_unreported",
+            f"this device's relay answered `{verb}` without reporting `{field}`, so whether "
+            "the peer acted is unknown; restart the relay with `lop network restart` and "
+            "ask again.",
+        )
+    return detail[field]
 
 
 def _resolve(target: str, root: Path | None = None) -> Any:
@@ -584,8 +659,12 @@ def _cmd_ls(args: argparse.Namespace) -> int:
     # A LISTING THAT CONTACTS ITS PEERS, so it needs the relay's own budget plus
     # slack rather than the 5 s default: the table it reports is refreshed from the
     # members (Q-R2-1), and a short client timeout would fall back to the local
-    # snapshot the refresh is there to replace.
-    live = _unwrap_list_answer(_relay_call("net_ls", timeout=_listing_timeout()))
+    # snapshot the refresh is there to replace. ``allow_no_answer`` because
+    # ``ls``/``show`` DO have a local spelling: this device's own records, listed
+    # with the table marked unverified (``_summarise``).
+    live = _unwrap_list_answer(
+        _relay_call("net_ls", timeout=_listing_timeout(), allow_no_answer=True)
+    )
     records = store.list_networks()
     rows = live if live else [_summarise(record) for record in records]
     if not rows:
@@ -606,7 +685,9 @@ def _cmd_show(args: argparse.Namespace) -> int:
     # Same budget as `peers`/`ls`: `net_show` contacts every member before it
     # reports the table, so a 5 s client timeout would time out on the relay's own
     # work and answer from the stale local record.
-    live = _relay_call("net_show", network=args.network, timeout=_listing_timeout())
+    live = _relay_call(
+        "net_show", network=args.network, timeout=_listing_timeout(), allow_no_answer=True
+    )
     if live is not None:
         return _emit(args, {"ok": True, **live}, _show_lines(live))
     from local_operator.network.relay import members_digest_of
@@ -689,7 +770,12 @@ def _cmd_rm(args: argparse.Namespace) -> int:
 
 def _cmd_member_rm(args: argparse.Namespace) -> int:
     """Revoke a member: tombstone, rotate, bump the epoch, fan out (R5)."""
-    live = _relay_call("net_member_rm", network=args.network, device_id=args.device)
+    # ``allow_no_answer``: a revocation HAS a local spelling — the tombstone, the
+    # epoch rotation and the queue write all happen here (below), and the payload
+    # says the rotation is queued rather than fanning out.
+    live = _relay_call(
+        "net_member_rm", network=args.network, device_id=args.device, allow_no_answer=True
+    )
     if live is not None:
         return _emit(
             args,
@@ -779,6 +865,7 @@ def _cmd_invite(args: argparse.Namespace) -> int:
         ttl_s=float(args.expires),
         hosts=hosts,
         device_id=args.device,
+        allow_no_answer=True,
     )
     if live is not None:
         payload = {"ok": True, **live}
@@ -1380,6 +1467,21 @@ def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
     return _run
 
 
+#: The peer's stop vocabulary that means "the session is no longer running", so
+#: this side's ``ok`` is derived from a NAMED outcome instead of from the absence of
+#: one (Q-R4-1). The words are ``relay._STOP_OUTCOME_WORD``'s, i.e. the peer's own
+#: ``control.StopOutcome.method`` rendered for a viewer, and the set mirrors
+#: `control.ENDED_METHODS` ("the stop did its job"). ``not_running`` belongs here
+#: because it IS the answer to "did it stop": the peer holds no runtime for that id
+#: and the relay emits it as an outcome rather than an error (`relay._op_session_stop`).
+#: ``refused`` (no identity proof) and ``skipped`` (busy, deliberately left alone,
+#: `control.LEFT_ALONE_METHODS`) are the two that did NOT act — a command that did
+#: not act must never report success, and the old
+#: ``outcome not in ("", "refused")`` reported success for both of those AND for a
+#: missing outcome.
+_STOP_ENDED_OUTCOMES = frozenset({"stopped", "killed", "already-gone", "not_running"})
+
+
 def _cmd_sessions(args: argparse.Namespace) -> int:
     """``lop network sessions`` — the session plane, across the mesh.
 
@@ -1392,6 +1494,12 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     peer runs its own kill-switch ladder (its own pid proofs, its own rungs, its
     own sentences) and this side renders the peer's ``StopOutcome`` vocabulary
     verbatim rather than inventing a second set of words for "did it stop".
+
+    EVERY VERB HERE ASKS AND WAITS: none of them has a local spelling of its own
+    op (the session lives on another device and only this device's relay can ask
+    it), so none of them may take ``allow_no_answer`` and none of them may read a
+    missing answer as a result (Q-R4-1). ``ok`` is a claim about a NAMED field the
+    peer reported — never about the absence of one.
     """
     from local_operator.network.types import MeshRefusal
 
@@ -1406,19 +1514,17 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # rung waits out a drain only the owning machine can bound, and a CLI
         # that gave up at 5 s would report "nothing happened" about a stop that
         # was working.
-        detail = (
-            _relay_call(
-                "peer_session_stop",
-                peer=peer,
-                session_id=session_id,
-                mode="graceful",
-                timeout=240.0,
-            )
-            or {}
+        detail = _relay_answer(
+            "peer_session_stop",
+            peer=peer,
+            session_id=session_id,
+            mode="graceful",
+            timeout=240.0,
         )
+        outcome = str(_reported(detail, "outcome", verb="stop") or "")
         return _emit(
             args,
-            {"ok": detail.get("outcome") not in ("", "refused"), **detail},
+            {"ok": outcome in _STOP_ENDED_OUTCOMES, **detail},
             [
                 str(detail.get("detail") or ""),
                 f"rung: {detail.get('rung')}  outcome: {detail.get('outcome')}",
@@ -1430,20 +1536,18 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             raise MeshRefusal(
                 "peer_required", "--engage needs --peer: a session lives on one device"
             )
-        detail = (
-            _relay_call(
-                "peer_session_engage",
-                peer=peer,
-                session_id=engage,
-                cwd=str(getattr(args, "cwd", "") or ""),
-                timeout=120.0,  # a spawn, bounded by the relay's own engage deadline
-            )
-            or {}
+        detail = _relay_answer(
+            "peer_session_engage",
+            peer=peer,
+            session_id=engage,
+            cwd=str(getattr(args, "cwd", "") or ""),
+            timeout=120.0,  # a spawn, bounded by the relay's own engage deadline
         )
+        engaged = bool(_reported(detail, "engaged", verb="engage"))
         return _emit(
             args,
-            {"ok": bool(detail.get("engaged")), **detail},
-            [str(detail.get("detail") or ""), f"engaged: {bool(detail.get('engaged'))}"],
+            {"ok": engaged, **detail},
+            [str(detail.get("detail") or ""), f"engaged: {engaged}"],
         )
 
     if getattr(args, "create", False):
@@ -1451,22 +1555,20 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             raise MeshRefusal(
                 "peer_required", "--create needs --peer: the peer mints the session id"
             )
-        detail = (
-            _relay_call(
-                "peer_session_create",
-                peer=peer,
-                cwd=str(getattr(args, "cwd", "") or ""),
-                name=str(getattr(args, "name", "") or ""),
-                prompt=str(getattr(args, "prompt", "") or ""),
-                timeout=120.0,  # a spawn plus its first turn's admission
-            )
-            or {}
+        detail = _relay_answer(
+            "peer_session_create",
+            peer=peer,
+            cwd=str(getattr(args, "cwd", "") or ""),
+            name=str(getattr(args, "name", "") or ""),
+            prompt=str(getattr(args, "prompt", "") or ""),
+            timeout=120.0,  # a spawn plus its first turn's admission
         )
+        minted = str(_reported(detail, "session_id", verb="create") or "")
         return _emit(
             args,
-            {"ok": bool(detail.get("session_id")), **detail},
+            {"ok": bool(minted), **detail},
             [
-                f"session: {detail.get('session_id') or '-'}",
+                f"session: {minted or '-'}",
                 f"admitted: {bool(detail.get('admitted'))}",
                 str(detail.get("detail") or ""),
             ],
@@ -1477,7 +1579,12 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             "peer_required",
             "name a device with --peer, or ask every device with --all-peers",
         )
-    payload = _relay_call("peer_session_rows", timeout=_listing_timeout()) or {}
+    # The merge is a LISTING, so it is the one verb here whose success does not
+    # rest on a single reported word: what it must not do is dress an unreachable
+    # relay up as "no sessions" (Q-R4-1), which is why this call refuses instead
+    # of falling through to an empty set. When the relay IS up, the peer block per
+    # row is what labels an empty answer (``reachable`` + ``reason``).
+    payload = _relay_answer("peer_session_rows", timeout=_listing_timeout())
     remote = [row for row in (payload.get("sessions") or []) if isinstance(row, dict)]
     if peer:
         wanted = peer.lower()
@@ -1553,19 +1660,25 @@ def _cmd_peers(args: argparse.Namespace) -> int:
     # slack rather than the 5s default: with the default, one unreachable member
     # would make the control call time out and this verb would report "the relay is
     # not running" about a relay that is running perfectly well.
-    live = _relay_call("net_peer_ls", timeout=_listing_timeout())
+    # ``allow_no_answer`` because THIS verb is the family's own emitter: it ships the
+    # refusal itself, below, and keeping that branch here (rather than letting
+    # ``_relay_call`` raise) is what keeps its documented payload — ``code`` +
+    # ``message`` + an empty ``peers`` — stable for the direct-call tests.
+    live = _relay_call("net_peer_ls", timeout=_listing_timeout(), allow_no_answer=True)
     if live is None:
         # ONE REFUSAL SHAPE FOR THE WHOLE FAMILY: ``code`` + ``message``, the same
         # keys every other `lop network` refusal uses and the only shape an agent
         # path has to parse. This one used to answer with a bare ``error`` key, so
         # a consumer that read ``code`` saw nothing at all (QA round 1, F-6). The
         # sentence distinguishes a stopped relay from a wedged one (Q-R3-4).
+        # The CODE is the shared constant, so the whole family — this branch and
+        # every ``_relay_call`` refusal — branches on one string.
         message = _relay_unavailable_message()
         return _emit(
             args,
             {
                 "ok": False,
-                "code": "relay_unavailable",
+                "code": CODE_RELAY_UNAVAILABLE,
                 "message": message,
                 "peers": [],
             },
@@ -1590,7 +1703,7 @@ def _cmd_peers(args: argparse.Namespace) -> int:
 
 def _cmd_disconnect(args: argparse.Namespace) -> int:
     record = _resolve(args.network)
-    live = _relay_call("net_disconnect", network=record.network_id)
+    live = _relay_call("net_disconnect", network=record.network_id, allow_no_answer=True)
     if live is None:
         from local_operator.network import store
         from local_operator.network.relay import set_trust
@@ -1613,7 +1726,7 @@ def _cmd_disconnect(args: argparse.Namespace) -> int:
 
 def _cmd_panic(args: argparse.Namespace) -> int:
     record = _resolve(args.network)
-    live = _relay_call("net_panic_local", network=record.network_id)
+    live = _relay_call("net_panic_local", network=record.network_id, allow_no_answer=True)
     if live is None:
         from local_operator.network import store
         from local_operator.network.relay import panic, set_trust
@@ -1658,7 +1771,9 @@ def _cmd_panic(args: argparse.Namespace) -> int:
 def _cmd_trust(args: argparse.Namespace) -> int:
     target = "active" if args.active else "untrusted" if args.untrusted else "active"
     record = _resolve(args.network)
-    live = _relay_call("net_trust_local", network=record.network_id, trust=target)
+    live = _relay_call(
+        "net_trust_local", network=record.network_id, trust=target, allow_no_answer=True
+    )
     applied_locally = live is None
     if live is None:
         from local_operator.network.relay import set_trust
@@ -1819,6 +1934,7 @@ def _cmd_confirm(args: argparse.Namespace) -> int:
         matched=admit,
         reason="" if admit else "declined",
         answered_by="harness" if args.sas_stdin else "human",
+        allow_no_answer=True,
     )
     if live is None:
         # No relay running: the pairing loop cannot be waiting either, so this
@@ -1862,7 +1978,7 @@ def _pending_pairings() -> list[dict[str, Any]]:
     """The parked pairings: the relay's view when it runs, the files otherwise."""
     from local_operator.network import store
 
-    live = _relay_call("net_pair_pending")
+    live = _relay_call("net_pair_pending", allow_no_answer=True)
     rows = live.get("value") if isinstance(live, dict) else None
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
@@ -1923,7 +2039,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     work, the fallback below answered instead, and the operator read a relay
     state from the one path that could not check it (QA round 2, Q-R2-6).
     """
-    live = _relay_call("net_doctor", peer=args.peer, timeout=_listing_timeout())
+    live = _relay_call(
+        "net_doctor", peer=args.peer, timeout=_listing_timeout(), allow_no_answer=True
+    )
     payload = live if live is not None else _doctor_locally(args)
     checks = list(payload.get("checks") or [])
     lines = []
