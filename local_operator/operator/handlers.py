@@ -23,6 +23,8 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any
 
 from local_operator.operator import (
     LEVEL_ANCHOR_UNPINNED,
@@ -55,7 +57,11 @@ def dispatch(args: argparse.Namespace) -> int:
         return _status()
     if command == "sign":
         return _sign(args)
-    print("usage: lop operator {init|trust|install|sign|status}", file=sys.stderr)
+    if command == "devices":
+        from local_operator.operator.pair_handlers import describe_devices
+
+        return describe_devices(args)
+    print("usage: lop operator {init|trust|install|sign|status|devices}", file=sys.stderr)
     return 2
 
 
@@ -75,47 +81,37 @@ def _is_privileged() -> bool:
     return bool(geteuid is not None and geteuid() == 0)
 
 
-def _init(args: argparse.Namespace) -> int:
-    root = config_dir()
-    try:
-        handle = create_key(config_root=root, preference=args.backend)
-    except KeyBackendError as exc:
-        print(f"could not create the operator key: {exc}", file=sys.stderr)
-        return 1
-    anchor = anchor_for_handle(handle, label=args.label)
+def stage_anchor(root: Path, anchor: Any) -> Path:
+    """Write an anchor statement to the staging path, 0600 under a 0700 directory.
+
+    Split out of ``init`` (and reused by ``devices --revoke``) so the STAGING
+    half of onboarding exists once. Both callers produce a statement the one
+    privileged install step then moves, which is what keeps "root-owned or
+    nothing" true for every anchor write rather than only for the first one.
+    """
     staged = staging_path(root)
     staged.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(staged.parent, 0o700)
     staged.write_bytes(anchor_bytes(anchor))
     os.chmod(staged, 0o600)
-
-    print(f"operator key created in the {handle.backend} store")
-    print(f"  key id : {handle.key_id}")
-    print(f"  level  : {describe_level(handle)}")
-    print(f"  staged : {staged}")
-    print()
-    print("The runtime trusts ONLY the root-owned anchor. Install it with:")
-    print("  lop operator install")
-    if handle.backend == "file-only":
-        print()
-        print(
-            "WARNING: this host has no presence store, so loosening is authorised by a "
-            "key any process running as you can read. That is reported as a lower level "
-            "and is NOT a boundary.",
-            file=sys.stderr,
-        )
-    return 0
+    return staged
 
 
-def _install(args: argparse.Namespace) -> int:
-    root = config_dir()
+def install_anchor(root: Path, *, print_only: bool = False) -> int:
+    """The ONE privileged step: move the staged anchor to where the runtime reads it.
+
+    Returns a process exit code rather than raising, because every caller is a
+    CLI verb whose contract is an exit status. ``print_only`` is what
+    ``lop operator install --print-only`` prints, unchanged from when this lived
+    inline in that verb.
+    """
     staged = staging_path(root)
     target = anchor_path()
     if not staged.exists():
         print(f"nothing staged at {staged}; run `lop operator init` first", file=sys.stderr)
         return 1
     command = install_commands(staged, target)
-    if args.print_only:
+    if print_only:
         print(" && ".join(" ".join(argv) for argv in command))
         return 0
     if _is_privileged():
@@ -145,6 +141,38 @@ def _install(args: argparse.Namespace) -> int:
         print(f"  the runtime will NOT trust it: {loaded.reason}", file=sys.stderr)
         return 1
     return 0
+
+
+def _init(args: argparse.Namespace) -> int:
+    root = config_dir()
+    try:
+        handle = create_key(config_root=root, preference=args.backend)
+    except KeyBackendError as exc:
+        print(f"could not create the operator key: {exc}", file=sys.stderr)
+        return 1
+    anchor = anchor_for_handle(handle, label=args.label)
+    staged = stage_anchor(root, anchor)
+
+    print(f"operator key created in the {handle.backend} store")
+    print(f"  key id : {handle.key_id}")
+    print(f"  level  : {describe_level(handle)}")
+    print(f"  staged : {staged}")
+    print()
+    print("The runtime trusts ONLY the root-owned anchor. Install it with:")
+    print("  lop operator install")
+    if handle.backend == "file-only":
+        print()
+        print(
+            "WARNING: this host has no presence store, so loosening is authorised by a "
+            "key any process running as you can read. That is reported as a lower level "
+            "and is NOT a boundary.",
+            file=sys.stderr,
+        )
+    return 0
+
+
+def _install(args: argparse.Namespace) -> int:
+    return install_anchor(config_dir(), print_only=bool(args.print_only))
 
 
 def _trust() -> int:
@@ -188,7 +216,25 @@ def _status() -> int:
         print("loosening: refused — a file sits where the anchor belongs and is not root-owned")
     elif report["level"] == LEVEL_SPAWN_ONLY:
         print("loosening: only the process that started the session may loosen it")
+    _print_paired_devices()
     return 0
+
+
+def _print_paired_devices() -> None:
+    """The paired phones, from the same store ``lop operator devices`` reads.
+
+    On ``status`` because the level ABOVE says how strong authority is on this
+    host and says nothing about WHICH devices hold it. An operator deciding
+    whether to revoke a phone should not have to know a second verb exists.
+    """
+    from local_operator.operator.devices import list_devices
+
+    paired = list_devices(config_dir())
+    if not paired:
+        return
+    print(f"paired devices         : {len(paired)}")
+    for device in paired:
+        print(f"  - {device.device_id}  {device.name or '(unnamed)'}")
 
 
 def _sign(args: argparse.Namespace) -> int:
