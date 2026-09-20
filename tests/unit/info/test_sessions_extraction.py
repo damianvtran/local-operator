@@ -168,6 +168,25 @@ EXPECTED = [
         # BYTE of every row for every other cell in this file — the drain has
         # its own cells below.
         "leaving": "",
+        # -- THE MESH'S FIVE KEYS, appended last for the same reason every key
+        # above was appended: the published order is a contract and this
+        # EXTENDS it. Present on EVERY row so no consumer branches on key
+        # existence, and on a device with no network they carry the LOCAL
+        # answer rather than being absent (mesh-session-mobility.md §9.3).
+        "locality": "local",
+        "peer": None,
+        # ``mode: "local"`` rather than absent: the field is always present so a
+        # reader can tell "local" from "written by a build that does not know
+        # about the mesh" (§5.1).
+        "placement": {
+            "mode": "local",
+            "network_id": "",
+            "home_device": "",
+            "policy": "pinned",
+            "stamp_revision": 0,
+        },
+        "origin": None,
+        "last_synced_at": None,
     },
     {
         "state": "live",
@@ -198,6 +217,25 @@ EXPECTED = [
         "completion_reason": "",
         # NOT LEAVING — present on every row so the published shape is stable.
         "leaving": "",
+        # -- THE MESH'S FIVE KEYS, appended last for the same reason every key
+        # above was appended: the published order is a contract and this
+        # EXTENDS it. Present on EVERY row so no consumer branches on key
+        # existence, and on a device with no network they carry the LOCAL
+        # answer rather than being absent (mesh-session-mobility.md §9.3).
+        "locality": "local",
+        "peer": None,
+        # ``mode: "local"`` rather than absent: the field is always present so a
+        # reader can tell "local" from "written by a build that does not know
+        # about the mesh" (§5.1).
+        "placement": {
+            "mode": "local",
+            "network_id": "",
+            "home_device": "",
+            "policy": "pinned",
+            "stamp_revision": 0,
+        },
+        "origin": None,
+        "last_synced_at": None,
     },
     {
         "state": "stale",
@@ -233,6 +271,25 @@ EXPECTED = [
         # default: a record written by an older runtime lists as "not leaving"
         # rather than raising.
         "leaving": "",
+        # -- THE MESH'S FIVE KEYS, appended last for the same reason every key
+        # above was appended: the published order is a contract and this
+        # EXTENDS it. Present on EVERY row so no consumer branches on key
+        # existence, and on a device with no network they carry the LOCAL
+        # answer rather than being absent (mesh-session-mobility.md §9.3).
+        "locality": "local",
+        "peer": None,
+        # ``mode: "local"`` rather than absent: the field is always present so a
+        # reader can tell "local" from "written by a build that does not know
+        # about the mesh" (§5.1).
+        "placement": {
+            "mode": "local",
+            "network_id": "",
+            "home_device": "",
+            "policy": "pinned",
+            "stamp_revision": 0,
+        },
+        "origin": None,
+        "last_synced_at": None,
     },
 ]
 
@@ -457,7 +514,7 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     rows = session_rows()
     assert rows[0]["leaving"] == LEAVING_ON_SIGNAL
     assert [row["leaving"] for row in rows[1:]] == ["", ""]
-    assert "leaving" in rows[0] and list(rows[0])[-1] == "leaving"
+    assert "leaving" in rows[0] and list(rows[0])[-1] == "last_synced_at"
 
     assert (
         cli.sessions_command(

@@ -526,6 +526,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_secret_parser(subparsers)
 
+    # Mesh networks (design: docs/design/mesh-network.md). Same stdlib-only
+    # registration rule as tunnels/secrets: the peer listener, the crypto and the
+    # config store are imported by the verb that needs them, so `lop --version` and
+    # `lop network --help` pay for none of it. `parents=[parent_parser]` keeps the
+    # position-independent globals (--debug, --agent) working on these subcommands.
+    from local_operator.network.cli import add_parser as add_network_parser
+
+    add_network_parser(subparsers, parent_parser)
+
     # QwenCloud console session cookie: the credential the personal Token Plan
     # usage window needs and no login flow can mint (a browser session cookie
     # cannot be refreshed headlessly). stdlib-only registration, same rule.
@@ -679,6 +688,20 @@ def build_cli_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="with --all, cap the stored rows listed; positive (default: 50)",
+    )
+    # THE MESH'S TWO LISTING FLAGS (mesh-session-mobility.md §9.3). Both default
+    # off, so a client that does not ask gets exactly today's answer — which is
+    # what keeps `lop sessions --json` byte-identical on a device with no network.
+    sessions_parser.add_argument(
+        "--peer",
+        default=None,
+        metavar="DEVICE",
+        help="list the sessions held by one peer device (its own catalogue, over the mesh)",
+    )
+    sessions_parser.add_argument(
+        "--all-peers",
+        action="store_true",
+        help="also list the sessions other devices in this network are holding",
     )
     # `lop sessions cleanup`: the explicit, previewable way to run the session
     # cleanup policy. An optional sub-subcommand (dest defaults to None) so
@@ -3519,6 +3542,76 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+#: The keys a REMOTE row is filled out to, so the merged list has ONE shape.
+#: Taken from the local builder's published set rather than invented here: a
+#: consumer that reads ``lop sessions --json`` with ``--all-peers`` must not have
+#: to branch per row, and a missing key on the remote half is exactly the "absent
+#: is not a claim" trap the desktop row model documents.
+_REMOTE_ROW_FILL: dict[str, Any] = {
+    "rss_bytes": None,
+    "footprint_bytes": None,
+    "uptime_s": None,
+    "heartbeat_age_s": None,
+    "version": "",
+    "source_ref": "",
+    "subagents_running": None,
+    "subagents_queued": None,
+    "last_activity_s": None,
+    "completion_kind": "",
+    "completion_reason": "",
+    "leaving": "",
+}
+
+
+def _remote_session_rows(*, peer: str = "", all_peers: bool = False) -> list[dict[str, Any]] | None:
+    """Sessions held by other devices, read through this device's relay.
+
+    Asked of the RELAY because that is the only process holding peer links and
+    the only one that speaks the mesh. ``None`` means "I could not ask, or nobody
+    by that name answered" — distinct from ``[]``, which is "asked, and it holds
+    nothing": the first is why the caller reports a sentence and a non-zero exit,
+    and collapsing them would make an unreachable device look empty.
+
+    NO NETWORK, NO RELAY, NO ROWS. Either may be absent for reasons that are not
+    errors (never joined, or the relay is not running), so both degrade to an
+    empty answer for ``--all-peers`` — while an explicitly named ``--peer`` gets
+    ``None`` so the operator is told instead of shown an empty table.
+    """
+    try:
+        from local_operator.network import relay, store
+    except Exception:  # noqa: BLE001 — a mesh that cannot load is no mesh
+        return None if peer else []
+    try:
+        record = store.find_own_relay()
+        if record is None:
+            return None if peer else []
+        reply = relay.control_request(record, "peer_session_rows")
+        if reply is None or reply.get("op") != "ack":
+            return None if peer else []
+        payload = reply.get("detail") or {}
+        remote = list(payload.get("sessions") or [])
+        if peer:
+            wanted = str(peer).lower()
+            matches = [
+                item
+                for item in remote
+                if str((item.get("peer") or {}).get("device_id") or "").lower() == wanted
+                or str((item.get("peer") or {}).get("name") or "").lower() == wanted
+            ]
+            if not matches:
+                peers = {
+                    str((block or {}).get("name") or "").lower(): device_id
+                    for device_id, block in (payload.get("peers") or {}).items()
+                }
+                if wanted not in peers:
+                    return None
+                return []
+            remote = matches
+        return [{**_REMOTE_ROW_FILL, **dict(item)} for item in remote if isinstance(item, dict)]
+    except Exception:  # noqa: BLE001 — a broken mesh must not break a listing
+        return None if peer else []
+
+
 def sessions_command(args: argparse.Namespace) -> int:
     """``lop sessions`` — list active sessions and their resource usage.
 
@@ -3548,6 +3641,28 @@ def sessions_command(args: argparse.Namespace) -> int:
     # in full, and a stored cap means nothing without ``--all`` asking for them.
     # ``None`` lets ``collect`` apply its own stored cap.
     rows = session_rows(config_dir(), include_stored=args.all, stored_limit=args.limit)
+
+    # THE FEDERATED LISTING (§9.1/§9.3). Both flags default off, so nothing below
+    # runs and the local listing is byte-identical to what it was before the mesh
+    # existed — the zero-peer regression at the CLI boundary. ``--peer`` names ONE
+    # device and lists ITS catalogue (the question "what is build-box running?")
+    # rather than merging, because mixing local rows into that answer would hide
+    # the device the question was about.
+    remote_rows: list[dict[str, Any]] = []
+    peer_name = getattr(args, "peer", None)
+    if peer_name or getattr(args, "all_peers", False):
+        remote_rows = _remote_session_rows(
+            peer=str(peer_name or ""), all_peers=bool(args.all_peers)
+        )
+        if peer_name and remote_rows is None:
+            print(
+                f"no device called {peer_name!r} is reachable over the mesh from here",
+                file=sys.stderr,
+            )
+            return 1
+        if peer_name:
+            rows = []
+        rows = rows + (remote_rows or [])
 
     if args.json:
         print(_json.dumps(rows, indent=2))
@@ -3601,6 +3716,22 @@ def sessions_command(args: argparse.Namespace) -> int:
     # the turn the drain is finishing (U1/U2, PR #1141).
     leaving = {row["session_id"]: (row.get("leaving") or "") for row in rows}
     show_leaving = any(leaving.values())
+    # WHICH DEVICE holds a row, present only when some row is remote. Without it
+    # a merged listing is ambiguous in the one way that matters: the PID column
+    # would name a process on another machine with nothing saying so.
+    peers = {
+        row["session_id"]: (
+            "local"
+            if str(row.get("locality") or "local") != "remote"
+            else str(
+                (row.get("peer") or {}).get("name")
+                or (row.get("peer") or {}).get("device_id")
+                or "?"
+            )
+        )
+        for row in rows
+    }
+    show_peer = any(str(row.get("locality") or "") == "remote" for row in rows)
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3613,6 +3744,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'WHY':<{WHY_COLUMN_WIDTH}}"
     if show_leaving:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
+    if show_peer:
+        header += f" {'DEVICE':<{PEER_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3631,6 +3764,16 @@ def sessions_command(args: argparse.Namespace) -> int:
         needs = _fit_cell(row.get("pending") or "", NEEDS_COLUMN_WIDTH)
         stored = row["state"] == "stored"
         state = _state_cell(row["state"])
+        # A remote row has no local uptime or heartbeat: those are facts of a
+        # process on ANOTHER machine, and the peer's catalogue does not carry
+        # them. They read "—" beside the DEVICE column that says where the row's
+        # process actually is, rather than a fabricated zero.
+        uptime = "—" if stored or row["uptime_s"] is None else _format_duration(row["uptime_s"])
+        heartbeat = (
+            "—"
+            if stored or row["heartbeat_age_s"] is None
+            else _format_duration(row["heartbeat_age_s"])
+        )
         line = (
             f"{state:<{STATE_COLUMN_WIDTH}} "
             f"{('—' if stored else str(row['pid'])):>7} "
@@ -3638,8 +3781,12 @@ def sessions_command(args: argparse.Namespace) -> int:
             f"{_pad_cell(name, CONVERSATION_COLUMN_WIDTH)} "
             f"{_pad_cell(model, MODEL_COLUMN_WIDTH)} {_format_bytes(row['rss_bytes']):>8} "
             f"{_format_bytes(row['footprint_bytes']):>9} "
-            f"{('—' if stored else _format_duration(row['uptime_s'])):>8} "
-            f"{('—' if stored else _format_duration(row['heartbeat_age_s'])):>7}"
+            # A remote row has no local uptime or heartbeat: those are facts of
+            # a process on ANOTHER machine, and the peer's catalogue does not
+            # carry them. They read "—" beside the DEVICE column that says where
+            # the row's process actually is, rather than a fabricated zero.
+            f"{uptime:>8} "
+            f"{heartbeat:>7}"
         )
         if show_stored:
             stamp = row["last_activity_s"]
@@ -3657,6 +3804,12 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
+        if show_peer:
+            # The device name is authored by ANOTHER machine (a member row's
+            # ``name``), so it is fitted by cells like the other foreign text on
+            # this line rather than sliced by characters.
+            held = _fit_cell(peers.get(row["session_id"]) or "?", PEER_COLUMN_WIDTH)
+            line += f" {_pad_cell(held, PEER_COLUMN_WIDTH)}"
         print(line)
     return 0
 
@@ -4981,6 +5134,12 @@ LEAVING_COLUMN_WIDTH = 51
 NEEDS_COLUMN_WIDTH = 8
 CONVERSATION_COLUMN_WIDTH = 24
 MODEL_COLUMN_WIDTH = 24
+
+#: Width of the PEER column — the device a remote row belongs to. On the
+#: LEAVING/WHY precedent: the column appears ONLY when some row is remote,
+#: so a local-only listing is re-flowed by nothing (mesh §9.2's budget rule
+#: applied to a terminal).
+PEER_COLUMN_WIDTH = 18
 
 
 #: Width of `wake status`'s label column ("supervisor:  ", "scheduled:   ").
@@ -7868,6 +8027,10 @@ def main() -> int:
             from local_operator.secrets.cli import main as secret_main
 
             return secret_main(args)
+        elif args.subcommand == "network":
+            from local_operator.network.cli import main as network_main
+
+            return network_main(args)
         elif args.subcommand == "qwencloud-ticket":
             return qwencloud_ticket_command(args)
         elif args.subcommand == "browser":

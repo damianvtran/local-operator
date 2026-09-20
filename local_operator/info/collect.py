@@ -615,6 +615,8 @@ def session_rows(
     a stable shape with one nullable field. The extraction test asserts exactly
     this order, so the expectation is updated in the same change.
     """
+    from local_operator.session.placement import local_placement
+
     info = collect_sessions(root, include_stored=include_stored, stored_limit=stored_limit)
     return [
         {
@@ -673,9 +675,48 @@ def session_rows(
             # root per session. ``lop sessions`` also prints it (its own LEAVING
             # column, present only when some row carries one).
             "leaving": line.leaving,
+            # -- the mesh's five keys, appended for the same reason every key
+            # above was: the established order is a published contract and this
+            # EXTENDS it (mesh-session-mobility.md §9.3). They are present on
+            # EVERY row, local or remote, so a consumer never branches on key
+            # existence — and on a device with no network they are the local
+            # answer rather than an absent one.
+            #
+            # ``locality``/``peer`` are the transport's two required fields:
+            # ``peer`` is ``None`` on a local row and the peer block on a remote
+            # one, which is what lets a client group by device without ever
+            # inferring remoteness from an id's shape.
+            "locality": "local",
+            "peer": None,
+            # From the session's own ``mesh.json``, and the LOCAL default
+            # (``mode: "local"``) when there is none: the field is always
+            # present so a reader can tell "local" from "written by a build
+            # that does not know about the mesh" (§5.1).
+            "placement": (
+                stamp.placement.to_json() if stamp is not None else local_placement().to_json()
+            ),
+            "origin": (dict(stamp.origin) if stamp is not None and stamp.origin else None),
+            # R22's visible half: a ``--keep`` copy's last pull. Never set by a
+            # device that owns the session, which is why it is ``None`` here —
+            # this listing is the store's own rows.
+            "last_synced_at": None,
         }
-        for line in info.lines
+        for line, stamp in zip(info.lines, _stamps(info.lines, root), strict=True)
     ]
+
+
+def _stamps(lines: Sequence[Any], root: Path | None) -> list[Any]:
+    """Each row's ownership stamp, or ``None`` — one small file per row.
+
+    Read here rather than carried on the row because the row is the CONTRACT and
+    the stamp is durable state: a session with no stamp must list exactly as it
+    did before the mesh existed, and ``None`` is how this function says so.
+    """
+    from local_operator.session.placement import read_stamp
+
+    if root is None:
+        return [None for _ in lines]
+    return [read_stamp(root, str(getattr(line, "session_id", "") or "")) for line in lines]
 
 
 def build_subagent_tree(

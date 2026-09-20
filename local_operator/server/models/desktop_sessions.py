@@ -42,6 +42,30 @@ class SessionRow(BaseModel):
     #: The renderer's ``SessionCatalogueRow`` is this shape's hand-written
     #: mirror, so this key is a change to a second file as well as this one.
     pinned: bool
+    #: -- THE MESH'S FIVE KEYS (mesh-session-mobility.md §9.2). Additive and
+    #: defaulted, so every existing client reads exactly what it read before;
+    #: they are DECLARED here rather than left to ``extra="allow"`` so the shape
+    #: a renderer can rely on is written down where the rest of it is.
+    #:
+    #: ``locality`` and ``peer`` are the transport's two: ``"local"`` with
+    #: ``peer: null`` for a row on this device, ``"remote"`` with the peer block
+    #: for one another device holds. A client groups by ``peer.name`` and treats
+    #: an absent ``peer`` as the local group, which is why it is always present
+    #: with both values here rather than omitted for the local case.
+    locality: Literal["local", "remote"] = "local"
+    peer: dict[str, Any] | None = None
+    #: Where the session runs (``local``/``peer``/``pool``) and the policy that
+    #: governs it, from the session's own ``mesh.json``. Always present for a row
+    #: this build writes, so a reader can tell "local" from "written by a build
+    #: that does not know about the mesh" (§5.1).
+    placement: dict[str, Any] | None = None
+    #: How it got here: ``moved`` (id preserved, ownership transferred) or
+    #: ``fork`` (a ``--keep`` copy). ``None`` is no provenance claim, and the row
+    #: then shows no "copy of…" subtitle.
+    origin: dict[str, Any] | None = None
+    #: R22's visible half: when this device last pulled a ``--keep`` copy it does
+    #: not own. ``None`` on a row this device holds.
+    last_synced_at: float | None = None
 
 
 class SessionList(BaseModel):

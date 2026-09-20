@@ -48,6 +48,16 @@ def _consumer_defaults() -> dict[str, object]:
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
     )
+
+    # The mesh audit log's three bounds, taken from the module that READS them:
+    # `AuditLog.__init__` resolves an absent key against exactly these constants, so
+    # pinning them here is what makes a registry default that drifts a red test
+    # rather than a page that lies about what the writer will do.
+    from local_operator.network.audit import (
+        AUDIT_GENERATIONS,
+        AUDIT_MAX_AGE_DAYS,
+        AUDIT_MAX_BYTES,
+    )
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -118,6 +128,9 @@ def _consumer_defaults() -> dict[str, object]:
         "session.cleanup.max_total_bytes": DEFAULT_MAX_TOTAL_BYTES,
         "session.cleanup.remove_empty": DEFAULT_REMOVE_EMPTY,
         "subagents.max_running": DEFAULT_MAX_RUNNING_JOBS,
+        "network.audit.max_bytes": AUDIT_MAX_BYTES,
+        "network.audit.generations": AUDIT_GENERATIONS,
+        "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
         # The reader's own fallback, which is also what every unrecognised
         # shape resolves to — so the page cannot advertise a default the
         # delegating model's tier picker disagrees with.

@@ -50,6 +50,11 @@ from local_operator.session.frontend_state import (
     sync_wire_payload,
 )
 from local_operator.session.page_cache import load_transcript_page
+
+# The ownership stamp and the local default: read once per row to publish the
+# mesh's placement fields, and imported at module level because this module
+# already carries the whole desktop bridge (mesh-session-mobility.md §9.2).
+from local_operator.session.placement import local_placement, read_stamp
 from local_operator.session.restored_rows import record_field, roster_records
 from local_operator.session.retention import DESKTOP_MARKER_NAME
 from local_operator.session.runtime import registry
@@ -3173,6 +3178,11 @@ class DesktopSessions:
             for entry in (*page_entries, *extra_entries):
                 row = entry.row._asdict()
                 stored = read_session_attachment(self.root / "sessions" / entry.id)
+                # Read once per row: the ownership stamp is the durable carrier of
+                # placement, and its ABSENCE is the statement "no mesh has ever
+                # governed this session" — which is the value the row publishes
+                # rather than a guess (§1.2).
+                stamp = read_stamp(self.root, entry.id)
                 row.update(
                     {
                         "active": entry.active,
@@ -3193,6 +3203,25 @@ class DesktopSessions:
                         # client deriving the listing-level ``degraded`` should
                         # not have to handle both.
                         "degraded": list(entry.row.degraded),
+                        # -- the mesh's fields, from the session's own stamp
+                        # (mesh-session-mobility.md §9.2). A device with no network
+                        # writes the LOCAL answer rather than omitting them, so
+                        # the shape is stable and a renderer never branches on key
+                        # existence. The peer half of the federation is the
+                        # transport's ``include_peers`` (§9.5); the KEYS are this
+                        # document's, and they are here so a remote row needs no
+                        # second shape when that lands.
+                        "locality": "local",
+                        "peer": None,
+                        "placement": (
+                            stamp.placement.to_json()
+                            if stamp is not None
+                            else local_placement().to_json()
+                        ),
+                        "origin": (
+                            dict(stamp.origin) if stamp is not None and stamp.origin else None
+                        ),
+                        "last_synced_at": None,
                     }
                 )
                 if attention_degraded and DECORATION_ATTENTION not in row["degraded"]:

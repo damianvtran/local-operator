@@ -735,6 +735,20 @@ class SessionRecord:
     started_at: float = field(default_factory=time.time)
     heartbeat_at: float = field(default_factory=time.time)
     capabilities: list[str] = field(default_factory=list)
+    #: Where this session's runtime lives — the wire form of
+    #: ``session/placement.py``'s ``SessionPlacement.to_json()``, i.e. a plain
+    #: dict. A DICT rather than that dataclass deliberately: ``to_json`` is
+    #: ``asdict`` and ``from_json`` filters against ``__dataclass_fields__``, so a
+    #: dataclass field would come back as a dict from a peer's record and the
+    #: field's type would change shape on one round trip.
+    #:
+    #: ADDITIVE and optional, on ``PROTOCOL_VERSION``'s own terms (below): an older
+    #: reader drops the key and behaves exactly as it did, and ``None``/absent IS
+    #: the local case and the older-build case. A build that knows about the mesh
+    #: ALWAYS writes it — ``{"mode": "local", ...}`` for an ordinary session — so
+    #: a reader can tell "local" from "this runtime is too old to know"
+    #: (``mesh-session-mobility.md`` §5.1).
+    placement: dict[str, Any] | None = None
 
     # -- live state ---------------------------------------------------------
     # Purely ADDITIVE, and PROTOCOL_VERSION deliberately does NOT move for
