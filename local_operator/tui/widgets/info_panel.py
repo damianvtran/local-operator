@@ -824,6 +824,20 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             glyph, ink = WEDGED_MARKER, "warning"
         elif line.is_self:
             glyph, ink = ATTACHED_MARKER, "muted"
+        elif line.busy or line.leaving:
+            # A draining session IS working (``busy`` is true of it), so it keeps
+            # the working ink; what changes is the words beside it, above.
+            #
+            # THIS BRANCH PRECEDES THE FAILED UPDATE BELOW, deliberately (agent review
+            # round 3, NIT). Both are true of a row that failed an update and has since
+            # latched a drain — ``update_failed`` is cleared only by the next window, so
+            # the two do co-occur — and before this ordering the failure arm came first,
+            # which took the accent marker off a row that is leaving and left the drain
+            # fact inked by nothing. One ink per row means one of the two has to yield,
+            # and the drain wins because it is the fact that is still true of the
+            # process: the abandoned move has already been reported by the time the
+            # reader sees this row, and the words beside it still name the departure.
+            glyph, ink = IDLE_MARKER, "accent"
         elif phase == UPDATE_FAILED:
             # A FAILED UPDATE IS THE ONE ROW STATE THE OPERATOR IS EXPECTED TO ACT ON,
             # and it used to wear the idle row's exact ink set — same marker, same meta
@@ -843,10 +857,6 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             # reporting. The queued window deliberately takes nothing, because it is a
             # calm, self-resolving fact.
             glyph, ink = IDLE_MARKER, "warning"
-        elif line.busy or line.leaving:
-            # A draining session IS working (``busy`` is true of it), so it keeps
-            # the working ink; what changes is the words beside it, above.
-            glyph, ink = IDLE_MARKER, "accent"
         else:
             glyph, ink = IDLE_MARKER, "muted"
         # Built widest-first and shed WHOLE ITEMS from the right, because the
