@@ -42,6 +42,8 @@ from typing import Any
 
 import pytest
 
+from tests.e2e.harness import NO_NOTIFY_ENV
+
 pytestmark = pytest.mark.e2e
 
 #: How long the wrapped candidate sleeps before it execs the real runtime entry
@@ -125,6 +127,10 @@ def slow_runtime_child(monkeypatch: pytest.MonkeyPatch) -> list[subprocess.Popen
         model_selection_override: bool = False,
     ) -> subprocess.Popen[bytes]:
         env = dict(os.environ)
+        # A real runtime child (the wrapper execs the production entry point),
+        # and the spec it runs is the test hosting unless a cell overrides it —
+        # so the gate is re-asserted here rather than only inherited.
+        env.update(NO_NOTIFY_ENV)
         # Production's routing environment, built the same way: the wrapper
         # execs the real entry point, which reads these.
         env["LOP_MOBILE_CHILD_CWD"] = cwd

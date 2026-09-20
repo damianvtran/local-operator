@@ -35,6 +35,17 @@ export enum ErrorCode {
   OWNER_REFUSED = 'owner_refused',
   EXTENSION_UNRESPONSIVE = 'extension_unresponsive',
   CAPABILITY_UNSUPPORTED = 'capability_unsupported',
+  UNSUPPORTED_METHOD = 'unsupported_method',
+  SURFACE_UNAVAILABLE = 'surface_unavailable',
+  SURFACE_NOT_OWNED = 'surface_not_owned',
+  PROCESS_EXITED = 'process_exited',
+  INPUT_QUEUE_FULL = 'input_queue_full',
+  UNKNOWN_KEY = 'unknown_key',
+  SECURE_INPUT_ACTIVE = 'secure_input_active',
+  CONSOLE_UNAVAILABLE = 'console_unavailable',
+  INVALID_GRID = 'invalid_grid',
+  CONSOLE_CAPTURE_FULL = 'console_capture_full',
+  CAPTURE_UNAVAILABLE = 'capture_unavailable',
   INTERNAL = 'internal',
 }
 

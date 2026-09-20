@@ -196,6 +196,61 @@ BUDGET_SCRIPTS = frozenset(
 #: `BUDGET_SCRIPTS` already uses for `context-budget`.
 CLI_SANITY_SCRIPTS = frozenset({"scripts/check_streaming_contract.py"})
 
+#: What the two `xplat-probe-*` jobs read from `scripts/`. The battery
+#: (`scripts/xplat_probe.py`) is stdlib-only and self-driving, so `scripts/**`
+#: as a whole is deliberately NOT an input — the same choice `CLI_SANITY_SCRIPTS`
+#: records, for the same reason: a `shard_tests.py` change cannot alter a single
+#: probe, while widening to every script would put a Windows runner and a full
+#: battery on every scripts-only diff.
+#:
+#: The last three are not helpers beside the probe, they are its own reads:
+#: `--driver tui` imports `scripts.probe_isolation` and
+#: `scripts.visual_capture` in the child that boots the app, so a change to
+#: either changes what the `tui.boot` probe measures. `xplat_linux_matrix.sh` is
+#: the rig the extra DISTROS (Mint, and any other image) are read through — the
+#: jobs do not execute it, but it is the Linux leg's own tooling, so a change to
+#: it belongs on the diff that also exercises the legs.
+XPLAT_SCRIPT_INPUTS = frozenset(
+    {
+        "scripts/xplat_probe.py",
+        "scripts/xplat_report.py",
+        "scripts/xplat_linux_matrix.sh",
+        "scripts/probe_isolation.py",
+        "scripts/visual_capture.py",
+    }
+)
+
+#: `scripts/xplat/**` is the container rig the extra Linux distros are built
+#: from (`Dockerfile.probe` and its dockerignore). A prefix rather than a name
+#: list: the rig grows files (a second image, a helper script) and a name list
+#: would silently stop covering them.
+XPLAT_SCRIPT_PREFIXES = ("scripts/xplat/",)
+
+#: The probe's `tui.boot` step boots the REAL app against the fake session the
+#: test suite owns — `--driver tui` does `from tests.unit.tui.test_app_pilot
+#: import FakeSession, _factory` — so a diff confined to `tests/**` must NOT
+#: blanket-skip these jobs. That is the same trap `WINDOWS_TEST_PATHS` records,
+#: in the other direction (there the job runs the test; here it imports it).
+#: The `__init__.py` markers are named because the dotted import needs the
+#: package chain to exist, not because the probe reads them itself.
+#:
+#: `conftest.py` is an OVER-APPROXIMATION and is declared as one: the battery is
+#: not a pytest run, so nothing imports it. It is listed because the test package
+#: is a live input to this job and the pytest bootstrap is the one path a reader
+#: would otherwise have to reason about case by case; the cost of the false
+#: positive is one battery run, and the cost of the false negative is a leg that
+#: never runs on the diff that broke it. Anything that can show a conftest change
+#: cannot alter a probe reading may drop it.
+XPLAT_TEST_INPUTS = frozenset(
+    {
+        "tests/unit/tui/test_app_pilot.py",
+        "tests/__init__.py",
+        "tests/unit/__init__.py",
+        "tests/unit/tui/__init__.py",
+        "conftest.py",
+    }
+)
+
 GATE_CONFIG_PATHS = frozenset({"Makefile", ".flake8", "setup.cfg", "tox.ini"})
 MANIFEST_PATHS = frozenset({"pyproject.toml"})
 DEPS_LOCK_PATHS = frozenset({"uv.lock"})
@@ -286,6 +341,7 @@ FLAGS = (
     "unit",
     "tui",
     "windows",
+    "xplat",
     "audit",
     "cli",
     "server",
@@ -298,6 +354,8 @@ JOB_FLAGS: dict[str, tuple[str, ...]] = {
     "type-check": ("types",),
     "context-budget": ("budget",),
     "filesystem-boundaries-windows": ("windows",),
+    "xplat-probe-linux": ("xplat",),
+    "xplat-probe-windows": ("xplat",),
     "test": ("unit",),
     "pip-audit": ("audit",),
     "tui-e2e": ("tui",),
@@ -404,6 +462,21 @@ JOB_COMMANDS: dict[str, tuple[str, ...]] = {
     "tui-e2e": (
         "env -u NO_COLOR TERM=xterm-256color " ".venv/bin/python -m pytest tests/e2e -m e2e -n0 -q",
     ),
+    # Both `xplat-probe-*` legs carry the SAME local spelling, and that is the
+    # honest shape rather than a copy-paste: the pair differs only by the OS leg
+    # CI supplies, and a developer's machine has exactly one OS. The command is
+    # the battery on THIS host — the same reading the job takes of its own
+    # runner, which is precisely the relationship `test`'s local command has to
+    # an ubuntu runner it does not reproduce either. Excluding them instead would
+    # be the false claim in the other direction: the battery runs locally (it is
+    # self-isolating, needs no network and no secrets), and it is the cheapest
+    # way to see a probe regression before pushing. `run_jobs` runs the shared
+    # spelling ONCE, because a second run of a several-minute battery answers
+    # nothing the first did not — the Linux leg's richer local rig
+    # (`scripts/xplat_linux_matrix.sh`, which needs Docker and rebuilds images)
+    # is deliberately not wired into `--run`: see `scripts/xplat/README.md`.
+    "xplat-probe-linux": (".venv/bin/python scripts/xplat_probe.py",),
+    "xplat-probe-windows": (".venv/bin/python scripts/xplat_probe.py",),
 }
 
 #: Jobs in `JOB_FLAGS` that deliberately have no local command, each with the
@@ -444,6 +517,10 @@ FLAG_REASONS: dict[str, str] = {
     "unit": "at least one changed path outside the inert set (docs/**, web-only)",
     "tui": "same predicate as `unit`, deliberately (scripts/** is a tui input)",
     "windows": "a path the Windows job reads, or a manifest/CI/gate config",
+    "xplat": (
+        "a path the probe battery reads: the package it walks and imports, its "
+        "own scripts, or the test-suite app double it boots the TUI against"
+    ),
     "audit": "a Python, manifest, lockfile, CI or unrecognised path",
     "cli": (
         "a Python, manifest, lockfile, CI or unrecognised path, or the "
@@ -573,6 +650,19 @@ def flags_for(
         or bool(cats & {CAT_CI, CAT_MANIFEST, CAT_GATE_CONFIG, CAT_OTHER})
         or bool(path_set & (WINDOWS_TEST_PATHS | WINDOWS_CONFTEST_PATHS | WINDOWS_LOADED_PATHS))
     )
+    # `CAT_PYTHON` is the broad half on purpose: the battery AST-scans every
+    # `local_operator/**/*.py` for POSIX-only module-level imports and then
+    # imports EVERY module it can walk (`pkgutil.walk_packages`), so a change to
+    # any file in the package is a change to what the battery measures — a
+    # narrower predicate would skip the legs on exactly the PRs they exist for.
+    # `CAT_DEPS_LOCK` is absent because these jobs install from
+    # `pyproject.toml` (`pip install -e ".[dev]"`), not from `uv.lock`, and
+    # `CAT_GATE_CONFIG` because neither leg runs a linter or the Makefile.
+    xplat = (
+        bool(cats & {CAT_PYTHON, CAT_MANIFEST, CAT_CI, CAT_OTHER})
+        or bool(path_set & (XPLAT_SCRIPT_INPUTS | XPLAT_TEST_INPUTS))
+        or any(p.startswith(XPLAT_SCRIPT_PREFIXES) for p in path_set)
+    )
     budget = bool(cats & {CAT_PYTHON, CAT_MANIFEST, CAT_DEPS_LOCK}) or bool(
         path_set & BUDGET_SCRIPTS
     )
@@ -583,6 +673,7 @@ def flags_for(
         "unit": unit,
         "tui": unit,
         "windows": windows,
+        "xplat": xplat,
         "audit": audit,
         "cli": cli,
         "server": cli,
@@ -902,10 +993,28 @@ def _command_bound(command: str) -> str | None:
 
 
 def run_jobs(jobs: Sequence[str], root: Path) -> int:
-    """Run each selected job's local commands in order; return a shell status."""
+    """Run each selected job's local commands in order; return a shell status.
+
+    A command that two selected jobs SHARE runs once. The `xplat-probe-*` legs
+    are the case that made this explicit: they differ only by the OS leg CI
+    supplies, so they carry the same local spelling, and a local run has exactly
+    one host — running the battery twice would double a ~4-minute gate to answer
+    the question it already answered. The skipped repeat is printed with the job
+    that ran it, because a selected job that prints nothing reads as a job that
+    ran nothing.
+    """
     failures: list[str] = []
+    already_run: dict[str, str] = {}
     for job in jobs:
         for command in JOB_COMMANDS[job]:
+            if command in already_run:
+                print(
+                    f"\n=== {job}: {command}\n"
+                    f"    (not re-run: {already_run[command]} already ran this exact "
+                    "command in this invocation)"
+                )
+                continue
+            already_run[command] = job
             print(f"\n=== {job}: {command}", flush=True)
             proc = subprocess.run(command, shell=True, cwd=str(root), check=False)
             if proc.returncode != 0:

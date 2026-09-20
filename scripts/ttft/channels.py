@@ -593,6 +593,10 @@ async def drive_tui(
             "TMPDIR": str(run.root),
         }
     )
+    # ``child_env`` carries the notification gate (``harness_child_env``) with it:
+    # the child below is a real TUI in a fresh interpreter, its session is one
+    # nobody is watching, and the hosting's reply is a mock provider's canned line
+    # — which is a notification body, and belongs nowhere near the operator.
     proc = await asyncio.create_subprocess_exec(
         sys.executable,
         str(Path(__file__).resolve().parents[1] / "bench_ttft.py"),
@@ -797,6 +801,9 @@ async def drive_exec(
             "TMPDIR": str(run.root),
         }
     )
+    # The real CLI below is a child of a bench, so it is gated the same way: see
+    # ``child_env``, which routes through ``harness_child_env`` (the gate AND the
+    # nested-session waiver the real invocation needs under an agent's shell).
 
     async def one(index: int, arm: str) -> dict[str, Any]:
         token = new_token()

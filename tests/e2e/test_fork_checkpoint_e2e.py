@@ -36,7 +36,7 @@ import pytest
 
 from local_operator.session.attached import AttachedSession
 from local_operator.tui.app import OperatorApp
-from tests.e2e.harness import wait_for_adoption
+from tests.e2e.harness import NO_NOTIFY_ENV, wait_for_adoption
 from tests.e2e.test_fork_e2e import _never_take_over, _pump
 from tests.e2e.watchdog import bounded
 
@@ -296,6 +296,9 @@ async def test_a_fork_of_a_fork_serves_its_own_id(headless_tui_env: Path, worksp
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
         "LOP_MOBILE_CHILD_CWD": str(workspace),
         "LOP_MOBILE_CHILD_RESUME": second,
+        # A real runtime child driven by a test-owned fork: last, so nothing
+        # above can reinstate a gate-less environment.
+        **NO_NOTIFY_ENV,
     }
     child = subprocess.Popen(
         [sys.executable, "-m", "local_operator.session.runtime.process"],

@@ -212,8 +212,21 @@ def child_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     Kept as a function rather than inlined because a child built by hand (the TUI
     arm does) must carry the same strip rule as one the code under test spawns,
     and the two must not drift.
+
+    THE STRIP IS NOT THE WHOLE RULE, and the notification gate is the other half.
+    Every child here is a real session nobody is watching: the ``test`` hosting's
+    only reply is "Hello from the mock provider!", a notification body is a
+    snippet of the session's own last assistant line, and this repository has 17
+    recorded banner attempts from drive-by rigs that let exactly that reach the
+    operator's lock screen. ``local_operator.agent_shell.harness_child_env`` is the
+    product's one carrier for the pair — it also waives the nested-session guard,
+    which is what lets a bench drive the real CLI from an agent's shell at all —
+    so the gate is applied HERE rather than at each spawn site: one mechanism,
+    instead of three that can drift apart.
     """
+    from local_operator.agent_shell import harness_child_env
+
     env = {key: value for key, value in os.environ.items() if not key.startswith(STRIPPED_PREFIXES)}
     if extra:
         env.update(extra)
-    return env
+    return harness_child_env(env)

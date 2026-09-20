@@ -98,6 +98,7 @@ from local_operator.server.utils.desktop_sessions import (
 )
 from local_operator.session import catalog
 from local_operator.session.attention import AttentionStore
+from local_operator.session.model_selection import session_uses_test_hosting
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import DesktopPresence, desktop_presence
 from local_operator.session.runtime.types import RUN_DIRNAME, SessionRecord
@@ -1016,7 +1017,21 @@ class DesktopFeed:
         session only when its bridge has a LIVE subscriber that can notify:
         a bridge retained in the pool with nobody attached announces nothing, so
         excluding it here would leave the completion unannounced everywhere.
+
+        TWO GATES KEEP THE TEST HOSTING OFF THE WIRE, and they are different
+        questions rather than belt-and-braces. The process switch is "am I
+        allowed to notify at all" — a backend started by a rig or a test has
+        it on, and a backend the OPERATOR is running does not. The per-session
+        read is "was this conversation ever run on the mock", which is the one
+        the operator's own backend needs: it polls a store a rig may have left
+        mock sessions in, from a process that never touched the mock itself.
+        Without it, that store's conversations banner the operator with "Hello
+        from the mock provider!" on the machine-wide channel.
         """
+        from local_operator.tui.notify import notifications_enabled
+
+        if not notifications_enabled():
+            return
         bridged = set(self._bridged())
         candidates: list[tuple[str, str, str, str, int]] = []
         # See below: filled on first use, then reused for every remaining row.
@@ -1041,6 +1056,23 @@ class DesktopFeed:
                 presence = desktop_presence(self.root, cached=False)
             policy = self._focus_policy_for(self._session_id(identity), presence)
             if policy is None:
+                continue
+            if await asyncio.to_thread(
+                session_uses_test_hosting, self.sessions_dir / self._session_id(identity)
+            ):
+                # A mock conversation in this store, whoever ran it. Asked LAST
+                # of the candidate filters, because it is the only one that
+                # reads a file: a store with a hundred finished real sessions
+                # pays nothing for them (they stop at the cheap checks above),
+                # and one banner's worth of work for the row this saves.
+                #
+                # OFF THE LOOP, because that read is not cheap: it is a backward
+                # walk to the newest v2 row, measured at 57-745 ms on this
+                # operator's three largest journals, and this line runs for every
+                # candidate row. `session_uses_test_hosting` memoises its verdict
+                # on the journal's `(mtime_ns, size)`, so the steady tick is a
+                # `stat`; the thread hop is for the misses, which is the whole
+                # reason a serve backend must not do this inline.
                 continue
             candidates.append(
                 (identity, str(row["token"]), str(row["kind"]), policy, int(row["sequence"]))

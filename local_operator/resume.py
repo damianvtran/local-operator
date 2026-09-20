@@ -20,12 +20,11 @@ import json
 import logging
 import os
 import re
-import sys
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from local_operator.procstate import is_zombie
+from local_operator.procstate import is_zombie, pid_liveness
 
 #: Module level, not lazy, and deliberately so: this module sits on the CLI
 #: startup path, and ``session.errors`` is the one importable that costs
@@ -1203,21 +1202,17 @@ def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = 
         return None
     if pid <= 0:
         return None
-    # Windows has no signal 0 — ``os.kill`` there TERMINATES the target
-    # (see ``session.retention._process_alive``). A parseable marker is
-    # treated as live rather than probed, so a ``/resume`` cannot kill
-    # the phone-started child it is trying to share (F2). Windows also has no
-    # zombie state, so there is nothing the probe below could add there.
-    if sys.platform == "win32":
-        return pid
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+    # ``os.kill(pid, 0)`` is a liveness probe on POSIX and a KILL on Windows,
+    # where CPython's ``os_kill_impl`` reaches ``TerminateProcess`` for any
+    # signal but the two console events — so probing there would kill the
+    # phone-started child this is trying to share (F2). The shared tri-state
+    # owns that distinction (``procstate.pid_liveness``); this used to spell its
+    # own ``sys.platform`` branch, which is the drift the shared authority
+    # exists to stop, and the spelling the rest of the tree already replaced.
+    # ``None`` (unprovable) is read as LIVE: a session called dead is one a
+    # ``/resume`` starts a second runtime against.
+    if pid_liveness(pid) is False:
         return None
-    except PermissionError:
-        return pid
-    except OSError:
-        return pid
     if check_zombie and is_zombie(pid):
         # The probe is spent only here, where signal 0 has already said
         # "exists". At the user-facing call sites the difference between a

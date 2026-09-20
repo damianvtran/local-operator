@@ -1965,3 +1965,101 @@ def test_parallel_is_a_providers_member(manager: ConfigManager) -> None:
 
     assert settings_io.validate(providers, ["parallel"]) is None
     assert settings_io.coerce(providers, "exa, parallel") == ["exa", "parallel"]
+
+
+# ---------------------------------------------------------------------------
+# Two rows whose answer is a PLATFORM question (B26 and D23).
+# ---------------------------------------------------------------------------
+
+
+def test_the_bash_shell_help_names_the_shell_this_os_falls_back_to() -> None:
+    """``/bin/sh`` cannot exist on Windows, so that row must not promise it (B26).
+
+    The row names a PATH, and the resolver behind it (``tools.builtin``, pinned
+    to this row by ``test_bash_shell_row_shares_the_consumer_path``) ends
+    somewhere different on each platform: ``/bin/sh`` on POSIX, a Git for Windows
+    ``bash.exe`` on Windows, and — with neither — a refusal with an install hint
+    rather than an execution in a dialect the tool does not advertise.
+
+    THE WINDOWS SPELLING IS ALSO A WIDTH (design round 1, D1). The first cut was
+    163 cells against a 74-cell detail field with no wrapping and a shed ladder
+    that DROPS the sentence rather than trimming it, so it rendered as
+    `…else the bash.exe` at 80 columns and `…with neit` at 120 — unreadable on
+    the platform it was written for at every width the page supports. The
+    clause it drops is not lost information; the test below is what pins it to
+    the message that still carries it.
+    """
+    posix = settings_io._bash_shell_help(windows=False)
+    windows = settings_io._bash_shell_help(windows=True)
+
+    assert posix == "Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh."
+    assert "/bin/sh" not in windows, "Windows has no /bin/sh to fall back to"
+    assert "bash.exe" in windows
+
+    # The row itself carries this host's spelling, and only one of them.
+    assert settings_io._BASH_SHELL_HELP == settings_io._bash_shell_help(settings_io._IS_WINDOWS)
+    assert settings_io.BY_KEY["bash.shell"].help == settings_io._BASH_SHELL_HELP
+
+
+def test_the_bash_shell_help_fits_the_80_column_footer() -> None:
+    """A cell budget, not a style preference: the field does not wrap (D1).
+
+    ``.settings-view-detail`` is ``height: 2`` with no wrap, its shed ladder has
+    no rung below "help alone", and its floor cuts the sentence mid-clause with
+    a visible ``…``. So a help string that overruns is not merely ugly — the
+    half that says what a blank field does is what disappears, and it disappears
+    silently on a frame a reviewer of the string cannot see.
+
+    Pinned at the hard budget the POSIX sibling is already written against, and
+    the failure this would have caught is the one that shipped: the Windows
+    spelling measured 163 cells.
+    """
+    for windows in (False, True):
+        help_text = settings_io._bash_shell_help(windows)
+        assert cell_len(help_text) <= 74, f"{cell_len(help_text)} cells: {help_text!r}"
+
+
+def test_the_dropped_refusal_clause_lives_in_the_tools_own_message() -> None:
+    """D1's fix shortens the row; it must not DELETE what it shortened away.
+
+    "with neither, the tool refuses and says how to install one" was the half of
+    the 163-cell sentence that told a Windows user what a blank field means.
+    It moved into ``WINDOWS_NO_BASH_MESSAGE`` — where the tool card gives it a
+    whole row — and the two surfaces are checked together here, because a
+    later edit could otherwise shorten one by dropping the claim entirely.
+    """
+    from local_operator.tools.builtin import WINDOWS_NO_BASH_MESSAGE
+
+    assert "Install Git for Windows" in WINDOWS_NO_BASH_MESSAGE
+    assert "no /bin/sh" in WINDOWS_NO_BASH_MESSAGE
+    # And the row still names the same interpreter that message refuses over.
+    assert "bash.exe" in settings_io._bash_shell_help(windows=True)
+
+
+def test_a_windows_launcher_is_judged_by_what_windows_can_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.access(path, X_OK)`` is vacuous on Windows, so PATHEXT answers (D23).
+
+    The check it replaced was satisfied by ANY existing file, so a ``.txt`` or a
+    ``.ps1`` was accepted as a click launcher and the failure arrived later as an
+    unexplained refusal to launch. What Windows itself uses is the extension
+    list, plus the ``.exe`` ``CreateProcess`` appends to a name with none.
+    """
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+
+    assert settings_io._windows_command_is_runnable(r"C:\tools\app.exe")
+    assert settings_io._windows_command_is_runnable(r"C:\tools\app.CMD")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\notes.txt")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\script.ps1")
+
+    # A name with no extension runs ``<name>.exe``, and only when that exists.
+    naked = tmp_path / "app"
+    assert not settings_io._windows_command_is_runnable(str(naked))
+    (tmp_path / "app.exe").write_text("", encoding="utf-8")
+    assert settings_io._windows_command_is_runnable(str(naked))
+
+    # PATHEXT is the user's own list, read rather than hardcoded.
+    monkeypatch.setenv("PATHEXT", ".PY")
+    assert settings_io._windows_command_is_runnable(r"C:\tools\tool.py")
+    assert not settings_io._windows_command_is_runnable(r"C:\tools\app.exe")

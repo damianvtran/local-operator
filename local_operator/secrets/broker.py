@@ -47,9 +47,11 @@ from typing import Any, Callable
 
 from local_operator.secrets.errors import SecretStoreError
 from local_operator.secrets.peer import (
+    PEER_AUTHENTICATION_SUPPORTED,
     PeerAuthenticationUnavailable,
     ProcessIdentity,
     authorize_by,
+    broker_unsupported_reason,
     parent_pid,
     peer_identity,
     process_info,
@@ -196,7 +198,17 @@ class SecretBroker:
         0600 immediately. Both halves matter and macOS enforces them at
         ``connect()`` (spike 7), so this is a genuine barrier against other
         uids rather than advisory metadata.
+
+        **On a platform with no peer-identity probe this refuses to bind at
+        all.** ``_serve_connection`` already fails closed per connection, so
+        the observable behaviour there would be identical — but only after an
+        operator has started a daemon, watched it listen, and been denied by
+        it. A daemon that can serve nobody is a mystery to debug; a refusal
+        that names the platform is not. The message names the working
+        alternative, because the keyfile tier needs no broker at all.
         """
+        if not PEER_AUTHENTICATION_SUPPORTED:
+            raise BrokerError(broker_unsupported_reason() or "")
         from local_operator.secrets.keys import ensure_secrets_dir, secrets_dir
 
         ensure_secrets_dir(self._base)

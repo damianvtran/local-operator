@@ -130,6 +130,36 @@ table's `last_activity`, and the idle interval is the agent's own derivation
 rather than a returned field. §0.5 and §17.1 are unchanged between revision 3
 and this one.
 
+**Revision 5 — this commit — shapes two things the table left to the reader,
+and no decision moved.** §10.2's `console_status` and `console_read` rows name
+`cursor` without saying what it is, while the only cursor type the document
+defines is §5.4's emulator cursor; the rows now carry that spelling and §10.2
+states it in one paragraph, because a wire field the frozen table does not shape
+is a field two implementations can disagree about while both stay conformant.
+§10.6 gains the `data` keys per code for the same reason one level down: its copy
+rules promise the specifics (“the clamp it applied”, “the accepted byte count”)
+without saying which key carries them, and a privately chosen spelling degrades
+exactly the diagnosis §15 promises while every gate stays green. Both amendments
+come from the agent-review round 1 on the tool half (`local-operator` #1338) and
+are the contract its app half implements.
+
+**Revision 6 — this commit — answers the QA round 2 run against the app half,
+and no decision moved.** That round drove the REAL app (`local-operator-ui`
+PR A, built at `b1826cb40`) rather than a peer, and the four things it found are
+the four an interface that has only ever had one side cannot see: §10.6 gains
+`capture_unavailable` — the app's own deliberate addition to this table, which
+says “no pane is displaying the surface and this version cannot reconstruct one”
+— as a code of its own, distinct from `console_capture_full`'s busy capture
+view, with the host that answers each named in its row, because modelling only
+one of the two made the app's ordinary state read as “your app is newer than
+this session”. `console_unavailable`'s `reason` is now read rather than merely
+published (its values are named, and two of them are per-surface states rather
+than §10.1's three conditions), and §10.5 names the canonical spelling of every
+key name plus the synonyms a caller may write, which the shipped guide had got
+wrong for every control key: it documented `ctrl-c` where the encoder spells
+`ctrl+c`. The two host-facing rows of §10.6's key table are marked as such, so
+“published” and “read by the session” stop being the same word.
+
 | area | revision 1 | revision 2 |
 |---|---|---|
 | D1 emulator | xterm.js, ghostty assessed from licences and packaging | **unchanged decision, now evidence-backed** — and the ghostty path is recorded as *measured-viable*, with its sha256, its minisign verification and a named switch trigger (§5.5) |
@@ -1497,14 +1527,25 @@ vocabulary; ids are opaque strings.
 |---|---|---|
 | `console_list` | `{session_id?: str}` | `[{surface, session_id, origin, command, argv_tail, cwd, cols, rows, running, exit_code, last_activity, live, agent_owned}]` |
 | `console_create` | `{session_id, cwd?, command?, args?, input?, env?, cols?, rows?, reveal?, retain?}` | `{surface, cols, rows, pid, live, revealed}` |
-| `console_status` | `{surface}` | `{running, exit_code, exit_epoch, cols, rows, live, truncated, modes, cursor, last_activity, retain, secure}` |
-| `console_read` | `{surface, mode: "viewport"\|"scrollback", start?, count?}` | `{text, cols, rows, cursor, truncated, live, mode}` |
+| `console_status` | `{surface}` | `{running, exit_code, exit_epoch, cols, rows, live, truncated, modes, cursor ({x, y} — §5.4's emulator cursor), last_activity, retain, secure}` |
+| `console_read` | `{surface, mode: "viewport"\|"scrollback", start?, count?}` | `{text, cols, rows, cursor ({x, y} — §5.4's emulator cursor), truncated, live, mode}` |
 | `console_screenshot` | `{surface, format?: "png"}` | `{image_base64, cols, rows, rendered: "displayed"\|"offscreen", theme, live}` |
 | `console_input` | `{surface, text?, bytes?, secret_ref?, paste?}` | `{accepted: true, bytes: <count>}` |
 | `console_keys` | `{surface, keys: [str, …]}` | `{accepted: true, encoded: [str, …]}` |
 | `console_resize` | `{surface, cols, rows}` | `{cols, rows}` |
 | `console_secure` | `{surface, on}` | `{secure}` |
 | `console_close` | `{surface, kill?: bool, retain?: bool}` | `{closed, exit_code?}` |
+
+**`cursor` is the emulator's own shape, and that is the only one.** §5.4 fixes it
+(`readonly cursor: Readonly<{ x: number; y: number }>`, i.e. `@xterm/headless`'s
+`cursorX`/`cursorY`, where `x` is the COLUMN and `y` the ROW) and both rows above
+carry that value unchanged, so a host emits `{x, y}` and nothing else. It is
+`null` in `console_status` when the app has no grid for the surface — a restored,
+never-runtime surface (§7.3) — which is a value rather than an omission, and the
+session-side renderer prints a field it does not recognise as it arrived rather
+than as `None`. The renderer also ACCEPTS `{row, col}` defensively for a host
+written against an earlier draft; that tolerance is not a second wire spelling
+and no app may emit it.
 
 And the renderer-facing ops on the browser's IPC namespace shape (not RPC —
 `ipc.ts:20-35`'s rule 2 forbids routing them through `desktop-request`):
@@ -1565,9 +1606,29 @@ Human typing needs no encoder we own: the mirror's `@xterm/xterm` DOM handler
 produces bytes for a real keystroke. Agent keys do — and `@xterm/headless`'s
 `input(data, wasUserInput?)` **does not encode**; its own typing says it fires
 `onData` with what it is given. So main owns a named-key encoder (→ `\x03` for
-ctrl-c, `\x1b[A` vs `\x1bOA` for up depending on `modes.applicationCursorKeysMode`,
-`\t`, `\x1b[Z` for shift-tab, F1-F12, home/end/pgup/pgdn/ins/del, alt/meta
-prefixes, and the DECCKM/DECKPWM/DECBKM interactions the mode flags expose).
+`ctrl+c`, `\x1b[A` vs `\x1bOA` for `up` depending on
+`modes.applicationCursorKeysMode`, `\t`, `\x1b[Z` for `shift+tab`, `f1`–`f12`,
+`home`/`end`/`pageup`/`pagedown`/`insert`/`delete`, and the
+DECCKM/DECKPWM/DECBKM interactions the mode flags expose).
+
+**The name vocabulary, and the one spelling of each.** The names are the
+encoder's `NAMED_KEYS` set, and they are written with `+` and no dashes:
+`ctrl+c` (not `ctrl-c`), `shift+tab` (not `shift-tab`), `pageup`/`pagedown` (not
+`page-up`), `insert`/`delete` (not `ins`/`del`), `escape`, `enter` (with
+`return` as the encoder's second name for the same byte), `tab`, `space`,
+`backspace`, the four arrows, `home`, `end`, `f1`–`f12`, `ctrl+a`–`ctrl+z` and
+`ctrl+space`/`ctrl+[`/`ctrl+\`/`ctrl+]`/`ctrl+^`/`ctrl+_`. `+` is also this
+repository's own notation for a key (`tui/app.py`'s `ctrl+pageup`), which is why
+it is the one the guide and `docs/CONSOLE.md` must publish.
+
+**What the vocabulary does NOT have, stated here because prose promised it:**
+there is no `alt`/`meta`/`cmd` combination in `NAMED_KEYS` — a named key is a
+name, not an arbitrary modifier chord — so no document may offer one. The encoder
+is the single source of truth (§10.5's invariant) and its `unknown_key` refusal
+carries the accepted set, so a caller that guesses reads the real list instead of
+a second, staler one: that refusal is authoritative, and a session-side normaliser
+may fold a *spelling* (`ctrl-c`, `CTRL+C`, `esc`, `cr`) onto a name, never invent
+one.
 
 **The invariant that keeps one encoder from becoming two:** a conformance test
 drives each named key through the *mirror's* real encoder (a DOM `KeyboardEvent`
@@ -1599,9 +1660,41 @@ with the reason the existing value would be a lie:
 | queue full (input too fast) | `input_queue_full` (**new**, cmux's) | says how many bytes were accepted |
 | named key unknown | `unknown_key` (**new**, cmux's) | lists the accepted names |
 | secure input active | `secure_input_active` (**new**) | refused read/screenshot, with the reason |
-| capability off / pty unavailable | `console_unavailable` (**new**) | names which of the three conditions failed (§10.1) |
+| capability off / pty unavailable | `console_unavailable` (**new**) | names the condition the app reports in `reason` (§10.1's three are `disabled` — the Settings toggle or the launch flag — and `pty_unavailable`, the native module; `spawn_failed` and `no_runtime` are the app's two PER-SURFACE reasons and are named as what they are, not as a feature-wide switch) |
 | grid out of range | `invalid_grid` (**new**) | carries the clamp it applied |
-| a second capture requested while the capture view is busy | `console_capture_full` (**new**) | names the surface whose capture holds the view; the caller's own surface is never the one named, because §13.3's one-at-a-time rule is what makes this reachable at all |
+| a second capture requested while the capture view is busy | `console_capture_full` (**new**) | the capture view is busy with another surface's frame, one at a time (§13.3). Answered by the app that HAS that view (§17.1's PR B) — no other host emits it, and its copy names no holder: §10.6 promises a holder key neither half implements yet, so the sentence names the condition instead and the key stays recorded as owed |
+| a screenshot of a surface with no displayed pane, on an app without the offscreen capture view | `capture_unavailable` (**new**) | names the condition — no pane is displaying that surface, and this app version cannot reconstruct a frame — and points at the pane or at `read`. Answered by the app that LACKS the capture view (§17.1's PR A, §13.2's third case), which is the state every screenshot is in until PR B lands; the app sends `rendered: null` as its proof that there is no frame, and the code is the condition, so nothing else is read |
+
+**The `data` keys, per code.** `ErrorDetail.data` is `dict[str, Any]`, so a copy
+rule that names a specific — the handle, the accepted byte count, the clamp — is
+unimplementable until the key carrying it is written down, and a spelling chosen
+privately on one side fails *silently*: every gate stays green while the sentence
+degrades to its generic form. These are the keys, one spelling each, and every row
+says which side READS it, because “published here” and “read by the session” are
+not the same claim: **session-facing** is a value the harness copy reads,
+**host-facing** is a value the host publishes and this half deliberately does not
+read — so a later reader can tell an unread key that is owed from one that is
+meant to be unread.
+
+| code | `data` keys |
+|---|---|
+| `surface_unavailable` | **session-facing**: `surface` (the handle asked for), `count` (how many surfaces exist) |
+| `surface_not_owned` | **session-facing**: `surface` (the handle that belongs to another session) |
+| `process_exited` | **session-facing**: `exit_code`, `retain` (absent means the log is retained) |
+| `input_queue_full` | **session-facing**: `accepted` — the bytes the host TOOK; the size of the refused payload is the host's own `message`, and a copy that read it as an accepted count would state the opposite of what happened |
+| `unknown_key` | **session-facing**: `accepted` (the names the encoder has), `key` (the one that was not found) |
+| `invalid_grid` | **session-facing**: `clamp: {cols, rows}` — the grid applied instead; `reason: "fixed"` for the surface that cannot be resized at all, where there is no clamp to carry |
+| `console_unavailable` | **session-facing**: `reason` — which condition failed: `disabled` (the Settings toggle, or the launch flag) and `pty_unavailable` (the native module §10.1 names), plus the app's two PER-SURFACE reasons, `spawn_failed` and `no_runtime`. A value this half does not know is named as it arrived rather than mapped onto one of §10.1's three, because the app's own word is more use than an invented remedy |
+| `proto_mismatch` | **session-facing**: `proto` — the peer's revision, so the sentence can name both numbers |
+| `console_capture_full` | **host-facing, none in this half**: §13.3's busy-view copy names no holder yet, and the key is recorded here as one to add when a host emits this code — which no released host does (it is §17.1's PR B that has the capture view) |
+| `capture_unavailable` | **host-facing**: `rendered` — the app's own frame-type field, sent as `null` because there is no frame to type. Published rather than merely discovered, and deliberately UNREAD: the code IS the condition, so a copy that claimed a specific from this key would be claiming one from a value that is always `null` |
+
+No other code carries keys: `unsupported_method` and `secure_input_active` are
+answered by the copy alone. The session side reads every session-facing row above
+and none of the host-facing ones, with two legacy spellings accepted defensively
+and never read as `None` — `handle` for `surface`, and a flat `cols`/`rows` for
+`invalid_grid` — recorded here so the renderer's tolerance is not mistaken for the
+contract.
 
 **Proto rule this design follows:** every addition above is *additive* — new
 methods, new `ErrorCode` values that an old peer never emits (and that a peer
@@ -1901,6 +1994,17 @@ Three cases, and the result always names which one it was:
 | the pane is displayed on this surface | `webContents.capturePage()` of the app's own window, cropped to the pane's reported rect | `"displayed"` |
 | the pane is closed / this is an agent-only surface | a **capture view**: a hidden renderer fed the surface's record (replay), at the surface's grid, with the **DOM renderer** pinned, photographed with `capturePage()` | `"offscreen"` |
 | the record is `live: false` (post-relaunch) | the same capture view over the replayed history | `"offscreen"` |
+| no pane is displaying the surface, in a build that has no capture view yet | nothing is photographed: the call is refused, typed (§17.1 splits the pane path from the replay one, so this is the state an app built between the two PRs is in for EVERY screenshot) | no result — a refusal, `capture_unavailable` |
+
+**A build without the capture view refuses rather than guessing, and that refusal
+is a code of its own.** `capture_unavailable` says the condition it is in — no pane
+is displaying the surface, and this version cannot reconstruct a frame from the
+record — and it is deliberately NOT `console_capture_full`: that code is §13.3's
+capture view being busy with another surface's frame, which only a build that HAS
+the view can reach. The two are different conditions answered by different hosts
+(a host with the view, and a host without it), the copy for each names its own
+condition, and the `data` each carries is recorded in §10.6 — `rendered: null` for
+this one, as the app's own proof that there is no frame.
 
 **Three measured traps shape this path, and revision 1 did not know about any of
 them** (all from the compatibility spike, §0.4):
@@ -1941,7 +2045,9 @@ them** (all from the compatibility spike, §0.4):
   cookie-jar target already relies on (`index.ts`, §2.4).
 - **The capture view is a renderer process**, so its cost is real and bounded:
   at most **one** capture view at a time app-wide (`console_capture_full` is a
-  typed refusal, mirroring cmux's `input_queue_full` honesty), sized to the
+  typed refusal, mirroring cmux's `input_queue_full` honesty, and it is the code
+  ONLY a build with the capture view can emit — a build without one refuses a
+  screenshot with `capture_unavailable` instead, §13.2), sized to the
   surface's grid, and torn down by pid-exact teardown (§16.2).
 - **The renderer is pinned to the DOM renderer, and the pin is asserted** — a
   renderer choice that could silently become WebGL would turn every offscreen
@@ -2155,7 +2261,9 @@ is how a feature produces "it just didn't work".
 | unknown key name | `unknown_key` listing the accepted set | nothing |
 | grid out of range | refused with `invalid_grid` and the clamp it would have applied | the divider's own clamp is the user-facing bound |
 | read/screenshot while secure input is on | `secure_input_active` | the lock marker is visible, so the refusal is explained by the screen |
-| capture view busy | `console_capture_full` | nothing |
+| a console call that reaches an app whose console is off, or a `create` whose process will not start | `console_unavailable`, naming the `reason` the app reports (`disabled`, `pty_unavailable`, `spawn_failed`, `no_runtime`) | the pane says why, in one line |
+| capture view busy | `console_capture_full` — a build with §13.3's capture view (§17.1's PR B) is the only host that emits it | nothing |
+| a screenshot with no displayed pane, on a build without the capture view | `capture_unavailable`, naming the condition and pointing at the pane or at `read` (§17.1's PR A, which is every screenshot until B lands) | the pane is the remedy, and it is the agent's own turn that says so |
 | pane closed, agent captures anyway | **works** (§13.1/§13.2) — `rendered: "offscreen"` | nothing |
 | app closed *while a surface was running* | `ui_host_unavailable` from the transport, with copy that names the app and says the surfaces ended with it | the pane is gone with the app; next launch shows the recorded history |
 
