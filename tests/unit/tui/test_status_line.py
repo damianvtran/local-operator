@@ -28,6 +28,8 @@ from local_operator.tui.widgets.status_line import (
     _DROP_LADDER_ESTIMATE,
     _DROP_LADDER_QUIET,
     _DROP_LADDER_QUIET_ESTIMATE,
+    _DROP_LADDER_QUIET_ESTIMATE_PARKED,
+    _DROP_LADDER_QUIET_PARKED,
     _MIN_GROUP_GAP,
     _SEP_RIGHT,
     _SPINNER_FRAMES,
@@ -49,6 +51,7 @@ from local_operator.tui.widgets.status_line import (
     NAME_CELLS_FLOOR,
     McpStatus,
     StatusLine,
+    _model_for_park,
     context_semantic_color,
     drop_ladder,
     format_agents,
@@ -1221,6 +1224,85 @@ def test_the_parked_rung_survives_a_width_that_sheds_the_readings() -> None:
     # One row at every width, parked or not: the band never wraps.
     for width in (40, 60, 80, 100, 200):
         assert len(status.render_text(width).plain.splitlines()) == 1, width
+
+
+def test_a_parked_alarm_is_never_shed_even_where_the_model_label_goes() -> None:
+    """A standing alarm outranks a non-alarm (review round 2, D10).
+
+    The model label is outside every ladder, so the walk could not shed it —
+    right against the readings, wrong against the park: the alarm went and
+    `◆ kimi-k2-thinking` stayed, and the parked row said nothing at all about
+    remote access (measured on the round-2 head: a 27-cell band rendered
+    `◆ model`). The label is the concession now, and the property is asserted
+    over every width rather than at one: a width at which the alarm is missing is
+    the defect.
+    """
+    status, _clock = _full_band()
+    status.update(tunnel_parked=True)
+    for width in range(200, 3, -1):
+        row = status.render_text(width).plain
+        assert cell_len(row) <= width, (width, row)
+        assert len(row.splitlines()) == 1, (width, row)
+        if width >= 19:
+            # Above the alarm's own width it is there WHOLE, wherever the walk
+            # chose to place it in the left group.
+            assert "remote access off" in row, (width, row)
+        else:
+            # Below it, the irreducible tail starts with the cropped alarm —
+            # never with the model label, which is what the tail used to emit.
+            assert row.startswith(ICON_TUNNEL), (width, row)
+    # ...and the assertion above is not passing by never showing the label: both
+    # fit at a width a user has, and a truncated label is still a label.
+    assert f"{ICON_MODEL} " in status.render_text(200).plain
+    assert f"{ICON_MODEL} " in status.render_text(48).plain
+    # The knee, FOUND rather than derived, because the label's own length moves
+    # it (29 cells is the pair's floor for the shortest spelling of `◆ model`; this
+    # fixture's is longer). The property is the step across that width: above it
+    # both fit, below it the label is what goes and the alarm is what remains —
+    # which is the inversion this finding is about, asserted as an adjacency
+    # rather than as a magic number.
+    knee = min(
+        width for width in range(200, 4, -1) if ICON_MODEL in status.render_text(width).plain
+    )
+    assert "remote access off" in status.render_text(knee).plain
+    below = status.render_text(knee - 1).plain
+    assert "remote access off" in below, below
+    assert ICON_MODEL not in below, below
+
+
+def test_the_park_takes_the_model_labels_slot_and_leaves_the_ladder() -> None:
+    """The parked variants: the alarm is OUT of the ladder, the label is IN it.
+
+    Both halves are one change and each is load-bearing. An alarm that is still a
+    rung can be shed — that was D10. A label that is not a rung can never be shed
+    — that was the inversion D10 filed. So `tunnel` is gone from the parked
+    variants and `model` sits exactly where it was: after every reading, before
+    the alarm group, which is the position the original rung-order argument had
+    already picked.
+    """
+    for base in (
+        _DROP_LADDER,
+        _DROP_LADDER_QUIET,
+        _DROP_LADDER_ESTIMATE,
+        _DROP_LADDER_QUIET_ESTIMATE,
+    ):
+        assert "model" not in base, base
+        parked = _model_for_park(base)
+        assert "tunnel" not in parked, parked
+        # Same rungs, one substitution, in the same order.
+        assert parked == tuple("model" if rung == "tunnel" else rung for rung in base), parked
+        # The alarm group still ends the ladder, so a parked variant cannot end
+        # on an unbounded rung either.
+        assert parked[-1] == "approvals", parked
+    # The selector hands those variants out on the park flag alone, and leaves
+    # every unparked ladder byte-identical.
+    mcp = McpStatus(configured=2, connected=2)
+    assert drop_ladder(mcp, parked=True) is _DROP_LADDER_QUIET_PARKED
+    assert drop_ladder(mcp) is _DROP_LADDER_QUIET
+    assert drop_ladder(mcp, context_estimated=True, parked=True) is (
+        _DROP_LADDER_QUIET_ESTIMATE_PARKED
+    )
+    assert "tunnel" not in drop_ladder(mcp, parked=True)
 
 
 def test_the_quiet_ladder_moves_mcp_and_the_alarm_is_last_either_way() -> None:
