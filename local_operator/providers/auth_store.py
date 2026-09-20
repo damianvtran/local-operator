@@ -25,12 +25,32 @@ lease in ``auth_credential_refresh_leases`` (same atomic upsert as
 rotating OAuth refresh token used to invalidate each other's new token
 (PR-24); the loser now waits out the winner's write instead of POSTing a
 consumed token. Clients are still per-process — only the refresh is leased.
+
+Three more defences guard the same rotating token against REFRESH-TOKEN REUSE
+DETECTION, which revokes the whole token family rather than failing one
+request (a Radient grant died twice in ~17 hours on this machine):
+
+* :data:`REFRESH_SEND_UNCONFIRMED_KEY` — a write-ahead marker, armed before
+  the POST, recording that this row's refresh token was presented by an
+  exchange whose outcome never arrived. A token whose send is unconfirmed is
+  never presented again until the marker expires.
+* :data:`AUTH_REFRESH_LEASE_MS` outliving ``PROVIDER_REFRESH_HTTP_TIMEOUT_S``,
+  so a peer's lease cannot expire inside the window where the holder's request
+  may still be in flight.
+* :data:`GRANT_DEAD_AT_KEY` — the IdP's own refusal, persisted on the row, so
+  every row-reading surface says "sign-in expired" instead of "logged in", and
+  only an interactive login clears it.
+
+A caller that loses the lease is never served an access token past its expiry:
+the refusal is a classified error the cascade rotates on, not a stale bearer
+spent upstream.
 """
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -61,10 +81,112 @@ logger = logging.getLogger("local_operator.providers.auth_store")
 OAUTH_REFRESH_SKEW_MS = 60_000  # pre-emptive refresh trigger
 DEFAULT_BLOCK_MS = 60_000  # rate-limit / 401 backoff
 
-#: How long a process may hold the cross-process refresh lease. Copied from
-#: usage (30 s): long enough for a slow IdP, short enough that a crashed
-#: holder cannot strand every sibling until they reboot.
-AUTH_REFRESH_LEASE_MS = 30_000
+#: The connect/read budget a provider's refresh POST runs under. Every refresh
+#: in ``providers/oauth/`` passes ``timeout=30.0`` (anthropic, kimi, openai,
+#: xai, zai, qwencloud, radient all name the same number), and it is named here
+#: rather than inline in each of them because :data:`AUTH_REFRESH_LEASE_MS` is
+#: derived from it: the two drifting apart is the defect that derivation exists
+#: to prevent, not a style question.
+PROVIDER_REFRESH_HTTP_TIMEOUT_S = 30.0
+
+#: How long a process may hold the cross-process refresh lease.
+#:
+#: The lease MUST outlive the request it guards, plus a margin. It used to be
+#: 30 s — exactly the holder's HTTP timeout — so a peer's lease expired at the
+#: same instant the holder's POST would time out, and the peer then took the
+#: lease and re-presented the SAME rotating refresh token while the holder's
+#: request could still be on the wire. Against a provider that rotates and runs
+#: refresh-token reuse detection (Radient), that is the POST that revokes the
+#: whole token family: the operator's grant died twice in ~17 hours this way.
+#:
+#: 2.5x the request budget. The FLOOR is PROVIDER_REFRESH_HTTP_TIMEOUT_S plus
+#: whatever the holder does around the POST (the row re-read, the guarded
+#: UPDATE, the commit — sub-100 ms here, but a process can be descheduled for
+#: long stretches on a loaded host, which is what the margin buys). The CEILING
+#: is what a CRASHED holder leaves behind: a peer that loses the lease is never
+#: served a stale bearer any more (see ``_served_while_contended``), so a long
+#: TTL is not free, and 75 s keeps the stranded window inside the roughly one
+#: minute a caller already tolerates from ``DEFAULT_BLOCK_MS``.
+AUTH_REFRESH_LEASE_MS = 75_000
+
+#: Payload key recording that THIS row's refresh token was PRESENTED by an
+#: exchange whose outcome never arrived — the request may have reached the IdP
+#: and spent the token, and re-presenting a spent token is the reuse-detection
+#: POST that revokes the family. Value is ``{"digest": <short digest of the
+#: presented token>, "at": <epoch milliseconds>}``.
+#:
+#: Why a DIGEST rather than the token: the marker only ever answers "is the
+#: token in this row the one an exchange is unsure about?", and a digest keeps
+#: the payload from carrying the same live credential twice. It is not a
+#: confidentiality measure — the token itself lives in the same row.
+#:
+#: Why it is ARMED BEFORE THE POST: a process that dies mid-request takes all
+#: its in-memory knowledge with it, and the next boot would present a token that
+#: may already be spent. The write-ahead marker is the only channel that
+#: survives that death. The price is a false positive in the narrow window
+#: between the arm and the wire, which is why the marker EXPIRES
+#: (:data:`UNCONFIRMED_SEND_TTL_S`).
+#:
+#: The same defence, for the same reason, already protects MCP OAuth grants
+#: (``mcp.auth.GRANT_UNCONFIRMED_SEND_KEY``). Deliberately a DIFFERENT key from
+#: MCP's while every other name here is shared: the two subsystems never write
+#: the same row, but a marker key that read another subsystem's marker would
+#: suppress a refresh on no evidence at all, and this one is cheap to keep
+#: distinct.
+REFRESH_SEND_UNCONFIRMED_KEY = "refresh_send_unconfirmed"
+
+#: Payload key: the IdP REFUSED this row's grant for good. Value is the epoch
+#: milliseconds at which the refusal was recorded.
+#:
+#: It is persisted rather than merely raised so a row-reading surface — the
+#: usage panel, the model picker, the desktop status routes — can say "sign-in
+#: expired" from the row alone, with no live refresh attempt to re-earn the
+#: verdict. That is what makes the verdict honest on a row whose access token
+#: has not expired yet, which is exactly the state the old code reported as a
+#: healthy login.
+#:
+#: Only an INTERACTIVE login clears it: :meth:`AuthStore.upsert_credential`
+#: replaces the payload wholesale, so a token minted by a refresh can never
+#: resurrect the family this marker says the IdP revoked (a refresh landing
+#: after the tombstone is refused, not persisted — see
+#: ``AuthStore._ensure_oauth_fresh``).
+#:
+#: A payload key rather than ``disabled_cause``, deliberately. A
+#: ``disabled_cause`` row is FILTERED OUT of :meth:`AuthStore.list_credentials`,
+#: which would make the dead login vanish from every panel that has to name the
+#: account and offer the remedy — the opposite of what the row is for, and it
+#: contradicts the documented rule that a dead grant is REPORTED, never retired
+#: (see :class:`CredentialInvalidError` and ``AuthStore.list_oauth_accesses``).
+#:
+#: Spelled the same as ``mcp.auth.GRANT_DEAD_AT_KEY`` because it is the same
+#: concept, and in MILLISECONDS here where MCP stores seconds: each value is
+#: written and read by one subsystem only (a row belongs to exactly one of
+#: them) and the unit follows its writer's clock helper, ``_now_ms``.
+GRANT_DEAD_AT_KEY = "grant_dead_at"
+
+#: How long a "presented but unacknowledged" send marker stays live (see
+#: :data:`REFRESH_SEND_UNCONFIRMED_KEY`).
+#:
+#: The marker exists to stop us re-presenting a token an exchange may already
+#: have spent, and the price of believing it is one interactive sign-in, so it
+#: must be BOUNDED. A marker armed in the window between this write and the
+#: request reaching the wire (a crash, a refused connection) describes a token
+#: nothing ever presented, and a marker that never expired would suppress that
+#: account's refresh until the user happened to re-authenticate — the "bricked
+#: account" failure mode. An hour covers a restart, a slow session or a user who
+#: stepped away, and after it lapses we present the stored token again, which is
+#: exactly the behaviour every boot had BEFORE this marker existed. So the
+#: expiry can only degrade to the status quo ante, never to something worse.
+#:
+#: What this store CANNOT do, stated because the MCP twin does it: it has no
+#: httpx request event hook, so it cannot tell a connect-phase failure (the
+#: request was never handed to the transport, nothing was spent) from a request
+#: that went out and was never answered. Both keep the marker. The cost is that
+#: a token endpoint which is briefly unreachable can cost this account ONE
+#: interactive sign-in rather than a silent retry, which is the trade taken on
+#: purpose: an arm a tick too early costs a browser visit, one a tick too late
+#: risks the whole family.
+UNCONFIRMED_SEND_TTL_S = 3600.0
 
 #: Hard ceiling on ANY credential block, whatever computed it (a usage
 #: reset estimate, a provider Retry-After header, a caller's block_ms). A
@@ -251,6 +373,51 @@ def _identity_key_for(provider: str, credential: dict[str, Any]) -> str | None:
     if credential.get("refresh") and credential.get("access"):
         return f"oauth:{provider}"
     return None
+
+
+def _refresh_token_digest(refresh_token: str) -> str:
+    """Short stable digest of one refresh token, for the send marker.
+
+    Never a credential in its own right: it only ever answers "is the token in
+    this row the one an exchange presented?", so keeping the digest rather than
+    a second copy of the token keeps the payload from carrying the same live
+    secret twice. Truncated, because the question compares a handful of our own
+    tokens rather than searching an adversarial keyspace.
+
+    The same helper name exists in ``mcp.auth``, which guards the same
+    reuse-detection POST for MCP grants. Not imported from there on purpose:
+    that would put the MCP package on the provider store's import path for
+    fourteen lines of hashing, and the two markers must stay independently
+    evolvable.
+    """
+    return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()[:16]
+
+
+def _send_marker_is_live(marker: Any, refresh_token: str | None, *, now_ms: int) -> bool:
+    """Whether a send marker says ``refresh_token`` may already be spent.
+
+    ``True`` only for a WELL-FORMED, UNEXPIRED marker whose digest belongs to
+    this token. Every other shape is ``False``, and the caller clears the marker
+    on the way past rather than believing it:
+
+    * a marker whose digest belongs to a DIFFERENT token is stale — a peer has
+      rotated the row since — and suppressing a healthy, newly rotated token
+      because of an unrelated send is a false positive the user pays for with a
+      browser visit;
+    * expiry (see :data:`UNCONFIRMED_SEND_TTL_S`) is what stops a marker that
+      never resolved from suppressing an account's refresh indefinitely;
+    * a malformed marker cannot be compared against anything, so it can never be
+      believed.
+    """
+    if not isinstance(marker, dict):
+        return False
+    at = marker.get("at")
+    digest = marker.get("digest")
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return False
+    if not 0 <= now_ms - at <= UNCONFIRMED_SEND_TTL_S * 1000:
+        return False
+    return bool(refresh_token) and digest == _refresh_token_digest(refresh_token)
 
 
 class _SerializedConnection:
@@ -623,6 +790,15 @@ class AuthStore:
         identity = _identity_key_for(provider, credential)
         payload = dict(credential)
         payload["type"] = credential_type
+        # An INTERACTIVE write is the only thing that may clear the two
+        # durability markers, and it does so by replacing the payload wholesale.
+        # Dropped explicitly rather than left to that replacement: a login flow
+        # that seeded its dict from the row it is replacing (a re-login that
+        # reuses the stored account/org fields) would otherwise carry a dead
+        # grant's tombstone, or another token's unconfirmed-send marker, onto
+        # the credential the user just proved is alive.
+        payload.pop(GRANT_DEAD_AT_KEY, None)
+        payload.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
         now = self._now_ms()
         data_json = json.dumps(payload)
 
@@ -888,6 +1064,277 @@ class AuthStore:
         except sqlite3.Error:
             logger.debug("auth refresh lease release failed", exc_info=True)
 
+    # -- durability markers for the refresh path --------------------------------
+    #
+    # Two pieces of state that must outlive the process that learned them, and
+    # that therefore live in the row payload rather than in memory:
+    #
+    # * :data:`REFRESH_SEND_UNCONFIRMED_KEY` — a token was presented by an
+    #   exchange whose outcome never arrived, so it may already be spent and must
+    #   not be presented again until it expires;
+    # * :data:`GRANT_DEAD_AT_KEY` — the IdP refused the grant for good, so every
+    #   surface must say so until the user signs in again.
+    #
+    # Both are read-modify-written through :meth:`_update_payload` so neither can
+    # invent its own staleness rule, and both are cleared the same way: by an
+    # interactive login (``upsert_credential``), which replaces the payload.
+
+    @staticmethod
+    def _presented_refresh_token(creds: dict[str, Any]) -> str | None:
+        """The refresh token a provider's refresh fn would present for ``creds``.
+
+        Read with the same ``refresh``/``refresh_token`` fallback the provider
+        refreshes use (``providers/oauth/radient.py`` and its siblings), so the
+        digest a marker records is the digest of the token that would actually
+        go on the wire. The fallback is why this is a helper rather than a bare
+        ``.get("refresh")`` at each of the three call sites.
+        """
+        token = creds.get("refresh") or creds.get("refresh_token")
+        return str(token) if token else None
+
+    @staticmethod
+    def _holds_live_bearer(creds: dict[str, Any], *, now_ms: int) -> bool:
+        """Whether ``creds`` holds an access token still inside its lifetime.
+
+        ``expires`` is written at MINT time with the provider's own skew already
+        subtracted (``EXPIRY_SKEW_MS`` in ``providers/oauth/radient.py`` and
+        siblings), so ``expires <= now`` is a token the provider itself treats as
+        dead and no second skew belongs here. A payload with no ``expires`` is a
+        static token that never expires — the Z.AI coding-plan shape — and is
+        live by definition.
+        """
+        if not creds.get("access"):
+            return False
+        expires = creds.get("expires")
+        if expires is None:
+            return True
+        try:
+            return int(expires) > now_ms
+        except (TypeError, ValueError):
+            return False
+
+    def _update_payload(self, credential_id: int, mutate: Callable[[dict[str, Any]], bool]) -> bool:
+        """Read-modify-write one row's payload under ``mutate``.
+
+        The single write primitive for both durability markers. It re-reads the
+        row INSIDE the call because each marker is computed from state a peer may
+        have changed since the caller last looked, and every caller writes only
+        while its own precondition still holds — the same check-then-write
+        convention the refresh path's cross-process guard already uses, rather
+        than a second one. ``mutate`` returns whether the row still wants the
+        write at all.
+
+        Returns whether the write happened. A row that is GONE (a racing logout)
+        is ``False`` and never a re-created row: an explicitly removed credential
+        stays removed. Best-effort on a sqlite error, like every other marker
+        write here — losing a marker restores the pre-marker behaviour rather
+        than failing the request that triggered it.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or not isinstance(row.data, dict):
+            return False
+        data = dict(row.data)
+        if not mutate(data):
+            return False
+        try:
+            self._conn.execute(
+                "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(data), self._now_ms(), credential_id),
+            )
+            self._conn.commit()
+        except sqlite3.Error:
+            logger.debug("auth payload marker write failed", exc_info=True)
+            return False
+        return True
+
+    def _arm_send_marker(self, credential_id: int, presented_refresh_token: str) -> None:
+        """Arm the write-ahead marker for a token an exchange is about to present.
+
+        Called while the refresh lock AND the cross-process lease are held, and
+        BEFORE the POST: that ordering is the whole point. A process that dies
+        between the write and the response takes all in-memory knowledge with it,
+        and the next boot would present a token the IdP may already have spent —
+        the reuse-detection POST that revokes the family. The marker is the only
+        channel that survives that death.
+
+        Best-effort: a store failure must not stop the POST.
+        """
+        marker = {"digest": _refresh_token_digest(presented_refresh_token), "at": self._now_ms()}
+
+        def write(data: dict[str, Any]) -> bool:
+            data[REFRESH_SEND_UNCONFIRMED_KEY] = marker
+            return True
+
+        self._update_payload(credential_id, write)
+
+    def _clear_send_marker(self, credential_id: int) -> None:
+        """Resolve the send marker: the exchange reached a DEFINITIVE answer.
+
+        Called for a 2xx whose rotation was persisted, for an ``invalid_grant``
+        refusal, and for a marker that turned out to be stale (expired, or about
+        a token the row no longer holds). Deliberately NOT called for anything
+        else, which is the whole point of the marker:
+
+        * the request was written and no answer arrived — the state the marker
+          describes;
+        * an answer that proves nothing about our token, such as a ``5xx`` or a
+          ``429``. A provider that commits a rotation and THEN fails the response
+          leaves the row holding a spent token, so clearing the marker there
+          would let the next attempt re-present it: the reuse-detection POST that
+          revokes the whole family. Keeping it costs this account at most one
+          interactive sign-in — and since a marked token is never presented
+          again, it can also never be double-spent, which is the property that
+          matters more.
+        """
+
+        def drop(data: dict[str, Any]) -> bool:
+            if REFRESH_SEND_UNCONFIRMED_KEY not in data:
+                return False
+            data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+            return True
+
+        self._update_payload(credential_id, drop)
+
+    def send_unconfirmed(self, credential_id: int, refresh_token: str | None = None) -> bool:
+        """Whether a LIVE marker says ``refresh_token`` may already be spent.
+
+        ``refresh_token`` defaults to the one stored, which is the question the
+        refresh path asks before it POSTs. A marker that is stale — expired, or
+        about a different token — is CLEARED on the way past rather than
+        believed, because the answer already decided it is not this row's
+        business; leaving it in place would re-evaluate (and re-clear) it on
+        every later attempt. See :func:`_send_marker_is_live` for the rule.
+        """
+        row = self.get_credential(credential_id)
+        if row is None or not isinstance(row.data, dict):
+            return False
+        data = dict(row.data)
+        marker = data.get(REFRESH_SEND_UNCONFIRMED_KEY)
+        if marker is None:
+            return False
+        target = refresh_token if refresh_token is not None else self._presented_refresh_token(data)
+        if _send_marker_is_live(marker, target, now_ms=self._now_ms()):
+            return True
+        self._clear_send_marker(credential_id)
+        return False
+
+    @staticmethod
+    def _grant_dead_at(creds: dict[str, Any]) -> int | None:
+        """The epoch-ms a dead-grant tombstone was written, or ``None``.
+
+        Tolerant by design: an absent, non-numeric, boolean or non-positive value
+        is NOT a tombstone. An unreadable marker must never suppress a refresh
+        that might work, so "unknown" has to fall on the side that keeps trying.
+        """
+        marker = creds.get(GRANT_DEAD_AT_KEY)
+        if isinstance(marker, bool) or not isinstance(marker, (int, float)):
+            return None
+        return int(marker) if marker > 0 else None
+
+    def grant_is_dead(self, credential_id: int) -> bool:
+        """Whether this row carries the IdP's own refusal as a persisted verdict.
+
+        The read half of :data:`GRANT_DEAD_AT_KEY`, for surfaces that must state
+        the verdict WITHOUT attempting a refresh: a dead grant is a fact about
+        the account, and re-earning it with a POST is both a wasted round trip
+        and a second chance to present a revoked family's token.
+        """
+        row = self.get_credential(credential_id)
+        return (
+            row is not None
+            and isinstance(row.data, dict)
+            and self._grant_dead_at(row.data) is not None
+        )
+
+    def _mark_grant_dead(self, credential_id: int, *, rejected_refresh_token: str | None) -> bool:
+        """Record that this row's refresh token was refused by the IdP for good.
+
+        The tombstone is the OUTCOME of a refusal the caller has already
+        classified (an ``invalid_grant`` this store turned into
+        :class:`CredentialInvalidError`); it is never the classification itself,
+        so the store cannot invent a dead grant out of a transient 5xx.
+
+        ``rejected_refresh_token`` makes the freshness re-read a
+        compare-and-skip, and it exists because this is a whole-payload
+        read-modify-write: a sibling that persisted a fresh rotation between the
+        caller's guard and this write would otherwise have a LIVE token marked
+        dead (or erased by a pre-rotation snapshot) and stay suppressed until an
+        interactive login. The caller holds the refresh lock and the lease, so
+        the remaining gap is against writers that deliberately do not take them —
+        an interactive login — which is why the compare is here as well as there.
+        A row that no longer holds the token the IdP rejected is left alone.
+
+        Returns whether the tombstone was written.
+        """
+
+        def write(data: dict[str, Any]) -> bool:
+            if rejected_refresh_token is not None:
+                stored = self._presented_refresh_token(data)
+                if stored != rejected_refresh_token:
+                    logger.warning(
+                        "dead-grant marker for %s was NOT written: the row now holds a "
+                        "different refresh token (a peer rotated it, or the user signed in "
+                        "again), so the refusal this marker records is about a superseded "
+                        "token",
+                        credential_id,
+                    )
+                    return False
+            data[GRANT_DEAD_AT_KEY] = self._now_ms()
+            # The refusal IS the definitive answer to the send marker: the IdP
+            # told us what happened to the presented token, so there is nothing
+            # left for the marker to protect.
+            data.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+            return True
+
+        return self._update_payload(credential_id, write)
+
+    def _served_while_contended(
+        self, row: StoredCredential, now_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """What a caller may be served when it did NOT win the refresh lease.
+
+        One place for the rule, because every leakage here is a stale bearer
+        spent upstream: PR #1340 fixed the CONSUMER half of that (a stale bearer
+        is no longer treated as a live one by the tunnel), and this is the store
+        half.
+
+        A peer holding the lease means its POST is in flight and may rotate the
+        row at any moment, so the honest answers are ordered by what is KNOWN:
+
+        * a tombstoned grant is served nothing — :class:`CredentialInvalidError`,
+          the same verdict the row would produce with the lease free;
+        * a bearer still inside its own lifetime is served as before. It is a
+          different secret from the refresh token the peer is rotating, and this
+          row only needed a refresh because of the pre-emptive skew, so refusing
+          it would fail requests that would have worked. This is the narrow,
+          deliberate exception, and it is narrow because ``_needs_refresh``
+          triggers at most ``OAUTH_REFRESH_SKEW_MS`` before expiry;
+        * anything else is refused with a CLASSIFIED error rather than served.
+          The old code returned whatever the row held — an access token that was
+          past its expiry, which the peer session measured being spent upstream
+          as though it were live. An honest failure lets the cascade rotate to a
+          sibling (``_resolve`` blocks this row and moves on) instead of sending
+          a request that cannot authenticate.
+
+        The send marker is deliberately NOT consulted here. A live marker in this
+        branch means the peer's exchange armed it moments ago and is on the wire,
+        which is the mechanism working; refusing on it would fail every request
+        that races a healthy refresh. The marker is consulted where it protects
+        something — in the leased branch, by the only writer, before a POST.
+        """
+        if self._grant_dead_at(now_data) is not None:
+            raise CredentialInvalidError(
+                f"OAuth grant for '{row.provider}' was refused by the identity provider; "
+                f"run /login {row.provider} to sign in again"
+            )
+        if self._holds_live_bearer(now_data, now_ms=self._now_ms()):
+            return now_data
+        raise AuthStoreError(
+            f"OAuth credential {row.id} for '{row.provider}' is being refreshed by another "
+            "process and holds no usable access token; retry in a moment, or run "
+            f"/login {row.provider} if it does not clear"
+        )
+
     @staticmethod
     def _needs_refresh(creds: dict[str, Any], *, force: bool = False) -> bool:
         if force:
@@ -916,6 +1363,20 @@ class AuthStore:
         authorized_at can never rewrite them — identity is fixed at login.
         """
         creds = dict(row.data)
+        # The IdP's own refusal, persisted on the row, is honoured BEFORE the
+        # freshness check and therefore before any POST. The ordering matters: a
+        # tombstoned grant is dead whether or not its access token has expired
+        # yet, and a row that still looks fresh is exactly the state that used to
+        # be reported as a healthy login. This is where the store CONSUMES a
+        # terminal verdict; WHICH refusals are terminal is decided one layer down
+        # (``oauth/callback_server.is_terminal_grant_response``, widened for
+        # Radient's prose body by #1342) — the store records and honours the
+        # verdict rather than re-deriving it.
+        if self._grant_dead_at(creds) is not None:
+            raise CredentialInvalidError(
+                f"OAuth grant for '{row.provider}' was refused by the identity provider; "
+                f"run /login {row.provider} to sign in again"
+            )
         if not self._needs_refresh(creds, force=force):
             return creds
         refresh = self._refresh_fn(row.provider)
@@ -928,6 +1389,13 @@ class AuthStore:
             if current is None or current.disabled_cause is not None:
                 raise AuthStoreError(f"Credential {row.id} disappeared during refresh")
             fresh = dict(current.data)
+            # The same ask as the pre-lock check, repeated under the lock: a
+            # sibling may have tombstoned the grant while we waited for it.
+            if self._grant_dead_at(fresh) is not None:
+                raise CredentialInvalidError(
+                    f"OAuth grant for '{row.provider}' was refused by the identity provider; "
+                    f"run /login {row.provider} to sign in again"
+                )
             if not self._needs_refresh(fresh, force=force):
                 return fresh
             if not self._try_refresh_lease(row.id):
@@ -941,14 +1409,16 @@ class AuthStore:
                 now_data = dict(now_row.data)
                 if not self._needs_refresh(now_data, force=force):
                     return now_data
-                # Peer still in flight or failed without writing. Fall through
-                # and try the lease again below only if force requires it;
-                # otherwise serve whatever they left. force=True still needs
-                # a live token, so we retry the lease once.
+                # Peer still in flight or failed without writing. Serve whatever
+                # is still HONEST (see ``_served_while_contended``) and re-try the
+                # lease only for a caller that has no choice about needing a
+                # fresh token (force=True): a non-forced caller does not take a
+                # live holder's lease, because a second POST of the same rotating
+                # token is the harm the lease exists to prevent.
                 if not force:
-                    return now_data
+                    return self._served_while_contended(row, now_data)
                 if not self._try_refresh_lease(row.id):
-                    return now_data
+                    return self._served_while_contended(row, now_data)
             # Imported here, not at module scope: `callback_server` drags in
             # http.server/ssl/email (~138 ms, 150-odd modules), and three
             # separate comments in this codebase exist to stop anyone
@@ -956,79 +1426,154 @@ class AuthStore:
             # has already paid for the module, so the cost is zero here.
             from local_operator.providers.oauth.callback_server import InvalidGrantError
 
+            presented = self._presented_refresh_token(fresh)
+            # Everything from here to the return runs holding the cross-process
+            # lease, and EVERY exit must free it. That used to be six separate
+            # release calls, one per exit path, and a leaked lease now strands
+            # peers for the whole of AUTH_REFRESH_LEASE_MS — the very window in
+            # which they must not take the lease themselves — so the release is a
+            # `finally` that no later edit can miss.
             try:
-                refreshed = await refresh(fresh)
-            except AuthStoreError:
-                self._release_refresh_lease(row.id)
-                raise
-            except InvalidGrantError as exc:
-                # RFC 6749 SS5.2 terminal grant error. Re-raised as the store's
-                # own permanent-failure type so nothing above imports the
-                # OAuth flow module to identify it, and so the existing
-                # `except AuthStoreError` handlers still catch it.
-                #
-                # The cross-process rotation race documented on the success
-                # path below reaches HERE FIRST, and is the more dangerous
-                # arrival: with a rotating refresh token (kimi rotates), the
-                # process that loses the race POSTs a token the winner has
-                # already consumed, and the IdP answers `invalid_grant`
-                # legitimately. Declaring the credential permanently dead on
-                # that evidence condemns a LIVE grant -- the winner's token is
-                # in the DB and working -- and before this classification
-                # existed the loser raised a generic AuthStoreError and
-                # self-healed on the next cycle. So the same guard runs first:
-                # if the stored refresh token is no longer the one we sent,
-                # another process refreshed successfully and our rejection is
-                # about a superseded token, not about the account.
+                if presented and self.send_unconfirmed(row.id, presented):
+                    # This row's refresh token was presented by an exchange whose
+                    # answer never arrived, so it MAY already be spent, and
+                    # re-presenting a spent token is the reuse-detection POST that
+                    # revokes the whole family. Refuse, and say so at WARNING: the
+                    # state costs the operator an interactive sign-in and has to
+                    # be readable in a log rather than inferred from an
+                    # unexplained failure. Bounded on purpose — the marker expires
+                    # (UNCONFIRMED_SEND_TTL_S), so this can never be permanent.
+                    logger.warning(
+                        "refresh for credential %s (%s) was NOT attempted: its stored "
+                        "refresh token was presented by an exchange that was never "
+                        "acknowledged, and presenting it again may revoke the whole "
+                        "token family — run /login %s to sign in again",
+                        row.id,
+                        row.provider,
+                        row.provider,
+                    )
+                    raise AuthStoreError(
+                        f"OAuth refresh for '{row.provider}' was deferred: the stored "
+                        "refresh token was presented by an exchange that was never "
+                        f"acknowledged, so it is not presented again; run /login "
+                        f"{row.provider} to sign in again"
+                    )
+                if presented:
+                    # WRITE-AHEAD, and before the request can be on the wire: a
+                    # process that dies mid-POST takes all in-memory knowledge
+                    # with it, and the next boot would present a token this
+                    # exchange may already have spent.
+                    self._arm_send_marker(row.id, presented)
+                try:
+                    refreshed = await refresh(fresh)
+                except AuthStoreError:
+                    # The refresh fn's OWN refusal. Nothing about it says what
+                    # happened to the token on the wire, so the marker is left
+                    # exactly as it is: armed if the exchange may have run, and
+                    # absent if it never did.
+                    raise
+                except InvalidGrantError as exc:
+                    # RFC 6749 SS5.2 terminal grant error. Re-raised as the store's
+                    # own permanent-failure type so nothing above imports the
+                    # OAuth flow module to identify it, and so the existing
+                    # `except AuthStoreError` handlers still catch it.
+                    #
+                    # The cross-process rotation race documented on the success
+                    # path below reaches HERE FIRST, and is the more dangerous
+                    # arrival: with a rotating refresh token (kimi rotates), the
+                    # process that loses the race POSTs a token the winner has
+                    # already consumed, and the IdP answers `invalid_grant`
+                    # legitimately. Declaring the credential permanently dead on
+                    # that evidence condemns a LIVE grant -- the winner's token is
+                    # in the DB and working -- and before this classification
+                    # existed the loser raised a generic AuthStoreError and
+                    # self-healed on the next cycle. So the same guard runs first:
+                    # if the stored refresh token is no longer the one we sent,
+                    # another process refreshed successfully and our rejection is
+                    # about a superseded token, not about the account.
+                    now_row = self.get_credential(row.id)
+                    if now_row is not None and dict(now_row.data).get("refresh") != fresh.get(
+                        "refresh"
+                    ):
+                        logger.warning(
+                            "refresh race on %s: our token was already rotated by another "
+                            "process; keeping its token rather than declaring the grant dead",
+                            row.id,
+                        )
+                        return dict(now_row.data)
+                    # Past the race guard, the refusal IS about the token this row
+                    # holds, so the verdict is recorded as DATA before it is
+                    # raised: every surface that reads the row (the usage panel,
+                    # ``/provider``) can then say "sign-in expired" without a live
+                    # refresh attempt to re-earn it, and only an interactive login
+                    # clears it. The marker is resolved by the write — the IdP told
+                    # us what happened to the presented token.
+                    self._mark_grant_dead(row.id, rejected_refresh_token=presented)
+                    raise CredentialInvalidError(
+                        f"OAuth grant for '{row.provider}' is no longer valid: {exc}"
+                    ) from exc
+                except Exception as exc:
+                    raise AuthStoreError(
+                        f"OAuth refresh failed for '{row.provider}': {exc}"
+                    ) from exc
+                merged = dict(fresh)
+                merged.update(refreshed)
+                # Restore identity fields from the stored credential — NEVER
+                # rewritten by refresh, whatever the refresh fn returns.
+                for field in ("org_id", "org_name", "authorized_at"):
+                    if field in fresh:
+                        merged[field] = fresh[field]
+                    else:
+                        merged.pop(field, None)
+                # The response IS the acknowledgement the marker was waiting for:
+                # the exchange ran, so the token it presented is consumed and the
+                # row holds its replacement. Skipped here rather than trusted from
+                # ``fresh``, which was read BEFORE the arm.
+                merged.pop(REFRESH_SEND_UNCONFIRMED_KEY, None)
+                # Cross-process guard: the server's job processes each build their
+                # own AuthStore, so the per-process refresh lock does not cover
+                # them. Two processes racing a rotating refresh token both POST
+                # the same token; the IdP rotates and the loser's new token is
+                # dead. If the stored refresh token changed under us (another
+                # process won), skip our write — overwriting would clobber the
+                # winner's live token with our dead one and soft-delete the row.
                 now_row = self.get_credential(row.id)
                 if now_row is not None and dict(now_row.data).get("refresh") != fresh.get(
                     "refresh"
                 ):
                     logger.warning(
-                        "refresh race on %s: our token was already rotated by another "
-                        "process; keeping its token rather than declaring the grant dead",
+                        "refresh race on %s: another process refreshed first; " "keeping its token",
                         row.id,
                     )
-                    self._release_refresh_lease(row.id)
                     return dict(now_row.data)
-                self._release_refresh_lease(row.id)
-                raise CredentialInvalidError(
-                    f"OAuth grant for '{row.provider}' is no longer valid: {exc}"
-                ) from exc
-            except Exception as exc:
-                self._release_refresh_lease(row.id)
-                raise AuthStoreError(f"OAuth refresh failed for '{row.provider}': {exc}") from exc
-            merged = dict(fresh)
-            merged.update(refreshed)
-            # Restore identity fields from the stored credential — NEVER
-            # rewritten by refresh, whatever the refresh fn returns.
-            for field in ("org_id", "org_name", "authorized_at"):
-                if field in fresh:
-                    merged[field] = fresh[field]
-                else:
-                    merged.pop(field, None)
-            # Cross-process guard: the server's job processes each build their
-            # own AuthStore, so the per-process refresh lock does not cover
-            # them. Two processes racing a rotating refresh token both POST
-            # the same token; the IdP rotates and the loser's new token is
-            # dead. If the stored refresh token changed under us (another
-            # process won), skip our write — overwriting would clobber the
-            # winner's live token with our dead one and soft-delete the row.
-            now_row = self.get_credential(row.id)
-            if now_row is not None and dict(now_row.data).get("refresh") != fresh.get("refresh"):
-                logger.warning(
-                    "refresh race on %s: another process refreshed first; " "keeping its token",
-                    row.id,
+                if now_row is not None and self._grant_dead_at(dict(now_row.data)) is not None:
+                    # A sibling tombstoned the grant while our POST was in flight,
+                    # and the IdP then answered US with a rotation. A token minted
+                    # by a refresh belongs to the family the IdP revoked, so it
+                    # must not resurrect the login: the rotation is dropped, the
+                    # tombstone the sibling wrote stands, and the caller is told
+                    # the truth instead of being handed a token out of a dead
+                    # family. Checked AFTER the refresh-race guard because a
+                    # rotated token is the more specific explanation of a moved
+                    # row, and the guard's outcome keeps the peer's payload
+                    # untouched either way.
+                    logger.warning(
+                        "refresh on %s minted a token after the grant was marked dead; "
+                        "the tombstone is kept and the rotation is not persisted",
+                        row.id,
+                    )
+                    raise CredentialInvalidError(
+                        f"OAuth grant for '{row.provider}' was refused by the identity "
+                        f"provider; run /login {row.provider} to sign in again"
+                    )
+                self._conn.execute(
+                    "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
+                    (json.dumps(merged), self._now_ms(), row.id),
                 )
+                self._conn.commit()
+                return merged
+            finally:
                 self._release_refresh_lease(row.id)
-                return dict(now_row.data)
-            self._conn.execute(
-                "UPDATE auth_credentials SET data = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(merged), self._now_ms(), row.id),
-            )
-            self._conn.commit()
-            self._release_refresh_lease(row.id)
-            return merged
 
     def _refreshable_row(self, credential_id: int) -> StoredCredential | None:
         """The row a refresh may act on, or ``None`` when there is no such row.
@@ -1787,6 +2332,11 @@ class AuthStore:
           (there is none) while a caller that wants the account's state can
           see why. This does not weaken the invariant above: reporting that a
           grant is dead is still not disabling, blocking or deleting the row.
+          The verdict is taken from the row's own persisted tombstone first
+          (:data:`GRANT_DEAD_AT_KEY`), so the state is reported at all — a
+          live attempt can only report it while the access token is stale
+          enough to need refreshing, and a dead grant whose token has not
+          expired yet was exactly what used to render as a healthy login.
 
         Logged-out rows are still excluded — ``list_credentials`` filters on
         ``disabled_cause``, and an account the user signed out of is genuinely
@@ -1802,6 +2352,34 @@ class AuthStore:
         rows = [r for r in self.list_credentials(provider) if r.credential_type == "oauth"]
         accesses: list[OAuthAccess] = []
         for row in sorted(rows, key=lambda r: r.id):
+            data = row.data if isinstance(row.data, dict) else {}
+            if self._grant_dead_at(data) is not None:
+                # The refusal is ALREADY on the row, so this read does not have
+                # to re-earn it with a POST: a dead grant is a fact about the
+                # account, and re-deriving it would be both a wasted round trip
+                # and a second chance to present a revoked family's token. It is
+                # also the case a live attempt cannot cover — a row whose access
+                # token has not expired yet, which the old code reported as a
+                # perfectly healthy login while every refresh was being refused.
+                logger.info(
+                    "usage: credential %s for %s has a dead grant (recorded); re-login " "required",
+                    row.id,
+                    provider,
+                )
+                accesses.append(
+                    OAuthAccess(
+                        access_token="",
+                        credential_id=row.id,
+                        account_id=data.get("account_id"),
+                        email=data.get("email"),
+                        org_id=data.get("org_id"),
+                        api_endpoint=data.get("api_endpoint"),
+                        kind="oauth",
+                        raw=data,
+                        credential_invalid=True,
+                    )
+                )
+                continue
             try:
                 creds = await self._ensure_oauth_fresh(row)
             except CredentialInvalidError:
@@ -1813,7 +2391,6 @@ class AuthStore:
                     row.id,
                     provider,
                 )
-                data = row.data if isinstance(row.data, dict) else {}
                 accesses.append(
                     OAuthAccess(
                         access_token="",
