@@ -956,3 +956,95 @@ def test_the_report_frame_carries_the_handshake_proof() -> None:
     import json as _json
 
     assert cap.hex() not in _json.dumps(presented)
+
+
+@pytest.mark.asyncio
+async def test_the_client_signs_instead_of_prompting_when_it_has_no_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revision 2's client half: ask the owner for a challenge, sign it, attach it.
+
+    Three properties, and the first is the one a regression would hurt most:
+
+    * a connection that PROVED the spawn capability presents it and asks for no
+      challenge at all — the interactive console must stay prompt-free, and a
+      prompt there is a regression in the one surface that already worked;
+    * a connection with no capability asks for a challenge and attaches
+      ``operator_sig``/``operator_key_id`` to the increasing frame only;
+    * a frame the owner advertises no support for is returned BYTE-IDENTICAL, so
+      an old runtime keeps working for ordinary control and answers the frame
+      with its own typed refusal.
+
+    ``sign_challenge`` is monkeypatched because a real signature needs the
+    operator's private half, which by design lives behind a presence gesture (or,
+    in tests, a key file this test has no business creating). What is pinned here
+    is the CLIENT's protocol behaviour: which frames get a signature, which get a
+    prompt, and which get nothing.
+    """
+    from local_operator.mobile.attach_client import AttachClient
+    from local_operator.operator.sign import Signature
+
+    calls: list[dict[str, Any]] = []
+
+    async def fake_request_frame(op: str, **fields: Any) -> dict[str, Any]:
+        calls.append({"op": op, **fields})
+        return {"op": "ack", "req": fields.get("req"), "challenge": "cd" * 32, "expires_s": 30}
+
+    def fake_sign_challenge(**kwargs: Any) -> Signature:
+        calls.append({"signed": kwargs})
+        return Signature(sig="aa" * 71, key_id="0f" * 16)
+
+    monkeypatch.setattr("local_operator.mobile.attach_client.sign_challenge", fake_sign_challenge)
+
+    def client(*, bearing: bool, supported: bool) -> Any:
+        made = object.__new__(AttachClient)
+        made._operator_cap = b"\x01" * 32 if bearing else None
+        made._operator_nonce = "n" * 64 if bearing else ""
+        made._operator_salt = "s" * 64 if bearing else ""
+        made._authority_bearing = bearing
+        made._operator_signature_supported = supported
+        made._operator_signatures = {}
+        made._session_id = "sess-9"
+        made._on_operator_prompt = prompts.append
+        made._request_frame = fake_request_frame
+        return made
+
+    prompts: list[str] = []
+    frame = {"op": "slash_result", "command": "approvals", "args": "auto", "req": "r1"}
+
+    # 1. The console that proved the capability: no challenge, no prompt.
+    capable = client(bearing=True, supported=True)
+    out = await capable._present_operator_signature(dict(frame))
+    assert calls == [], f"a capable console asked for a challenge: {calls}"
+    assert prompts == []
+    assert "operator_sig" not in out
+
+    # 2. No capability, owner supports signing: one challenge, one prompt, one sig.
+    follower = client(bearing=False, supported=True)
+    out = await follower._present_operator_signature(dict(frame))
+    asked = [c for c in calls if "op" in c]
+    assert [c["op"] for c in asked] == ["operator_challenge"], calls
+    assert asked[0]["action"] == "loosen" and asked[0]["request_id"] == "", calls
+    assert out["operator_sig"] == "aa" * 71 and out["operator_key_id"] == "0f" * 16
+    # The prompt NAMES the session and the effect — the OS dialog cannot, so this
+    # copy is the operator's only statement of what they are approving.
+    assert prompts and "sess-9" in prompts[0] and "LOOSEN" in prompts[0], prompts
+    # ...and the signature is spent: a second frame for the same action asks again
+    # rather than replaying a signature whose challenge the owner already used.
+    calls.clear()
+    await follower._present_operator_signature(dict(frame))
+    assert [c["op"] for c in calls if "op" in c] == ["operator_challenge"], calls
+
+    # 3. An owner that does not advertise the feature: the frame is untouched, so
+    # an older runtime serves ordinary control exactly as it did before.
+    legacy = client(bearing=False, supported=False)
+    calls.clear()
+    assert await legacy._present_operator_signature(dict(frame)) == frame
+    assert calls == [] and legacy._operator_signatures == {}
+
+    # 4. An ORDINARY frame never asks for anything, whatever the owner supports.
+    calls.clear()
+    ordinary = client(bearing=False, supported=True)
+    ordinary_frame = {"op": "prompt", "text": "hi", "req": "r2"}
+    assert await ordinary._present_operator_signature(dict(ordinary_frame)) == ordinary_frame
+    assert calls == []

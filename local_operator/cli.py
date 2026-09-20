@@ -526,6 +526,14 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_secret_parser(subparsers)
 
+    # Operator authority (issue #1310, revision 2). Registration is stdlib-only
+    # for the same reason `secret`'s is: `lop --version` must not load
+    # Security.framework, the CNG stack or `cryptography`, and the verbs that do
+    # live in `operator/handlers.py`, imported only when a verb is dispatched.
+    from local_operator.operator.cli import add_parser as add_operator_parser
+
+    add_operator_parser(subparsers)
+
     # QwenCloud console session cookie: the credential the personal Token Plan
     # usage window needs and no login flow can mint (a browser session cookie
     # cannot be refreshed headlessly). stdlib-only registration, same rule.
@@ -7868,6 +7876,10 @@ def main() -> int:
             from local_operator.secrets.cli import main as secret_main
 
             return secret_main(args)
+        elif args.subcommand == "operator":
+            from local_operator.operator.cli import main as operator_main
+
+            return operator_main(args)
         elif args.subcommand == "qwencloud-ticket":
             return qwencloud_ticket_command(args)
         elif args.subcommand == "browser":

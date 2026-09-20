@@ -6902,7 +6902,7 @@ async def test_the_command_and_answer_routes_carry_the_authority_refusal(tmp_pat
     from httpx import ASGITransport, AsyncClient
 
     from local_operator.config import ConfigManager
-    from local_operator.harness.approval import OPERATOR_CAP_REQUIRED_NOTICE
+    from local_operator.harness.approval import OPERATOR_AUTHORITY_REQUIRED_NOTICE
     from local_operator.server.routes import capabilities, desktop_sessions
     from local_operator.server.utils.desktop_sessions import DesktopSessions
     from local_operator.session.errors import OperatorAuthorityRequired
@@ -6974,7 +6974,7 @@ async def test_the_command_and_answer_routes_carry_the_authority_refusal(tmp_pat
                 assert command.status_code == 422, command.text
                 body = command.json()
                 assert body["detail"]["code"] == "operator_authority_required", body
-                assert body["detail"]["message"] == OPERATOR_CAP_REQUIRED_NOTICE, body
+                assert body["detail"]["message"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, body
 
                 answer = await client.post(
                     f"/v1/desktop/sessions/{sid}/answers",
@@ -6992,7 +6992,7 @@ async def test_the_command_and_answer_routes_carry_the_authority_refusal(tmp_pat
                 assert answer.status_code == 422, answer.text
                 detail = answer.json()["detail"]
                 assert detail["code"] == "operator_authority_required", detail
-                assert detail["message"] == OPERATOR_CAP_REQUIRED_NOTICE, detail
+                assert detail["message"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, detail
                 assert detail["still_pending"] is True, detail
     finally:
         await pool.close()

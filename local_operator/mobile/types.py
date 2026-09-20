@@ -180,6 +180,34 @@ def validate_control_frame(frame: dict[str, Any]) -> None:
         # unauthorised, so the two cases stay distinguishable in the logs.
         if not is_wire_hex(frame.get("operator_cap")):
             raise ValueError("operator_cap must be a hex string")
+    # THE SIGNATURE FIELDS (revision 2). Same treatment as ``operator_cap`` and for
+    # the same reason — a credential that reaches the seam untyped is a credential
+    # the seam has to defend against — but validated WHERE THEY APPEAR rather than
+    # only on the ops that read them, because these three travel together and a
+    # client that sends one without the others has a bug worth naming: the seam
+    # would otherwise answer with a generic authority refusal and hide it.
+    #
+    # SHAPE ONLY, and deliberately loose where the value's length is variable:
+    # an ES256 signature is DER, so its hex length moves with the leading bytes
+    # of each integer, and a validator that pinned it would refuse valid
+    # signatures from some signers. The bound that matters is enforced at the
+    # verifier (``verify.MAX_SIGNATURE_BYTES``), which is the only place that
+    # knows what a signature is.
+    if "operator_sig" in frame:
+        signature = frame.get("operator_sig")
+        if not isinstance(signature, str) or len(signature) > 160 or len(signature) % 2:
+            raise ValueError("operator_sig must be a hex string")
+        try:
+            bytes.fromhex(signature)
+        except ValueError as exc:
+            raise ValueError("operator_sig must be a hex string") from exc
+    if "operator_key_id" in frame:
+        if not is_wire_hex(frame.get("operator_key_id")):
+            raise ValueError("operator_key_id must be a hex string")
+    if "operator_cert" in frame:
+        certificate = frame.get("operator_cert")
+        if not isinstance(certificate, str) or not certificate or len(certificate) > 4096:
+            raise ValueError("operator_cert must be a bounded string")
     # ``operator_nonce`` is deliberately NOT validated here, and the reason is the
     # one rule the two ends have to agree on (agent review round 2, R2-5/R2-6).
     # The nonce is read on exactly one frame — the CONNECT frame, by the runtime's

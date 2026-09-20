@@ -326,13 +326,13 @@ class OperatorAuthorityRequired(ValueError, RuntimeError):
         if message is None:
             from local_operator.harness.approval import (
                 CARD_APPROVAL_REFUSED_NOTICE,
-                OPERATOR_CAP_REQUIRED_NOTICE,
+                OPERATOR_AUTHORITY_REQUIRED_NOTICE,
             )
 
             message = (
                 CARD_APPROVAL_REFUSED_NOTICE
                 if self.trigger in self.CARD_OPS
-                else OPERATOR_CAP_REQUIRED_NOTICE
+                else OPERATOR_AUTHORITY_REQUIRED_NOTICE
             )
         super().__init__(message)
 
