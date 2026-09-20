@@ -93,7 +93,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Callable, Iterable, Match, Optional, Pattern, Sequence, Union
+from typing import (
+    Callable,
+    Iterable,
+    Mapping,
+    Match,
+    Optional,
+    Pattern,
+    Sequence,
+    Union,
+)
 
 REDACTION_MARKER = "[redacted]"
 """What a credential is replaced with in anything about to be surfaced.
@@ -1833,99 +1842,292 @@ def _make_hit(shape: Shape, match: Match[str], value: str) -> ShapeHit:
 #: partial mask cannot hide behind it, long enough not to fire on ordinary text.
 _FRAGMENT_WINDOW = 6
 
+#: The two costs every question below chooses between, in nanoseconds per byte of
+#: the text: one C-level ``str`` search (``value in text``, ``window in text``),
+#: and one gated pass over the text, which is one Python-level step per character.
+#:
+#: Measured on this host (CPython 3.12.13, best of three, on 1.3-1.8 MB of
+#: credential-dense text — a large tool result or transcript body carrying a
+#: credential row every few hundred bytes, which is the shape this pass is
+#: expensive on):
+#:
+#: * the search is **~1 ns per byte PER KEY**, and the negative case — the common
+#:   one, the value or window that was masked — has to walk the whole text;
+#: * the pass is **~25-190 ns per byte whatever the key count**, set by how much
+#:   of the text its gate admits (2 keys that start on rare characters: 25 ns;
+#:   the 49 windows of two credentials in text that is full of them: 190 ns).
+#:
+#: So a question with a handful of keys is answered by one search each — 2 keys
+#: cost 2 ms against 44 ms for the pass on the same text — and a question with
+#: thousands of them is answered by the pass, because at that end the searches are
+#: exactly the shape the freeze came in: 6000 keys cost 8.9 s of searches against
+#: 44 ms. Both arms answer the same question byte for byte (a test pins them
+#: against each other on the corpus and on the incident's own shape), so which one
+#: runs is a cost decision and never a behaviour one.
+#:
+#: The pass's span is quoted at both ends because it is the arm with the flat
+#: cost; the crossover uses the upper end, so a question near it errs toward the
+#: arm whose cost does not depend on the answer.
+_SEARCH_NS_PER_BYTE = 1.0
+_PASS_NS_PER_BYTE = 190.0
 
-class _GramIndex:
-    """The six-character runs of one model-visible text, built on FIRST use.
 
-    **Why an index rather than a substring search per fragment.** The check that
-    came before this one spells it ``fragment in text`` for every offset of the
-    credential, so it scans the whole text once per offset and its price is linear
-    in the text for EVERY credential in it. Building the text's six-character runs
-    ONCE turns each fragment test into a set lookup instead.
+def _searches_are_cheaper(keys: int) -> bool:
+    """Whether ``keys`` C-level searches beat one gated pass over the text.
 
-    **It is a trade, not a win, and the numbers below are the whole of the claim.**
-    Measured on this host (CPython 3.12.13, best of three runs, against a 1 MB
-    high-entropy tool result built from 32-hex-character lines; the scan column is
-    ``_credential_fragments_survive`` at ``91d70791``):
+    The whole decision, in one place, from the two measured terms above: the
+    searches are linear in the KEY count and the pass is not, so this is the same
+    comparison for both questions the index asks.
+    """
+    return keys * _SEARCH_NS_PER_BYTE <= _PASS_NS_PER_BYTE
 
-    * one hit, 64-character value — scan **8 ms**, this index **224 ms**;
-    * one hit, 512-character value — scan **102 ms**, this index **221 ms**;
-    * one hit, 4 KB PEM body — scan **823 ms**, this index **278 ms**;
-    * 20 hits of 512 characters over one text — scan **2729 ms**, this index **241 ms**.
 
-    So the index pays a fixed one-pass build — **224 ms** and a peak of **76 MB** of
-    transient set for a 1 MB text (708,574 distinct runs) — and only earns it back
-    where the scan it replaces is longer than that build: a value of a couple of KB
-    or more, several hits sharing one text, or a text large enough that one scan is
-    already the expensive half. For a single short credential in a large result it
-    is genuinely SLOWER than the loop it replaces, and the memory is proportional to
-    the text. Both facts are why it stays lazy and why most results never touch it.
+class _SurvivalIndex:
+    """Whether readable material survived in one model-visible text, for every hit.
 
-    **How large that memory gets, measured, because 76 MB is the small end and
-    nothing below bounds it (agent review R2, finding 2).** The peak is set by the
-    TEXT and not by the credential — one six-character run per text position, each a
-    fresh string rather than a slice, at roughly **100 bytes of transient set per
-    byte of text** — so it grows linearly with no plateau. Measured through the
-    shipped entry point on this host, one masked 40-character credential inside a
-    high-entropy hex result, one process per reading (peak RSS delta against the
-    same text built without the scan; the pre-index column is
-    ``_credential_fragments_survive`` at ``91d70791``):
+    **The defect this replaces.** The check was ``value in text`` per hit, and
+    ``_only_fully_masked`` asks it once per hit, so the pass cost ``hits x bytes``.
+    Five session runtimes on this machine were found frozen for 1.5 to 7.2 hours
+    with 100% of their event-loop main thread sampled inside the C-level search of
+    this pass (``_sre_SRE_Pattern_search`` -> ``sre_search`` -> ``sre_ucs1_match`` /
+    ``sre_ucs2_match``) while heartbeats went stale for hours, and one stall dump
+    landed exactly here: ``redaction_shapes.py:1963`` in the revision it ran (the
+    pre-change line number of ``if value in text``), with ~5.4 G byte-scans for
+    0.86 MB of text carrying 6,270 hits. The session
+    runtime's heartbeat is an asyncio task on that same loop, so an occupation past
+    its 45 s timeout is indistinguishable from a dead runtime and every control call
+    refuses without ``--force``.
 
-    * 1 MB text — pre-index **3.0 MB**, this index **101.7 MB** (~761,000 runs),
-      and the index is slower here too: **0.39 s** against **0.25 s**, because the
-      mask pass dominates and the build is pure addition. In the single-hit shape it
-      is therefore strictly memory-negative — it buys no wall time and pays ~100 MB;
-    * 4 MB text — this index **391.0 MB** (~2,719,000 runs), i.e. the same ~98 bytes
-      per text byte, i.e. linear in the text.
+    **Why 6.4 s of scan is a freeze and not a slowdown.** Cost per byte RISES with
+    size, because the hits rise with it: at a fixed hit density the grading half
+    measured 1.19 / 1.45 / 1.82 / 2.63 microseconds per byte at 64 / 128 / 256 /
+    512 KB. A text big enough to matter is therefore the text this pass cannot
+    finish inside a heartbeat — which is the loop occupancy #1363 bounds and this
+    change removes.
 
-    So a multi-megabyte tool result carrying ONE secret pays hundreds of megabytes
-    transiently, on a check that runs per tool result. Read the ratio rather than
-    the megabyte — the absolute figure follows the text's distinct-run count (1 MB
-    of one repeated line is far cheaper than 1 MB of random hex) — and read it as a
-    disclosure, not a bound: the build is bounded only by the length of the text
-    handed in.
+    **Two questions, both unchanged.** A hit is EXPOSED when the whole VALUE is in
+    the text as delivered, or when the value is at least a window long and one of
+    its six-character windows is in the text WITH THE MARKER STRIPPED. The
+    judgement is the one :func:`_credential_fragments_survive` documents at
+    length — anchored on the credential's own characters, the marker never
+    material — and this index changes only how the two questions are asked.
 
-    Reproduce a row by loading this module by path in one process (it has no
-    intra-package imports, so the pre-index revision loads beside it), building the
-    text, and diffing ``resource.getrusage(RUSAGE_SELF).ru_maxrss`` around a single
-    ``scrub_shapes_with_hits`` call — one process per reading, since ``ru_maxrss`` is
-    a high-water mark and never falls back.
+    **Each question is asked once for the whole call, over its own keys.** The
+    keys are per credential, not per hit, and there are only two of them: the
+    distinct VALUES (the whole-value half) and the distinct six-character WINDOWS
+    of those values (the partial-mask half). A text with 6270 hits over two
+    credentials asks two questions of two keys and 49 windows, and reads the text
+    by whichever of the two arms :func:`_searches_are_cheaper` picks — one C-level
+    search per key while the keys are few, one gated pass when they are not. That
+    is the whole of the change: the text is read a BOUNDED number of times per
+    call, and the number of hits does not appear in the cost.
 
-    LAZY, because most results contain no hit at all: nothing is built unless a hit
-    needs a fragment tested, so the ordinary-text path is untouched. Most results
-    are also far too small for either side to matter — every text in the credential
-    corpus is under 200 characters, where the whole question is moot.
+    **The two arms are not interchangeable, and the difference is where the
+    marker is read.** The whole-value half reads the text AS DELIVERED, marker
+    included, because a credential that is (or contains) the marker survives only
+    if its own bytes are in there — the limit pinned by
+    ``test_a_marker_inside_the_credentials_own_value_is_a_recorded_limit``, where
+    a wholly surviving ``tok[redacted]tail`` must escalate. The window half reads
+    it with the marker stripped, because the marker is what a mask WRITES and a run
+    straddling one would otherwise match a credential whose own value IS the
+    marker (the two ``.npmrc`` spellings and the cookie-header case QA round 1
+    found escalating on nothing readable at all). Stripping it also makes the two
+    characters either side of a removed marker adjacent, which is what lets a mask
+    that stopped inside a credential be seen at all — the case the floor exists
+    for.
 
-    The redaction MARKER is stripped before the runs are taken: it is what a mask
-    writes, never material a mask left behind, and a run straddling one would
-    otherwise match a credential whose own value IS the marker — the two ``.npmrc``
-    cases and the cookie-header case QA round 1 found escalating on nothing readable
-    at all. The seam the strip creates is harmless (a credential's own characters
-    are never joined by it, and a seam match would require the value's characters
-    to be readable on both sides of a marker, which is a real survivor anyway); what
-    it does cost is stated in :func:`_credential_fragments_survive`.
+    **Nothing is built unless a hit needs it, and the ordinary result pays
+    nothing.** ``scrub_shapes_with_hits`` returns before this class is constructed
+    when the text carries no anchor, and each half is built on its first question,
+    so a text whose hits never reach the fragment half never pays for the windows.
+    Most results are also far too small for either arm to matter: every text in the
+    credential corpus is under 200 characters.
+
+    **What this bounds, and what it does not.** The transient set the previous
+    index built (one six-character run per text position, ~100 bytes per byte of
+    text, 101.7 MB measured for a 1 MB text) is GONE: both arms are keyed on the
+    credentials, so the memory follows the values (~100 bytes per value character)
+    rather than the text: those values are substrings of the text, so the length of
+    the text remains the bound in the pathological case where every hit is a
+    distinct multi-kilobyte value, and the credentials are the bound in the
+    ordinary one. The cost that remains is at most ``_PASS_NS_PER_BYTE``
+    per byte plus ``_SEARCH_NS_PER_BYTE`` per key per byte, i.e. linear in the text
+    with a bound that does not contain the hit count — measured at 0.03-0.21
+    microseconds per byte on the shapes that froze a runtime, against 4.3-4.7
+    microseconds per byte before, flat as the hit count grows. The memory follows
+    the credentials too: on the 1 MB of high-entropy hex text the previous index's
+    disclosure was measured against, one credential row now adds **1.0 MB** of peak
+    RSS where it added **24.5 MB** (one process per reading, `ru_maxrss` delta
+    around a single ``scrub_shapes_with_hits``).
     """
 
-    __slots__ = ("_text", "_grams")
+    __slots__ = (
+        "_text",
+        "_values",
+        "_whole_done",
+        "_whole_found",
+        "_windows",
+        "_readable",
+        "_windows_done",
+        "_windows_found",
+    )
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, values: Iterable[str]) -> None:
         self._text = text
-        self._grams: set[str] | None = None
+        # Distinct VALUES, and the marker is never one of them: the two questions
+        # are per credential, so a text with 6270 hits over two credentials asks
+        # two questions, and a value that IS the marker is not a survivor.
+        self._values = tuple(
+            value for value in dict.fromkeys(values) if value and value != REDACTION_MARKER
+        )
+        self._whole_done = False
+        self._whole_found: set[str] = set()
+        self._windows_done = False
+        self._windows: dict[str, tuple[str, ...]] = {}
+        self._readable: Optional[str] = None
+        self._windows_found: set[str] = set()
 
-    def __contains__(self, gram: str) -> bool:
-        if self._grams is None:
-            readable = self._text.replace(REDACTION_MARKER, "")
-            self._grams = {
-                readable[start : start + _FRAGMENT_WINDOW]
-                for start in range(len(readable) - _FRAGMENT_WINDOW + 1)
-            }
-        return gram in self._grams
+    def whole_survives(self, value: str) -> bool:
+        """Whether the whole value occurs in the text as the model reads it."""
+        if not self._whole_done:
+            self._scan_whole()
+        return value in self._whole_found
+
+    def window_survives(self, value: str) -> bool:
+        """Whether any six-character window of the value survived in the text."""
+        if not self._windows_done:
+            self._scan_windows()
+        return value in self._windows_found
+
+    def _scan_whole(self) -> None:
+        """Decide every distinct value's presence, by the cheaper of the two arms.
+
+        Both arms are the same predicate — an occurrence of the value in the text
+        — so which one runs cannot change an answer, only the cost.
+        """
+        self._whole_done = True
+        if not self._values:
+            return
+        if _searches_are_cheaper(len(self._values)):
+            self._whole_found.update(value for value in self._values if value in self._text)
+            return
+        self._whole_found.update(_present_heads(self._text, self._values))
+
+    def _scan_windows(self) -> None:
+        """Decide which values kept a window, by the cheaper of the two arms."""
+        self._windows_done = True
+        self._windows = _value_windows(self._values)
+        if not self._windows:
+            return
+        readable = self._readable_text()
+        if _searches_are_cheaper(len(self._windows)):
+            for window, carriers in self._windows.items():
+                if window in readable:
+                    self._windows_found.update(carriers)
+            return
+        self._windows_found = _present_windows(readable, self._windows)
+
+    def _readable_text(self) -> str:
+        """The text with the marker stripped, built once, and only when asked for.
+
+        The strip is skipped when there is no marker to strip: on that text the two
+        readings ARE the same string, and a copy of a multi-megabyte result to
+        change nothing in it is pure cost.
+        """
+        if self._readable is None:
+            self._readable = (
+                self._text.replace(REDACTION_MARKER, "")
+                if REDACTION_MARKER in self._text
+                else self._text
+            )
+        return self._readable
 
 
-def _credential_fragments_survive(
-    hit: ShapeHit, text: str, grams: "_GramIndex | None" = None
-) -> bool:
-    """Whether a readable piece of the CREDENTIAL survived in the masked ``text``.
+def _value_windows(values: Sequence[str]) -> dict[str, tuple[str, ...]]:
+    """Every six-character window of every value, mapped back to the values holding it.
+
+    Keyed by the WINDOW rather than by the value because the pass below reads the
+    text once and asks "which values does this position speak for?" — the reverse
+    direction would have to hold a position list per window, which is the whole
+    text again. A value shorter than a window has none and so can never survive
+    this half, which is the floor's own behaviour (the check this replaces
+    returned there without reading the text at all).
+    """
+    grouped: dict[str, list[str]] = {}
+    for value in values:
+        for start in range(len(value) - _FRAGMENT_WINDOW + 1):
+            grouped.setdefault(value[start : start + _FRAGMENT_WINDOW], []).append(value)
+    return {window: tuple(carriers) for window, carriers in grouped.items()}
+
+
+def _present_windows(readable: str, windows: Mapping[str, tuple[str, ...]]) -> set[str]:
+    """Which values have a window in ``readable``, in ONE pass over it.
+
+    One step per character, gated on the first character of the needed windows, so
+    the per-character work is a set lookup and a window is only ever compared where
+    it could start. The gate is what keeps this arm's cost near the floor rather
+    than at one dict lookup per character of a multi-megabyte text.
+    """
+    gate = {window[0] for window in windows}
+    found: set[str] = set()
+    for position, char in enumerate(readable):
+        if char in gate:
+            carriers = windows.get(readable[position : position + _FRAGMENT_WINDOW])
+            if carriers is not None:
+                found.update(carriers)
+    return found
+
+
+def _present_heads(text: str, values: Sequence[str]) -> set[str]:
+    """Which of ``values`` occur in ``text``, in ONE pass over it.
+
+    The arm for a question with too many keys for one search each, where those
+    searches are what the freeze was made of. Two structural facts make it exact
+    rather than approximate, and both matter:
+
+    * the head is the value's own first ``_FRAGMENT_WINDOW`` characters, so any
+      occurrence of the value starts on one of them — the pass cannot miss one;
+    * the head is only a CANDIDATE: the characters after it are checked against
+      the whole value, because a text can carry the head without carrying the
+      credential (a shorter value that prefixes a longer one, a name that starts
+      like a token). Nothing enters the answer that was not verified in full.
+
+    A value shorter than the window is looked up at its own length, which is why
+    the keys carry widths: a five-character password is a real hit (``dsn-password``
+    on the ``amqp`` case, which is the one escalating positive the corpus pins), and
+    it must be found by its own five characters rather than by a window it does not
+    have.
+    """
+    by_width: dict[int, dict[str, list[str]]] = {}
+    for value in values:
+        width = min(len(value), _FRAGMENT_WINDOW)
+        by_width.setdefault(width, {}).setdefault(value[:width], []).append(value)
+    # First character -> the widths whose keys can start there, so the common
+    # position pays one comparison and one lookup rather than one per width.
+    widths_of: dict[str, tuple[int, ...]] = {}
+    for width, heads in by_width.items():
+        for head in heads:
+            known = widths_of.get(head[0], ())
+            if width not in known:
+                widths_of[head[0]] = known + (width,)
+
+    found: set[str] = set()
+    for position, char in enumerate(text):
+        widths = widths_of.get(char)
+        if widths is None:
+            continue
+        for width in widths:
+            candidates = by_width[width].get(text[position : position + width])
+            if candidates is None:
+                continue
+            for value in candidates:
+                if value not in found and text[position : position + len(value)] == value:
+                    found.add(value)
+    return found
+
+
+def _credential_fragments_survive(hit: ShapeHit, index: _SurvivalIndex) -> bool:
+    """Whether a readable piece of the CREDENTIAL survived in the masked text.
 
     **Anchored on the credential's own characters, never on the matched region**,
     and that is the whole of the judgement (QA round 1, Q1). The region is not all
@@ -1935,8 +2137,8 @@ def _credential_fragments_survive(
     for a value that never left the tool. Four corpus hits were affected, three of
     the four because the "survivor" was the redaction MARKER itself. So:
 
-    * the marker is not material (``_GramIndex`` strips it, and a value that IS the
-      marker is never a survivor);
+    * the marker is not material (the window half reads the text with it stripped,
+      and a value that IS the marker is never a survivor);
     * the whole VALUE present in the text is a leak: the rule's group was narrower
       than the credential, or this copy was never masked;
     * a window OF THE VALUE present is a partial leak — the mask stopped inside the
@@ -1946,30 +2148,29 @@ def _credential_fragments_survive(
     Reading the VALUE rather than the region means material a rule deliberately
     preserves can never be counted as a survivor.
 
-    **A stated limit, not an oversight.** Because ``_GramIndex`` strips the marker
-    before taking its runs, a credential whose own value literally contains
+    **The questions are asked of an index, not of the text.** The order is
+    deliberate and load-bearing: readable material is checked FIRST, so a
+    truncated-PEM hit cannot have an exposure swallowed by the caller's other
+    branch. Neither question scans the text once per hit — that is what held a
+    runtime's event loop for hours (:class:`_SurvivalIndex`).
+
+    **A stated limit, not an oversight.** Because the window half reads the text
+    with the marker stripped, a credential whose own value literally contains
     ``[redacted]`` and survives only PARTIALLY is unrepresentable: the fragment
     still in the text is spelled exactly like the marker a mask would have written,
     and no reading of the text can tell them apart. That identity is what makes the
     ``.npmrc`` and cookie false positives above impossible to grade correctly by
     inspection, so it is not closable here — only the wholly-surviving copy of such
-    a value is still caught, by the ``value in text`` test above. Reaching it needs
-    an operator secret that itself contains the harness's marker string, which is
-    why the limit is recorded rather than paid for.
+    a value is still caught, by the whole-value half. Reaching it needs an operator
+    secret that itself contains the harness's marker string, which is why the limit
+    is recorded rather than paid for.
     """
     value = hit.value
     if not value or value == REDACTION_MARKER:
         return False
-    if value in text:
+    if index.whole_survives(value):
         return True
-    if len(value) < _FRAGMENT_WINDOW:
-        return False
-    if grams is None:
-        grams = _GramIndex(text)
-    return any(
-        value[start : start + _FRAGMENT_WINDOW] in grams
-        for start in range(len(value) - _FRAGMENT_WINDOW + 1)
-    )
+    return index.window_survives(value)
 
 
 def _is_truncated_pem(hit: ShapeHit) -> bool:
@@ -2020,21 +2221,25 @@ def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
     ordinary outcome: the value was masked whole before the model could read it,
     whatever surface it arrived on.
 
-    The check is a substring test per hit against the credential's own region,
-    not a proof: it catches a value that survives whole (the group was narrower
-    than the credential) and one that survives in six-character fragments.
-    Fixing the patterns is the real work; this is the backstop that stops the
-    false claim if one slips through again.
+    The check asks two questions of the credential's own characters — is the
+    whole VALUE still in the text, or is one of its six-character windows — and it
+    is a backstop rather than a proof: it catches a value that survives whole (the
+    group was narrower than the credential) and one that survives in fragments.
+    Fixing the patterns is the real work; this is what stops the false claim if one
+    slips through again. Neither question scans the text once per hit: the index
+    reads it once for all of them, which is what a runtime wedged inside this pass
+    paid for.
     """
     marked: list[ShapeHit] = []
-    # One index for the text, shared by every hit and built on first need: the
-    # fragment test is per-credential and the text is the same for all of them.
-    grams = _GramIndex(text)
+    # One index for the text, shared by every hit, holding the values of all of
+    # them: the two questions are per-credential and the text is the same for all
+    # of them, so the reading is done once (see :class:`_SurvivalIndex`).
+    index = _SurvivalIndex(text, (hit.value for hit in hits))
     for hit in hits:
         # Readable material is checked FIRST, so the truncated-PEM branch below
         # cannot swallow an exposure: a block that was masked is contained, and
         # one that left a fragment readable is not.
-        exposed = _credential_fragments_survive(hit, text, grams)
+        exposed = _credential_fragments_survive(hit, index)
         if _is_truncated_pem(hit) or exposed:
             # A BEGIN with no END is a key whose LENGTH we cannot see: everything
             # visible is masked, and the claim is still withheld, because nothing
