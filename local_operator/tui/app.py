@@ -14651,7 +14651,7 @@ class OperatorApp(App[None]):
             notice("this conversation has nothing saved yet — nothing to archive", "warning")
             return
         from local_operator.paths import config_dir
-        from local_operator.session.archived import set_archived
+        from local_operator.session.archived import archive_change, eviction_clause
 
         current = self._archived_ids()
         if archived and session_id in current:
@@ -14660,12 +14660,12 @@ class OperatorApp(App[None]):
         if not archived and session_id not in current:
             notice("this conversation is not archived — /archive hides it from the lists", "info")
             return
-        set_archived(config_dir(), session_id, archived)
+        _, evicted = archive_change(config_dir(), session_id, archived)
         if archived:
             notice(
                 f"archived {session_id} — it is hidden from /resume, the sidebar and "
                 "search; `/unarchive` brings it back, and the picker's Archived toggle "
-                "still opens it",
+                "still opens it" + eviction_clause(evicted),
                 "info",
             )
         else:
@@ -29041,6 +29041,30 @@ class OperatorApp(App[None]):
             _FRONTEND_LOCAL_SLASHES as _FOLLOWER_LOCAL_SLASHES,
         )
 
+        # Commands whose WORK belongs to this machine even when an owner's stale
+        # capability snapshot still advertises them `authoritative_session`.
+        #
+        # NOT THE WHOLE `_FOLLOWER_LOCAL_SLASHES` SET, and the difference is
+        # what the set means: a membership there says "this frontend paints the
+        # interaction and the owner need not be told about it", which for `/btw`
+        # and `/loop` is true of the OVERLAY while the work still crosses the
+        # authoritative seam (`/btw`'s question rides `complete_aside`, and every
+        # `/loop` iteration submits through the source's own owner). Pulling
+        # those two back would break both — pinned by
+        # `test_every_authoritative_slash_routes_to_owner_with_supported_images`,
+        # which is why they keep their own pullbacks below.
+        #
+        # The three here are different: the store they write is
+        # `config_dir()/archived-sessions.json`, the directory they remove is in
+        # this `config_dir()/sessions/`, and the sidebar and picker that render
+        # the result are this terminal's. Routed to an owner — which is what
+        # happened for `/delete` in the state a user is actually in, and what the
+        # wrong-machine split would do to `/archive` on a cross-host attach —
+        # they would act on another machine's store, and `/delete` would be
+        # refused by the owner's own guard because the conversation a viewer is
+        # standing in always holds a live claim (review round 1, MAJOR-1).
+        _LOCAL_WORK_SLASHES = frozenset({"/archive", "/unarchive", "/delete"})
+
         if command == "/model" and arg.strip().casefold() == "saved":
             # Saved belongs to the invoking terminal, not the owner's config.
             # Resolve now, at commitment, and route the concrete selection so
@@ -29060,6 +29084,14 @@ class OperatorApp(App[None]):
             # The invoking TUI owns scheduling/interaction, even when a legacy
             # owner advertises the older authoritative classification. Each
             # loop iteration still uses the source's real owner prompt route.
+            remote_capability = None
+        if command in _LOCAL_WORK_SLASHES:
+            # ...and the same pullback for the commands whose WORK is here: an
+            # owner running older code still advertises these from the snapshot
+            # it took when the socket opened, and that advertisement must not be
+            # allowed to send the write or the removal to another machine. See
+            # `_LOCAL_WORK_SLASHES` above for why the whole frontend-local set is
+            # the wrong test.
             remote_capability = None
         # Bare ``/mcp`` is argument-dependent: its LISTING is canonical and
         # renders locally from the follower's own snapshot facade, while its
@@ -29118,7 +29150,11 @@ class OperatorApp(App[None]):
             if command == "/model" and not arg:
                 self._open_model_picker()
                 return
-            if self._stopped_session_id and bool(getattr(self._session, "is_cold", False)):
+            if (
+                self._stopped_session_id
+                and bool(getattr(self._session, "is_cold", False))
+                and (entry is None or "/" + entry.name not in _LOCAL_WORK_SLASHES)
+            ):
                 # A viewer that `/stop` ended keeps the owner's LAST capability
                 # list (the sync that would clear it is never coming), so a
                 # routed command reaches `route_shared_slash` and is refused
@@ -29157,6 +29193,19 @@ class OperatorApp(App[None]):
                 # True for exactly those three argument-bearing forms and False
                 # for `/model`, `/goal`, `/rename`, `/effort`, bare `/team`,
                 # `/team chart`, bare `/agent` and bare `/mcp`.
+                #
+                # A FOURTH EXEMPTION SITS IN THE CONDITION ITSELF: a command
+                # whose WORK is local (`_LOCAL_WORK_SLASHES` — archive,
+                # unarchive, delete) is never intercepted here, no matter what
+                # the stale snapshot advertises. The old owner's capability list
+                # is frozen at the moment the socket closed, so those three are
+                # still advertised `authoritative_session` by it, and reading
+                # the advertisement as the routing decision would answer "this
+                # session was stopped; /resume …" for commands that need no
+                # owner at all — which for `/delete` is exactly the state it must
+                # work in, since the conversation the viewer is standing in is
+                # the one whose owner just exited and released the claim this
+                # command's guard checks.
                 #
                 # The LOCAL pullbacks above are untouched by that breadth:
                 # `/model default`, bare `/mcp` and `/team chart` set
@@ -35055,7 +35104,15 @@ class OperatorApp(App[None]):
         # AFTER `load_text`: adoption re-keys onto the markers now in the
         # buffer, so the text has to be there first.
         editor.adopt_attachments(images)
-        editor.set_commands(SLASH_COMMANDS)
+        # THE INVOKER'S OWN LIST, not the raw registry (review round 1, MINOR-1).
+        # The other restore path — the boot/unbind one — was updated with the
+        # conditional offer and this one was missed, so opening and closing an
+        # aside on any session re-offered `/unarchive` for a conversation that is
+        # not archived: the one command whose whole contract is that it appears
+        # only in the state it can act on. `/unarchive` typed anyway still
+        # answers with a sentence, so nothing was ever wrong on screen — the list
+        # simply promised a verb the session could not use.
+        editor.set_commands(self._offered_commands())
         editor.set_records_history(True)
         self.screen.remove_class(ASIDE_LAYOUT_CLASS)
         editor.focus()
@@ -38045,7 +38102,7 @@ class OperatorApp(App[None]):
         sentence (see ``ServingSessionHandle._slash_result``'s twin).
         """
         from local_operator.paths import config_dir
-        from local_operator.session.archived import archived_ids, set_archived
+        from local_operator.session.archived import archive_change, archived_ids, eviction_clause
 
         session_id = self._resumable_session_id()
         if not session_id:
@@ -38067,13 +38124,13 @@ class OperatorApp(App[None]):
                 text="this conversation is not archived — /archive hides it from the lists",
                 style="info",
             )
-        set_archived(config_dir(), session_id, archived)
+        _, evicted = archive_change(config_dir(), session_id, archived)
         if archived:
             return SlashResult(
                 kind="notice",
                 text=(
                     f"archived {session_id} — hidden from /resume, the sidebar and search; "
-                    "`/unarchive` brings it back"
+                    "`/unarchive` brings it back" + eviction_clause(evicted)
                 ),
                 style="info",
             )

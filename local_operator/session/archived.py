@@ -65,6 +65,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
+from typing import Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -168,19 +169,70 @@ def set_archived(config_dir: Path, session_id: str, archived: bool) -> bool:
     Never raises, like its sibling: its caller is a route or a keypress handler
     answering a user who pressed something, and a read-only config directory
     must cost them the archive rather than the request.
+
+    The EVICTION the cap causes is reported by :func:`archive_change` rather
+    than here, so this stays the boolean the pin store's verb returns and the
+    routes stay a one-line echo.
+    """
+    return archive_change(config_dir, session_id, archived)[0]
+
+
+def archive_change(config_dir: Path, session_id: str, archived: bool) -> tuple[bool, list[str]]:
+    """``set_archived``, plus the ids the CAP dropped to make room.
+
+    ``ARCHIVED_LIMIT`` is a bound on the FILE, and the bound is paid by the
+    OLDEST entry — which reappears in the picker, the sidebar, the desktop
+    catalogue and search, reviving a conversation the user deliberately hid.
+    Silent, that is indistinguishable from the archive forgetting, so the verb
+    that caused it hands the evicted ids back and the receipt names them
+    (review round 1, MINOR-2).
+
+    A list rather than a single id even though one write can drop at most one:
+    the slice below decides, not the caller, and a future ``ARCHIVED_LIMIT``
+    change or a bulk verb must not turn a true report into a truncated one.
+    Eviction only ever happens on an ARCHIVE (the un-archive branch shrinks the
+    list), and it is empty on every no-op write — the common case, and the one
+    that must not pay for a report.
     """
     directory = Path(config_dir)
     current = read_archived(directory)
     if archived:
         if session_id in current:
-            return True
+            return True, []
         entries = [session_id, *current]
     else:
         if session_id not in current:
-            return False
+            return False, []
         entries = [item for item in current if item != session_id]
+    evicted = entries[ARCHIVED_LIMIT:]
     _write_archived(directory, entries)
-    return archived
+    return archived, evicted
+
+
+def eviction_clause(evicted: Sequence[str]) -> str:
+    """The receipt clause naming what the CAP put back in the lists, or ``""``.
+
+    EMPTY WHEN NOTHING WAS EVICTED, so both hosts append it unconditionally and
+    the common receipt is byte-identical to the one this feature shipped with.
+
+    The sentence lives HERE, beside the constant that causes it, because the
+    cap is a fact about this store and the alternative is a second spelling of
+    it in each frontend — and because the user-visible consequence of reaching
+    200 archives is exactly the thing review round 1 (MINOR-2) found recorded
+    only in this module's docstring: the oldest archived conversation comes back
+    into the picker, the sidebar, the desktop catalogue and search, with nothing
+    anywhere saying why. A user reads it in the receipt at the moment it
+    happens; an agent reads it here and in the design record's "what this does
+    NOT do".
+    """
+    if not evicted:
+        return ""
+    named = ", ".join(evicted)
+    verb = "is" if len(evicted) == 1 else "are"
+    return (
+        f" The archive holds at most {ARCHIVED_LIMIT}, so the oldest of them "
+        f"({named}) {verb} listed again."
+    )
 
 
 def _write_archived(directory: Path, entries: list[str]) -> None:

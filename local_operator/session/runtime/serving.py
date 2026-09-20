@@ -4203,7 +4203,7 @@ class ServingSessionHandle(SessionHandle):
         identically whether the session is local or detached.
         """
         from local_operator.paths import config_dir
-        from local_operator.session.archived import archived_ids, set_archived
+        from local_operator.session.archived import archive_change, archived_ids, eviction_clause
 
         session_id = getattr(session, "session_id", "") or ""
         if not session_id:
@@ -4225,13 +4225,16 @@ class ServingSessionHandle(SessionHandle):
                 text="this conversation is not archived — /archive hides it from the lists",
                 style="info",
             )
-        set_archived(config_dir(), session_id, archived)
+        _, evicted = archive_change(config_dir(), session_id, archived)
         if archived:
             return SlashResult(
                 kind="notice",
                 text=(
                     f"archived {session_id} — hidden from /resume, the sidebar and search; "
                     "`/unarchive` brings it back"
+                    # The cap's consequence, named at the moment it happens and
+                    # spelled once for both hosts (session.archived owns it).
+                    + eviction_clause(evicted)
                 ),
                 style="info",
             )
