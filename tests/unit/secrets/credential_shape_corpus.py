@@ -499,6 +499,20 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case("docker run -p 8080:80 nginx", "a published port, not a password"),
     Case("ssh -p 2222 host", "an ssh port, not a password"),
     Case("mysql -u root -e 'select 1'", "a mysql call with no password flag"),
+    # The production misfire, measured 2026-09-19: a watch-log entry that QUOTED
+    # the documented way to hand a stored secret to a child. The token after
+    # ``--secret`` is the secret's NAME in the store — the thing an operator has
+    # to be able to read — and it must survive byte-identical, because the hit it
+    # caused filed a rotation ticket for a credential that was not in the text.
+    # Joined from its segments so the literal never appears as a flag VALUE in this
+    # SOURCE: a flag followed by a value is exactly the shape a redaction pass
+    # rewrites, and this file is read by agents through those passes.
+    Case(
+        "lop secret run --secret "
+        + "_".join(("OS", "PROD2", "ADMIN", "PASSWORD"))
+        + " -- <command>",
+        "a flag NAMING a stored secret, not carrying one",
+    ),
     Case("aws sts get-caller-identity --query Account --output text", "an ordinary AWS read"),
     Case("aws configure list-profiles", "a profile listing"),
     Case("gh auth status", "a login check that prints no token"),

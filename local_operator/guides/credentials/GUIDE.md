@@ -34,19 +34,24 @@ curl -H "Authorization: Bearer $(lop secret get GITHUB_TOKEN)" https://api.githu
 The value crosses a pipe into the child's argv. You never see it, and it never
 enters the transcript.
 
-Do **not** do any of these — each one puts the secret somewhere it outlives the
-command:
+Do **not** do either of these — the transcript is the one place a value must
+never land, because the transcript is the model's context:
 
 ```bash
 echo "$(lop secret get GITHUB_TOKEN)"          # prints it
 TOKEN=$(lop secret get GITHUB_TOKEN); echo $TOKEN   # same, one step later
-lop secret get GITHUB_TOKEN > /tmp/token       # writes it to disk, unencrypted
 ```
 
 `lop secret get` writes the value to stdout with no trailing newline and exits
 non-zero with empty stdout on any failure, which is what makes `$( )` safe: a
 missing secret gives you an empty string and a failed command, never a partial
 or a diagnostic in place of a value.
+
+A FILE is a different matter. `lop secret get NAME > /tmp/token` puts the value
+on disk unencrypted, which is **not** treated as a compromise — the model never
+sees it — but it is a cleanup debt: delete the copy afterwards **without
+reading it**, because reading it is what would turn a contained value into a
+leaked one. Prefer a form that never leaves a copy at all:
 
 For a secret that is a FILE (a service-account JSON, a PEM), use the form that
 materialises it for one command and removes it afterwards:
@@ -117,15 +122,43 @@ remove the file, so delete the plaintext afterwards. Verify a round trip with
 `lop secret get NAME | shasum -a 256` against the original when the value has
 to be byte-exact.
 
+## What actually counts as a compromise
+
+The harness tells you when it masks a credential (`[credential redaction] …`),
+and the notice classifies itself. The distinction is worth knowing, because a
+rotation is the user's work and a false alarm spends it:
+
+- **A value in the MODEL'S CONTEXT is compromised.** It was not masked, so it is
+  in the transcript in plain text, replays into later requests, and may be in
+  training data. Nothing can undo that: the credential has to be rotated, and
+  only the user can do it. The notice says `rotate it — … could not be fully
+  masked, so it is in this session's context`, and it means it.
+- **A value that reached `bash` is not compromised.** A command's `argv`, a
+  child's environment, a pipeline, an output pipe: the value was *used*, not
+  *read*, and the model never saw it. **Do not ask for a rotation for this** —
+  the harness masks it, reports that it happened, and asks only for cleanup.
+- **A value in this process's memory is not compromised.** Same reason.
+- **A plaintext file on disk is not compromised either** — but it is the one
+  case with work in it: delete the copy without reading it (`rm -f`), then
+  carry on. Reading it to "check" is exactly what would create the compromise.
+
+So when a notice arrives, read its second half: a `rotate it` head is a real
+incident, and the contained wording is the harness saying the event happened,
+it was handled, and there is no exposure.
+
 ## What you must never do
 
 - **Never echo, print, or log a secret**, in any surface — bash output, an eval
   cell, a notice, a commit message.
-- **Never write one to a file** you do not immediately delete, and never into
-  the repository. Not `.env`, not a config file, not a scratch note.
+- **Never write one into the repository** — not `.env`, not a config file, not a
+  scratch note, not a commit. And never leave a plaintext copy outside it
+  either: delete it as soon as the command that needed it is done, **without
+  reading it**.
 - **Never put one in a commit, a PR body, an issue, or a message** to anyone.
-  If you think you have, say so immediately — a leaked credential must be
-  rotated, and only the user can do that.
+  If you think you have, say so immediately. Whether it has to be rotated
+  depends on where it went: a value that reached the model's context must be
+  rotated by the user, while one that only reached a shell or a file needs the
+  copy deleted — unread — and nothing more.
 - **Never paste one into a tool argument** that is echoed back, including your
   own reasoning text.
 - **Never move a secret between stores** without being asked. Reading one out of

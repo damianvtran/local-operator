@@ -146,15 +146,28 @@ def reset_shape_hit_reporter(token: Any) -> None:
     _HIT_REPORTER.reset(token)
 
 
-def report_shape_hits(labels: list[str]) -> None:
-    """Hand shape labels to the session's incident queue, if one is attached."""
-    if not labels:
+def report_shape_hits(labels: list[str], *, reached_model: bool = True) -> None:
+    """Hand shape labels, and their classification, to the session's incident queue.
+
+    ``reached_model`` is the SEVERITY, and its default is the escalated reading
+    because the caller that cannot say is the caller that must not claim
+    containment: a value left readable in the text the model reads may be in
+    training data, while a mask that was whole is only an event to report. A
+    caller that has run the table and knows (``ShapeReport.reached_model``)
+    passes it; a caller holding a bare list of labels does not, and keeps the
+    rotation notice it filed before this distinction existed.
+
+    An empty ``labels`` with ``reached_model`` true is a REAL case and is not
+    filtered out here: it is the hit that left a fragment behind while nothing
+    was contained whole, and it is the compromise the notice exists to escalate.
+    """
+    if not labels and not reached_model:
         return
     reporter = _resolve(_HIT_REPORTER.get())
     if reporter is None:
         return
     try:
-        reporter(labels)
+        reporter(labels, reached_model=reached_model)
     except Exception:  # noqa: BLE001 — a report must never break a mask
         pass
 

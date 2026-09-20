@@ -69,17 +69,31 @@ byte-identical, and it is as much a part of the contract as the positive set.
 
 INVARIANT: **a mask is all of the credential or none of it** — never a masked prefix
 with the remainder readable. A notice that says a credential was masked has to be
-true, because the operator's next action is a rotation. `_close_partial_masks`
-enforces it for every rule, and `tests/unit/secrets/test_credential_shapes.py`
-sweeps it over the corpus with a frozen, ratcheted residual (three rules, each with
-its reason recorded beside the table).
+true: a readable fragment left behind has entered the model's context window, which
+is the one condition this harness treats as a compromise (see the next paragraph).
+`_close_partial_masks` enforces it for every rule, and
+`tests/unit/secrets/test_credential_shapes.py` sweeps it over the corpus with a
+frozen, ratcheted residual (three rules, each with its reason recorded beside the
+table).
+
+**WHAT "COMPROMISED" MEANS HERE, because the severity of the notice hangs off it.**
+A credential is compromised when a VALUE reaches the MODEL'S CONTEXT WINDOW — the
+unmasked text of a request, the transcript it is journaled to, and so plausibly a
+training corpus. A credential that reaches `bash` (its `argv`, a child's
+environment), that lives in this process's memory, or that is written to disk in
+plaintext is NOT compromised: each of those is a containment, and the only thing it
+owes anyone is cleanup. That is why :attr:`ShapeHit.exposed` exists and why it is
+the sole input to the escalated notice: a hit that was masked whole is reported as
+an event with NO exposure, and only a fragment that survived into the text the model
+reads escalates. This paragraph is about SEVERITY; it changes nothing about
+coverage, where under-masking is still a leak and over-masking is still a defect.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Callable, Iterable, Match, Optional, Pattern, Union
+from typing import Callable, Iterable, Match, Optional, Pattern, Sequence, Union
 
 REDACTION_MARKER = "[redacted]"
 """What a credential is replaced with in anything about to be surfaced.
@@ -924,9 +938,35 @@ def _vendor_tail_guard(match: Match[str]) -> bool:
     return not re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tail)
 
 
+#: An ENVIRONMENT-VARIABLE (or secret-store NAME) spelling: capitals, digits and
+#: underscores, no lower case. ``OS_PROD2_ADMIN_PASSWORD``, ``API_KEY``.
+_ENV_NAME_SHAPED = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
 def _flag_value_guard(match: Match[str]) -> bool:
-    """A ``--flag VALUE`` pair, unless the value is syntax rather than a secret."""
-    return not any(char in match.group(2) for char in _EXPRESSION_CHARS)
+    """A ``--flag VALUE`` pair, unless the value is syntax or a NAME.
+
+    The syntax half is the original rule: a value carrying brackets or parentheses
+    is a usage-string placeholder, not a secret.
+
+    **The NAME half is measured, not hypothetical.** ``lop secret run --secret
+    OS_PROD2_ADMIN_PASSWORD -- <command>`` is the documented way to hand a stored
+    secret to a child, and the token after that flag is the secret's NAME in the
+    store — the one thing the operator needs to be able to read. On 2026-09-19 a
+    watch-log entry that QUOTED that command set this rule off, which filed a
+    rotation ticket in a production transcript for a credential that was not in
+    the text at all (the second firing of this class). A value that is spelled as
+    an environment variable AND ends in a credential word is a reference to a
+    credential, never one: the same judgement the rule already makes for
+    ``--secret NAME[=VAR]``. A value that could BE a credential — mixed case, any
+    lower case, or any token without a credential-word tail — is still masked.
+    """
+    value = match.group(2)
+    if any(char in value for char in _EXPRESSION_CHARS):
+        return False
+    if _ENV_NAME_SHAPED.fullmatch(value) and is_credential_name(value):
+        return False
+    return True
 
 
 def _BARE_SCHEME_REPLACEMENT(match: Match[str]) -> str:
@@ -1430,6 +1470,11 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # it rewrites the help text the agent is reading. The pattern stays
         # simple and the guard does the judging, which keeps the gate's anchors
         # easy to keep honest.
+        #
+        # The guard's NAME clause extends that judgement to the spelling real
+        # commands use — ``--secret OS_PROD2_ADMIN_PASSWORD``, where the token
+        # after the flag is a reference to a stored secret. See
+        # ``_flag_value_guard`` for the production incident that measured it.
         re.compile(
             r"(?i)(--(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
             r"client[-_]?secret|auth[-_]?token|access[-_]?token)(?:=|\s+))([^\s\"']{3,})"
@@ -1648,9 +1693,67 @@ class ShapeHit:
     window: str = ""
     #: Whether the ENTIRE credential is gone from the scrubbed text. A hit with
     #: ``complete=False`` still registers (containment of what can be contained)
-    #: but must NOT be announced: the row tells the operator the value was masked,
-    #: and the operator's next action is not to rotate it.
+    #: but may not be announced AS CONTAINED: the containment notice tells the
+    #: operator the value was masked, and that claim has to be true.
     complete: bool = True
+    #: Whether READABLE credential material survived the mask in this text.
+    #:
+    #: This is the whole severity classification, and it is deliberately a
+    #: separate fact from ``complete``: ``complete`` says whether the mask may be
+    #: CLAIMED (a truncated PEM is fully masked and still unclaimable, because
+    #: nothing proves the rest of the key is not further down), while ``exposed``
+    #: says whether anything readable is left in the text the model is about to
+    #: read. Only ``exposed`` is a compromise: a value in the model's context may
+    #: be in training data, which is the one exposure this harness cannot undo, so
+    #: it is the one that asks the operator for a rotation. Everything else the
+    #: table catches — masked whole in a command's `argv`, in a tool result, in a
+    #: file on disk — is contained before the model sees it.
+    exposed: bool = False
+
+
+@dataclass(frozen=True)
+class ShapeReport:
+    """One run of the table over one piece of text: what it contained, and what escaped.
+
+    The pair every consumer needs, and the reason it is one object rather than two
+    return values: the two facts have to travel together, because the notice's
+    SEVERITY (see :attr:`ShapeHit.exposed`) is decided by the second while its
+    wording is decided by the first, and a caller that reads one without the other
+    either loses a real compromise or announces a containment it cannot prove.
+
+    ``labels`` are shape NAMES, never values — a report that carried the credential
+    would be the leak it exists to describe. Only hits whose mask may be CLAIMED
+    appear in it, so it is exactly the set of shapes the contained notice may name.
+
+    ``reached_model`` is true when any hit left readable credential material in the
+    text the model reads. A text can produce both — one rule masks a DSN whole while
+    another leaves a fragment of a different credential behind — and the louder fact
+    wins, which is why this is a single boolean on the pair rather than a per-label
+    flag.
+    """
+
+    labels: tuple[str, ...] = ()
+    reached_model: bool = False
+
+
+def shape_report(hits: Sequence[ShapeHit]) -> ShapeReport:
+    """Summarise one run's hits: the claimable labels, and whether anything escaped.
+
+    The single place that decides which hits may be named in a notice, so the
+    contained notice and the escalated one can never disagree about what the table
+    found: containment takes every hit (values are registered elsewhere, by
+    :meth:`local_operator.variables.VariableStore._register_shape_hits`), the
+    ANNOUNCEMENT takes only the claimable ones, and the escalation takes any hit
+    that left something readable.
+    """
+    ordered: dict[str, None] = {}
+    for hit in hits:
+        if hit.complete:
+            ordered.setdefault(hit.label, None)
+    return ShapeReport(
+        labels=tuple(ordered),
+        reached_model=any(hit.exposed for hit in hits),
+    )
 
 
 def scrub_shapes_with_hits(text: str) -> tuple[str, list[ShapeHit]]:
@@ -1712,7 +1815,7 @@ def _make_hit(shape: Shape, match: Match[str], value: str) -> ShapeHit:
 
 
 def _credential_fragments_survive(hit: ShapeHit, text: str) -> bool:
-    """Whether any readable piece of the matched credential is still in ``text``.
+    """Whether a readable piece of the matched credential survived in ``text``.
 
     The check is against the CREDENTIAL, not the matched fragment: a DSN password
     containing ``@`` used to be masked to the first ``@`` while the password
@@ -1723,11 +1826,16 @@ def _credential_fragments_survive(hit: ShapeHit, text: str) -> bool:
     """
     if not hit.value:
         return False
-    if hit.value in text:
+    if hit.value == text:
         return True
     window = hit.window or hit.value
+    if window == text:
+        # The whole matched REGION is the text (an isolated dump of the
+        # credential itself, or the field of a JSON envelope). That is an
+        # exposure, not a survivor: the value is elsewhere in the text.
+        return True
     if len(window) <= 6:
-        return window in text and window != hit.value
+        return window in text
     for start in range(0, len(window) - 5, 3):
         if window[start : start + 6] in text:
             return True
@@ -1756,35 +1864,52 @@ def _is_truncated_pem(hit: ShapeHit) -> bool:
 
 
 def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
-    """Drop any hit whose credential is still readable in ``text``.
+    """Grade every hit: contained, contained-but-unclaimable, or EXPOSED.
 
     **A notice may never announce a masking that did not happen.** The row the
-    operator is asked to act on says the value "was masked before you saw it",
-    and a claim like that is worse than silence when it is false: it is the
-    difference between rotating a credential and believing you already have.
-    This was a real defect — a DSN password containing ``@`` was masked only to
-    the first ``@`` while the incident row still promised the whole thing was
-    gone, and the tail was in the transcript.
+    operator is asked to act on says the value "was masked before you saw it", and
+    a claim like that is worse than silence when it is false: it is the difference
+    between rotating a credential and believing you already have. This was a real
+    defect — a DSN password containing ``@`` was masked only to the first ``@``
+    while the incident row still promised the whole thing was gone, and the tail
+    was in the transcript.
 
-    The check is a substring test per hit, not a proof: it catches a value that
-    survives WHOLE (the group was narrower than the credential) and not one that
-    survives in fragments. Fixing the patterns is the real work; this is the
-    backstop that stops the false claim if one slips through again.
+    Two flags come out of here, and they are different facts:
+
+    * ``exposed`` — readable credential material is still in ``text``. That text
+      is what the model reads, so this hit has reached the context window and is
+      the one case that asks for a rotation.
+    * ``complete`` — the mask may be CLAIMED as whole. A truncated PEM is fully
+      masked (nothing readable survives) and still unclaimable, because nothing
+      proves the rest of the key is not further down a transcript we have not
+      read. Withholding the claim is the honest half of that fix, and such a hit
+      is neither announced as contained nor escalated: no claim of any kind is
+      made about it.
+
+    A hit that is neither exposed nor unclaimable is CONTAINED, and that is the
+    ordinary outcome: the value was masked whole before the model could read it,
+    whatever surface it arrived on.
+
+    The check is a substring test per hit against the credential's own region,
+    not a proof: it catches a value that survives whole (the group was narrower
+    than the credential) and one that survives in six-character fragments.
+    Fixing the patterns is the real work; this is the backstop that stops the
+    false claim if one slips through again.
     """
     marked: list[ShapeHit] = []
     for hit in hits:
-        if _is_truncated_pem(hit):
+        # Readable material is checked FIRST, so the truncated-PEM branch below
+        # cannot swallow an exposure: a block that was masked is contained, and
+        # one that left a fragment readable is not.
+        exposed = _credential_fragments_survive(hit, text)
+        if _is_truncated_pem(hit) or exposed:
             # A BEGIN with no END is a key whose LENGTH we cannot see: everything
             # visible is masked, and the claim is still withheld, because nothing
             # proves the rest of the key is not further down a transcript we have
-            # not read. Withholding the claim is the honest half of the fix.
-            marked.append(replace(hit, complete=False))
-            continue
-        if _credential_fragments_survive(hit, text):
-            # Keep it for CONTAINMENT, flag it out of the NOTICE: the value is
-            # registered for the rest of the session either way, and the honest
-            # thing to withhold is the claim, not the protection.
-            marked.append(replace(hit, complete=False))
+            # not read. The hit is kept for CONTAINMENT either way — the value is
+            # registered for the rest of the session — and the honest thing to
+            # withhold is the claim, not the protection.
+            marked.append(replace(hit, complete=False, exposed=exposed))
         else:
             marked.append(hit)
     return marked
