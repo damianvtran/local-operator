@@ -266,6 +266,14 @@ function rowFor(target: HTMLParagraphElement): HTMLElement | null {
  * right way round — the user can see what they pressed and read the answer's opening
  * lines, and the threshold where that starts is recorded in §17.16 rather than
  * discovered by a user.
+ *
+ * FLOOR is the SINGLE source of that 12 px gap: the CSS `scroll-margin-*` these
+ * replaced are only honoured by `scrollIntoView`, which this no longer calls, so they
+ * were removed rather than left as inert duplicates (round-5 R5-4). Near the threshold
+ * the gap is BEST-EFFORT, not exact — measured 3.9 px instead of 12 px in one
+ * compressed case, because the row constraint is applied after the notice's and can
+ * claw part of the gap back. Below the threshold something has to give and it is the
+ * gap, not the control.
  */
 function revealNotice(target: HTMLParagraphElement): void {
   const apply = (): void => {
@@ -335,11 +343,23 @@ function paintState(): void {
     return;
   }
   // Exactly one capability has its own sentence on screen: say the other one, and
-  // only the other one.
+  // only the other one. "as well" needs an antecedent, so it is used only when the
+  // covering notice reports that capability OFF — a quiet notice reports an ACTION
+  // ("Uploads are on. Turn this off…"), and "Downloads are off as well." under it
+  // claimed a relation that is not there (round-5 D1/UX U2). The ATTENTION weight is
+  // the same test the rest of this file uses for "this capability is off".
+  const reportsOff = (element: HTMLParagraphElement): boolean =>
+    element.classList.contains("consent-note--attention");
   if (downloadsCovered) {
-    consentState.textContent = uploadsOn ? "Uploads are on." : "Uploads are off as well.";
+    const both = reportsOff(downloadsNotice) && !uploadsOn;
+    consentState.textContent = uploadsOn ? "Uploads are on." : both ? "Uploads are off as well." : "Uploads are off.";
   } else {
-    consentState.textContent = downloadsOn ? "Downloads are on." : "Downloads are off as well.";
+    const both = reportsOff(uploadsNotice) && !downloadsOn;
+    consentState.textContent = downloadsOn
+      ? "Downloads are on."
+      : both
+        ? "Downloads are off as well."
+        : "Downloads are off.";
   }
 }
 

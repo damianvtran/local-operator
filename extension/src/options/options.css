@@ -258,11 +258,13 @@ input:focus-visible {
   font-size: 13px;
   line-height: 1.5;
   color: var(--ink-dim);
-  /* The reveal scrolls this box into view, and without a margin it lands flush on
-   * the window edge — measured `notice.bottom − innerHeight = 0 px` at 900x620,
-   * 760x520 and 420x700, which reads as a clipped line rather than a placed one
-   * (round-3 U3). */
-  scroll-margin-bottom: 12px;
+  /* The reveal scrolls this box into view, and without a gap it lands flush on the
+   * window edge — measured `notice.bottom − innerHeight = 0 px` at 900x620, 760x520
+   * and 420x700, which reads as a clipped line rather than a placed one (round-3
+   * U3). That gap is now supplied by the reveal's own FLOOR constant, because the
+   * reveal measures and scrolls by an offset instead of calling `scrollIntoView`:
+   * `scroll-margin` is only honoured by the latter, so keeping it here would be a
+   * second, inert source of truth for the same 12 px (round-5 R5-4). */
 }
 /* The note that needs an ACTION, told apart from the one that reports success.
  *
@@ -365,9 +367,9 @@ li .btn {
   font-size: 15px;
   line-height: 1.4;
   color: var(--ink);
-  /* Keeps the control off the very top edge when the reveal has to bring the row
-   * back into view (round-3 U4). */
-  scroll-margin-top: 12px;
+  /* No `scroll-margin-top` here: the reveal's own FLOOR holds the pressed row off
+   * the top edge (round-3 U4's measurement, round-5 R5-4's cleanup), and a
+   * `scroll-margin` would be inert without a `scrollIntoView` call to honour it. */
 }
 .switch input {
   position: absolute;
