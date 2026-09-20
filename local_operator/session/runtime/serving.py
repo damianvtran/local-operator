@@ -5520,7 +5520,7 @@ class ServingSessionHandle(SessionHandle):
             return ""
         return (
             "; but operator authority is not installed on this machine yet: neither can run "
-            "until `lop operator install` has (one privileged step)"
+            "until `lop operator install` has run there (one privileged step)"
         )
 
     def _approvals_slash(
@@ -5593,10 +5593,17 @@ class ServingSessionHandle(SessionHandle):
                 # The remedy names WHERE it works. This handle cannot see the
                 # connection that asked, so the sentence is written to be true
                 # from either side: a tightening word takes effect anywhere, and
-                # a loosening word takes effect only in the terminal or app
-                # window that started this session (issue #1310; design round 1
+                # a loosening word needs the operator (issue #1310; design round 1
                 # D3, UX round 1 U1/U2 — the old wording sent a follower pane to
                 # `/approvals auto` and the same pane answered with a refusal).
+                #
+                # THAT LAST CLAUSE READ "only in the terminal or app window that
+                # started this session" UNTIL ROUND 7 (QA Q7-2): the report code
+                # four lines below had already been rewritten for revision 2, so
+                # the comment described spawner authority as current while
+                # `_adopt_remedy` named the levers that work. An attached pane, the
+                # desktop app and a paired phone all loosen; the spawner gets no
+                # prompt of its own and, now, no sentence naming it either.
                 remedy = self._adopt_remedy(on_disk, may_loosen=may_loosen)
                 if (
                     transition_authority("approvals", on_disk) == "authority-increasing"

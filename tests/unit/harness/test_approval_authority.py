@@ -610,3 +610,109 @@ def test_signature_target_is_derived_from_the_frame_not_from_a_field() -> None:
     assert signature_target({"op": "approval_answer", "approved": False}) is None
     assert signature_target({"op": "ping"}) is None
     assert signature_target({"op": "slash_result", "command": "approvals", "args": "ask"}) is None
+
+
+# ---------------------------------------------------------------------------
+# Q7-1's class, closed rather than its sentence
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+#: Every phrasing that offers a reader a remedy they cannot take under the
+#: revision-2 authority model. The first two name the SPAWNER's window (which a
+#: phone, an attached pane and a desktop backend are not, and which a
+#: background-started runtime does not have); the last three are the deleted
+#: retire-and-reopen family verbatim.
+_WINDOW_REMEDIES = (
+    "the window that started this session",
+    "app window that started this session",
+    "the terminal or app window that started",
+    "the window that opens a runtime owns its gate",
+    "retire and reopen",
+    "reopen the session here",
+)
+
+
+def _shipped_notices() -> dict[str, str]:
+    """Every notice CONSTANT the product ships, by name.
+
+    Collected rather than listed: a hand-maintained list is the thing a fourth
+    sentence slips past, which is exactly how this finding arrived three times
+    (design round 1, agent round 6, QA round 7) — each fix swept the sentences
+    someone had noticed.
+    """
+    return {
+        name: value
+        for name, value in vars(approval_module).items()
+        if name.endswith("_NOTICE") and isinstance(value, str)
+    }
+
+
+def test_no_shipped_notice_names_a_window_remedy() -> None:
+    """Q7-1 as a CLASS: no shipped copy sends a reader to the spawner's window.
+
+    Three rounds produced three sentences carrying this clause — the refusal, the
+    card refusal, and finally ``LOOSENING_REFUSED_NOTICE``, which QA round 7
+    measured reaching a reader on BOTH hosts (``serving.py`` and ``tui/app.py``
+    render the same constant) while the design doc asserted "no remedy depends on
+    owning a window any more". Each fix had swept the sentences someone had
+    looked at, so this cell inventories the PRODUCT instead: every notice
+    constant in ``harness/approval.py``, and then every string literal in
+    ``local_operator/**.py``, against the phrasings that promise a window.
+
+    Docstrings are excluded and that is deliberate rather than convenient: the
+    code that explains WHY a remedy was deleted has to be able to quote it, and
+    two of those explanations sit in this diff. Comments are not in the AST at
+    all. What is asserted is the copy a reader can be shown.
+    """
+    notices = _shipped_notices()
+    # The inventory has to be big enough to be the product: a refactor that
+    # renamed or inlined these constants would make the sweep below vacuous.
+    assert len(notices) >= 6, sorted(notices)
+    for name, copy in sorted(notices.items()):
+        for phrase in _WINDOW_REMEDIES:
+            assert phrase not in copy, f"{name} offers a window remedy: {copy!r}"
+
+    offenders: dict[str, list[str]] = {}
+    for module in sorted((_REPO_ROOT / "local_operator").rglob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if id(node) in docstrings:
+                continue
+            for phrase in _WINDOW_REMEDIES:
+                if phrase in node.value:
+                    offenders.setdefault(phrase, []).append(
+                        f"{module.relative_to(_REPO_ROOT).as_posix()}:{node.lineno}"
+                    )
+    assert not offenders, f"shipped copy still promises a window remedy: {offenders}"
+
+
+def test_every_notice_fits_the_error_frame_slice() -> None:
+    """M-3: the two newest copies sat outside the cap that the two older ones pin.
+
+    ``server.py`` slices a raised exception's text to 400 characters before it
+    answers, so a copy longer than that reaches a raw client as a sentence that
+    stops mid-remedy (QA round 2, Q3). The cells that pin this pinned
+    ``OPERATOR_AUTHORITY_REQUIRED_NOTICE`` and ``CARD_APPROVAL_REFUSED_NOTICE``
+    by name — and the unconfigured pair added in round 6, now the longest copies
+    in the product, were pinned by nothing. A future edit naming
+    ``lop operator install`` twice more would truncate with nothing going red.
+
+    Asserted as a property of the INVENTORY rather than of four names, for the
+    same reason the cell above collects its subjects.
+    """
+    limits = {"LOOSENING_REFUSED_NOTICE": 400, "LOOSENING_KEPT_BY_ASK_NOTICE": 400}
+    for name, copy in sorted(_shipped_notices().items()):
+        limit = limits.get(name, 400)
+        assert len(copy) <= limit, f"{name} is {len(copy)} characters (cap {limit}): {copy!r}"

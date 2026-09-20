@@ -74,6 +74,7 @@ from local_operator.mobile.types import SessionProjection
 from local_operator.operator import report_operator_authority
 from local_operator.operator import verify as operator_verify
 from local_operator.operator.trust import (
+    ANCHOR_REFRESH_S,
     AnchorCache,
     AnchorLoad,
     OperatorAnchor,
@@ -883,10 +884,15 @@ _MAX_CHALLENGES_PER_CONN = 8
 _MAX_LIVE_CHALLENGES = 64
 
 #: How long a runtime may keep trusting the revocation list it read at first need.
-#: The cache's own default (``trust.ANCHOR_REFRESH_S``) with the runtime's name on
-#: it, so a test can shrink the window to zero by patching ONE constant here rather
-#: than poking the value the cache already holds.
-_ANCHOR_REFRESH_S = 30.0
+#:
+#: THE SAME OBJECT THE PRODUCT QUOTES, not a second literal that happens to agree
+#: (agent review round 7, M-2). ``trust.ANCHOR_REFRESH_S`` is what the design doc
+#: and `lop operator devices --revoke`'s receipt state to an operator, so a runtime
+#: enforcing its own copy could tell someone a window it does not honour — a
+#: security claim outrunning the code, which is the class this round exists to
+#: remove. Bound here as a module attribute as well, because a test shrinks the
+#: window to zero by patching ONE name and this is the name the cache is built from.
+_ANCHOR_REFRESH_S = ANCHOR_REFRESH_S
 
 #: How long a verified device certificate is remembered. The certificate is
 #: checked lazily and per certificate string; a TTL rather than a permanent cache
@@ -3869,6 +3875,14 @@ class RuntimeServer:
         consume), and it needs no timer for the same reason: every entry it holds
         is one of the entries in some connection's map, so anything it can forget
         has already been forgotten here, and any VALUABLE entry has a deadline.
+
+        THE RE-INSERTION BELOW CANNOT GROW THAT MAP (agent review round 7, N-2),
+        which is worth the half-sentence because it reads as though it could: it
+        refreshes deadlines only for entries ALREADY COUNTED AT MINT — a challenge
+        in this connection's map was inserted into the runtime map by the mint that
+        created it, under the ``_MAX_LIVE_CHALLENGES`` check — and the second loop
+        drops the expired ones. So the map's size is what the bound says it is,
+        whether or not this runs.
         """
         stale = [key for key, (_, deadline) in conn.operator_challenges.items() if deadline < now]
         for key in stale:

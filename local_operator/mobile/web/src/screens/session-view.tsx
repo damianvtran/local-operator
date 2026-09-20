@@ -53,7 +53,14 @@ function Header({
 	   D2). The sheet unmounts the moment it closes, and a report set inside it was
 	   never painted — measured: panel gone, header still "needs you", the user told
 	   nothing. The header is the surface the sheet closes back onto, so the receipt
-	   belongs to it and survives. */
+	   belongs to it and survives.
+
+	   IT PERSISTS UNTIL THE SCREEN UNMOUNTS, which is the intent and not a
+	   lifetime a timer should own: `onReceipt` has one caller (the loosen success
+	   path) and a second loosen rewrites the same sentence, so there is nothing
+	   stale to clear — the gate is still auto either way. An earlier version of
+	   this comment claimed the next gesture cleared it, which no code did (design
+	   round 7, D9). */
 	const [gateReceipt, setGateReceipt] = useState("");
 	return (
 		<>

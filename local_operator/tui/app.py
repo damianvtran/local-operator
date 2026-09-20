@@ -21795,7 +21795,7 @@ class OperatorApp(App[None]):
             return ""
         return (
             "; but operator authority is not installed on this machine yet: neither can run "
-            "until `lop operator install` has (one privileged step)"
+            "until `lop operator install` has run there (one privileged step)"
         )
 
     def _configured_approvals_mode(self) -> str | None:

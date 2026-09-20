@@ -185,10 +185,11 @@ export function PairScreen() {
 						</p>
 					) : (
 						<p className="text-meta text-ink-muted">
-							It cannot sign yet: that machine has not installed its operator authority,
-							so it has no key to check this phone&rsquo;s signatures with. Run{" "}
-							<code>lop operator install</code> there (one privileged step) — then this
-							phone&rsquo;s approvals and loosenings will be accepted. Revoke it with{" "}
+							This phone can sign already; that machine cannot check it yet. Its operator
+							authority is not installed, so there is no key there to verify this
+							phone&rsquo;s signatures against. Run <code>lop operator install</code> there
+							(one privileged step) — then this phone&rsquo;s approvals and loosenings will
+							be accepted. Revoke it with{" "}
 							<code>lop operator devices --revoke {status.deviceId}</code>.
 						</p>
 					)}

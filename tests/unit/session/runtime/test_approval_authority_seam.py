@@ -3224,6 +3224,15 @@ def test_the_prompt_copy_is_wired_at_the_surfaces_that_can_show_it() -> None:
     CALLED with, and building an attached session to observe one log line would test
     the logging, not the wiring. ``AttachClient``'s own handling of the callback is
     covered directly in ``tests/unit/mobile/test_attach_client.py``.
+
+    AND THIS CELL IS ONLY HALF THE CHAIN (agent review round 7, M-4, which mutation-
+    tested it): gutting ``OperatorApp._on_operator_prompt`` leaves this green while
+    the copy reaches nobody, because a pane with a handler installed takes no
+    fallback log. The PAINT half is driven where the paint happens —
+    ``tests/unit/tui/test_approvals_ux.py::
+    test_the_signature_prompt_copy_is_painted_where_a_human_can_read_it`` — so the
+    chain is covered end to end: this cell says the argument is passed, that one
+    says the argument is used.
     """
     client_source = (_TESTS_ROOT / "local_operator" / "session" / "attached.py").read_text(
         encoding="utf-8"

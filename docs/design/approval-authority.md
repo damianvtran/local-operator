@@ -533,7 +533,16 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   remedy depends on owning a window any more) and answers the part that remains
   in the PROMPT: `effect_copy` names the session and the effect, so the person
   answering a Touch ID dialog is told which gate their gesture is about to
-  loosen (raised round 2 UX U9);
+  loosen (raised round 2 UX U9). **That sentence took three sweeps to become
+  true.** The refusal and the card refusal were rewritten first, the `/approvals`
+  REPORT in round 6, and `LOOSENING_REFUSED_NOTICE` — which reaches a reader on
+  both hosts — only in round 7 (QA Q7-1), each round having fixed the sentences
+  someone had happened to look at. It is now a claim a test can fail on rather
+  than a claim in prose: `tests/unit/harness/test_approval_authority.py::
+  test_no_shipped_notice_names_a_window_remedy` inventories every notice constant
+  AND every non-docstring string literal under `local_operator/` against the
+  phrasings that promise a window, so a fourth sentence cannot slip through
+  unnoticed;
 - **the phone's card component renders the refusal body raw.** The sentence it
   now receives is the CARD's — the question survived, and a deny works from there
   — but `pending-card.tsx`'s `humanizeError` has no arm for it, so the copy is

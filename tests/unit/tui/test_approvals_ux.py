@@ -928,3 +928,42 @@ async def test_a_stopped_session_settles_its_live_approval() -> None:
         await pilot.press("y")
         await _settle(pilot)
         assert len(app.query(ApprovalBlock)) == receipts_before
+
+
+@pytest.mark.asyncio
+async def test_the_signature_prompt_copy_is_painted_where_a_human_can_read_it(
+    config_dir: Path,
+) -> None:
+    """U3's PAINT half, DRIVEN — the seam a gutted handler left green (M-4).
+
+    Agent review round 7 mutated `OperatorApp._on_operator_prompt` into a no-op
+    and `test_the_prompt_copy_is_wired_at_the_surfaces_that_can_show_it` stayed
+    green: that cell is an AST fact about the arguments a constructor is CALLED
+    with, and the paint it feeds was exercised nowhere. The chain it did not cover
+    is the one that matters to the person answering a prompt — the sentence is
+    built, handed to the pane, and then either appended to the transcript or lost
+    silently, because a pane with a handler installed takes no fallback log.
+
+    Both directions are asserted, because the scoping is part of the claim: a copy
+    for a session the user is no longer in must NOT paint, and that branch is the
+    one an over-eager fix would delete.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        assert app._session is session, "the app never adopted the session under test"
+
+        copy = "Authorise the operator key to LOOSEN the approval gate of sess-9"
+        app._on_operator_prompt(session, copy)
+        await pilot.pause()
+        notices = _notices(app)
+        assert notices, "the prompt copy reached no surface: the handler painted nothing"
+        assert copy in notices[-1], notices[-1]
+
+        # THE SCOPING: a copy raised for another conversation is dropped, not
+        # painted onto the one the user switched to.
+        before = len(_notices(app))
+        app._on_operator_prompt(object(), "a copy for a session that is no longer current")
+        await pilot.pause()
+        assert len(_notices(app)) == before, "a stale prompt copy was painted"
