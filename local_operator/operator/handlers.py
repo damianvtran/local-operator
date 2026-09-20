@@ -59,6 +59,22 @@ def dispatch(args: argparse.Namespace) -> int:
     return 2
 
 
+def _is_privileged() -> bool:
+    """Whether this process may already write the anchor's root-owned path.
+
+    POSIX answers with ``os.geteuid``; Windows has no such attribute (reading it
+    raises ``AttributeError``, which the probe battery counts as a fatal
+    unguarded POSIX attribute), and there is no cheap, dependency-free way to ask
+    whether the token is elevated — so Windows answers ``False`` and takes the
+    print-the-command path. That is the honest outcome: a Windows operator runs
+    the PowerShell step from an elevated shell, and a `lop` process that guessed
+    "elevated" would write a non-administrator-owned file into ``%PROGRAMDATA%``
+    and call it an anchor.
+    """
+    geteuid = getattr(os, "geteuid", None)
+    return bool(geteuid is not None and geteuid() == 0)
+
+
 def _init(args: argparse.Namespace) -> int:
     root = config_dir()
     try:
@@ -102,14 +118,14 @@ def _install(args: argparse.Namespace) -> int:
     if args.print_only:
         print(" && ".join(" ".join(argv) for argv in command))
         return 0
-    if os.geteuid() == 0:  # pragma: no cover — running as root is the rare case
+    if _is_privileged():
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(staged, target)
         os.chmod(target, 0o644)
     else:
-        if shutil.which("sudo") is None:  # pragma: no cover — macOS and most Linux have sudo
+        if shutil.which("sudo") is None:
             print(
-                "sudo is not on PATH. Run these as root by hand:\n  "
+                "installing the anchor needs administrator rights. Run this by hand:\n  "
                 + "\n  ".join(" ".join(argv) for argv in command),
                 file=sys.stderr,
             )

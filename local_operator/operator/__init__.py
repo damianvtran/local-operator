@@ -107,7 +107,7 @@ LEVEL_UNREPORTED = "unreported"
 _REPORTED = False
 
 
-def authority_level_load(*, uid: int | None = None) -> tuple[str, AnchorLoad]:
+def authority_level_load(*, uid: int | str | None = None) -> tuple[str, AnchorLoad]:
     """The level plus the load that produced it, for callers that need the why."""
     loaded = load_anchor(uid)
     if loaded.exists and not loaded.root_owned:
@@ -124,7 +124,7 @@ def authority_level_load(*, uid: int | None = None) -> tuple[str, AnchorLoad]:
     )
 
 
-def operator_authority_level(*, uid: int | None = None) -> str:
+def operator_authority_level(*, uid: int | str | None = None) -> str:
     """How strong THIS host's operator authority is. Absorbs the capability guarantee.
 
     The previous revision answered a narrower question — "does the OS stop a
@@ -146,7 +146,7 @@ def operator_authority_level(*, uid: int | None = None) -> str:
     return level
 
 
-def operator_authority_report(*, uid: int | None = None) -> dict[str, Any]:
+def operator_authority_report(*, uid: int | str | None = None) -> dict[str, Any]:
     """The level with everything a report line needs, including the residual.
 
     ``capability_guarantee`` is the absorbed value: it answers the OLD question
@@ -172,7 +172,7 @@ def operator_authority_report(*, uid: int | None = None) -> dict[str, Any]:
     }
 
 
-def report_operator_authority(*, uid: int | None = None) -> str:
+def report_operator_authority(*, uid: int | str | None = None) -> str:
     """Log the authority level once per process and return it."""
     global _REPORTED
     level = operator_authority_level(uid=uid)

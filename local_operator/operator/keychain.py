@@ -40,10 +40,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
-import hashlib
 import os
-import secrets
-import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -578,28 +575,3 @@ def _named_backend(name: str, *, config_root: Path) -> Any:
     if name == CNG_PRESENCE:
         return CngBackend()
     return FileKeyBackend(default_file_path(config_root))
-
-
-def key_file_mode_is_private(path: Path) -> bool:
-    """Whether a key file is 0600 (and owned by this uid).
-
-    Reported, never enforced by changing an existing file's mode: silently
-    chmod-ing a path is the kind of helpful behaviour that makes a host look safe
-    without the operator having decided it is.
-    """
-    try:
-        info = path.stat()
-    except OSError:
-        return False
-    return stat.S_IMODE(info.st_mode) == 0o600 and info.st_uid == os.getuid()
-
-
-def random_device_id() -> str:
-    """A fresh device identifier for a pairing step (used by stage D)."""
-    return secrets.token_hex(16)
-
-
-def digest_key(*parts: str) -> str:
-    """A short digest over several strings, for cache keys and test ids."""
-    joined = "\x00".join(parts).encode("utf-8")
-    return hashlib.sha256(joined).hexdigest()
