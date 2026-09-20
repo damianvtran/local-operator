@@ -187,6 +187,16 @@ _AMBIENT_VARS = (
     "FAL_API_KEY",
     "ZAI_API_KEY",
     "HF_TOKEN",
+    # The anchor's directory on Windows (`PROGRAMDATA`): an inherited value would
+    # point the operator-authority ANCHOR — the root of trust every loosening is
+    # verified against — at whatever directory the runner happens to name, in a
+    # suite whose operator tests are supposed to be reading a throwaway one. It
+    # is a MACHINE directory rather than a secret, so the remedy is scrubbing
+    # (which makes `anchor_dir` fall back to the platform default) rather than a
+    # `_HARMLESS` note: a variable that names where trust lives is exactly the
+    # "redirectable anchor path" the design forbids, and the suite should not
+    # inherit one either.
+    "PROGRAMDATA",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real
