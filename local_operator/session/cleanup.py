@@ -36,7 +36,9 @@ the real store**, and refuses on the actor's behalf:
   jsonl`` — an always-on, per-store record, because the earlier reaps were
   only discoverable by hunting through per-process log files.
 - **Hard guards apply even when enabled.** A session with a live claim,
-  lease or pid; one with an armed wake; one with unread spooled mail; the
+  lease or pid; one with an armed wake (DORMANT entries — the ``stopped_at``
+  marker ``/stop`` writes, which the supervisor skips — do not guard, see
+  :func:`_has_armed_wake`); one with unread spooled mail; the
   session being built right now; and the :data:`RECENT_KEEP` most recently
   active sessions are never candidates. The guards are checked per
   directory at decision time, not from a cached listing.
@@ -396,11 +398,14 @@ EXPLICIT_DELETE_POLICY = "explicit-delete"
 #: refused by, keyed by the reason :func:`_guard` returns.
 #:
 #: ONE SENTENCE PER GUARD rather than one blanket refusal, because the remedies
-#: differ: a running session is stopped, an armed wake is cancelled, unread mail
-#: is read. The mapping is closed on purpose — a reason it does not carry still
-#: refuses through the fallback below, so a guard added to :func:`_guard` later
-#: cannot quietly become a condition the user is allowed to delete through. That
-#: direction is the whole safety property here: every path that does not
+#: differ: a running session is stopped, an armed wake is cancelled from the
+#: conversation or its entry file, unread mail is read by reopening. Every
+#: sentence names an action the user can actually take — review round 1 and UX
+#: round 1 both found sentences naming doors that did not exist. The mapping is
+#: closed on purpose — a reason it does not carry still refuses through the
+#: fallback below, so a guard added to :func:`_guard` later cannot quietly become
+#: a condition the user is allowed to delete through. That direction is the whole
+#: safety property here: every path that does not
 #: positively clear is a refusal.
 _GUARD_REFUSALS: dict[str, str] = {
     "claimed by a live process": (
@@ -410,10 +415,25 @@ _GUARD_REFUSALS: dict[str, str] = {
         "That conversation is open in a running session. Stop it before deleting it."
     ),
     "has an armed wake": (
-        "That conversation has a wake armed for it. Cancel the wake before deleting it."
+        # THE REMEDY HAS TO EXIST SOMEWHERE THE USER CAN REACH (UX round 1, U1).
+        # "Cancel the wake before deleting it" named an action with no surface:
+        # the composer offers no wake command, the wake band lists schedules with
+        # no cancel action or binding, and `lop wake`'s own copy says there is no
+        # cancel (`cli.py` names the entry FILE for the same reason, round 3
+        # D20). The two doors that do exist are the conversation itself — the
+        # model-facing `wake` tool cancels by schedule id, so asking is an action
+        # a user can take — and the index entry, which is the same file remedy
+        # the CLI's ghost row already names, in the same relative form.
+        "That conversation has a wake armed for it. Reopen it and ask it to cancel "
+        "the wake, or delete its wakes/<session-id>.json entry, before deleting it."
     ),
     "has unread spooled mail": (
-        "That conversation has unread messages waiting. Read them before deleting it."
+        # "Read them" named no way to read them (UX round 1, U4). The spool
+        # drains once, at open (`inbox.drain_inbox`), and no command reads
+        # another conversation's inbox — so reopening that conversation IS the
+        # action, and it is the one this names.
+        "That conversation has unread messages waiting. Reopen it to read them "
+        "before deleting it."
     ),
 }
 
@@ -450,6 +470,12 @@ class DeleteOutcome:
     ``children`` is how many subagent runs this conversation launched, counted
     so a receipt can say they are KEPT. It is information about the blast
     radius, never an input to the decision: the deletion removes one directory.
+
+    ``label`` is how a sentence names the conversation — title first, id in
+    parentheses. The hosts all print it rather than re-deriving it, so a
+    rehearsal cannot name the target in one frontend and not another (design
+    round 1, D2). Empty when ``found`` is false: an id that resolves to nothing
+    has no title to show and the 404 sentence names it already.
     """
 
     session_id: str
@@ -457,6 +483,31 @@ class DeleteOutcome:
     deleted: bool
     refusal: str = ""
     children: int = 0
+    label: str = ""
+
+
+def session_label(directory: Path) -> str:
+    """How a destructive sentence names the conversation it will remove.
+
+    TITLE FIRST because the id is not on the screen the rehearsal is typed into
+    (design round 1, D2): the status band carries the model and the cwd, and the
+    id appears only as a dim right-hand column inside a different screen
+    (``/resume``). A rehearsal that named only the id asked a user to confirm the
+    destruction of something they could not see — and in the PR's own frame the
+    fixture's id was the string ``sess``, which reads as a truncated word.
+
+    Falls back to ``this conversation (<id>)`` when the session has no stored
+    title rather than inventing one: the lists have no label for it either, so a
+    second spelling of "Untitled conversation" here would be a name the user
+    never chose and cannot search for.
+    """
+    try:
+        from local_operator.resume import stored_session_title
+
+        title = stored_session_title(directory)
+    except Exception:  # noqa: BLE001 — a label is never worth failing a delete over
+        title = ""
+    return f"“{title}” ({directory.name})" if title else f"this conversation ({directory.name})"
 
 
 def _subagent_child_count(directory: Path) -> int:
@@ -521,7 +572,7 @@ def delete_session(
     silent no-op:
 
     * **A running session.** Every hard guard in :func:`_guard` applies
-      unchanged — a live claim, a live lease, an armed wake, unread spooled
+      unchanged — a live claim, a live lease, an ARMED wake, unread spooled
       mail, and a guard that could not be evaluated. Deleting the directory of a
       session that is serving a turn leaves a process writing into a path that
       no longer exists, and the ledger the user reads would lose the record of
@@ -573,6 +624,7 @@ def delete_session(
             deleted=False,
             refusal=_GUARD_REFUSALS.get(reason, _GUARD_REFUSAL_FALLBACK),
             children=children,
+            label=session_label(directory),
         )
     removed = remove_session_dir(
         directory,
@@ -596,6 +648,7 @@ def delete_session(
         deleted=removed,
         refusal="" if removed else _DELETE_REFUSAL_FALLBACK,
         children=children,
+        label=session_label(directory),
     )
 
 
@@ -665,11 +718,49 @@ def _lease_runtime_alive(directory: Path) -> bool | None:
     return _process_alive(pid)
 
 
-def _has_wake(config_dir: Path, session: str) -> bool:
+def _has_armed_wake(config_dir: Path, session: str) -> bool:
+    """Whether a wake for this session can still FIRE (U2).
+
+    THE GUARD ASKS ABOUT FIRING, NOT ABOUT EXISTENCE. It used to be
+    ``entry_path(...).exists()``, and `/stop` deliberately does not delete a
+    schedule — it stamps ``stopped_at`` on the index entry, which the supervisor
+    skips in every path it has (``wakes/supervisor.py``: the due scan, the
+    delivery reconciliation and ``_next_wake_ms``), with its own comment saying
+    the wakes "stay armed but do not fire until the user reopens it". So a
+    conversation in which the user had ever set a reminder could NEVER be deleted
+    from the moment they stopped it: `/delete` is refused with a sentence about a
+    wake the product has itself put to sleep, and re-stopping or waiting does not
+    change the answer. A marker that cannot fire is not pending live work — the
+    invariant this guard protects is that nothing which can still happen is
+    silently destroyed, and a dormant entry cannot happen.
+
+    REOPENING REVIVES IT, and that is why dropping dormancy here is safe rather
+    than merely convenient: the session's next open clears ``stopped_at``
+    (``wakes/store.write_entry``'s ``clear`` argument), and a later delete of
+    that conversation is refused again while the schedule is armed. Nothing the
+    user can still receive is lost without a refusal; what stops being refused is
+    the reminder attached to a conversation they have already ended and now ask
+    to destroy.
+
+    FAIL-CLOSED ON ANYTHING UNREADABLE, exactly as the existence check was: an
+    entry that cannot be parsed may be armed, and the guard's contract is that
+    every path which does not positively clear is a refusal. ``store.read_entry``
+    is deliberately NOT used — it treats an unreadable file as absent for
+    display's sake, which here would turn a corrupt entry into a delete.
+    """
     try:
         from local_operator.wakes.store import entry_path
 
-        return entry_path(config_dir, session).exists()
+        path = entry_path(config_dir, session)
+        if not path.exists():
+            return False
+        try:
+            entry = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True  # present but unreadable: assume it fires
+        if not isinstance(entry, dict):
+            return True
+        return not entry.get("stopped_at")
     except Exception:  # noqa: BLE001 — unprovable is "yes"
         return True
 
@@ -698,7 +789,7 @@ def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
             return "claimed by a live process"
         if _lease_runtime_alive(directory):
             return "leased by a live process"
-        if _has_wake(config_dir, directory.name):
+        if _has_armed_wake(config_dir, directory.name):
             return "has an armed wake"
         if _has_spooled_mail(directory):
             return "has unread spooled mail"
@@ -1123,8 +1214,12 @@ def apply_cleanup(
 
 def _forget_wake_entry(config_dir: Path, session: str) -> None:
     """A removed session cannot have a wake fire for it; drop its index entry.
-    Unreachable in practice (an armed wake is a hard guard) but keeps the
-    index from pointing at nothing if the guard was bypassed by hand."""
+
+    REACHABLE since U2: a DORMANT entry no longer refuses the delete, so a
+    stopped conversation whose reminder was put to sleep is removed together with
+    that entry. An ARMED entry still refuses above, which is why this stays
+    best-effort — it is cleanup for the case the guard now lets through, not a
+    step the delete depends on."""
     try:
         from local_operator.wakes.store import remove_entry
 

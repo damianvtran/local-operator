@@ -4203,7 +4203,11 @@ class ServingSessionHandle(SessionHandle):
         identically whether the session is local or detached.
         """
         from local_operator.paths import config_dir
-        from local_operator.session.archived import archive_change, archived_ids, eviction_clause
+        from local_operator.session.archived import (
+            archive_change,
+            archived_ids,
+            eviction_clause,
+        )
 
         session_id = getattr(session, "session_id", "") or ""
         if not session_id:
@@ -4231,7 +4235,8 @@ class ServingSessionHandle(SessionHandle):
                 kind="notice",
                 text=(
                     f"archived {session_id} — hidden from /resume, the sidebar and search; "
-                    "`/unarchive` brings it back"
+                    "/unarchive brings it back, and the picker's Archived toggle (ctrl+a) "
+                    "still opens it."
                     # The cap's consequence, named at the moment it happens and
                     # spelled once for both hosts (session.archived owns it).
                     + eviction_clause(evicted)
@@ -4288,8 +4293,11 @@ class ServingSessionHandle(SessionHandle):
             return SlashResult(
                 kind="notice",
                 text=(
-                    f"/delete removes {session_id} and its transcript for good — it cannot "
-                    f"be undone.{kept} Run /delete yes to confirm."
+                    # The TARGET, named the way the lists name it — title first,
+                    # id in parentheses (design round 1, D2). The outcome carries
+                    # the label so this arm and the serving host cannot drift.
+                    f"/delete removes {outcome.label} and its transcript for good — it "
+                    f"cannot be undone.{kept} Run /delete yes to confirm."
                 ),
                 style="warning",
             )

@@ -1347,15 +1347,23 @@ def render_rows(
                 ),
                 style=row_bg + Style(color=dim),
             )
-        # The archived mark, painted `dim` like the two qualifier tags beside it
-        # and for the reason given there: it is metadata ABOUT the row, not part
-        # of the conversation's title. It sits LAST among the qualifiers, so the
-        # marks a user sees on every list (fork, exec, live state) keep their
-        # existing distance from the name.
+        # The archived mark, painted `muted` — NOT the `dim` the qualifier tags
+        # beside it use, and the difference is measured rather than stylistic
+        # (design round 1, D3): `dim` is 3.43:1 on the row ground in the dark
+        # theme and 2.72:1 in the light one, both under AA, and this file's own
+        # body-match note rejects those numbers for a mark that explains a row.
+        # That is what this is: in a revealed list it is the only thing saying
+        # the row is not offered by default, so it gets the ink that explains
+        # (`muted`, 6.51:1 dark / 5.18:1 light) while the age and the id keep
+        # `dim` as lookup keys.
+        #
+        # It sits LAST among the qualifiers, so the marks a user sees on every
+        # list (fork, exec, live state) keep their existing distance from the
+        # name.
         if archive_col:
             line.append(
                 _pad_cells(ARCHIVE_MARKER if getattr(row, "archived", False) else "", archive_col),
-                style=row_bg + Style(color=dim),
+                style=row_bg + Style(color=theme_mod.semantic_color("muted")),
             )
         # The live-state mark sits immediately before the name, where the eye
         # scanning the name column passes it anyway. Its ink is the state's own
@@ -1581,6 +1589,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         self._selected = 0
         self._offset = 0
         self._hovered: int | None = None
+        #: Whether the pointer is on the ARCHIVED TOGGLE LINE. Separate from
+        #: ``_hovered`` because the toggle is not a row — it sits above the list
+        #: and has no index — and it gets its own ground when the pointer is over
+        #: it (design round 1, D5): the whole line is the hit box, so the whole
+        #: line has to say so before it is clicked, not only after.
+        self._toggle_hovered = False
         # ``{session id: conversation digest}``, built by the caller before the
         # screen is pushed (``search_index.build_index``). Optional so a host
         # without an index — tests, embedders — gets the name-and-id filter
@@ -2087,8 +2101,16 @@ class SessionPickerScreen(ModalScreen[str | None]):
 
     def on_mouse_move(self, event) -> None:  # type: ignore[no-untyped-def]
         index = self._index_at(event)
+        # One hit-test for two effects: the pointer shape AND the toggle's own
+        # hover ground (design round 1, D5) — the toggle is a control, and until
+        # now only the hand said so, so the mouse path was invisible until it was
+        # used. Computed once because `_clicked_toggle` measures a region.
+        on_toggle = index is None and self._clicked_toggle(event)
         if index != self._hovered:
             self._hovered = index
+            self._repaint()
+        if on_toggle != self._toggle_hovered:
+            self._toggle_hovered = on_toggle
             self._repaint()
         # Hand pointer over a row only (a click resumes it); the card's
         # padding and headers keep the default shape — EXCEPT the Archived
@@ -2097,13 +2119,12 @@ class SessionPickerScreen(ModalScreen[str | None]):
         # The inline-rule assignment drives `Screen.update_pointer_shape()`
         # through the property's own observer and no-ops when the shape did not
         # change.
-        self.styles.pointer = (
-            "pointer" if index is not None or self._clicked_toggle(event) else "default"
-        )
+        self.styles.pointer = "pointer" if index is not None or on_toggle else "default"
 
     def on_leave(self, event) -> None:  # type: ignore[no-untyped-def]
-        if self._hovered is not None:
+        if self._hovered is not None or self._toggle_hovered:
             self._hovered = None
+            self._toggle_hovered = False
             self._repaint()
         self.styles.pointer = "default"
 
@@ -2986,9 +3007,19 @@ class SessionPickerScreen(ModalScreen[str | None]):
         text = self._toggle_row_text()
         if not text:
             return Text()
+        style = Style(color=theme_mod.semantic_color("muted"))
+        if self._toggle_hovered:
+            # The same ground a hovered ROW gets, and padded to the pane for the
+            # same reason the rows are: a ground that stops at the last word
+            # reads as a highlight on the text, not as "this whole line is the
+            # target" — which is what the hit box already is.
+            style += Style(bgcolor=theme_mod.semantic_color("tint-select"))
+            return Text(
+                _pad_cells(truncate_cells(text, self._usable()), self._usable()), style=style
+            )
         return Text(
             truncate_cells(text, self._usable()),
-            style=Style(color=theme_mod.semantic_color("muted")),
+            style=style,
         )
 
     def _results_text(self) -> Text:

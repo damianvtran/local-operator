@@ -14663,9 +14663,19 @@ class OperatorApp(App[None]):
         _, evicted = archive_change(config_dir(), session_id, archived)
         if archived:
             notice(
+                # NO BACKTICKS: this is a terminal, and the receipt was the only
+                # sentence in the family that printed markdown (design round 1,
+                # D4 / UX U3) — a reader met two cells of punctuation that mean
+                # nothing here. The command reads as a command without them,
+                # exactly as "Run /delete yes to confirm." does.
+                #
+                # THE CHORD IS NAMED (UX U5): the picker's own first line has
+                # always said "ctrl+a", so a keyboard user can go back without
+                # opening the picker to learn the key — which is the one thing
+                # this receipt exists to make discoverable.
                 f"archived {session_id} — it is hidden from /resume, the sidebar and "
-                "search; `/unarchive` brings it back, and the picker's Archived toggle "
-                "still opens it" + eviction_clause(evicted),
+                "search; /unarchive brings it back, and the picker's Archived toggle "
+                "(ctrl+a) still opens it." + eviction_clause(evicted),
                 "info",
             )
         else:
@@ -14717,8 +14727,14 @@ class OperatorApp(App[None]):
                 else ""
             )
             notice(
-                f"/delete removes {session_id} and its transcript for good — it cannot be "
-                f"undone.{kept} Run /delete yes to confirm.",
+                # THE TARGET, named the way the lists name it — title first, id in
+                # parentheses (design round 1, D2). The id alone was not on the
+                # screen the rehearsal is typed into, so the one check a
+                # rehearsal exists for ("is this the conversation I mean?") had
+                # nothing to check against. The label comes from the outcome so
+                # this host and the two others cannot drift.
+                f"/delete removes {outcome.label} and its transcript for good — it "
+                f"cannot be undone.{kept} Run /delete yes to confirm.",
                 "warning",
             )
             return
@@ -35547,7 +35563,14 @@ class OperatorApp(App[None]):
                 [
                     ArgumentChoice(
                         name="yes",
-                        description="delete this conversation and its transcript",
+                        # FITS WHOLE (design round 1, D6): the previous text
+                        # truncated to "delete this conversation and its tran…",
+                        # cutting the OPERATIVE noun — the thing being destroyed
+                        # is the transcript — so the row that exists to slow a
+                        # finger down read as a half-sentence. "for good" keeps
+                        # the register of the rehearsal sentence it confirms; the
+                        # transcript itself is named there, where there is room.
+                        description="removes this conversation for good",
                         detail="cannot be undone",
                         alert=True,
                     )
@@ -38102,7 +38125,11 @@ class OperatorApp(App[None]):
         sentence (see ``ServingSessionHandle._slash_result``'s twin).
         """
         from local_operator.paths import config_dir
-        from local_operator.session.archived import archive_change, archived_ids, eviction_clause
+        from local_operator.session.archived import (
+            archive_change,
+            archived_ids,
+            eviction_clause,
+        )
 
         session_id = self._resumable_session_id()
         if not session_id:
@@ -38129,8 +38156,11 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice",
                 text=(
+                    # Plain text and the chord, for the reasons the local handler
+                    # states (D4 / U3, U5).
                     f"archived {session_id} — hidden from /resume, the sidebar and search; "
-                    "`/unarchive` brings it back" + eviction_clause(evicted)
+                    "/unarchive brings it back, and the picker's Archived toggle (ctrl+a) "
+                    "still opens it." + eviction_clause(evicted)
                 ),
                 style="info",
             )
@@ -38185,8 +38215,11 @@ class OperatorApp(App[None]):
             return SlashResult(
                 kind="notice",
                 text=(
-                    f"/delete removes {session_id} and its transcript for good — it cannot "
-                    f"be undone.{kept} Run /delete yes to confirm."
+                    # The TARGET, named the way the lists name it — title first,
+                    # id in parentheses (design round 1, D2). The outcome carries
+                    # the label so this arm and the serving host cannot drift.
+                    f"/delete removes {outcome.label} and its transcript for good — it "
+                    f"cannot be undone.{kept} Run /delete yes to confirm."
                 ),
                 style="warning",
             )

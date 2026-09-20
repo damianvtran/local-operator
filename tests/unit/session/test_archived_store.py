@@ -191,3 +191,30 @@ def test_a_read_only_config_root_costs_the_archive_and_not_the_caller(
     monkeypatch.setattr(os, "replace", explode)
     assert set_archived(tmp_path, A, True) is True
     assert read_archived(tmp_path) == []
+
+
+def test_a_failed_write_reports_no_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review round 2, NIT-2: the clause describes what happened to the FILE.
+
+    ``archive_change`` returns the ids the cap dropped so the receipt can name the
+    conversation that came back into every list. On a config root this process
+    cannot write, nothing came back — the file did not change — so reporting the
+    ids the slice computed would promise a revocation of the archive that did not
+    happen. The STATE echo stays the desired state (that is the pin route's
+    contract, asserted in the test above); the eviction report does not.
+    """
+    from local_operator.session.archived import archive_change
+
+    for index in range(ARCHIVED_LIMIT):
+        _session(tmp_path, f"{index:012x}")
+
+    def explode(*args: object, **kwargs: object) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(os, "replace", explode)
+    state, evicted = archive_change(tmp_path, A, True)
+
+    assert state is True
+    assert evicted == [], "nothing was dropped, because nothing was written"
