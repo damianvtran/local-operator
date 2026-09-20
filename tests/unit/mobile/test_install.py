@@ -853,6 +853,8 @@ def test_snapshot_bundle_trusts_a_present_bundle_its_guard_accepts(tmp_path: Pat
 
     assert status == "already built"
     build.assert_not_called()
+
+
 # --------------------------------------------------------------------------
 # An install that would change nothing must do nothing.
 #
