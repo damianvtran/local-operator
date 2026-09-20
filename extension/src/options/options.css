@@ -234,6 +234,12 @@ input:focus-visible {
  * Chrome took back) on controls that are OFF by default and are not dangerous to
  * leave alone. Spending danger here would make the one true danger state harder
  * to find. */
+/* The two consent notices, as ONE block, with a gap between them. */
+.consent-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
 .consent-note {
   margin: 8px 0 0;
   padding: 8px 10px;
@@ -259,8 +265,15 @@ input:focus-visible {
 /* The state line: the switches' own state IN WORDS, beside the other cards' state
  * lines (round-1 D3 — the off switch was carried entirely by a 14×14 knob at
  * 1.13:1 against the card, and no sentence said which way either switch points).
- * Quieter than a hint, because it restates the controls above it rather than
- * teaching anything new. */
+ *
+ * `--ink-muted`, and NOT the quieter token it looks like it should be: this is a
+ * statement about what the product is currently allowed to do, which a user has to
+ * be able to read to know what they are consenting to, and the hint text around it
+ * explains controls rather than state. Round 2 (D7) measured the two against the
+ * card — 7.93:1 here against 5.11:1 for the hints — and asked for the COMMENT to
+ * match the code rather than the other way round, which is what this is: the state
+ * line is deliberately easier to read than the teaching text, and "quieter than a
+ * hint" was the wrong description of it. */
 .consent-state {
   margin: 14px 0 0;
   padding-top: 10px;

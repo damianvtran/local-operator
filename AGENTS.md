@@ -1898,7 +1898,15 @@ support extensions". Verified here: with `--load-extension=extension/dist` the
 only `chrome-extension://` targets were Chrome's own built-ins and our manifest
 name was absent; `Extensions.loadUnpacked` over CDP returned our id and the
 popup drove normally. `docs/design/browser-extension-e2e.md` records the same
-finding on Chrome 151.
+finding on Chrome 151, and it was re-confirmed on **Chrome 153.0.8010.53**
+(2026-09-20, PR #1335's E2E): `--load-extension` loaded nothing, with or without
+`--disable-extensions-except`, while `Extensions.loadUnpacked` worked first try.
+The failure is worth recognising because of its SHAPE rather than its silence: the
+extension's own pages still resolve at `chrome-extension://<id>/…`, so the harness
+gets a real-looking options page whose `chrome.runtime` and `chrome.storage` are
+both `undefined` — which reads as a broken manifest, not as an unloaded extension,
+and cost one round of debugging. Check `chrome.runtime.id` on any extension page
+before believing a manifest defect.
 
 **Size the viewport with `Emulation.setDeviceMetricsOverride`, not
 `--window-size`.** Headless inherits no real window, so it defaults to whatever

@@ -1157,8 +1157,13 @@ deliberately does NOT call `chrome.downloads.erase`: the history row is the only
   Two consequences are accepted rather than hidden: (a) the per-call ceiling and
   the byte ceiling at the EXTENSION end now apply only to transfers the extension
   can attribute to the driven page, so a transfer with NO referrer is neither
-  cancelled nor counted against the per-call limit — it is reported, and the
-  harness refuses it if its own checks fail; (b) for an own transfer the extension
+  cancelled nor counted against the per-call limit — it is reported, and the harness
+  judges it on its own checks: size, mtime window and content policy. **A
+  no-referrer transfer that corroborates on those IS accepted** (round-2 N3 — the
+  earlier wording here said the harness "refuses it", which is not what the code
+  does and not what the design wants: a redirect chain or a blob download reports no
+  referrer, and refusing those would break the feature to close a window the
+  ownership check can only narrow); (b) for an own transfer the extension
   cannot attribute, the byte ceiling is enforced where it always was for the
   harness's purposes: after it lands, by removing the file. The ceilings are
   defence in depth around a policy the harness applies to the landed bytes, so
@@ -2060,3 +2065,86 @@ grant, throwaway identity key) and its `--load-extension` finding are handed to 
 QA round at `~/workspace/lo-dl-e2e/rig.py` (`shots.py` beside it produced the frames);
 the round-1 review's own repro of the failing test is the second independent
 instrument this round leans on.
+
+---
+
+### 17.15 Round-2 remediation: the viewport defect, and the narrowed predicates
+
+One commit against `6ffe5a96`, the head round 2 read. CI was green there; this
+section records what changed on top of it and what was measured.
+
+* **U1 (major) — the explaining sentence was below the fold.** Measured before the
+  fix, at the sizes the UX stream named: **760x520** — download row at y=549, notice
+  at y=849–925 in a 520 px viewport; **420x700** — row at y=610, notice at
+  y=988–1085. A user who had scrolled far enough to press the switch got the knob
+  flicking back with nothing readable saying why: round 1's U1 returning through
+  layout rather than state. The fix is **placement without reflow** — the notices
+  are wrapped in one `position: sticky; bottom: 12px` block, which keeps them in
+  their flow position (so the two rows above never move between states, which is
+  what D4 measured and what a reserved-height slot or an absolute overlay would both
+  have broken) and additionally pins them inside the viewport while the card is on
+  screen. After the fix, in every state and at every size, the notice's viewport box
+  is inside the viewport, and the rows' document positions are byte-identical across
+  off / on / missing / pending.
+* **U2 == D6 (one defect, two streams).** The pending-permission notice was painted
+  in the quiet weight: its ring measured `rgb(59,53,39)` — identical to the success
+  note's — against `rgb(181,175,162)` for the denial and revocation notes, although
+  this file's own rule classes an unanswered dialog as attention-worthy. It now
+  carries the attention treatment at its call site.
+* **U3 — the keyboard user had no way out.** Space on the switch set
+  `disabled = true` for a wait of up to 120 s, dropped focus to `BODY`, and left the
+  switch unreachable by an 8-step Tab walk, with no cancel. The switch is now never
+  disabled: a second press is the cancel, which supersedes the wait and stores
+  nothing (a withdrawn question is not consent), and a grant Chrome makes afterwards
+  is still honoured through `onAdded` rather than inferred from the stale promise.
+* **U4 / D7 / D8.** The refusal copy no longer promises "Chrome will ask once more"
+  (a dialog this build cannot put on screen); the `.consent-state` comment now
+  describes the token it actually uses — deliberately easier to read than the hints,
+  7.93:1 against 5.11:1 — instead of claiming to be quieter than them; and the state
+  line defers to whichever notice is already explaining a capability, so the
+  eight-pixel-apart pair no longer both say "downloads are off".
+* **M4 — an unhandled rejection re-introduced.** `worker.ts`'s two
+  `chrome.permissions` listeners used a bare `void announceCapabilities()`; the
+  function awaits `storedSwitch`, which goes through the API deadline, so a
+  deadline rejection escaped a Chrome event handler as `Uncaught (in promise)` —
+  the exact defect the file's own `fireAndForget` docstring records. Both now use
+  the helper.
+* **M1 — narrowed, not deferred.** An item with NO reported state and a file that
+  IS present is refused and removed again, as the base commit did: the absent-state
+  sentence round 1 fixed belongs to the case where no file is there, and accepting a
+  state-less item was a widening rather than a fix.
+* **M2 — closed at the source, and the guard's rows now say why.** The two
+  allow-list rows proved *lexical* containment only, and round 2 measured the
+  consequence: with a symlinked parent (`<downloads>/link -> <config>/sessions/<id>`)
+  `shutil.move` relocated `<config>/sessions/<id>/session.json` into quarantine and
+  `os.unlink` deleted it. `intake_landed` now also compares the RESOLVED path against
+  both spellings of the config root (macOS makes `/var/...` a symlink to
+  `/private/var/...`, so one spelling is not enough — that is what the first attempt
+  at this fix missed, measured). Verified against both shapes: the exposed
+  `~/Downloads` spelling and the `/private` one. The rows reference this proof.
+* **M3 — the two ownership predicates now share a written contract** (scheme and
+  host lowercased, userinfo dropped, default port dropped, `""` for anything with no
+  origin), because they cannot be the same CODE — Python has no URL parser here — and
+  the TS comment claiming sameness was the newly wrong part.
+* **M5 — the refusal copy no longer claims Chrome refused.** A request that resolves
+  without a grant, and one that resolves with a grant Chrome does not hold, are one
+  outcome as far as the page can tell, and the sentence says what the page can see
+  rather than attributing a decision to Chrome.
+* **N2 — the directory this call creates is 0700**, like every other directory the
+  feature owns; **N3 — R10's sentence about a no-referrer transfer is corrected** (the
+  harness accepts one that corroborates on size and mtime; it does not refuse it).
+
+**Measured after the fix** (real built extension, real headless Chrome, one Chrome
+per frame, `Extensions.loadUnpacked`, processes reaped): at **900x620, 760x520,
+420x700 and 760x1080**, in all four states, the notice's viewport box is inside the
+viewport and the two rows' document y is identical across states. Frames are
+attached to the PR comment; the geometry probe is
+`~/workspace/lo-dl-e2e/geom.py` beside the assembly rig.
+
+**Handed over from QA's round-2 finding, recorded here because it is not mine to
+absorb silently:** the assembly gap I deferred was rig-side — `BridgeService.startup()`
+never binds a socket, `chrome.runtime.reload()` does not revive an MV3 worker, the
+reconnect alarm only dials while disconnected — and on Chrome 153 every download
+after the first from an origin is silently refused unless `automatic_downloads` is
+allowed, which is why this rig's later cases could not produce a reading. The
+`--load-extension` finding above is theirs, re-confirmed and now in `AGENTS.md`.

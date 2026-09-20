@@ -492,8 +492,16 @@ async function announceCapabilities(target?: WebSocket): Promise<void> {
  * and `send` no-ops without an open socket, so the cost of a fire-and-forget here
  * is one storage read per Chrome event.
  */
-chrome.permissions?.onRemoved?.addListener(() => void announceCapabilities());
-chrome.permissions?.onAdded?.addListener(() => void announceCapabilities());
+chrome.permissions?.onRemoved?.addListener(() =>
+  // `fireAndForget`, not a bare `void`: this function awaits `storedSwitch`, which
+  // goes through the API deadline, and a deadline rejection escaping into a Chrome
+  // event handler is the `Uncaught (in promise)` this file's own helper exists to
+  // contain (round-2 M4 — the same defect its docstring records, reintroduced here).
+  fireAndForget(announceCapabilities(), "capability re-announce after a revoked grant"),
+);
+chrome.permissions?.onAdded?.addListener(() =>
+  fireAndForget(announceCapabilities(), "capability re-announce after a restored grant"),
+);
 
 async function connect(): Promise<void> {  // `connecting` guards the window between `new WebSocket()` and `onopen`, when
   // `connected` is still false: without it, a `chrome.alarms` tick (or a wake
