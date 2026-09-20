@@ -11457,6 +11457,50 @@ def _download_audit(
     )
 
 
+#: The prefix every refusal in this feature's copy is composed with.
+#:
+#: It is NOT decoration and it is not only this layer's spelling: the app host
+#: composes its own refusals with it (`downloads.ts`'s `refuse`/`refuseLive`:
+#: "refused: `x` is an executable/script type; nothing was saved"), the extension
+#: composes its upload refusals with it, and `browser_files` composes its name
+#: refusals with it — so on the wire it is the ONE mark that separates a HOST'S
+#: REFUSAL from that host's own account of a call that simply found nothing. The
+#: app host sends both on the same shape (its no-op sentence is "no download
+#: started within 120s; if the page needs a click first, pass a selector, or
+#: `click` it and retry"), and the wire carries no flag to tell them apart — nor
+#: may one be added here, because `PROTO_VERSION` and both hosts are untouched by
+#: this change. See `_reason_is_refusal`.
+REFUSAL_PREFIX = "refused:"
+
+
+def _refusal_clause(reason: str) -> str:
+    """The BARE clause of a refusal, prefix removed.
+
+    Copy and the audit row both compose from this, so a host that already wrote
+    the prefix into its own sentence cannot make the harness print it twice
+    ("refused: refused: …") or make the row and the sentence disagree about what
+    was said.
+    """
+    clause = reason.strip()
+    if clause.startswith(REFUSAL_PREFIX):
+        clause = clause[len(REFUSAL_PREFIX) :].strip()
+    return clause
+
+
+def _reason_is_refusal(reason: str) -> bool:
+    """Whether a host's ARMED-path ``reason`` is a refusal, not an account.
+
+    Both arrive as `armed: true` with no files (§6.2), so on this path the words
+    are the only signal there is, and the design gave them a stable one: a
+    refusal is composed with ``REFUSAL_PREFIX``, and a host describing a call
+    that merely found nothing is not. Reading it that way is what keeps the
+    record's three states apart — an armed host refusal must not be reported as
+    a no-op (the defect this exists for), and a no-op must not be reported as a
+    refusal.
+    """
+    return reason.strip().startswith(REFUSAL_PREFIX)
+
+
 async def _browser_download(
     tool_call_id: str,
     state: BrowserSurfaceProtocol,
@@ -11517,11 +11561,15 @@ async def _browser_download(
     assert result is not None
     call_id = files.new_call_id()
     origin = str(result.get("url", ""))
+    # The host's own account of the call, read once here so both arms below see
+    # the same string — the armed-`true` case is exactly the one that used to
+    # discard it (see `_reason_is_refusal`).
+    reason = str(result.get("reason") or "").strip()
     if not bool(result.get("armed", True)):
         # The host refused to arm. That is a policy answer carried as a result
         # (§6.2 — an extension may not emit an ErrorCode an old daemon would
         # drop), and it is rendered here as the model-facing refusal.
-        reason = str(result.get("reason") or "the host refused to arm a download")
+        clause = _refusal_clause(reason or "the host refused to arm a download")
         _download_audit(
             call_id=call_id,
             session_id=session_id,
@@ -11530,9 +11578,9 @@ async def _browser_download(
             origin=origin,
             name="",
             verdict="armed_false",
-            reason=reason,
+            reason=clause,
         )
-        return _error(tool_call_id, "browser", f"refused: {reason}")
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {clause}")
 
     reported = {
         str(item.get("name")): item
@@ -11577,6 +11625,32 @@ async def _browser_download(
             "browser",
             "nothing was saved: " + "; ".join(refused_intake) + ".",
         )
+    if not candidates and reason and _reason_is_refusal(reason):
+        # The host ARMED the capture and then refused the transfer, and reported
+        # neither files nor an error: its `reason` IS the answer, and the app
+        # host — the one that always arms — answers every refusal this way. The
+        # sentence below is the SAME refusal the pre-arm path renders, from the
+        # same composer, so a refusal reads the same wherever the host stopped.
+        #
+        # Why a verdict of its own rather than `armed_false` or `deny`:
+        # `armed_false` means the host declined to ARM (state (a)); `deny` means a
+        # candidate LANDED and the harness refused it, and its rows always name
+        # the entry they deleted. Neither is this: the host armed, decided, and
+        # nothing was written. `no_download` is the third state — a call where
+        # nothing started and the host said nothing — and folding a refusal into
+        # it is the defect this branch exists to fix.
+        clause = _refusal_clause(reason)
+        _download_audit(
+            call_id=call_id,
+            session_id=session_id,
+            host=host,
+            action="download",
+            origin=origin,
+            name="",
+            verdict="armed_refused",
+            reason=clause,
+        )
+        return _error(tool_call_id, "browser", f"{REFUSAL_PREFIX} {clause}")
     if not candidates:
         wait = wire.get("timeout_s", files.DOWNLOAD_TIMEOUT_S)
         _download_audit(
