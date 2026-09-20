@@ -5072,6 +5072,33 @@ async def test_the_persisted_reason_is_bounded_like_its_sibling(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_an_empty_server_name_writes_no_warning(tmp_path):
+    """R3: the one input the new writer drops and the old one journalled.
+
+    Pinned so the divergence is a decision rather than an accident: the row's
+    whole subject is the server, and "MCP server '' is unavailable" is not
+    something the model can act on. The manager's three ``on_incident`` sites
+    all pass a name from the configured server table, so the arming that would
+    otherwise have no row behind it is unreachable today — if a caller that can
+    pass an empty name is ever added, the ARMING has to move rather than this
+    guard being relaxed (the method's docstring says so).
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    await session.journal_mcp_unavailable("", "MCP authorization failed")
+
+    assert [m for m in session._context.messages if isinstance(m, CustomMessage)] == []
+    # The named-server case still writes, so the guard is a filter rather than a
+    # blanket refusal on this path.
+    await session.journal_mcp_unavailable("files", "/mcp reauth files")
+    assert [m.custom_type for m in session._context.messages if isinstance(m, CustomMessage)] == [
+        SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE
+    ]
+    await session.dispose()
+
+
+@pytest.mark.asyncio
 async def test_mcp_unavailability_is_persisted_and_reaches_the_model_as_a_user_turn(tmp_path):
     """Both halves of the decision, on the WIRE rather than in the live list.
 
