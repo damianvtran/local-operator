@@ -65,6 +65,7 @@ from pydantic import BaseModel, Field, field_validator
 # Shared identity with ``local_operator.types`` (see its docstring): the CLI
 # catches this at zero startup cost while ``teams`` raises it where the lock
 # times out. Importing the name (not redefining it) keeps the two identical.
+from local_operator.procstate import O_BINARY
 from local_operator.types import TeamRegistryLockTimeout, TeamRegistryRecoveryError
 
 logger = logging.getLogger(__name__)
@@ -976,7 +977,7 @@ class TeamRegistry:
         must use — see :data:`_READ_RECOVERY_UI_WAIT_S`.
         """
         self.config_dir.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.config_dir / ".teams.lock", os.O_CREAT | os.O_RDWR, 0o600)
+        fd = os.open(self.config_dir / ".teams.lock", os.O_CREAT | os.O_RDWR | O_BINARY, 0o600)
         acquired = False
         budget = _TEAM_LOCK_TIMEOUT_S if wait is None else max(0.0, wait)
         deadline = time.monotonic() + budget

@@ -24356,6 +24356,25 @@ class OperatorApp(App[None]):
             session_name_provider=(
                 None if session is None else (lambda: getattr(session, "conversation_name", ""))
             ),
+            # The same answer the session's own per-turn context carries, for the
+            # same reason: a `!lop exec` here is still a command run FROM this
+            # session, so it must reach the same verdict the agent's own `bash`
+            # in that session would. Bang mode builds its own context (it runs
+            # outside a turn), so nothing else derives it — and leaving it at the
+            # default would give one session two answers to one question, which
+            # is the drift `tests/unit/session/test_tool_context_parity.py`
+            # exists to catch. The TEST is the same one `Session._build_tool_context`
+            # applies — `task` in the live inventory — but the read is WIDER here:
+            # that derivation reads `self._tools` and `tool.name` directly, while
+            # both hops below go through `getattr` with a default, because this path
+            # also runs before a session exists and a duck-typed host object may
+            # carry neither attribute. A missing attribute therefore reads as "no
+            # `task`" (the fail-closed answer) rather than raising on a bang command
+            # the guard has no bearing on.
+            may_delegate=any(
+                getattr(tool, "name", None) == "task"
+                for tool in (getattr(session, "_tools", None) or ())
+            ),
         )
 
         def on_update(update: AgentToolUpdate) -> None:

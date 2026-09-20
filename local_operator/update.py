@@ -52,6 +52,7 @@ from urllib.parse import urlparse
 from urllib.request import url2pathname
 
 from local_operator.interpreter import SAFE_PATH_FLAG
+from local_operator.procstate import PLATFORM_LABEL
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,17 @@ _DAEMON_PLIST_LABELS = (
     "com.local-operator.tunnel",
     "com.local-operator.wakes",
 )
+
+#: Whether this host's supervised daemons are launchd AGENTS, i.e. whether the
+#: repair below can address them at all.
+#:
+#: The scan it guards reads ``~/Library/LaunchAgents``, a macOS layout: on Linux
+#: the unit is a systemd ``--user`` unit and on Windows a scheduled task, and
+#: neither lives there. Read ONCE into a named constant rather than inline in
+#: the guard, so a test can flip the platform branch without patching
+#: ``sys.platform`` process-wide (which is what an inline read would force, and
+#: which leaks into any import that lands inside that window).
+_DAEMONS_ARE_LAUNCHD_AGENTS = sys.platform == "darwin"
 
 #: Default loopback probe used only for the unsupervised warning. Must
 #: match ``mobile.daemon.DEFAULT_PORT``; do not import that module here.
@@ -1149,6 +1161,10 @@ def daemon_image_path() -> Path:
     It is also the only shape that survives a prune: the unit names THIS path,
     so a restart after a flip or a prune cannot hit the deleted libpython
     dylib pin that killed 113 processes on 2026-09-15.
+
+    Nothing writes it where no supervisor exists: the file is a POSIX shell
+    script and is gated off Windows in :func:`_may_name_the_shim`, so the path is
+    named here but never planted there.
     """
     return stable_root() / "bin" / "python3"
 
@@ -1421,11 +1437,20 @@ def _generation_env(generation: Path) -> dict[str, str]:
     console scripts land in ``<gen>/bin``). The bin directory exists only to keep
     uv away from the REAL ``~/.local/bin``, whose entries are this layout's
     stable launchers and must not be rewritten by an installer.
+
+    THE BIN DIRECTORY IS SPELLED BY :func:`_interpreter_dir`, and the hardcoded
+    ``"bin"`` this replaces was the only spelling in the module that disagreed
+    with the three helpers beside it (:func:`_venv_interpreter`,
+    ``_link_generation_bin``, :func:`write_stable_launchers`). On Windows uv
+    writes its launchers as ``<name>.exe`` into ``Scripts``, so a generation
+    built with ``bin`` would have been one whose scripts every reader looked for
+    in ``Scripts`` and found nothing — the silent half-layout this module's own
+    ``_console_script_names`` comment calls the failure nobody reproduces.
     """
     return {
         **os.environ,
         "UV_TOOL_DIR": str(generation / "tools"),
-        "UV_TOOL_BIN_DIR": str(generation / "bin"),
+        "UV_TOOL_BIN_DIR": str(generation / _interpreter_dir()),
     }
 
 
@@ -1562,7 +1587,15 @@ def flip_pointer(generation: Path) -> None:
     staged = pointer.with_name(f"{pointer.name}.tmp-{os.getpid()}")
     try:
         staged.unlink(missing_ok=True)
-        os.symlink(generation, staged)
+        # ``target_is_directory=True`` is a NO-OP on POSIX (the parameter is
+        # accepted and ignored there) and decides the link's TYPE on Windows,
+        # where a symlink is created as a file link by default and a file link
+        # to a directory is not a directory: every read through it fails. The
+        # target is a generation root, so the flag is not optional there. It
+        # does not make the call privilege-free — see
+        # :func:`generation_layout_supported` — which is why the flip below is
+        # only reached on a platform where the link can be made at all.
+        os.symlink(generation, staged, target_is_directory=True)
         os.rename(staged, pointer)
     finally:
         try:
@@ -1620,6 +1653,16 @@ def _may_name_the_shim() -> bool:
     daemons at itself, and rendering a unit that runs the machine's install from
     a worktree would be the same surprise in the other direction.
     """
+    if not generation_layout_supported():
+        # NO SUPERVISED UNIT EXISTS OFF POSIX for the shim to serve, and the shim
+        # is a `/bin/sh` script besides: `CreateProcess` has no shebang handling,
+        # so on Windows the file would be written and be UNEXECUTABLE by anything
+        # that named it. A unit rendered against it would name a program that can
+        # only fail, which is the shape `ensure_daemon_image` already refuses for
+        # a missing pointer ("a shim that can only exit 78 is worse than no
+        # shim"). Saying `None` here keeps every installer on its pre-generation
+        # shape — a real interpreter path — instead.
+        return False
     if _is_generation_install():
         return True
     return install_kind() in (InstallKind.UV_TOOL, InstallKind.PIPX, InstallKind.PIP)
@@ -1669,6 +1712,11 @@ def ensure_daemon_image(generation: Path | None = None) -> Path | None:
     one writer of a file the operator's daemons will execute, and "a caller said
     so" is not a licence to plant it anywhere.
     """
+    if not generation_layout_supported():
+        # Asked FIRST, because the ``generation`` branch below is an explicit
+        # override of :func:`_may_name_the_shim` and would otherwise write the
+        # unexecutable POSIX shim on a platform with no daemon supervisor.
+        return None
     if generation is not None:
         if not _is_generation_install(generation):
             return None
@@ -1714,6 +1762,60 @@ def _interpreter_dir() -> str:
     the failure mode nobody reproduces.
     """
     return "Scripts" if os.name == "nt" else "bin"
+
+
+def generation_layout_supported() -> bool:
+    """Can this platform host the generation layout at all?
+
+    STATED ONCE, so the three entry points that have to agree cannot drift: the
+    two builders (:func:`install_into_generation`, :func:`clone_into_generation`)
+    and the dispatcher that chooses between them (:func:`perform_upgrade`).
+
+    ``False`` off POSIX, and that is a property of the layout rather than a
+    policy. Its whole mechanism is a SYMLINK CHAIN: ``current`` points at a
+    generation, and each ``~/.local/bin/<entry>`` points THROUGH ``current`` so
+    that a command on PATH resolves whichever build is current at exec. On
+    Windows a symlink needs Developer Mode or ``SeCreateSymbolicLinkPrivilege``,
+    so today:
+
+      * ``flip_pointer`` raises ``[WinError 1314]`` AFTER a whole venv has been
+        built — the expensive half of an upgrade, thrown away; and
+      * the launchers cannot be made at all (uv also spells them ``<name>.exe``
+        there, which ``_console_script_names`` does not). Those launchers are
+        what makes ``lop`` on PATH follow the pointer, so the pointer would move
+        while PATH kept running the PREVIOUS install — the split machine design
+        review round 1 (D1) made the migration refuse and roll back rather than
+        accept.
+
+    A directory junction (unprivileged, and the reason this is not simply
+    "Windows cannot link") would cover ``current`` alone. The launcher half is
+    FILES, where a junction does not exist and a hard link or a copy would PIN
+    one generation — deleting the property the layout exists for. So Windows
+    keeps the in-place upgrade it has always had until a launcher that needs no
+    symlink exists; see :func:`generation_layout_refusal`.
+    """
+    return os.name == "posix"
+
+
+def generation_layout_refusal() -> str:
+    """The refusal sentence for a machine the layout cannot be adopted on.
+
+    Names the OS and the alternative, which is this repo's rule for a platform
+    that genuinely cannot do the thing: a legible EARLY refusal, never a
+    traceback and never a half-built layout.
+    """
+    where = PLATFORM_LABEL
+    return (
+        f"the generation layout needs POSIX symlinks, and this is {where}: `lop update` "
+        "installs each build into its own generation, points `current` at it, and links "
+        "~/.local/bin/<entry> through that pointer so that `lop` on PATH follows the "
+        "current build. Off POSIX a symlink needs Developer Mode or elevation, and uv "
+        "writes those entries as <entry>.exe besides, so the second half of the layout "
+        "cannot be built and `lop` on PATH would keep running the previous install while "
+        "`current` had already moved.\n"
+        "Use `uv tool install --force local-operator` instead: it updates this machine in "
+        "place, which is how it has always updated here."
+    )
 
 
 def _pointer_consumers() -> tuple[Path, ...]:
@@ -2082,6 +2184,11 @@ def install_into_generation(
     one of them would name the renamed-away directory and dangle. Reserved-and-
     built-in-place keeps uv's own artefacts pointing at paths that survive.
     """
+    if not generation_layout_supported():
+        # REFUSED BEFORE the reservation, the installer and the flip: the reason
+        # this gate exists is that the same refusal discovered later costs a
+        # whole built venv, and leaves nothing behind to show for it.
+        raise UpdateError(generation_layout_refusal())
     token = commit[:12] or version or "pypi"
     generation = _reserve_generation(token)
     argv = installer_argv(InstallKind.UV_TOOL)
@@ -2165,6 +2272,11 @@ def clone_into_generation(
     generation as an install still in flight (``prune_generations``) and a
     generation we just adopted is finished by definition.
     """
+    if not generation_layout_supported():
+        # Same gate as the other builder, and it has to be here too: the
+        # migration copies a tree and flips the pointer, so a platform that
+        # cannot link would build a 136 MB copy and then fail on the pointer.
+        raise UpdateError(generation_layout_refusal())
     origin = Path(source) if source is not None else Path(sys.prefix)
     if not origin.is_dir():
         raise UpdateError(f"nothing to clone: {origin} is not a directory")
@@ -2861,6 +2973,12 @@ def install_migrate_command() -> int:
     daemons, where a worktree venv repointed the operator's four live plists at
     itself. Only a durable installed tree has something worth adopting.
     """
+    if not generation_layout_supported():
+        # FIRST, before the idempotency check: the answer to "may this machine
+        # adopt the layout" is the platform, and it does not become yes because
+        # the tree happens to be installed.
+        print(generation_layout_refusal(), file=sys.stderr)
+        return 1
     if _is_generation_install():
         print(f"already using the generation layout: {process_install_root()}")
         # Printed WITH its target, like every other pointer line in the product:
@@ -3352,7 +3470,21 @@ def perform_upgrade(
         raise UpdateError(
             unknown_refusal(prefix=str(prefix) if prefix else None, executable=executable)
         )
-    if detected is InstallKind.UV_TOOL and run is None:
+    if detected is InstallKind.UV_TOOL and run is None and not generation_layout_supported():
+        # LOUD, not silent, and the fall-through below is the point: this machine
+        # takes the in-place ``uv tool install --force`` it has always taken
+        # instead of a generation layout it cannot finish. The in-place upgrade
+        # rewrites the tree the running fleet imports from — the hazard the
+        # generation layout was built to remove — but that is what this platform
+        # has today, and a refusal here would leave `lop update` unusable where
+        # the update itself works. The alternative is a launcher that needs no
+        # symlink; until that exists this is a documented degradation rather
+        # than a half-adopted layout (see :func:`generation_layout_supported`).
+        logger.warning(
+            "not using the generation layout on this platform: %s",
+            generation_layout_refusal(),
+        )
+    if detected is InstallKind.UV_TOOL and run is None and generation_layout_supported():
         # ``target`` is the PyPI version just installed, and this path is always
         # a PyPI wheel unless the caller passed ``source`` (a git snapshot):
         # ``commit``/``ref`` describe that case, and leaving them empty is what
@@ -3636,9 +3768,45 @@ def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
     wheel's renderers exist, and because four children would pay four
     interpreter startups on every upgrade. Never raises: the upgrade already
     succeeded, so the worst outcome here is a warning.
+
+    A PLATFORM IT CANNOT ADDRESS IS REPORTED, NOT SILENT (audit A24). The scan
+    is ``~/Library/LaunchAgents``, so on Linux and Windows it finds nothing and
+    this used to return an empty :class:`DaemonRefresh` — which prints nothing
+    at all, and therefore reads in the upgrade summary as "there was nothing to
+    do". What is true on those hosts is the opposite of reassuring: a systemd
+    unit or a scheduled task written by an older build is still running the
+    previous interpreter, which is exactly the drift this step exists to
+    repair. Re-registering those units is a real follow-up and is deliberately
+    NOT invented here — a unit/Task-XML rewrite is not the plist rewrite this
+    child performs, and it needs each installer's own identity guard — so what
+    ships this round is the sentence that says the refresh did not happen.
+
+    THE ANNOUNCEMENT IS MADE *AFTER* THE SCAN, not instead of it. The scan is
+    the module's own question ("which of our agents are installed") and it is
+    consulted on every platform: gating the CALL on the platform made the
+    function's own contract untestable off macOS, and four of this module's
+    tests patch the scan and assert what the child was invoked with. What is
+    platform-specific is the CONCLUSION drawn when the scan comes back empty,
+    and that is where the branch belongs.
+
+    THE SENTENCE NAMES NO DAEMON. The upgrade summary is parsed by tests that
+    pin each refresh step's own output, and the mobile step must stay
+    distinguishable from this one; an enumeration here also goes stale the
+    moment a fifth supervised daemon exists.
     """
     name = "service daemons"
-    if not _installed_daemon_plists():
+    installed = _installed_daemon_plists()
+    if not installed:
+        if not _DAEMONS_ARE_LAUNCHD_AGENTS:
+            return DaemonRefresh(
+                name,
+                lines=(
+                    "service daemons: not refreshed — this step rewrites launchd "
+                    f"agents, which only macOS has (this host is {PLATFORM_LABEL}); "
+                    "re-run each supervised daemon's own installer to move its "
+                    "unit or task onto this build",
+                ),
+            )
         return DaemonRefresh(name)
     import subprocess
 
