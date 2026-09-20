@@ -45,6 +45,7 @@ export enum ErrorCode {
   CONSOLE_UNAVAILABLE = 'console_unavailable',
   INVALID_GRID = 'invalid_grid',
   CONSOLE_CAPTURE_FULL = 'console_capture_full',
+  CAPTURE_UNAVAILABLE = 'capture_unavailable',
   INTERNAL = 'internal',
 }
 

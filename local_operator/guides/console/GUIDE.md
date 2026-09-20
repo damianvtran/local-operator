@@ -48,7 +48,7 @@ handle from `list`/`create`.
 | `read` | The text. `mode='viewport'` (default) is the visible screen — what a person looking at the pane sees; `mode='scrollback'` is a history window positioned by `start`/`count`. |
 | `screenshot` | A PNG of the surface, written to a file whose path comes back in the result. |
 | `input` | Type `text` into the surface, or a stored secret via `secret_ref`. `paste=true` asks for a bracketed paste. |
-| `keys` | Named keys, e.g. `['ctrl-c']`, `['up']`, `['ctrl-a', 'd']`. |
+| `keys` | Named keys, e.g. `['ctrl+c']`, `['up']`, `['ctrl+a', 'd']`. Common synonyms are accepted. |
 | `resize` | Change the grid (`cols`/`rows`). |
 | `secure` | The USER's do-not-capture switch: while it is on, the app refuses to read or capture that surface. |
 | `close` | End the surface (`kill` to signal the process). `retain=false` discards its output. |
@@ -71,20 +71,31 @@ with it and every call reports that — create a new one instead of retrying.
 
 ## Named keys
 
-`keys` takes names, not raw escape bytes. Accepted names:
+`keys` takes names, not raw escape bytes. The names are written with `+` and no
+dashes — the spelling the encoder itself uses, and this repository's own notation
+elsewhere — and these are all of them:
 
-- Control: `ctrl-a` through `ctrl-z` (lower case, e.g. `ctrl-c`).
-- Navigation: `up`, `down`, `left`, `right`, `home`, `end`, `page-up`,
-  `page-down`, `insert`, `delete`.
-- Editing: `enter`, `tab`, `shift-tab`, `backspace`, `escape`, `space`.
+- Control: `ctrl+a` through `ctrl+z`, plus `ctrl+space`, `ctrl+[`, `ctrl+\`,
+  `ctrl+]`, `ctrl+^`, `ctrl+_` (`ctrl+c` interrupts, `ctrl+d` ends input, `ctrl+z`
+  suspends).
+- Navigation: `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`,
+  `insert`, `delete`.
+- Editing: `enter`, `tab`, `shift+tab`, `backspace`, `escape`, `space`.
 - Function keys: `f1` to `f12`.
-- Modifiers on a named key: `alt-<name>` / `meta-<name>`, and `shift-<name>`
-  where it is not already a name of its own (e.g. `shift-tab`).
+
+`return` is the encoder's other name for `enter`. There is no `alt`/`meta`/`cmd`
+combination: a named key is a name, not an arbitrary modifier chord.
+
+**Synonyms are accepted and normalised before the call**, so a spelling that is
+not the canonical one still works: `ctrl-c`, `ctrl_c`, `CTRL+C` and `^c` all send
+`ctrl+c`; `shift-tab` sends `shift+tab`; `esc` sends `escape`; `cr` and `return`
+send `enter`; `pgup` and `page-up` send `pageup`, `pgdn` and `page-down` send
+`pagedown`; `ins` sends `insert` and `del` sends `delete`.
 
 An unknown name is refused with the accepted set rather than being sent as
 literal text — and **that refusal is the authoritative list**: the encoder lives
-in the app, so if a name below is refused, use the spelling the refusal reports.
-A sequence of keys is sent into the surface in order, so `['ctrl-a', 'd']`
+in the app, so if a name above is refused, use the spelling the refusal reports.
+A sequence of keys is sent into the surface in order, so `['ctrl+a', 'd']`
 detaches from a `tmux`/`screen` session.
 
 Arrow keys and other cursor keys are encoded for the mode the program has set
@@ -101,6 +112,10 @@ which mode is active, and the result echoes what was encoded.
   live screen**, and the result says which you got.
 - The capture view is one at a time app-wide; a second concurrent capture is
   refused with `console_capture_full` (retry, or read the surface as text).
+- A build that has no capture view yet refuses a screenshot of a surface with no
+  displayed pane with `capture_unavailable`: open that surface's pane first, or
+  read the surface as text. It is an ordinary state of that build, not an app
+  fault — do not tell the user to update anything.
 - **Never use macOS `screencapture`** to photograph a console. It captures the
   frontmost window and steals the user's focus, which is exactly what these
   surfaces are built to avoid.
@@ -161,6 +176,7 @@ refusal that describes a state.
 | `secure_input_active` | The user has secure input on for that surface. | Wait, or ask them to toggle it off in the pane. |
 | `invalid_grid` | The requested cols/rows are outside what the app honours. | Use the clamp it reports. |
 | `console_capture_full` | Another capture is in flight (one at a time). | Retry in a moment, or read the text. |
+| `capture_unavailable` | No pane is displaying that surface, and this app version cannot reconstruct a frame offscreen. | Ask the user to open the surface's pane, then retry; or read the text. |
 | `console_unavailable` | The app's console feature is off (settings, launch flag, or a failed native module). | Tell the user which; the app log names a load failure. |
 | `proto_mismatch` | App and session speak different protocol versions. | Update Local Operator. |
 | transport "not running"/"not answering" | The app is gone or wedged. | Ask the user to re-open the app; the surfaces ended with it. Never retry in a loop. |

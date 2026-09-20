@@ -60,7 +60,7 @@ process. The tier is recorded per call (`call_approval_tier`) and — this matte
 | `read` | Text: `viewport` (the visible screen) or a `scrollback` window (`start`/`count`). |
 | `screenshot` | A PNG of the surface, written by the harness to a file whose path comes back in the result. |
 | `input` | `text`, or a stored secret by `secret_ref`; `paste` asks for a bracketed paste. |
-| `keys` | Named keys (`['ctrl-c']`, `['up']`, `['shift-tab']`, `['f5']`). |
+| `keys` | Named keys (`['ctrl+c']`, `['up']`, `['shift+tab']`, `['f5']`), in the encoder's own `+` spelling. Common synonyms are accepted and normalised before the call: `ctrl-c`, `CTRL+C`, `^c`, `shift-tab`, `esc`, `cr`, `pgup`, `page-up`. |
 | `resize` | Change the grid. |
 | `secure` | The user's do-not-capture span. |
 | `close` | End the surface (`kill` to signal the process, `retain=false` to discard the output). |
@@ -131,13 +131,22 @@ not a photograph of a live screen, and the field is what keeps that honest. macO
 `screencapture` is never used: it captures the frontmost window and needs exactly
 the focus theft these surfaces avoid.
 
+A build that has no offscreen capture view yet (design §17.1 splits the pane path
+from the replay one) refuses a screenshot of a surface with no displayed pane with
+`capture_unavailable` — a code of its own, not `console_capture_full`: that one is
+the capture view being busy with another surface, which only a build WITH the view
+can reach. The refusal names the condition and points at the pane or at `read`,
+and it is an ordinary state of that build rather than an app fault or a version
+skew, so nothing should tell the user to update.
+
 ## Refusals
 
 Every mid-flight failure is a typed `ErrorCode`, so nothing substring-matches a
 message: `unsupported_method` (update the app), `surface_unavailable`,
 `surface_not_owned`, `process_exited`, `input_queue_full`, `unknown_key`,
 `secure_input_active`, `invalid_grid`, `console_capture_full`,
-`console_unavailable`, plus the pre-existing `proto_mismatch` and the transport's
+`capture_unavailable`, `console_unavailable`, plus the pre-existing
+`proto_mismatch` and the transport's
 "not running"/"not answering". Absence is reported as absence: a session whose app
 has quit is told the surfaces ended with it, immediately and without a socket,
 rather than being left to hang.
@@ -175,7 +184,8 @@ carries the same list.
    contract:** the app half must emit exactly §10.6's names
    (`unsupported_method`, `surface_unavailable`, `surface_not_owned`,
    `process_exited`, `input_queue_full`, `unknown_key`, `secure_input_active`,
-   `console_unavailable`, `invalid_grid`, `console_capture_full`).
+   `console_unavailable`, `invalid_grid`, `console_capture_full`,
+   `capture_unavailable`).
 
    **The `data` key table, published so neither half has to guess one.** §10.6
    freezes the CODE names and §15 the sentences, but neither said which key inside
@@ -183,19 +193,21 @@ carries the same list.
    degrades the sentence SILENTLY: the copy stays correct and generic while the
    handle, the clamp or the accepted byte count never appears, with nothing red in
    any gate. §10.6 now carries this table; it is the spelling both halves test
-   against, and the session side reads exactly these:
+   against, and each row says whether the SESSION reads the value or the host only
+   publishes it:
 
    | code | `data` keys |
    |---|---|
-   | `surface_unavailable` | `surface` (the handle asked for), `count` (how many exist) |
-   | `surface_not_owned` | `surface` |
-   | `process_exited` | `exit_code`, `retain` (absent means retained) |
-   | `input_queue_full` | `accepted` — the bytes the host TOOK, never the size of the refused payload |
-   | `unknown_key` | `accepted` (the names the encoder has), `key` (the one not found) |
-   | `invalid_grid` | `clamp: {cols, rows}`; `reason: "fixed"` for a surface that cannot be resized at all |
-   | `console_unavailable` | `reason` (which of design §10.1's conditions failed) |
-   | `proto_mismatch` | `proto` — the peer's revision, so both numbers can be named |
-   | `console_capture_full` | none yet: the copy names no holder, and design §10.6's "names the surface whose capture holds the view" is implemented when a host emits this code |
+   | `surface_unavailable` | session reads `surface` (the handle asked for), `count` (how many exist) |
+   | `surface_not_owned` | session reads `surface` |
+   | `process_exited` | session reads `exit_code`, `retain` (absent means retained) |
+   | `input_queue_full` | session reads `accepted` — the bytes the host TOOK, never the size of the refused payload |
+   | `unknown_key` | session reads `accepted` (the names the encoder has), `key` (the one not found) |
+   | `invalid_grid` | session reads `clamp: {cols, rows}`; `reason: "fixed"` for a surface that cannot be resized at all |
+   | `console_unavailable` | session reads `reason` — `disabled` (the Settings toggle or the launch flag), `pty_unavailable` (the native module design §10.1 names), or the app's per-surface `spawn_failed`/`no_runtime`; an unknown value is named as it arrived |
+   | `proto_mismatch` | session reads `proto` — the peer's revision, so both numbers can be named |
+   | `console_capture_full` | host-facing, MADE UNREAD: the copy names no holder, and design §10.6's "names the surface whose capture holds the view" is implemented when a host emits this code — which no released host does, since it is PR B that has the capture view |
+   | `capture_unavailable` | host-facing, MADE UNREAD: `rendered: null`, the app's own proof that there is no frame. The code IS the condition (§13.2), so a copy reading this key would be claiming a specific from a value that is always `null` |
 
    `unsupported_method` and `secure_input_active` carry no keys: the copy alone
    answers them. Two legacy spellings are accepted DEFENSIVELY and never read as

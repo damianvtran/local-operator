@@ -194,6 +194,15 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:   + its one inventory line                +10 chars = +4
 #:   = measured on this head                  83,134 chars = ~29,904 billed
 #:
+#: Two reviews later the head moved by ONE more edit, and it is recorded here for
+#: the same reason: QA round 2 found the shipped `keys` field and the guide
+#: documenting `ctrl-c`/`shift-tab` — spellings the app's encoder refuses, since it
+#: spells them `ctrl+c`/`shift+tab` — so the field names the canonical spelling and
+#: its synonyms in +79 characters (+28 tokens): 83,213 chars, ~29,933 billed, 17
+#: tokens of headroom. The full synonym list lives in `guide://console`, which is
+#: progressive disclosure and never rides the start context, so only the pointer to
+#: the canonical spelling is paid for here.
+#:
 #: (components rounded; the total is taken from the char counts, so the three
 #: component figures are floors — 4,717/2.78, 811/2.78 and 10/2.78 are 1,696.8,
 #: 291.7 and 3.6, and a reader who adds the printed integers gets 1,993 rather

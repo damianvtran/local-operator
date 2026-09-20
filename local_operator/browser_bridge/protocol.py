@@ -446,7 +446,16 @@ class ErrorCode(StrEnum):
     # * `invalid_grid` — requested cols/rows outside what the app will honour;
     #   carries the clamp it applied.
     # * `console_capture_full` — the app's one-at-a-time offscreen capture view is
-    #   already in use (design §13.3).
+    #   already in use (design §13.3). Answered by the app that HAS the capture
+    #   view (PR B, §17.1).
+    # * `capture_unavailable` — no pane is displaying the surface, so the app has
+    #   nothing to photograph. Answered by an app that has no offscreen capture
+    #   view yet (PR A, §13.2/§17.1) — the two are DIFFERENT conditions on
+    #   different hosts, and modelling only one of them made the ordinary state of
+    #   the shipped app read as "your app is newer than this session". The app half
+    #   documents this as its one deliberate addition to §10.6
+    #   (`local-operator-ui` src/main/console/protocol.ts); this is the session
+    #   half of the same contract.
     UNSUPPORTED_METHOD = "unsupported_method"
     SURFACE_UNAVAILABLE = "surface_unavailable"
     SURFACE_NOT_OWNED = "surface_not_owned"
@@ -457,6 +466,7 @@ class ErrorCode(StrEnum):
     CONSOLE_UNAVAILABLE = "console_unavailable"
     INVALID_GRID = "invalid_grid"
     CONSOLE_CAPTURE_FULL = "console_capture_full"
+    CAPTURE_UNAVAILABLE = "capture_unavailable"
     INTERNAL = "internal"
 
 

@@ -428,6 +428,100 @@ async def test_the_read_footer_carries_the_same_cursor_shape(
 
 
 @pytest.mark.asyncio
+async def test_the_status_renders_a_mode_string_as_its_value(
+    monkeypatch: pytest.MonkeyPatch, live_app: None
+) -> None:
+    """Q-4: §5.4 types `modes.mouseTracking` as a STRING, and the real app sends
+    `"none"` — which a truthiness test rendered as `modes on: mouseTracking`, i.e.
+    the opposite of what the app said, in a model-facing result.
+    """
+    _install(
+        monkeypatch,
+        _FakeClient(
+            {
+                "running": True,
+                "modes": {
+                    "applicationCursorKeys": False,
+                    "bracketedPaste": False,
+                    "mouseTracking": "none",
+                },
+            }
+        ),
+    )
+    result = await _call({"method": "status", "surface": "con:1:a"})
+    assert "modes on: none" in result.text, result.text
+    assert "mouseTracking" not in result.text, result.text
+
+    # A mode the program HAS asked for prints its value, not just its name: the
+    # value is what tells a reader whether mouse reports are on, and which kind.
+    _install(
+        monkeypatch,
+        _FakeClient(
+            {
+                "running": True,
+                "modes": {
+                    "applicationCursorKeys": True,
+                    "bracketedPaste": False,
+                    "mouseTracking": "vt200",
+                },
+            }
+        ),
+    )
+    result = await _call({"method": "status", "surface": "con:1:a"})
+    assert "modes on: applicationCursorKeys, mouseTracking=vt200" in result.text, result.text
+    assert "bracketedPaste" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_every_key_spelling_reaches_the_encoder_under_one_name(
+    monkeypatch: pytest.MonkeyPatch, live_app: None
+) -> None:
+    """Q-2: the guide shipped `ctrl-c`/`shift-tab`, which the app's encoder refuses.
+
+    Its names use `+` (`ctrl+c`, `shift+tab`) — the spelling this repository uses
+    everywhere else — so every control key a model read about failed against the
+    only real host with `Unknown key name: ctrl-c`. A model that has to guess a
+    spelling fails a TUI test for the wrong reason, so the synonyms are folded onto
+    the encoder's own name HERE, before anything reaches the wire.
+    """
+    cases: tuple[tuple[list[str], list[str]], ...] = (
+        (["ctrl+c"], ["ctrl+c"]),
+        (["ctrl-c"], ["ctrl+c"]),
+        (["CTRL+C"], ["ctrl+c"]),
+        (["^c"], ["ctrl+c"]),
+        (["shift-tab"], ["shift+tab"]),
+        (["esc"], ["escape"]),
+        (["return"], ["enter"]),
+        (["cr"], ["enter"]),
+        (["pgup", "pgdn"], ["pageup", "pagedown"]),
+        (["page-up", "page_down"], ["pageup", "pagedown"]),
+        (["ins", "del"], ["insert", "delete"]),
+        (["back-space"], ["backspace"]),
+        (["ctrl+a", "d"], ["ctrl+a", "d"]),
+        (["  ctrl + c  "], ["ctrl+c"]),
+    )
+    client = _install(monkeypatch, _FakeClient({"accepted": True}))
+    for spelling, expected in cases:
+        result = await _call({"method": "keys", "surface": "con:1:a", "keys": spelling})
+        assert result.is_error is False, (spelling, result.text)
+        method, params = client.calls[-1]
+        assert method == "console_keys"
+        assert params == {"surface": "con:1:a", "keys": expected}, (spelling, params)
+
+    # A name this side does not know is NOT rewritten: the app's `unknown_key`
+    # refusal carries the accepted set, so a local grammar that guessed would
+    # replace the authoritative answer with a staler one.
+    await _call({"method": "keys", "surface": "con:1:a", "keys": ["meta+c", "weird-key"]})
+    assert client.calls[-1][1] == {"surface": "con:1:a", "keys": ["meta+c", "weird-key"]}
+
+    # A blank entry is dropped rather than sent as an empty name, and a call that
+    # was nothing but blanks is refused locally rather than spending a round trip.
+    result = await _call({"method": "keys", "surface": "con:1:a", "keys": ["   "]})
+    assert result.is_error is True
+    assert "at least one named key" in result.text, result.text
+
+
+@pytest.mark.asyncio
 async def test_secure_reports_the_answer_not_the_request(
     monkeypatch: pytest.MonkeyPatch, live_app: None
 ) -> None:
@@ -459,6 +553,10 @@ async def test_typed_refusals_are_rendered_from_the_code_not_the_message(
         (ErrorCode.PROCESS_EXITED, "has exited"),
         (ErrorCode.SECURE_INPUT_ACTIVE, "refuses to read"),
         (ErrorCode.CONSOLE_CAPTURE_FULL, "one at a time"),
+        # The code the real app sends for an ordinary condition and this version did
+        # not model (Q-1) — asserted here like its siblings so the copy that reaches
+        # the MODEL is the harness's and names the app's real state.
+        (ErrorCode.CAPTURE_UNAVAILABLE, "no pane is displaying it"),
     ):
         _install(
             monkeypatch,

@@ -12989,6 +12989,93 @@ CONSOLE_SCROLLBACK_MAX_ROWS = 2000
 #: reproducing the payload — the same job `bash`'s describer does for a command.
 CONSOLE_APPROVAL_PREVIEW_CHARS = 160
 
+#: A leading modifier word and the separator a caller wrote after it, so it can be
+#: folded to the `+` the encoder spells its names with (`ctrl-c`, `CTRL_C` and
+#: `control c` all become `ctrl+c`). `page-up` is deliberately NOT matched: `page`
+#: is not a modifier, so that spelling falls through to the whole-name aliases
+#: below rather than being rebuilt as `page+up`.
+_CONSOLE_MODIFIER = re.compile(
+    r"^(ctrl|control|shift|alt|meta|cmd|command|opt|option|super)[-+_]",
+    re.IGNORECASE,
+)
+
+#: The canonical word for each modifier a caller might write. Only `ctrl` and
+#: `shift` combinations exist in the encoder's vocabulary today; the others are
+#: folded to the same shape so an unsupported `meta-c` is refused by the app under
+#: a spelling the caller recognizes, and this side never asserts they exist.
+_CONSOLE_MODIFIER_WORDS: dict[str, str] = {
+    "ctrl": "ctrl",
+    "control": "ctrl",
+    "shift": "shift",
+    "alt": "alt",
+    "meta": "meta",
+    "cmd": "cmd",
+    "command": "cmd",
+    "opt": "opt",
+    "option": "opt",
+    "super": "super",
+}
+
+#: Names whose separators a caller may insert (`page-up`, `page_up`, `back-space`).
+#: The folded spelling IS the encoder's name for these, and the list is written out
+#: rather than derived from the vocabulary: deriving it would mean carrying the
+#: encoder's whole name list on this side, which is the second source of truth the
+#: aliases exist to avoid. Every entry is a name the guide already documents, and
+#: an entry can only ADD a spelling to it — never a name the encoder does not have.
+#: `page` is not a modifier word, so the modifier branch above cannot fold these.
+_CONSOLE_FOLDABLE_NAMES = frozenset({"pageup", "pagedown", "backspace"})
+
+
+#: Whole-name spellings a model writes, mapped to the name the encoder has. Keyed
+#: on the name with its separators removed, so `pg-up` and `pg_up` are one entry.
+#: Nothing here carries a BYTE: the encoder is the app's (design §10.5 keeps one
+#: table, pinned against the mirror's DOM handler), and a byte table on this side
+#: would be the second encoder that invariant exists to prevent.
+_CONSOLE_KEY_ALIASES: dict[str, str] = {
+    "esc": "escape",
+    "cr": "enter",
+    "return": "enter",
+    "pgup": "pageup",
+    "pgdn": "pagedown",
+    "ins": "insert",
+    "del": "delete",
+}
+
+
+def _console_key_name(key: str) -> str:
+    """One `keys` entry, in the spelling the app's encoder accepts.
+
+    WHY THIS EXISTS AT ALL (QA round 2, Q-2): the encoder's names use `+`
+    (`ctrl+c`, `shift+tab`) because that is also this repository's own notation
+    everywhere else (`ASIDE_SCROLL_BACK_KEY = "ctrl+pageup"` in `tui/app.py`), while
+    the shipped guide documented the `-` form — so every control key a model read
+    about was refused by the only real host, with `Unknown key name: ctrl-c`. A
+    model that has to guess a spelling fails a TUI test for the wrong reason, and
+    the fix belongs on this side: the app's vocabulary is frozen by the UI half of
+    the split, and its encoder is the one table.
+
+    An unrecognised name is returned UNCHANGED rather than refused here: the app's
+    `unknown_key` refusal carries the accepted set as `data["accepted"]`, so a
+    local grammar that guessed would replace the authoritative answer with a
+    second, staler one.
+    """
+    raw = re.sub(r"\s+", "", key).lower()
+    if not raw:
+        return ""
+    match = _CONSOLE_MODIFIER.match(raw)
+    if match:
+        head = _CONSOLE_MODIFIER_WORDS[match.group(1)]
+        return f"{head}+{raw[match.end() :]}"
+    # Caret notation, which is a spelling models write for control keys in prose
+    # (`^C`, `^[`) and which maps exactly onto the encoder's `ctrl+` names — the
+    # bracket and underscore controls included.
+    if len(raw) == 2 and raw.startswith("^") and (raw[1].isalpha() or raw[1] in "[\\]^_ "):
+        return f"ctrl+{raw[1]}"
+    folded = raw.replace("-", "").replace("_", "")
+    if folded in _CONSOLE_FOLDABLE_NAMES:
+        return folded
+    return _CONSOLE_KEY_ALIASES.get(folded, raw)
+
 
 #: One tool with a `method` parameter is ONE schema in the prompt-cache prefix,
 #: where ten tools would be ten — the same shape `BrowserParams` uses for the same
@@ -13078,9 +13165,10 @@ class ConsoleParams(BaseModel):
     )
     keys: list[str] = Field(
         default_factory=list,
-        description="'keys': named keys, e.g. ['ctrl-c'], ['up'], ['shift-tab'], ['f5'], "
-        "['ctrl-a', 'd']. The accepted names are in guide://console; an unknown name is "
-        "refused with the accepted set.",
+        description="'keys': named keys in the encoder's spelling — ['ctrl+c'], ['up'], "
+        "['shift+tab'] — with synonyms ('ctrl-c', 'CTRL+C', 'shift-tab', 'esc', "
+        "'pgup') normalised first. The names are in guide://console; an unknown one "
+        "is refused with the accepted set.",
     )
     on: bool | None = Field(
         default=None,
@@ -13168,9 +13256,12 @@ def _console_wire_params(params: ConsoleParams, session_id: str) -> tuple[dict[s
             wire["paste"] = True
         return wire, ""
     if method == "keys":
-        keys = [key.strip() for key in params.keys if key.strip()]
+        # Normalised HERE, before the wire, so the spelling a model wrote never
+        # decides whether the call works — see `_console_key_name` for why this
+        # side owns the aliases and not the bytes.
+        keys = [name for name in (_console_key_name(key) for key in params.keys) if name]
         if not keys:
-            return {}, "'keys' needs at least one named key (e.g. ['ctrl-c'])."
+            return {}, "'keys' needs at least one named key (e.g. ['ctrl+c'])."
         return {"surface": params.surface, "keys": keys}, ""
     if method == "resize":
         if params.cols is None or params.rows is None:
@@ -13462,6 +13553,24 @@ def _console_cursor_text(cursor: Any) -> str:
     return str(cursor)
 
 
+def _console_mode_is_on(value: Any) -> bool:
+    """Whether one `modes` entry is on, where §5.4 types the map with TWO kinds.
+
+    The cursor-key/paste flags are booleans, but `mouseTracking` is `IModes`' own
+    STRING (`"none"`, `"vt200"`, …), and a truthiness test read the real app's
+    `"none"` as an on-mode — `modes on: mouseTracking` for a surface with mouse
+    tracking OFF (QA round 2, Q-4: the same class of false statement about the
+    surface as the legacy `{row, col}` cursor). So the booleans are `is True`
+    exactly (anything else a host sends is not a claim this side can render as
+    "on"), and a string is off when it names no mode.
+    """
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "none", "off", "false")
+    return False
+
+
 def _console_status_text(result: dict[str, Any]) -> str:
     """Render `console_status` without asserting anything the app did not say.
 
@@ -13496,7 +13605,15 @@ def _console_status_text(result: dict[str, Any]) -> str:
         lines.append(f"cursor: {_console_cursor_text(result.get('cursor'))}")
     modes = result.get("modes")
     if isinstance(modes, dict):
-        active = sorted(name for name, on in modes.items() if on)
+        # A string-valued axis prints its actual value (`mouseTracking=vt200`)
+        # rather than the axis name: §5.4's type is the emulator's own, and the
+        # value is what tells a reader whether the program has asked for mouse
+        # reports at all.
+        active = sorted(
+            f"{name}={value}" if isinstance(value, str) else name
+            for name, value in modes.items()
+            if _console_mode_is_on(value)
+        )
         lines.append("modes on: " + (", ".join(active) if active else "none"))
     if lines:
         lines.append("An idle surface can equally be a program waiting for input: read it to see.")

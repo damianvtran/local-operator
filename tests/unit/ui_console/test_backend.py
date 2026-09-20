@@ -509,6 +509,73 @@ def test_the_queue_refusal_reads_the_accepted_count_not_the_payload_size() -> No
     assert "9000" not in bare, bare
 
 
+def test_the_two_capture_refusals_name_their_own_condition() -> None:
+    """Q-1/Q-2 (QA round 2): `capture_unavailable` is a condition, not a skew.
+
+    The real app refuses `console_screenshot` with `capture_unavailable` when no
+    pane is displaying the surface — its own documented addition to §10.6, and the
+    state EVERY screenshot is in on a build without the offscreen capture view.
+    Before this code was modelled, the well-formed refusal failed
+    `Response.model_validate` and the forward-compat hook told the model the app
+    was newer than the session: a false statement about a supported operation.
+
+    The two capture codes must also stay distinguishable, because they are
+    different conditions answered by different hosts (a build with §13.3's capture
+    view, and one without it) — an agent that read the busy-view sentence for this
+    one would go and retry against a pane that does not exist.
+    """
+    unavailable = backend.console_error_text(
+        BridgeError(
+            ErrorCode.CAPTURE_UNAVAILABLE,
+            "no pane is displaying this surface, and this app version cannot reconstruct "
+            "a frame offscreen",
+            {"rendered": None},
+        )
+    )
+    assert "no pane is displaying it" in unavailable, unavailable
+    assert "newer" not in unavailable, unavailable
+    assert "Update Local Operator" not in unavailable, unavailable
+    assert "busy" not in unavailable, unavailable
+
+    full = backend.console_error_text(
+        BridgeError(ErrorCode.CONSOLE_CAPTURE_FULL, "the capture view is busy", {})
+    )
+    assert "one at a time" in full, full
+    assert "no pane" not in full, full
+    assert full != unavailable
+
+
+def test_the_console_off_refusal_names_the_reason_the_app_reported() -> None:
+    """Q-3 (QA round 2): §10.6 publishes `reason` and §15 says the copy names the
+    condition, so the value is READ rather than left in a payload nobody looks at.
+
+    The real app's payload is `{"reason": "disabled"}` for the kill switch, and its
+    other three values are `pty_unavailable`, plus the two PER-SURFACE states
+    `spawn_failed` and `no_runtime`. An unrecognised value is named as it arrived:
+    the app's own word is more use than an invented remedy, and mapping it onto one
+    of §10.1's three would be a claim the app did not make.
+    """
+    cases = (
+        ("disabled", "LOCAL_OPERATOR_UI_CONSOLE_HOST"),
+        ("pty_unavailable", "node-pty"),
+        ("spawn_failed", "could not start this surface's process"),
+        ("no_runtime", "no runtime for that surface"),
+        ("something_the_app_added", "'something_the_app_added'"),
+    )
+    for reason, expected in cases:
+        text = backend.console_error_text(
+            BridgeError(ErrorCode.CONSOLE_UNAVAILABLE, "host prose", {"reason": reason})
+        )
+        assert expected in text, (reason, text)
+        assert "host prose" not in text, (reason, text)
+
+    # No reason at all is the disjunction over §10.1's three conditions, because an
+    # absent value is not a claim about which of them it was.
+    bare = backend.console_error_text(BridgeError(ErrorCode.CONSOLE_UNAVAILABLE, "host prose", {}))
+    assert "settings toggle" in bare and "terminal component" in bare, bare
+    assert "host prose" not in bare, bare
+
+
 def test_the_record_is_read_through_the_console_model(tmp_path: Path) -> None:
     """`ConsoleHostClient` must read THIS namespace's model, or the capability bit
     is dropped on the floor and every call looks like a console-less host."""

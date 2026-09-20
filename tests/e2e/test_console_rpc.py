@@ -43,6 +43,69 @@ from tests.e2e.watchdog import bounded
 
 SECRET = "hunter2-three-blind-mice"
 
+#: The names the app's encoder has, with the byte each one sends (design §10.5;
+#: `local-operator-ui` `src/main/console/keys.ts`, whose own conformance test pins the
+#: table byte for byte against the pane's DOM handler). A MIRROR for this peer, never a
+#: second source of truth: it is here so the peer can answer a `console_keys` call the
+#: way the app does — the whole list encoded before any of it is written, and a name
+#: outside the vocabulary refused with the accepted set — which is what lets the cells
+#: below assert that a SPELLING lands on a name this table has, and that the name
+#: encodes to the byte the key means.
+_PEER_KEY_BYTES: dict[str, bytes] = {
+    "enter": b"\r",
+    "tab": b"\t",
+    "shift+tab": b"\x1b[Z",
+    "backspace": b"\x7f",
+    "escape": b"\x1b",
+    "space": b" ",
+    "up": b"\x1b[A",
+    "home": b"\x1b[H",
+    "pageup": b"\x1b[5~",
+    "pagedown": b"\x1b[6~",
+    "insert": b"\x1b[2~",
+    "delete": b"\x1b[3~",
+    "f5": b"\x1b[15~",
+    "ctrl+a": b"\x01",
+    "ctrl+c": b"\x03",
+    "ctrl+d": b"\x04",
+    "ctrl+z": b"\x1a",
+    "ctrl+[": b"\x1b",
+}
+
+#: One row per spelling a model may write, with the name the encoder has and the byte
+#: that name sends. Q-2's whole point: the guide shipped `ctrl-c`/`shift-tab` and the
+#: encoder spells them `ctrl+c`/`shift+tab`, so every control key a model read about
+#: was refused by the only real host.
+_KEY_SPELLINGS: tuple[tuple[str, str, bytes], ...] = (
+    ("ctrl+c", "ctrl+c", b"\x03"),
+    ("ctrl-c", "ctrl+c", b"\x03"),
+    ("CTRL+C", "ctrl+c", b"\x03"),
+    ("ctrl_c", "ctrl+c", b"\x03"),
+    ("^c", "ctrl+c", b"\x03"),
+    ("ctrl+a", "ctrl+a", b"\x01"),
+    ("shift+tab", "shift+tab", b"\x1b[Z"),
+    ("shift-tab", "shift+tab", b"\x1b[Z"),
+    ("escape", "escape", b"\x1b"),
+    ("esc", "escape", b"\x1b"),
+    ("enter", "enter", b"\r"),
+    ("return", "enter", b"\r"),
+    ("cr", "enter", b"\r"),
+    ("pageup", "pageup", b"\x1b[5~"),
+    ("pgup", "pageup", b"\x1b[5~"),
+    ("page-up", "pageup", b"\x1b[5~"),
+    ("pagedown", "pagedown", b"\x1b[6~"),
+    ("pgdn", "pagedown", b"\x1b[6~"),
+    ("page-down", "pagedown", b"\x1b[6~"),
+    ("insert", "insert", b"\x1b[2~"),
+    ("ins", "insert", b"\x1b[2~"),
+    ("delete", "delete", b"\x1b[3~"),
+    ("del", "delete", b"\x1b[3~"),
+    ("backspace", "backspace", b"\x7f"),
+    ("back-space", "backspace", b"\x7f"),
+    ("up", "up", b"\x1b[A"),
+    ("f5", "f5", b"\x1b[15~"),
+)
+
 
 class _Rpc(BaseHTTPRequestHandler):
     """The app's RPC leg, with the four safety rules a peer must keep too."""
@@ -53,6 +116,8 @@ class _Rpc(BaseHTTPRequestHandler):
     #: method -> (code, message, data); takes precedence over ``replies``
     refusals: dict[str, tuple[str, str, dict[str, Any]]] = {}
     received: list[tuple[str, dict[str, Any]]] = []
+    #: the bytes each accepted `console_keys` call encoded, in call order
+    encoded: list[list[bytes]] = []
 
     def do_POST(self) -> None:  # noqa: N802 - http.server's spelling
         # The body is read BEFORE the key is checked, which is what the app's own
@@ -78,6 +143,32 @@ class _Rpc(BaseHTTPRequestHandler):
                 "ok": False,
                 "error": {"code": code, "message": message, "data": data},
             }
+        elif method == "console_keys":
+            # The app's own encoder path in miniature (`keys.ts`, §10.5): the WHOLE
+            # list is encoded before any of it is written, and a name outside the
+            # vocabulary is a typed `unknown_key` carrying the accepted set. Both
+            # halves matter to the cells below, because what they test is which NAME
+            # the session put on the wire: a fold onto a name this table does not
+            # have has to fail here rather than pass quietly.
+            names = [str(name) for name in (params.get("keys") or [])]
+            unknown = next((name for name in names if name not in _PEER_KEY_BYTES), None)
+            if unknown is not None:
+                body = {
+                    "id": request.get("id"),
+                    "ok": False,
+                    "error": {
+                        "code": "unknown_key",
+                        "message": f"Unknown key name: {unknown}.",
+                        "data": {"accepted": sorted(_PEER_KEY_BYTES), "key": unknown},
+                    },
+                }
+            else:
+                type(self).encoded.append([_PEER_KEY_BYTES[name] for name in names])
+                body = {
+                    "id": request.get("id"),
+                    "ok": True,
+                    "result": {"accepted": True, "encoded": names},
+                }
         else:
             body = {
                 "id": request.get("id"),
@@ -116,7 +207,7 @@ class Peer:
         handler = type(
             "_PeerHandler",
             (_Rpc,),
-            {"key": self.key, "replies": {}, "refusals": {}, "received": []},
+            {"key": self.key, "replies": {}, "refusals": {}, "received": [], "encoded": []},
         )
         self.handler = handler
         self.server = HTTPServer(("127.0.0.1", 0), handler)
@@ -127,6 +218,11 @@ class Peer:
     @property
     def received(self) -> list[tuple[str, dict[str, Any]]]:
         return self.handler.received
+
+    @property
+    def encoded(self) -> list[list[bytes]]:
+        """The bytes each accepted `console_keys` call put on the pty, in order."""
+        return self.handler.encoded
 
     def serve(self, **replies: dict[str, Any]) -> None:
         self.handler.replies.update(replies)
@@ -377,6 +473,10 @@ async def test_a_request_without_the_key_is_refused(peer: Peer, tmp_path: Path) 
         ("secure_input_active", "refuses to read"),
         ("invalid_grid", "outside what the app will honour"),
         ("console_capture_full", "one at a time"),
+        # The app's own addition to §10.6 (Q-1), over the real wire: it must validate
+        # as a MODELLED code, so the forward-compat hook never fires and the model
+        # reads the condition rather than "the app is newer than this session".
+        ("capture_unavailable", "no pane is displaying it"),
         ("console_unavailable", "console feature as unavailable"),
         # The one code the first round left out of this list, which is how the copy
         # that interpolated the host's own sentence survived a green suite: a test
@@ -534,6 +634,123 @@ async def test_a_surface_the_user_opened_is_readable_and_named_as_theirs(
     # demonstrates "a surface the user opened" is the row that has to carry it.
     assert "session the-users-session" in result.text
     assert "/Users/someone/project" in result.text
+
+
+@pytest.mark.parametrize(
+    ("spelling", "canonical", "byte"),
+    _KEY_SPELLINGS,
+    ids=[row[0] for row in _KEY_SPELLINGS],
+)
+@pytest.mark.asyncio
+async def test_every_key_spelling_is_one_name_and_one_byte(
+    peer: Peer, tmp_path: Path, spelling: str, canonical: str, byte: bytes
+) -> None:
+    """RE-RUN AGAINST THE APP (Q-2): one spelling per cell, as a real key press.
+
+    Three facts per row, and all three are the defect Q-2 found: the session folds
+    the SPELLING onto the name the encoder has (asserted on the wire, in full —
+    surface and keys, so nothing else rides along), the name is one the encoder
+    actually has (the peer refuses anything else with `unknown_key`, exactly as the
+    app does, so a fold onto an invented name fails HERE rather than silently), and
+    that name encodes to the byte the key means (`\x03` for `ctrl+c`, `\x1b[Z` for
+    `shift+tab`) — which is the thing the model was failing to reach when the guide
+    told it to write `ctrl-c`.
+
+    The byte is asserted against a literal, not against the mirror table's own
+    lookup: the table is what the peer encodes WITH, so asserting through it would
+    only prove the dict is consistent with itself.
+    """
+    peer.publish()
+    session = _session(tmp_path)
+    try:
+        result = await execute_console(
+            "c-keys",
+            {"method": "keys", "surface": "con:1:a", "keys": [spelling]},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+    finally:
+        await session.dispose()
+
+    assert result.is_error is False, (spelling, result.text)
+    assert peer.received[-1] == (
+        "console_keys",
+        {"surface": "con:1:a", "keys": [canonical]},
+    ), peer.received[-1]
+    assert peer.encoded == [[byte]], (spelling, peer.encoded)
+
+
+@pytest.mark.asyncio
+async def test_a_name_the_encoder_does_not_have_is_refused_with_its_own_words(
+    peer: Peer, tmp_path: Path
+) -> None:
+    """Q-2's other half: the fold accepts SPELLINGS, it never invents names.
+
+    `meta+c` is not in the encoder's vocabulary — there is no modifier-chord
+    vocabulary in it (design §10.5 says so now) — and the app answers with the
+    accepted set in `data.accepted`. A session-side grammar that guessed would
+    replace that authoritative list with a staler one, which is why an unrecognised
+    name reaches the wire exactly as it arrived.
+    """
+    peer.publish()
+    session = _session(tmp_path)
+    try:
+        result = await execute_console(
+            "c-keys",
+            {"method": "keys", "surface": "con:1:a", "keys": ["meta+c"]},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+    finally:
+        await session.dispose()
+
+    assert result.is_error is True
+    assert peer.received[-1][1] == {"surface": "con:1:a", "keys": ["meta+c"]}
+    assert "Unknown key name: meta+c" in result.text, result.text
+    assert "ctrl+c" in result.text, result.text
+    # Nothing was written: the app encodes the whole list before any of it, and this
+    # cell is the one that can see the peer keep that rule.
+    assert peer.encoded == []
+
+
+@pytest.mark.asyncio
+async def test_the_console_off_refusal_names_the_reason_the_app_sent(
+    peer: Peer, tmp_path: Path
+) -> None:
+    """RE-RUN AGAINST THE APP (Q-3): the app's own payload is `{"reason": "disabled"}`.
+
+    Launched with `LOCAL_OPERATOR_UI_CONSOLE_HOST=0`, the real app answers a console
+    method with exactly this body. The gate normally stops the call first — a record
+    saying `console: false` is what keeps the tool out of the inventory (§15) — so
+    this cell drives the case the record did not show: a caller that got through
+    anyway, which §15 keeps as the second line of defence. The copy must name the
+    condition the app named, not disjoin §10.1's three.
+    """
+    peer.publish()
+    peer.refuse(
+        "console_status",
+        "console_unavailable",
+        "this app's console is not available (disabled): LOCAL_OPERATOR_UI_CONSOLE_HOST is off",
+        {"reason": "disabled"},
+    )
+    session = _session(tmp_path)
+    try:
+        result = await execute_console(
+            "c-status",
+            {"method": "status", "surface": "con:1:a"},
+            None,
+            None,
+            session._build_tool_context(),
+        )
+    finally:
+        await session.dispose()
+
+    assert result.is_error is True
+    assert "LOCAL_OPERATOR_UI_CONSOLE_HOST" in result.text, result.text
+    assert "this app's console is not available (disabled)" not in result.text, result.text
+    assert "settings toggle" not in result.text, result.text
 
 
 @pytest.mark.asyncio

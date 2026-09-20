@@ -429,6 +429,48 @@ def console_error_text(error: BridgeError) -> str:
             "do not work around it by reading the surface another way."
         )
     if code == ErrorCode.CONSOLE_UNAVAILABLE:
+        # Q-3 (QA round 2): §10.6 publishes `reason` for this code and §15 says the
+        # copy "names which of the three conditions failed" — so the value is READ
+        # rather than left in the payload for a reader that never looks. The app's
+        # values are not only §10.1's three: `disabled` is the launch flag (and
+        # Settings' toggle, where the app has one), `pty_unavailable` is the native
+        # module §10.1 names, and `spawn_failed`/`no_runtime` are PER-SURFACE states
+        # that a create or a read hits rather than a feature-wide switch. An
+        # unrecognised value is printed as it arrived, because the app's own
+        # spelling is worth more to the model than a generic sentence and inventing
+        # a remedy for a reason this half does not know is the class of false
+        # statement the cursor and the capture rows were fixed for.
+        reason = str(data.get("reason") or "").strip()
+        if reason == "disabled":
+            return (
+                "The app reports its console feature as unavailable for this run: it was "
+                "launched with LOCAL_OPERATOR_UI_CONSOLE_HOST set to a false value, or the "
+                "console is switched off in the app's Settings. Tell the user rather than "
+                "retrying; no surface can be created until it is on."
+            )
+        if reason == "pty_unavailable":
+            return (
+                "The app reports its console feature as unavailable because its terminal "
+                "component (node-pty) did not load — a packaging fault the app's own log "
+                "names, and one worth reporting. Tell the user; do not retry."
+            )
+        if reason == "spawn_failed":
+            return (
+                "The app could not start this surface's process and dropped the surface. "
+                "Check the command and its args/cwd, tell the user, and create a new "
+                "surface rather than repeating the call."
+            )
+        if reason == "no_runtime":
+            return (
+                "The app holds no runtime for that surface in this run (a surface from an "
+                "earlier run of the app, or one its registry has released), so there is "
+                "nothing to read or write. Create a new surface rather than retrying."
+            )
+        if reason:
+            return (
+                f"The app reports its console feature as unavailable (reason: {reason!r}) "
+                "and refused the call. Tell the user what it reports rather than retrying."
+            )
         return (
             "The app reports its console feature as unavailable and refused the call. "
             "That is a settings toggle, the launch flag LOCAL_OPERATOR_UI_CONSOLE_HOST=0, "
@@ -466,6 +508,22 @@ def console_error_text(error: BridgeError) -> str:
             "The app's offscreen capture view is busy with another surface's frame (it "
             "is deliberately one at a time). Retry this screenshot in a moment, or read "
             "the surface as text."
+        )
+    if code == ErrorCode.CAPTURE_UNAVAILABLE:
+        # The OTHER capture refusal, and telling them apart is what the §10.6 row
+        # exists for: `console_capture_full` is the capture view being busy with a
+        # different surface's frame (an app that HAS the view, §13.3), while this is
+        # there being no frame to take at all (§13.2) — the state every screenshot
+        # hits on an app built before the offscreen capture view exists. The app
+        # sends `data {"rendered": null}`, its own field for "no frame", which names
+        # no handle or value to read, so the condition itself is the whole answer.
+        # Modelled rather than left to the forward-compat hook, which read this
+        # ordinary state as "your app is newer than this session".
+        return (
+            "The app has no frame of that surface to give: no pane is displaying it, and "
+            "this app version cannot reconstruct one offscreen. Ask the user to open that "
+            "surface's pane in the app's console tab, then take the screenshot again — or "
+            "read the surface as text instead, which needs no pane."
         )
     if code == ErrorCode.PROTO_MISMATCH:
         # Both numbers come from `data`, and the host's free-text message is NOT
