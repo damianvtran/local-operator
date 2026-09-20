@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.harness import NO_NOTIFY_ENV
+
 pytestmark = pytest.mark.e2e
 
 
@@ -113,6 +115,11 @@ def test_a_cold_wake_runs_its_turn_with_no_terminal_open(tmp_path: Path) -> None
         "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path),
         "LOP_MOBILE_CHILD_CWD": str(tmp_path),
         "LOP_MOBILE_CHILD_RESUME": "coldwake0001",
+        # This child runs the MOCK hosting (the assertion below waits for the
+        # mock's own reply to land in its transcript), so without this it would
+        # announce a completion whose body is that reply — the operator's
+        # reported banner, fired by our own suite.
+        **NO_NOTIFY_ENV,
     }
     child = subprocess.Popen(
         [sys.executable, "-m", "local_operator.session.runtime.process"],
@@ -174,6 +181,10 @@ def test_the_real_supervisor_process_fires_a_cold_wake(tmp_path: Path) -> None:
         **os.environ,
         "HOME": str(home),
         "LOCAL_OPERATOR_CONFIG_DIR": str(tmp_path),
+        # The supervisor CANDIDATE it spawns inherits this mapping, and the
+        # runtime it engages runs the mock hosting — the parent's own gate
+        # cannot reach a grandchild that was handed a filtered environment.
+        **NO_NOTIFY_ENV,
     }
     # Every inherited CMUX_* variable is stripped: a forked runtime that
     # inherits a real CMUX_WORKSPACE_ID renames the operator's live cmux

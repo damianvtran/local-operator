@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +49,9 @@ from local_operator.server.utils.desktop_sessions import (
     DesktopSessions,
 )
 from local_operator.session.attention import AttentionStore
+from local_operator.session.model_selection import ENV_ALLOW_TEST_HOSTING_NOTIFY
 from local_operator.tui.notify import BODIES
+from tests.notification_opt_in import notification_path_opt_in
 
 
 def _publish(
@@ -142,6 +146,31 @@ def _session_dir(root: Path, session_id: str, *, assistant: str = "", title: str
 def names_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the privacy flag ON, so a developer's own config cannot decide a test."""
     monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
+
+
+@pytest.fixture(autouse=True)
+def _notification_gate_off() -> Iterator[None]:
+    """Opt this module IN to the notification path, deliberately and visibly.
+
+    ``tests/conftest.py`` arms ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` for every test
+    (and at import time, so spawned children inherit it), because a test that
+    reaches the operator's real Notification Centre is a side effect no
+    assertion looks at. Here the notification frame IS the subject, so the gate
+    is cleared once for the module.
+
+    The body is ``tests/notification_opt_in.notification_path_opt_in`` — the shared
+    opt-in — which clears that switch AND waives the test-hosting rule; the
+    session this module fabricates for the test-hosting cell carries a real
+    selection row, and the cell that asserts the RULE (``test_a_stored_mock_
+    session_emits_no_notification``) turns the escape back off for itself.
+
+    Set and restored by hand rather than through ``monkeypatch``: that fixture
+    is FUNCTION-scoped and SHARED with the tests, and one test here calls
+    ``monkeypatch.undo()`` to put a patched composer back — which would re-arm
+    this gate mid-test and lose the very banner the test is about.
+    """
+    with notification_path_opt_in():
+        yield
 
 
 async def _baselined(root: Path, session_id: str) -> _Bridge:
@@ -546,6 +575,10 @@ async def test_a_compose_failure_costs_the_banner_not_the_attention_frame(
     _session_dir(tmp_path, sid, assistant="Done.")
     bridge = await _baselined(tmp_path, sid)
 
+    from local_operator import notifications
+
+    real_compose = notifications.compose
+
     def explode(*args: object, **kwargs: object) -> None:
         raise RuntimeError("transcript unreadable")
 
@@ -558,7 +591,13 @@ async def test_a_compose_failure_costs_the_banner_not_the_attention_frame(
     assert bridge.attention["completion_token"] is not None
 
     # And the bridge recovers on the next completion once compose works again.
-    monkeypatch.undo()
+    #
+    # The composer is restored BY NAME rather than with ``monkeypatch.undo()``.
+    # That call reverts every patch on this fixture instance, which is shared
+    # with the autouse fixtures — `names_on` above and, in `tests/conftest.py`,
+    # the process-wide notification gate — so `undo()` re-arms the gate this
+    # module deliberately cleared and the recovery half then proves nothing.
+    monkeypatch.setattr("local_operator.notifications.compose", real_compose)
     monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: True)
     _publish(tmp_path, sid, "result-2")
     await bridge.refresh_attention()
@@ -638,7 +677,14 @@ async def test_the_privacy_flag_is_honoured_on_the_wire_too(
     _session_dir(tmp_path, sid, assistant="Merged the acquisition docs.", title="Project Atlas")
     bridge = await _baselined(tmp_path, sid)
 
-    monkeypatch.setattr("local_operator.tui.notify.settings_get", lambda key, default=None: False)
+    # Only the PRIVACY flag is turned off here, not the notification gate: a
+    # blanket ``settings_get`` -> False also disables
+    # ``display.notifications`` and the frame would then never be composed,
+    # leaving this test asserting a leak it never exercised.
+    monkeypatch.setattr(
+        "local_operator.tui.notify.settings_get",
+        lambda key, default=None: False if key == "display.notification_session_name" else default,
+    )
     _publish(tmp_path, sid, "result-1")
     await bridge.refresh_attention()
 
@@ -859,3 +905,124 @@ def test_the_gates_session_name_obeys_the_privacy_flag(
     # skew directions, which is the property that lets this ship before the UI.
     assert PendingGateState(**gate).session_name == ""
     assert PendingGateState(request_id="g", kind="ask", title="t").session_name == ""
+
+
+@pytest.mark.asyncio
+async def test_a_stored_mock_session_emits_no_notification(tmp_path: Path) -> None:
+    """The bridge's half of the test-hosting gate.
+
+    This stream exists while an app is DISPLAYING a session, so the frame is an
+    offer the renderer turns into a native banner — and a session that ran on the
+    test hosting must not become one, whichever process is reading the store. The
+    attention frame still goes out: that is the receipt sync, not chrome.
+
+    THE MODULE'S OPT-IN IS TURNED BACK OFF HERE, and that is the whole cell: the
+    shared fixture waives the test-hosting rule for the suites whose subject is
+    the frame, so a test asserting the RULE has to close the waiver it would
+    otherwise inherit. The kill switch stays cleared, so the frame is available
+    and the rule is the only thing suppressing it.
+    """
+    import json
+
+    # A plain pop, NOT `monkeypatch.delenv`: monkeypatch is set up before this
+    # module's autouse opt-in, so its undo runs AFTER that fixture's teardown and
+    # would re-set the escape for every later test in the worker (the feed
+    # module's rule cell went red exactly that way). The reader reads fresh, so
+    # popping it for the body of this cell is the waiver this test needs.
+    os.environ.pop(ENV_ALLOW_TEST_HOSTING_NOTIFY, None)
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="Hello from the mock provider!", title="Mock work")
+    with (tmp_path / "sessions" / sid / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps(
+                {
+                    "id": "selection-1",
+                    "ts": 1.0,
+                    "type": "custom",
+                    "payload": {
+                        "custom_type": "selected_model",
+                        "details": {
+                            "version": 2,
+                            "selector": "test/test-model",
+                            "effort": None,
+                            "boot": None,
+                        },
+                    },
+                }
+            )
+            + "\n"
+        )
+    bridge = await _baselined(tmp_path, sid)
+
+    _publish(tmp_path, sid, "result-1")
+    state = await bridge.refresh_attention()
+
+    assert bridge.kinds == ["attention"], bridge.kinds
+    assert state["unseen"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_stored_hosting_read_stays_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-2 on the bridge's side: the same reader, the same reason.
+
+    Asked on the THREAD it ran in rather than against a duration — a wall-clock
+    bound on a loaded box is a flake, and "not the loop's thread" is exactly
+    what the fix buys (every neighbouring store read in this bridge's poll loop
+    already hops threads). The reader is doubled, so the assertion is about
+    where it ran; the notification frame in the same cell proves it was asked
+    for this row at all.
+    """
+    import threading
+
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="A real answer.", title="Real work")
+    bridge = await _baselined(tmp_path, sid)
+
+    threads: list[threading.Thread] = []
+
+    def probe(directory: Path) -> bool:
+        threads.append(threading.current_thread())
+        return False
+
+    monkeypatch.setattr(
+        "local_operator.server.utils.desktop_sessions.session_uses_test_hosting", probe
+    )
+    _publish(tmp_path, sid, "result-1")
+    await bridge.refresh_attention()
+
+    assert threads, "the bridge never asked the reader; the cell proved nothing"
+    assert all(thread is not threading.main_thread() for thread in threads), threads
+    assert bridge.kinds == ["attention", "notification"], bridge.kinds
+
+
+@pytest.mark.asyncio
+async def test_a_silenced_process_offers_no_banner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process switch is asked FIRST, before even the compose.
+
+    A rig that runs its own backend is silenced by the same inherited variable
+    it handed its children (``tui.notify.suppress_notifications_for_process``),
+    and a frame nobody may raise is worth neither the compose nor the round trip
+    — the renderer turns frames into native banners. The attention frame still
+    goes out, because that is the receipt sync rather than chrome.
+
+    This module opts IN to the notification path for every other cell, so this
+    one puts the switch back for the length of the read.
+    """
+    pool = DesktopSessions(tmp_path)
+    sid = await pool.create(str(tmp_path))
+    _session_dir(tmp_path, sid, assistant="A real answer.", title="Real work")
+    bridge = await _baselined(tmp_path, sid)
+
+    _publish(tmp_path, sid, "result-1")
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    state = await bridge.refresh_attention()
+
+    assert bridge.kinds == ["attention"], bridge.kinds
+    assert state["unseen"] is True
