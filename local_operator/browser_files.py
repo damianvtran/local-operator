@@ -47,12 +47,14 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import stat
 import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, NamedTuple
+from typing import Any, Literal, Mapping, NamedTuple, Sequence
+from urllib.parse import urlsplit
 
 from local_operator.paths import config_dir
 
@@ -971,10 +973,406 @@ def is_within(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
+#: What happened to a refused ENTRY, as a value rather than a sentence.
+#:
+#: These are the four distinguishable outcomes, and the words for them live in
+#: ``builtin.py`` beside ``_disposition_outcome`` so the report has ONE vocabulary. They
+#: are separate values rather than a boolean because "we left it on purpose" and
+#: "we could not remove it" are different facts, and a boolean can only spell the
+#: first as the second — which is how round-1 Q2's report came to say "still on
+#: disk — could NOT be removed" about an entry that was never there.
+DELETED = "deleted"  # we removed the entry
+KEPT = "kept"  # we left it deliberately: it is not ours to remove
+FAILED = "failed"  # we tried to remove it and could not
+ABSENT = "absent"  # there was no entry to remove
+
+
+class IntakeRefusal(NamedTuple):
+    """One reported file the harness refused, and what became of its entry.
+
+    ``disposition`` is a FACT rather than a promise, so the caller can say which
+    outcome happened in the same words every other refusal uses. A reason without
+    it would let a row claim a file was gone when the unlink failed — the exact
+    over-reporting review round 1 (R2) and round 2 (N7) exist for.
+    """
+
+    name: str
+    reason: str
+    disposition: str
+
+
+class IntakeOutcome(NamedTuple):
+    """What one intake pass did: names now IN the session directory, and refusals."""
+
+    moved: tuple[str, ...]
+    refused: tuple[IntakeRefusal, ...]
+
+
+def _entry_stat(path: Path) -> os.stat_result | None:
+    """``lstat``, or ``None`` when the entry is not there any more.
+
+    ``lstat`` and never ``stat``: the subject is the ENTRY the host named, and a
+    symlink must be reported as a symlink rather than silently resolved to
+    whatever it points at (the R1 rule — the delete and the chmod both act on the
+    entry, and this is where that is decided).
+    """
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+
+
+#: Ports a URL's canonical form omits, matching what `URL.origin` drops. The KEYS
+#: are also the only schemes this predicate will name an origin for — see below.
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def _origin_of(url: str) -> str:
+    """``scheme://host[:port]`` for a URL, or ``""`` when there is no origin.
+
+    Origin granularity, not the whole URL: the referrer Chrome reports is the page
+    the download was started from, and comparing full URLs would refuse a download
+    whose page moved between two paths of the same site — the comparison exists to
+    tell two DIFFERENT pages apart, and the origin is what does that here.
+
+    ALIGNED WITH THE EXTENSION'S PREDICATE, and only as far as the two can be:
+    `download.ts::originOf` computes `new URL(url).origin`, this side does string
+    arithmetic on `urlsplit` (this module has no URL parser and must not grow one
+    for a comparison it can do without). The contract they share is therefore
+    written down rather than assumed — **one of `http`, `https`, `ws`, `wss`; scheme
+    and host lowercased; userinfo dropped; a default port dropped; and `""` for
+    anything else**, which includes the schemes whose origin the two sides compute
+    DIFFERENTLY: `new URL('blob:https://example.test/uuid').origin` is
+    `https://example.test`, while `urlsplit` sees a scheme with no host. Round 2
+    (M2) measured exactly that divergence, and round 3 closed it by narrowing BOTH
+    sides to the four schemes a driven page can actually be — the alternative was a
+    contract comment claiming agreement the code did not have. Outside the contract
+    both sides yield `""`, and `""` refuses rather than matching, which is the safe
+    direction and the one the caller documents.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return ""
+    host = parts.hostname
+    scheme = parts.scheme.lower()
+    if scheme not in _DEFAULT_PORTS or not host:
+        return ""
+    try:
+        port = parts.port
+    except ValueError:
+        # An unparsable port is a URL we cannot attribute, not one to guess at.
+        return ""
+    if port is None or port == _DEFAULT_PORTS[scheme]:
+        return f"{scheme}://{host}"
+    return f"{scheme}://{host}:{port}"
+
+
+def _unlink_entry(path: Path) -> bool:
+    """Remove the ENTRY, never its target; ``False`` when it could not be done."""
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
+def _stop_clause(cancelled: str, state: str) -> str:
+    """Why a transfer stopped, in words that read inside both call sites' sentences.
+
+    One function because the deleted partial and the already-gone partial must not
+    describe the same fact two ways, and because the earlier shape nested a
+    sentence inside a parenthesis — "the transfer was stopped (the transfer did not
+    complete (state unknown))" — which round 1's review caught as doubled nonsense.
+    The fallback names the STATE, because that is all there is when no cancel reason
+    was sent.
+    """
+    return {
+        "over_cap": f"it crossed the {DOWNLOAD_MAX_BYTES} byte limit",
+        "over_count": f"it was past the {DOWNLOAD_MAX_FILES_PER_CALL} files this call saves",
+        "unfinished": "its time ran out",
+    }.get(cancelled, f"it ended in state {state or 'unknown'}")
+
+
+def intake_landed(
+    items: Sequence[Mapping[str, Any]],
+    directory: Path,
+    *,
+    window_s: float = DOWNLOAD_TIMEOUT_MAX_S + 60.0,
+    now: float | None = None,
+    page_origin: str = "",
+) -> IntakeOutcome:
+    """Move every reported absolute path the policy accepts into ``directory``.
+
+    One pass, one decision per entry, and the decision is a pure function of the
+    reported item plus the filesystem — so the caller's audit row cannot disagree
+    with what the disk did.
+
+    ``page_origin`` is the page this session is DRIVING, and the ownership test it
+    enables comes FIRST: before anything is moved or removed, because none of the
+    branches below can tell a download the CALL caused from one the user started by
+    hand — a `DownloadItem` carries no `tabId` (measured on Chrome 153.0.8013.53),
+    so the reported referrer is the only association there is. An item whose
+    referrer is a DIFFERENT origin is refused and LEFT WHERE IT IS, a cancelled one
+    included: a user's in-flight download must not be deleted or cancelled by a
+    refusal that was never about it.
+
+    An UNKNOWN ``page_origin`` refuses every item that carries a path, and that is
+    the deliberate direction rather than a gap. The tool reports "" when it could
+    not read the driven tab's URL, and skipping the test then would make the guard
+    vanish: a completed download from another origin would be moved into quarantine
+    and removed from the user's folder with a success result and no refusal row. A
+    save that moves somebody else's file is worse than a save that declines, so the
+    refusal is the answer and its reason says so.
+
+    An ABSENT referrer on a KNOWN origin is not a mismatch: several legitimate
+    shapes (a redirect chain, a page-initiated blob) report none, and refusing those
+    would break the feature to close a window this check can only narrow.
+
+    ``window_s`` is the mtime window the entry must fall inside: the file must have
+    been written during THIS call. Its default is a named constant because the
+    number is a policy decision (a slow disk and a fast one disagree about
+    "just now") rather than an implementation detail.
+    """
+    # 0700 on the directory as well as on the files: a 0755 parent would let any
+    # local user LIST what a session saved, which is the rule the audit trail's own
+    # directory follows (`DOWNLOAD_AUDIT`'s writer chmods `browser/downloads` the
+    # same way). Round 2 (N2) caught this mkdir creating it 0755 when `session_dir`
+    # had not already done it.
+    #
+    # ONLY when this call creates it, and that condition is load-bearing rather than
+    # tidy: an unconditional chmod also REPAIRED a directory that was deliberately
+    # read-only, which silently turned the "the entry could NOT be removed" path into
+    # a success — two tests caught it, and the same shape would hide a real refusal
+    # from a user whose session directory is locked down. `mkdir(mode=...)` is masked
+    # by umask, so the chmod is what actually pins 0700.
+    if not directory.exists():
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(directory, 0o700)
+        except OSError:
+            # A directory we cannot chmod still has to be usable, and the caller's
+            # report does not claim a mode it did not set.
+            pass
+    current = time.time() if now is None else now
+    moved: list[str] = []
+    refused: list[IntakeRefusal] = []
+    root = config_dir()
+    # TWO spellings of the root, because on this platform they are the same
+    # directory: macOS makes `/var/...` a symlink to `/private/var/...`, so a path
+    # written through either one is the file the other names, and a comparison that
+    # knew only one spelling would pass a path inside the other (round-2 M2 is the
+    # measurement that turned this from theory into a test).
+    roots = (root, Path(os.path.realpath(root)))
+    session_origin = _origin_of(page_origin)
+    for raw in items:
+        if not isinstance(raw, Mapping):
+            continue
+        reported = str(raw.get("path") or "")
+        name = safe_name(str(raw.get("name") or os.path.basename(reported)))
+        if not reported:
+            # The app host, which writes into `directory` and reports no path.
+            continue
+        state = str(raw.get("state") or "")
+        cancelled = str(raw.get("cancelled") or "")
+        # A transfer that did not complete, told apart from one we were never told
+        # about: an ABSENT state is not evidence of a stop. Reading it as one
+        # swallowed the "the host named a file that is not there" case entirely —
+        # round 1's blocker, where the copy the assertion expected had become
+        # unreachable.
+        stopped = bool(cancelled) or (bool(state) and state != "complete")
+        source = Path(os.path.normpath(reported))
+        if not source.is_absolute():
+            # Resolved against OUR cwd it would name something arbitrary, which is
+            # exactly the confusion the upload gate refuses relative paths for.
+            refused.append(
+                IntakeRefusal(name, "the host reported a path that is not absolute", KEPT)
+            )
+            continue
+        if is_within(source, directory):
+            # Already in the session directory: nothing to move, and the ordinary
+            # snapshot will pick it up.
+            moved.append(source.name)
+            continue
+        if any(is_within(source, candidate) for candidate in roots):
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the host named a path inside Local Operator's own config directory",
+                    KEPT,
+                )
+            )
+            continue
+        # The same question again, RESOLVED. The check above is lexical, and round 2
+        # (M2) measured what that misses: a download directory holding a symlinked
+        # PARENT (`<downloads>/link -> <config>/sessions/<id>`) passes it, and the
+        # file the host named is then OUR session record — `shutil.move` relocated
+        # `session.json` into the quarantine directory and `os.unlink` deleted it.
+        # Nothing follows the link now: a source that resolves inside the config root
+        # is refused and LEFT ALONE (it is our own store, so deleting it would be the
+        # destructive half of the same mistake).
+        resolved = Path(os.path.realpath(source))
+        if any(is_within(resolved, candidate) for candidate in roots):
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the host named a path that resolves inside Local Operator's own "
+                    "config directory",
+                    KEPT,
+                )
+            )
+            continue
+        # OWNERSHIP, before every destructive branch below.
+        referrer = str(raw.get("referrer") or "")
+        if not session_origin:
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "this session could not confirm which page started this download, "
+                    "so nothing was moved or removed",
+                    KEPT,
+                )
+            )
+            continue
+        if referrer and _origin_of(referrer) != session_origin:
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the download was started by a page this session is not driving",
+                    KEPT,
+                )
+            )
+            continue
+        entry = _entry_stat(source)
+        if entry is None:
+            if stopped:
+                # The transfer was stopped and the partial file is ALREADY gone:
+                # Chrome removes a cancelled download's own partial file. Measured in
+                # the first end-to-end run, and the reason this is not reported as a
+                # corroboration failure.
+                refused.append(
+                    IntakeRefusal(
+                        name,
+                        f"the transfer was stopped — {_stop_clause(cancelled, state)} — "
+                        "and the partial file is already gone",
+                        ABSENT,
+                    )
+                )
+                continue
+            # ABSENT, not KEPT: there was no entry, so no caller may render this as
+            # "could NOT be removed — it is still on disk" (round-1 Q2). KEPT means
+            # "an entry exists and we chose to leave it", which is a different fact.
+            refused.append(IntakeRefusal(name, "the file the host named is not there", ABSENT))
+            continue
+        if not stat.S_ISREG(entry.st_mode):
+            # A symlink, a directory, a fifo: the entry dies, its target does not
+            # (R1). Nothing is followed, so a link pointing at /etc/passwd is an
+            # unlinked link and not a moved password file.
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the host named an entry that is not a regular file",
+                    DELETED if _unlink_entry(source) else FAILED,
+                )
+            )
+            continue
+        size = int(raw.get("bytes") or 0)
+        if size and entry.st_size != size:
+            # Not corroborated, and therefore NOT deleted — see the docstring.
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    f"the file on disk is {entry.st_size} bytes where the host reported {size}",
+                    KEPT,
+                )
+            )
+            continue
+        if not (current - window_s <= entry.st_mtime <= current + 5.0):
+            refused.append(IntakeRefusal(name, "the file was not written during this call", KEPT))
+            continue
+        if stopped:
+            # Ours, and unusable: the peer stopped the transfer (the byte cap, the
+            # per-call file count, or the deadline), so a partial file is sitting in
+            # the user's download directory and this is the only step that will ever
+            # look at it.
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    # Composed rather than nested: round 1 caught a sentence inside
+                    # a parenthesis ("the transfer was stopped (the transfer did not
+                    # complete (state unknown))"), and the word that says a peer
+                    # cancelled it has to survive — it is the only thing that
+                    # distinguishes this from a transfer that simply broke.
+                    f"the transfer was cancelled — {_stop_clause(cancelled, state)}",
+                    DELETED if _unlink_entry(source) else FAILED,
+                )
+            )
+            continue
+        if not state:
+            # A transfer whose state the host did not report cannot be shown to have
+            # COMPLETED: the file on disk may be its partial. Refused and deleted,
+            # because it is ours (the referrer matched) and nothing later in the
+            # pipeline ever looks outside the quarantine root. Round 2 (M1): accepting
+            # it was a widening of the shipped behaviour, not a fix — the base commit
+            # refused and removed this shape, and the absent-STATE sentence round 1
+            # fixed is about a file that is NOT there, which the branch above still
+            # answers.
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "the host did not report the transfer's state, so it cannot be "
+                    "treated as complete",
+                    DELETED if _unlink_entry(source) else FAILED,
+                )
+            )
+            continue
+        destination = directory / name
+        if destination.exists():
+            # Never a silent overwrite (§11.4): Chrome uniquifies a colliding
+            # download name within the download directory, so this means a file from
+            # an EARLIER call of this session already holds the name. Refusing keeps
+            # both, and the caller says which one this was.
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    "this session already holds a file with that name",
+                    DELETED if _unlink_entry(source) else FAILED,
+                )
+            )
+            continue
+        try:
+            # `shutil.move`, not `os.rename`: the user's download directory may be
+            # on another volume (a separate Downloads disk, a network mount) and a
+            # rename across filesystems raises EXDEV. The copy-then-unlink path is
+            # slower and is the only one that works everywhere.
+            shutil.move(str(source), str(destination))
+        except OSError as exc:
+            # The source is left where Chrome put it rather than half-moved: the
+            # refusal names that, so the caller's report cannot claim the user's
+            # download directory was cleaned up when it was not.
+            logger.warning("could not move the landed browser download %s: %s", source, exc)
+            refused.append(
+                IntakeRefusal(
+                    name,
+                    f"it could not be moved into the session directory ({exc.strerror})",
+                    KEPT,
+                )
+            )
+            continue
+        if source.exists():
+            # A cross-volume move that copied but could not unlink its source (an
+            # immutable file, a permission Chrome wrote but we cannot delete) would
+            # otherwise leave the ORIGINAL in place — the one outcome the operator's
+            # decision names as unacceptable, including when the content is refused.
+            # Best-effort, and the report says what actually happened.
+            _unlink_entry(source)
+        moved.append(name)
+    return IntakeOutcome(tuple(moved), tuple(refused))
+
+
 # ---------------------------------------------------------------------------
 # The quarantine root, and the audit trail
 # ---------------------------------------------------------------------------
-
 DOWNLOADS_DIRNAME = "browser/downloads"
 AUDIT_FILENAME = "audit.jsonl"
 

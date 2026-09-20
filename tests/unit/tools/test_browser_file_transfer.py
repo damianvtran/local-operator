@@ -52,6 +52,8 @@ class FakeHost:
         methods: tuple[str, ...] = ("upload",),
         version: str = "0.1.18",
         capabilities_known: bool = True,
+        disabled: tuple[str, ...] = (),
+        switches_known: bool = False,
         result: dict[str, Any] | None = None,
         on_call: Any = None,
     ) -> None:
@@ -59,12 +61,20 @@ class FakeHost:
         self._methods = methods
         self._version = version
         self._capabilities_known = capabilities_known
+        self._disabled = disabled
+        self._switches_known = switches_known
         self.result = result or {}
         self.on_call = on_call
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def capabilities(self) -> HostCapabilities:
-        return HostCapabilities(self._methods, self._version, self._capabilities_known)
+        return HostCapabilities(
+            methods=self._methods,
+            version=self._version,
+            capabilities_known=self._capabilities_known,
+            disabled=self._disabled,
+            switches_known=self._switches_known,
+        )
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((method, params))
@@ -182,11 +192,17 @@ def test_upload_escalates_to_exec_and_everything_else_stays_write(monkeypatch) -
 # --- the capability refusal --------------------------------------------------
 
 
-def test_download_on_the_extension_host_is_refused_without_a_socket_call() -> None:
-    """No extension build can serve it, so the copy must not send the user to an
-    update that cannot help (measured: Chrome refuses the browser-level download
-    commands to an extension's debugger session)."""
-    host = FakeHost(methods=("upload",))
+def test_download_on_an_older_extension_sends_the_reader_to_the_update_and_the_switch() -> None:
+    """A build that predates the capability: update it, then turn the switch on.
+
+    This is state (a) of the three the record can now express. It used to be the
+    only answer for `download` — the old copy said no build could serve it — which
+    is why the assertion that the remedy is an UPDATE is paired here with the
+    warning that the update alone is not enough: the capability is opt-in, and a
+    reader sent to the update without the switch would meet the same refusal for a
+    different reason and conclude the update failed.
+    """
+    host = FakeHost(methods=("upload",), version="0.1.18")
     result = _flow(
         "download",
         host,
@@ -197,10 +213,96 @@ def test_download_on_the_extension_host_is_refused_without_a_socket_call() -> No
     )
     assert result.is_error
     assert host.calls == [], "the refusal must come from the record, not the wire"
-    assert "browser extension cannot serve 'download'" in result.text
-    assert "desktop app" in result.text
-    assert "bash + curl" in result.text
+    assert "does not provide 'download'" in result.text
+    assert "first version that does is 0.1.19" in result.text
+    assert "Allow downloads" in result.text
     assert (result.details or {}).get("error_code") == "capability_unsupported"
+
+
+def test_download_with_the_operators_switch_off_names_the_switch_not_an_update() -> None:
+    """State (b): the build CAN serve it and the operator has not enabled it.
+
+    The distinction is the whole point of the `capability_switches` event. Sending
+    this user to an update would be a remedy that cannot work (their build is
+    current), and the copy must not offer it — asserted here as the ABSENCE of the
+    update sentence, not only as the presence of the switch one.
+    """
+    host = FakeHost(methods=(), version="0.1.19", disabled=("download",), switches_known=True)
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+    assert result.is_error
+    assert host.calls == [], "a switched-off capability costs no socket call"
+    assert "'download' is switched off" in result.text
+    assert "Allow downloads" in result.text
+    assert "chrome://extensions" in result.text
+    assert "No update is involved" in result.text
+    assert "first version that does is" not in result.text
+
+
+def test_upload_with_the_operators_switch_off_names_the_upload_switch() -> None:
+    """The same state for the other capability, worded by ITS OWN label.
+
+    A single shared sentence would tell a user looking for "Allow downloads" to
+    flip the wrong control, so the labels come from `CAPABILITY_SWITCH_LABEL` and
+    this test pins that the mapping is per-method rather than one string.
+    """
+    host = FakeHost(
+        methods=("download",), version="0.1.19", disabled=("upload",), switches_known=True
+    )
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=["/tmp/x.pdf"]),
+        context=_ctx(),
+    )
+    assert result.is_error
+    assert host.calls == []
+    assert "'upload' is switched off" in result.text
+    assert "Allow uploads" in result.text
+    assert "Allow downloads" not in result.text
+
+
+def test_a_switched_on_extension_downloads_over_the_wire() -> None:
+    """State (c): the switch is on, the method is advertised, the call is SENT.
+
+    The inverse of the two refusals above, and the one that would silently rot:
+    a gating change that never lets anything through still passes every
+    "refused" assertion in this file.
+    """
+
+    def write_it(method: str, params: dict[str, Any]) -> None:
+        # The app host's shape: bytes in the directory the harness composed. The
+        # extension's shape (a file in the user's Downloads plus a reported path)
+        # is exercised by the intake tests below.
+        Path(params["dir"], "receipt.pdf").write_bytes(b"%PDF-1.4" + b"\x00" * 32)
+
+    host = FakeHost(
+        methods=("download", "upload"),
+        version="0.1.19",
+        disabled=(),
+        switches_known=True,
+        result={"armed": True, "url": "https://example.test/export"},
+        on_call=write_it,
+    )
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+    assert not result.is_error
+    assert [call[0] for call in host.calls] == ["download"]
+    assert "receipt.pdf" in result.text
 
 
 def test_upload_on_a_pre_feature_extension_names_the_first_version_that_has_it() -> None:
@@ -283,6 +385,11 @@ def test_download_fails_when_the_host_reports_a_file_that_never_landed() -> None
     host = FakeHost(
         methods=("download",),
         result={
+            # The url is what the item is attributed to, and the real extension
+            # always reports one: without it the harness cannot tell whose download
+            # an item is and refuses for THAT reason (round-1 R3), which would mask
+            # the sentence this test exists to pin.
+            "url": "http://127.0.0.1:9/page",
             "files": [{"name": "receipt.pdf", "path": "/nowhere/receipt.pdf", "bytes": 10}],
             "armed": True,
             "reason": "",
@@ -297,8 +404,18 @@ def test_download_fails_when_the_host_reports_a_file_that_never_landed() -> None
         context=_ctx(),
     )
     assert result.is_error
-    assert "no download started" in result.text
-    assert "receipt.pdf" not in result.text
+    # The intake refuses it, and the sentence has to say the right thing about the
+    # right file: nothing was saved (the check this design rests on), the path the
+    # host named was not there, and the entry is reported as NOTHING TO REMOVE —
+    # not as "left in place" and not as "could not be removed — still on disk".
+    # A path we cannot corroborate might be the user's own file, so the report must
+    # neither claim we cleaned it up nor claim we failed to (R2/N7, round-1 Q2).
+    assert "nothing was saved" in result.text
+    assert "not there" in result.text
+    # The words matter as much as the sentence (round-1 Q2): an entry that was never
+    # there must not be reported as one this call failed to remove.
+    assert "nothing to remove" in result.text
+    assert "NOT deleted" not in result.text
 
 
 def test_download_deletes_executable_content_even_when_the_host_calls_it_a_pdf(
@@ -1283,4 +1400,105 @@ def test_an_absent_client_is_a_typed_refusal_not_an_attribute_error() -> None:
         )
     )
     assert result.is_error
-    assert "cannot serve" in result.text
+    # "No browser is attached" is the right answer for an absent client even on a
+    # method no host ever advertised: there is no peer, so no version and no switch
+    # answer exists to attribute. The N3 point is the TYPE — a `capability_refusal`
+    # built from an empty record, never an AttributeError out of the one function
+    # that must answer before touching a socket.
+    assert "no browser is attached" in result.text
+    assert (result.details or {}).get("error_code") == "capability_unsupported"
+
+
+# --- the extension's shape, driven through the tool (round-1 R8) -------------
+
+
+def _extension_download(
+    tmp_path: Path, *, referrer: str, origin: str = "https://example.test"
+) -> tuple[FakeHost, Path, bytes]:
+    """A host that behaves like the EXTENSION: it writes OUTSIDE the directory and
+    reports the absolute path Chrome chose (the app host's shape, bytes in the
+    composed directory, is covered above)."""
+    landing = tmp_path / "Downloads"
+    landing.mkdir(exist_ok=True)
+    payload = b"%PDF-1.4\n" + b"y" * 40
+    landed = landing / "receipt.pdf"
+
+    def write_it(method: str, params: dict[str, Any]) -> None:
+        landed.write_bytes(payload)
+
+    host = FakeHost(
+        methods=("download",),
+        version="0.1.19",
+        switches_known=True,
+        result={
+            "armed": True,
+            "url": f"{origin}/export",
+            "files": [
+                {
+                    "name": "receipt.pdf",
+                    "path": str(landed),
+                    "bytes": len(payload),
+                    "state": "complete",
+                    "cancelled": "",
+                    "referrer": referrer,
+                }
+            ],
+        },
+        on_call=write_it,
+    )
+    return host, landed, payload
+
+
+def test_download_relocates_the_file_the_extension_landed(tmp_path: Path) -> None:
+    """The architecture the operator's decision actually ships, at the tool level.
+
+    Every other test in this file drives the APP host's shape (bytes in the directory
+    the harness composed). Nothing drove the extension's: a host that cannot write
+    into the session directory, reports the absolute path Chrome chose, and leaves
+    Python to move the file in, chmod it and delete the original. A regression in
+    that wiring would leave every other assertion here green while the feature saved
+    nothing.
+    """
+    host, landed, payload = _extension_download(tmp_path, referrer="https://example.test/export")
+
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+
+    assert not result.is_error, result.text
+    facts = (result.details or {}).get("files") or []
+    assert [fact["name"] for fact in facts] == ["receipt.pdf"]
+    assert facts[0]["bytes"] == len(payload)
+    # The directory is STAMPED per call (`<stamp>-<session8>`), so the assertion
+    # finds the file the tool actually wrote rather than recomposing the name and
+    # comparing against a second, differently-stamped directory.
+    saved = list(bf.downloads_root().glob("*-sess0001*/receipt.pdf"))
+    assert len(saved) == 1, saved
+    assert saved[0].read_bytes() == payload
+    assert stat.S_IMODE(saved[0].stat().st_mode) == 0o600
+    assert not landed.exists(), "the original must be gone from the user's Downloads"
+
+
+def test_download_leaves_another_pages_download_where_it_is(tmp_path: Path) -> None:
+    """A file this call did not cause is refused, and NOT removed (round-1 R2)."""
+    host, landed, _ = _extension_download(tmp_path, referrer="https://elsewhere.example/account")
+
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+
+    assert landed.exists(), "a download another page started is not ours to remove"
+    assert result.is_error
+    assert "a page this session is not driving" in result.text
+    assert "left in place" in result.text
+    assert "still on disk" not in result.text
