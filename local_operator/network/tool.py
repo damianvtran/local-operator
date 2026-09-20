@@ -297,13 +297,20 @@ def _write_token_file(token: str) -> str:
 
 
 def _networks_block(payload: dict[str, Any]) -> list[str]:
+    from local_operator.network.relay import membership_marker
+
     rows = payload.get("networks") or []
     if not rows:
         return ["no networks on this device"]
+    # THE COUNT TRAVELS WITH WHAT IT RESTS ON, through the same function the CLI's `ls`
+    # uses: an agent reading this digest and an operator reading the terminal are
+    # looking at one rendering of one fact, so neither can be told the member set was
+    # checked when it was not (QA round 3, Q-R2-1).
     return [
         f"{row.get('name')}  {row.get('network_id')}  epoch {row.get('epoch')}  "
         f"{row.get('role')}  {row.get('members')} member(s)  {row.get('trust')}"
         + (f"  {row.get('links')} link(s)" if row.get("links") else "")
+        + membership_marker(row)
         for row in rows
     ]
 
@@ -328,11 +335,17 @@ def _render(action: str, payload: dict[str, Any]) -> list[str]:
     if action == "ls":
         return _networks_block(payload)
     if action == "show":
+        from local_operator.network.relay import membership_lines
+
         lines = [
             f"{payload.get('name')}  {payload.get('network_id')}  epoch "
             f"{payload.get('epoch')}  trust {payload.get('trust')}  "
             f"role {payload.get('role')}"
         ]
+        # THIS DEVICE'S OWN STANDING, before the rows: a removed or refused device's
+        # member table looks perfectly healthy, and the sentence is the only thing on
+        # this surface that says otherwise (QA round 3, Q-R3-2).
+        lines.extend(membership_lines(payload))
         for member in payload.get("members_detail") or []:
             mark = "active" if member.get("active") else "REMOVED"
             suspect = "  [suspect]" if member.get("suspect") else ""

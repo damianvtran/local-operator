@@ -186,6 +186,33 @@ class Authorizer:
             self._refused(link, op, refusal, frame)
             raise refusal
         recorded_epoch = int(frame.get("epoch") or link.epoch)
+        # A ROTATION ANNOUNCES THE NEW EPOCH, so its own ``epoch`` is the one we do not
+        # have yet. Requiring it to equal the record's epoch refused EVERY rotation
+        # that arrived over a live link — measured, on a real one: a rotation to epoch
+        # 2 reached a peer at epoch 1 and was refused `epoch_stale` ("the network has
+        # rotated (this device is at epoch 1); the link must be re-established"), so no
+        # member removal ever propagated over a live link to anybody, and the removed
+        # device was left reporting its old epoch, its old member list and
+        # `trust: active` while every attempt to reach the network failed (QA round 3,
+        # Q-R3-2; the same silence is why peer-b's epoch 3 never reached the Mac in
+        # that run's 90 s watch).
+        #
+        # The GATE'S PURPOSE IS KEPT: the LINK must be at the epoch this record holds,
+        # which is what stops a frame from a link established against an older key from
+        # acting. What a rotation's own epoch MEANS is settled by the apply path, which
+        # is the code that owns the rule (§8.1 step 4: a strictly greater epoch,
+        # attributed to the sender, internally consistent, digest-checked) — a second,
+        # weaker copy of it here is how the two came to disagree.
+        if op == "net_epoch":
+            if link.epoch == record.epoch:
+                return
+            refusal = Refusal(
+                "epoch_stale",
+                f"this link authenticated at epoch {link.epoch} and the network is at "
+                f"{record.epoch}, so a rotation on it is refused before it is read",
+            )
+            self._refused(link, op, refusal, frame)
+            raise refusal
         if link.epoch == record.epoch and recorded_epoch == record.epoch:
             return
         if link.phase == "reconcile" and recorded_epoch == record.epoch - 1:

@@ -323,3 +323,102 @@ def test_status_never_surfaces_the_relay_control_record() -> None:
     rendered = _text(result) + json.dumps(result.details or {}, default=str)
     assert "control_key" not in rendered
     assert "control_port" not in rendered
+
+
+def test_the_agent_digest_says_what_a_member_count_rests_on() -> None:
+    """The agent's own surface must carry the same caveat the CLI does.
+
+    Round 3's blocker was a count presented as authoritative when it had not been
+    checked (Q-R2-1). An operator reads `lop network ls`; an agent reads THIS tool's
+    digest of the same JSON, so a marker that only the CLI printed would leave the
+    agent acting on an unchecked subset. Both call one owner
+    (``relay.membership_marker``) for that reason.
+    """
+    verified = net_tool._render(
+        "ls",
+        {
+            "networks": [
+                {
+                    "name": "devmesh",
+                    "network_id": "n_" + "a" * 22,
+                    "epoch": 1,
+                    "role": "admin",
+                    "members": 3,
+                    "trust": "active",
+                    "membership": {
+                        "table": {"answered": ["d_1"], "not_answered": [], "complete": True}
+                    },
+                }
+            ]
+        },
+    )
+    assert any("[members verified with all 1 peer(s)]" in line for line in verified), verified
+
+    partial = net_tool._render(
+        "ls",
+        {
+            "networks": [
+                {
+                    "name": "devmesh",
+                    "network_id": "n_" + "a" * 22,
+                    "epoch": 1,
+                    "role": "admin",
+                    "members": 3,
+                    "trust": "active",
+                    "membership": {
+                        "table": {
+                            "answered": ["d_1"],
+                            "not_answered": [{"device_id": "d_2", "reason": "no_live_link"}],
+                            "complete": False,
+                        }
+                    },
+                }
+            ]
+        },
+    )
+    assert any("verified with 1 of 2 peer(s)" in line for line in partial), partial
+    assert any("verified with all" not in line for line in partial), partial
+
+    # A row that reached the tool WITHOUT a refresh (no relay answering) says so too.
+    unread = net_tool._render(
+        "ls",
+        {
+            "networks": [
+                {
+                    "name": "devmesh",
+                    "network_id": "n_" + "a" * 22,
+                    "epoch": 1,
+                    "role": "admin",
+                    "members": 4,
+                    "trust": "active",
+                    "membership": {
+                        "table": {"answered": [], "not_answered": [], "complete": False}
+                    },
+                }
+            ]
+        },
+    )
+    assert any("NOT verified" in line for line in unread), unread
+
+
+def test_the_agent_digest_carries_a_removed_devices_own_standing() -> None:
+    """`show` on a removed device: the sentence, not a healthy-looking member list."""
+    lines = net_tool._render(
+        "show",
+        {
+            "name": "devmesh",
+            "network_id": "n_" + "a" * 22,
+            "epoch": 2,
+            "role": "admin",
+            "trust": "active",
+            "members_detail": [{"device_id": "d_1", "name": "laptop", "active": True}],
+            "membership": {
+                "state": "removed",
+                "sentence": "this device is no longer a member of devmesh (removed by d_9)",
+                "remedies": ["re-pair as a new device"],
+            },
+        },
+    )
+    body = "\n".join(lines)
+    assert "no longer a member of devmesh (removed by d_9)" in body
+    assert "re-pair as a new device" in body
