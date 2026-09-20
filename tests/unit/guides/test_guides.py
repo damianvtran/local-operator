@@ -34,6 +34,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "failover",
         "mcp",
         "mobile",
+        "network",
         "peer-messaging",
         "qwencloud",
         "scratchpad",
@@ -198,6 +199,40 @@ def test_mobile_guide_requires_a_password_delivery_ask() -> None:
     assert "lop mobile install" in body
     assert "Show it once" not in body
     assert "context window" in body
+
+
+def test_network_guide_names_the_human_step_and_the_real_commands() -> None:
+    """The mesh playbook (R19). An agent that invents a pairing flag, or that
+    offers to place a session on a peer this build cannot place, is the failure
+    this guide exists to prevent — so the commands it names must be the CLI's,
+    the human step must be marked as the human's, and the unbuilt surfaces must
+    be named as unbuilt rather than implied.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://network")
+    assert body is not None
+
+    # The setup sequence, in the CLI's own spelling.
+    assert "lop network init" in body
+    assert "lop network invite --role drive --json" in body
+    assert "lop network join @<token-file>" in body
+    assert "lop network peers --json" in body
+    # R3: the human reads the code off the screen; the agent may not finish it.
+    assert "You cannot do this step" in body
+    assert "code" in body and "fingerprint" in body
+    # R17's controls, with the rule that guards them.
+    assert "lop network panic" in body
+    assert "never as a retry after a failed command" in body
+    # The unbuilt halves are named, not sold: session placement, brokering, and
+    # the one flag whose scope in the CLI is narrower than its message.
+    assert "Not yet available in this build" in body
+    assert "--purge-identity" in body and "does not" in body
+    # The two-phase pair the design sketches does not exist in this CLI, so the
+    # guide must not teach it.
+    assert "join --confirm" not in body
+    # Shareable prompt text: no machine-shaped absolute paths, and no home dir.
+    assert "/Users/" not in body
+    assert "/home/" not in body
 
 
 def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:

@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 
 from local_operator.harness.intent import apply_intent_schema
 from local_operator.harness.types import AgentTool, ToolContext
+from local_operator.network.tool import build_network_tool
 from local_operator.tools import builtin
 from local_operator.tools.agent_tool import build_agent_tool
 from local_operator.tools.eval import build_eval_tool
@@ -61,6 +62,12 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "agent": lambda context: build_agent_tool(context),
     "team": lambda context: build_team_tool(context),
     "team_delete": lambda context: build_team_delete_tool(context),
+    # Unconditional entry, appended rather than inserted so the array's prefix —
+    # which the prompt cache keys on — is unchanged for every existing session:
+    # `lop network init` is how a first network comes into existence, so a gate
+    # on "a relay is configured" would strip the tool from exactly the session
+    # that has to create one (see build_network_tool).
+    "network": lambda context: build_network_tool(context),
 }
 
 #: Tool set used when the session does not restrict the names. Kept explicit
@@ -94,6 +101,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "agent",
     "team",
     "team_delete",
+    "network",
 ]
 
 
