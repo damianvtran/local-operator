@@ -46,6 +46,11 @@ invariant is pinned by
 ``tests/unit/test_shard_stall_watchdog.py::test_no_ci_job_runs_both_watchdogs_in_one_process``.
 Nothing interlocks the timers, because nothing runs them together; if a future
 job did, the interlocks would have to be added deliberately.
+The product has a third timer (``session/runtime/stall_watchdog``, the runtime's
+own bound). It cannot reach this stage either, and not because of job
+configuration: it arms only inside the runtime child's ``__main__`` branch, so
+it lives in a spawned runtime process, never in the pytest process this file's
+``bounded`` blocks run in.
 
 ``exit=True`` kills the whole process, so a fired watchdog takes down the
 pytest worker with it. That is the intended behaviour and not a rough edge: a

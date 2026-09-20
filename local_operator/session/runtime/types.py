@@ -1044,6 +1044,37 @@ class SessionRecord:
     updated: str = ""
     update_failed: str = ""
 
+    # -- what the last beat measured ---------------------------------------
+    # Same additive contract as the blocks above, and PROTOCOL_VERSION again
+    # deliberately does not move: nothing is required to read these, and a
+    # reader that ignores them loses a distinction rather than a fact.
+    #
+    # WHY THEY EXIST. ``heartbeat_age_s`` says only HOW LONG the owner has been
+    # quiet, and that one number cannot tell three different situations apart:
+    # a runtime wedged in its own work, a runtime the host stopped scheduling,
+    # and a runtime that is simply gone. All three read as ``wedged`` at 45 s,
+    # and on 2026-09-20 five sessions sat in that single ambiguous word for
+    # 1.5-7.2 h before being reaped by hand. These two fields are in-process
+    # readings taken by the owner itself, so they cost no fork and remain true
+    # of the PROCESS rather than of the machine's average: a large lag with CPU
+    # that advanced says the runtime burned its own core (the measured shape —
+    # ~0.9 core against a stale beat), while a large lag with CPU that did NOT
+    # advance says it was descheduled (the host). ``None`` means this build does
+    # not report, never zero — a pre-field runtime has not told us either way.
+    #
+    #: Seconds since the PREVIOUS beat, measured by the beating loop. The gap is
+    #: what a stalled loop leaves behind: a healthy runtime owns up to
+    #: ``HEARTBEAT_INTERVAL_S`` (15 s) here, and this host has produced 105.8 s
+    #: and 205.8 s on sessions whose CPU was advancing. Note that a turn-boundary
+    #: republish rewrites ``heartbeat_at`` without re-measuring, so this can
+    #: exceed the age the record appears to have by up to one interval.
+    beat_lag_s: float | None = None
+    #: How much CPU time this PROCESS spent since the previous beat — all
+    #: threads, ``time.process_time()``, read in-process. Paired with the lag
+    #: above it separates "starved by its own work" (this advanced) from
+    #: "starved by the host" (this did not), which no other field can.
+    cpu_since_beat_s: float | None = None
+
     # -- build stamp --------------------------------------------------------
     # Same additive contract as the live-state block above, and for the same
     # reason: PROTOCOL_VERSION deliberately does not move for a field nobody

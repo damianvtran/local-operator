@@ -187,6 +187,14 @@ EXPECTED = [
         "leaving": "",
         "updating": "",
         "update_failed": "",
+        # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
+        # and this process's own CPU time over the same gap. Appended at the END
+        # like every extension above it, and ``None`` on rows whose runtime does
+        # not report them — the same unreported-vs-zero distinction
+        # ``subagents_queued`` makes. Both are absent from the fake record below,
+        # which is what a runtime predating the fields looks like.
+        "beat_lag_s": None,
+        "cpu_since_beat_s": None,
     },
     {
         "state": "live",
@@ -219,6 +227,14 @@ EXPECTED = [
         "leaving": "",
         "updating": "",
         "update_failed": "",
+        # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
+        # and this process's own CPU time over the same gap. Appended at the END
+        # like every extension above it, and ``None`` on rows whose runtime does
+        # not report them — the same unreported-vs-zero distinction
+        # ``subagents_queued`` makes. Both are absent from the fake record below,
+        # which is what a runtime predating the fields looks like.
+        "beat_lag_s": None,
+        "cpu_since_beat_s": None,
     },
     {
         "state": "stale",
@@ -256,6 +272,14 @@ EXPECTED = [
         "leaving": "",
         "updating": "",
         "update_failed": "",
+        # WHAT THE LAST BEAT MEASURED (the 2026-09-20 freeze): no-progress seconds
+        # and this process's own CPU time over the same gap. Appended at the END
+        # like every extension above it, and ``None`` on rows whose runtime does
+        # not report them — the same unreported-vs-zero distinction
+        # ``subagents_queued`` makes. Both are absent from the fake record below,
+        # which is what a runtime predating the fields looks like.
+        "beat_lag_s": None,
+        "cpu_since_beat_s": None,
     },
 ]
 
@@ -496,13 +520,15 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     assert [row["leaving"] for row in rows[1:]] == ["", ""]
     # THE TRAILING KEY IS THE CONTRACT, so this asserts the rule rather than one
     # column: a field is APPENDED to the published row and never inserted, so the
-    # key order every existing consumer reads is unchanged by it. ``update_failed``
-    # is the newest extension (the third phase of the window, design review round 1,
-    # D1) and therefore the last one; ``leaving`` and ``updating`` must still be
-    # present and before it, in that order.
+    # key order every existing consumer reads is unchanged by it. The measured
+    # pair (``beat_lag_s``/``cpu_since_beat_s``) is the newest extension and
+    # therefore the last two; ``leaving`` and ``updating`` must still be present
+    # and before them, in that order.
     assert "leaving" in rows[0] and list(rows[0]).index("leaving") < list(rows[0]).index("updating")
     assert list(rows[0]).index("updating") < list(rows[0]).index("update_failed")
-    assert list(rows[0])[-1] == "update_failed"
+    assert list(rows[0]).index("update_failed") < list(rows[0]).index("beat_lag_s")
+    assert list(rows[0]).index("beat_lag_s") < list(rows[0]).index("cpu_since_beat_s")
+    assert list(rows[0])[-1] == "cpu_since_beat_s"
 
     assert (
         cli.sessions_command(
