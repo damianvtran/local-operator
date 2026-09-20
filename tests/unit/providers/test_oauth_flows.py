@@ -559,6 +559,81 @@ class TestATerminalGrantIsToldFromAnOutage:
         assert is_terminal_grant_response(401, self.RADIENT_DEAD_GRANT) is True
 
     @pytest.mark.parametrize(
+        "error_field",
+        [
+            # The direction the incident's body uses, and the one the first
+            # version handled.
+            "Token refresh failed: refresh token is expired or revoked",
+            # ...and the ordinary English paraphrase, which the first version
+            # still read as RETRYABLE (review round 1, m1) — one wording away
+            # from the same nine-hour crash loop.
+            "Invalid refresh token",
+            "Expired refresh token",
+            "The refresh token was revoked",
+            # Separators and the joined form: a provider's field can carry any
+            # of the three, and the first version accepted only `_` and a
+            # space.
+            "refresh-token-expired",
+            "refresh_token no longer valid",
+            "refresh token expired",
+        ],
+    )
+    def test_every_spelling_of_a_dead_refresh_token_is_terminal(self, error_field: str) -> None:
+        """A dead grant is a dead grant whichever way the field spells it.
+
+        Every case here is a 401 with prose in the `error` FIELD, which is how
+        Radient states it; the point of the widening is that the RULE (a free
+        text field that names a refresh token and calls it dead) does not depend
+        on the word order or the punctuation the provider happened to choose.
+        """
+        body = json.dumps({"error": error_field})
+        assert is_terminal_grant_response(401, body) is True
+
+    @pytest.mark.parametrize(
+        "error_field",
+        [
+            "refresh token is not expired yet",
+            "the refresh token isn't expired",
+            # ...and the typographic apostrophe, which is what a UI copy-paste
+            # or a smart-quoting client actually sends. The contraction has no
+            # word boundary before its `n`, which is why the guard keys on the
+            # apostrophe rather than on `\\bn't\\b`.
+            "the refresh token isn\u2019t expired",
+            "refresh token was not revoked",
+        ],
+    )
+    def test_a_grant_being_described_as_still_good_is_not_a_verdict(self, error_field: str) -> None:
+        """The mirror case the widening has to keep out: a NEGATED verdict.
+
+        "... refresh token is not expired yet" describes a working grant, and a
+        rule that matched the verdict word wherever it found it would deprioritise
+        a live account in `/usage`, the routing cascade and `model/configure.py`
+        until the operator re-logged in — the expense the narrowness of this
+        pattern exists to avoid, arriving from the other direction.
+        """
+        body = json.dumps({"error": error_field})
+        assert is_terminal_grant_response(401, body) is False
+
+    def test_a_joined_camel_case_field_is_read_as_an_unknown_code_not_as_prose(self) -> None:
+        """The one spelling this widening deliberately does NOT reach, pinned.
+
+        `{"error": "RefreshTokenExpired"}` is a joined verdict, and the field
+        parser lowercases the value it returns (`_oauth_error_code` — RFC 6749
+        codes are lowercase), so by the time a rule reads it, `refreshtokenexpired`
+        is shape-identical to a machine code. The accepted rule for those is that
+        an UNRECOGNISED code stays retryable: a code we do not know is one we
+        cannot judge, and treating every long lowercase token as a verdict is how
+        a provider's `ratelimited` becomes a dead account in `/usage`.
+
+        The joined form IS matched where there is no parseable field at all — the
+        fallback scan over the whole body — so this is a recorded boundary rather
+        than an untested gap, and both halves are asserted.
+        """
+        joined = json.dumps({"error": "RefreshTokenExpired"})
+        assert is_terminal_grant_response(401, joined) is False
+        assert is_terminal_grant_response(401, "token endpoint said: RefreshTokenExpired") is True
+
+    @pytest.mark.parametrize(
         "body",
         [
             # The verdict is a CODE: whatever its prose says, the code decides,

@@ -1784,10 +1784,7 @@ def test_a_park_is_private_and_announced_once_per_transition(tmp_path, monkeypat
     assert state.read() is None
 
 
-@pytest.mark.asyncio
-async def test_a_fixed_login_re_arms_the_parked_connector(
-    tmp_path, monkeypatch, connection
-) -> None:
+def test_a_fixed_login_re_arms_the_parked_connector(tmp_path, monkeypatch, connection) -> None:
     """Park → sign in → the connector comes back by itself.
 
     The whole reason a park is safe: nothing else notices, because the connector
@@ -1796,6 +1793,13 @@ async def test_a_fixed_login_re_arms_the_parked_connector(
     guards' two decisions stubbed (`service_path`, the real-home check) and
     `launchctl` recorded rather than run, because a test suite must never reach
     the operator's own launchd.
+
+    SYNCHRONOUS, deliberately: with no event loop on the calling thread the hook
+    runs inline, so every `kicks` assertion below is about the decision the
+    guard made and nothing else. That branch is real (a script or a plain
+    non-async caller takes it) and it is the branch these guards live on; the
+    loop-taking branch, and the reason it exists (review round 1, m3), is
+    covered by `test_the_rearm_never_blocks_the_event_loop` below.
     """
     from local_operator.providers.auth_store import AuthStore as Store
     from local_operator.tunnels import install
@@ -1874,6 +1878,54 @@ async def test_a_fixed_login_re_arms_the_parked_connector(
     monkeypatch.delenv("LOP_TUNNEL_NO_REARM")
     assert "starting again" in install.rearm_if_parked(provider="radient", credential_id=7)
     assert len(kicks) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_rearm_never_blocks_the_event_loop(tmp_path, monkeypatch, connection) -> None:
+    """The hook's blocking supervisor call runs OFF the loop (review round 1, m3).
+
+    Measured rather than asserted structurally. The stubbed hook blocks on an
+    event and records the thread it ran on, and the credential write has to
+    RETURN while that block is still in place — which is the finding itself: the
+    real hook ends in a `launchctl kickstart` / `systemctl start` with a
+    20-second timeout, and this write path is reached from the desktop login
+    route, so a hung service manager used to stall every request the server was
+    serving. The thread identity is asserted too, because "the write returned"
+    would also be true of a call that merely awaited something.
+
+    Written so a REGRESSION cannot hang the suite: the stub's own wait is
+    bounded, so on the pre-fix code the write blocks for that bound and the
+    second assertion is what fails — with its reason in the message.
+    """
+    import threading
+
+    from local_operator.tunnels import install
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    entered = threading.Event()
+    released = threading.Event()
+    finished = threading.Event()
+    threads: list[int] = []
+
+    def blocking_rearm(*, provider: str, credential_id: int) -> str:
+        threads.append(threading.get_ident())
+        entered.set()
+        released.wait(2)
+        finished.set()
+        return "The Radient tunnel connector is starting again."
+
+    monkeypatch.setattr(install, "rearm_if_parked", blocking_rearm)
+    with closing(AuthStore()) as store:
+        store.upsert_credential(
+            "radient", {"type": "oauth", "account_id": "qa", "access": "a", "refresh": "r"}
+        )
+        assert entered.wait(2), "the hook never ran at all"
+        assert not finished.is_set(), "the credential write waited for the hook"
+        assert threads and threads[0] != threading.get_ident(), "the hook ran on the loop"
+    # Released before the loop closes, so the executor thread is not left in a
+    # wait the suite would then join on.
+    released.set()
+    assert finished.wait(2), "the hook never completed once released"
 
 
 def test_rearm_declines_everything_that_is_not_this_tunnel(

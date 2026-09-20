@@ -16,21 +16,103 @@ Two rules the code below keeps, both of them lessons from that incident:
 * A check that cannot run reports that it could not run. Neither a lost network
   nor an unreadable store is allowed to read as "your login is dead", which is
   what sent an offline machine to a login it did not need.
+* A check that costs a network call is BOUNDED, and a negative answer is reused
+  for the window in which re-asking cannot learn anything new. The login verdict
+  is the one check here that reaches the network at all (see REFRESH_WAIT_S and
+  VERDICT_TTL_S): it is read by routes the desktop polls on open, so an unbounded
+  call there is a stalled poll rather than a slow answer.
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
 from contextlib import closing
 from typing import Any
 
 import httpx
 
 from local_operator.providers.auth_store import (
+    DEFAULT_BLOCK_MS,
     AuthStore,
     AuthStoreError,
     CredentialInvalidError,
 )
 from local_operator.tunnels import config, gateway, state
+
+#: How long the login verdict may wait for a token endpoint that is not answering.
+#:
+#: `AuthStore`'s refresh POST carries a 30-second client timeout, which is right
+#: for a model request — a slow identity provider must not fail a turn — and wrong
+#: here, where the caller is a route the desktop polls on open. Measured on this
+#: branch with the token endpoint blackholed: **30.9 s** for one
+#: `GET /v1/desktop/tunnel` (review round 1, M1), the whole poll spent on a call
+#: whose own answer is "I could not check". Past the bound the verdict is
+#: `unknown`, which is already the honest one for a check that did not finish.
+REFRESH_WAIT_S = 2.0
+
+#: How long a NON-`ok` verdict is reused instead of being recomputed.
+#:
+#: The same shape merged #1340 uses for the desktop's side of this question
+#: (`DIAGNOSIS_TTL_S` / `_diagnosis_key` in `server/routes/desktop_radient.py`),
+#: for the same class of cost: a verdict that cost a token-endpoint POST is not
+#: re-asked on every poll while it still holds — there, measured as seven failed
+#: refreshes for six refusals. `DEFAULT_BLOCK_MS` is the window the store's own
+#: cascade keeps a credential with a failed refresh out of rotation for, so it is
+#: exactly the window in which re-asking can learn nothing new.
+#:
+#: `ok` is never reused: it is the answer that is usually FREE (a token inside its
+#: refresh skew returns without a POST) and the one whose staleness would matter
+#: most. A row that CHANGED — a re-login, or a refresh a peer landed — is decided
+#: again whatever the clock says, because the row's `updated_at` is in the key.
+VERDICT_TTL_S = DEFAULT_BLOCK_MS / 1000
+
+#: The last non-`ok` login verdict, keyed by the row it was made about.
+#:
+#: Module state, and deliberately: it memoises THIS device's store reading, is
+#: keyed by that store's own database and the row's own write stamp (see
+#: :func:`_verdict_key`), and expires on its own within :data:`VERDICT_TTL_S`, so
+#: it caches no fact this process is not allowed to know. Purging is opportunistic
+#: on write.
+_VERDICTS: dict[tuple[str, int, int], tuple[dict[str, Any], float]] = {}
+
+
+def _verdict_key(store: AuthStore, credential_id: int, updated_at: int) -> tuple[str, int, int]:
+    """What a remembered verdict is ABOUT: one store's row, as it stands now.
+
+    The store's database path is in the key because this memo outlives one call
+    while two daemons can share this process, and credential ids restart at 1 in
+    every config dir. ``updated_at`` is what the store writes on every change to a
+    row, so a re-login — or a refresh another process landed — composes a different
+    key and the verdict is decided again; a FAILED refresh writes nothing, which is
+    what lets a verdict hold across the very failures it describes.
+    """
+    return (str(store.db_path), credential_id, updated_at)
+
+
+def _remembered_verdict(key: tuple[str, int, int]) -> dict[str, Any] | None:
+    """The verdict still in force for this row, or ``None`` to decide again."""
+    entry = _VERDICTS.get(key)
+    if entry is None:
+        return None
+    verdict, expires = entry
+    if time.monotonic() >= expires:
+        _VERDICTS.pop(key, None)
+        return None
+    return dict(verdict)
+
+
+def _remember_verdict(key: tuple[str, int, int], verdict: dict[str, Any]) -> dict[str, Any]:
+    """Reuse ``verdict`` for this row for the store's own block window."""
+    now = time.monotonic()
+    # Purge first: an entry is dead within VERDICT_TTL_S and there is never a
+    # reason to keep one, so a row that keeps changing cannot grow this dict
+    # without bound.
+    for stale, (_verdict, expires) in list(_VERDICTS.items()):
+        if expires <= now:
+            _VERDICTS.pop(stale, None)
+    _VERDICTS[key] = (dict(verdict), now + VERDICT_TTL_S)
+    return verdict
 
 
 async def probe(value: dict[str, Any]) -> dict[str, Any]:
@@ -123,6 +205,17 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
     rather than `login_required`: sending an offline machine to a login it does
     not need is the misdirection this surface exists to remove, and
     `CredentialInvalidError` is the one signal that separates the two.
+
+    BOUNDED, and memoised, because the check is a network call after all
+    (:data:`REFRESH_WAIT_S`, :data:`VERDICT_TTL_S`). It fires exactly when the
+    stored access token is outside its refresh skew — which is the condition this
+    surface exists to describe, not an edge case — and it reached the Radient
+    refresh POST with its 30-second client timeout on the server's event loop, so
+    a partitioned network (the incident's OWN condition) made every poll of
+    `GET /v1/desktop/tunnel` and `GET /v1/auth/status` wait it out. The two bounds
+    turn that into one bounded wait per window, and `unknown` is what the wait
+    resolves to when it expires: the check did not finish, which is a fact about
+    this machine and not a verdict about the login.
     """
     selected = value.get("credential_id")
     dead: dict[str, Any] = {"credential_id": selected, "state": "login_required"}
@@ -132,13 +225,28 @@ async def login_verdict(value: dict[str, Any]) -> dict[str, Any]:
         row = store.get_credential(selected)
         if row is None or row.provider != "radient" or row.credential_type != "oauth":
             return dead
+        key = _verdict_key(store, selected, row.updated_at)
+        remembered = _remembered_verdict(key)
+        if remembered is not None:
+            return remembered
         try:
-            await store.ensure_oauth_fresh_or_raise(selected)
+            await asyncio.wait_for(store.ensure_oauth_fresh_or_raise(selected), REFRESH_WAIT_S)
         except CredentialInvalidError:
-            return dead
+            return _remember_verdict(key, dead)
         except AuthStoreError:
             # Reachable row, unusable answer: the network, not the login.
-            return {"credential_id": selected, "state": "unknown"}
+            return _remember_verdict(key, {"credential_id": selected, "state": "unknown"})
+        except asyncio.TimeoutError:
+            # `wait_for` CANCELLED the refresh, and a cancellation reaches neither
+            # of `_ensure_oauth_fresh`'s release paths (`CancelledError` is not an
+            # `Exception`), so the cross-process refresh LEASE it took is still
+            # held. Left alone it would block the desktop's own Radient calls with
+            # `refresh_did_not_land` until it expired (`AUTH_REFRESH_LEASE_MS`), so
+            # it is freed here. Only this process's own lease — the release is
+            # scoped to this holder — so a peer's is untouched, and the store's own
+            # `dispose`-shaped helper is the same call its failure paths make.
+            store._release_refresh_lease(selected)
+            return _remember_verdict(key, {"credential_id": selected, "state": "unknown"})
     return {"credential_id": selected, "state": "ok"}
 
 
@@ -234,7 +342,7 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
             "remedy": None,
         }
     stored = value.get("record")
-    report = payload(
+    assembled = payload(
         value,
         stored if isinstance(stored, dict) else {},
         source="cached",
@@ -242,5 +350,5 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
         connector=await connector_state(value, reachable=reachable),
         login=await login_verdict(value),
     )
-    report["configured"] = True
-    return report
+    assembled["configured"] = True
+    return assembled

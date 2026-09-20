@@ -158,12 +158,23 @@ contains an API key, access token, refresh token, or complete stored grant.
   `configured` means credential presence, **not** a successful connection test.
 - `GET /v1/auth/status`: redacted stored account identities and credential types.
   Environment credentials are not removable stored accounts. The result also
-  carries `radient_login` (the tunnel-owning login's state: `ok`,
-  `login_required`, `unknown`) and `tunnel_remedy` (the command that clears it,
-  or `null`), because a row can be `configured` with an unexpired access token
-  and still be refused by the identity provider. Both are `null`/`unknown`-safe
-  and neither performs a network call: this route is polled beside an
-  interactive login form.
+  carries `radient_login` and `tunnel_remedy`, because a row can be `configured`
+  with an unexpired access token and still be refused by the identity provider.
+  **Both are objects, not strings.** `radient_login` is
+  `{"credential_id": int|null, "state": "ok"|"login_required"|"unknown"}` — the
+  same shape as the `login` object on `GET /v1/desktop/tunnel` — and
+  `tunnel_remedy` is `{"command": str, "url": str}` or `null`, the same shape as
+  `remedy` there. A renderer written from a sentence that called them a state and
+  a command reads a dict where it expects a string.
+  `unknown` means the check could not run and never means "the login is dead".
+  The verdict is decided from this machine's own credential store, but it is not
+  free of the network: a stored access token outside its refresh skew makes the
+  store attempt a refresh, which is a POST to a token endpoint. That one call is
+  bounded (`tunnels/report.py`'s `REFRESH_WAIT_S`, 2 s) and a non-`ok` verdict is
+  reused for the window the store's own cascade blocks a failed credential for
+  (`VERDICT_TTL_S`, 60 s), so a partitioned network costs this poll one bounded
+  wait per window and the answer on expiry is `unknown`. Both bounds exist
+  because this route is polled beside an interactive login form.
   `login_required` here is the SAME condition `POST /v1/desktop/radient` types as
   `grant_invalid` (401 `radient_credential_refused`): both key on the store's own
   dead-grant verdict (`CredentialInvalidError`), which this branch also widened
@@ -212,9 +223,20 @@ alone is not an inference credential.
   `not serving`, `stopped`, `not configured`, `unknown` (`unknown` only when a
   caller asked not to probe the loopback gateway); `result.login.state` is one
   of `ok`, `login_required`, `unknown`, where `unknown` means the check could not
-  run and never means "the login is dead". `result.remedy` is the command that
-  clears the condition, or `null` — the remedy is a terminal command, so the UI
-  shows it rather than running it, and this route has no write half.
+  run and never means "the login is dead". `result.remedy` is
+  `{"command": str, "url": str}` or `null`: the command that clears the
+  condition, with the console URL that belongs beside it. The remedy is a
+  terminal command, so the UI shows it rather than running it, and this route has
+  no write half. It is an OBJECT rather than a bare string for that reason — the
+  URL travels with the command.
+  **`connector.detail` names no command.** It is one surface-neutral sentence
+  that this route, `lop tunnel status` and the park file all print verbatim, and
+  the TUI renders it too, so a command baked into it would be a slash command
+  handed to a desktop callout (or a shell command handed to a composer). A
+  renderer that wants to offer the fix appends `remedy.command` in its own
+  surface's spelling: `lop login radient` in a shell, `/login radient` in the
+  app's composer. The same applies to `radient_login`/`tunnel_remedy` on
+  `GET /v1/auth/status`.
 
 There is no SSE frame for this. It changes when a person signs in or edits the
 console, so the app polls it on open and refetches when a sign-in it started

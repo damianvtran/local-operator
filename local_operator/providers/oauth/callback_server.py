@@ -304,8 +304,51 @@ TERMINAL_GRANT_ERRORS = frozenset(
 #: that code's meaning exactly (see the exclusions above), which is what stops a
 #: ``{"error":"invalid_request","error_description":"...invalid_grant..."}``
 #: from being read as a verdict about the grant.
+#:
+#: DIRECTION, SEPARATORS AND NEGATION, all three of which the first version got
+#: wrong in a way its own probe list showed (review round 1, m1):
+#:
+#: * The verdict reads in BOTH orders. Radient states it token-first ("refresh
+#:   token is expired or revoked"); the ordinary English paraphrase everyone
+#:   reaches for first is adjective-first ("Invalid refresh token"), and that one
+#:   was still classified retryable -- which is the incident's own failure mode
+#:   one wording away.
+#: * Separators are `[-_ ]?`, not `[_ ]?` ("refresh-token-expired"), and the match
+#:   is case-insensitive, because a provider's field can carry any of them.
+#:   BOUNDARY, recorded rather than discovered: a JOINED camel spelling inside the
+#:   `error` FIELD still does not reach this rule. The field parser lowercases
+#:   what it returns (RFC 6749 codes are lowercase), and a lowercased
+#:   `refreshtokenexpired` is shape-identical to a machine code — which the rule
+#:   above keeps retryable, deliberately, because a code we do not know is one we
+#:   cannot judge. The joined form IS matched on the fallback path, where there is
+#:   no parseable field and the raw body text is scanned.
+#: * The gap between the two halves EXCLUDES a negation -- see
+#:   :data:`_NEGATION_FREE_GAP`, where the spelling and the reason it cannot use
+#:   `\bn't\b` both live.
+#:
+#: The gap a verdict word may sit away from the phrase it judges, with the
+#: NEGATION GUARD the first version lacked.
+#:
+#: Python's `re` has no variable-width lookbehind, so "not" cannot be asserted
+#: BEFORE the verdict word; instead it is excluded from the consumed span, which is
+#: this tempered class: "one character that is not a full stop and does not start a
+#: negation", repeatable. Two spellings of the negation are needed and neither is
+#: `\bn't\b` -- there is no word boundary inside `isn't` (the `n` follows the word
+#: character `s`), so the contraction is keyed on its apostrophe, ASCII or
+#: typographic, and the guard is what keeps "... refresh token is not expired
+#: yet", a working grant being DESCRIBED, out of this set.
+_NEGATION_FREE_GAP = r"(?:(?!\bnot\b|n['\u2019]t\b)[^.])"
+
 _DEAD_REFRESH_TOKEN = re.compile(
-    r"refresh[_ ]?token\b[^.]{0,48}\b(?:expired|revoked|invalid|no longer valid)\b"
+    # "refresh token is expired", "RefreshTokenExpired", "refresh-token-invalid",
+    # "refresh_token no longer valid". No `\b` after `token`: the joined camel
+    # form has no boundary there, and the verdict word has to follow either way.
+    r"refresh[-_ ]?token"
+    + _NEGATION_FREE_GAP
+    + r"{0,48}?(?:expired|revoked|invalid|no longer valid)"
+    # ...or the verdict first: "Invalid refresh token", "expired refresh_token".
+    + r"|\b(?:invalid|expired|revoked)\b" + _NEGATION_FREE_GAP + r"{0,24}?refresh[-_ ]?token",
+    re.IGNORECASE,
 )
 
 #: The shape of an RFC 6749 ``error`` code: one short lowercase token, no spaces.
