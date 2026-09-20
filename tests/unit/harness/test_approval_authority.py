@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -664,6 +665,16 @@ def test_no_shipped_notice_names_a_window_remedy() -> None:
     code that explains WHY a remedy was deleted has to be able to quote it, and
     two of those explanations sit in this diff. Comments are not in the AST at
     all. What is asserted is the copy a reader can be shown.
+
+    THE SUBJECT GREW TWICE, each time because a pass found the clause somewhere
+    this cell could not read (agent review round 8, R8-1): the shipped
+    DOCUMENTATION (`docs/**/*.md`, whose own arm is below, after QA round 8 found
+    the sentence asserted as current in `docs/DESKTOP_CONTROLS.md`) and the
+    shipped PORTAL SOURCES (`local_operator/mobile/web/src`, where the phone's own
+    copy lives — a reader is shown those strings exactly as they are shown the
+    Python ones). The portal half strips JavaScript comments first, for the same
+    reason the Python half skips docstrings: prose that records the deletion must
+    be able to name it.
     """
     notices = _shipped_notices()
     # The inventory has to be big enough to be the product: a refactor that
@@ -674,6 +685,12 @@ def test_no_shipped_notice_names_a_window_remedy() -> None:
             assert phrase not in copy, f"{name} offers a window remedy: {copy!r}"
 
     offenders: dict[str, list[str]] = {}
+    for source in sorted((_REPO_ROOT / "local_operator" / "mobile" / "web" / "src").rglob("*.ts*")):
+        relative = source.relative_to(_REPO_ROOT).as_posix()
+        normalised = _js_copy(source)
+        for phrase in _WINDOW_REMEDIES:
+            if phrase in normalised:
+                offenders.setdefault(phrase, []).append(relative)
     for module in sorted((_REPO_ROOT / "local_operator").rglob("*.py")):
         tree = ast.parse(module.read_text(encoding="utf-8"))
         docstrings = {
@@ -698,6 +715,87 @@ def test_no_shipped_notice_names_a_window_remedy() -> None:
     assert not offenders, f"shipped copy still promises a window remedy: {offenders}"
 
 
+def _js_copy(path: Path) -> str:
+    """A TypeScript source with its comments removed — the copy a renderer can show.
+
+    The analogue of skipping docstrings on the Python side, and it exists for the
+    same reason: a comment that records WHY a remedy was deleted must be able to
+    name it (``pair.tsx`` has one, next to the revoked-device copy).
+    """
+    text = re.sub(r"/\*.*?\*/", " ", path.read_text(encoding="utf-8"), flags=re.DOTALL)
+    return re.sub(r"^\s*//.*$", " ", text, flags=re.MULTILINE)
+
+
+#: A WINDOW NAMED AS THE PLACE TO LOOSEN FROM, in any wording (agent review round
+#: 8, R8-2). The phrase list above is precise and hand-maintained, so a fourth
+#: sentence saying the same thing in different words would pass it; this is the
+#: invariant that cannot miss a paraphrase which keeps the REMEDY (``/approvals``,
+#: ``adopt``) beside a window-ish noun. Its stated bound: a paraphrase with no
+#: remedy word at all in the same clause — "do it in the console that opened the
+#: session" — is still the phrase list's job.
+_WINDOW_REMEDY_SHAPE = (
+    re.compile(
+        r"\b(window|console|terminal)\b[^.\n]{0,80}?\b(approvals|adopt|retire and reopen)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(approvals|adopt|retire and reopen)\b[^.\n]{0,80}?\b(window|console|terminal)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def test_no_shipped_copy_offers_a_window_as_the_place_to_loosen() -> None:
+    """The invariant the phrase list cannot be, checked over every shipped copy.
+
+    Every one of the four sentences this class has produced paired a window-ish noun
+    (window, console, terminal) with the remedy (``/approvals auto``, adopting the
+    file, retiring and reopening). That conjunction is what makes the sentence a
+    remedy rather than a description, and it survives rewording in a way a fixed
+    phrase list does not.
+
+    The tokens are chosen so the invariant is TRUE of this tree rather than merely
+    loud: `approvals`/`adopt`/`retire and reopen` are the gate-loosening verbs, so
+    unrelated copy that mentions a terminal and a reopen — the notifications help
+    line, the phone's "the terminal session went away — reopen it to answer" —
+    does not match. Both were measured against this cell before it was written, and
+    the narrower token set is why it has no exemptions.
+    """
+    offenders: dict[str, list[str]] = {}
+    for module in sorted((_REPO_ROOT / "local_operator").rglob("*.py")):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if id(node) in docstrings:
+                continue
+            if any(shape.search(node.value) for shape in _WINDOW_REMEDY_SHAPE):
+                offenders.setdefault(node.value[:60], []).append(
+                    f"{module.relative_to(_REPO_ROOT).as_posix()}:{node.lineno}"
+                )
+    for source in sorted((_REPO_ROOT / "local_operator" / "mobile" / "web" / "src").rglob("*.ts*")):
+        if any(shape.search(_js_copy(source)) for shape in _WINDOW_REMEDY_SHAPE):
+            offenders.setdefault(source.name, []).append(source.relative_to(_REPO_ROOT).as_posix())
+    assert not offenders, f"shipped copy offers a window as the place to loosen: {offenders}"
+
+
+#: The runtime slices a raised exception's text to this many characters before it
+#: answers (``server.py``'s ``str(exc)[:400]``). One number, in one place, because
+#: an earlier version of the cell below carried a per-notice mapping in which every
+#: value equalled the default — a budget that could never change a verdict (agent
+#: review round 8, R8-3).
+_ERROR_FRAME_CHARS = 400
+
+
 def test_every_notice_fits_the_error_frame_slice() -> None:
     """M-3: the two newest copies sat outside the cap that the two older ones pin.
 
@@ -712,10 +810,10 @@ def test_every_notice_fits_the_error_frame_slice() -> None:
     Asserted as a property of the INVENTORY rather than of four names, for the
     same reason the cell above collects its subjects.
     """
-    limits = {"LOOSENING_REFUSED_NOTICE": 400, "LOOSENING_KEPT_BY_ASK_NOTICE": 400}
     for name, copy in sorted(_shipped_notices().items()):
-        limit = limits.get(name, 400)
-        assert len(copy) <= limit, f"{name} is {len(copy)} characters (cap {limit}): {copy!r}"
+        assert (
+            len(copy) <= _ERROR_FRAME_CHARS
+        ), f"{name} is {len(copy)} characters (cap {_ERROR_FRAME_CHARS}): {copy!r}"
 
 
 def test_no_shipped_document_promises_a_window_remedy() -> None:

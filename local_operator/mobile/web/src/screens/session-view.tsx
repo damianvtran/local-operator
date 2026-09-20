@@ -55,12 +55,14 @@ function Header({
 	   nothing. The header is the surface the sheet closes back onto, so the receipt
 	   belongs to it and survives.
 
-	   IT PERSISTS UNTIL THE SCREEN UNMOUNTS, which is the intent and not a
-	   lifetime a timer should own: `onReceipt` has one caller (the loosen success
-	   path) and a second loosen rewrites the same sentence, so there is nothing
-	   stale to clear — the gate is still auto either way. An earlier version of
-	   this comment claimed the next gesture cleared it, which no code did (design
-	   round 7, D9). */
+	   IT IS CLEARED BY THE NEXT GESTURE THAT CHANGES THE GATE, which is what the
+	   sentence reports: `onReceipt("")` comes from the sheet's tighten path, so a
+	   `keep asking` leaves no header claiming the gate is auto (UX round 8, U8-3 —
+	   the flow the round-7 comment below was wrong about: it asserted there was
+	   nothing stale to clear, and a tighten one tap away is exactly that). The
+	   round-7 design note is kept because it is the reason the receipt lives HERE:
+	   an earlier version set it inside the sheet, which unmounted before it could
+	   paint (design round 6, D2). */
 	const [gateReceipt, setGateReceipt] = useState("");
 	return (
 		<>

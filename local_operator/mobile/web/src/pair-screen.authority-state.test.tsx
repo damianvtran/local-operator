@@ -93,3 +93,31 @@ describe("the pairing screen and the machine's own state", () => {
 		);
 	});
 });
+
+describe("the pairing screen's failure copy", () => {
+	it("routes a revoked device back to the machine, not into a loop (U8-1)", async () => {
+		/* The old sentence was "Pair it again from `lop pair`" — the exact step the
+		   machine refuses for ever, with no un-revoke verb anywhere in the product
+		   (`_stage_anchor_with_revocation` only ever writes `revoked: true`, into a
+		   root-owned anchor). Measured in the UX round-8 browser pass as a loop: the
+		   phone is sent to mint a fresh code, claims it, and is refused again with
+		   the same advice. The copy now names the only route that exists — a new
+		   anchor on the machine — and says what that costs. */
+		mocks.claimPairingCode.mockRejectedValueOnce(
+			new Error("this device has been revoked"),
+		);
+		await pairAway();
+		const said = await screen.findByText(/revoked on the machine/, undefined, { timeout: 5000 });
+		expect(said.textContent).toContain("lop operator init");
+		expect(said.textContent).toContain("lop operator install");
+		expect(said.textContent).toContain("only there");
+		expect(said.textContent).not.toContain("Pair it again");
+	});
+
+	it("turns a relay fault into a sentence rather than a status code (U8-4)", async () => {
+		mocks.claimPairingCode.mockRejectedValueOnce(new Error("500"));
+		await pairAway();
+		const said = await screen.findByText(/could not answer/, undefined, { timeout: 5000 });
+		expect(said.textContent).toContain("lop serve");
+	});
+});

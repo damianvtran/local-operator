@@ -133,6 +133,25 @@ describe("the phone's gate sheet", () => {
 		expect(mocks.sendCommandWithProof).toHaveBeenCalledTimes(1);
 	});
 
+	it("clears the receipt when a tighten leaves the gate elsewhere (U8-3)", async () => {
+		/* The receipt reports a STATE ("this session's gate is now auto"), and it
+		   lives on the header, above the sheet. A `keep asking` from that same sheet
+		   is one tap from the receipt's own control, and it used to leave the header
+		   asserting a gate the session no longer has — measured as one frame carrying
+		   the runtime's refusal and a header claiming the opposite. The round-7
+		   comment justified the persistence with "nothing stale to clear"; this is
+		   the flow that made that false, so the assertion is on the state, not the
+		   sentence. */
+		await openSheet();
+		fireEvent.click(screen.getByText("run without asking (auto)"));
+		await waitFor(() => expect(screen.getByRole("status").textContent).toContain("now auto"));
+		fireEvent.click(screen.getByLabelText("approvals in this session"));
+		await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+		fireEvent.click(screen.getByText("keep asking (ask)"));
+		await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+		expect(mocks.sendCommandWithProof).toHaveBeenCalledTimes(2);
+	});
+
 	it("says what it will refuse before the tap on an unpaired phone (D4)", async () => {
 		mocks.storedCertificate.mockReturnValue(null);
 		await openSheet();

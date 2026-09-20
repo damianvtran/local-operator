@@ -76,7 +76,17 @@ def _pending_target(root: Path, only: str) -> dict[str, object] | None:
 
 
 def _confirm(row: dict[str, object]) -> bool:
-    """Ask, on the terminal, naming what is being authorised (never just "ok?")."""
+    """Ask, on the terminal, naming what is being authorised (never just "ok?").
+
+    THE PROMISE IS QUALIFIED AT THE PROMPT (UX round 8, U8-2). This is the moment
+    consent is given, and on a host whose anchor is staged but not installed the
+    sentence below promised authority that cannot be exercised yet — the receipt
+    carried the qualification, which the operator reads AFTER answering. One
+    predicate, one surface earlier, so the answer is given with the same facts the
+    receipt states.
+    """
+    from local_operator.operator import operator_authority_unusable
+
     name = str(row.get("name") or "")
     device_id = str(row.get("device_id") or "")
     sys.stdout.write(
@@ -86,6 +96,13 @@ def _confirm(row: dict[str, object]) -> bool:
         f"This lets that device APPROVE parked tool calls and LOOSEN this session's "
         f"approval gate, from anywhere it can reach this machine.\n"
     )
+    if operator_authority_unusable():
+        # Same wording as the receipt's qualification, because a reader who sees
+        # both should not have to reconcile two sentences about one host.
+        sys.stdout.write(
+            "  ...once this machine's operator authority is installed: run "
+            "`lop operator install` here (one privileged step).\n"
+        )
     sys.stdout.flush()
     try:
         answer = input("Authorise it? [y/N] ").strip().lower()

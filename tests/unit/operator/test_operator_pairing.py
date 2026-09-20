@@ -437,3 +437,42 @@ def test_the_revoke_receipt_states_the_window_it_actually_honours(
     refusal = capsys.readouterr().err
     assert "lop operator install" in refusal, refusal
     assert "no installed operator anchor" in refusal, refusal
+
+
+def test_the_pairing_prompt_qualifies_its_promise_on_this_host(
+    paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 8, U8-2: the moment consent is given carries the same facts as the receipt.
+
+    The `Authorise it? [y/N]` prompt is where the operator decides, and on a host
+    whose anchor is staged but not installed it promised authority that cannot be
+    exercised yet — the qualification arrived one step LATER, in the receipt, after
+    the answer. Same predicate the receipt uses (`operator_authority_unusable`), one
+    surface earlier. Both directions are asserted, because a prompt that hedged on an
+    anchored host would be the same defect mirrored.
+    """
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import trust
+    from local_operator.operator.pair_handlers import _confirm
+
+    root = _config()
+    row = {"name": "phone", "device_id": "ab" * 8}
+    monkeypatch.setattr("builtins.input", lambda *_args: "n")
+
+    def installed(uid: Any = None) -> Any:
+        return _installed_anchor(trust, root, uid)
+
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+    assert _confirm(row) is False
+    qualified = capsys.readouterr().out
+    assert "lop operator install" not in qualified, qualified
+    assert "This lets that device APPROVE" in qualified, qualified
+
+    absent = lambda uid=None: _absent_anchor(trust, uid)  # noqa: E731 - a seam, not a style
+    monkeypatch.setattr(trust, "load_anchor", absent)
+    monkeypatch.setattr(operator_pkg, "load_anchor", absent)
+    assert _confirm(row) is False
+    unready = capsys.readouterr().out
+    assert "once this machine's operator authority is installed" in unready, unready
+    assert "lop operator install" in unready, unready

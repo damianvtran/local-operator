@@ -88,6 +88,14 @@ export function GateSheet({
 					images: [],
 				});
 				setNotice("keeping approvals at ask in this session");
+				/* AND THE LOOSENING RECEIPT GOES (UX round 8, U8-3). It lives on the
+				   header, above this sheet, and it reports a STATE ("the gate is now
+				   auto — gated tools run without asking"); a tighten from this very
+				   sheet leaves it asserting something the gate no longer is, one frame
+				   after the sheet says otherwise. Clearing it here is what makes the
+				   round-6 comment's claim ("the next gesture clears it") true, rather
+				   than a claim about code that did not exist. */
+				onReceipt("");
 				return;
 			}
 			await loosen();

@@ -218,10 +218,30 @@ function humanizePairingError(error: unknown): string {
 		return "That code is not valid — run `lop pair` on the machine again for a fresh one.";
 	}
 	if (message.includes("revoked")) {
-		return "This device has been revoked on the machine. Pair it again from `lop pair`.";
+		/* THE ONLY WAY BACK, and why the old sentence was a LOOP (UX round 8, U8-1):
+		   it read "Pair it again from `lop pair`", which is the step the machine
+		   refuses for ever. Nothing in the product lifts a revocation —
+		   `_stage_anchor_with_revocation` only ever writes `revoked: true`, and the
+		   anchor it writes into is root-owned — so the state is cleared by a NEW
+		   anchor, which invalidates every device paired to the old one. Naming that
+		   is the difference between a loop and a route; naming it WRONGLY (a verb
+		   that does not exist) would be worse than the loop. */
+		return (
+			"This device has been revoked on the machine, and a revocation is lifted only " +
+			"there — pairing again will be refused. On the machine, create a new operator " +
+			"anchor (`lop operator init`, then `lop operator install`) and pair this phone " +
+			"again; every phone paired to the old anchor has to pair again too."
+		);
 	}
 	if (message.toLowerCase().includes("subtle")) {
 		return "This browser cannot hold a device key securely, so pairing is unavailable here.";
+	}
+	if (/\b[45]\d\d\b/.test(message)) {
+		/* A FAULT, NOT A VERDICT (UX round 8, U8-4): this fell through to the raw
+		   message, so a relay fault rendered on the phone as "500" — a number the
+		   reader has no way to interpret, on the surface whose other three arms
+		   each say what to do next. */
+		return "The machine could not answer — check that `lop serve` is running there, then try again.";
 	}
 	return message;
 }
