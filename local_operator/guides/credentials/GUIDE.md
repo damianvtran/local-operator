@@ -128,11 +128,13 @@ The harness tells you when it masks a credential (`[credential redaction] …`),
 and the notice classifies itself. The distinction is worth knowing, because a
 rotation is the user's work and a false alarm spends it:
 
-- **A value in the MODEL'S CONTEXT is compromised.** It was not masked, so it is
-  in the transcript in plain text, replays into later requests, and may be in
-  training data. Nothing can undo that: the credential has to be rotated, and
-  only the user can do it. The notice says `rotate it — … could not be fully
-  masked, so it is in this session's context`, and it means it.
+- **A value in the MODEL'S CONTEXT is compromised.** Something of it is readable
+  there — the mask did not remove every copy, whether it fell short or a rule
+  kept a run by design — so it is in the transcript in plain text, replays into
+  later requests, and may be in training data. Nothing can undo that: the
+  credential has to be rotated, and only the user can do it. The notice says
+  `rotate it — … its value is readable in this session's context`, and it means
+  it.
 - **A value that reached `bash` is not compromised.** A command's `argv`, a
   child's environment, a pipeline, an output pipe: the value was *used*, not
   *read*, and the model never saw it. **Do not ask for a rotation for this** —
