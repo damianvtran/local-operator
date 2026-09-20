@@ -354,6 +354,17 @@ def _emit(args: argparse.Namespace, payload: dict[str, Any], lines: list[str]) -
     return 0 if payload.get("ok", True) else 1
 
 
+#: Slack added to the relay's own listing budget before a control call gives up.
+#: The relay bounds its peer probe (``LISTING_PROBE_BUDGET_S``); this is the
+#: client, and it must outwait the server it is asking rather than inventing its
+#: own, shorter deadline.
+_LISTING_TIMEOUT_SLACK_S = 8.0
+
+
+def _listing_timeout() -> float:
+    return float(_import_relay().LISTING_PROBE_BUDGET_S) + _LISTING_TIMEOUT_SLACK_S
+
+
 def _relay_call(op: str, *, timeout: float = 5.0, **fields: Any) -> dict[str, Any] | None:
     """Run one op on the running relay, or ``None`` when there is no relay.
 
@@ -440,6 +451,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     port = args.port or settings.port
     identity = load_or_mint()
 
+    # ONE ANSWER TO "WHERE CAN PEERS REACH US", used for BOTH the record's listen
+    # block and our own member row. They are the two things a joiner receives, so
+    # deriving them separately is how the row said `endpoints: []` while the
+    # record said `advertised: ["52.27.70.210:4200"]` (QA round 1, F-2).
+    settings = _replace(settings, listen_address=listen_address, port=port)
+    advertised = imported.advertise_endpoints(settings, declared=tuple(args.advertise_hosts or []))
+
     record = types.NetworkRecord(
         network_id=store.new_network_id(),
         name=args.name,
@@ -450,7 +468,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         listen={
             "address": listen_address,
             "port": port,
-            "advertised": list(args.advertise_hosts or settings.advertise_hosts),
+            "advertised": advertised,
         },
     )
     from secrets import token_bytes
@@ -471,7 +489,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
         capabilities=sorted(types.capabilities_for_role("admin")),
         added_by=identity.device_id,
         added_via="self",
-        endpoints=[],
+        # OUR OWN ROW CARRIES OUR OWN ENDPOINTS. It is the row every joiner
+        # receives in the admission frame and the row every member receives in a
+        # member list, so leaving it empty is what made a freshly paired device
+        # permanently undialable (QA round 1, F-2).
+        endpoints=list(advertised),
         root=None,
         persist=False,
     )
@@ -813,6 +835,24 @@ def _cmd_join(args: argparse.Namespace) -> int:
         )
     identity = load_or_mint(name=args.name)
     settings = relay_mod.NetworkSettings.from_config()
+
+    # AN EXPIRED TOKEN IS A LOCAL FACT, so it is refused locally with its own code.
+    # The listener deliberately answers a refused invite by CLOSING rather than by
+    # explaining (an open port that explains is an oracle), so without this check
+    # the most common pairing failure — an invite left in a chat log overnight —
+    # reached the user as "could not join", i.e. as a network problem, and they
+    # retried the network instead of minting a new token (QA round 1, F-4).
+    now = time.time()
+    expires_at = envelope.issued_at + envelope.ttl_s
+    if expires_at <= now:
+        raise MeshRefusal(
+            "invite_expired",
+            f"that invite expired {int(now - expires_at)}s ago. Invites are short-lived on "
+            "purpose, so a token left where someone else could read it stops working; "
+            "mint a fresh one on the other device with `lop network invite` and bring the "
+            "new file across.",
+        )
+
     last_reason = ""
     for host in hosts:
         link_result = _join_one(
@@ -832,13 +872,22 @@ def _cmd_join(args: argparse.Namespace) -> int:
             store=store,
             relay_mod=relay_mod,
         )
+        if isinstance(link_result, str):
+            # A per-host sentence, kept so the NEXT host is still tried and so the
+            # final refusal can say what actually happened at each one.
+            last_reason = link_result
+            continue
         if link_result is None:
             continue
         return _emit(args, {"ok": True, **link_result[1]}, link_result[0])
     raise MeshRefusal(
         "join_failed",
         "could not join: "
-        f"{last_reason or 'every endpoint in the invite refused or was unreachable'}",
+        f"{last_reason or 'every endpoint in the invite refused or was unreachable'}. "
+        "A token that was already redeemed, one the other device no longer accepts, and "
+        "a wrong address all end the same way on the wire, because a peer that explains "
+        "every refusal tells an attacker which tokens are real. If you are not certain "
+        "the token is still open, mint a fresh one with `lop network invite`.",
     )
 
 
@@ -895,11 +944,20 @@ def _join_one(
     settings: Any,
     args: argparse.Namespace,
     **helpers: Any,
-) -> tuple[list[str], dict[str, Any]] | None:
-    """One dial attempt: handshake, the human step, then admission."""
+) -> tuple[list[str], dict[str, Any]] | str | None:
+    """One dial attempt: handshake, the human step, then admission.
+
+    Returns ``(lines, payload)`` on success, a SENTENCE describing what happened at
+    this host when it failed, or ``None`` when the host argument itself was
+    unusable. The sentence is why the caller can say more than "could not join":
+    "nothing was listening at 52.27.70.210:4200" and "the handshake stopped with
+    ConnectionResetError" are different problems, and the second is what a refused
+    or already-redeemed token looks like from here (QA round 1, F-4).
+    """
     import socket
 
     from local_operator.network import wire
+    from local_operator.network.handshake import refusal_from_pairing
     from local_operator.network.identity import mint_instance_id
     from local_operator.network.types import HandshakeRefusal, MeshRefusal
 
@@ -907,6 +965,7 @@ def _join_one(
     Credential = helpers["Credential"]
     store = helpers["store"]
     invite_mod = helpers["invite_mod"]
+    relay_mod = helpers["relay_mod"]
 
     address, _, port_text = host.rpartition(":")
     try:
@@ -917,9 +976,14 @@ def _join_one(
         sock = socket.create_connection(
             (address or host, port), timeout=settings.handshake_timeout_s
         )
-    except OSError:
-        return None
+    except OSError as exc:
+        return f"nothing was listening at {host} ({exc.__class__.__name__})"
     deadline = wire.deadline_in(settings.handshake_timeout_s)
+    # ONE ANSWER, used for the hello we send AND for our own durable record: the
+    # inviter copies the hello's list onto our member row, and `listen` is what
+    # every later reader of this record sees. Deriving them separately is how the
+    # record came to claim the INVITER's address (QA round 1, F-7).
+    advertised = relay_mod.advertise_endpoints(settings)
     try:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         handshake = Handshake.new(
@@ -932,6 +996,10 @@ def _join_one(
             mode="join",
             capabilities=list(wire.LINK_CAPABILITIES),
             build={},
+            # The inviter records THESE on our member row. Without them it kept the
+            # observed source address, an ephemeral NAT port, so a paired device
+            # could never be dialled back (QA round 1, F-2).
+            endpoints=advertised,
         )
         handshake.join_block = {
             "invite_id": envelope.invite_id,
@@ -972,17 +1040,26 @@ def _join_one(
             )
         )
         if answer.get("op") == "net_pair_abort":
-            raise MeshRefusal(
-                str(answer.get("reason") or "aborted"),
-                (
-                    invite_mod.sas_mismatch_sentence()
-                    if answer.get("reason") == "sas_mismatch"
-                    else f"the pairing was refused ({answer.get('reason')})"
-                ),
-            )
+            # ``refusal_from_pairing`` OWNS the reason -> sentence map, and it lives
+            # in ``handshake`` beside the frames it describes. This call used to go
+            # through ``invite_mod``, which never had the helper: every wrong-SAS
+            # pairing — a typo in six digits, the normal user path — died with
+            # ``AttributeError: module 'local_operator.network.invite' has no
+            # attribute 'sas_mismatch_sentence'`` instead of refusing (QA round 1,
+            # F-1). Going through the one function also gets the invite-shaped
+            # reasons (``invite_already_used``, ``invite_in_use``) their sentences.
+            raise refusal_from_pairing(str(answer.get("reason") or "aborted"))
         if not answer.get("admit"):
             raise MeshRefusal("not_admitted", "the other device did not admit this machine")
-        record = _persist_join(answer, envelope, identity, host, store)
+        record = _persist_join(
+            answer,
+            envelope,
+            identity,
+            host,
+            store,
+            peer_endpoints=handshake.peer_endpoints,
+            advertised=advertised,
+        )
         return (
             [
                 f"joined {record.name} ({record.network_id}) at epoch {record.epoch}",
@@ -1002,13 +1079,15 @@ def _join_one(
         )
     except MeshRefusal:
         raise
-    except HandshakeRefusal:
-        # The reason is deliberately dropped here: it is already in the local audit
-        # record, and this device's human gets the one sentence that matters — that
-        # the other side refused — rather than our own refusal vocabulary.
-        return None
-    except (wire.LinkCryptoError, OSError, TimeoutError):
-        return None
+    except HandshakeRefusal as refusal:
+        # NOT named as a peer refusal: the listener closes the socket on a refusal
+        # rather than explaining (an oracle would let a stranger probe token
+        # validity), so what arrives here is a frame that never came. The sentence
+        # is still the honest one, and it reaches the user instead of being
+        # dropped on the floor.
+        return f"the handshake at {host} stopped: {refusal.sentence}"
+    except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
+        return f"the handshake at {host} stopped ({exc.__class__.__name__})"
     finally:
         try:
             sock.close()
@@ -1064,7 +1143,14 @@ def _session_protocol() -> int:
 
 
 def _persist_join(
-    answer: dict[str, Any], envelope: Any, identity: Any, host: str, store: Any
+    answer: dict[str, Any],
+    envelope: Any,
+    identity: Any,
+    host: str,
+    store: Any,
+    *,
+    peer_endpoints: list[str] | None = None,
+    advertised: list[str] | None = None,
 ) -> Any:
     """Write the network record and its secret from the admission frame.
 
@@ -1073,6 +1159,15 @@ def _persist_join(
     be unverifiable, and a member list the joiner invented from the welcome frame
     would name a device it cannot check. ``material`` is written to the SEPARATE
     secrets file, never into the record.
+
+    ``advertised`` is what THIS device says about itself, and it is the honest
+    value: the record used to be written with ``advertised: [host]`` where ``host``
+    is the INVITER's dial address, so a joiner's durable record claimed to be
+    reachable at the other machine's address — a mis-dial waiting for the first
+    consumer of ``listen.advertised`` (QA round 1, F-7). ``peer_endpoints`` is
+    the inviter's own answer, from its ``welcome``; it fills the inviter's row
+    when the admission frame's copy carries none (an older inviter, or one
+    admitted before this build).
     """
     from local_operator.network.types import (
         MemberRecord,
@@ -1100,6 +1195,23 @@ def _persist_join(
             ),
         ]
     self_row = next((row for row in rows if row.device_id == identity.device_id), None)
+    # WHERE WE CAN BE REACHED, from our own settings rather than from the address
+    # we happened to dial.
+    own_endpoints = [str(item) for item in (advertised or []) if str(item)]
+    for row in rows:
+        if row.device_id == identity.device_id:
+            # OUR OWN ROW IS OUR DECLARATION, never the address the OTHER device
+            # observed. The frame's copy of this row carries the inviter's fallback
+            # when we declared nothing, which on a NAT'd joiner is an ephemeral port
+            # — a dead address written into our own durable record. An empty list is
+            # the honest answer here; this device's relay fills it from its live
+            # listening port on its next publish.
+            row.endpoints = list(own_endpoints)
+        elif not row.endpoints:
+            # The inviter's row. Prefer its own declared endpoints (from the
+            # ``welcome``), and fall back to the address that actually worked —
+            # the invite named it, so it is evidence, not a guess.
+            row.endpoints = list(peer_endpoints or []) or [host]
     record = NetworkRecord(
         network_id=str(network.get("network_id") or envelope.network_id),
         name=str(network.get("name") or envelope.network_name),
@@ -1111,7 +1223,9 @@ def _persist_join(
         self_capabilities=list(self_row.capabilities) if self_row else [],
         created_at=time.time(),
         created_by=envelope.inviter_device_id,
-        listen={"address": "", "port": 0, "advertised": [host]},
+        # ``address``/``port`` are ours; ``advertised`` is ours. Nothing here names
+        # the inviter any more.
+        listen={"address": "", "port": 0, "advertised": list(own_endpoints)},
         rotations={str(key): str(value) for key, value in (answer.get("rotations") or {}).items()},
         members=rows,
     )
@@ -1122,6 +1236,24 @@ def _persist_join(
     state = SecretState(network_id=record.network_id, epoch=record.epoch, secret=material)
     store.save(record, None)
     store.save_secrets(state, None)
+    # THE JOINER AUDITS ITS OWN ADMISSION. Every other mutating verb records one
+    # and, being admitted is the mutation a joiner makes. Without this the joining
+    # device's log stayed empty — no `audit.jsonl` was even created — while the
+    # inviter had the full pairing history, so an incident review on the joiner
+    # had nothing to read (QA round 1, F-3).
+    _audit(
+        "member_admitted",
+        network_id=record.network_id,
+        network_name=record.name,
+        epoch=record.epoch,
+        actor="self",
+        subject=identity.device_id,
+        # THE SAME DETAIL SHAPE THE INVITER WRITES for the same event, and only the
+        # keys the audit writer's per-event whitelist keeps — a key the whitelist
+        # does not know is dropped by the writer, so passing one here would claim a
+        # record the file never gets.
+        detail={"role": record.self_role, "member_kind": "device", "epoch": record.epoch},
+    )
     return record
 
 
@@ -1296,7 +1428,7 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             "peer_required",
             "name a device with --peer, or ask every device with --all-peers",
         )
-    payload = _relay_call("peer_session_rows") or {}
+    payload = _relay_call("peer_session_rows", timeout=_listing_timeout()) or {}
     remote = [row for row in (payload.get("sessions") or []) if isinstance(row, dict)]
     if peer:
         wanted = peer.lower()
@@ -1344,11 +1476,24 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_peers(args: argparse.Namespace) -> int:
-    live = _relay_call("net_peer_ls")
+    # A LISTING PROBES ITS PEERS, so it needs the relay's own listing budget plus
+    # slack rather than the 5s default: with the default, one unreachable member
+    # would make the control call time out and this verb would report "the relay is
+    # not running" about a relay that is running perfectly well.
+    live = _relay_call("net_peer_ls", timeout=_listing_timeout())
     if live is None:
+        # ONE REFUSAL SHAPE FOR THE WHOLE FAMILY: ``code`` + ``message``, the same
+        # keys every other `lop network` refusal uses and the only shape an agent
+        # path has to parse. This one used to answer with a bare ``error`` key, so
+        # a consumer that read ``code`` saw nothing at all (QA round 1, F-6).
         return _emit(
             args,
-            {"ok": False, "peers": [], "error": "the relay is not running"},
+            {
+                "ok": False,
+                "code": "relay_unavailable",
+                "message": "the relay is not running; start it with `lop network start`",
+                "peers": [],
+            },
             ["the relay is not running; start it with `lop network start`"],
         )
     # ``net_peer_ls`` answers a LIST (a peer table), so the control client wraps it
@@ -1689,11 +1834,20 @@ def _has_terminal() -> bool:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    """Diagnose the mesh. Reports; never asserts reachability it has not proven."""
+    """Diagnose the mesh. Reports; never asserts reachability it has not proven.
+
+    ``ok`` ANSWERS "IS THE MESH HEALTHY", derived from the check rows rather than
+    asserted. It used to be hardcoded ``true`` while a row in the same payload
+    said ``ok: false``, so a consumer that read the summary line and not the array
+    read a failing mesh as a passing one — and ``ok`` is exactly the key an agent
+    path checks first (QA round 1). The failing rows are also named in ``code`` /
+    ``message``, so the refusal family keeps one shape.
+    """
     live = _relay_call("net_doctor", peer=args.peer)
     payload = live if live is not None else _doctor_locally(args)
+    checks = list(payload.get("checks") or [])
     lines = []
-    for check in payload.get("checks", []):
+    for check in checks:
         state = "ok " if check.get("ok") else "FAIL"
         lines.append(
             f"{state} {check.get('check', '')} {check.get('device_id', '')} "
@@ -1707,7 +1861,17 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "this device has no device identity (identity_missing): run `lop network init`, or "
             "re-pair with a new invite"
         )
-    return _emit(args, {"ok": True, **payload}, lines)
+    failures = [
+        f"{check.get('check', '')}: {check.get('detail', '') or 'failed'}"
+        for check in checks
+        if not check.get("ok")
+    ]
+    healthy = not failures and bool(payload.get("identity_present", True))
+    answer: dict[str, Any] = {**payload, "ok": healthy}
+    if not healthy:
+        answer["code"] = "unhealthy"
+        answer["message"] = "; ".join(failures) or "the device has no identity"
+    return _emit(args, answer, lines)
 
 
 def _doctor_locally(args: argparse.Namespace) -> dict[str, Any]:

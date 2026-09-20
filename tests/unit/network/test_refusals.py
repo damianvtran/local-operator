@@ -54,6 +54,35 @@ def _args(**fields: object) -> Namespace:
     return Namespace(**base)
 
 
+def test_sessions_peer_json_refuses_with_a_document(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``lop sessions --peer X --json`` answers with JSON, not with silence (F-5).
+
+    Every `lop network` verb emits ``{"ok": false, "code": ..., "message": ...}``
+    when it refuses, and the design says the agent path PARSES the JSON. This one
+    printed its sentence on stderr and left stdout EMPTY with rc=1, so a parser
+    could not tell a refusal from a crash. The other front end for the same rows is
+    `lop network sessions`, which already answered with a document.
+    """
+    from local_operator import cli as main_cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    args = Namespace(
+        json=True,
+        sessions_command=None,
+        all=False,
+        limit=None,
+        peer="d_absent",
+        all_peers=False,
+    )
+    assert main_cli.sessions_command(args) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["code"] == "peer_unreachable"
+    assert "reachable" in payload["message"]
+
+
 # ---------------------------------------------------------------------------
 # R2 — panic (and friends) after a disconnect
 # ---------------------------------------------------------------------------
@@ -118,7 +147,10 @@ def test_the_relay_control_path_refuses_by_name_too(root: Path) -> None:
         ("show", 0),
         ("trust", 0),
         ("log", 0),
-        ("doctor", 0),
+        # ``doctor`` exits non-zero because a DISCONNECTED device has a failing
+        # check: ``ok`` now means "the mesh is healthy", not "the command ran",
+        # so rc follows the checks (QA round 1).
+        ("doctor", 1),
         ("status", 0),
     ],
 )
@@ -154,9 +186,11 @@ def test_peers_with_no_relay_is_an_answer_not_a_failure(
     assert net_cli._cmd_peers(_args()) == 1  # noqa: SLF001
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    # The JSON keeps the sentence the agent tool and the guide document; the REMEDY
-    # lives on the human line, which is where a person reads it.
-    assert payload["error"] == "the relay is not running"
+    # ONE SHAPE FOR THE FAMILY: ``code`` + ``message``, the same keys every other
+    # `lop network` refusal carries. This one used to answer with a bare ``error``
+    # key, so a consumer that read ``code`` found nothing (QA round 1, F-6).
+    assert payload["code"] == "relay_unavailable"
+    assert "relay" in payload["message"]
 
 
 def test_a_network_that_does_not_exist_refuses_by_name(

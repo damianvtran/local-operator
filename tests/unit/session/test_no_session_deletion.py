@@ -263,6 +263,184 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # -- the mesh package: `<config>/network/` and the session STAMP ----------
+    # THE MESH LEGITIMATELY WRITES AND REMOVES PLENTY — network records, invite
+    # tokens, outbox queues, parked pairings, the audit log, the identity keypair.
+    # Every one of those paths is composed by `network/store.py`'s own helpers on
+    # top of `identity.network_root()`: `(root or config_dir()) / "network"`. It is
+    # a SIBLING of `sessions/` under the config root and never a parent of it, so
+    # no call in this group can name a path under `sessions/` — which is the whole
+    # of the argument, and why they are argued in one block rather than one by one.
+    #
+    # `_write_private_json` is the package's single staged-write path ("the only
+    # write path in this package"): the `os.replace` puts a tmp FILE over its
+    # target in the same network/ subdirectory, and the unlink removes only that
+    # call's own sidecar. `purge_network_artifacts` is `uninstall --purge`, whose
+    # blast radius the design fixes in §12: network records, invite files, queues,
+    # parked pairings, the audit log and the network-scoped catalogue — all under
+    # `network/`. The ONE session-shaped path in the package is the stamp, and it
+    # gets its own block below.
+    (
+        "local_operator/network/store.py::_write_private_json",
+        "os.replace",
+        "Staged 0600 write of one network-store FILE under <config>/network/...; "
+        "both sides are direct children of the same network/ subdirectory",
+    ),
+    (
+        "local_operator/network/store.py::_write_private_json",
+        "<path>.unlink",
+        "Removes only this call's own .<name>.<pid>.tmp sidecar after the replace, "
+        "in the same directory under <config>/network/",
+    ),
+    (
+        "local_operator/network/store.py::_quarantine",
+        "os.replace",
+        "Sets an unparsable network record or parked decision aside as <name>.corrupt, "
+        "in the SAME <config>/network/ subdirectory it was read from",
+    ),
+    (
+        "local_operator/network/store.py::forget",
+        "<path>.unlink",
+        "`lop network rm`: the record FILE and its .secrets.json FILE under "
+        "<config>/network/networks/ (design §12 — local record removal, audit kept)",
+    ),
+    (
+        "local_operator/network/store.py::clear_pending_pairing",
+        "<path>.unlink",
+        "The parked pairing FILE <config>/network/pending/<invite>.pending.json, once "
+        "its question is answered, declined or timed out",
+    ),
+    (
+        "local_operator/network/store.py::clear_pair_decision",
+        "<path>.unlink",
+        "The human's recorded answer FILE <config>/network/pending/<invite>.decision.json",
+    ),
+    (
+        "local_operator/network/store.py::queued_frames",
+        "<path>.unlink",
+        "Deletes one UNPARSABLE <stamp>.frame FILE found by globbing that peer's own "
+        "<config>/network/outbox/<device>/ directory; a torn frame must not block a queue",
+    ),
+    (
+        "local_operator/network/store.py::drop_frame",
+        "<path>.unlink",
+        "Drops one drained frame FILE; the path is handed over by `queued_frames`'s glob "
+        "over that peer's <config>/network/outbox/<device>/ directory",
+    ),
+    (
+        "local_operator/network/store.py::purge_network_artifacts",
+        "<path>.unlink",
+        "`uninstall --purge`: invite FILEs, parked pending/decision FILEs, the network "
+        "record and .secrets.json FILEs, audit.jsonl plus its .<n>.gz generations, and "
+        "the network-scoped catalog.json — every path built by this module's own "
+        "helpers under <config>/network/ (design §12's blast radius, identity kept)",
+        8,
+    ),
+    (
+        "local_operator/network/store.py::purge_network_artifacts",
+        "shutil.rmtree",
+        "The two outbox queue DIRECTORIES: <config>/network/outbox/<device_id>/ for each "
+        "member of a purged network, and every remaining queue when the purge covers "
+        "every network. Both are children of network/outbox/, a sibling of sessions/",
+        2,
+    ),
+    (
+        "local_operator/network/store.py::purge_identity",
+        "<path>.unlink",
+        "`uninstall --purge-identity`: the keypair FILE <config>/network/identity/"
+        "device.json, and only after a TTY confirmation that names every network the "
+        "identity is in",
+    ),
+    (
+        "local_operator/network/store.py::purge_identity",
+        "<path>.rmdir",
+        ".../network/identity/ itself, and only when the filesystem confirms it is "
+        "empty — rmdir refuses a non-empty directory, and device.json is the only "
+        "content that directory ever holds",
+    ),
+    (
+        "local_operator/network/identity.py::_staged_write",
+        "os.replace",
+        "Staged write of <config>/network/identity/device.json: a tmp FILE over the "
+        "keypair FILE, both direct children of identity/",
+    ),
+    (
+        "local_operator/network/identity.py::_staged_write",
+        "<path>.unlink",
+        "Removes only this call's own .device.json.<pid>.tmp sidecar in identity/",
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._rotate",
+        "<path>.unlink",
+        "Closes the live audit FILE (<config>/network/audit.jsonl) into its "
+        "audit.jsonl.<n>.gz generation in that same directory; the compression is "
+        "why the original is removed",
+    ),
+    (
+        "local_operator/network/audit.py::AuditLog._prune_generations",
+        "<path>.unlink",
+        "Drops an aged or over-count audit.jsonl.<n>.gz generation FILE in "
+        "<config>/network/, oldest first, and logs each deletion in the surviving log",
+    ),
+    (
+        "local_operator/network/cli.py::_cmd_disconnect",
+        "<path>.unlink",
+        "`lop network disconnect`: deletes THIS network's <id>.secrets.json FILE under "
+        "<config>/network/networks/, so the device can no longer read new traffic; the "
+        "record, the membership and the audit trail all stay",
+    ),
+    (
+        "local_operator/network/relay.py::RelayServer._ctl_disconnect",
+        "<path>.unlink",
+        "The same secrets FILE deletion as `_cmd_disconnect`, reached through the "
+        "relay's control socket instead of the CLI process",
+    ),
+    (
+        "local_operator/network/relay.py::uninstall",
+        "<path>.unlink",
+        "Removes the relay's own LaunchAgent plist FILE (<home>/Library/LaunchAgents/"
+        "<label>.plist) — a HOME path, not a config one — and only when `is_supported()` "
+        "and the plist is the one this real home owns",
+    ),
+    (
+        "local_operator/network/tool.py::execute_network",
+        "<path>.unlink",
+        "Removes the agent tool's own `tempfile.mkstemp` invite-token FILE (system temp, "
+        "prefix lop-join-) once the join it was written for has run; a leaked copy is a "
+        "live credential until it is redeemed",
+    ),
+    # -- the session STAMP: `sessions/<id>/mesh.json` ------------------------
+    # THE ONE MESH FILE THAT REALLY IS INSIDE A SESSION DIRECTORY, so it is argued
+    # here and not in the block above. `stamp_path` joins the literal
+    # `MESH_STAMP_NAME` as the LAST component, so neither call can name a session
+    # DIRECTORY: `os.replace` puts a tmp FILE over the mesh.json FILE (a replace
+    # over a regular file never removes or renames its parent), the unlink removes
+    # only that call's own tmp sidecar, and `remove_stamp` unlinks mesh.json alone —
+    # an absence `read_stamp` documents as the ordinary "unplaced" state, which is
+    # the pre-mesh behaviour, not a session that lost its transcript or its record.
+    # This is the design's own stamp lifecycle (mesh-session-mobility.md §1.2/§5.1):
+    # the WRITE is how `net_session_create` records `home_device` on the session the
+    # peer just asked for, and the removal belongs to the move/fork path, which is
+    # the next slice and not in this build.
+    (
+        "local_operator/session/placement.py::write_stamp",
+        "os.replace",
+        "tmp FILE -> sessions/<id>/mesh.json FILE; the directory is written INTO, never "
+        "named, and a failed write deliberately leaves no stamp at all",
+    ),
+    (
+        "local_operator/session/placement.py::write_stamp",
+        "os.unlink",
+        "Removes only this call's own .mesh.json.<pid>.tmp sidecar before re-raising the "
+        "failed write",
+    ),
+    (
+        "local_operator/session/placement.py::remove_stamp",
+        "<path>.unlink",
+        "Unlinks sessions/<id>/mesh.json ONLY — placement metadata whose absence "
+        "read_stamp() reads as the supported 'unplaced' state; never the directory, "
+        "and never a transcript or a session record",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",
@@ -1476,6 +1654,11 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
+        # The mesh placement stamp: one FILE at `sessions/<id>/mesh.json`, written
+        # by `net_session_create` so a session the peer asked for records WHERE it
+        # lives. Its receiver is the stamp path — never the session directory, and
+        # never a second displacer riding on an allow-listed function.
+        "local_operator/session/placement.py::write_stamp",  # tmp -> mesh.json
     }
 )
 

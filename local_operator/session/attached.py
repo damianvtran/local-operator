@@ -7018,8 +7018,21 @@ class AttachedSession:
         prove locality, and here the answer is known from the owner. Locality is
         not re-derived here because a property must not do registry I/O on a path
         the status bar reads.
+
+        NO OWNER OBJECT YET: a viewer built by ``__new__`` (the protocol test) or
+        one still inside ``__init__``. There is no remote owner to have been placed
+        elsewhere, so the local answer is the honest one — the same answer the cold
+        arm gives, for the same reason. It is deliberately NOT ``"unknown"``: this
+        property promises never to answer that (readers branch on it, and the
+        ``"another-machine"`` arm exists precisely so that a KNOWN remote answer
+        does not have to be spelled ``"unknown"``), and ``getattr`` rather than a
+        bare ``self._owner`` is what keeps the promise true for every construction
+        path rather than only the one ``__init__`` takes.
         """
-        return "this-machine" if self._owner.placement.is_local else "another-machine"
+        owner = getattr(self, "_owner", None)
+        if owner is None:
+            return "this-machine"
+        return "this-machine" if owner.placement.is_local else "another-machine"
 
     # -- SessionProtocol identity/state ------------------------------------
 

@@ -925,12 +925,27 @@ def test_an_owner_session_is_not_a_viewer() -> None:
 
 
 def test_the_runtime_role_predicates_disagree_between_the_two_classes() -> None:
-    """The predicates must actually discriminate.
+    """The predicates must actually discriminate, and on the DESIGNED values.
 
     Asserted as a PAIR rather than per class: three predicates that returned
     the same value on both sides would type-check, pass a conformance test, and
     still be useless — which is the failure mode of the flag they replace
     (``is_remote`` is constant-True for every `lop` TUI session).
+
+    ``runtime_locality`` is the pair's sharpest member, so it is asserted as the
+    design fixes it rather than as "whatever the classes happen to return":
+    ``protocol.py``'s union is four-valued, the OWNER facade is ``"this-process"``
+    because its loop runs on this event loop, and a VIEWER is ``"this-machine"``
+    (its runtime is a separate process on this host) — with the fourth member,
+    ``"another-machine"``, reserved for a viewer whose owner is a remote placement
+    (§1.3), asserted where that owner is built rather than stubbed here (see
+    ``test_owner_seam.py::test_runtime_locality_answers_another_machine_for_a_remote_placement``).
+
+    And never ``"unknown"``: that arm exists for a facade that cannot prove
+    locality, and this one always can — by reading the owner's placement, or by
+    having no owner at all, which is the same this-machine answer the cold viewer
+    gets. That was the arm this class used to raise ``AttributeError`` on instead,
+    for every viewer not built through ``__init__``.
     """
     owner = Session.__new__(Session)
     viewer = AttachedSession.__new__(AttachedSession)
@@ -943,6 +958,11 @@ def test_the_runtime_role_predicates_disagree_between_the_two_classes() -> None:
 
     assert owner.runtime_locality == "this-process"
     assert viewer.runtime_locality == "this-machine"
+    # The pair discriminates: the facade's answer is the one the viewer must never
+    # give, and neither of them is allowed to fall back to the conservative arm.
+    assert viewer.runtime_locality != owner.runtime_locality
+    assert owner.runtime_locality != "unknown"
+    assert viewer.runtime_locality != "unknown"
 
 
 def test_the_viewer_protocol_covers_what_only_the_facade_has() -> None:

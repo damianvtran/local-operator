@@ -186,6 +186,7 @@ def build_hello(
     capabilities: list[str],
     build: dict[str, Any],
     join: dict[str, Any] | None = None,
+    endpoints: list[str] | None = None,
 ) -> dict[str, Any]:
     frame: dict[str, Any] = {
         "net": "hello",
@@ -201,12 +202,56 @@ def build_hello(
         "caps": capabilities,
         "build": build,
     }
+    # THE DIALER'S OWN ENDPOINTS RIDE THE HELLO, and they are why a listener can
+    # record a member row that `_ensure_link` can dial later. Without them the
+    # only address a listener ever learned was the OBSERVED source address of the
+    # connection, which is an ephemeral port that is closed the moment the link
+    # drops — so a paired peer was permanently unreachable (QA round 1, F-2).
+    # The hello is inside the transcript, so this field is authenticated before
+    # anything acts on it, and both sides hash the SAME bytes (the listener folds
+    # in the frame it received), so the SAS is unaffected.
+    if endpoints:
+        frame["endpoints"] = list(endpoints)
     if mode == "join":
         # A join carries the invitation id and the joiner's own device key; the
         # MAC over the transcript is what proves possession of the token, so the
         # token itself never crosses the wire.
         frame["join"] = join or {}
     return frame
+
+
+#: How many endpoints a handshake may declare, and how long one may be. The
+#: list lands in a durable member row that `_ensure_link` dials, so an
+#: unbounded or absurd one is a dial storm waiting to happen: a peer can only
+#: ever be asked to dial what it learned here.
+MAX_DECLARED_ENDPOINTS = 8
+MAX_ENDPOINT_CHARS = 255
+
+
+def clean_endpoints(value: Any) -> list[str]:
+    """Validate a peer's declared endpoints: ``host:port`` strings, bounded.
+
+    Anything malformed is DROPPED rather than refused: a peer that declares one
+    bad endpoint and one good one is still reachable, and refusing the whole
+    handshake over a cosmetic field would be a worse failure than ignoring it.
+    The value is used only to fill a member row, never as authority — the link
+    is authenticated by the key, not by the address it claims.
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    cleaned: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if not text or len(text) > MAX_ENDPOINT_CHARS:
+            continue
+        address, _, port_text = text.rpartition(":")
+        if not address or not port_text.isdigit() or not 0 < int(port_text) <= 65535:
+            continue
+        if text not in cleaned:
+            cleaned.append(text)
+        if len(cleaned) >= MAX_DECLARED_ENDPOINTS:
+            break
+    return cleaned
 
 
 def build_join_block(*, invite_id: str, joiner_public_key: str, joiner_name: str) -> dict[str, Any]:
@@ -375,6 +420,13 @@ class Handshake:
     peer_public_key: str = ""
     peer_capabilities: list[str] = field(default_factory=list)
     peer_build: dict[str, Any] = field(default_factory=dict)
+    #: Where THIS device says peers can reach it (``advertise_hosts`` plus
+    #: detected addresses), carried on the hello we send.
+    self_endpoints: list[str] = field(default_factory=list)
+    #: Where the PEER says it can be reached. Set from the peer's hello when we
+    #: listen and from its ``welcome`` when we dial, because the two roles learn
+    #: different frames first.
+    peer_endpoints: list[str] = field(default_factory=list)
     phase: LinkPhase = "member"
     credential: Credential | None = None
     join_block: dict[str, Any] = field(default_factory=dict)
@@ -396,6 +448,7 @@ class Handshake:
         mode: Mode = "member",
         capabilities: list[str] | None = None,
         build: dict[str, Any] | None = None,
+        endpoints: list[str] | None = None,
     ) -> Handshake:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -415,6 +468,7 @@ class Handshake:
             capabilities=list(capabilities or [MESH_NET_V1]),
             build=dict(build or {}),
             self_device_id=identity.device_id,
+            self_endpoints=clean_endpoints(endpoints or []),
             # Overwritten by `establish` with the DERIVED id; this placeholder exists
             # only so the dataclass field is never unset before the handshake completes.
             link_id=b"",
@@ -441,6 +495,7 @@ class Handshake:
             capabilities=self.capabilities,
             build=self.build,
             join=join,
+            endpoints=self.self_endpoints,
         )
         _send_frame(sock, self.hello)
         return self.hello
@@ -490,6 +545,11 @@ class Handshake:
         check_link_version(frame.get("v"), mine=LINK_VERSION)
         self.phase = cast(LinkPhase, str(frame.get("phase", "member")))
         self.peer_public_key = self._peer_key_from_welcome(frame)
+        # The listener's ``welcome`` is where the DIALER learns where the peer can
+        # be reached. ``welcome`` is the last plaintext frame and is OUTSIDE the
+        # transcript (only hello/challenge/auth are hashed), so this field cannot
+        # perturb the SAS the two humans compare.
+        self.peer_endpoints = clean_endpoints(frame.get("endpoints"))
         self.establish()
         return frame
 
@@ -544,6 +604,7 @@ class Handshake:
         self.peer_instance_id = str(frame["instance_id"])
         self.peer_capabilities = [str(cap) for cap in frame.get("caps") or []]
         self.peer_build = dict(frame.get("build") or {})
+        self.peer_endpoints = clean_endpoints(frame.get("endpoints"))
         self.join_block = dict(frame.get("join") or {})
         return frame
 
@@ -758,6 +819,7 @@ class Handshake:
         capabilities: list[str] | None = None,
         members_digest: str = "",
         network_name: str = "",
+        endpoints: list[str] | None = None,
     ) -> dict[str, Any]:
         """The listener's last plaintext frame. The SAS is deliberately absent."""
         frame: dict[str, Any] = {
@@ -775,6 +837,11 @@ class Handshake:
         if phase == "pair":
             frame["network"] = {"network_id": self.network_id, "name": network_name}
             frame["inviter"] = {"device_id": self.self_device_id, "name": self.identity.name}
+        if endpoints:
+            # How the dialer learns where to reach US. Sent here rather than in
+            # the challenge because ``welcome`` is outside the transcript, so a
+            # build that does not know this key reads it as decoration.
+            frame["endpoints"] = list(endpoints)
         if nets is not None:
             frame["nets"] = nets
         return frame
