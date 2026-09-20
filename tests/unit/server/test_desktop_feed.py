@@ -97,11 +97,12 @@ def _notification_gate_off() -> Iterator[None]:
     banners composed here ARE the subject, so the gate is cleared once for the
     module rather than by each of the twenty tests that need it.
 
-    The body is ``tests/notification_opt_in.notifications_on`` — the shared
-    opt-in — which clears that switch AND waives the test-hosting rule: this
-    module's fabricated sessions carry no journal, so only the first applies
-    today, and sharing the helper is what keeps a module that later seeds a real
-    selection from having to remember a second variable.
+    The body is ``tests/notification_opt_in.notification_path_opt_in`` — the
+    shared opt-in — which clears that switch AND waives the test-hosting rule:
+    this module's fabricated sessions carry no journal, so only the first applies
+    to most cells here, and sharing the helper is what keeps a module that later
+    seeds a real selection from having to remember a second variable. The cells
+    that assert the RULE close the waiver for their own body.
 
     Set and restored by hand rather than through ``monkeypatch``, and that is
     deliberate: that fixture is FUNCTION-scoped and SHARED with the tests, so a
@@ -2907,7 +2908,19 @@ def test_a_stored_mock_session_is_never_bannered_by_another_process(tmp_path) ->
 def test_a_session_with_no_recorded_hosting_is_still_announced(tmp_path) -> None:
     """Failing toward notifying: an unreadable or selection-free journal is not
     evidence of a test session, and muting a real completion would be its own
-    bug report."""
+    bug report.
+
+    THE MODULE'S OPT-IN IS CLOSED FOR THIS BODY, and without that this cell
+    proves nothing: the shared fixture waives the test-hosting rule for the whole
+    module, so the tolerant branch below the waiver is never reached and the
+    assertion holds whatever it does. Its sibling above closes the escape the
+    same way, for the same reason. A plain ``os.environ.pop``, NOT
+    ``monkeypatch.delenv``: monkeypatch is set up before a module-level autouse
+    fixture and so restores after it, re-setting the escape for every later test
+    in the worker.
+    """
+    os.environ.pop(ENV_ALLOW_TEST_HOSTING_NOTIFY, None)
+
     root = tmp_path
     sid = "b" * 12
     _session(root, sid)  # no transcript at all
