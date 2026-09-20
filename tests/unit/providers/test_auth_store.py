@@ -2176,6 +2176,18 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
             provider, {**_oauth(refresh="rotating-token", access="access-1"), **creds}
         )
 
+    @staticmethod
+    def _current(store: AuthStore, credential_id: int) -> Any:
+        """The row as it stands now, for the type checker as much as the test.
+
+        ``get_credential`` is Optional because a row can be deleted out from under
+        a caller. Every call here is on a row this test created, so a miss is a
+        test bug and the assertion says which credential went missing.
+        """
+        row = store.get_credential(credential_id)
+        assert row is not None, f"credential {credential_id} disappeared"
+        return row
+
     async def test_a_lost_response_arms_the_marker_and_the_token_is_never_presented_again(
         self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2209,7 +2221,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
 
         monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: lost_response)
         with pytest.raises(AuthStoreError):
-            await store._ensure_oauth_fresh(store.get_credential(row.id))
+            await store._ensure_oauth_fresh(self._current(store, row.id))
         assert posts == ["rotating-token"]
 
         after = store.get_credential(row.id)
@@ -2220,7 +2232,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
         # The second attempt refuses to present it, says so, and does not clear
         # the marker — clearing is reserved for a DEFINITIVE answer.
         with pytest.raises(AuthStoreError, match="never acknowledged"):
-            await store._ensure_oauth_fresh(store.get_credential(row.id))
+            await store._ensure_oauth_fresh(self._current(store, row.id))
         assert posts == ["rotating-token"]
         still = store.get_credential(row.id)
         assert still is not None and REFRESH_SEND_UNCONFIRMED_KEY in still.data
@@ -2285,7 +2297,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
             return {"access": "access-2", "refresh": "rotated", "expires": expires_at}
 
         monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: ok)
-        data = await store._ensure_oauth_fresh(store.get_credential(row.id))
+        data = await store._ensure_oauth_fresh(self._current(store, row.id))
         assert data["access"] == "access-2"
         assert posts == ["rotating-token"]
         # A persisted rotation clears the marker: the answer IS the ack.
@@ -2318,7 +2330,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
 
         monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refused)
         with pytest.raises(CredentialInvalidError):
-            await store._ensure_oauth_fresh(store.get_credential(row.id))
+            await store._ensure_oauth_fresh(self._current(store, row.id))
         assert posts == ["rotating-token"]
 
         after = store.get_credential(row.id)
@@ -2340,7 +2352,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
 
         # A later attempt is refused from the persisted verdict, without POSTing.
         with pytest.raises(CredentialInvalidError):
-            await store._ensure_oauth_fresh(store.get_credential(row.id))
+            await store._ensure_oauth_fresh(self._current(store, row.id))
         assert posts == ["rotating-token"]
 
     async def test_the_tombstone_survives_a_rotation_and_only_a_login_clears_it(
@@ -2374,7 +2386,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
             AuthStore, "_refresh_fn", lambda self_, provider: refresh_lost_to_a_tombstone
         )
         with pytest.raises(CredentialInvalidError):
-            await store._ensure_oauth_fresh(store.get_credential(row.id))
+            await store._ensure_oauth_fresh(self._current(store, row.id))
         assert posts == ["rotating-token"]
 
         after = store.get_credential(row.id)
@@ -2394,7 +2406,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
             return {"access": "fresh-access", "expires": store._now_ms() + 3600_000}
 
         monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: ok)
-        data = await store._ensure_oauth_fresh(store.get_credential(row.id))
+        data = await store._ensure_oauth_fresh(self._current(store, row.id))
         assert data["access"] == "fresh-access"
         assert second == ["rotating-token"]
 
@@ -2547,10 +2559,10 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
 
         monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: lost)
         with pytest.raises(AuthStoreError):
-            await store._ensure_oauth_fresh(store.get_credential(row.id))
+            await store._ensure_oauth_fresh(self._current(store, row.id))
         # The next attempt refuses (the marker) — and must free the lease.
         with pytest.raises(AuthStoreError, match="never acknowledged"):
-            await store._ensure_oauth_fresh(store.get_credential(row.id), force=True)
+            await store._ensure_oauth_fresh(self._current(store, row.id), force=True)
         assert peer._try_refresh_lease(row.id) is True
         store.close()
         peer.close()
@@ -2596,7 +2608,7 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
 
         monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refused)
         with pytest.raises(AuthStoreError):
-            await store._ensure_oauth_fresh(store.get_credential(row.id))
+            await store._ensure_oauth_fresh(self._current(store, row.id))
         assert posts == ["rotating-token"]
 
         terminal = is_terminal_grant_response(401, body)
@@ -2611,5 +2623,5 @@ class TestTheRotatingRefreshTokenIsNeverRePresented:
             # the IdP may already have spent.
             assert REFRESH_SEND_UNCONFIRMED_KEY in after.data
         with pytest.raises(AuthStoreError):
-            await store._ensure_oauth_fresh(store.get_credential(row.id))
+            await store._ensure_oauth_fresh(self._current(store, row.id))
         assert posts == ["rotating-token"], "the token was presented twice"
