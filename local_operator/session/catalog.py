@@ -576,6 +576,15 @@ def decorate_rows(
 ) -> list[SessionRow]:
     """Fill in each row's runtime state, and float the ones needing a person.
 
+    ``include_archived`` is the archive predicate for the rows this function
+    ADDS: a live record the scan did not carry is skipped when the archive store
+    holds its id, unless the caller asked for archived rows — and when it is
+    added it carries the store's own ``archived`` answer. It is not a filter over
+    ``rows``, which the caller has already filtered; this is the second place the
+    predicate has to be asked, because the registry knows nothing about archives
+    (QA round 1, Q1 — see the ``if include_live`` block for the failure that
+    motivated it).
+
     Two reads for the whole list: the discovery records say which sessions
     are running, working, attached or not answering, and the wake index says
     which have reminders armed. Best-effort — a picker that cannot read either
