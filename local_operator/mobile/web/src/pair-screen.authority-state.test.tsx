@@ -95,27 +95,35 @@ describe("the pairing screen and the machine's own state", () => {
 });
 
 describe("the pairing screen's failure copy", () => {
-	it("routes a revoked device back to the machine, not into a loop (U8-1)", async () => {
-		/* The old sentence was "Pair it again from `lop pair`" — the exact step the
-		   machine refuses for ever, with no un-revoke verb anywhere in the product
-		   (`_stage_anchor_with_revocation` only ever writes `revoked: true`, into a
-		   root-owned anchor). Measured in the UX round-8 browser pass as a loop: the
-		   phone is sent to mint a fresh code, claims it, and is refused again with
-		   the same advice. The copy now names the only route that exists — a new
-		   anchor on the machine — and says what that costs. */
+	it("routes a revoked device back to the machine with an operand it can act on (U1)", async () => {
+		/* The route, in the three states it has been through: "Pair it again from
+		   `lop pair`" (the step the machine refuses for ever — UX round 8, U8-1), then
+		   `lop operator init` + `install` (which the local revocation record defeated —
+		   round 9's Q9-1/R9-2, measured 403 either way), now the inverse verb — with
+		   THIS PHONE'S OWN ID in it rather than a `<this phone's device id>`
+		   placeholder (UX and design round 10, U1: the id is derived from this phone's
+		   key a few lines above and was discarded, so the command on screen could not be
+		   run by the person reading it). */
 		mocks.claimPairingCode.mockRejectedValueOnce(
 			new Error("this device has been revoked"),
 		);
 		await pairAway();
 		const said = await screen.findByText(/revoked on the machine/, undefined, { timeout: 5000 });
-		/* The route, as the CLI actually spells it (agent review round 9, R9-2: the
-		   first version of this copy sent the operator to create a new anchor, which
-		   the local record then defeated — measured 403 either way). */
-		expect(said.textContent).toContain("lop operator devices --authorise");
-		expect(said.textContent).toContain("lop operator install");
 		expect(said.textContent).toContain("only there");
-		expect(said.textContent).not.toContain("Pair it again");
-		expect(said.textContent).not.toContain("create a new operator anchor");
+
+		/* The command is a COMMAND: `<code>`, like the neighbouring paragraph's
+		   `lop pair`, and it carries the real 32-hex id (D1). */
+		const command = await screen.findByText(/lop operator devices --authorise/);
+		expect(command.tagName.toLowerCase()).toBe("code");
+		expect(command.textContent).toMatch(/^lop operator devices --authorise [0-9a-f]{32}$/);
+		expect(screen.queryByText(/this phone's device id/)).toBeNull();
+		expect(screen.queryByText(/Pair it again/)).toBeNull();
+		expect(screen.queryByText(/create a new operator anchor/)).toBeNull();
+
+		/* D2: the machine-side condition the old parenthetical asked a phone reader to
+		   evaluate is now its own sentence, gated on a check they can run. */
+		expect(screen.getByText(/lop operator status/)).toBeTruthy();
+		expect(screen.getByText(/lop operator install/)).toBeTruthy();
 	});
 
 	it("turns a relay fault into a sentence rather than a status code (U8-4)", async () => {

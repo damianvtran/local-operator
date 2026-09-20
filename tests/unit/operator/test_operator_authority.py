@@ -632,3 +632,45 @@ def test_lop_operator_init_is_idempotent_and_never_replaces_a_key(
     assert "the anchor statement was missing, so it was written" in said, said
     assert json.loads(trust.staging_path(tmp_path).read_text())["key_id"] == first_anchor["key_id"]
     assert key_path.read_bytes() == first_key
+
+
+def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    """Design round 10, D3: the block that broke mid-word below ~79 columns.
+
+    The first version printed ONE string containing newlines and an 11-space
+    continuation indent. At 60 and 44 columns the terminal soft-wrapped those physical
+    lines again, stranding the indent mid-answer and splitting words — the only field
+    in the report with a hand-set indent, and the only one that looked broken. Every
+    other field is one line per fact and lets the terminal wrap; this is asserted as
+    that: one line per sentence, starting at column 0, with no interior run of spaces
+    for a terminal to strand.
+    """
+    from local_operator.operator import handlers
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        handlers,
+        "operator_authority_report",
+        lambda: {
+            "level": "spawn-capability-only",
+            "anchor_path": str(tmp_path / "anchor-root" / "501.json"),
+            "anchor_installed": False,
+            "anchor_root_owned": False,
+            "backend": "",
+            "presence_enforced_by_os": False,
+            "capability_guarantee": "spawn-capability",
+            "reason": "no anchor installed",
+        },
+    )
+    assert handlers._status() == 0
+    out = capsys.readouterr().out.splitlines()
+    at = next(index for index, line in enumerate(out) if line.startswith("loosening:"))
+    lines = out[at : at + 2]
+    assert len(lines) == 2, out
+    for line in lines:
+        assert line == line.lstrip(), f"a hand-set indent came back: {line!r}"
+        assert "  " not in line, f"a doubled space for a terminal to strand: {line!r}"
+    assert lines[0].endswith("host.")
+    assert "lop operator init" in lines[1], lines

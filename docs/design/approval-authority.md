@@ -549,13 +549,23 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   `tests/unit/harness/test_approval_authority.py` sweep an explicit subject list —
   every notice constant, every non-docstring string literal under `local_operator/`,
   every string in the portal sources (`local_operator/mobile/web/src`, comments
-  stripped) and every `docs/**/*.md` — against both the phrasings that promise a
-  window and a phrase-independent shape (a window-ish noun beside a gate-loosening
-  verb). The one exemption is THIS file, and it is checked rather than asserted: a
-  mention here must sit beside a word that makes it history. What that buys is
-  narrower than "nothing can slip through unnoticed" and is what the cells
-  guarantee: a fifth assertion in a Python literal, a portal string or a document
-  fails, and an un-qualified claim in this file fails too;
+  stripped) and every `docs/**/*.md` — judged twice. Once against the phrasings this
+  class has produced, sentence by sentence in documents so a wrapped line cannot hide
+  one. Then against a phrase-independent SHAPE. The shape is a surface noun — a
+  window, a console, a terminal — near one of the two remedy names the shipped
+  phrasings carried. The two names are `approvals` and `retire and reopen`. In a
+  document the shape additionally requires a spawner relation, which is what made the
+  deleted rule false: a start, launch or open word taking a session or runtime as its
+  object. The one exemption is THIS file, and it is checked rather than asserted: a
+  mention here must sit beside a word that makes it history. **The exclusions are
+  deliberate and they are part of the bound** (agent review round 10, MINOR-1): a bare
+  verb meaning "to loosen" is not one of the two names, so copy pairing a surface noun
+  with it is not caught, and ownership of the gate is excluded as a relation because
+  this PR's own repaired sentence uses that word. The concrete counterexample is
+  recorded in the cell's own docstring rather than quoted here. What the cells do
+  catch is every wording this class actually shipped — each is in a mutation battery
+  — and, in a document, any re-statement of the spawner rule. A claim outside those
+  shapes is the phrase list's job; an un-qualified claim in this file still fails;
 - **the phone's card component renders the refusal body raw.** The sentence it
   now receives is the CARD's — the question survived, and a deny works from there
   — but `pending-card.tsx`'s `humanizeError` has no arm for it, so the copy is
