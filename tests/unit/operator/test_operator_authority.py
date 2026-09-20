@@ -633,6 +633,26 @@ def test_lop_operator_init_is_idempotent_and_never_replaces_a_key(
     assert json.loads(trust.staging_path(tmp_path).read_text())["key_id"] == first_anchor["key_id"]
     assert key_path.read_bytes() == first_key
 
+    # (c) the state where the carrier is absent AND nothing needs writing — an
+    # INSTALLED anchor with no staged file — used to omit the line entirely rather
+    # than say there is none (UX round 10, U4): a slot that reads as "not reported".
+    trust.staging_path(tmp_path).unlink()
+    monkeypatch.setattr(
+        handlers,
+        "load_anchor",
+        lambda uid=None: trust.AnchorLoad(
+            anchor=trust.OperatorAnchor.from_json(first_anchor),
+            path=trust.anchor_path(uid),
+            root_owned=True,
+            reason="ok",
+            exists=True,
+        ),
+    )
+    assert handlers.dispatch(args) == 0
+    said = capsys.readouterr().out
+    assert "staged : (none at" in said, said
+    assert "anchor : " in said and "installed: True" in said, said
+
 
 def test_the_spawn_only_status_lines_are_wrapped_by_the_terminal_not_by_hand(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
