@@ -1022,7 +1022,8 @@ def _entry_stat(path: Path) -> os.stat_result | None:
         return None
 
 
-#: Ports a URL's canonical form omits, matching what `URL.origin` drops.
+#: Ports a URL's canonical form omits, matching what `URL.origin` drops. The KEYS
+#: are also the only schemes this predicate will name an origin for — see below.
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 
 
@@ -1038,13 +1039,16 @@ def _origin_of(url: str) -> str:
     `download.ts::originOf` computes `new URL(url).origin`, this side does string
     arithmetic on `urlsplit` (this module has no URL parser and must not grow one
     for a comparison it can do without). The contract they share is therefore
-    written down rather than assumed — **scheme and host lowercased, userinfo
-    dropped, a default port dropped, and `""` for anything with no origin at all**
-    (`data:`, `blob:`, a relative path). Round 2 (M3) found the earlier shapes
-    disagreed exactly there: `netloc` kept the userinfo and the case, so a referrer
-    whose only difference was `User@host` refused as a different page. Outside the
-    contract both sides yield `""`, and `""` refuses rather than matching — the safe
-    direction, and the one the caller documents.
+    written down rather than assumed — **one of `http`, `https`, `ws`, `wss`; scheme
+    and host lowercased; userinfo dropped; a default port dropped; and `""` for
+    anything else**, which includes the schemes whose origin the two sides compute
+    DIFFERENTLY: `new URL('blob:https://example.test/uuid').origin` is
+    `https://example.test`, while `urlsplit` sees a scheme with no host. Round 2
+    (M2) measured exactly that divergence, and round 3 closed it by narrowing BOTH
+    sides to the four schemes a driven page can actually be — the alternative was a
+    contract comment claiming agreement the code did not have. Outside the contract
+    both sides yield `""`, and `""` refuses rather than matching, which is the safe
+    direction and the one the caller documents.
     """
     try:
         parts = urlsplit(url)
@@ -1052,14 +1056,14 @@ def _origin_of(url: str) -> str:
         return ""
     host = parts.hostname
     scheme = parts.scheme.lower()
-    if not scheme or not host:
+    if scheme not in _DEFAULT_PORTS or not host:
         return ""
     try:
         port = parts.port
     except ValueError:
         # An unparsable port is a URL we cannot attribute, not one to guess at.
         return ""
-    if port is None or port == _DEFAULT_PORTS.get(scheme):
+    if port is None or port == _DEFAULT_PORTS[scheme]:
         return f"{scheme}://{host}"
     return f"{scheme}://{host}:{port}"
 

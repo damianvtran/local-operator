@@ -107,16 +107,19 @@
              The state line is what says, in words, which way the switches point
              (round-1 D3) — the off state used to be carried by the knob alone.
 
-             The notices are STICKY TO THE BOTTOM OF THE VIEWPORT (round-2 U1). At
-             760x520 and 420x700 the explaining sentence sat at y=849 and y=988 —
-             below the fold entirely — so a user saw the knob flick back off with
-             nothing readable saying why, which is round 1's U1 re-entering through
-             layout rather than state. Sticky is the fix that does NOT reflow: the
-             element keeps its place in the flow (so the two rows above it never
-             move between states, which is what D4 measured) and additionally stays
-             pinned near the bottom of the viewport while this card is on screen. A
-             user who has scrolled far enough to reach the switch can therefore
-             always read the answer. -->
+             WHY THEY ARE STILL READABLE AT SHORT VIEWPORT HEIGHTS (round-2 U1).
+             Measured before the fix: at 760x520 the sentence sat at viewport
+             y=530-587 in a 520 px viewport and at 420x700 at y=592-688 — below the
+             fold entirely — so a user who had scrolled far enough to press the
+             switch saw the knob flick back off with nothing readable saying why.
+             The shipped mechanism is a REVEAL, not a pinned block: `notice()` in
+             `options.ts` scrolls this box into view (see `revealNotice`, which also
+             keeps the pressed row on screen and re-applies the scroll once the
+             page's own flash banner has settled). A `position: sticky` block was
+             tried first and rejected on measurement — it pinned at 900x620 and
+             420x700 but left the notice at y=530 in a 520 px viewport, which is the
+             case that matters, and it would not recover from a resize or a focus
+             change either. Nothing here is sticky. -->
         <p class="consent-state" id="consent-state"></p>
         <div class="consent-notices">
           <p class="consent-note hidden" id="downloads-notice" role="status" aria-live="polite"></p>

@@ -2078,14 +2078,25 @@ section records what changed on top of it and what was measured.
   at y=849–925 in a 520 px viewport; **420x700** — row at y=610, notice at
   y=988–1085. A user who had scrolled far enough to press the switch got the knob
   flicking back with nothing readable saying why: round 1's U1 returning through
-  layout rather than state. The fix is **placement without reflow** — the notices
-  are wrapped in one `position: sticky; bottom: 12px` block, which keeps them in
-  their flow position (so the two rows above never move between states, which is
-  what D4 measured and what a reserved-height slot or an absolute overlay would both
-  have broken) and additionally pins them inside the viewport while the card is on
-  screen. After the fix, in every state and at every size, the notice's viewport box
-  is inside the viewport, and the rows' document positions are byte-identical across
-  off / on / missing / pending.
+  layout rather than state. The fix is **placement without reflow**: `notice()` in
+  `options.ts` REVEALS the sentence with `scrollIntoView({ block: "nearest" })` (see
+  `revealNotice`), which changes the scroll offset only — the two rows above keep
+  their document positions in every state, which is what D4 measured and what a
+  reserved-height slot, an absolute overlay or a notice between the rows would each
+  have broken. After the fix, in every state and at every size, the notice's viewport
+  box is inside the viewport, and the rows' document positions are byte-identical
+  across off / on / missing / pending.
+
+  **A `position: sticky; bottom: 12px` block was tried FIRST and is NOT what ships.**
+  It pinned at 900x620 (543–620) and 420x700 (604–700) but left the notice at y=530
+  in a 520 px viewport — i.e. it did not fix the case the finding is about — and it
+  would not recover from the two cases the reveal does: a notice painted while the
+  window is taller than its position (nothing scrolls, correctly) followed by a
+  resize to a short window, and a tab-away that scrolls focus into view and abandons
+  it again. Round 3 (M1/D4) caught this document and `options.html` describing the
+  rejected variant as the shipped one, while `options.ts` recorded it as rejected —
+  three accounts of one fix, two of them wrong. `options.ts`'s comment was the
+  accurate one, and the other two now match it.
 * **U2 == D6 (one defect, two streams).** The pending-permission notice was painted
   in the quiet weight: its ring measured `rgb(59,53,39)` — identical to the success
   note's — against `rgb(181,175,162)` for the denial and revocation notes, although
@@ -2148,3 +2159,102 @@ reconnect alarm only dials while disconnected — and on Chrome 153 every downlo
 after the first from an origin is silently refused unless `automatic_downloads` is
 allowed, which is why this rig's later cases could not produce a reading. The
 `--load-extension` finding above is theirs, re-confirmed and now in `AGENTS.md`.
+
+---
+
+### 17.16 Round-3 remediation: the identical account, the intent-bound cancel, and the rebase
+
+One commit on top of a rebase onto `origin/main` (`d031cc49`), the base CI requires.
+Every measurement below is from this round's runs.
+
+**M3 — the rebase, and why CI had never run.** The branch was `CONFLICTING` on 12
+paths (the vendored driver set, `extension/src/driver/file-transfer.tables.gen.ts`,
+`extension/ui-vendor/protocol.gen.ts`), all of them generated, because main had moved
+the same files' input stamps. GitHub runs no `pull_request` workflow while the merge
+ref cannot be created, so the **zero** check runs on `6ffe5a96` and `dc41dcd9` were
+never API flapping — there was no run to read, and round 2's report was wrong to
+attribute that to the network. Resolution: take main's generated files, then
+regenerate with `gen_ts` from the rebased sources (which keeps main's own additions
+and restamps the input hash). **Proof the rebase carried no content of its own**, run
+per file over the 40 paths the branch touches: **5 commits paired 1:1** by
+`git range-diff 4e2899cc..dc41dcd9 d031cc49..HEAD`; **28 files byte-identical ± line
+sets**; **11 differ ONLY in the generated `Inputs sha256` stamp**; **1**
+(`protocol.gen.ts`) additionally carries main's own 13 added `ErrorCode` values,
+inherited rather than authored.
+
+**M1 == D4 — three accounts of one fix, two of them wrong.** `options.html` and this
+document described the notices as a `position: sticky; bottom: 12px` block that ships;
+`options.ts` recorded sticky as tried and rejected. Measured: sticky pinned at
+900x620 and 420x700 but left the notice at **y=530 in a 520 px viewport**, so it did
+not fix the case the finding is about, and it cannot recover from a resize or a
+tab-away that scrolls focus into view. The shipped mechanism is the reveal. All three
+accounts now say that, and `options.ts`'s `notice()` comment carries the rejected
+variant with the measurement that rejected it.
+
+**U1 (major) — the cancel now exists for a real gesture.** The round-2 guard was
+`downloadRequestPending && !allowDownloads.checked`, and it could not fire: the first
+press awaits `renderConsent()`, which repaints the knob to the capability's real (off)
+state, so a human's second press found the switch off, toggled it ON, and fell through
+to a second request — measured with trusted events as **1 → 2 → 3 requests** with the
+notice, knob and scroll byte-identical. The cancel is now bound to the **intent**: a
+`click` listener runs before the checkbox's default action and `preventDefault()`s it,
+which is what stops both the toggle and the second request (Space on a focused switch
+fires a click, so the keyboard path is the same code). Measured with real clicks at
+900x620, 760x520, 420x700, 760x1080 and 380x440 — after the second press,
+`{disabled: false, checked: false, focus: "allow-downloads", notice: "Stopped waiting.
+Downloads stay off."}`. Focus and reachability were already fixed in round 2 and are
+unchanged.
+
+**D1 (major) — the state line contradicted the switches.** `paintState()` read "a
+notice is on screen" as "this capability is off", so uploads-ON with a downloads
+notice showing landed in the both-explained branch and printed *"Neither the agent's
+saving nor its attaching is available on this browser"* while the uploads switch sat
+ON above it — reachable in one pass (turn uploads on, then press downloads). A notice
+now counts as explaining only when it carries the **attention** weight, which is the
+test that separates "this is off, and here is why" from "this is on".
+
+**D2 — the reveal survives the layout moving under it.** The page's own `#confirm`
+flash banner (20 px plus margins, raised by the same gesture) shifts the layout ~31 px
+after the paint, and a scroll computed once left the notice 7 px of 38 visible for
+about four seconds. The reveal is now applied and then **re-applied on the next
+frame**, and the re-check reads live geometry.
+
+**U3 / U4 — the reveal's edges.** `scroll-margin-bottom: 12px` on the notice (measured
+`notice.bottom − innerHeight` was **0 px** at 900x620, 760x520 and 420x700 before it,
+and is **12 px** at all three now) and `scroll-margin-top: 12px` on the switch row.
+The control also wins when both cannot fit: at 380x440 the reveal used to put the
+pressed row at **viewport y = −53** (the answer readable, the knob and its state line
+gone, the pair round-1 D3 exists to keep together); the row is now at **y = 12** with
+the notice's opening lines below it. **The threshold, recorded rather than hidden:**
+at 380 px width the row and a full notice are 455 px apart, so below roughly a 460 px
+viewport height the notice's tail clips — the knob, its state line and the notice's
+first lines stay visible, which is the right way round.
+
+**U5 — one statement about the load-time reveal, not two.** `notice()`'s docstring
+said a page must not scroll itself as it opens while the repair's call site argued for
+exactly that. The behaviour is kept (it points at the one state that needs the user)
+and the docstring now describes it: it fires once per page, and because the DOM write
+and the scroll happen in one task the page opens already scrolled rather than jumping.
+
+**U6 — the cancel copy is one clause** (*"Stopped waiting. Downloads stay off."*)
+instead of 236 characters and three clauses for a pause the user just created.
+
+**M2 — `blob:` closed by narrowing BOTH sides.** `new URL('blob:https://h/uuid').origin`
+is the inner URL's origin (`https://h`) while `urlsplit` sees a scheme with no host, so
+the round-2 contract comment claimed an agreement the code did not have. Both
+predicates now name an origin only for the four schemes a driven page can be — `http`,
+`https`, `ws`, `wss` — and answer `""` for everything else. Verified case by case on
+both sides: `http://User@Host:80/x → http://host`, `https://Example.test/y →
+https://example.test`, `https://h:8443/z → https://h:8443`, `ws://h:80/a → ws://h`, and
+`blob:`, `data:`, `/relative`, `ftp://h/p` all `→ ""` on both.
+
+**m4/m5 — both majors pinned by tests that were proved to fail.** The symlinked-parent
+repro is now a test (`kept`, the record intact, the quarantine empty), and the
+rejection containment is one too: a storage failure inside the announce must not reach
+the runtime as `unhandledRejection`. Writing that test **found a second site of the
+same defect** — `wire.onopen` was an `async` event handler whose `announceCapabilities`
+rejection escaped the same way — so the handshake is now a named function passed
+through `fireAndForget`, and with all three call sites bare the test goes red while the
+rest of the suite stays green (296 → 296), which is what makes it a pin rather than a
+decoration.
+

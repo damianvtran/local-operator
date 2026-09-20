@@ -576,7 +576,16 @@ async function connect(): Promise<void> {  // `connecting` guards the window bet
     }
   };
 
-  wire.onopen = async () => {
+  wire.onopen = () => {
+    // `fireAndForget`, because this handler is now SYNCHRONOUS and owns an async
+    // handshake: an `async` event handler's rejection reaches the runtime as
+    // `Uncaught (in promise)` — which is what a storage failure inside
+    // `announceCapabilities` produced here, and the SECOND site of the defect round-2
+    // M4 fixed in the two `chrome.permissions` listeners (this test caught it).
+    fireAndForget(openWire(wire), "capability announce on connect");
+  };
+
+  const openWire = async (wire: WebSocket): Promise<void> => {
     clearDialTimer();
     if (socket !== wire) {
       // A later dial already owns the worker; this one must not claim

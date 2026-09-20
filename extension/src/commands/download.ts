@@ -5,24 +5,33 @@ import { safeName } from "../driver/file-transfer-policy";
 import { CAPS } from "../driver/file-transfer.tables.gen";
 import { click } from "./input";
 
-/** ``scheme://host:port`` for a URL, or ``""`` when it is not one.
+/** ``scheme://host[:port]`` for a URL, or ``""`` when it is not one.
  *
  * Origin granularity rather than the whole URL, and the SAME granularity Python
  * applies (`browser_files._origin_of`) to the `referrer` it is given: comparing
  * full URLs would drop the association whenever a page moved between two paths of
  * the same site, and comparing nothing at all is how a browser-wide API turns into
- * a browser-wide action. `URL.origin` is used rather than string surgery because
- * Chrome canonicalises both inputs itself (lowercased host, default port omitted),
- * which is exactly the form the Python side parses.
+ * a browser-wide action.
+ *
+ * THE SHARED CONTRACT, written down because the two sides cannot share CODE (Python
+ * has no URL parser here): one of `http`, `https`, `ws`, `wss`; scheme and host
+ * lowercased; userinfo dropped; a default port dropped; `""` for anything else.
+ * The scheme list is not decoration — it is what makes the two agree. Round 3 (M2)
+ * measured the divergence it closes: `new URL('blob:https://example.test/uuid')`
+ * gives `.origin === 'https://example.test'` (the INNER URL's origin), while
+ * `urlsplit` sees a scheme with no host and answers `""`. Restricting both sides to
+ * the four schemes a driven page can be is the fix; a contract comment claiming
+ * agreement the code did not have was the defect.
  */
 function originOf(url: string): string {
   if (!url) return "";
   try {
     const parsed = new URL(url);
-    // `file:`/`data:`/`about:` origins are the literal string "null", which is not
-    // an origin anything can be attributed to — reported as unknown instead, so an
-    // unattributable referrer can never equal an unattributable page and count as
-    // a match.
+    const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+    if (!["http", "https", "ws", "wss"].includes(scheme)) return "";
+    // `URL.origin` is used rather than string surgery for the rest: Chrome
+    // canonicalises both inputs itself (lowercased host, default port omitted),
+    // which is exactly the form the Python side parses.
     return parsed.origin === "null" ? "" : parsed.origin;
   } catch {
     return "";
