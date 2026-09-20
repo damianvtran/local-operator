@@ -131,7 +131,7 @@ claim:
 | platform | private half | presence per signature | guarantee |
 | --- | --- | --- | --- |
 | macOS | Secure Enclave P-256, `SecAccessControlCreateWithFlags(… kSecAccessControlPrivateKeyUsage \| kSecAccessControlUserPresence)` via `ctypes` on Security.framework | every `SecKeyCreateSignature` raises Touch ID / login-password | strong |
-| Windows | CNG key in the Microsoft Software KSP with `NCRYPT_UI_POLICY` / `NCRYPT_UI_PROTECT_KEY_FLAG` | per-use consent dialog | strong; a DPAPI file alone is **not** a presence gate and is reported as such |
+| Windows | CNG key in the Microsoft Software KSP with `NCRYPT_UI_POLICY` / `NCRYPT_UI_PROTECT_KEY_FLAG` — **not implemented on this build** | none on this build | **`file-only`, which is NOT a boundary** (below) |
 | Linux | no presence store implemented yet — see below | none | **`file-only`, which is NOT a boundary** |
 
 macOS reachability was verified separately from the key itself: `ctypes` loads
@@ -164,6 +164,21 @@ worked around:
   `cryptography`), and the Secure Enclave path is exercised by the operator's own
   `lop operator init` / `lop operator sign` runs. The level report keeps the
   difference visible instead of implying the strong path was measured.
+
+**Windows is not a presence tier on this build, and the ladder now says so
+instead of dying on it.** This row used to read "per-use consent dialog · strong",
+which the code contradicted: `CngBackend.create()` raises *"not implemented on this
+build"*, and `choose_backend("auto")` returned that backend for `os.name == "nt"`
+without asking whether the host could USE it — so `lop operator init` exited 1
+naming an internal backend, on a host whose honest level is `file-only`. The
+ladder now falls to `file-only` (reported as the level it is), an explicit
+`--backend cng-presence` fails with an operator-readable sentence naming
+`--backend file-only` and saying that a file-backed key raises no prompt, and
+`CngBackend.supported()` answers for the BUILD rather than for the host — which is
+the question its only caller asks. **Read, not run**: there is no Windows host in
+this CI, so this is a claim about the selection logic and the failure text, and the
+`NCRYPT_UI_POLICY` call itself remains unexercised here exactly as the macOS
+presence path is.
 
 **Linux has no presence backend in this change.** `file-only` — a 0600 PKCS#8
 P-256 key — is what this build creates there, and it is **not a boundary**: the
@@ -245,12 +260,36 @@ graph and gains one function that takes a **verdict**.
 **One signing entry point, and the prompt names the session and the effect.**
 Anything on the machine may invoke it, including a model's tool child — and it
 always prompts. That is the boundary: not the caller's identity but "only a human
-can answer this". The OS dialog cannot carry custom copy, so the copy is built
-once (`operator/sign.py::effect_copy`, e.g. *"Authorise the operator key to
-LOOSEN the approval gate of `<session>`"*) and every in-process surface is handed
-it through `AttachClient`'s `on_operator_prompt`; with no host callback it still
-reaches the log rather than nowhere. Prompts are rate-limited by construction:
-one signature per action, because the memo is **popped** by the frame that uses it.
+can answer this". Prompts are rate-limited by construction: one signature per
+action, because the memo is **popped** by the frame that uses it, and the number
+of live challenges is bounded per connection and in aggregate
+(`server._MAX_CHALLENGES_PER_CONN`, `server._MAX_LIVE_CHALLENGES`).
+
+**WHERE THAT COPY ACTUALLY REACHES A HUMAN — corrected, because this paragraph
+used to claim more than the code did.** The copy is built once
+(`operator/sign.py::effect_copy`, e.g. *"Authorise the operator key to LOOSEN the
+approval gate of `<session>`"*), and there are exactly three routes it can take,
+none of them the OS dialog:
+
+- the CLI prints it to **stderr** before signing (`lop operator sign`; stdout
+  stays the value and nothing else), so the person who typed the command reads it
+  before the gesture;
+- an attached viewer's pane paints it as a transcript notice. The wiring is
+  `AttachClient(on_operator_prompt=…)` at the pane's construction site, which is
+  what this paragraph previously asserted and what no production site passed —
+  the callback took its fallback branch and the sentence became a log line;
+- the relay's own clients log it at `warning`, because that surface has no human
+  at a terminal and a machine-side prompt with nobody looking is the event an
+  operator most needs to find afterwards.
+
+**The OS sheet itself cannot carry it, and that is a property of the API rather
+than an omission.** `SecKeyCreateSignature` takes no parameters dictionary, so
+there is nowhere to pass a reason; `kSecUseOperationPrompt` was the key that would
+have carried one and Apple deprecated it in macOS 11 (availability 10.10–11.0),
+before the key type this backend creates was in use here. On Windows the same
+holds for the CNG backend's unimplemented consent dialog. So the mitigation for
+the misread-prompt residual is the product's own copy on the surfaces above, and
+this document says that rather than claiming the dialog speaks for us.
 
 ### 2.5 Why the spawn capability was not enough
 
@@ -299,6 +338,18 @@ card is answerable. **No row regressed**: the owning pane and the spawning
 console are untouched (the latter deliberately prompt-free), and every ordinary,
 tightening and deny route is byte-identical to what it was.
 
+**The supervisor row is driven, not reasoned about.** `--supervisor-fd` was a flag
+that parsed, validated and then did nothing: `run_session` reads the descriptor off
+the `ExecArgs` object rather than off the argparse namespace, and the construction
+in `cli.py` omitted the field, so the run minted no capability and a supervisor
+waited out its whole timeout. Found by the e2e cell that drives a real supervised
+run — socketpair first, descriptor number in argv, capability read upward,
+`remember_operator_cap(pid, cap)`, then a TUI supervisor whose `y` is ACCEPTED and
+whose gated tool actually runs (`tests/e2e/test_exec_startup_e2e.py::
+test_a_supervised_run_is_approved_through_the_handoff`). Its sibling keeps the
+`--background` shape, where nobody may approve, so the pair states the rule and its
+exception.
+
 Two rows were narrower than this document could honestly make them while stages D
 and E were unlanded, and both have since landed:
 
@@ -345,6 +396,30 @@ exactly where it was most needed — a background-started runtime has no window 
 reopen it from. It is **deleted**, and a test asserts the phrase is absent rather
 than merely that the new phrases are present, so it cannot creep back as a
 "harmless" sentence.
+
+**...on every surface a reader meets, which took a round to be true.** The refusal
+notices were rewritten first; the REPORT — the sentence an operator reads *before*
+acting — still said *"typed in the terminal or app window that started this
+session"* and then appended the deleted remedy, and the suite pinned BOTH ends
+(`test_serving_approvals_live.py` required the clause PRESENT while
+`test_approval_authority_seam.py` required it absent from the refusal). Under this
+model that was wrong twice over: it withheld capability that now exists (a pane
+attached to another process's runtime loosens with one gesture, §3), and it named
+a window a background-started runtime does not have. Both handles
+(`session/runtime/serving.py::_adopt_remedy` and `tui/app.py::_adopt_remedy`, kept
+in the same words) now name the real levers, and the contradiction is closed by
+inverting the report cell rather than by narrowing this paragraph.
+
+**The missing-anchor state is named wherever it is the reason.** Between
+`lop operator init` (which stages the anchor) and `lop operator install` (the
+privileged step that lands it) neither named surface can sign, so the refusal, the
+`/approvals default` receipt and the report all name the install step instead of
+offering remedies that cannot run — and the refusals do it under a distinct typed
+code (`operator_authority_unconfigured`, a subclass of
+`operator_authority_required`, so every route that keys on the base keeps working)
+which the phone can act on without pattern-matching English. `lop pair` and the
+portal's pairing screen report the same host state, from the same predicate, rather
+than promising authority the machine cannot honour.
 ### 4.2 What the refusal looks like on a narrow screen
 
 The copy is 288 characters (the card's is 228) and both are under the runtime's
@@ -395,6 +470,20 @@ That is the honest statement of what this closes and what it does not — it
 removes "read a world-readable-under-this-uid record and dial a port" as an
 attack, which is what a model-authored tool call can actually do today.
 
+**A revocation reaches a RUNNING runtime, within a bound.** The anchor is read
+once and pinned in memory, which is what stops a same-uid subject forcing a read
+of the root-owned file per frame — and it used to mean the revocation list was
+frozen for the lifetime of a session, so a device the operator had revoked went on
+loosening and approving on every runtime started before that edit (measured:
+`load_anchor` calls: 1). The cache now re-reads the anchor on a bounded window
+(`trust.ANCHOR_REFRESH_S`, 30 s, never per frame), adopting only a load that names
+the same operator key — a rotation is a privileged step and does not take effect
+mid-session — and the certificate cache re-checks revocation on every use, so the
+window is the ONLY staleness a revoked device gets. `lop operator devices
+--revoke`'s receipt states that window, and the aggregate challenge count is bounded
+across connections rather than per connection, because the per-connection maximum
+alone left a subject that can dial as many sockets as it likes unbounded.
+
 Also deliberately not fixed here, recorded so it is not mistaken for covered:
 
 - **background-spawned runtimes have no console**, so nothing may loosen them
@@ -410,6 +499,11 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   readable by the attack this issue exists for. `tests/e2e/
   test_exec_startup_e2e.py::test_exec_supervisor_approval_ui` drives a parked
   `--control` gate and pins the behaviour;
+- **Windows is not a presence tier on this build, and no Windows host was run in
+  this change.** The ladder's decision and the failure text are read from the code
+  and pinned by a test; the `NCRYPT_UI_POLICY` call, like the macOS presence
+  prompt, remains unexercised here. A host in that state gets `file-only`, which
+  this document already grades as not-a-boundary;
 - **the device certificate store is writable by the subject it is meant to
   constrain**, and that is by design rather than an oversight: it sits under the
   operator's config root (`<config>/operator/devices/<device_id>.json`, 0644 under
@@ -533,6 +627,14 @@ Also deliberately not fixed here, recorded so it is not mistaken for covered:
   than reasoned about: the run exits 1 on the session LEASE's refusal
   (`session <id> is already open in another process`) and the supervisor receives
   no capability, because the run never wrote.
+- **Round 6 remediation (this change, landed)** — the four review streams' MAJORs,
+  all of them about a claim that outran the code rather than about the mechanism:
+  a revocation that never reached a running runtime; the deleted remedy still
+  shipping on the `/approvals` REPORT; the pre-install state refused with remedies
+  that cannot run and no mention of `lop operator install`; the prompt copy wired
+  at no production site; the phone's loosen receipt set inside the sheet that then
+  unmounted; and Windows graded `strong` while `create()` raises. Each one is
+  fixed at the source and pinned by the cell named beside it in this document.
 - **Revision 2, stage F (partly this change)** — the docs, the surface table, the
   residual and the refusal copy, all updated here: the conservative branch of
   `approvals_default_notice` stopped naming "the window that started it" (a
