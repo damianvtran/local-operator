@@ -2772,8 +2772,8 @@ def test_a_dormant_wake_stays_below_presence() -> None:
 def test_urgency_still_outranks_an_armed_wake() -> None:
     """Promoting wakes must not have demoted anything above them.
 
-    A person waiting and a broken runtime are both more urgent than a schedule,
-    and a live turn is what the spinner exists for.
+    A person waiting and a session that has stopped reporting are both more
+    urgent than a schedule, and a live turn is what the spinner exists for.
     """
     from local_operator.tui.terminal_title import SPINNER_FRAMES
     from local_operator.tui.widgets.session_picker import (
@@ -2786,11 +2786,41 @@ def test_urgency_still_outranks_an_armed_wake() -> None:
     pending = _row("urg000000001", "waiting")._replace(pending="approval", **base)
     assert row_state_mark(pending, 0)[0] == NEEDS_YOU_MARKER
 
-    wedged = _row("urg000000002", "broken")._replace(live_state="wedged", **base)
+    wedged = _row("urg000000002", "quiet owner")._replace(live_state="wedged", **base)
     assert row_state_mark(wedged, 0)[0] == WEDGED_MARKER
 
     busy = _row("urg000000003", "working")._replace(live_state="busy", **base)
     assert row_state_mark(busy, 0)[0] in set(SPINNER_FRAMES)
+
+
+def test_a_not_answering_row_wears_its_own_shape_and_the_warning_ink() -> None:
+    """The row must stop drawing a failed turn's mark, in that turn's ink.
+
+    The operator's report: a session that had simply stopped reporting was drawn
+    exactly as a session whose last turn FAILED — same glyph, same ink — so
+    "not answering" was indistinguishable from "broken" at a glance. Two
+    assertions, because either half alone leaves the collision: the shape must
+    differ from the failure mark, and the ink must differ from the failure ink.
+    """
+    from local_operator.session.catalog import WEDGED_STATUS, CatalogEntry
+    from local_operator.tui.widgets.session_picker import (
+        COMPLETION_MARKERS,
+        WEDGED_MARKER,
+        row_state_mark,
+    )
+
+    row = _row("wedged0000001", "quiet owner")._replace(live_state="wedged")
+    glyph, ink = row_state_mark(row, 0)
+    assert glyph == WEDGED_MARKER
+    assert ink == "warning"
+
+    error_glyph, error_ink = COMPLETION_MARKERS["error"]
+    assert glyph != error_glyph, "a stale beat is not a failed turn"
+    assert ink != error_ink, "and it must not wear the failure ink either"
+
+    # The words are the backend's and do not move with the glyph — the pairing
+    # the sidebar's own table checks, restated here for the picker's consumers.
+    assert CatalogEntry(row).status == WEDGED_STATUS
 
 
 # --- the two-pane telescope layout ------------------------------------------
