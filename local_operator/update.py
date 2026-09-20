@@ -4659,6 +4659,14 @@ def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], st
 
     ``None`` — the caller reports "no interpreter to run it with" — only when
     neither a pointer nor a usable ``sys.executable`` exists.
+
+    THE LABEL RIDES WITH THE IMAGE ON BOTH BRANCHES. The cross-tree branch names
+    ``current_interpreter()``, so its image must be branded BESIDE THAT
+    INTERPRETER — ``spawn_identity`` can only brand this process's venv, and
+    pairing its link with the generation's interpreter is literally the row an
+    EDR killed 1079 times on 2026-09-19 (a labelled ``argv[0]`` on a
+    ``python3.x`` image). ``spawn_identity_for_interpreter`` returns the label
+    and the link together, or rung 2 (the bare target path, no label at all).
     """
     from local_operator import procname
 
@@ -4668,16 +4676,8 @@ def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], st
             return None
         argv0, image = procname.spawn_identity(label)
         return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", *tail], image
-    # The branded link is planted per venv on first use, so the new tree may not
-    # have one yet; the label rides on the argv either way, which is the axis a
-    # ``ps`` reader sees.
-    return [
-        procname.branded_argv0(label),
-        SAFE_PATH_FLAG,
-        "-m",
-        "local_operator.cli",
-        *tail,
-    ], str(interpreter)
+    argv0, image = procname.spawn_identity_for_interpreter(label, str(interpreter))
+    return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", *tail], image
 
 
 def _installed_daemon_plists() -> list[Path]:

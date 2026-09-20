@@ -375,27 +375,34 @@ def _spawn_runtime(
     # an indistinguishable `python3.x` row in Activity Monitor. The session id is
     # already a hex handle the user sees in `lop sessions`, and it is truncated
     # to 8 so `ps -o ucomm`'s 16-char window still separates two sessions.
-    # `spawn_identity` returns BOTH axes, and only as a pair: the label is
-    # `argv[0]` when a branded image was planted, and on the rung that could not
-    # plant one it hands back the bare interpreter with the label deliberately
-    # withheld — a labelled `argv[0]` empties the child's `sys.executable` on
-    # Linux (see `procname.spawn_identity`).
+    #
+    # WHICH BUILD THE CHILD RUNS is the interpreter, and it is decided HERE
+    # rather than inherited: `_spawn_interpreter` resolves the CURRENT
+    # generation's, because that is what makes a mixed-generation fleet
+    # converge one session at a time. The NAME then has to be asked for from
+    # that SAME interpreter's tree — one call per branch, so the two axes can
+    # never disagree:
+    #
+    #  - same tree as this process: `spawn_identity` (the link beside our own
+    #    `python`);
+    #  - another generation's tree: `spawn_identity_for_interpreter`, which
+    #    plants the link BESIDE THAT interpreter and returns the pair, or rung
+    #    2 (the bare path, label deliberately withheld). Patching `executable`
+    #    after `spawn_identity` is exactly what this replaced, and it produced
+    #    a LABELLED argv[0] on a `python3.x` image — the row an EDR killed 1079
+    #    times on 2026-09-19, and a labelled `argv[0]` also empties the child's
+    #    `sys.executable` on Linux (see `procname.spawn_identity`).
     from local_operator import procname
 
-    argv0, executable = procname.spawn_identity(procname.LABEL_SESSION_ANON, id=str(session_id)[:8])
-    # WHICH BUILD THE CHILD RUNS is the interpreter, so the engage decides it
-    # here rather than inheriting this process's. ``spawn_identity``'s image
-    # belongs to THIS process's venv (it is a hardlink planted beside our own
-    # ``python``), so passing it through would put a freshly engaged runtime
-    # back on the build this engage is leaving — the opposite of converging.
     interpreter = _spawn_interpreter()
     if interpreter != sys.executable:
-        executable = interpreter
-        if argv0 == sys.executable:
-            # Rung 2 had no label to carry (see ``procname.spawn_identity``), so
-            # its argv[0] was a path; keep the pair consistent rather than
-            # naming one interpreter and executing another.
-            argv0 = interpreter
+        argv0, executable = procname.spawn_identity_for_interpreter(
+            procname.LABEL_SESSION_ANON, interpreter, id=str(session_id)[:8]
+        )
+    else:
+        argv0, executable = procname.spawn_identity(
+            procname.LABEL_SESSION_ANON, id=str(session_id)[:8]
+        )
     try:
         process = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
             # TWO INDEPENDENT PROPERTIES ON ONE SPAWN, both required.
