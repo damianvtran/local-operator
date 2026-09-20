@@ -49,6 +49,24 @@ def test_brand_this_process_names_the_comm_axis(tmp_path: Path) -> None:
     assert _comm_after("brand_this_process()", tmp_path) == procname.BRAND
 
 
+def test_cross_tree_spawn_withholds_the_label_without_an_image() -> None:
+    """The cross-tree helper is rung 2 off macOS, and rung 2 is UNLABELLED.
+
+    There is no image axis to plant on Linux, so the pair must be the bare
+    target path with ``executable=None``. The reason it matters here more than
+    on macOS is the same one that made the old argv-only rung a mistake: a
+    labelled ``argv[0]`` leaves the child with an EMPTY ``sys.executable``,
+    because CPython derives it from ``argv[0]`` (see the module ladder).
+    """
+    target = sys.executable
+    argv0, executable = procname.spawn_identity_for_interpreter(
+        procname.LABEL_DAEMONS_REFRESH, target
+    )
+    assert executable is None
+    assert argv0 == target
+    assert procname.BRAND not in argv0
+
+
 def test_set_process_name_names_the_comm_axis(tmp_path: Path) -> None:
     assert _comm_after("set_process_name()", tmp_path) == procname.BRAND
 
