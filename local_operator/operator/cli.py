@@ -59,6 +59,25 @@ def add_parser(subparsers: Any) -> None:
     actions.add_parser("trust", help="Show whether the installed anchor is trusted")
     actions.add_parser("status", help="Report the operator authority level and why")
 
+    devices_parser = actions.add_parser(
+        "devices",
+        help="List paired phones, pending pairing requests, and revoke a device",
+    )
+    devices_parser.add_argument(
+        "--revoke",
+        default="",
+        metavar="DEVICE_ID",
+        help=(
+            "Add this device to the anchor's revocation list (needs the same ONE "
+            "privileged step as installing the anchor)"
+        ),
+    )
+    devices_parser.add_argument(
+        "--print-only",
+        action="store_true",
+        help="With --revoke, print the privileged command instead of running it",
+    )
+
     sign_parser = actions.add_parser(
         "sign",
         help="Sign a runtime's challenge with the operator key (raises the OS prompt)",
