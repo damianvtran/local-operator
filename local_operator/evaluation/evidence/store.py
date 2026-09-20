@@ -137,11 +137,19 @@ if hasattr(os, "register_at_fork"):
 # is given — a `0x0A` in the payload lands as `0x0D 0x0A` and every later
 # record is misparsed. See `procstate.O_BINARY` for the measured case.
 _WRITE_FLAGS = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | O_BINARY
+# `| O_BINARY` is the READ half of the write-side fix, and it was
+# found by review rather than by the reading that produced the write
+# half: text mode rewrites on the way IN too, so an artifact whose
+# bytes contain `0x0D 0x0A` was hashed as something other than what
+# is on disk. `verify.py` compares that digest to the file NAME, so
+# on Windows such an artifact failed its own verification. Same flag,
+# same reason, opposite direction.
 _READ_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
+    | O_BINARY
 )
 _DIR_FLAGS = _READ_FLAGS | getattr(os, "O_DIRECTORY", 0)
 
