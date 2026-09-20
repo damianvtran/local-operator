@@ -556,7 +556,13 @@ GRAPH_TREES: tuple[str, ...] = ("local_operator", "tests", "scripts")
 #: `local_operator.*`, so a change inside the covered trees can break them. A
 #: scoped `type-check` list that omits them is therefore not "complete for what this
 #: change can break" (#1322 QA round 1, Q-1: measured 20 files pyright analyzes and
-#: the graph did not, 8 of them importers of `local_operator`).
+#: the graph did not, 9 of them importers of `local_operator` — 8 modules — re-derived
+#: here). It is a
+#: LITERAL list, not a derivation from pyright's own file set: `[tool.pyright]` excludes
+#: `docs/**`, and one analyzer file stays outside this list
+#: (`extension/scripts/generate-icons.py`, which imports nothing of ours — no live hole,
+#: but a new top-level tree that imports `local_operator` reopens the class until it is
+#: named here, so the residual is stated rather than implied closed).
 ANALYZED_TREES: tuple[str, ...] = ("benchmarks/osworld_v2_adapter",)
 
 #: Everything the graph parses: the suite's trees plus the trees a gate analyses.
@@ -634,6 +640,12 @@ STRUCTURAL_PREFIXES: tuple[tuple[str, str], ...] = (
     ),
     (
         "tests/helpers/",
+        # Retained although the tree holds 0 files today. It is the conventional home
+        # of a shared helper package, and the reason it is a prefix — a helper is
+        # imported for what it DOES, so no import edge is a contract for its effects —
+        # applies to it the moment it exists. A prefix matching nothing costs nothing;
+        # deleting it would let the next tree of that name narrow silently (#1322 QA
+        # round-1 delta).
         "a shared test-helper tree — no import edge is a contract for what it does",
     ),
 )
@@ -643,7 +655,7 @@ STRUCTURAL_PREFIXES: tuple[tuple[str, str], ...] = (
 #: process's own entry, which every test that boots the real app inherits.
 #: The files a test reaches by importing the APPLICATION, and the closure behind
 #: them — the one reference class no static analysis can bound. Measured on this
-#: tree (measured on `b0577cdd`, 2026-09-20): 448 of the 508 `local_operator/**`
+#: tree (re-derived 2026-09-20): 452 of the 512 `local_operator/**`
 #: modules are inside this closure, so a
 #: change to any of them makes almost every test a candidate and the whole-tree
 #: command is the only honest answer. Restricted to three roots rather than "all
@@ -1288,7 +1300,7 @@ class _Scan:
 
     `(ROOT / "scripts").glob("*.py")` reads every Python file in `scripts/` and
     names none of them, so an edge built only from names cannot see it — measured
-    on this tree: `tests/unit/tui/test_visual_gallery.py` reads all 197 covered
+    on this tree: `tests/unit/tui/test_visual_gallery.py` reads all 201 covered
     `scripts/*.py` that way and asserts an ordering invariant on each (#1322 QA
     round 2, Q-1). One covered `scripts/**` file changed by a token and reached
     only through that scan selected NOTHING, so the local gate went green while
