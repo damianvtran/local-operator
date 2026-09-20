@@ -26,18 +26,19 @@ def to_data_url(mime_type: str, content: bytes) -> str:
 
 @pytest.fixture
 def temp_uploads_dir(tmp_path: Path):
-    """Fixture to create a temporary uploads directory and mock UPLOADS_DIR."""
-    # Create a unique subdirectory within tmp_path for uploads
-    # to simulate the structure and avoid conflicts if other tests use tmp_path root.
+    """Fixture to create a temporary uploads directory and redirect the module at it.
+
+    ``uploads_dir`` is patched rather than a module constant, because the module
+    no longer HAS a constant: the directory is resolved from
+    ``paths.config_dir()`` at the point of use, so an isolated run honours
+    ``LOCAL_OPERATOR_CONFIG_DIR`` instead of creating a directory in the
+    operator's real home.
+    """
     mock_uploads_path = tmp_path / "test_uploads"
     mock_uploads_path.mkdir(parents=True, exist_ok=True)
 
-    with patch.object(attachment_utils, "UPLOADS_DIR", mock_uploads_path):
-        # Ensure the mocked directory is used by _ensure_uploads_dir_exists if it's called again
-        # or if not, ensure it exists for the test.
-        attachment_utils._ensure_uploads_dir_exists()
+    with patch.object(attachment_utils, "uploads_dir", lambda: mock_uploads_path):
         yield mock_uploads_path
-    # Cleanup is handled by tmp_path fixture automatically
 
 
 class TestParseBase64DataUrl:

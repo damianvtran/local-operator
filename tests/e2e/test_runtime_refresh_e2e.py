@@ -47,7 +47,7 @@ from local_operator.session.runtime.inbox import (
 )
 from local_operator.tui.app import OperatorApp
 from local_operator.update import BuildStamp
-from tests.e2e.harness import transcript_text, wait_for_adoption
+from tests.e2e.harness import NO_NOTIFY_ENV, transcript_text, wait_for_adoption
 from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
@@ -78,6 +78,10 @@ def _seed(config_dir: Path, session_id: str) -> None:
 
 def _child_env(config_dir: Path, prefix: Path, session_id: str, **extra: str) -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.startswith("CMUX_")}
+    # Re-asserted after the strip so a runtime child in these cells cannot
+    # announce: the strip removes the pane families only, and every one of
+    # these children either runs the mock hosting or settles a real turn.
+    env.update(NO_NOTIFY_ENV)
     env.update(
         {
             "LOCAL_OPERATOR_CONFIG_DIR": str(config_dir),

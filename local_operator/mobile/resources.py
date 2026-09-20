@@ -57,6 +57,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from local_operator import procstate
+
 #: A subprocess runner seam so tests can inject fake ``ps``/``top`` output
 #: without spawning real processes. Returns ``(returncode, stdout)``; a raising
 #: implementation is caught by the callers, same as a non-zero return.
@@ -260,6 +262,13 @@ def _pid_exists(pid: int) -> bool:
     answers "exists", which is the conservative direction here — it spends the
     dump, i.e. the behaviour a pid nobody can classify would otherwise have had.
 
+    WINDOWS IS NOT THAT PRIMITIVE'S PLATFORM (cross-platform work, 2026-09-18):
+    signal 0 there is ``TerminateProcess``, so probing a live pid would kill
+    the session whose footprint this module was asked about. The probe is
+    therefore :func:`local_operator.procstate.pid_alive`, which branches on the
+    platform and on win32 asks the kernel via ``OpenProcess``; the POSIX answer
+    above is unchanged.
+
     Called only for pids the direct reader could not answer, where the two
     answers lead to opposite costs: the dump for one that exists, nothing for
     one that does not.
@@ -273,13 +282,10 @@ def _pid_exists(pid: int) -> bool:
     """
     if pid <= 0 or pid > _PID_MAX:
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
+    # `_PID_MAX` first: `os.kill` raises `OverflowError` outside C `int` on
+    # POSIX, and `OpenProcess`'s DWORD conversion raises the same way on
+    # Windows, so the bound keeps this module's no-raise contract on both.
+    return procstate.pid_alive(pid)
 
 
 def _linux_pss_bytes(pid: int) -> int | None:

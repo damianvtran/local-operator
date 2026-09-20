@@ -73,6 +73,7 @@ from local_operator.session.catalog import (
     status_of,
 )
 from local_operator.session.creation import CREATED_AT_NAME
+from local_operator.session.model_selection import ENV_ALLOW_TEST_HOSTING_NOTIFY
 from local_operator.session.runtime import registry
 from local_operator.session.runtime.presence import (
     desktop_attending_session,
@@ -83,6 +84,36 @@ from local_operator.session.runtime.presence import (
 from local_operator.session.runtime.types import HEARTBEAT_TIMEOUT_S, SessionRecord
 from local_operator.tui.notify import BODY_BACKGROUND_DIGEST, background_digest_title
 from local_operator.wakes.store import write_entry
+from tests.notification_opt_in import notification_path_opt_in
+
+
+@pytest.fixture(autouse=True)
+def _notification_gate_off() -> Iterator[None]:
+    """Opt this module IN to the notification path, deliberately and visibly.
+
+    ``tests/conftest.py`` arms ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` for every
+    test, and at import time too, because a test that reaches the operator's
+    real Notification Centre is a side effect no assertion looks at. The
+    banners composed here ARE the subject, so the gate is cleared once for the
+    module rather than by each of the twenty tests that need it.
+
+    The body is ``tests/notification_opt_in.notification_path_opt_in`` — the
+    shared opt-in — which clears that switch AND waives the test-hosting rule:
+    this module's fabricated sessions carry no journal, so only the first applies
+    to most cells here, and sharing the helper is what keeps a module that later
+    seeds a real selection from having to remember a second variable. The cells
+    that assert the RULE close the waiver for their own body.
+
+    Set and restored by hand rather than through ``monkeypatch``, and that is
+    deliberate: that fixture is FUNCTION-scoped and SHARED with the tests, so a
+    test calling ``monkeypatch.undo()`` (``test_a_compose_failure_costs_the_
+    banner_not_the_attention_frame`` does, to put a composer back) would
+    silently re-arm this gate mid-test and lose its own banner. The test that
+    pins the gate itself (``test_a_silenced_process_composes_no_banner``) sets
+    it back explicitly.
+    """
+    with notification_path_opt_in():
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -2742,3 +2773,160 @@ def test_a_failed_publish_does_not_lose_the_section_move(tmp_path, monkeypatch):
         kinds.count("catalogue") == 1
     ), "the section move was lost by the failed fan-out instead of being retried"
     asyncio.run(feed.close())
+
+
+# ---------------------------------------------------------------------------
+# The test-hosting gates: what keeps a mock session off the operator's screen
+# ---------------------------------------------------------------------------
+
+#: A mock session's stored model selection — the row
+#: ``Session._persist_selected_model`` journals, and the only durable record of
+#: which hosting a conversation actually ran on. Read by
+#: ``session_uses_test_hosting``.
+_SELECTION_ROW = {
+    "id": "selection-1",
+    "ts": 1.0,
+    "type": "custom",
+    "payload": {
+        "custom_type": "selected_model",
+        "details": {"version": 2, "selector": "test/test-model", "effort": None, "boot": None},
+    },
+}
+
+
+def _selection(directory: Path, selector: str) -> None:
+    row = json.loads(json.dumps(_SELECTION_ROW))
+    row["payload"]["details"]["selector"] = selector
+    with (directory / "transcript.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+def _bannered(feed: DesktopFeed, subscription: FeedSubscription) -> list[dict[str, Any]]:
+    _tick(feed)
+    return _notified(_queued(subscription))
+
+
+def test_a_silenced_process_composes_no_banner(tmp_path, monkeypatch) -> None:
+    """The process kill switch reaches the machine-wide channel.
+
+    It always governed ``tui.notify.detached_notify``; the feed pushes a
+    ``notification`` frame the desktop app turns into a native banner, so a
+    process told not to notify must not offer one either — the switch names the
+    process's behaviour, not one of its wires. The control arm in the same cell
+    (the same store, published, without the switch) proves the frame was
+    otherwise coming.
+    """
+    root = tmp_path
+    sid = "e" * 12
+    _session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    _publish(root, sid)
+    assert [frame["session_id"] for frame in _bannered(feed, subscription)] == [sid]
+
+    monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
+    _publish(root, sid)
+    assert _bannered(feed, subscription) == []
+
+
+def test_the_stored_hosting_read_stays_off_the_event_loop(tmp_path, monkeypatch) -> None:
+    """R1-2: the journal walk is 0.6 ms warm and up to ~745 ms cold, and this
+    backend polls on its own loop.
+
+    Asserted on the THREAD the reader ran in rather than on a duration: a
+    wall-clock bound on a loaded box is a flake, while "not the loop's thread"
+    is the property the fix is about (the neighbouring store reads in this same
+    method already hop threads for the same reason). The reader is doubled so
+    the assertion is about WHERE it ran, not about what it answered.
+    """
+    import threading
+
+    root = tmp_path
+    sid = "d" * 12
+    _session(root, sid)
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+
+    threads: list[threading.Thread] = []
+
+    def probe(directory: Path) -> bool:
+        threads.append(threading.current_thread())
+        return False
+
+    monkeypatch.setattr("local_operator.server.utils.desktop_feed.session_uses_test_hosting", probe)
+    _publish(root, sid)
+    announced = _bannered(feed, subscription)
+
+    assert threads, "the candidate filter never asked the reader; the cell proved nothing"
+    assert all(thread is not threading.main_thread() for thread in threads), threads
+    assert [frame["session_id"] for frame in announced] == [sid], announced
+
+
+def test_a_stored_mock_session_is_never_bannered_by_another_process(tmp_path) -> None:
+    """A scratch store outlives the rig that filled it.
+
+    The process switch above cannot reach this case: the backend here never ran
+    the mock (a rig did, and exited), it merely POLLS the store the rig left
+    behind. Without the per-session read, that store's mock conversations banner
+    the operator with the mock's own reply. The control in the same cell is a
+    real session in the same store, which must still be announced — the check is
+    a filter, not a mute.
+
+    THE MODULE'S OPT-IN IS TURNED BACK OFF HERE, and that is the whole cell: the
+    shared fixture waives the test-hosting rule for the suites whose subject is
+    the frame, so a test asserting the RULE has to close the waiver it would
+    otherwise inherit. The kill switch stays cleared, so the frame is available
+    and the rule is the only thing suppressing it.
+    """
+    # A plain pop, NOT `monkeypatch.delenv`: monkeypatch is set up before this
+    # module's autouse opt-in (it is what ``isolate_environment`` requests), so
+    # its undo runs AFTER that fixture's teardown and would re-set the escape
+    # for every later test in the worker — which is how this cell first made an
+    # unrelated suite's rule cell go red. The reader reads fresh, so popping it
+    # for the body of this cell is exactly the waiver this test needs.
+    os.environ.pop(ENV_ALLOW_TEST_HOSTING_NOTIFY, None)
+
+    root = tmp_path
+    mock_sid = "f" * 12
+    real_sid = "a" * 12
+    _selection(_session(root, mock_sid), "test/test-model")
+    _selection(_session(root, real_sid), "openai/gpt-x")
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _publish(root, mock_sid)
+    _publish(root, real_sid)
+
+    announced = _bannered(feed, subscription)
+
+    assert [frame["session_id"] for frame in announced] == [real_sid], announced
+
+
+def test_a_session_with_no_recorded_hosting_is_still_announced(tmp_path) -> None:
+    """Failing toward notifying: an unreadable or selection-free journal is not
+    evidence of a test session, and muting a real completion would be its own
+    bug report.
+
+    THE MODULE'S OPT-IN IS CLOSED FOR THIS BODY, and without that this cell
+    proves nothing: the shared fixture waives the test-hosting rule for the whole
+    module, so the tolerant branch below the waiver is never reached and the
+    assertion holds whatever it does. Its sibling above closes the escape the
+    same way, for the same reason. A plain ``os.environ.pop``, NOT
+    ``monkeypatch.delenv``: monkeypatch is set up before a module-level autouse
+    fixture and so restores after it, re-setting the escape for every later test
+    in the worker.
+    """
+    os.environ.pop(ENV_ALLOW_TEST_HOSTING_NOTIFY, None)
+
+    root = tmp_path
+    sid = "b" * 12
+    _session(root, sid)  # no transcript at all
+    feed = _feed(root)
+    feed._take_baseline()
+    subscription = feed.subscribe()
+    _publish(root, sid)
+
+    assert [frame["session_id"] for frame in _bannered(feed, subscription)] == [sid]

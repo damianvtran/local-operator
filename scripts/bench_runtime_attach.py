@@ -161,6 +161,14 @@ def _run_isolated(runs: int) -> list[dict[str, float]]:
         saved = {key: os.environ.get(key) for key in ("HOME", "LOCAL_OPERATOR_CONFIG_DIR")}
         os.environ["HOME"] = str(root)
         os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
+        # Every run engages a real runtime on the ``test``/mock hosting
+        # (``_seed_config``) and waits for it to bind — the shape that ends in a
+        # mock completion. The gate is set per run, after the strip above, so a
+        # child that inherits this environment cannot notify
+        # (``tui.notify.suppress_notifications_for_process``).
+        from local_operator.tui.notify import suppress_notifications_for_process
+
+        suppress_notifications_for_process("runtime-attach benchmark")
         try:
             result = asyncio.run(_one_run(config_dir))
             result["run"] = float(index)

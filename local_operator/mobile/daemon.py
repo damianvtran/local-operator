@@ -66,6 +66,7 @@ from local_operator.mobile.types import (
     SessionRecord,
     SubagentRow,
 )
+from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.creation import session_category, session_created_at
 from local_operator.session.runtime import registry
 
@@ -2330,7 +2331,14 @@ class MobileDaemon:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            # REAL detachment, per platform. ``start_new_session=True`` is
+            # documented "(POSIX only)" and the Windows ``_execute_child``
+            # parameter is literally ``unused_start_new_session``: a child
+            # spawned for a phone session would silently stay on this daemon's
+            # console, where a console close takes it down — the one thing this
+            # spawn exists to survive. The helper also keeps POSIX on
+            # ``setsid`` (byte-identical behaviour there).
+            **detached_popen_kwargs(),
         )
 
         async def ready() -> None:

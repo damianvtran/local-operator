@@ -860,6 +860,34 @@ def _announceable_kind(entry: CatalogEntry) -> str:
     return entry.completion_kind if entry.completion_kind in CONTEXTS else "complete"
 
 
+def _is_test_hosted(directory: Path, entry: CatalogEntry) -> bool:
+    """Whether this row's conversation is on the TEST hosting (the mock wire).
+
+    LAYER 3'S OWN HALF of the rule, and the one the operator actually meets:
+    the process switch silences the process that RAN the mock, while THIS
+    surface is the TUI they keep a dozen of, reading a store every rig on the
+    machine writes into. Without the per-row read, a ``test/test-model`` session
+    left in that store is bannered here with the mock's own sentence exactly as
+    a real session's "finished" would be (review round 1, R1-1, reproduced with
+    a real app and a real store).
+
+    IT RUNS IN THE SCAN'S WORKER THREAD, never on the event loop: the scan is
+    dispatched as ``asyncio.to_thread(collect)``, and this is a journal walk —
+    0.6 ms when the newest v2 row is at the tail and up to ~745 ms on a large
+    journal that has none (see ``session_uses_test_hosting``'s docstring for the
+    measurements). That function memoises on the journal's
+    ``(mtime_ns, size)``, so a steady tick costs a ``stat`` per row.
+
+    A SKIPPED ROW CONSUMES NO CLAIM, deliberately: this is asked in the row
+    FILTER, above the per-tick cap and above ``claim_delivery``, so the
+    completion stays unseen and claimable by whatever surface may legitimately
+    announce it.
+    """
+    from local_operator.session.model_selection import session_uses_test_hosting
+
+    return session_uses_test_hosting(directory / "sessions" / entry.id)
+
+
 def _desktop_owns_completion(directory: Path, entry: CatalogEntry) -> bool:
     """Whether a connected desktop app will raise this row's banner itself.
 
@@ -23206,6 +23234,7 @@ class OperatorApp(App[None]):
                     or entry.row.pending
                     or entry.id == current
                     or entry.row.live_state not in _BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES
+                    or _is_test_hosted(directory, entry)
                     or _desktop_owns_completion(directory, entry)
                 ):
                     # A pending row is a GATE, not a finished turn: the runtime
@@ -23221,6 +23250,13 @@ class OperatorApp(App[None]):
                     # narrowed by kind — the feed carries completions only, so
                     # an `interrupted` row, which the desktop never banners,
                     # must still be announced here.
+                    #
+                    # `_is_test_hosted` is the same rule on the STORE side (R1-1):
+                    # a session whose journal records the mock hosting must not be
+                    # bannered by any surface, and this one reads a store every
+                    # rig writes into. It is asked in the filter rather than at the
+                    # spawn so a skipped row never consumes a claim — see the
+                    # helper for the measured cost and why it is off the loop.
                     #
                     # The `live_state` test is the SAME rule as the
                     # `entry.id == current` skip beside it, applied to a window

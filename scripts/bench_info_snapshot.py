@@ -59,6 +59,12 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 
+# A benchmark under scripts/ must read the tree it lives in, not whatever tree
+# the venv was installed from; and it builds child environments for real `lop`
+# processes, so the shared desktop gate is imported from the same root.
+sys.path.insert(0, str(REPO))
+
+from local_operator.agent_shell import harness_child_env  # noqa: E402
 
 #: How far ``ri_resident_size`` and ``ps`` RSS may diverge on a PARKED process
 #: before the layout proof is called broken: a page or two of drift is the two
@@ -706,6 +712,13 @@ def measure_route_http(
     # child inherit this session's provider/model (AGENTS.md, "Isolating a run").
     for name in [key for key in env if key.startswith(("CMUX_", "LOP_"))]:
         env.pop(name)
+    # The daemon below is the backend whose machine-wide feed raises desktop
+    # banners, and this script drives the real CLI — so the child environment is
+    # a HARNESS child's: `harness_child_env` declares the script a harness (an
+    # agent's shell would otherwise get every inner invocation refused) and
+    # carries the notification gate in the same breath (`agent_shell.
+    # harness_child_env`). One helper, so the gate cannot be forgotten here.
+    env = harness_child_env(env)
 
     # Verify which tree the daemon is about to import BEFORE booting it: an
     # editable install of another worktree would otherwise serve this

@@ -53,6 +53,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple, TypeVar
 
+from local_operator import procstate
 from local_operator.paths import config_dir
 from local_operator.procstate import is_zombie, zombie_states
 from local_operator.session.runtime.types import (
@@ -348,16 +349,20 @@ def pid_alive(pid: int, *, check_zombie: bool = False) -> bool:
     is the one implementation the lease and the resume path share: a holder
     that is a zombie must be reported dead by all three, or discovery reaps the
     record while the claim that keeps the session un-attachable survives it.
+
+    The cheap existence probe is likewise shared — :func:`procstate.pid_alive`
+    — because signal 0 is a KILL on Windows and a probe on POSIX, and this one
+    runs on every `lop` invocation.
     """
     if pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
+    # THE PROBE IS NOT `os.kill(pid, 0)` HERE, AND MUST NOT BECOME IT AGAIN.
+    # On Windows signal 0 is not a signal: CPython's `os.kill` falls through to
+    # `TerminateProcess`, so the liveness probe every `scan()` calls — this one
+    # runs on every `lop` invocation — would KILL the session it was asked
+    # about and then report it alive. `procstate.pid_alive` asks the kernel the
+    # right question per platform (see it for the CPython citation).
+    if not procstate.pid_alive(pid):
         return False
     return not check_zombie or not is_zombie(pid)
 

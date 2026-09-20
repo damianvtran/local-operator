@@ -1,32 +1,137 @@
-"""User-level service lifecycle; no root installer or global cloudflared login."""
+"""User-level service lifecycle; no root installer or global cloudflared login.
+
+One daemon, three supervisors (see :mod:`local_operator.supervisors`): a
+LaunchAgent plist on macOS, a ``systemd --user`` unit on Linux, a Task Scheduler
+task on Windows. All three record the store the connector serves
+(``LOCAL_OPERATOR_CONFIG_DIR``), because a tunnel belongs to a config root.
+"""
 
 from __future__ import annotations
 
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-from local_operator import launchd, procname
-from local_operator.paths import config_dir
+from local_operator import launchd, procname, procstate, supervisors
+from local_operator.paths import CONFIG_DIR_ENV, config_dir
 from local_operator.tunnels import config
 
 LABEL = "com.local-operator.tunnel"
 
+#: Linux user unit name, and the Task Scheduler task name (Windows). Fixed, like
+#: ``LABEL``: the store travels in the unit's environment, so a second config
+#: root retargets this connector rather than shadowing it.
+SYSTEMD_UNIT = "lop-tunnel.service"
+TASK_NAME = "Local Operator tunnel"
+
+#: The refusal every entry point shares when the machine has no user supervisor.
+NO_SUPERVISOR_ERROR = supervisors.no_supervisor_error("lop tunnel serve")
+
+
+def task_record_path() -> Path:
+    """Our own copy of the Windows task definition (Task Scheduler keeps the original)."""
+    return config.directory() / "service-task.xml"
+
 
 def service_path() -> Path:
-    if sys.platform == "darwin":
+    kind = supervisors.supervisor()
+    if kind == supervisors.LAUNCHCTL:
         return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
-    if sys.platform.startswith("linux"):
-        return Path.home() / ".config" / "systemd" / "user" / "lop-tunnel.service"
-    raise ValueError("Use lop tunnel serve in the foreground on this platform.")
+    if kind == supervisors.SYSTEMCTL:
+        return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+    if kind == supervisors.SCHTASKS:
+        return task_record_path()
+    raise ValueError(NO_SUPERVISOR_ERROR)
+
+
+def render_systemd(config_base: Path | None = None) -> str:
+    """The systemd user unit, for the store ``config_base`` names.
+
+    ``config_base`` defaults to this process's config dir, which is what
+    ``install`` wants; a repair would pass the store recorded in the unit it is
+    replacing (see :func:`local_operator.tunnels.config.directory`).
+
+    ``UMask=0077`` is load-bearing rather than tidy: the connector's
+    ``cloudflared.token`` is written 0600 by ``config.private_write`` and
+    nothing else protects it, so the unit must not widen it at write time.
+    """
+    base = config_base if config_base is not None else config_dir()
+    # The stable shim when this machine has the generation layout, else this
+    # process's interpreter: a unit restarts, and a path inside a tree a flip or
+    # a prune replaced is a daemon that dies at load.
+    image = procname.supervised_image() or sys.executable
+    return supervisors.render_systemd_unit(
+        description="Radient personal tunnel",
+        after="network-online.target",
+        pre_lines=["Type=simple"],
+        exec_start=f"{supervisors.quoted(str(image))} -m local_operator.tunnels.service",
+        post_lines=[
+            f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={base}')}",
+            "UMask=0077",
+        ],
+        restart_sec=10,
+    )
+
+
+def render_task_xml(config_base: Path | None = None) -> str:
+    """The Windows Task Scheduler task for the connector, store included."""
+    base = config_base if config_base is not None else config_dir()
+    image = procname.supervised_image() or sys.executable
+    return supervisors.render_task_xml(
+        description="Radient personal tunnel connector",
+        image=str(image),
+        argv=["-m", "local_operator.tunnels.service"],
+        environment={CONFIG_DIR_ENV: str(base)},
+        log=config.directory(base) / "service.log",
+        user_id=supervisors.current_user_id(),
+    )
 
 
 def _run(args: list[str], *, checked: bool = True) -> None:
-    result = subprocess.run(args, capture_output=True, timeout=20)
+    """Run a supervisor command, refusing LEGIBLY when the binary is absent.
+
+    ``subprocess.run(check=False)`` suppresses a non-zero exit status but NOT
+    ``FileNotFoundError`` for a missing executable, so a Linux without systemd
+    (Devuan, Alpine, most containers, WSL2 without systemd) used to escape as an
+    ``OSError`` from ``lop tunnel install`` — which ``tunnels/cli.py`` renders as
+    *"check network access and your Radient login"*. The diagnosis was wrong,
+    and it is precisely the misreport ``browser_bridge._supervisor`` exists to
+    prevent: a missing user service manager is not a network problem.
+    """
+    if shutil.which(args[0]) is None:
+        raise ValueError(NO_SUPERVISOR_ERROR)
+    result = subprocess.run(args, capture_output=True, timeout=20)  # noqa: S603 — fixed argv
     if checked and result.returncode:
-        raise ValueError("Tunnel service action failed; check your user service manager.")
+        # ``capture_output=True`` without ``text=True`` answers in BYTES, but a
+        # test double (or a future `text=True`) answers in str — one adapter
+        # rather than a shape every caller has to remember, same as
+        # ``launchd._text``.
+        raw = result.stderr if result.stderr is not None else b""
+        stderr = (raw.decode(errors="replace") if isinstance(raw, bytes) else raw).strip()
+        raise ValueError(
+            "Tunnel service action failed; check your user service manager."
+            + (f"\n{stderr[:200]}" if stderr else "")
+        )
+
+
+def _domain() -> str:
+    """``gui/<uid>`` — the launchd domain the ``bootout`` below addresses.
+
+    The sibling installers each have this helper; the tunnel arm was the one
+    still spelling ``f"gui/{os.getuid()}"`` inline, which put ``os.getuid`` in
+    a function (``action``) that is reachable on every platform. The guard is
+    here rather than at that call site because ``os.getuid`` does not exist off
+    POSIX: an inline spelling is an ``AttributeError`` waiting for the next
+    caller, and only a guard INSIDE the function it protects is visible to a
+    reader — or to the static scan that grades this branch — as "safe to call
+    anywhere" rather than "currently unreachable".
+    """
+    if procstate.is_windows():
+        raise RuntimeError("launchd domains exist only on macOS")
+    return f"gui/{os.getuid()}"
 
 
 def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
@@ -96,7 +201,7 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
     """
     name = "tunnel"
     try:
-        if sys.platform != "darwin":
+        if supervisors.supervisor() != supervisors.LAUNCHCTL:
             # The systemd user unit has no plist to repair; it re-reads its unit
             # file on every start, so it has never had this failure mode.
             return launchd.PlistRefresh(name=name, kind="unsupported")
@@ -125,9 +230,12 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
 
 
 def install() -> None:
+    kind = supervisors.supervisor()
+    if kind is None:
+        raise ValueError(NO_SUPERVISOR_ERROR)
     path = service_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    if sys.platform == "darwin":
+    if kind == supervisors.LAUNCHCTL:
         log = config.directory() / "service.log"
         config.private_write(log, "")
         value = render_plist()
@@ -147,41 +255,48 @@ def install() -> None:
             raise ValueError(
                 launchd.reload_failure("tunnel", path, "lop tunnel install", reloaded.detail).detail
             )
-    else:
-        # Systemd quoting is its own grammar, not shell escaping. Percent is
-        # doubled because unit specifiers expand even inside quoted strings.
-        def quoted(value: str) -> str:
-            return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
-
-        text = (
-            "[Unit]\nDescription=Radient personal tunnel\nAfter=network-online.target\n"
-            "[Service]\nType=simple\n"
-            # The stable shim when this machine has the generation layout, else
-            # this process's interpreter: a unit restarts, and a path inside a
-            # tree a flip or a prune replaced is a daemon that dies at load.
-            f"ExecStart={quoted(str(procname.supervised_image() or sys.executable))} "
-            "-m local_operator.tunnels.service\n"
-            f"Environment={quoted('LOCAL_OPERATOR_CONFIG_DIR=' + str(config_dir()))}\n"
-            "Restart=on-failure\nRestartSec=10\nUMask=0077\n"
-            "[Install]\nWantedBy=default.target\n"
-        )
-        path.write_text(text)
+    elif kind == supervisors.SYSTEMCTL:
+        path.write_text(render_systemd())
         path.chmod(0o600)
         _run(["systemctl", "--user", "daemon-reload"])
         _run(["systemctl", "--user", "enable", "--now", path.name])
+    else:  # schtasks
+        xml = render_task_xml()
+        # The record first: it is what `uninstall` and a future diff read, and it
+        # is the only visible copy of a definition Task Scheduler keeps in the
+        # registry.
+        config.private_write(path, xml)
+        ok, detail = supervisors.create_task(TASK_NAME, xml)
+        if not ok:
+            raise ValueError(f"schtasks could not register the tunnel service: {detail}")
+        started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
+        if started.returncode:
+            raise ValueError(
+                "the tunnel task was registered but could not be started: "
+                f"{((started.stderr or started.stdout) or '').strip()[:200]}"
+            )
 
 
 def action(name: str) -> None:
+    kind = supervisors.supervisor()
+    if kind is None:
+        raise ValueError(NO_SUPERVISOR_ERROR)
     path = service_path()
-    if not path.exists():
+    # Windows has no registration FILE this installer owns (Task Scheduler keeps
+    # its own copy), so "the record is gone" must not read as "not installed".
+    if not path.exists() and kind != supervisors.SCHTASKS:
         raise ValueError(
             "Tunnel service not installed. Run lop tunnel install or lop tunnel serve."
         )
-    if sys.platform == "darwin":
+    if kind == supervisors.SYSTEMCTL and shutil.which("systemctl") is None:
+        # Reachable through `lop tunnel start` on a systemd-less Linux: the unit
+        # file may exist from a machine backup, but nothing here can run it.
+        raise ValueError(NO_SUPERVISOR_ERROR)
+    if kind == supervisors.LAUNCHCTL:
         if name == "stop":
             # A bare bootout, deliberately: stopping is not a reload, and there
             # is nothing to bootstrap afterwards.
-            _run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], checked=False)
+            _run(["launchctl", "bootout", f"{_domain()}/{LABEL}"], checked=False)
         else:
             # start/restart both mean "load the plist that is on disk now", so
             # both go through the shared reload: the old shape bootstrapped with
@@ -194,17 +309,51 @@ def action(name: str) -> None:
                         "tunnel", path, "lop tunnel install", reloaded.detail
                     ).detail
                 )
-    else:
+    elif kind == supervisors.SYSTEMCTL:
         _run(["systemctl", "--user", name, path.name])
+    else:  # schtasks
+        if name in ("stop", "restart"):
+            ended = supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
+            if ended.returncode and "running" not in ((ended.stderr or ended.stdout) or "").lower():
+                raise ValueError(((ended.stderr or ended.stdout) or "").strip()[:200])
+        if name in ("start", "restart"):
+            started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
+            if started.returncode:
+                raise ValueError(((started.stderr or started.stdout) or "").strip()[:200])
 
 
 def uninstall() -> None:
-    if sys.platform != "darwin" and not sys.platform.startswith("linux"):
-        return  # This platform only supports the foreground connector.
+    kind = supervisors.supervisor()
+    if kind is None:
+        # Nothing this installer could have registered; the connector runs in the
+        # foreground there, and saying so is the whole answer.
+        return
+    if kind == supervisors.SCHTASKS:
+        _uninstall_task()
+        return
     path = service_path()
     if not path.exists():
         return
     action("stop")
-    if sys.platform.startswith("linux"):
+    if kind == supervisors.SYSTEMCTL:
         _run(["systemctl", "--user", "disable", path.name])
     path.unlink()
+
+
+def _uninstall_task() -> None:
+    """Deregister the Windows task and delete our copy of its definition.
+
+    A separate function so ``uninstall`` keeps exactly ONE file-removal call:
+    ``tests/unit/session/test_no_session_deletion.py`` inventories every
+    ``<path>.unlink`` by function and count, and a second one riding on that
+    row would be a new unreviewed remover — which is what the inventory exists
+    to catch.
+
+    ``/End`` before ``/Delete`` for the same reason ``mobile``'s arm sends it:
+    ``schtasks /Delete`` deregisters the task without interrupting the program
+    it runs, so the connector would keep serving after ``lop tunnel uninstall``
+    reported it removed.
+    """
+    supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
+    supervisors.delete_task(TASK_NAME)
+    task_record_path().unlink(missing_ok=True)
