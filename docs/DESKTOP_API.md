@@ -164,6 +164,14 @@ contains an API key, access token, refresh token, or complete stored grant.
   and still be refused by the identity provider. Both are `null`/`unknown`-safe
   and neither performs a network call: this route is polled beside an
   interactive login form.
+  `login_required` here is the SAME condition `POST /v1/desktop/radient` types as
+  `grant_invalid` (401 `radient_credential_refused`): both key on the store's own
+  dead-grant verdict (`CredentialInvalidError`), which this branch also widened
+  to cover a token endpoint that answers in prose (Radient's
+  `{"error": "Token refresh failed: refresh token is expired or revoked"}`). A
+  renderer may treat the two as one state; the vocabulary differs because this
+  one is the tunnel's persisted reason (the park file, `lop tunnel status` and
+  the phone's 503 all use it) and that one is a per-request refusal code.
 - `POST /v1/auth/login` with `{provider: <method id>}` starts a login operation.
 - `GET /v1/auth/operations/{id}` returns `id`, `provider`, `state`, `message`,
   `auth_url`, `instructions`, `input_required`, `prompt_id`, and `expires_in`.
