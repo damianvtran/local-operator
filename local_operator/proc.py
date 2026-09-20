@@ -5,9 +5,17 @@ the identical shape. It is stated once because the three properties below are
 easy to get subtly wrong and each omission fails in a way that points somewhere
 else entirely:
 
-- ``start_new_session=True`` puts the child in its own session and process
-  group, so it survives this process exiting and — more importantly — a Ctrl-C
-  in this terminal does not deliver SIGINT to it.
+- detachment, spelled per platform. ``start_new_session=True`` puts the child
+  in its own session and process group on POSIX, so it survives this process
+  exiting and — more importantly — a Ctrl-C in this terminal does not deliver
+  SIGINT to it. WINDOWS SILENTLY IGNORES THAT FLAG (``subprocess`` documents it
+  "(POSIX only)"; the Windows ``_execute_child`` parameter is literally named
+  ``unused_start_new_session``), so the child kept this console and both
+  Ctrl-C and a console close reached the very process the flag exists to
+  protect. :func:`local_operator.procstate.detached_popen_kwargs` is the one
+  home for "really detached on this platform" — ``DETACHED_PROCESS`` and a new
+  process group there — and this function merges its result rather than
+  passing a flag that only looks honoured.
 - stdio fully redirected to ``DEVNULL``. A child that inherits this process's
   stdout writes bytes straight into the middle of a painted Textual frame, and
   one that inherits stdin competes with the input loop for keystrokes.
@@ -24,6 +32,8 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+
+from local_operator.procstate import detached_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +94,7 @@ def spawn_detached(
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **detached_popen_kwargs(),
         )
         return True
     except Exception:

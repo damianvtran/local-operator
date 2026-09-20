@@ -54,6 +54,8 @@ import os
 import time
 from pathlib import Path
 
+from local_operator.procstate import O_BINARY
+
 #: Beside the transcript, in the family the per-session sidecars already use
 #: (``.execution-lease``, ``.session.pid``). Dotted so a listing that walks a
 #: session directory never reads it as a session.
@@ -188,7 +190,7 @@ class WakeWriteLock:
         neither is allowed to escape as a bare ``OSError``.
         """
         try:
-            fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            fd = os.open(self.path, os.O_CREAT | os.O_RDWR | O_BINARY, 0o600)
         except OSError as exc:
             # Not a WakeLockBusy: nothing was contended and re-running changes
             # nothing until the directory's mode does. `strerror` is the only

@@ -900,10 +900,25 @@ def _local_zone_key() -> str:
     ``/usr/share/zoneinfo/Europe/London`` on Linux), then the abbreviation as a
     last resort. The fallback is the DST-sensitive one and that is accepted:
     a name that changes costs the fast path (slow), never a wrong number.
+
+    **Windows takes the registry rather than falling through to that
+    fallback.** There is no ``/etc/localtime`` to read, and ``os.path.realpath``
+    does not raise for a missing path — it returns it unchanged — so the probe
+    below silently finds nothing and Windows would ALWAYS land on the
+    DST-sensitive abbreviation, losing the fast path for half of every year.
+    ``TimeZoneKeyName`` is the stable name Windows keeps for exactly this
+    purpose (``Eastern Standard Time`` all year, unlike ``tzname()``). A
+    registry read that fails — an unreadable or absent key, a stripped-down
+    image — falls through to the same accepted fallback, so this cannot make
+    the key worse than it is today.
     """
     env_zone = os.environ.get("TZ", "").strip()
     if env_zone:
         return env_zone
+    if os.name == "nt":
+        windows_zone = _windows_zone_key()
+        if windows_zone:
+            return windows_zone
     try:
         target = os.path.realpath("/etc/localtime")
         marker = "zoneinfo/"
@@ -918,6 +933,40 @@ def _local_zone_key() -> str:
         return datetime.now().astimezone().tzname() or ""
     except Exception:  # noqa: BLE001 — an unresolvable zone is an empty key
         return ""
+
+
+def _windows_zone_key() -> str | None:
+    """Windows' stable zone name from the registry, or ``None`` if it is unreadable.
+
+    ``TimeZoneKeyName`` is the name Windows keeps for exactly this purpose
+    (``Eastern Standard Time`` all year, unlike the DST-sensitive
+    ``tzname()``). Split out from :func:`_local_zone_key` so it can be
+    exercised off Windows at all: the branch is one registry read and nothing
+    else, so injecting a stand-in ``winreg`` exercises the real call shape
+    rather than a re-implementation of it.
+
+    Every failure is ``None`` rather than an exception — an absent or
+    unreadable key on a stripped-down image must fall through to the caller's
+    documented fallback, never turn a day bucket into a crash. ``ImportError``
+    is caught with ``OSError`` for the same reason the broader guard exists
+    elsewhere in this tree: off Windows there is no ``winreg`` to import, and
+    this function is reachable in a test that does not share the platform.
+    """
+    try:
+        import winreg
+
+        # ``# type: ignore`` on the attribute accesses, matching
+        # ``helpers.py``'s Windows registry block: ``winreg`` has no stubs the
+        # checker resolves off Windows, and the guarded import is the reason
+        # this is safe rather than the reason to skip the check.
+        with winreg.OpenKey(  # type: ignore
+            winreg.HKEY_LOCAL_MACHINE,  # type: ignore
+            r"SYSTEM\CurrentControlSet\Control\TimeZoneInformation",
+        ) as key:
+            name = winreg.QueryValueEx(key, "TimeZoneKeyName")[0]  # type: ignore
+    except (ImportError, OSError):
+        return None
+    return name if isinstance(name, str) and name else None
 
 
 def _local_day_bounds_ms(day: str) -> tuple[int, int]:

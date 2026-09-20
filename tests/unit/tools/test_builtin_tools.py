@@ -24,8 +24,9 @@ from typing import Any
 
 import pytest
 from PIL import Image
+from rich.cells import cell_len
 
-from local_operator import imaging
+from local_operator import imaging, procstate
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -369,6 +370,206 @@ def test_resolve_bash_shell_expands_a_tilde(monkeypatch) -> None:
     monkeypatch.setenv("HOME", "/home/tester")
     assert builtin.resolve_bash_shell("~/bin/bash") == "/home/tester/bin/bash"
     assert builtin.resolve_bash_shell("  ~/bin/bash  ") == "/home/tester/bin/bash"
+
+
+# -- Windows: there is no /bin/sh, so the last resort must be found or refused --
+
+
+def _as_windows_without_bash(monkeypatch, tmp_path, *, program_files: Path | None = None) -> None:
+    """A Windows host with no ``bash`` on PATH and no OTHER source of one."""
+    monkeypatch.setattr(builtin.shutil, "which", lambda name: None)
+    # The platform fact has one home (`procstate._PLATFORM`), which every
+    # Windows branch in the package — this module's included — reads.
+    monkeypatch.setattr(procstate, "_PLATFORM", "win32")
+    monkeypatch.setenv("ProgramFiles", str(program_files if program_files else tmp_path / "pf"))
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+
+
+def test_resolve_bash_shell_finds_git_bash_where_which_cannot(monkeypatch, tmp_path) -> None:
+    r"""A Windows host that HAS bash still missed `shutil.which`.
+
+    Git for Windows' default PATH option installs ``...\Git\cmd``, which has no
+    ``bash.exe`` inside it — so the resolver has to look in the install tree
+    itself, or a machine with a perfectly good bash falls through to a Unix path
+    Windows cannot execute.
+    """
+    program_files = tmp_path / "pf"
+    git_bash = program_files / "Git" / "bin" / "bash.exe"
+    git_bash.parent.mkdir(parents=True)
+    git_bash.write_text("", encoding="utf-8")
+    _as_windows_without_bash(monkeypatch, tmp_path, program_files=program_files)
+
+    assert builtin.resolve_bash_shell(None) == str(git_bash)
+    # The configured override still wins over the search, on every platform.
+    assert builtin.resolve_bash_shell("C:/other/bash.exe") == "C:/other/bash.exe"
+
+
+def test_resolve_bash_shell_last_resort_on_windows_is_the_posix_sentinel(
+    monkeypatch, tmp_path
+) -> None:
+    """With no bash anywhere it returns `/bin/sh` as a SENTINEL, not as a plan.
+
+    The spawn path refuses on it (see the tool-level test below): guessing
+    ``cmd.exe`` here would make this tool execute every command in a language it
+    does not advertise, which is the silent wrong answer the refusal replaces.
+    """
+    _as_windows_without_bash(monkeypatch, tmp_path)
+    assert builtin.resolve_bash_shell(None) == builtin.BASH_SHELL_FALLBACK
+
+
+@pytest.mark.asyncio
+async def test_bash_refuses_legibly_when_windows_has_no_bash(
+    tools, context, tmp_path, monkeypatch
+) -> None:
+    """Before this, every call on such a host failed with `cannot execute
+    '/bin/sh'` under a ``FileNotFoundError`` — naming a path the user never
+    chose and prescribing `clear it to auto-resolve bash on PATH`, which on
+    Windows is the thing that just failed."""
+    _as_windows_without_bash(monkeypatch, tmp_path)
+    # `bash.shell` unset: this is the auto-resolve path a fresh install takes.
+    from local_operator.config import ConfigManager
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    ConfigManager(tmp_path / "config").set_config_value("bash", {"shell": ""})
+
+    spawns: list[tuple[object, ...]] = []
+
+    async def _never_spawn(*args, **kwargs):
+        spawns.append(args)
+        raise AssertionError("the refusal must come before any spawn")
+
+    monkeypatch.setattr(builtin.asyncio, "create_subprocess_exec", _never_spawn)
+
+    result = await _call(tools, "bash", {"command": "echo hi"}, context)
+
+    assert result.is_error is True
+    assert "no bash on this Windows host" in result.text
+    assert "Git for Windows" in result.text
+    assert "bash.shell" in result.text  # names the key that changes the answer
+    assert spawns == []
+
+
+#: The painted width of the tool card's output lane at 80x24. ``_append_output``
+#: computes it as ``width - 2 - tool_card.OUTPUT_INDENT`` (the frame and the
+#: indent), so at 80 columns it is 76 — and anything longer is CUT with a
+#: trailing ``…`` rather than wrapped. Duplicated here rather than imported
+#: because ``tool_card`` pulls Textual in and this module is not a TUI test.
+_CARD_LANE_CELLS = 76
+
+
+def _split_like_cmd_exe(line: str) -> list[str]:
+    """The argv ``cmd.exe`` + ``CommandLineToArgvW`` produce for ``line``.
+
+    Spelled out rather than approximated with ``shlex``: ``shlex.split(posix=False)``
+    KEEPS the quote characters in the token, so it reports one token for the
+    broken single-quoted spelling too and would pass the defect. The rule that
+    matters is the one this reproduces — a double quote protects a run that may
+    contain spaces, and a single quote is an ordinary character.
+    """
+    args: list[str] = []
+    current: list[str] = []
+    in_double_quotes = False
+    for char in line:
+        if char == '"':
+            in_double_quotes = not in_double_quotes
+            continue
+        if char.isspace() and not in_double_quotes:
+            if current:
+                args.append("".join(current))
+                current = []
+            continue
+        current.append(char)
+    if current:
+        args.append("".join(current))
+    return args
+
+
+class TestTheWindowsBashRefusalCopy:
+    """D2/D3: this message is copy an operator PASTES, so it is checked as such.
+
+    Two properties, neither of them visible to a tool-level assertion about the
+    text's content: the card truncates PER LINE, so a sentence one cell too long
+    is silently cut; and the remedy is a command line, which the shell it is
+    pasted into — ``cmd.exe``, the default Windows shell and the one whose
+    missing bash this message is about — splits by its own quoting rules.
+    """
+
+    def test_every_line_fits_the_card_lane(self) -> None:
+        """The clipped line was line 5, at 84 cells (86 painted) against 76.
+
+        It was the sentence explaining WHY ``cmd.exe`` is not silently used —
+        the answer to the first thing a user asks — and it ended at `…must be…`
+        in the only failing state, 80x24.
+        """
+        budget = _CARD_LANE_CELLS - 2  # OUTPUT_INDENT
+        for line in builtin.WINDOWS_NO_BASH_MESSAGE.splitlines():
+            assert cell_len(line) <= budget, f"{cell_len(line)} cells: {line!r}"
+
+    def test_the_remedy_survives_cmd_exe_splitting(self) -> None:
+        """Single quotes are not quoting in ``cmd.exe``, so the path was split.
+
+        The single-quoted spelling yields six arguments there (the path broken
+        at its space, with the stray quote left inside), which argparse answers
+        with `unrecognized arguments: Files\\Git\\bin\\bash.exe'`. Double quotes
+        are the one spelling ``cmd.exe`` and PowerShell both honour.
+        """
+        remedy = next(
+            line
+            for line in builtin.WINDOWS_NO_BASH_MESSAGE.splitlines()
+            if line.startswith("lop config edit")
+        )
+        assert _split_like_cmd_exe(remedy) == [
+            "lop",
+            "config",
+            "edit",
+            "bash.shell",
+            r"C:\Program Files\Git\bin\bash.exe",
+        ], remedy
+        # The same check against the spelling this replaced, so the test is
+        # about the quoting and not about the sentence around it.
+        broken = remedy.replace('bash.shell "', "bash.shell '").replace('bash.exe"', "bash.exe'")
+        assert len(_split_like_cmd_exe(broken)) == 6, broken
+
+    def test_no_other_line_offers_a_single_quoted_remedy(self) -> None:
+        """The sibling message carried the same mistake, for a different verb.
+
+        `lop config edit bash.shell ''` is not an empty argument in ``cmd.exe``:
+        it arrives as the two-character value ``''``, which the row's own
+        validator treats as a real path. `""` is empty in every shell this can
+        be pasted into.
+        """
+        assert "''" not in builtin.WINDOWS_NO_BASH_MESSAGE
+        source = Path(builtin.__file__).read_text(encoding="utf-8")
+        assert "config edit bash.shell ''" not in source
+        assert 'config edit bash.shell ""' in source
+
+
+@pytest.mark.asyncio
+async def test_bash_kill_path_goes_through_the_shared_platform_helper(
+    tools, context, monkeypatch
+) -> None:
+    """The timeout/abort teardown must not name `os.killpg`/`signal.SIGKILL`.
+
+    Neither exists on Windows, so the first attribute lookup raised
+    ``AttributeError`` out of the tool — on the stop paths, with the spawned tree
+    still alive. ``procstate.terminate_process_tree`` is the one implementation;
+    on POSIX it is the ``killpg(getpgid(pid), SIGKILL)`` this used to do inline
+    (pinned by the descendant tests above).
+    """
+    calls: list[tuple[int, bool]] = []
+
+    def _record(pid: int, *, force: bool = False) -> bool:
+        calls.append((pid, force))
+        return True
+
+    monkeypatch.setattr(builtin, "terminate_process_tree", _record)
+
+    result = await _call(tools, "bash", {"command": "sleep 5", "timeout": 0.2}, context)
+
+    assert "TIMEOUT" in result.text
+    assert calls, "the timeout path never reached the kill helper"
+    assert all(force is True for _pid, force in calls)
 
 
 def _set_configured_shell(monkeypatch, tmp_path, value: str):

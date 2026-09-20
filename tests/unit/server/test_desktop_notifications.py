@@ -514,7 +514,18 @@ async def test_an_unknown_or_foreign_token_claims_nothing(tmp_path: Path) -> Non
     assert await pool.claim_notification(theirs, foreign) is True
 
     # An unknown SESSION is a 404 in the same shape the read receipt uses.
-    for bogus in ("../../etc", "not-hex", "a" * 12, mine.upper(), "", "0123456789ab"):
+    #
+    # The uppercase entry is written out rather than derived from ``mine``, and
+    # that is a fix rather than a style choice: ``mine.upper()`` is only a
+    # FOREIGN id when ``mine`` contains a letter. Session ids are 12 lowercase
+    # hex characters, so an all-digit one upper-cases to itself (4 of 400 draws
+    # here; the exact rate is (10/16)**12 = 0.36%), and the assertion below then
+    # demands a ``KeyError`` for a perfectly valid session and fails. It reads as
+    # a flake because that rate is rare
+    # enough to pass review and recur in CI, and it bites the shard whose
+    # composition happens to place this test under ``-n auto``. A literal
+    # uppercase id is foreign for every draw and still the same shape.
+    for bogus in ("../../etc", "not-hex", "a" * 12, "ABCDEF012345", "", "0123456789ab"):
         with pytest.raises(KeyError):
             await pool.claim_notification(bogus, foreign)
 
