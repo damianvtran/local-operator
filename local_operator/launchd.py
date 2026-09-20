@@ -705,6 +705,21 @@ def is_own_plist(path: Path, label: str) -> bool:
         return False
 
 
+class JobNotOurs(ValueError):
+    """A verb refused because the job it addresses belongs to another run.
+
+    A ``ValueError``, because every caller that already catches that keeps
+    working — a refusal is not a new failure mode for them — and a TYPE OF ITS
+    OWN, because one caller has to tell two very different things apart (review
+    round 3, QA Q-2): `lop tunnel stop` reads a ``ValueError`` from
+    ``install.action("stop")`` as "there is no supervised job, the connector is
+    running in the foreground" and prints "Stop requested …". That is right for
+    the foreground case and a false success for a refusal, where nothing was
+    called at all. Raised only through :func:`not_our_job_error`'s sentence, so
+    the message a user reads stays one spelling.
+    """
+
+
 def not_our_job_error(path: Path, label: str) -> str:
     """Why a verb refused to address a job this run does not own.
 

@@ -162,11 +162,19 @@ def gateway_answers(timeout: float = 2.0) -> bool:
     connection), so a connector whose authorization lapsed answers ``ok: false``
     while being perfectly alive. ``lop tunnel status`` owns that question; here
     the only question is "did my own gateway answer on my port", which is what
-    the twins' ``health(port) is not None`` means too. A stray listener on the
-    port cannot pass for it: the gateway checks the ``Host`` header against its
-    own port before serving the path (``gateway.py``), so a foreign server
-    answers another status or another body, and both count as not-answering
-    here — the direction that repairs.
+    the twins' ``health(port) is not None`` means too.
+
+    WHAT IT PROVES, AND WHAT IT DOES NOT. It proves that SOMETHING answered
+    ``200`` with a JSON object on that path of that port. It cannot prove the
+    answerer is OUR gateway: a foreign listener serving exactly that passes, and
+    nothing cheaper tells the two apart from here — measured (review round 3,
+    QA Q-1/N2, after this docstring claimed the opposite). What makes the
+    composite gate safe is the ORDER: ``job_running`` is asked first, and launchd
+    can hold a live pid only for OUR label, so a port is probed only while our
+    own supervised process is alive — the same argument the browser bridge's
+    health comment makes. The answer is therefore "my port produced a
+    gateway-shaped reply", which is all the repair-or-leave-alone decision
+    needs, and all this claims.
 
     Never raises: an unreadable record, a closed port and a hung listener all
     answer ``False``, which is the direction that reloads.
@@ -197,7 +205,14 @@ def _configured_gateway_port() -> int | None:
     """
     try:
         return config.port(config.load().get("gateway_port", config.DEFAULT_GATEWAY_PORT))
-    except ValueError:
+    except (OSError, ValueError):
+        # OSError as well as ValueError, and it is not theoretical (review round
+        # 3, M2): `load()` reads `config.json`, so an unreadable record — a
+        # directory where the file should be, a permission the sandbox lacks —
+        # arrives as `IsADirectoryError`/`PermissionError`, and catching only
+        # `ValueError` let it escape `install()` and turn a repair into a
+        # traceback. Anything that stops this probe from reading the port is
+        # "not answering", which is the direction that repairs.
         return None
 
 
@@ -535,7 +550,10 @@ def action(name: str) -> None:
         # resolves to the Label INSIDE the file. Every call below addresses the
         # label, so the refusal is here, ahead of all of them.
         if not launchd.is_own_plist(path, LABEL):
-            raise ValueError(launchd.not_our_job_error(path, LABEL))
+            # `JobNotOurs` rather than a bare ValueError so `lop tunnel stop` can
+            # tell a refusal from "the connector runs in the foreground" — the
+            # other reason this installer raises here (review round 3, QA Q-2).
+            raise launchd.JobNotOurs(launchd.not_our_job_error(path, LABEL))
         if name == "stop":
             # A bare bootout, deliberately: stopping is not a reload, and there
             # is nothing to bootstrap afterwards.
@@ -577,7 +595,18 @@ def uninstall() -> None:
     path = service_path()
     if not path.exists():
         return
-    action("stop")
+    try:
+        action("stop")
+    except ValueError:
+        # THE SUPERVISOR HALF MAY REFUSE; THE FILE HALF MUST STILL WORK (review
+        # round 3, N3). `action("stop")` applies the identity guard, so from a
+        # redirected home it declines rather than booting out the operator's
+        # connector — and calling it directly here turned that refusal into a
+        # traceback that left the SANDBOX's own plist on disk. What this function
+        # owns is the file, and being refused the launchd half is not a reason to
+        # keep it; nothing is reported that did not happen, because this returns
+        # no step list at all.
+        pass
     if kind == supervisors.SYSTEMCTL:
         _run(["systemctl", "--user", "disable", path.name])
     path.unlink()

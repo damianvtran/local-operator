@@ -16,7 +16,9 @@ neither is re-created the same way.
 
 from __future__ import annotations
 
+import argparse
 import http.server
+import json
 import plistlib
 import sys
 import threading
@@ -266,6 +268,11 @@ def test_the_gateway_probe_answers_only_for_a_serving_gateway(
     A fake would prove nothing about this finding: the whole point of R-7 is that
     the surface exists and is worth asking. The record is pointed at a port this
     test binds, so the answer comes from a real socket.
+
+    THIS HANDLER IS ITSELF THE STRAY LISTENER the docstring names as a limit: it
+    is not the gateway, and it passes the probe. That is the measured behaviour
+    the docstring now states instead of denying (review round 3, QA Q-1/N2); the
+    composite gate is safe because `job_running` is asked first.
     """
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -280,7 +287,7 @@ def test_the_gateway_probe_answers_only_for_a_serving_gateway(
             self.end_headers()
             self.wfile.write(payload)
 
-        def log_message(self, *args: object) -> None:
+        def log_message(self, format: str, *args: object) -> None:
             return  # an access log per probe would be noise in the pytest output
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
@@ -330,3 +337,95 @@ def test_the_stop_verb_refuses_a_redirected_home_and_acts_for_the_owned_one(
     install.action("stop")
 
     assert runs == [["launchctl", "bootout", f"{launchd.job_domain()}/{install.LABEL}"]], runs
+
+
+def test_an_unreadable_record_answers_not_answering_rather_than_raising(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """M2: the probe's never-raises contract covers the FILESYSTEM, not just config.
+
+    The reviewer's reproduction: with the record present but unreadable as a file
+    — `config.json` a directory, or a permission the sandbox lacks — `load()`
+    raises `OSError`, which is not a `ValueError`. Catching only that let it
+    escape `install()` and turn a repair into a traceback. Not answering is the
+    answer, because it is the direction that repairs.
+    """
+    store = tmp_path / "store" / "tunnel"
+    (store / "config.json").mkdir(parents=True)
+    monkeypatch.setattr(install.config, "directory", lambda base=None: store)
+
+    assert install.gateway_answers(timeout=0.2) is False
+
+
+def test_a_redirected_home_uninstall_still_removes_its_own_plist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """N3: the supervisor half may refuse; the FILE half must still work.
+
+    `uninstall()` calls `action("stop")`, which applies the identity guard, so
+    from a redirected home it declines — and that refusal escaped, leaving the
+    sandbox's own plist on disk behind a traceback. Nothing of the operator's is
+    touched either way: the refused stop issues no call at all.
+    """
+    rig = _Rig(monkeypatch, tmp_path / "sandbox", own=False)
+    rig.write_current_plist()
+    monkeypatch.setattr(install, "_run", lambda args, **kwargs: rig.calls.append(list(args)))
+
+    install.uninstall()  # must not raise
+
+    assert not rig.path.exists(), "the sandbox's own plist must still be removed"
+    assert rig.calls == [], f"a redirected home reached launchd: {rig.calls}"
+
+
+def test_a_refused_stop_is_reported_as_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """QA Q-2: a refused stop must not read as success.
+
+    `lop tunnel stop` treats a `ValueError` from `action("stop")` as "there is no
+    supervised job — the connector runs in the foreground". That is right for the
+    foreground case and was a false success for a refusal: the identity guard
+    raised the same type, nothing was called, and the CLI printed
+    "Stop requested …" with exit 0. The refusal now reaches the operator as one —
+    its own sentence on stderr, non-zero exit — which is what the type
+    (`launchd.JobNotOurs`) exists for.
+    """
+    from local_operator.tunnels import cli as tunnel_cli
+
+    rig = _Rig(monkeypatch, tmp_path / "sandbox", own=False)
+    rig.write_current_plist()
+    # The rig's home IS the store the CLI reads (`config.directory` is patched to
+    # it), so the record has to live there, not one level up.
+    (tmp_path / "sandbox" / "config.json").write_text(
+        json.dumps({"stopped": False, "gateway_port": 4100})
+    )
+
+    code = tunnel_cli.main(argparse.Namespace(tunnel_command="stop"))
+
+    captured = capsys.readouterr()
+    assert code == 1, captured
+    assert "not the LaunchAgent the real home owns" in captured.err
+    assert "Stop requested" not in captured.out
+    assert rig.calls == [], f"a redirected home reached launchd: {rig.calls}"
+
+
+def test_a_stop_with_no_supervisor_still_reports_the_foreground_case(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other direction: the cheerful branch is right where it still applies.
+
+    A machine with no supervisor at all (a foreground connector, `lop tunnel
+    serve`) is not a refusal, and the sentence that branch exists for must
+    survive the new type.
+    """
+    from local_operator.tunnels import cli as tunnel_cli
+
+    monkeypatch.setattr(install.supervisors, "supervisor", lambda: None)
+    monkeypatch.setattr(install.config, "directory", lambda base=None: tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps({"stopped": False, "gateway_port": 4100}))
+
+    code = tunnel_cli.main(argparse.Namespace(tunnel_command="stop"))
+
+    captured = capsys.readouterr()
+    assert code == 0, captured
+    assert "Stop requested" in captured.out
