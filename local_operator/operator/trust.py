@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import sys
 from dataclasses import dataclass, field
@@ -69,6 +70,27 @@ _ANCHOR_ROOTS = {
 _ANCHOR_ROOT_OVERRIDE: Path | None = None
 
 
+def _owner_key() -> str:
+    """The per-human component of the anchor's filename.
+
+    POSIX answers with the uid, which is the identity the runtime and the
+    operator's own processes agree on. Windows has no ``os.getuid`` at all —
+    reading the attribute there raises ``AttributeError``, which the probe
+    battery catches as a fatal unguarded POSIX attribute — so it answers with the
+    account NAME.
+
+    What that name is worth is deliberately small: the anchor's authority comes
+    from WHERE the file lives and WHO owns it (``%PROGRAMDATA%`` is
+    administrator-writable), never from this string. Its only job is that two
+    humans on one host do not share a key.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return str(getuid())
+    account = os.environ.get("USERNAME") or os.environ.get("USER") or "default"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", account)[:64]
+
+
 def anchor_dir() -> Path:
     """The directory the anchor is read from."""
     if _ANCHOR_ROOT_OVERRIDE is not None:
@@ -87,9 +109,9 @@ def anchor_dir() -> Path:
     return root
 
 
-def anchor_path(uid: int | None = None) -> Path:
+def anchor_path(uid: int | str | None = None) -> Path:
     """One file per human, so two admins on one host do not share a key."""
-    who = os.getuid() if uid is None else uid
+    who = uid if uid is not None else _owner_key()
     return anchor_dir() / f"{who}.json"
 
 
@@ -227,7 +249,7 @@ def _open_no_follow(path: Path) -> tuple[int, os.stat_result] | None:
         return None
 
 
-def load_anchor(uid: int | None = None) -> AnchorLoad:
+def load_anchor(uid: int | str | None = None) -> AnchorLoad:
     """Read and validate the pinned anchor. Never raises, never follows a link.
 
     FAIL-CLOSED AT EVERY STEP. A missing file, an unreadable file, a symlinked
