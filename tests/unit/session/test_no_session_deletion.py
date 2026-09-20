@@ -105,6 +105,28 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes <venv>/bin/.'Local Operator'.<dead-pid>.tmp orphans only; glob is venv-scoped",
     ),
+    # -- operator/device pairing store (stage D, issue #1310) ----------------
+    # Every path in these three is built from `config_dir()/operator/...` plus a
+    # device id validated by `_safe_name` (alphanumerics, '-' and '_', at most 128
+    # chars) — no session id, no caller-chosen directory component, and nothing
+    # that can name a path under `sessions/`. The VALUES they unlink are the
+    # pairing code, a pending pairing request, and one device certificate: three
+    # single files this module itself wrote, never a directory.
+    (
+        "local_operator/operator/devices.py::clear_pairing",
+        "<path>.unlink",
+        "Drops <config>/operator/pairing.json, the code this process minted",
+    ),
+    (
+        "local_operator/operator/devices.py::drop_pending",
+        "<path>.unlink",
+        "Drops one <config>/operator/pending/<device-id>.json this module wrote",
+    ),
+    (
+        "local_operator/operator/devices.py::record_revocation",
+        "<path>.unlink",
+        "Drops one <config>/operator/devices/<device-id>.json on revocation",
+    ),
     (
         "local_operator/tui/app.py::OperatorApp._release_sidebar_preparation",
         "<path>.remove",

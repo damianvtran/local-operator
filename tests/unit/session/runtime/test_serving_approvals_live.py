@@ -430,7 +430,14 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
         handle._approvals_slash(session, "default auto", _SlashResult, may_loosen=False), "text", ""
     )
     assert "/approvals ask switches this session now" in refused, refused
-    assert "/approvals auto has to come from the window that started it" in refused, refused
+    # THE SPAWNER REMEDY IS DELETED, and this is the pin that says so (revision 2
+    # §5 / stage F). The old clause named "the window that started it", which for a
+    # background-started runtime is a window that does not exist — the remedy the
+    # redesign exists to remove. What replaces it is the three levers that work
+    # from anywhere, in the order a reader can act on them.
+    assert "needs the operator's own consent" in refused, refused
+    assert "has to come from the window" not in refused, refused
+    assert "retire" not in refused, refused
     # The unactionable half of the old sentence is gone: this is a FILE (or the
     # desktop app's settings), not something to go and type in a terminal — the
     # surface the operator was already sitting at (UX round 2, U7).

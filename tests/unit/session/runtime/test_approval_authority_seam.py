@@ -50,6 +50,7 @@ from local_operator.harness.approval import (
     request_proof,
     reset_operator_caps_for_tests,
 )
+from local_operator.operator.verify import key_id_for
 from local_operator.paths import config_dir
 from local_operator.session.runtime import launch as launch_module
 from local_operator.session.runtime import registry
@@ -1275,6 +1276,7 @@ _CAPABILITY_MODULES = frozenset(
         "local_operator/mobile/daemon.py",
         "local_operator/mobile/types.py",
         "local_operator/operator/__init__.py",
+        "local_operator/session/runtime/exec_control.py",
         "local_operator/session/runtime/launch.py",
         "local_operator/session/runtime/process.py",
         "local_operator/session/runtime/server.py",
@@ -1526,68 +1528,685 @@ async def test_an_impostor_endpoint_learns_nothing_it_can_replay(
 
 
 # ---------------------------------------------------------------------------
-# The relay, over its own socket: the handshake has to OUTLIVE the repaint
+# Stage D: the PHONE, through the relay, over the relay's real HTTP surface
 # ---------------------------------------------------------------------------
+#
+# WHAT USED TO BE HERE, AND WHY IT IS GONE. The cell that lived at this point was
+# ``test_the_relay_keeps_its_handshake_across_a_repaint``, and it FABRICATED the
+# thing it claimed to measure: it called ``remember_operator_cap(record.pid, cap)``
+# itself and then asserted that a relay holding that capability could loosen. No
+# production path ever registers a capability for a relay-spawned runtime —
+# ``mobile/daemon.py``'s own spawn builds
+# ``python -m local_operator.session.runtime.process`` and passes no
+# ``--operator-fd``, so ``entry.operator_cap`` is ALWAYS ``None`` there — which
+# means the test proved that a hand-built state works, not that the phone works.
+#
+# Revision 2 removes the need for that state entirely: the phone's authority is a
+# DEVICE SIGNATURE under an operator-signed certificate, and it therefore does not
+# depend on who spawned the runtime. So the fabrication is deleted and replaced by
+# the cell below, which drives the REAL path — the real runtime, the relay's real
+# dial, the relay's real HTTP surface, a real ES256 device key — with NO
+# ``remember_operator_cap`` anywhere in it. ``operator_cap_for`` returns ``None``
+# for the runtime behind it, exactly as it does in production.
+#
+# The negative fact is pinned too (:func:`test_the_relays_own_spawn_path_registers_`
+# ``no_capability``), because "the relay's capability is always None" is now a
+# deliberate property rather than an accident: if a future change DID hand the
+# relay a capability, the phone's cell below would still pass and nothing would
+# notice that the design's justification had changed.
+
+
+async def _new_device_key() -> tuple[Any, bytes]:
+    """A device's ES256 private key and its uncompressed public point.
+
+    Stands in for WebCrypto's non-extractable key: the POINT is what the operator
+    certifies and what the runtime verifies against, and the private half is used
+    here only to produce the signature the phone would produce. The portal's own
+    half of this is covered by vitest (``operator-device.test.ts``); what cannot
+    be covered there is the WIRE, which is what this rig drives.
+    """
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    point = key.public_key().public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return key, point
+
+
+def _store_device(
+    config_root: Path,
+    *,
+    device_spki: bytes,
+    certificate: str,
+    name: str = "test phone",
+) -> Any:
+    """Install a device certificate through the PRODUCTION store writer.
+
+    Not a hand-written JSON file: the on-disk shape, the 0644-under-0700 modes and
+    the derived id are all facts the relay reads, and a test that wrote its own
+    file would prove nothing about the writer the pairing flow actually uses.
+    """
+    from local_operator.operator import devices
+    from local_operator.operator.verify import read_device_cert
+
+    parsed = read_device_cert(certificate)
+    assert parsed is not None, "the rig signed a certificate it cannot parse"
+    return devices.write_device_cert(
+        config_root,
+        certificate=certificate,
+        parsed=parsed,
+        operator_key_id="",
+        name=name,
+    )
+
+
+def _issue_device_certificate(config_root: Path, device_spki: bytes, *, label: str) -> str:
+    """An operator-signed device certificate, from the REAL signer.
+
+    ``load_signer`` + ``issue_device_cert`` are the pairing flow's own two steps,
+    and the ``file-only`` backend is the only one a test may create (see
+    ``_install_operator_key``). Nothing here touches the operator's login keychain.
+    """
+    from local_operator.operator.sign import issue_device_cert, load_signer
+    from local_operator.operator.verify import key_id_for
+
+    signer = load_signer(config_root=config_root, backend_name="file-only")
+    assert signer is not None, "the rig's operator key did not load"
+    try:
+        return issue_device_cert(
+            device_spki=device_spki,
+            device_id=key_id_for(device_spki),
+            label=label,
+            signer=signer,
+        )
+    finally:
+        signer.close()
+
+
+def _device_signature(
+    key: Any, *, action: str, session_id: str, request_id: str, challenge: str
+) -> str:
+    """What the phone produces: ES256 over the domain-separated, bound message."""
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from local_operator.operator.verify import signed_message
+
+    message = signed_message(
+        action=action, session_id=session_id, request_id=request_id, challenge=challenge
+    )
+    return key.sign(message, ec.ECDSA(hashes.SHA256())).hex()
 
 
 @pytest.mark.asyncio
-async def test_the_relay_keeps_its_handshake_across_a_repaint(tmp_path: Path) -> None:
-    """The phone's authority survives ordinary traffic (agent R2-2 = UX U6).
+async def test_a_phone_signature_loosens_and_approves_for_a_session_the_relay_did_not_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE HEADLINE SURFACE (design §3, phone row; matrix cells P1 and P2).
 
-    The relay adopts the handshake from the frames it reads, and the ONLY frame
-    that carries the material is the welcome: every projection push — a token
-    count, a roster change, a card parking — carries ``operator_salt`` nowhere.
-    The first version cleared the connection's state before re-verifying from
-    the frame in hand, so the relay's authority was destroyed 49-275 ms after it
-    was established and the next command was refused with the copy. The rig that
-    measured it is one ``_push()`` between the handshake and the request, which
-    is what this test does twice.
+    A phone, reaching the machine through the relay's real HTTP surface, both
+    LOOSENS a running gate and APPROVES a parked card — for a session this
+    process never spawned and the relay never spawned either. Every hop is the
+    production one:
+
+    * the runtime mints the challenge on the relay's own control connection
+      (``daemon.request`` -> the runtime's ``operator_challenge`` op);
+    * the relay hands the challenge back over HTTP and forwards the command the
+      phone signs;
+    * the runtime verifies an ES256 signature from a device key against an
+      operator-SIGNED certificate under its anchored operator key.
+
+    THE RELAY HOLDS NOTHING HERE, and that is the point rather than a detail:
+    ``reset_operator_caps_for_tests()`` leaves ``operator_cap_for`` empty, so
+    ``entry.operator_cap`` is ``None`` and the relay's dial offers no nonce — the
+    exact state production is in. The old cell for this surface fabricated a
+    capability instead of accepting that.
     """
-    from local_operator.harness.approval import (
-        mint_operator_cap,
-        remember_operator_cap,
-        reset_operator_caps_for_tests,
-    )
-    from local_operator.mobile.daemon import MobileDaemon, SessionEntry, _dial
+    import httpx
 
-    reset_operator_caps_for_tests()
-    cap = mint_operator_cap()
-    live = await _serve(tmp_path, operator_cap=cap)
+    from local_operator.harness.approval import reset_operator_caps_for_tests
+    from local_operator.mobile.daemon import (
+        MobileDaemon,
+        SessionEntry,
+        _dial,
+        build_app,
+    )
+    from local_operator.operator.verify import key_id_for
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()  # NOBODY spawned this runtime
+    anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    session_id = live.record.session_id
     try:
-        record = live.record
+        assert operator_cap_for(live.record.pid) is None, "the rig spawned it after all"
+
+        device_key, device_point = await _new_device_key()
+        certificate = _issue_device_certificate(config_dir(), device_point, label="test phone")
+        stored = _store_device(config_dir(), device_spki=device_point, certificate=certificate)
+        # The relay declares the certificate on its auth frame, which is how the
+        # runtime can answer "this connection may loosen" before a frame arrives.
+        assert stored.device_id == key_id_for(device_point)
+
         daemon = MobileDaemon(port=0, password="pw")
-        entry = SessionEntry(record)
-        daemon.table.entries[record.pid] = entry
-        # The relay IS this spawner, which is the case the surface table
-        # promises works from the phone.
-        remember_operator_cap(record.pid, cap)
+        entry = SessionEntry(live.record)
+        daemon.table.entries[live.record.pid] = entry
         dial = asyncio.ensure_future(_dial(daemon, entry))
         try:
-            for _ in range(200):
-                if entry.authority_bearing:
+            # Wait for the relay's connection to be ESTABLISHED before asking it to
+            # mint a challenge: ``_dial`` publishes the writer only after it has
+            # authenticated and read the welcome, and a request racing that is
+            # answered 409 — the correct answer to a question asked too early, not
+            # a defect.
+            for _ in range(300):
+                if entry.writer is not None and entry.projection is not None:
                     break
-                await asyncio.sleep(0.05)
-            assert entry.authority_bearing, "the relay never completed its handshake"
+                await asyncio.sleep(0.02)
+            assert entry.writer is not None, "the relay never completed its dial"
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=build_app(daemon)), base_url="http://relay.local"
+            ) as relay:
+                login = await relay.post("/login", data={"password": "pw"})
+                assert login.status_code in (200, 303), login.text
 
-            # ONE ordinary repaint, then a second: no proof in either.
-            for round_number in (1, 2):
-                await live.runtime._push()
-                await asyncio.sleep(0.3)
-                assert entry.authority_bearing, (
-                    f"repaint {round_number} dropped the relay's handshake — this is the "
-                    "window the phone used to work in and nothing else"
+                async def phone_frame(*, action: str, request_id: str, body: dict[str, Any]) -> Any:
+                    """Challenge over HTTP, signature off the loop, command over HTTP."""
+                    challenge_reply = await relay.post(
+                        f"/api/sessions/{session_id}/operator/challenge",
+                        json={"action": action, "request_id": request_id},
+                    )
+                    assert challenge_reply.status_code == 200, challenge_reply.text
+                    challenge = challenge_reply.json()["challenge"]
+                    signature = _device_signature(
+                        device_key,
+                        action=action,
+                        session_id=session_id,
+                        request_id=request_id,
+                        challenge=challenge,
+                    )
+                    return await relay.post(
+                        f"/api/sessions/{session_id}/command",
+                        json={
+                            "operator_sig": signature,
+                            "operator_key_id": key_id_for(device_point),
+                            "operator_cert": certificate,
+                            **body,
+                        },
+                    )
+
+                # P2 — the phone LOOSENS the gate.
+                #
+                # ``slash_result``, NOT ``slash``: the session-level ``slash`` op is
+                # the off-terminal SUBSET (``/goal``, ``/compact``) and refuses
+                # ``/approvals`` with "/approvals is terminal-only here" — the dead
+                # end the design deletes. ``slash_result`` is the ROUTED op the
+                # runtime's authority seam was built for and the one the desktop
+                # backend and the TUI's attached pane already use, so the phone is
+                # taking the same road rather than a second one.
+                loosened = await phone_frame(
+                    action="loosen",
+                    request_id="",
+                    body={
+                        "op": "slash_result",
+                        "command": "approvals",
+                        "args": "auto",
+                        "images": [],
+                    },
                 )
-                assert entry.operator_salt, f"repaint {round_number} cleared the salt"
+                assert loosened.status_code == 200, loosened.text
+                assert live.handle._auto_approve is True, "the phone's signature did not loosen it"
+                assert await live.handle._approval_gate("bash", "rm -rf build/") is True
 
-            reply = await daemon.request(
-                record.pid, "slash_result", command="approvals", args="auto", images=[]
-            )
-            assert reply["op"] == "result", reply
-            assert live.handle._auto_approve is True
+                # P1 — the phone APPROVES a parked card, on a fresh challenge.
+                live.handle._auto_approve = False
+                parked = await _park_a_card(live.handle)
+                pending = live.handle._fold.projection.pending
+                assert pending is not None, "no card parked, so the approval proves nothing"
+                approved = await phone_frame(
+                    action="approve",
+                    request_id=pending.request_id,
+                    body={
+                        "op": "approval_answer",
+                        "request_id": pending.request_id,
+                        "approved": True,
+                        "remember": False,
+                    },
+                )
+                assert approved.status_code == 200, approved.text
+                assert await parked is True, "the phone's approval did not resolve the card"
+                assert live.handle._fold.projection.pending is None
         finally:
             dial.cancel()
     finally:
         await live.close(tmp_path)
+
+
+class _PhoneOverRelay:
+    """A paired phone driving one live runtime through a real relay.
+
+    The negative controls below all need the same four hops standing up — a live
+    runtime, a relay that really dialled it, a paired device key, and the relay's
+    real HTTP surface with a session cookie — and each of them then differs in ONE
+    place. Building that once is what keeps each control to the single line that
+    makes it a control, which is the difference between a negative test that
+    proves something and a negative test that proves the rig works.
+
+    Not a fixture: the runtime and the relay both belong to the test's own event
+    loop (``_serve`` and ``_dial`` both run on it), so the setup has to happen
+    inside the test rather than in a synchronous fixture.
+    """
+
+    def __init__(self, *, live: Any, daemon: Any, entry: Any, relay: Any, **parts: Any) -> None:
+        self.live = live
+        self.daemon = daemon
+        self.entry = entry
+        self.relay = relay
+        self.device_key = parts["device_key"]
+        self.device_point = parts["device_point"]
+        self.certificate = parts["certificate"]
+        self.session_id = parts["session_id"]
+        self.tmp_path = parts["tmp_path"]
+        self._dial = parts["dial"]
+        self._client = parts["client"]
+
+    async def challenge(self, *, action: str, request_id: str = "") -> Any:
+        return await self.relay.post(
+            f"/api/sessions/{self.session_id}/operator/challenge",
+            json={"action": action, "request_id": request_id},
+        )
+
+    def sign(
+        self,
+        *,
+        action: str,
+        request_id: str,
+        challenge: str,
+        key: Any | None = None,
+    ) -> str:
+        return _device_signature(
+            key if key is not None else self.device_key,
+            action=action,
+            session_id=self.session_id,
+            request_id=request_id,
+            challenge=challenge,
+        )
+
+    async def command(self, body: dict[str, Any]) -> Any:
+        return await self.relay.post(f"/api/sessions/{self.session_id}/command", json=body)
+
+    async def aclose(self) -> None:
+        self._dial.cancel()
+        await self._client.aclose()
+        await self.live.close(self.tmp_path)
+
+
+async def _phone_over_relay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    anchor: Any = None,
+    certificate: str | None = None,
+    device_point: bytes | None = None,
+) -> _PhoneOverRelay:
+    """Stand up the four hops. ``certificate``/``device_point`` let a control
+    substitute its own key material without rebuilding the rig."""
+    import httpx
+
+    from local_operator.harness.approval import reset_operator_caps_for_tests
+    from local_operator.mobile.daemon import (
+        MobileDaemon,
+        SessionEntry,
+        _dial,
+        build_app,
+    )
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    reset_operator_caps_for_tests()  # the relay never spawned this runtime
+    if anchor is None:
+        anchor = _install_operator_key(config_dir())
+    live = await _serve(tmp_path, operator_cap=mint_operator_cap(), operator_anchor=anchor)
+    if device_point is None:
+        device_key, device_point = await _new_device_key()
+    else:
+        device_key = None
+    if certificate is None:
+        certificate = _issue_device_certificate(config_dir(), device_point, label="test phone")
+        stored = _store_device(config_dir(), device_spki=device_point, certificate=certificate)
+        assert stored.device_id == key_id_for(device_point)
+
+    daemon = MobileDaemon(port=0, password="pw")
+    entry = SessionEntry(live.record)
+    daemon.table.entries[live.record.pid] = entry
+    dial = asyncio.ensure_future(_dial(daemon, entry))
+    for _ in range(300):
+        if entry.writer is not None and entry.projection is not None:
+            break
+        await asyncio.sleep(0.02)
+    assert entry.writer is not None, "the relay never completed its dial"
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=build_app(daemon)), base_url="http://relay.local"
+    )
+    await client.__aenter__()
+    login = await client.post("/login", data={"password": "pw"})
+    assert login.status_code in (200, 303), login.text
+    return _PhoneOverRelay(
+        live=live,
+        daemon=daemon,
+        entry=entry,
+        relay=client,
+        device_key=device_key,
+        device_point=device_point,
+        certificate=certificate,
+        session_id=live.record.session_id,
+        tmp_path=tmp_path,
+        dial=dial,
+        client=client,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_forged_device_certificate_cannot_loosen_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix cell N3, the half that is about SUBSTITUTION rather than ownership.
+
+    A relay that has been taken over — a same-uid child that read the portal
+    password and drives the local HTTP surface — can present any certificate it
+    likes. This one is well-formed, names a real P-256 point, and is signed by a
+    key the machine has never seen: ``verify_device_cert`` checks it against the
+    ANCHORED operator key and refuses. The gate therefore does not move, and the
+    refusal is the runtime's rather than the relay's — which is why the relay must
+    stay a forwarder and cannot be the thing that decides.
+    """
+    attacker_key, attacker_point = await _new_device_key()
+    # Signed by the ATTACKER, not the operator: the certificate's shape is right
+    # and its signature is not.
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from local_operator.operator.verify import DeviceCert, key_id_for
+
+    now = int(time.time())
+    statement = DeviceCert(
+        device_id=key_id_for(attacker_point),
+        spki=attacker_point,
+        label="not my phone",
+        issued_at=now - 10,
+        not_after=now + 3600,
+    )
+    forged = statement.encode(
+        signature=attacker_key.sign(statement.payload(), ec.ECDSA(hashes.SHA256()))
+    )
+    # The attacker also needs the certificate to be PRESENT in the store, because
+    # the relay declares one from there; that is exactly the substitution the
+    # config-root store permits and the signature is what defeats.
+    rig = await _phone_over_relay(
+        tmp_path, monkeypatch, certificate=forged, device_point=attacker_point
+    )
+    try:
+        challenge = (await rig.challenge(action="loosen")).json()["challenge"]
+        signature = _device_signature(
+            attacker_key,
+            action="loosen",
+            session_id=rig.session_id,
+            request_id="",
+            challenge=challenge,
+        )
+        reply = await rig.command(
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "operator_sig": signature,
+                "operator_key_id": key_id_for(attacker_point),
+                "operator_cert": forged,
+            }
+        )
+        assert reply.status_code != 200, reply.text
+        assert rig.live.handle._auto_approve is False, "a forged certificate loosened the gate"
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_replayed_phone_signature_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix cell N8: one challenge, one use.
+
+    The runtime POPS the challenge before it verifies, so the second presentation
+    of a captured ``operator_sig`` finds no live challenge at all and is refused —
+    regardless of the fact that the signature itself is perfectly valid, which is
+    the point: replay is removed as a category rather than mitigated by a nonce
+    that could be raced.
+    """
+    rig = await _phone_over_relay(tmp_path, monkeypatch)
+    try:
+        challenge = (await rig.challenge(action="loosen")).json()["challenge"]
+        signature = rig.sign(action="loosen", request_id="", challenge=challenge)
+        body = {
+            "op": "slash_result",
+            "command": "approvals",
+            "args": "auto",
+            "images": [],
+            "operator_sig": signature,
+            "operator_key_id": key_id_for(rig.device_point),
+            "operator_cert": rig.certificate,
+        }
+        first = await rig.command(body)
+        assert first.status_code == 200, first.text
+        assert rig.live.handle._auto_approve is True
+
+        # Re-arm the gate so a successful replay would be OBSERVABLE rather than
+        # answering a question that was already settled.
+        rig.live.handle._auto_approve = False
+        second = await rig.command(body)
+        assert second.status_code != 200, second.text
+        assert rig.live.handle._auto_approve is False, "the replay was accepted"
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_relay_holds_no_key_material_and_cannot_mint_a_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix cell N2, stated as the two facts that make the relay a courier.
+
+    1. A caller holding the portal password CAN drive the relay's local HTTP
+       surface — that is the threat model, not a hypothetical. What it cannot do
+       is make the relay produce authority: ``operator_cap`` is dropped from the
+       body (the relay mints its own, and it has none for this runtime), and the
+       only fields it forwards are the phone's unforgeable, single-use ones.
+    2. Nothing in the machine's operator/device store is a signing key. The
+       certificate is public data and the private half is on the phone, so "steal
+       the store" is not a path to a signature at all.
+    """
+    rig = await _phone_over_relay(tmp_path, monkeypatch)
+    try:
+        gate_before = rig.live.handle._auto_approve
+        forged_proof = mint_operator_cap().hex()
+        reply = await rig.command(
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "operator_cap": forged_proof,
+            }
+        )
+        assert reply.status_code != 200, reply.text
+        assert rig.live.handle._auto_approve is gate_before, "a pushed capability was honoured"
+
+        # And the store: a certificate, an id, a scope and a public point — no
+        # private half anywhere, and no operator key beside them.
+        from local_operator.operator import devices as device_store
+
+        root = config_dir()
+        stored = device_store.read_device(root, key_id_for(rig.device_point))
+        assert stored is not None
+        record = json.loads(device_store.device_path(root, stored.device_id).read_text())
+        assert set(record) == {
+            "v",
+            "kind",
+            "device_id",
+            "name",
+            "spki",
+            "key_id",
+            "scope",
+            "iat",
+            "exp",
+            "operator_key_id",
+            "certificate",
+        }
+        assert "PRIVATE" not in record["certificate"].upper()
+        for path in device_store.devices_dir(root).iterdir():
+            assert "private" not in path.read_text(encoding="utf-8").lower()
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_device_cannot_sign(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The revocation list is consulted at the point the device id is known.
+
+    ``verify_device_cert`` deliberately knows nothing about revocation — it checks
+    a signature and an expiry — so the check lives where the identity becomes
+    available (``server._device_cert_point``), against the ROOT-OWNED anchor's
+    list. An operator who revokes a lost phone therefore loses nothing to the
+    certificate still sitting readable under the config root.
+    """
+    from dataclasses import replace
+
+    rig = await _phone_over_relay(tmp_path, monkeypatch)
+    try:
+        device_id = key_id_for(rig.device_point)
+        anchor = rig.live.runtime._anchor_cache.get().anchor
+        assert anchor is not None
+        revoking = replace(anchor, devices=(({"device_id": device_id, "revoked": True}),))
+        # The runtime reads the anchor through ONE cache, pinned at first need, so
+        # the revocation is installed the way a real one lands: by making the
+        # cached load itself carry the revoked list.
+        from local_operator.operator.trust import AnchorLoad, anchor_path
+
+        rig.live.runtime._anchor_cache.load = AnchorLoad(
+            anchor=revoking,
+            path=anchor_path(),
+            root_owned=True,
+            reason="",
+            exists=True,
+        )
+        challenge = (await rig.challenge(action="loosen")).json()["challenge"]
+        signature = rig.sign(action="loosen", request_id="", challenge=challenge)
+        reply = await rig.command(
+            {
+                "op": "slash_result",
+                "command": "approvals",
+                "args": "auto",
+                "images": [],
+                "operator_sig": signature,
+                "operator_key_id": device_id,
+                "operator_cert": rig.certificate,
+            }
+        )
+        assert reply.status_code != 200, reply.text
+        assert rig.live.handle._auto_approve is False, "a revoked device loosened the gate"
+    finally:
+        await rig.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_paired_phone_is_offered_the_loosening_in_its_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report may not deny a command the connection could carry out.
+
+    ``_connection_may_loosen`` used to answer ``local`` only, with a comment
+    naming this as the single line stage D would widen. The phone declares its
+    PAIRED certificate on the relay's auth frame, the runtime verifies it under
+    the anchor, and the ``/approvals`` report then offers ``ask|auto`` — instead of
+    sending the phone after a window it does not have, which was the dead end
+    (UX round 2, U7/U9).
+
+    Asserted on the PREDICATE rather than on the rendered sentence, and that is
+    deliberate: the predicate is the widening, and the sentence it selects is
+    pinned separately by ``test_the_capability_name_appears_only_where_it_has_to``
+    (which drives the same sentence through both branches). Two pins, one fact.
+    """
+    from local_operator.harness.approval import approvals_default_notice
+
+    rig = await _phone_over_relay(tmp_path, monkeypatch)
+    try:
+        remote = [c for c in rig.live.runtime._clients.values() if c.locality == "remote"]
+        assert remote, "the relay's connection is not on the runtime"
+        conn = remote[0]
+        assert conn.device_certificate, "the relay declared no certificate"
+        frame = {"op": "slash_result", "command": "approvals", "args": "default auto", "images": []}
+        assert rig.live.runtime._connection_may_loosen(frame, conn) is True
+
+        # AND IT IS THE CERTIFICATE THAT DID IT: the same connection with the
+        # declaration removed is the conservative branch, so the widening is not
+        # ``remote`` becoming unconditionally optimistic.
+        conn.device_certificate = ""
+        # ``is not True`` rather than ``is False``: this predicate never answers
+        # ``False`` — a follower and a capable console must not be
+        # indistinguishable by accident, so the distinction it draws is "proved"
+        # versus "did not say".
+        assert rig.live.runtime._connection_may_loosen(frame, conn) is not True
+        offered = approvals_default_notice(may_loosen=False)
+        assert "has to come from the window" not in offered, offered
+        assert "needs the operator's own consent" in offered, offered
+    finally:
+        await rig.aclose()
+
+
+def test_the_relays_own_spawn_path_registers_no_capability() -> None:
+    """A SOURCE PIN on the fact the phone cell above no longer depends on.
+
+    ``mobile/daemon.py``'s spawn builds the session runtime by hand and passes no
+    ``--operator-fd``, so the relay's ``entry.operator_cap`` is always ``None``.
+    Under the spawn-authority model that was a reachability GAP — the surface
+    table promised a phone that could loosen and the code could not deliver it.
+    Under revision 2 it is a property the design relies on, and the reason the
+    device tier exists: the phone is a signer, not a capability holder.
+
+    Pinned as a source fact rather than as a process, because the claim is about
+    what the argv contains and a spawn would only show the symptom. If a future
+    change DOES hand the relay a capability, this fails and the design document's
+    phone row has to be re-argued deliberately.
+    """
+    source = (_TESTS_ROOT / "local_operator" / "mobile" / "daemon.py").read_text(encoding="utf-8")
+    # Parsed rather than substring-matched: the module's PROSE explains why this
+    # path has no descriptor ("it passes no `--operator-fd`"), and a naive
+    # `"--operator-fd" not in source` would fail on the explanation instead of on
+    # the code. An AST walk sees only what the interpreter would execute.
+    tree = ast.parse(source)
+    argv_literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "--operator-fd" not in argv_literals, (
+        "the relay's spawn now passes an operator descriptor; the phone's authority is "
+        "supposed to be spawn-independent — re-argue the design before changing this"
+    )
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    assert "OPERATOR_FD_FLAG" not in names, "the relay names the descriptor flag in code"
+
+    # And the ONE production caller of ``remember_operator_cap`` is still the real
+    # spawner, so a capability cannot be registered anywhere else by accident.
+    callers: list[str] = []
+    for module in sorted((_TESTS_ROOT / "local_operator").rglob("*.py")):
+        text = module.read_text(encoding="utf-8")
+        if (
+            re.search(r"\bremember_operator_cap\s*\(", text)
+            and "def remember_operator_cap" not in text
+        ):
+            callers.append(module.relative_to(_TESTS_ROOT).as_posix())
+    assert callers == ["local_operator/session/runtime/launch.py"], callers
 
 
 @pytest.mark.asyncio
@@ -1804,7 +2423,14 @@ async def test_the_routed_report_speaks_for_the_connection_that_asks(tmp_path: P
             {"op": "slash_result", "command": "approvals", "args": "default auto", "images": []},
         )
         unproved_text = str(unproved.get("data", {}).get("text", ""))
-        assert "has to come from the window that started it" in unproved_text, unproved_text
+        # THE CONSERVATIVE BRANCH NAMES THE REAL LEVERS, NOT THE SPAWNER (stage F).
+        # It used to say "has to come from the window that started it", which under
+        # revision 2 is the user-visible regression this redesign deletes: a
+        # background-started runtime HAS no window that started it. The pin is on
+        # the clause that identifies the branch, so the two branches stay
+        # distinguishable while the remedies inside are free to move.
+        assert "needs the operator's own consent" in unproved_text, unproved_text
+        assert "has to come from the window" not in unproved_text, unproved_text
         assert "/approvals ask switches this session now" in unproved_text, unproved_text
 
         # A WRONG proof is not a proof: it names the same frame the receipt does,
@@ -1827,7 +2453,7 @@ async def test_the_routed_report_speaks_for_the_connection_that_asks(tmp_path: P
                 },
             )
             forged_text = str(reply.get("data", {}).get("text", ""))
-            assert "has to come from the window that started it" in forged_text, forged_text
+            assert "needs the operator's own consent" in forged_text, forged_text
         finally:
             forged.close()
     finally:
@@ -2218,7 +2844,7 @@ async def test_the_report_offers_loosening_to_a_local_connection_that_can_sign(
                     },
                 )
                 text = str(reply.get("data", {}).get("text", ""))
-                offered = "has to come from the window that started it" not in text
+                offered = "needs the operator's own consent" not in text
                 assert offered is expect_offer, (expect_offer, text)
                 # And the one remedy that is true on BOTH is named either way. The
                 # sentence is spelled differently in the two cases — `ask|auto`
