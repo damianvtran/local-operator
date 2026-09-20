@@ -340,17 +340,24 @@ def signature_verdict(
 
     signer_spki = operator_spki
     if operator_cert is not None:
-        if device_spki is not None:
-            # The device's point was resolved and cached by the caller; using it
-            # here keeps one decode per certificate rather than one per frame.
-            signer_spki = device_spki
-        else:
-            if not isinstance(operator_cert, str):
-                return False
-            resolved = verify_device_cert(operator_cert, operator_spki=operator_spki, now=now)
-            if resolved is None:
-                return False
-            signer_spki = resolved
+        # THE DEVICE'S POINT MUST COME FROM THE CALLER, and ``None`` is a REFUSAL
+        # rather than "not looked up". This used to re-verify the certificate
+        # here whenever the caller passed no point, and that fallback silently
+        # defeated the whole revocation list: the caller
+        # (``RuntimeServer._device_cert_point``) is where the certificate is
+        # checked against the anchor AND where the anchor's revocation list is
+        # consulted, and it answers a revoked device with ``None``. Re-verifying
+        # in that case returned the device's point anyway and admitted the
+        # signature — caught by the phone's revoked-device cell in
+        # ``tests/unit/session/runtime/test_approval_authority_seam.py``, which is
+        # the negative control that exists for exactly this class of bypass.
+        #
+        # One resolution point, and ONLY the point travels. A caller that does not
+        # resolve the certificate therefore refuses every device signature rather
+        # than accepting one it has not checked — the fail-closed direction.
+        if device_spki is None:
+            return False
+        signer_spki = device_spki
     elif operator_key_id != key_id_for(operator_spki):
         # An anchored-key signature that names a different key id than the
         # anchor's is refused before the verify, so a frame cannot probe which

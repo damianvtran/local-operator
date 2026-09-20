@@ -1027,6 +1027,15 @@ class _ClientConn:
     #: holds no capability for this runtime — which is the fail-closed state.
     operator_nonce: str = ""
     operator_salt: str = ""
+    #: The operator-signed device certificate this connection declared in its
+    #: auth frame, or "" when it declared none. NOT yet verified at the point it
+    #: is stored — ``_device_cert_point`` is what resolves it under the anchor,
+    #: with the TTL cache and the revocation check — and every reader goes
+    #: through that, so an unverified string here can only change an answer to
+    #: ``False``. Kept per connection rather than per frame because the report
+    #: needs it before a frame arrives; the SIGNATURE still arrives on the frame
+    #: that claims authority, and is judged there.
+    device_certificate: str = ""
     #: The per-action challenges this connection has been minted and not yet
     #: spent, keyed by ``(action, request_id)``. Per CONNECTION for the same
     #: reason the nonce is: a challenge is authority-bearing material, and one
@@ -2877,6 +2886,23 @@ class RuntimeServer:
         # bind it to: a connection that will never be offered a proof does not
         # need one minted.
         server_salt = operator_nonce() if client_nonce else ""
+        # THE PAIRED-DEVICE DECLARATION (stage D). A relay says here that a phone
+        # has been paired with THIS machine, and the runtime verifies the
+        # certificate under the pinned anchor before it means anything — an
+        # UNVERIFIED string changes no behaviour, so a forged one is refused
+        # rather than denied service. Nothing crosses on it: the certificate is
+        # public data, and the private half that could make it useful is on the
+        # phone.
+        #
+        # It is DECLARED rather than derived from the frames because one report
+        # needs the answer before any frame arrives: whether this connection can
+        # carry out a loosening, which decides whether `/approvals` tells the
+        # phone it may switch the gate or tells it to find another surface
+        # (``_connection_may_loosen``).
+        raw_device = frame.get("operator_device")
+        device_certificate = (
+            raw_device if isinstance(raw_device, str) and 0 < len(raw_device) <= 4096 else ""
+        )
 
         if wants_frontend and FRONTEND_CAPABILITY not in self._record.capabilities:
             writer.close()
@@ -2921,6 +2947,7 @@ class RuntimeServer:
             wants_frontend=wants_frontend,
             operator_nonce=client_nonce,
             operator_salt=server_salt,
+            device_certificate=device_certificate,
         )
         self._clients[id(writer)] = conn
         # A terminal arriving flips ``detached`` (round 1, U2: it was computed
@@ -3742,18 +3769,47 @@ class RuntimeServer:
         return True
 
     def _local_operator_available(self, frame: dict[str, Any], conn: _ClientConn) -> bool:
-        """Whether THIS local connection could carry out a loosening by signing.
+        """Whether THIS connection could carry out a loosening by signing.
 
         Reads the anchor through the runtime's own cache, so the answer is the
         same anchor the seam will verify against and cannot drift from it. The
         server's own capability is deliberately NOT consulted: it is the
         SPAWNER's proof, and the point of the revision is that a connection
         without it can still hold authority.
+
+        THREE ANSWERS, and the third is what stage D widened — this predicate is
+        the single line the earlier revision named as the one that would:
+
+        * LOCAL, on a host with a usable anchor: yes. One presence gesture, and
+          an attached pane or the desktop backend is precisely the capability
+          this revision restores.
+        * REMOTE without a paired device: no. The relay cannot mint a signature,
+          and answering yes would put ``/approvals auto`` in a report on a
+          surface that cannot carry it out — the dead end UX round 2 removed.
+        * REMOTE with a device certificate that VERIFIES under the anchor: yes.
+          That is the phone, and it is the whole point of the stage: its
+          authority does not depend on who spawned the runtime.
         """
         del frame
-        if conn.locality != "local":
+        if conn.locality == "local":
+            return self._anchor_cache.get().usable
+        return self._paired_device_can_sign(conn)
+
+    def _paired_device_can_sign(self, conn: _ClientConn) -> bool:
+        """Whether this connection declared a device certificate the anchor vouches for.
+
+        Goes through ``_device_cert_point`` rather than a verification of its own,
+        and that is the load-bearing part: that helper is where the certificate is
+        checked under the anchored key, where the anchor's REVOCATION list is
+        consulted, and where the TTL cache lives. A second verification path here
+        could answer "yes" for a phone the seam would then refuse — the same class
+        of drift the refusal copy's single-sentence rule exists to prevent.
+        """
+        loaded = self._anchor_cache.get()
+        anchor = loaded.anchor if loaded.usable else None
+        if anchor is None or not conn.device_certificate:
             return False
-        return self._anchor_cache.get().usable
+        return self._device_cert_point(conn.device_certificate, anchor) is not None
 
     def _expire_challenges(self, conn: _ClientConn, now: float) -> None:
         """Drop this connection's spent-by-time challenges before minting another.
