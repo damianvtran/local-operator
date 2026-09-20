@@ -146,15 +146,27 @@ def reset_shape_hit_reporter(token: Any) -> None:
     _HIT_REPORTER.reset(token)
 
 
-def report_shape_hits(labels: list[str]) -> None:
-    """Hand shape labels to the session's incident queue, if one is attached."""
-    if not labels:
+def report_shape_hits(labels: list[str], *, reached_model: bool) -> None:
+    """Hand shape labels, and their classification, to the session's incident queue.
+
+    ``reached_model`` is the SEVERITY and it is REQUIRED, deliberately: a default
+    of True would invite a caller with nothing to report to file an escalated
+    notice about nothing, and a default of False would let a caller that cannot
+    classify claim containment it has not proven. Every in-tree caller can state
+    it — the two that have a ``ShapeReport`` pass it, and the labels-only path
+    passes True and says why in place (agent review R1, finding 5).
+
+    An empty ``labels`` with ``reached_model`` true is a REAL case and is not
+    filtered out here: it is the hit that left a fragment behind while nothing
+    was contained whole, and it is the compromise the notice exists to escalate.
+    """
+    if not labels and not reached_model:
         return
     reporter = _resolve(_HIT_REPORTER.get())
     if reporter is None:
         return
     try:
-        reporter(labels)
+        reporter(labels, reached_model=reached_model)
     except Exception:  # noqa: BLE001 — a report must never break a mask
         pass
 

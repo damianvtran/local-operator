@@ -129,8 +129,10 @@ from local_operator.redaction_shapes import (
     PEM_END_LINE_RE,
     PEM_HEADER_LINE_RE,
     REDACTION_MARKER,
+    ShapeReport,
     credential_dump_notice,
     scrub_secrets_with_hits,
+    shape_report,
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
@@ -2249,7 +2251,8 @@ class _PipeRedactor:
         # exists, so the loop's hook later finds nothing to match and files
         # nothing. Without this call the size of the incident that motivated the
         # whole change is: zero notices, zero rotation tickets.
-        report_shape_hits([hit.label for hit in hits if hit.complete])
+        report = shape_report(hits)
+        report_shape_hits(list(report.labels), reached_model=report.reached_model)
         return scrubbed.encode("utf-8")
 
     def _mask_open_key_block(self, ready: str) -> str:
@@ -2454,13 +2457,28 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     redact = getattr(store, "redact", None)
     if not callable(redact):
         return text
-    # ``redact_with_hits`` when the store has it: the live stream, the peek
-    # buffer and the abort receipt are the surfaces that paint a credential
-    # BEFORE any result exists, so they have to file the incident themselves —
-    # there is no later hook that will see the pre-mask text.
-    # Cast rather than probed: ``getattr`` yields ``object``, and the two names this
-    # looks for are the store's own public surface (``VariableStore.redact_with_hits``
-    # and its ``redact``), so a Callable annotation is the honest description.
+    # ``redact_with_report`` when the store has it: it carries the shape LABELS
+    # and the CLASSIFICATION (contained, or readable material left in the text),
+    # which the live stream, the peek buffer and the abort receipt need because
+    # they file the incident themselves — there is no later hook that will see
+    # the pre-mask text. ``redact_with_hits`` is the older, labels-only view, and
+    # a store that offers only that one keeps the escalated reading below: a
+    # caller that cannot prove containment must not claim it.
+    # Cast rather than probed: ``getattr`` yields ``object``, and the names this
+    # looks for are the store's own public surface (``VariableStore.redact_with_report``,
+    # ``VariableStore.redact_with_hits`` and its ``redact``), so a Callable annotation
+    # is the honest description.
+    report_aware = cast(
+        Callable[[str], tuple[str, ShapeReport]] | None,
+        getattr(store, "redact_with_report", None),
+    )
+    if callable(report_aware):
+        try:
+            scrubbed, report = report_aware(text)
+            report_shape_hits(list(report.labels), reached_model=report.reached_model)
+            return scrubbed
+        except Exception:  # noqa: BLE001 — fall through to the plain path below
+            logger.warning("report-aware redaction failed on a live surface", exc_info=True)
     hits_aware = cast(
         Callable[[str], tuple[str, list[str]]] | None,
         getattr(store, "redact_with_hits", None),
@@ -2468,7 +2486,13 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     if callable(hits_aware):
         try:
             scrubbed, labels = hits_aware(text)
-            report_shape_hits(labels)
+            if labels:
+                # No classification from this store: the labels-only view names the
+                # hits whose mask was whole, so the only reading it supports is the
+                # ESCALATED one — which is exactly what this path filed before the
+                # classification existed. Silent when nothing matched, which is why
+                # this is inside the guard rather than relying on a default.
+                report_shape_hits(labels, reached_model=True)
             return scrubbed
         except Exception:  # noqa: BLE001 — fall through to the plain path below
             logger.warning("hit-aware redaction failed on a live surface", exc_info=True)
