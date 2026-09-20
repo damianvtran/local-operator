@@ -907,6 +907,20 @@ class _ClientConn:
     #: auth frame; see ``ClientLocality``. Only ops that act on the USER's
     #: surroundings (an OAuth browser tab) read it.
     locality: ClientLocality = "local"
+    #: THE RESOLVED CAPABILITY SET the dialling relay declared (§3.3), empty for
+    #: every local dial and for every client built before the field. It exists so
+    #: the three ``locality == "remote"`` gates can become GRANT-AWARE: a member
+    #: that already holds ``prompt`` can already run a command in this session, so
+    #: refusing it a credential-store write is not a boundary — it is a speed bump
+    #: that teaches members to paste secrets into chat, which is the leak that gate
+    #: was protecting against. ABSENT MEANS LOCAL, exactly as every other additive
+    #: auth field does: nothing that reaches this socket today changes behaviour.
+    capabilities: frozenset[str] = frozenset()
+    #: ``{"device_id", "name"}`` of the device a relayed viewer sits at, or empty
+    #: for a local one. Carried for ONE reason: a refusal a remote viewer can hit
+    #: has to name the machine to act on (§4.4 — "run it on build-box" is not
+    #: something this runtime could otherwise say).
+    peer: dict[str, Any] = field(default_factory=dict)
     #: Which host is on the other end. ``"desktop"`` is declared in the attach
     #: frame; the remaining fields are that host's presentation state, which
     #: only it reports and only it is scored on.
@@ -2698,6 +2712,18 @@ class RuntimeServer:
         # caller that must say ``"remote"``, and an old client that never
         # heard of the field keeps the behaviour it always had.
         locality: ClientLocality = "remote" if frame.get("locality") == "remote" else "local"
+        # §3.3: the capabilities the dialling relay RESOLVED for the member it is
+        # relaying for. Absent (every client that exists today, plus every local
+        # dial) is the empty set, which leaves each gate below at the flat refusal
+        # it has always applied.
+        raw_caps = frame.get("capabilities")
+        capabilities: frozenset[str] = (
+            frozenset(str(item) for item in raw_caps)
+            if isinstance(raw_caps, (list, tuple))
+            else frozenset()
+        )
+        raw_peer = frame.get("peer")
+        peer: dict[str, Any] = dict(raw_peer) if isinstance(raw_peer, dict) else {}
         # v4: only attach clients may subscribe to the raw event relay. The
         # daemon's projection path must stay byte-identical, so a daemon auth
         # carrying the flag (there is none today) is deliberately ignored.
@@ -2753,6 +2779,8 @@ class RuntimeServer:
             writer=writer,
             kind=kind,
             locality=locality,
+            capabilities=capabilities,
+            peer=peer,
             surface=(
                 "desktop" if kind == "attach" and frame.get("surface") == "desktop" else "terminal"
             ),
@@ -3450,6 +3478,18 @@ class RuntimeServer:
             # it like any other rejected op. The daemon keeps both ops (the
             # phone's resume button rides them).
             if conn.kind == "attach" and op in ("new_conversation", "resume_session"):
+                # REFUSED, and the refusal STAYS: it protects the peer's own
+                # screen from a follower rebinding the conversation under the
+                # person sitting there. Only the SENTENCE gains a case (§4.4):
+                # "detach and /resume" is ambiguous once several devices can
+                # reach this session, so a relayed viewer is told which machine
+                # to run it on instead of being told to detach from nothing.
+                where = str((conn.peer or {}).get("name") or "")
+                if where and conn.locality == "remote":
+                    raise ValueError(
+                        f"a viewer on another device cannot rebind this session — run "
+                        f"`/resume {self._record.session_id}` on {where}, or reconnect here"
+                    )
                 raise ValueError(
                     "attached front ends cannot rebind the session; detach and /resume instead"
                 )
@@ -3713,6 +3753,7 @@ class RuntimeServer:
                     conn.locality,
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
+                    capabilities=conn.capabilities,
                 )
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
@@ -4359,6 +4400,7 @@ class RuntimeServer:
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
         audit_capable: bool = False,
+        capabilities: frozenset[str] = frozenset(),
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data.
 
@@ -4375,7 +4417,13 @@ class RuntimeServer:
             # Fork destinations are resumed from this machine's session store.
             # A foreign viewer must not receive a local id it cannot reach, nor
             # select another parent's path through the authenticated owner.
-            if locality != "local":
+            # §4.4: the second half of the old reason — "a foreign viewer must
+            # not receive a local id it cannot reach" — is no longer true over
+            # the mesh: a fork created on this owner is reachable from the
+            # viewer through this device's own catalogue, so the id is remote,
+            # which is a first-class state now. A caller that cannot resolve
+            # the owner (no mesh path, not local) is still refused.
+            if locality != "local" and "prompt" not in capabilities:
                 raise ValueError("fork requires a terminal on the session's machine")
             if set(frame) - {"op", "req", "message"}:
                 raise ValueError("fork_snapshot accepts only a message")
@@ -4423,7 +4471,10 @@ class RuntimeServer:
         if op == "mcp_credentials":
             from local_operator.mcp.credentials import MCPCredentials
 
-            if locality == "remote":
+            if locality == "remote" and "prompt" not in capabilities:
+                # §3.3: a member with `prompt` may do what a member with
+                # `prompt` can already do — it has a shell in this session.
+                # Without it, the flat refusal stands.
                 return {"code": "remote_client", "saved_ids": [], "failed_ids": []}
             try:
                 body = MCPCredentials.model_validate(frame.get("body"))
@@ -4473,7 +4524,7 @@ class RuntimeServer:
             if not callable(credential):
                 raise ValueError("this owner cannot hold session credentials")
             action = str(frame.get("action", ""))
-            if action == "store" and locality == "remote":
+            if action == "store" and locality == "remote" and "prompt" not in capabilities:
                 # Same locality rule the `/mcp` grant verbs apply
                 # (``mcp/grants.py::REMOTE_GRANT_NOTICE``): a secret pasted on
                 # a RELAYED client — a phone, in a future relay topology —

@@ -571,6 +571,17 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Where a notification click sends you when the desktop app is not running.",
     ),
+    # NEW_LAUNCH, honestly: all three keys are read when the audit WRITER is built,
+    # and the writer is built once per relay process (``AuditLog.from_config``). A
+    # LIVE label would promise an effect the code cannot deliver — the open file
+    # handle already exists — and the repo's rule is that a scope label says when a
+    # change lands, not when the user would like it to.
+    Section(
+        "network",
+        "Mesh network",
+        Scope.NEW_LAUNCH,
+        "Audit log retention for `lop network`. Bounds take effect when the relay " "restarts.",
+    ),
     Section(
         "retired",
         "Retired",
@@ -2790,6 +2801,51 @@ SETTINGS: tuple[Setting, ...] = (
         # every click into a terminal with nothing on screen or in the log
         # saying why. Rejecting it here keeps the user in front of the field.
         validate_value=_validate_desktop_launch_command,
+    ),
+    # -- network (the mesh audit log) ---------------------------------------
+    # Defaults mirror ``local_operator/network/audit.py``'s module constants, which
+    # is what ``_consumer_defaults()`` in tests/unit/test_settings_io.py pins: a
+    # registry default that disagrees with the reader's is a painted lie nothing
+    # else reports. The numbers and their arithmetic (why 8 MiB compressed, why 5
+    # generations, why 90 days) are justified in mesh-incident-response.md §4.5.
+    Setting(
+        key="network.audit.max_bytes",
+        path=("network", "audit", "max_bytes"),
+        section="network",
+        label="Audit size per generation",
+        kind=Kind.INT,
+        default=8_388_608,
+        minimum=65_536,
+        maximum=1_073_741_824,
+        help=(
+            "Bytes per generation, after rotation. 8 MiB of gzipped JSONL is roughly "
+            "55k records; the five-generation ceiling is therefore ~40 MiB."
+        ),
+    ),
+    Setting(
+        key="network.audit.generations",
+        path=("network", "audit", "generations"),
+        section="network",
+        label="Audit generations kept",
+        kind=Kind.INT,
+        default=5,
+        minimum=1,
+        maximum=50,
+        help="Rotated files kept before the oldest is pruned and that pruning is recorded.",
+    ),
+    Setting(
+        key="network.audit.max_age_days",
+        path=("network", "audit", "max_age_days"),
+        section="network",
+        label="Audit age cap (days)",
+        kind=Kind.FLOAT,
+        default=90.0,
+        minimum=1.0,
+        maximum=3650.0,
+        help=(
+            "Age and size both rotate, because age binds on a quiet install and size "
+            "on a busy one. Export with `lop network log --export` before pruning."
+        ),
     ),
 )
 
