@@ -157,7 +157,32 @@ contains an API key, access token, refresh token, or complete stored grant.
   storage provider. The mock test transport is not an end-user provider.
   `configured` means credential presence, **not** a successful connection test.
 - `GET /v1/auth/status`: redacted stored account identities and credential types.
-  Environment credentials are not removable stored accounts.
+  Environment credentials are not removable stored accounts. The result also
+  carries `radient_login` and `tunnel_remedy`, because a row can be `configured`
+  with an unexpired access token and still be refused by the identity provider.
+  **Both are objects, not strings.** `radient_login` is
+  `{"credential_id": int|null, "state": "ok"|"login_required"|"unknown"}` — the
+  same shape as the `login` object on `GET /v1/desktop/tunnel` — and
+  `tunnel_remedy` is `{"command": str, "url": str}` or `null`, the same shape as
+  `remedy` there. A renderer written from a sentence that called them a state and
+  a command reads a dict where it expects a string.
+  `unknown` means the check could not run and never means "the login is dead".
+  The verdict is decided from this machine's own credential store, but it is not
+  free of the network: a stored access token outside its refresh skew makes the
+  store attempt a refresh, which is a POST to a token endpoint. That one call is
+  bounded (`tunnels/report.py`'s `REFRESH_WAIT_S`, 2 s) and a non-`ok` verdict is
+  reused for the window the store's own cascade blocks a failed credential for
+  (`VERDICT_TTL_S`, 60 s), so a partitioned network costs this poll one bounded
+  wait per window and the answer on expiry is `unknown`. Both bounds exist
+  because this route is polled beside an interactive login form.
+  `login_required` here is the SAME condition `POST /v1/desktop/radient` types as
+  `grant_invalid` (401 `radient_credential_refused`): both key on the store's own
+  dead-grant verdict (`CredentialInvalidError`), which this branch also widened
+  to cover a token endpoint that answers in prose (Radient's
+  `{"error": "Token refresh failed: refresh token is expired or revoked"}`). A
+  renderer may treat the two as one state; the vocabulary differs because this
+  one is the tunnel's persisted reason (the park file, `lop tunnel status` and
+  the phone's 503 all use it) and that one is a per-request refusal code.
 - `POST /v1/auth/login` with `{provider: <method id>}` starts a login operation.
 - `GET /v1/auth/operations/{id}` returns `id`, `provider`, `state`, `message`,
   `auth_url`, `instructions`, `input_required`, `prompt_id`, and `expires_in`.
@@ -184,6 +209,38 @@ provider destinations and HTTP loopback URLs are accepted. Device instructions
 are display/copy content; input-required prompts are paste controls. The
 QwenCloud usage-OAuth method also requires its inference API key; a device grant
 alone is not an inference credential.
+
+## Tunnel state
+
+- `GET /v1/desktop/tunnel`: this machine's remote-access state, read-only, as
+  `lop tunnel status --json` reports it. `result.configured` is false when no
+  tunnel is enrolled on this machine (every other field is then a null/empty
+  placeholder, and the connector state is the literal `not configured`).
+  `result.cloud.source` is always `cached` here: the route answers about THIS
+  machine and never waits on an upstream call, which is also the only kind of
+  answer available when the login or the network is what is broken.
+  `result.connector.state` is one of `parked`, `connected`, `connecting`,
+  `not serving`, `stopped`, `not configured`, `unknown` (`unknown` only when a
+  caller asked not to probe the loopback gateway); `result.login.state` is one
+  of `ok`, `login_required`, `unknown`, where `unknown` means the check could not
+  run and never means "the login is dead". `result.remedy` is
+  `{"command": str, "url": str}` or `null`: the command that clears the
+  condition, with the console URL that belongs beside it. The remedy is a
+  terminal command, so the UI shows it rather than running it, and this route has
+  no write half. It is an OBJECT rather than a bare string for that reason — the
+  URL travels with the command.
+  **`connector.detail` names no command.** It is one surface-neutral sentence
+  that this route, `lop tunnel status` and the park file all print verbatim, and
+  the TUI renders it too, so a command baked into it would be a slash command
+  handed to a desktop callout (or a shell command handed to a composer). A
+  renderer that wants to offer the fix appends `remedy.command` in its own
+  surface's spelling: `lop login radient` in a shell, `/login radient` in the
+  app's composer. The same applies to `radient_login`/`tunnel_remedy` on
+  `GET /v1/auth/status`.
+
+There is no SSE frame for this. It changes when a person signs in or edits the
+console, so the app polls it on open and refetches when a sign-in it started
+settles; a new frame kind would carry minutes-old news.
 
 ## Settings
 
@@ -1457,6 +1514,7 @@ absent.
 |---|---|---|---|
 | `desktop_feed` | 1 | `GET /v1/desktop/events`, `POST /v1/desktop/presence` and their frame/lease shapes | the app opens no feed, beats no presence, and keeps its 5 s catalogue poll and its per-session notification path verbatim |
 | `desktop_presence` | 1 | the backend reads the per-publisher records under `run/desktop/delivery/` (plus the legacy `run/desktop/delivery.json` while an older sibling writes it) and defers its own completion banner to a notify-capable desktop | nothing is suppressed on the strength of a lease nobody publishes |
+| `tunnel` | 1 | `GET /v1/desktop/tunnel`, and `radient_login`/`tunnel_remedy` on `GET /v1/auth/status` | the app shows no tunnel state and no sign-in callout, and the account section keeps its current wording — it must not read the absent key as "the tunnel is fine" |
 
 Neither bumps `notification_contract`, which stays 1: the payload is unchanged
 except for the derived `focus_policy` routing field, which the client already

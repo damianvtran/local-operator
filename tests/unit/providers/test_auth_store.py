@@ -462,6 +462,45 @@ async def test_refresh_recovers_expired_token_row_stays_enabled(
     assert len(rows) == 1 and rows[0].disabled_cause is None
 
 
+async def test_a_shut_down_executor_re_arms_instead_of_failing_the_login(
+    store: AuthStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dispatch line carries the guard its neighbours have (review round 2, M3).
+
+    `run_in_executor` is the one line in the credential-write hook that can fail
+    while the loop it was handed to is still RUNNING: `shutdown_default_executor()`
+    — what `asyncio.run` performs on the way out — leaves the loop ticking with
+    no executor behind it, and the call then raises `RuntimeError: Executor
+    shutdown has been called`. Unguarded, that propagated out through
+    `_after_credential_write` and out of `upsert_credential`, i.e. out of a
+    credential write that had ALREADY COMMITTED: the operator is told the sign-in
+    failed after it succeeded, and the connector stays parked — the incident's
+    own outcome, one teardown window away.
+
+    So the assertion is about the LOGIN, which is what the hook must never fail,
+    and about the re-arm still happening: it now runs INLINE, which is the no-loop
+    branch's own trade (no thread is left to hand it to, and a loop on its way out
+    is serving nobody). The last block re-measures the premise — if a future
+    interpreter stopped raising there, this test would pass for the wrong reason.
+    """
+    from local_operator.tunnels import install
+
+    calls: list[tuple[str, int]] = []
+
+    def recording_rearm(*, provider: str, credential_id: int) -> str:
+        calls.append((provider, credential_id))
+        return "The Radient tunnel connector is starting again."
+
+    monkeypatch.setattr(install, "rearm_if_parked", recording_rearm)
+    await asyncio.get_running_loop().shutdown_default_executor()
+
+    stored = store.upsert_credential("radient", _oauth())
+    assert calls == [("radient", stored.id)], "the login's re-arm was dropped"
+
+    with pytest.raises(RuntimeError, match="[Ee]xecutor"):
+        asyncio.get_running_loop().run_in_executor(None, lambda: None)
+
+
 async def test_upsert_identity_dedupes_oauth_rows(store: AuthStore) -> None:
     creds = _oauth()
     creds["org_id"] = "org-1"
@@ -779,6 +818,42 @@ class TestADeadGrantIsReportedRatherThanOmitted:
         monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refresh)
         with pytest.raises(CredentialInvalidError) as caught:
             await store._ensure_oauth_fresh(row)
+        assert isinstance(caught.value, AuthStoreError)
+
+    async def test_a_prose_refusal_becomes_the_permanent_type_too(
+        self, store: AuthStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The incident's own body, through the raiser, this type.
+
+        Radient's endpoint answers a revoked refresh token with prose in the
+        `error` field rather than `invalid_grant`, and the code-only rule read
+        that as RETRYABLE — which is how a dead grant kept a supervised
+        connector restarting every 10 seconds for ~9 hours instead of arriving
+        here. The full chain is pinned in this one test: the real body, the
+        shared raiser, this store's own permanent type.
+        """
+        from local_operator.providers.oauth.callback_server import (
+            raise_for_refresh_failure,
+        )
+
+        row = store.upsert_credential(
+            "radient", {**_oauth(refresh="revoked-token", access="stale"), "expires": 0}
+        )
+
+        async def refresh(creds):  # noqa: ANN001
+            raise_for_refresh_failure(
+                "Radient",
+                401,
+                '{"error": "Token refresh failed: refresh token is expired or revoked"}',
+            )
+
+        monkeypatch.setattr(AuthStore, "_refresh_fn", lambda self_, provider: refresh)
+        stored = store.get_credential(row.id)
+        assert stored is not None
+        with pytest.raises(CredentialInvalidError) as caught:
+            await store._ensure_oauth_fresh(stored)
+        # Still an AuthStoreError, so every existing rotation handler on this
+        # path keeps working.
         assert isinstance(caught.value, AuthStoreError)
 
     async def test_the_rotation_race_loser_does_not_condemn_a_live_grant(
