@@ -79,10 +79,16 @@ export const PERMISSION_REQUEST_DEADLINE_MS = 120_000;
  * The switch reads OFF in this window — the effective state, not the click's
  * optimism — and this sentence says what the page is waiting for, so a user whose
  * dialog opened behind another window can tell a pending grant from a broken one.
+ *
+ * It also has to name the way OUT (round-4 U1). The escape exists — a second press
+ * cancels the wait — but nothing said so, and the neighbouring no-grant sentence
+ * teaches "turn the switch on again to ask Chrome once more", which in this state is
+ * the cancel. A user who wanted to stop waiting had no way to find that out, so the
+ * sentence says it.
  */
 export const PERMISSION_REQUEST_PENDING =
-  "Waiting for Chrome's permission prompt. If you do not see a dialog, look for a Chrome window " +
-  "behind this one — downloads stay off until the prompt is answered.";
+  "Waiting for Chrome's permission prompt. Press the switch again to stop waiting — downloads stay off " +
+  "until the prompt is answered. If you do not see a dialog, look for a Chrome window behind this one.";
 
 /** The ONE sentence for a grant this extension wants and does not hold.
  *

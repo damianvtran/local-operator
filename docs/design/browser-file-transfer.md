@@ -2179,8 +2179,9 @@ and restamps the input hash). **Proof the rebase carried no content of its own**
 per file over the 40 paths the branch touches: **5 commits paired 1:1** by
 `git range-diff 4e2899cc..dc41dcd9 d031cc49..HEAD`; **28 files byte-identical ± line
 sets**; **11 differ ONLY in the generated `Inputs sha256` stamp**; **1**
-(`protocol.gen.ts`) additionally carries main's own 13 added `ErrorCode` values,
-inherited rather than authored.
+(`protocol.gen.ts`) additionally carries main's own **11** added `ErrorCode` values
+(the enum is 19 members at this branch's pre-rebase head and 30 at `d031cc49`, and our
+head matches 30 exactly — all 11 are main's), inherited rather than authored.
 
 **M1 == D4 — three accounts of one fix, two of them wrong.** `options.html` and this
 document described the notices as a `position: sticky; bottom: 12px` block that ships;
@@ -2224,17 +2225,25 @@ frame**, and the re-check reads live geometry.
 and is **12 px** at all three now) and `scroll-margin-top: 12px` on the switch row.
 The control also wins when both cannot fit: at 380x440 the reveal used to put the
 pressed row at **viewport y = −53** (the answer readable, the knob and its state line
-gone, the pair round-1 D3 exists to keep together); the row is now at **y = 12** with
-the notice's opening lines below it. **The threshold, recorded rather than hidden:**
-at 380 px width the row and a full notice are 455 px apart, so below roughly a 460 px
-viewport height the notice's tail clips — the knob, its state line and the notice's
-first lines stay visible, which is the right way round.
+gone, the pair round-1 D3 exists to keep together); the row now holds its 12 px floor
+and the notice clips instead. **The threshold, recorded rather than hidden:** at 380 px
+width the row and a full notice are 455 px apart, and with the row at that floor the
+notice's tail clips below roughly **505 px** of viewport height — measured, and
+corrected from round 3's 460 px (round-4 U2). The knob, its state line and the notice's
+first lines stay visible, which is the right way round. The clip is 65 px at 380x440,
+and the clipped part is the explanation's tail, not its opening.
 
 **U5 — one statement about the load-time reveal, not two.** `notice()`'s docstring
 said a page must not scroll itself as it opens while the repair's call site argued for
 exactly that. The behaviour is kept (it points at the one state that needs the user)
-and the docstring now describes it: it fires once per page, and because the DOM write
-and the scroll happen in one task the page opens already scrolled rather than jumping.
+and the docstring now describes it: it fires once per page. **Corrected in round 4
+(design D1):** an earlier version of this paragraph claimed the DOM write and the
+scroll happen in one task so the page "opens already scrolled rather than jumping".
+That was true of the `scrollIntoView` this delta replaced and is false of the shipped
+rAF reveal — the notice is painted, ONE unscrolled frame is shown (measured 17 ms, with
+the notice below the fold at 900x620, 760x520 and 420x700), and the scroll lands on the
+next frame. It is a 17 ms flash of the unscrolled page, stated here because §17.16's
+M1 paragraph six lines above depends on the reveal being rAF-driven.
 
 **U6 — the cancel copy is one clause** (*"Stopped waiting. Downloads stay off."*)
 instead of 236 characters and three clauses for a pause the user just created.
@@ -2257,4 +2266,75 @@ rejection escaped the same way — so the handshake is now a named function pass
 through `fireAndForget`, and with all three call sites bare the test goes red while the
 rest of the suite stays green (296 → 296), which is what makes it a pin rather than a
 decoration.
+
+---
+
+### 17.17 Round-4 remediation: the pressed row, the escape's copy, and one honest threshold
+
+One commit on `594db769`. The measurements are from `/tmp/lo-r4.json` (7 sizes × 4
+states, one Chrome each, 20 stills re-taken in `/tmp/lo-dl-shots/r4-*.png`).
+
+**R1 (major) — the reveal corrected a row nobody had pressed.** `revealNotice` took
+its row from a hard-coded `label[for="allow-downloads"]` and ran that correction
+*after* the target's own scroll, so for the uploads notice it scrolled back UP — at
+380x300 the uploads row landed at y=194 and the uploads notice at **410–467 in a
+300 px viewport, entirely below the fold**, where the same reveal without that step put
+it at 231–288. The downloads notice was hidden by the same step (409–505 against a
+counterfactual 192–288), which is why §17.16's threshold read low.
+
+The row now comes from the target (`rowFor`), and — more to the point — the two
+constraints are solved **together, in one offset**, rather than by two scrolls that
+fight: scroll down by whatever the notice needs, then pull back up if that would carry
+the pressed row off the top (the row wins when both cannot be satisfied). Re-measured,
+uploads press, this rig's viewport heights:
+
+| size | viewport h | uploads row | uploads notice | clipped |
+|---|---|---|---|---|
+| 380x300 | 213 | 12 | 189–246 | 33 px (round 3: **all** of it) |
+| 420x400 | 313 | 67 | 244–301 | **0** (round 3: clipped) |
+| 380x440 | 353 | 107 | 284–341 | **0** (round 3: clipped) |
+| 380x500 | 413 | 167 | 344–401 | 0 |
+| 380x520 | 433 | 187 | 364–421 | 0 |
+| 380x560 | 473 | 226 | 403–460 | 0 |
+| 900x620 | 533 | 255 | 413–450 | 0 |
+
+The frame at the worst size shows the shape: the pressed row at the top with its focus
+ring, its state line, and the notice's first line readable — where round 3 showed none
+of it.
+
+**D4 still holds, measured across the states the reveal touches:** row *document*
+positions are byte-identical between the uploads-press and two-notice states (600/742
+at 380x500; 580/703 at 900x620). Only the scroll offset moves.
+
+**U2 — the threshold, stated as the rule it is.** With the pressed row at its 12 px
+floor, the notice is clipped until the viewport can hold *row floor + row→notice
+distance + notice height*, and that distance depends on how much prose sits between the
+row and the notice — which is why one absolute number was always going to be wrong.
+Measured in this rig at 380 wide: the **uploads** notice needs a viewport of ~246 px,
+and the **longer pending downloads** notice ~428 px (clipped by 215 / 75 / 15 px at
+213 / 353 / 413, and 0 at 433). In the streams' rig, where the reported viewport height
+equals the nominal window height, the same measurement is the ≈505 px round 4 reports;
+round 3's 460 px was that number read without the downloads notice's extra length.
+
+**U1 — the escape now says itself.** The pending sentence is: *"Waiting for Chrome's
+permission prompt. Press the switch again to stop waiting — downloads stay off until
+the prompt is answered. If you do not see a dialog, look for a Chrome window behind
+this one."* A second press is the cancel (round-4 U1's own structural fix), and the one
+place that could have taught a user this was a sentence that did not mention it.
+
+**R2 and U3 — the state line no longer restates a notice, by construction.** The
+branches are derived from the **switches**, not from the notices: the line speaks only
+for the capability no visible notice covers, and **hides when both are covered**. So
+the latent "Neither the agent's saving nor its attaching is available on this browser"
+cells R2 identified do not exist to be reached — there is no summary sentence left that
+can contradict an ON switch. Measured: uploads ON + a downloads notice → the line is
+empty, with the uploads notice reading *"Uploads are on. Turn this off…"* and the
+downloads notice naming the wait. One-notice states say only the other capability
+(*"Downloads are off as well."* / *"Uploads are off as well."*), which is U3's
+`info`-weight duplicate gone rather than special-cased.
+
+**N2 — the dead `change` branch is gone.** The click listener's `preventDefault()`
+means the `change` event never fires while a request is in flight, so the second guard
+was unreachable for any human gesture and read like a live one. The comment says what
+replaced it, and names the synthetic `change` shape it used to answer to.
 
