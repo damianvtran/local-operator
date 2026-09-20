@@ -255,7 +255,19 @@ class CandidateProbe:
     #: One entry per declared endpoint, in the order the row declares them. An
     #: endpoint whose attempt was still in flight when the budget ran out is named
     #: ``no_answer`` rather than dropped: a missing row reads as "fine".
+    #: READ ``complete`` BEFORE TREATING THIS AS EVERY CANDIDATE'S ANSWER — on the
+    #: early-return path a candidate can be ``no_answer`` simply because the
+    #: collector stopped waiting, not because anything was wrong with the address.
     attempts: list[CandidateAttempt]
+    #: True when EVERY declared endpoint reported, so ``attempts`` is the complete
+    #: per-address answer and each entry is that address's own outcome. False when
+    #: the probe returned at the winner (the ``wait_all=False`` path, where one
+    #: answer is all the caller asked for) or hit the deadline first, in which case
+    #: ``no_answer`` means "not heard from yet" and nothing more. A caller that
+    #: needs every address's answer asks for ``wait_all=True`` and should find this
+    #: True; a caller that only needs a link uses ``sock`` and ``reason`` and can
+    #: ignore both.
+    complete: bool
     #: The one line a peer row carries, and EMPTY when an address answered: the
     #: caller's success signal is the socket, and a "reason" beside it would be a
     #: sentence about a link that exists. See :func:`probe_reason`.
@@ -408,6 +420,7 @@ def probe_candidates(
         sock=winner_sock,
         winner=winner,
         attempts=attempts,
+        complete=settled == len(threads),
         reason="" if winner_sock is not None else probe_reason(attempts),
     )
 

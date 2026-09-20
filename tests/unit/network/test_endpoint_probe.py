@@ -20,6 +20,18 @@ address, which behaves differently on a laptop and in a CI container. That case 
 covered by the three-relay run over loopback in the evidence directory, which is
 where the end-to-end claim belongs. What is pinned here is the code path that made
 that hang fatal (QA round 2, Q-R2-2).
+
+TWO WAYS THIS FILE ITSELF WENT FLAKY UNDER XDIST, both fixed at the source rather
+than by loosening an assertion, because a test that cannot fail is not evidence:
+
+* an address made "refused" by binding port 0 and closing it can be re-bound by a
+  PARALLEL worker's own ``bind(0)``, which turns it into a live listener and makes
+  ``winner`` nondeterministic — so the unraceable fixture is a privileged port
+  nothing unprivileged can claim (``_refused_endpoint``); and
+* ``attempts`` on the EARLY-RETURN path is only what the collector had heard when
+  the first address answered, so a candidate can read ``no_answer`` while being
+  perfectly reachable — the test that asserts every address's own answer therefore
+  asks for ``wait_all=True`` and asserts ``complete`` before reading it.
 """
 
 from __future__ import annotations
@@ -65,13 +77,27 @@ def _live_endpoint() -> tuple[socket.socket, str]:
 
 
 def _refused_endpoint() -> str:
-    """An address nothing listens on: it fails FAST, which is what a test may
-    rely on portably. The hanging failure is the rig's, see the module docstring."""
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    probe.bind(("127.0.0.1", 0))
-    host, port = probe.getsockname()[:2]
-    probe.close()
-    return f"{host}:{port}"
+    """An address NOTHING CAN BE LISTENING ON, so "refused" is deterministic.
+
+    Port 1 is in the privileged range: no unprivileged process — this suite, an
+    xdist worker beside it, or anything else on the host — can bind it, and the
+    ephemeral allocator never hands it out. That is the whole point. The obvious
+    alternative is to bind port 0, read the port, close the socket and dial that
+    address, and it carries a window in which a PARALLEL test's own ``bind(0)``
+    takes the port: the address this test calls refused then becomes a live
+    listener, the probe has two successes racing for ``winner``, and the failure is
+    load-sensitive and unreproducible at ``-n0``. Prose is not a guarantee here, so
+    the address is one nothing can claim rather than one that merely is not claimed
+    yet.
+
+    The FAILURE CLASS is deliberately not pinned by the caller: the kernel answers
+    a connect to a closed loopback port with ``ConnectionRefusedError`` on the
+    usual path and ``ConnectionResetError`` when it resets instead, and both are
+    the platform's own name for the same fact. What this file asserts is that the
+    address DID NOT CONNECT and that the probe named the failure — which is the
+    property the report exists for.
+    """
+    return "127.0.0.1:1"
 
 
 def test_every_declared_address_is_dialled_and_the_last_one_can_win() -> None:
@@ -80,6 +106,14 @@ def test_every_declared_address_is_dialled_and_the_last_one_can_win() -> None:
     A member row is written by the DECLARING device, so its order is not something
     a receiver can fix. A probe that walked the row and spent a shared deadline
     would report this member unreachable with its one good address untouched.
+
+    ``wait_all=True`` DELIBERATELY. With a single candidate's answer being enough,
+    the probe returns the moment an address connects, and a candidate that has not
+    REPORTED by then is labelled ``no_answer`` — honest (“not heard from yet”) but
+    not this test's claim, which is about what each of the three addresses did. That
+    distinction is exactly what `complete` reports, so the test asks for the full
+    answer and asserts it got one: reading a partial list as if it were complete is
+    how this test first went flaky under xdist (and why the field exists).
     """
     server, live = _live_endpoint()
     refused = _refused_endpoint()
@@ -88,15 +122,18 @@ def test_every_declared_address_is_dialled_and_the_last_one_can_win() -> None:
             ["not-an-address", refused, live],
             deadline=time.monotonic() + 10.0,
             connect_cap=2.0,
+            wait_all=True,
         )
         assert probe.winner == live, probe.attempts
         assert probe.sock is not None
+        assert probe.complete is True, probe.attempts
         assert probe.reason == "", "a probe with a winner has no reason to give"
         probe.sock.close()
-        by_endpoint = {row.endpoint: row.detail for row in probe.attempts}
-        assert by_endpoint["not-an-address"] == "bad_endpoint"
-        assert by_endpoint[refused] == "connect_failed:ConnectionRefusedError"
-        assert by_endpoint[live] == "ok"
+        by_endpoint = {row.endpoint: row for row in probe.attempts}
+        assert by_endpoint["not-an-address"].detail == "bad_endpoint"
+        assert by_endpoint[refused].connected is False
+        assert by_endpoint[refused].detail.startswith("connect_failed:"), by_endpoint[refused]
+        assert by_endpoint[live].detail == "ok"
     finally:
         server.close()
 
@@ -114,6 +151,7 @@ def test_a_candidate_the_deadline_never_reached_is_reported_as_not_attempted() -
         connect_cap=2.0,
     )
     assert probe.sock is None
+    assert probe.complete is False, "nothing was dialled, so nothing reported"
     assert [row.detail for row in probe.attempts] == ["not_attempted", "not_attempted"]
     assert probe.reason.startswith("not_attempted")
 
@@ -131,6 +169,8 @@ def test_a_candidate_that_never_reported_is_named_rather_than_dropped() -> None:
     assert probe.attempts[0].endpoint == "127.0.0.1:1"
     assert probe.attempts[0].connected is False
     assert probe.attempts[0].detail in ("not_attempted", "no_answer")
+    assert probe.complete is False
+    assert probe.reason == probe.attempts[0].detail
 
 
 def test_the_probe_keeps_only_the_winner_and_closes_the_rest() -> None:
@@ -147,6 +187,7 @@ def test_the_probe_keeps_only_the_winner_and_closes_the_rest() -> None:
             wait_all=True,
         )
         assert probe.sock is not None
+        assert probe.complete is True, probe.attempts
         assert [row.detail for row in probe.attempts] == ["ok", "ok"]
         accepted = []
         for server in servers:
@@ -354,13 +395,19 @@ def test_the_listener_learns_the_member_table_from_the_peer_that_dialled_it(
 
     link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
     assert link is not None, reason
-    deadline = time.monotonic() + 5.0
+    # The listener's pull runs on its own handshake thread — `dial` returns when
+    # THIS side's handshake is done, and the peer may not have finished its end — so
+    # this waits on the EVENT (the row appearing), not on a fixed sleep, and the
+    # bound is generous because the thing being waited for is a loopback round trip
+    # that competes with every other worker. The assertion below it is the test: if
+    # the row never lands, the pull did not happen.
+    deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         if store.load(record.network_id, server_a.root).member(NEWCOMER) is not None:
             break
         time.sleep(0.05)
     learned = store.load(record.network_id, server_a.root)
-    assert learned.member(NEWCOMER) is not None
+    assert learned.member(NEWCOMER) is not None, "the listener never pulled the table"
     link.close("test")
 
 
