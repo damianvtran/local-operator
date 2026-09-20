@@ -319,7 +319,10 @@ def test_every_environment_variable_read_is_scrubbed_or_explained() -> None:
             "neither scrubs them (tests/conftest.py _AMBIENT_VARS) nor explains why "
             "an inherited value is harmless (_HARMLESS in this file). A variable that "
             "names a real-machine resource — a session, a window, a socket, a config "
-            "dir, a credential — goes in _AMBIENT_VARS.",
+            "dir, a credential — goes in _AMBIENT_VARS. So does an ESCAPE HATCH that "
+            "waives a rule the suite asserts (ALLOW_NESTED_SESSION, "
+            "NOTIFY_TEST_HOSTING): inheriting it makes every cell take the allow path "
+            "while looking like it tested the refusal.",
             *(f"  {name}: {', '.join(sorted(reads[name]))}" for name in unaccounted),
         ]
     )
