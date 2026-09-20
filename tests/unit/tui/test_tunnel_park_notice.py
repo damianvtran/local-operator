@@ -25,6 +25,7 @@ import pytest
 from rich.cells import cell_len
 
 from local_operator.tui.app import OperatorApp, tunnel_park_card
+from local_operator.tui.widgets.status_line import StatusLine
 from local_operator.tui.widgets.toast import Toast
 from tests.unit.tui.test_app_pilot import FakeSession, _factory
 
@@ -100,6 +101,18 @@ async def _boot():
     return app
 
 
+def _band(app: OperatorApp) -> StatusLine:
+    """The app's status band, asserted present.
+
+    ``_status`` is optional on the app until mount, and this suite drives the
+    real app: asserting once here rather than at each of the seven reads is both
+    shorter and the narrowing pyright needs (a member access is re-widened by any
+    call on its object, and these tests call the poll between reads).
+    """
+    assert app._status is not None
+    return app._status
+
+
 @pytest.mark.asyncio
 async def test_a_park_is_announced_once_and_withdrawn_when_it_clears(tmp_path) -> None:
     """One card, the login remedy, and it goes away when the park does."""
@@ -118,8 +131,9 @@ async def test_a_park_is_announced_once_and_withdrawn_when_it_clears(tmp_path) -
         # …and the BAND carries it too, which is the half that survives the
         # card's ten seconds (D4). Read out of the rendered row rather than
         # asked of `is_showing`, which reports whether the LADDER shed a rung
-        # and not whether the segment had anything to paint.
-        assert "remote access off" in app._status.render_text(120).plain
+        # and not whether the segment had anything to paint. `_status` is
+        # optional on the app until mount; this one asserts it, the way the
+        assert "remote access off" in _band(app).render_text(120).plain
 
         # The same episode, polled again: the card is left alone. `show`
         # re-arms its own dismissal timer, so re-raising here would hold a
@@ -128,7 +142,7 @@ async def test_a_park_is_announced_once_and_withdrawn_when_it_clears(tmp_path) -
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.generation == first_generation, "a second poll re-raised the card"
-        assert "remote access off" in app._status.render_text(120).plain
+        assert "remote access off" in _band(app).render_text(120).plain
 
         # The user signs in: the park is gone from disk (the connector cleared
         # it, or `lop tunnel status` did), and both claims go with it.
@@ -136,14 +150,14 @@ async def test_a_park_is_announced_once_and_withdrawn_when_it_clears(tmp_path) -
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is False, "a cleared park must retract its claim"
-        assert "remote access off" not in app._status.render_text(120).plain
+        assert "remote access off" not in _band(app).render_text(120).plain
 
         # …and a park that comes BACK is news again.
         _park(tmp_path)
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is True
-        assert "remote access off" in app._status.render_text(120).plain
+        assert "remote access off" in _band(app).render_text(120).plain
 
 
 @pytest.mark.asyncio
@@ -168,7 +182,7 @@ async def test_the_nag_gate_never_mentions_a_tunnel_that_is_not_in_use(tmp_path)
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is False
-        assert "remote access off" not in app._status.render_text(120).plain
+        assert "remote access off" not in _band(app).render_text(120).plain
 
         # A park behind a deliberate stop, which is not a park to act on. The
         # connector clears it itself when it runs; the terminal must not depend
@@ -177,7 +191,7 @@ async def test_the_nag_gate_never_mentions_a_tunnel_that_is_not_in_use(tmp_path)
         app._poll_tunnel_park()
         await pilot.pause()
         assert toast.display is False
-        assert "remote access off" not in app._status.render_text(120).plain
+        assert "remote access off" not in _band(app).render_text(120).plain
         assert state.read() is not None, "the fixture really did leave a park on disk"
 
 
