@@ -3149,3 +3149,111 @@ def test_a_symlinked_anchor_path_reports_the_redirect_not_a_missing_anchor(
 
     level, _ = authority_level_load()
     assert level == "anchor-unpinned", level
+
+
+@pytest.mark.asyncio
+async def test_the_live_challenge_count_is_bounded_across_connections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-4: the per-connection maximum bounded a socket, not the SUBJECT.
+
+    ``_MAX_CHALLENGES_PER_CONN`` is eight, and the party this predicate gates is the
+    one that can read the session record's ``control_key`` and therefore dial as many
+    connections as it likes — eight live challenges each, unbounded in aggregate. The
+    design already accepts denial from that subject rather than escalation, so this is
+    not an escalation either; it is the difference between a bounded denial and an
+    unbounded one, and it is now a term this cell can measure.
+    """
+    from local_operator.session.runtime import server as server_module
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    live = await _serve(tmp_path, operator_cap=None)
+    try:
+        cap = server_module._MAX_LIVE_CHALLENGES
+        per_conn = server_module._MAX_CHALLENGES_PER_CONN
+        conns = []
+        minted = 0
+        exhausted = False
+        # Enough connections to exceed the aggregate with room to spare, each one
+        # filled to its own per-connection maximum first.
+        for _ in range(cap // per_conn + 2):
+            conn = await _dial(live.record)
+            conns.append(conn)
+            for _ in range(per_conn):
+                if minted >= cap:
+                    exhausted = True
+                    break
+                reply = await _send(
+                    conn, None, {"op": "operator_challenge", "action": "loosen", "request_id": ""}
+                )
+                if reply["op"] == "error":
+                    exhausted = True
+                    break
+                minted += 1
+            if exhausted:
+                break
+        assert minted == cap, f"the aggregate bound is not {cap}: minted {minted}"
+        assert exhausted, "the aggregate bound never fired"
+        # ...and the refusal is the aggregate one, not the per-connection one, so a
+        # reader can tell the two apart.
+        conn = await _dial(live.record)
+        conns.append(conn)
+        refused = await _send(
+            conn, None, {"op": "operator_challenge", "action": "loosen", "request_id": ""}
+        )
+        assert refused["op"] == "error", refused
+        assert "this runtime" in refused["message"], refused
+        for conn in conns:
+            conn.close()
+    finally:
+        await live.close(tmp_path)
+
+
+def test_the_prompt_copy_is_wired_at_the_surfaces_that_can_show_it() -> None:
+    """UX round 6, U3 = design round 6, D3: the sentence reached nobody.
+
+    ``effect_copy`` builds "Authorise the operator key to LOOSEN the approval gate
+    of <session>", ``AttachClient`` fires it through ``on_operator_prompt``, and NO
+    production construction site passed that callback — so it took the fallback
+    branch and became a log line, while the design doc claimed the mitigation was
+    shipped. The OS sheet cannot carry the copy either
+    (``SecKeyCreateSignature`` takes no parameters dictionary and
+    ``kSecUsePrompt``/``kSecUseOperationPrompt`` was deprecated in macOS 11), so
+    these call sites ARE the mitigation.
+
+    Pinned as a source fact rather than by driving a pane, for the reason the relay
+    spawn pin gives: the claim is about which arguments a production constructor is
+    CALLED with, and building an attached session to observe one log line would test
+    the logging, not the wiring. ``AttachClient``'s own handling of the callback is
+    covered directly in ``tests/unit/mobile/test_attach_client.py``.
+    """
+    client_source = (_TESTS_ROOT / "local_operator" / "session" / "attached.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(client_source)
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "AttachClient"
+    ]
+    assert calls, "the pane no longer constructs an AttachClient here; re-argue this pin"
+    assert any(
+        keyword.arg == "on_operator_prompt" for call in calls for keyword in call.keywords
+    ), "the attached pane does not pass on_operator_prompt, so the copy is a log line again"
+
+    app_source = (_TESTS_ROOT / "local_operator" / "tui" / "app.py").read_text(encoding="utf-8")
+    app_tree = ast.parse(app_source)
+    # The app arms its callbacks through the same guarded `getattr`-then-call shape
+    # the cancel and recall handlers use, so the call is a NAME, not an attribute
+    # access — asserted as such rather than pattern-matched on the name alone, which
+    # would pass on the `getattr` string itself.
+    called = {
+        node.func.id
+        for node in ast.walk(app_tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "set_operator_prompt_notice" in called, (
+        "nothing installs the pane's prompt handler, so the copy has nowhere to land"
+    )

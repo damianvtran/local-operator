@@ -26,6 +26,7 @@ FORWARDS. Isolated config dir; never a real keychain.
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 from typing import Any
 
@@ -460,3 +461,140 @@ def test_the_portal_and_the_relay_agree_about_the_namespace() -> None:
     source = api.read_text(encoding="utf-8")
     assert "/v1/mobile" not in source, "the portal and the relay disagree about the namespace"
     assert "/api/sessions/" in source, "the portal no longer targets the relay's routes"
+
+
+def _anchor_with_revocation(monkeypatch, device_id: str) -> None:
+    """Make `trust.load_anchor` report an anchor whose revocation list names a device.
+
+    The ANCHOR is the authoritative list (the runtime consults it), and the local
+    ``revoked.json`` under the config root is the relay's own copy. A test cannot
+    create the root-owned file, so the root-owned FACT is supplied at the one read
+    the guard performs — which is what makes this cell about the guard's CHOICE of
+    list rather than about file permissions.
+    """
+    from local_operator.operator import trust
+
+    def load(uid: Any = None) -> Any:
+        return trust.AnchorLoad(
+            anchor=trust.OperatorAnchor(
+                key_id="00" * 16,
+                spki=b"\x04" + b"\xab" * 64,
+                backend="file-only",
+                presence=False,
+                label="test",
+                created_at=0,
+                devices=({"device_id": device_id, "revoked": True},),
+            ),
+            path=trust.anchor_path(uid),
+            root_owned=True,
+            reason="ok",
+            exists=True,
+        )
+
+    monkeypatch.setattr(trust, "load_anchor", load)
+
+
+def test_a_revocation_recorded_only_in_the_ANCHOR_still_stops_a_re_pair(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """UX round 6, U5: the two revocation lists disagreed, and the relay read the wrong one.
+
+    Measured before this fix: with the revocation recorded in the ANCHOR but not in
+    the local record — which is what an operator who edits the root-owned anchor
+    produces, and the documented way to revoke a device whose certificate this
+    machine still holds — ``POST /api/pair`` accepted a fresh code from that device
+    with HTTP 200. The guard asked ``is_revoked_here``, the config-root copy, while
+    the authoritative list lives in the anchor.
+    """
+    from local_operator.operator import devices as device_module
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = _logged_in(daemon)
+    point = _point()
+    device_id = devices.new_device_id(point)
+    _anchor_with_revocation(monkeypatch, device_id)
+
+    # THE STATE THAT MATTERED: the anchor says revoked, the local record says nothing.
+    assert device_module.is_revoked_here(tmp_path, device_id) is False
+    assert device_module.is_revoked(tmp_path, device_id) is True
+
+    code = devices.begin_pairing(tmp_path)
+    reply = client.post(
+        "/api/pair",
+        json={
+            "code": code,
+            "spki": base64.urlsafe_b64encode(point).decode().rstrip("="),
+            "name": "p",
+        },
+    )
+    assert reply.status_code == 403, reply.text
+    assert reply.json() == {"error": "this device has been revoked"}, reply.text
+    assert devices.list_pending(tmp_path) == []
+
+
+def test_a_refused_command_carries_the_TYPED_code_to_the_phone(tmp_path: Path, monkeypatch) -> None:
+    """UX round 6, U6: the phone needs the category, not English to pattern-match.
+
+    The portal decided whether to re-sign by matching substrings of the runtime's
+    sentence (``"only the operator can allow it"``), and that sentence has been
+    rewritten twice between revisions. The runtime already sends a typed code, and
+    the relay already decodes it into the exception — it simply rendered only the
+    prose onto the wire.
+
+    THE REAL ``daemon.request`` IS DRIVEN, not replaced: the cell stands a fake
+    WRITER in for the session socket, reads the frame the relay really built, and
+    answers it with the error frame a runtime sends. That keeps the decode, the
+    raise and the route's rendering in one production path, which is the whole
+    point of asserting the field rather than the sentence.
+    """
+    import local_operator.mobile.daemon as daemon_module
+    from local_operator.harness.approval import OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    daemon = MobileDaemon(port=0, password="pw123")
+    record = _record(session_id="typed-code-session")
+    entry = SessionEntry(record)
+    daemon.table.entries[record.pid] = entry
+
+    class FakeWriter:
+        """The session socket, in the one place this cell needs it: the write."""
+
+        def __init__(self) -> None:
+            self.written: list[dict[str, Any]] = []
+
+        def write(self, payload: bytes) -> None:
+            frame = json.loads(payload.decode())
+            self.written.append(frame)
+            # ANSWER AS THE RUNTIME WOULD, on the future the relay just parked:
+            # a typed refusal with its copy, exactly the shape
+            # `server._on_request` produces for an authority-increasing op.
+            daemon._pending_reqs[(record.pid, frame["req"])].set_result(
+                {
+                    "op": "error",
+                    "req": frame["req"],
+                    "message": OPERATOR_AUTHORITY_REQUIRED_UNCONFIGURED_NOTICE,
+                    "error_code": "operator_authority_unconfigured",
+                    "error_trigger": "slash_result",
+                }
+            )
+
+        async def drain(self) -> None:
+            return None
+
+    writer = FakeWriter()
+    entry.writer = writer  # type: ignore[assignment]
+    client = _logged_in(daemon)
+    reply = client.post(
+        "/api/sessions/typed-code-session/command",
+        json={"op": "slash_result", "command": "approvals", "args": "auto", "images": []},
+    )
+    assert len(writer.written) == 1, writer.written
+    assert reply.status_code == 422, reply.text
+    body = reply.json()
+    # The COPY is still carried verbatim, so every client that exists today is
+    # unaffected: `error` keeps its shape and the new field is additive.
+    assert "lop operator install" in body["error"], body
+    # ...and the CATEGORY rides beside it, for a client that has to decide what to
+    # offer next rather than reword a sentence it does not own.
+    assert body["code"] == "operator_authority_unconfigured", body

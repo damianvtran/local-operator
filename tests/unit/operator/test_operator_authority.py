@@ -180,6 +180,14 @@ def test_a_symlinked_anchor_path_is_refused(
     loaded = trust.load_anchor()
     assert loaded.usable is False
     assert "symbolic link" in loaded.reason, loaded.reason
+    # AND IT IS REPORTED AS AN UNPINNED ANCHOR, NOT AS NO ANCHOR (agent review round
+    # 6, R6-6). ``exists`` was left False for this refusal, so a host whose anchor is
+    # present but behind a link reported ``spawn-capability-only`` — the level for a
+    # host that never installed one — in a report whose whole job is to tell those
+    # two states apart. The reason field said "symbolic link" while the level said
+    # "nothing installed", and the level is what the operator's own `status` prints.
+    assert loaded.exists is True, "a present-but-redirected anchor is not a missing one"
+    assert operator_authority_level() == LEVEL_ANCHOR_UNPINNED
 
 
 def test_the_anchor_path_cannot_be_redirected(
@@ -435,6 +443,79 @@ def test_the_effect_copy_names_the_session_and_the_effect(keyed: Any) -> None:
     assert "APPROVE" in approve and "sess-42" in approve and "card-7" in approve
     fallback = effect_copy(purpose="approve", session_id="")
     assert "this session" in fallback
+
+
+def test_the_signing_verb_shows_the_copy_to_the_person_signing(
+    keyed: Any, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE SENTENCE REACHES A HUMAN FROM THE CLI (UX round 6, U3 = design D3).
+
+    Measured before this fix: ``lop operator sign`` wrote JSON on stdout and
+    nothing else, no OS operation prompt was passed at the signing call (there is
+    nowhere to pass one — ``SecKeyCreateSignature`` takes no parameters dictionary
+    and ``kSecUseOperationPrompt`` was deprecated in macOS 11), and
+    ``on_operator_prompt`` was set at no production construction site. So the
+    copy the design names as its mitigation for the misread-prompt residual was
+    built and shown to nobody, while the doc claimed it was shown.
+
+    ``stderr`` rather than stdout, because stdout is the value and nothing else —
+    the property the module docstring states and a caller parsing this verb
+    depends on.
+    """
+    from argparse import Namespace
+
+    from local_operator.operator.handlers import _sign
+
+    # The verb resolves the key the way the product does — through the config root
+    # — so the fixture's root has to BE the config root for this call.
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(keyed.root))
+    challenge = keyed.sign(challenge="ab" * 32, purpose="loosen", session_id="")["sig"]
+    # A REAL challenge, not a placeholder: the verb signs whatever it is handed,
+    # and this cell is about the human-facing line rather than about validation.
+    code = _sign(Namespace(challenge="cd" * 32, purpose="loosen", session="sess-9", request_id=""))
+    assert code == 0
+    captured = capsys.readouterr()
+    assert "LOOSEN" in captured.err and "sess-9" in captured.err, captured.err
+    assert "LOOSEN" not in captured.out, captured.out
+    # ...and stdout is still exactly the JSON value, so a caller that pipes it is
+    # unaffected by the human-facing line.
+    assert captured.out.strip().startswith("{") and captured.out.strip().endswith("}")
+
+
+def test_the_windows_ladder_falls_back_to_the_file_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R6-2/R6-8: ``supported()`` answered for the HOST, not for this BUILD.
+
+    ``choose_backend("auto")`` promises "the first backend this host both HAS and
+    can USE", and on ``os.name == "nt"`` it returned ``CngBackend`` without asking
+    the second half — whose ``create`` raises "not implemented on this build". So
+    ``lop operator init`` on Windows exited 1 with an internal backend name instead
+    of creating the ``file-only`` key it could have created, and instead of
+    reporting the level that host actually has.
+
+    Read, not run: no Windows host exists here, so this pins the DECISION (which
+    backend the ladder selects) and the operator-readable failure, not the CNG
+    call. The doc grades Windows accordingly.
+    """
+    from local_operator.operator import keychain
+
+    assert keychain.CngBackend().supported() is False, (
+        "supported() must answer for this build, not for the host: its only caller "
+        "uses it to decide whether the host can USE the backend"
+    )
+    with pytest.raises(keychain.KeyBackendError) as refused:
+        keychain.CngBackend().create()
+    assert "--backend file-only" in str(refused.value), str(refused.value)
+
+    monkeypatch.setattr(keychain.os, "name", "nt")
+    chosen = keychain.choose_backend("auto", config_root=tmp_path)
+    assert isinstance(chosen, keychain.FileKeyBackend), type(chosen).__name__
+    # ...and asking for it BY NAME still reports the readable reason rather than
+    # dying on an internal identifier.
+    with pytest.raises(keychain.KeyBackendError) as named:
+        keychain.choose_backend("cng-presence", config_root=tmp_path).create()
+    assert "not implemented on this build" in str(named.value), str(named.value)
 
 
 def test_signing_refuses_an_unknown_purpose_or_a_missing_challenge(keyed: Any) -> None:
