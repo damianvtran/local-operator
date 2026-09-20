@@ -514,3 +514,85 @@ async def test_a_live_archived_session_is_hidden_and_stamped_over_the_wire(archi
     revealed = _rows((await client.get("/v1/desktop/sessions?include_archived=true")).json())
     row = next(item for item in revealed if item["id"] == MINE)
     assert row["archived"] is True, "the row the reveal returns must state the truth"
+
+
+# ---------------------------------------------------------------------------
+# A delete must stop the daemon that performed it (desktop QA round 2, PR #390)
+# ---------------------------------------------------------------------------
+
+# Every read a client probes for a session it thinks it still has.
+_READS = (
+    "/v1/desktop/sessions/{id}",
+    "/v1/desktop/sessions/{id}/history",
+    "/v1/desktop/sessions/{id}/mcp",
+)
+# The subset a RESIDENT bridge answers 200 for without a live runtime: the MCP
+# read needs an owner to hand the status back from, so a seeded conversation
+# answers 404 there for its own reason and cannot be the failing cell here. The
+# 200 the QA report measured on `/mcp` came from a running app; the mechanism
+# under test — residency — is the same bridge for all three.
+_SERVED_READS = _READS[:2]
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_session_is_not_served_by_the_daemon_that_deleted_it(
+    archive_api,
+) -> None:
+    """The removal must be observable WITHOUT a restart of the process.
+
+    Desktop QA (PR #390) reloaded the app and landed on a fresh draft over the
+    removed id: `sessions.get`, `/history` and `/mcp` all answered 200 from the
+    daemon that had just deleted the conversation, so the client's 404 tombstone
+    never fired. A fresh daemon answers 404 for the same store, and the same
+    daemon answers 404 for an id it has never seen — so the 200 was residency,
+    not the store.
+
+    The cause is by design one layer down: ``DesktopSessions.session`` hands out a
+    RESIDENT bridge without re-checking the directory, because that lookup is the
+    expensive half of every read (see ``docs/evidence/session-load-central-cache``)
+    — and this test is what makes the delete the one event that tells it so.
+    """
+    client, root = archive_api
+    _session(root, MINE)
+    await _speak(root, MINE, "delete me")
+    _session(root, OTHER)
+
+    # The daemon serves the conversation FIRST, so what follows is about a
+    # session it has already opened rather than one it never could answer for.
+    for path in _SERVED_READS:
+        assert (await client.get(path.format(id=MINE))).status_code == 200, path
+
+    response = await client.request(
+        "DELETE", f"/v1/desktop/sessions/{MINE}", json={"confirmed": True}
+    )
+    assert response.status_code == 200, response.text
+
+    for path in _READS:
+        observed = (await client.get(path.format(id=MINE))).status_code
+        assert observed == 404, f"{path} still answers {observed} on the deleting daemon"
+
+    # CONTROLS: a blanket refusal cannot pass this, and the two daemons must
+    # agree about the same store — the session the delete did not address still
+    # answers here, and an id neither daemon has ever seen answers 404 there.
+    assert (await client.get(_READS[0].format(id=OTHER))).status_code == 200
+
+    # A SECOND daemon over the same store, and the comparison that names the
+    # defect: before the fix the deleting one answered 200 where this one
+    # answered 404, for the same directory tree.
+    fresh = DesktopSessions(root)
+    fresh_app = FastAPI()
+    fresh_app.state.config_manager = ConfigManager(root)
+    fresh_app.state.desktop_sessions = fresh
+    fresh_app.include_router(desktop_sessions.router)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=fresh_app),
+            base_url="http://localhost",
+            headers={"Authorization": f"Bearer {os.environ['LOCAL_OPERATOR_DESKTOP_TOKEN']}"},
+        ) as fresh_client:
+            for path in _READS:
+                ours = (await client.get(path.format(id=MINE))).status_code
+                theirs = (await fresh_client.get(path.format(id=MINE))).status_code
+                assert ours == theirs == 404, f"{path}: deleting {ours}, fresh {theirs}"
+    finally:
+        await fresh.close()

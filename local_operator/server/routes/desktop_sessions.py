@@ -2385,6 +2385,24 @@ async def delete_session_route(session_id: str, body: ConfirmDeletion, request: 
     The wake index is pruned by the deletion path itself (``cleanup``), and the
     search cache is keyed by ids the caller lists, so a stale entry is never
     consulted for a conversation that no longer exists.
+
+    THE DAEMON'S OWN RESIDENCY IS NOT FREE, so the pool drops it explicitly
+    (``DesktopSessions.forget``): a conversation this process has already opened
+    is served from a resident bridge without re-reading the directory, so a
+    deleted one stayed reachable — measured 200 on ``sessions.get`` and
+    ``/history`` — until the daemon restarted, while a FRESH daemon over the same
+    store answered 404 (desktop QA round 2, PR #390). After the fix every
+    session-scoped route answers 404 for the removed id, exactly as a fresh daemon
+    does, and that is measured rather than argued: the snapshot, ``/history``,
+    ``/mcp``, ``/report`` and ``/failovers`` reads, the ``/pin`` and ``/archive``
+    desired-state writes and the ``/seen`` receipt clear were each probed against
+    both daemons after a delete, and every cell agrees.
+    The RECORD plane needs no cooperation and gets none, which is the half that
+    was already true: the catalogue (``GET /v1/desktop/sessions``) and the search
+    digest are built from a store walk, so the id is simply gone from them —
+    re-read after a delete, the catalogue lists the surviving conversation and
+    nothing else. What a client holds until it re-reads is its own state, not this
+    daemon's.
     """
     async with errors(request):
         return reply(await host(request).delete(session_id))
