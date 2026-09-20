@@ -455,3 +455,209 @@ def test_a_configured_cap_actually_rotates_at_that_size(root: Path) -> None:
         )
     log.close()
     assert list(store.audit_path(root).parent.glob("audit.jsonl.*.gz")), "no rotation happened"
+
+
+# ---------------------------------------------------------------------------
+# R4 — Q-R4-1: a missing answer is not an outcome
+# ---------------------------------------------------------------------------
+
+#: `lop network sessions`'s own flag set — `_args` above builds `ls`'s, and a
+#: Namespace missing one of these would fail on `getattr` inside the handler
+#: rather than on the condition under test.
+_SESSIONS_FLAGS: dict[str, object] = {
+    "json": True,
+    "network_command": "sessions",
+    "peer": "",
+    "all_peers": False,
+    "create": False,
+    "engage": "",
+    "stop": "",
+    "cwd": "",
+    "name": "",
+    "prompt": "",
+}
+PEER = "d_" + "b" * 32
+
+
+def _sessions_args(**fields: object) -> Namespace:
+    flags = dict(_SESSIONS_FLAGS)
+    flags.update(fields)
+    return Namespace(**flags)
+
+
+def _relay_down(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The condition QA round 4 reproduced: an admitted member, no relay running.
+
+    A record on disk and nothing answering `find_own_relay` — which is the state
+    `qa-c2` was in, and NOT the same as a device with no network at all.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    _disconnected_device(root)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"peer": PEER, "stop": "deadbeefcafe"},
+        {"peer": PEER, "engage": "deadbeefcafe"},
+        {"peer": PEER, "create": True},
+        {"all_peers": True},
+        {"peer": PEER},
+    ],
+    ids=["stop", "engage", "create", "all-peers", "peer-list"],
+)
+def test_the_session_family_refuses_by_name_when_this_devices_relay_is_down(
+    fields: dict[str, object],
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every verb on the piloting surface, through `main` — the path a shell takes.
+
+    QA round 4's Q-R4-1: with this device's own relay down, `--stop` answered
+    ``{"ok": true}`` with rc 0 (a success receipt for a stop that never left the
+    machine), ``--engage`` answered a bare ``{"ok": false}`` with no code and no
+    sentence, and ``--all-peers`` presented an empty peer set as a result. The
+    refusal is now raised where the answer is lost, so each of these is the same
+    document `peers` has always shipped.
+    """
+    _relay_down(root, monkeypatch)
+    assert net_cli.main(_sessions_args(**fields)) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["code"] == "relay_unavailable"
+    assert "relay" in payload["message"]
+
+
+def test_the_whole_family_refuses_in_the_same_words_as_peers(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ONE VOICE: the family's refusal is byte-identical to the sibling's.
+
+    `peers` is the verb the guide documents the shape on, and it was already
+    right; the finding was that the session verbs next to it were not. Comparing
+    the two here is what keeps them from drifting apart again — the code is a
+    shared constant and the sentence is one function, and this fails if either
+    grows a second spelling.
+    """
+    _relay_down(root, monkeypatch)
+    assert net_cli._cmd_peers(_args()) == 1  # noqa: SLF001
+    reference = json.loads(capsys.readouterr().out)
+
+    for fields in (
+        {"peer": PEER, "stop": "deadbeefcafe"},
+        {"peer": PEER, "engage": "deadbeefcafe"},
+        {"all_peers": True},
+    ):
+        assert net_cli.main(_sessions_args(**fields)) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["code"] == reference["code"]
+        assert payload["message"] == reference["message"]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "ended"),
+    [
+        ("stopped", True),
+        ("killed", True),
+        ("already-gone", True),
+        # The peer holds no runtime for that id, and the relay emits that as an
+        # OUTCOME rather than an error (`relay._op_session_stop`) — so it is the
+        # answer to "did it stop", not a missing one.
+        ("not_running", True),
+        ("refused", False),
+        # A busy target: the ladder declined to signal and the runtime is still up
+        # (`control.LEFT_ALONE_METHODS`). The old derivation called this success.
+        ("skipped", False),
+        ("unknown", False),
+    ],
+)
+def test_a_stop_reports_success_only_for_an_outcome_that_ended_the_session(
+    outcome: str,
+    ended: bool,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`ok` follows a NAMED outcome, and the receipt still carries it verbatim.
+
+    The relay answered, so this is the relay-UP half: the word comes from the peer
+    and this side must not re-derive it. `skipped` is the case the old
+    ``outcome not in ("", "refused")`` got wrong even when the relay WAS running:
+    a stop that did not act must not report success (Q-R4-1).
+    """
+    _relay_down(root, monkeypatch)
+    answer = {"outcome": outcome, "rung": "socket", "session_id": "deadbeefcafe", "detail": ""}
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: answer)
+
+    assert net_cli.main(_sessions_args(peer=PEER, stop="deadbeefcafe")) == (0 if ended else 1)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is ended
+    assert payload["outcome"] == outcome  # the peer's own word, unaltered
+
+
+def test_a_stop_answer_without_an_outcome_refuses_instead_of_reporting_success(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The residual half of Q-R4-1: ``None not in ("", "refused")`` was TRUE.
+
+    A relay that answers without the field this verb exists to report is not a
+    stop that succeeded — it is a relay whose answer cannot be read, and the old
+    derivation turned it into ``{"ok": true}``. Both the empty dict the `or {}`
+    used to manufacture and the non-mapping wrap ``_relay_call`` makes
+    (``{"value": None}``) are covered.
+    """
+    for answer in ({}, {"value": None}):
+        _relay_down(root, monkeypatch)
+        monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: answer)
+        assert net_cli.main(_sessions_args(peer=PEER, stop="deadbeefcafe")) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ok"] is False
+        assert payload["code"] == "stop_unreported"
+        assert "outcome" in payload["message"]
+
+
+@pytest.mark.parametrize(
+    ("fields", "code"),
+    [
+        ({"peer": PEER, "engage": "deadbeefcafe"}, "engage_unreported"),
+        ({"peer": PEER, "create": True}, "create_unreported"),
+    ],
+)
+def test_engage_and_create_name_their_missing_field_too(
+    fields: dict[str, object],
+    code: str,
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same silence, one verb over: a bare ``{"ok": false}`` is not an answer.
+
+    QA round 4 saw ``{"ok": false}`` with no code and no sentence from `--engage`;
+    the missing-answer cause is fixed at the source, and this pins the other half
+    — an ANSWER without ``engaged``/``session_id`` — so neither verb can go back to
+    reporting an unreadable receipt as a plain failure.
+    """
+    _relay_down(root, monkeypatch)
+    monkeypatch.setattr(net_cli, "_relay_call", lambda *a, **k: {"ok": True})
+    assert net_cli.main(_sessions_args(**fields)) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["code"] == code
+
+
+def test_the_stop_word_map_never_turns_a_method_it_does_not_know_into_success() -> None:
+    """Every ladder method has a word, and the fallback word is not a success.
+
+    ``.get(method, "stopped")`` reported ``draining`` — alive and already leaving,
+    which `control.LEFT_ALONE_METHODS` groups with ``busy`` — as ``stopped``: a
+    receipt claiming this device ended a runtime it never signalled. Both halves
+    are pinned here because either one alone re-opens the hole: a method with no
+    word, or a default that reads as ended.
+    """
+    from local_operator.network.relay import _STOP_OUTCOME_DEFAULT, _STOP_OUTCOME_WORD
+
+    for method in ("socket", "sigterm", "sigkill", "gone", "refused", "busy", "draining"):
+        assert method in _STOP_OUTCOME_WORD, method
+    assert _STOP_OUTCOME_WORD["draining"] == "skipped"
+    assert _STOP_OUTCOME_DEFAULT not in net_cli._STOP_ENDED_OUTCOMES  # noqa: SLF001
