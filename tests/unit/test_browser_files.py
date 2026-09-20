@@ -883,3 +883,63 @@ def test_intake_reports_an_already_gone_partial_as_nothing_to_remove(tmp_path: P
 
     (refusal,) = outcome.refused
     assert refusal.disposition == bf.ABSENT
+
+
+def test_intake_refuses_a_path_reached_through_a_symlinked_parent(tmp_path: Path) -> None:
+    """The RESOLVED containment rule, with round-2 M2's own repro (round-3 m4).
+
+    The lexical check is not enough, and this is the measurement that says so: a
+    download directory holding a symlinked PARENT (`<downloads>/link ->
+    <config>/sessions/<id>`) passes it, and the file the host names is then OUR
+    session record — `shutil.move` relocated `session.json` into the quarantine
+    directory and `os.unlink` deleted it.
+
+    Both sides are asserted because two separate mistakes have to stay fixed: the
+    file must not be MOVED (the resolved-path branch), and it must not be DELETED
+    either — it is Local Operator's own store, so removing it would be the destructive
+    half of the same error. `tmp_path` is under `/private/var/...` on this host while
+    `config_dir()` is spelled through `/var/...`, which is what made the first attempt
+    at this fix pass locally and fail the real case; comparing both spellings of the
+    root is what closes it.
+    """
+    directory = _quarantine(tmp_path)
+    record = bf.config_dir() / "sessions" / "sess0001" / "session.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"private": true}')
+    landing = tmp_path / "Downloads"
+    landing.mkdir(exist_ok=True)
+    link = landing / "link"
+    link.symlink_to(record.parent, target_is_directory=True)
+
+    outcome = _intake(
+        [_item(link / "session.json", name="session.json", bytes=record.stat().st_size)],
+        directory,
+    )
+
+    assert outcome.moved == ()
+    assert record.exists(), "our own session record must survive a host's claim on it"
+    assert record.read_text() == '{"private": true}'
+    (refusal,) = outcome.refused
+    assert refusal.disposition == bf.KEPT
+    assert "resolves inside Local Operator's own config directory" in refusal.reason
+    assert list(directory.iterdir()) == [], "nothing may land in quarantine"
+
+
+def test_the_origin_predicate_names_only_the_schemes_the_extension_agrees_on(
+    tmp_path: Path,
+) -> None:
+    """`_origin_of`'s contract, pinned against `download.ts::originOf` (round-3 M2).
+
+    The two cannot share code — Python has no URL parser here — so the agreement is a
+    written contract with a test on one side and the same cases checked by hand on the
+    other. `blob:` is the case that was WRONG: `new URL('blob:https://h/uuid').origin`
+    is the inner URL's origin (`https://h`), while `urlsplit` sees a scheme with no
+    host — so the contract's claim that both answered `""` was false. Both sides now
+    answer `""` for anything outside the four schemes a driven page can be.
+    """
+    assert bf._origin_of("http://User@Host:80/x") == "http://host"
+    assert bf._origin_of("https://Example.test/y") == "https://example.test"
+    assert bf._origin_of("https://h:8443/z") == "https://h:8443"
+    assert bf._origin_of("ws://h:80/a") == "ws://h"
+    for url in ("blob:https://example.test/uuid", "data:text/plain,x", "/relative", "ftp://h/p"):
+        assert bf._origin_of(url) == "", f"{url} has no origin the extension agrees on"

@@ -234,14 +234,23 @@ input:focus-visible {
  * Chrome took back) on controls that are OFF by default and are not dangerous to
  * leave alone. Spending danger here would make the one true danger state harder
  * to find. */
-/* The two consent notices, as ONE block, with a gap between them. */
+/* The two consent notices, as ONE block, with a gap between them.
+ *
+ * The 8 px above the block matches the gap INSIDE it, so the state line to notice
+ * spacing and notice to notice spacing are the same rhythm — the previous shape had
+ * a per-notice top margin AND a flex gap, which rendered 16 px between two notices
+ * against 8 px under the state line (round-3 D3). */
 .consent-notices {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: 8px;
 }
 .consent-note {
-  margin: 8px 0 0;
+  /* The gap between two notices comes from the container's `gap`, so the first one
+   * carries no top margin of its own: with both, the rhythm rendered 16 px against
+   * the 8 px between the state line and the notice above it (round-3 D3). */
+  margin: 0;
   padding: 8px 10px;
   border: 1px solid var(--hairline-strong);
   border-radius: 6px;
@@ -249,6 +258,11 @@ input:focus-visible {
   font-size: 13px;
   line-height: 1.5;
   color: var(--ink-dim);
+  /* The reveal scrolls this box into view, and without a margin it lands flush on
+   * the window edge — measured `notice.bottom − innerHeight = 0 px` at 900x620,
+   * 760x520 and 420x700, which reads as a clipped line rather than a placed one
+   * (round-3 U3). */
+  scroll-margin-bottom: 12px;
 }
 /* The note that needs an ACTION, told apart from the one that reports success.
  *
@@ -351,6 +365,9 @@ li .btn {
   font-size: 15px;
   line-height: 1.4;
   color: var(--ink);
+  /* Keeps the control off the very top edge when the reveal has to bring the row
+   * back into view (round-3 U4). */
+  scroll-margin-top: 12px;
 }
 .switch input {
   position: absolute;

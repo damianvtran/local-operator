@@ -209,16 +209,58 @@ function notice(
   // with nothing readable saying why. `scrollIntoView` changes the SCROLL OFFSET
   // only — the two switch rows keep their document positions, which is the property
   // D4 measured and which every reflowing fix (a reserved-height slot above the
-  // rows, a notice between them) would have destroyed. A CSS `sticky` block was tried
-  // first and rejected on measurement: it pinned the block at 900x620 and 420x700 but
-  // left it at y=530 in a 520 px viewport, i.e. it did not fix the case that matters.
+  // rows, a notice between them) would have destroyed.
   //
-  // `reveal` is false for the load-time repair: a page that scrolls itself as it
-  // opens is a page that moves under the user's hands, and that paint happens on
-  // load rather than on an action.
+  // A CSS `position: sticky; bottom: 12px` block was tried FIRST and is NOT what
+  // ships: it pinned the block at 900x620 and 420x700 but left it at y=530 in a
+  // 520 px viewport, i.e. it did not fix the case that matters (round-2 U1's own
+  // measurement). It also would not survive the cases this one has to: a notice
+  // painted while the window is TALLER than the notice's position (nothing scrolls,
+  // correctly) followed by a resize to a short window leaves it below the fold with
+  // nothing to bring it back, and tabbing away scrolls focus into view and abandons
+  // it again. The reveal below re-runs on both.
   if (message && reveal) {
-    target.scrollIntoView({ block: "nearest" });
+    revealNotice(target);
   }
+}
+
+/** Scroll so the sentence AND the control it explains are both readable.
+ *
+ * Three measured requirements, none of them cosmetic:
+ *
+ *   1. THE LAYOUT MOVES AFTER THE PAINT. The page's own `#confirm` flash banner
+ *      ("Downloads are now allowed.", 20 px plus margins) is raised by the same
+ *      gesture, so a scroll computed at paint time is ~31 px stale by the time it
+ *      settles — measured leaving the notice 7 px of 38 visible for about four
+ *      seconds (round-3 D2). So the scroll is applied, then RE-APPLIED on the next
+ *      frame, when the geometry is final.
+ *   2. THE NOTICE MUST NOT SIT FLUSH ON THE EDGE. `scroll-margin-bottom` on the
+ *      notice supplies the gap the CSS pins; without it the bottom border landed on
+ *      the window edge at every size (round-3 U3).
+ *   3. THE CONTROL STAYS ON SCREEN. At 380x440 the notice is brought in while the
+ *      pressed row goes to viewport y=-53 — the user can read the answer but can no
+ *      longer see the knob or its state line, the pair round-1 D3 exists to keep
+ *      together (round-3 U4). If the reveal would push the row off the top, the row
+ *      wins: the notice's first lines stay visible and its tail clips, which is the
+ *      right way round.
+ *
+ * Both re-checks read live geometry rather than assuming, so a viewport that cannot
+ * fit both (the sub-500 px heights) degrades to "control visible, answer mostly
+ * visible" instead of "answer visible, control gone".
+ */
+function revealNotice(target: HTMLParagraphElement): void {
+  const apply = (): void => {
+    target.scrollIntoView({ block: "nearest" });
+    const row = document.querySelector('label[for="allow-downloads"]');
+    if (row && row.getBoundingClientRect().top < 8) {
+      row.scrollIntoView({ block: "start" });
+    }
+  };
+  requestAnimationFrame(() => {
+    apply();
+    // Again, one frame later: the flash banner has landed by now.
+    requestAnimationFrame(apply);
+  });
 }
 
 /** The state of both switches, in words, once each.
@@ -229,10 +271,20 @@ function notice(
 function paintState(): void {
   const downloadsOn = allowDownloads.checked;
   const uploadsOn = allowUploads.checked;
-  // "Explained" means a notice for that capability is on screen right now, so its
-  // own sentence already says it is off and why.
-  const downloadsExplained = downloadsNotice.textContent !== "";
-  const uploadsExplained = uploadsNotice.textContent !== "";
+  // "Explained" means an ATTENTION notice for that capability is on screen right
+  // now, so its own sentence already says the capability is off and why.
+  //
+  // The ATTENTION test is load-bearing, not a style choice (round-3 D1): a quiet
+  // notice reports an ACTION ("Uploads are on. Turn this off…"), so treating any
+  // visible notice as "this capability is off" made the two-notice state — uploads
+  // ON with a downloads notice showing — land in the both-explained branch and print
+  // "Neither the agent's saving nor its attaching is available on this browser"
+  // while the uploads switch sat ON 400 px above it. Reachable in one pass: turn
+  // uploads on, then press downloads.
+  const explaining = (element: HTMLParagraphElement): boolean =>
+    element.textContent !== "" && element.classList.contains("consent-note--attention");
+  const downloadsExplained = explaining(downloadsNotice);
+  const uploadsExplained = explaining(uploadsNotice);
   if (downloadsOn && uploadsOn) {
     consentState.textContent = "Downloads and uploads are both on for this browser.";
   } else if (downloadsOn && !uploadsExplained) {
@@ -449,20 +501,56 @@ async function applyUploads(checked: boolean): Promise<void> {
  */
 let pendingDownloadRequest = 0;
 let downloadRequestPending = false;
+
+/** Stop waiting for Chrome's answer, and say so.
+ *
+ * Stores nothing: a withdrawn question is not consent, and the grant is never
+ * INFERRED from a superseded promise. A grant Chrome has already made is still
+ * honoured — `chrome.permissions.onAdded` repaints from Chrome's own state — so
+ * cancelling cannot leave the page disagreeing with the browser.
+ */
+function cancelPendingDownload(): void {
+  pendingDownloadRequest += 1;
+  downloadRequestPending = false;
+  void renderConsent().then(() =>
+    // Short, because it reports a pause the user just created (round-3 U6): the
+    // 236-character three-clause version was written for a path a real gesture could
+    // not even reach, and the state it describes is the one the line below already
+    // shows.
+    notice(downloadsNotice, "Stopped waiting. Downloads stay off.", "info", true),
+  );
+}
+
+/* THE CANCEL IS BOUND TO THE INTENT, NOT TO THE STATE (round-3 U1).
+ *
+ * The round-2 guard was `downloadRequestPending && !allowDownloads.checked`, and it
+ * could not fire for a real gesture: `enableDownloads()` first awaits
+ * `renderConsent()`, which repaints the knob to the capability's real (off) state —
+ * so a human's second press finds the switch OFF, toggles it ON, and the guard fails.
+ * Measured with trusted events: press → 1 request; press again 1.2 s later → **2
+ * requests**, with the notice, knob and scroll byte-identical; a third press → 3. The
+ * cancel only ever appeared for a synthetic `change` carrying `checked=false`, i.e.
+ * the shape the code expected and no human produces.
+ *
+ * A `click` listener is where this belongs, and `preventDefault()` is what makes it
+ * work: for a checkbox the activation behaviour (the toggle) runs as the DEFAULT
+ * ACTION of the click, so a handler that runs first can cancel it, and the `change`
+ * event never fires. Space on a focused switch fires a click too, so the keyboard
+ * path is the same code. The switch therefore keeps focus, keeps its place in the
+ * tab order, and a second press is the cancel — while a first press still reaches
+ * `enableDownloads` through the untouched `change` listener below.
+ */
+allowDownloads.addEventListener("click", (event) => {
+  if (!downloadRequestPending) return;
+  event.preventDefault();
+  cancelPendingDownload();
+});
+
 allowDownloads.addEventListener("change", () => {
   if (downloadRequestPending && !allowDownloads.checked) {
     // Cancelling: invalidate the in-flight wait and put the switch back to the
     // state the capability is really in.
-    pendingDownloadRequest += 1;
-    downloadRequestPending = false;
-    void renderConsent().then(() =>
-      notice(
-        downloadsNotice,
-        "Stopped waiting for Chrome's answer, so downloads stay off. Turn the switch on again to ask once more — if Chrome did grant the permission in the meantime, the switch will follow it.",
-        "info",
-        true,
-      ),
-    );
+    cancelPendingDownload();
     return;
   }
   const action = allowDownloads.checked ? enableDownloads() : disableDownloads();
