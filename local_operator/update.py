@@ -47,10 +47,11 @@ from importlib.metadata import (
     version,
 )
 from pathlib import Path
-from typing import Any, Callable, Iterable, Literal, Sequence
+from typing import Any, Callable, Iterable, Iterator, Literal, Sequence
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+from local_operator.helpers import retention_label
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import PLATFORM_LABEL
 
@@ -2384,16 +2385,97 @@ def _sweep_staging_links(moment: float) -> list[Path]:
     return swept
 
 
-def referenced_install_roots() -> tuple[Path, ...]:
-    """The install roots named by live and persisted records.
+@dataclass(frozen=True)
+class ReferencedTrees:
+    """The install roots records name, and whether that answer is COMPLETE.
 
-    TWO NAMESPACES, because two kinds of long-lived process read a generation:
-    a session runtime (``run/mobile``) and the ``lop serve`` daemon
-    (``run/serve``, whose record has carried a ``prefix`` field all along for
-    the update path). Both are read through their own registry so pruning and
-    the processes that publish records cannot drift apart, and both imports are
-    FUNCTION-LOCAL because they reach the session and server layers: this module
-    is on ``lop --version``'s path and must not drag either in.
+    ``complete`` is ``False`` when a namespace held an entry this build could not
+    read at all — a torn record, a payload that is JSON but not a record of that
+    kind, or a run directory that could not be listed. The absence of a tree from
+    ``roots`` then proves NOTHING about it, which is why
+    :func:`prune_generations` keeps every candidate rather than delete one an
+    unreadable record might name: an unparseable record means KEEP the tree it
+    might name, because the other direction deletes the tree a live runtime may be
+    running from.
+
+    IT ANSWERS AS A SEQUENCE OF ROOTS — iteration, ``len``, ``in`` — so every caller
+    that only wants the trees to READ is unchanged by the second fact
+    (``install_status``'s "held by a live session", the tests that ask whether a
+    generation is named): only a caller that is about to DELETE has to answer for
+    it.
+
+    ``gaps`` IS THE SAME FACT IN WORDS, one clause per namespace that could not be
+    read whole, because the reason is not always corruption and the plan has to be
+    able to say which it is (review round 3, MINOR 3; see
+    :func:`prune_notice_lines`).
+    """
+
+    roots: tuple[Path, ...] = ()
+    complete: bool = True
+    #: WHY it is incomplete, one clause per namespace, in the words the notice line
+    #: reads (review round 3, MINOR 3 and NIT 2). ``complete`` False with ``gaps``
+    #: empty is only possible from a caller that constructs this itself; the readers
+    #: always name a reason.
+    gaps: tuple[str, ...] = ()
+
+    def __iter__(self) -> Iterator[Path]:
+        return iter(self.roots)
+
+    def __len__(self) -> int:
+        return len(self.roots)
+
+    def __contains__(self, item: object) -> bool:
+        return item in self.roots
+
+
+#: Why a prune keeps a candidate when the record read could not be completed.
+#:
+#: Spelled once: the prune's own report and the tests that read a decision's text
+#: must not be free to disagree about what the safe direction was called.
+_UNREADABLE_RECORD_REASON = "a record could not be read, so it may name this tree"
+
+
+def referenced_install_roots() -> ReferencedTrees:
+    """The install roots named by live and persisted records, and whether all of them were read.
+
+    FOUR NAMESPACES, because four kinds of record can name a tree a runtime is
+    importing from, and a prune that reads only some of them deletes the tree
+    under the runtimes only the others describe:
+
+    * a session runtime (``run/mobile``), and
+    * the ``lop serve`` daemon (``run/serve``, whose record has carried a
+      ``prefix`` field all along for the update path) — the two the readers and
+      the processes that publish them have to agree on, each read through its own
+      registry so they cannot drift apart; and
+    * the ``run/mobile/reaped`` SIDECAR — a record ``registry.scan`` has proven
+      dead and MOVED there rather than deleted, because it is the evidence a
+      death is classified from. It still describes a runtime that may exist: the
+      scan proves the pid it names is gone, and a prune runs beside a fleet in
+      which the same session may already have been re-engaged under a new pid
+      from the SAME tree. Reading only the live directory made this the one
+      namespace where a record could vouch for nothing.
+    * the ``run/host`` BOOT records — a record published about 1.2 s before the
+      first heartbeat, which is exactly the window this left unprotected (see
+      ``journal.write_boot_record``): a runtime that has just started has a boot
+      record and no heartbeat yet, so between those two moments the tree it is
+      importing from was named by nothing here at all. That window is where a
+      prune is most likely to find a "superseded, unreferenced" tree whose owner
+      is in fact mid-start.
+
+    THE TURN JOURNAL IS NOT ONE OF THE FOUR, and that is a decision rather than
+    an oversight (review round 1, MINOR 1). A ``TurnJournalRow`` carries an
+    ``install_root`` too, but it lives in the CONVERSATION directory rather than in
+    a run namespace, and a live runtime that owns one is named by its live record
+    and by its boot record as well — two independent reads would have to fail
+    before the row were the only holder, and ``journal.prune_boot_records`` never
+    touches a live pid's row. Reading it would mean walking every conversation under
+    every config root on every prune, which is a second traversal whose own failure
+    mode would then have to be answered for; the four above are the namespaces whose
+    WRITERS publish a tree before anything else can name it.
+
+    Every one of those imports is FUNCTION-LOCAL because they reach the session and
+    server layers: this module is on ``lop --version``'s path and must not drag
+    either in.
 
     AND TWO CONFIG ROOTS. ``registry.scan()`` reads ``config_dir()``, which is the
     AMBIENT one — an isolated run, a second profile, a QA pass each have their
@@ -2402,21 +2484,86 @@ def referenced_install_roots() -> tuple[Path, ...]:
     ``keep`` margin alone (review round 1, R-7). Both roots are read, deduped;
     the default (``~/.local-operator``) is the one every ordinary session on the
     machine publishes under, and reading it is what makes rule 2 mean what its
-    docstring says. The failure direction is unchanged: MORE trees kept.
+    docstring says.
 
-    A failure in either namespace, under either root, reads as "no records from
-    there", which only ever keeps MORE trees — the direction that costs disk
-    rather than a running session.
+    THE FAILURE DIRECTION IS THE ONE READ THIS GETS TO CHOOSE, AND IT IS NOT
+    "MORE TREES" BY ACCIDENT (review round 1, MINOR 4; measured as QA round 1,
+    Q2). Fewer records means FEWER protected trees and therefore MORE deletion —
+    the direction that ends a running session — so a namespace that cannot be read,
+    or an entry that cannot be parsed, makes this answer INCOMPLETE rather than
+    empty, and an incomplete answer keeps EVERY candidate
+    (``ReferencedTrees.complete``; :func:`prune_generations`). What the per-entry
+    rescue in :func:`_entries_in_directory` bounds is the cost to the OTHER
+    records: a torn sidecar must not be why the twenty-nine good ones beside it
+    stop protecting their trees.
     """
     roots: list[Path] = []
     seen: set[str] = set()
+    reasons: list[str] = []
     for config_root in _config_roots():
-        for value in _session_roots_under(config_root) + _serve_roots_under(config_root):
+        records, gaps = _records_under(config_root)
+        reasons.extend(gaps)
+        for _record, value in records:
             key = str(value)
             if key and key not in seen:
                 seen.add(key)
                 roots.append(Path(key))
-    return tuple(roots)
+    return ReferencedTrees(tuple(roots), not reasons, tuple(reasons))
+
+
+def _records_under(config_root: Path) -> tuple[list[tuple[Any, str]], tuple[str, ...]]:
+    """``(record, install_root)`` for every record published under one config root, and
+    the reasons that read is INCOMPLETE (empty when it is whole).
+
+    ONE GATHERING, because two readers need the same four namespaces and each
+    wants a different part of the answer: ``referenced_install_roots`` wants the
+    roots (what a prune must keep), and ``note_doomed_runtimes`` wants the records
+    together with their config root (where a marker must land, and whose run key it
+    must carry). A second traversal per reader would be free to disagree with this
+    one about which namespaces count, and the disagreement would show up as a
+    deleted tree rather than as a failing test.
+
+    THE SECOND VALUE IS THE SAFE DIRECTION, and it is a fact rather than a
+    decoration. Each of the four readers can come back with FEWER records than its
+    namespace holds — an entry that will not parse, a payload that is JSON but not
+    a record of that kind, a run directory that cannot be listed, a namespace path
+    that is not a directory at all, an exception in the reader itself — and fewer
+    records means FEWER protected trees, which is the direction that deletes the
+    tree a live runtime may be running from. NO REASONS means every record that
+    exists in those namespaces was READ, so a tree absent from the first value is
+    PROVEN unnamed; any reason at all means it might be named by something this
+    read could not see, so :func:`prune_generations` keeps every candidate instead
+    of deleting one of them. The reasons ride along because a prune that keeps
+    everything has to be able to say WHY without claiming more than it knows
+    (review round 3, MINOR 3).
+    """
+    found: list[tuple[Any, str]] = []
+    reasons: list[str] = []
+    for read in (
+        _session_records_under(config_root),
+        _serve_records_under(config_root),
+        _reaped_records_under(config_root),
+        _boot_records_under(config_root),
+    ):
+        found.extend(read.entries)
+        if read.unreadable:
+            reasons.append(read.note or f"{config_root} holds records this build could not read")
+    return found, tuple(reasons)
+
+
+def _roots_from(records: Iterable[Any], field: str) -> list[tuple[Any, str]]:
+    """``(record, value)`` for every record whose root field is set.
+
+    A record with no root field says nothing about a tree — it is dropped rather
+    than coerced to a bare ``""``, which ``Path("")`` would silently read as the
+    current directory and so protect or doom an unrelated tree.
+    """
+    found: list[tuple[Any, str]] = []
+    for record in records:
+        value = str(getattr(record, field, "") or "")
+        if value:
+            found.append((record, value))
+    return found
 
 
 def _config_roots() -> tuple[Path, ...]:
@@ -2430,35 +2577,682 @@ def _config_roots() -> tuple[Path, ...]:
     return (ambient, default)
 
 
-def _session_roots_under(config_root: Path) -> list[Path]:
-    """``install_root`` from every session record under one config root."""
-    found: list[Path] = []
+@dataclass(frozen=True)
+class _NamespaceRead:
+    """One namespace's answer: what it named, and whether it could be READ AT ALL.
+
+    TWO FACTS RATHER THAN ONE LIST, because "this namespace names nothing" and
+    "this namespace could not be read" protect different numbers of trees and only
+    one of them is evidence. A reader that returns ``[]`` for both is the bug QA
+    round 1 measured: the prune then deleted the tree the unreadable record might
+    have named, and — because the same traversal feeds ``note_doomed_runtimes`` —
+    removed it with no attestation either.
+
+    ``note`` IS WHY IT IS UNREADABLE, and it exists because the reasons must be able
+    to differ (review round 3, MINOR 3 and NIT 2). The registry-backed readers key on
+    a COUNT mismatch, which ordinary churn also produces — a session starting or
+    exiting between the two listings — so the only sentence a plan could otherwise
+    print for both is "a record could not be read", which is false on a healthy
+    machine. The clause carries the namespace and the reason, so the line says what
+    this read actually knows rather than the worst thing it could have been.
+    """
+
+    entries: tuple[tuple[Any, str], ...] = ()
+    unreadable: bool = False
+    #: WHY it is unreadable, as one clause the upgrade path can print; ``""`` when
+    #: the read was whole (see the class docstring and :func:`prune_notice_lines`).
+    note: str = ""
+
+
+def _entries_in_directory(directory: Path, parse: Any, field: str) -> _NamespaceRead:
+    """``(record, value)`` for every record file in one directory, one bad entry at a time.
+
+    THE PER-ENTRY RESCUE IS THE WHOLE REASON THIS FUNCTION EXISTS rather than four
+    inline loops. A rescue around the LOOP — the shape this replaced — made one
+    wrong payload cost every good record beside it: ``BootRecord.from_json``,
+    ``SessionRecord.from_json`` and ``ServeRecord.from_json`` all raise
+    ``TypeError`` for a wrong-typed field and for a payload missing a required key,
+    which is the shape each of their own docstrings calls "a torn file", and that
+    ``TypeError`` escaped the ``(OSError, ValueError)`` the loop expected, reached
+    the caller's outer handler, and left the WHOLE namespace reading as empty.
+    Measured (review round 1 BLOCKER; QA round 1, Q1): with one malformed record
+    beside a good one, in EITHER order, ``referenced roots read: 0`` and the good
+    record's tree was REMOVED — unattested, because the same traversal feeds
+    ``note_doomed_runtimes``.
+
+    ``except Exception`` rather than an exception list: what a parser raises for a
+    payload it cannot use is not this reader's contract to enumerate, and a list is
+    one shape away from the same bug (the next ``from_json`` raising ``KeyError``,
+    or ``AttributeError`` for a non-object, would walk straight out again).
+
+    ``None`` FROM A PARSER IS AN UNREADABLE ENTRY TOO, not a harmless one. The
+    parsers return ``None`` for JSON that is not an object, and this reader does not
+    get to decide that a payload it cannot read NAMED NO TREE — the whole point of
+    the flag is that "says nothing" and "says something I could not read" must not
+    be the same answer to a caller about to delete a tree.
+
+    AND THE ENTRY IS NAMED IN THE LOG, at ``warning`` rather than ``debug``: an
+    unreadable entry keeps EVERY generation until it is dealt with (see
+    :func:`prune_generations`), which is a state the operator has to be able to see
+    from ``~/.local-operator/logs`` on the automatic path, where nothing prints. A
+    level that only appears under ``-v`` is how this condition stayed invisible in
+    the first place (review round 2, MAJOR 1).
+    """
+    try:
+        paths = sorted(directory.glob("*.json"))
+    except OSError:
+        # Cannot even see what is there. That is "unreadable", not "empty".
+        logger.warning("cannot list the record namespace %s: keeping every generation", directory)
+        return _NamespaceRead(
+            unreadable=True,
+            note=f"{directory} could not be listed, so every generation is kept",
+        )
+    records: list[Any] = []
+    unreadable = False
+    torn = False
+    changed = False
+    for path in paths:
+        try:
+            record = parse(json.loads(path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            # LISTED AND THEN GONE IS NOT A RECORD THAT COULD NOT BE READ (review
+            # round 3, MINOR 3). A publisher unlinks its own record when it exits and
+            # another process's sweep moves a dead one into the sidecar, so the
+            # window between this listing and this read is enough for either. The
+            # answer stays INCOMPLETE — the record that was here a moment ago may
+            # name any generation — but it must not be WORDED as corruption, or a
+            # healthy machine is told its records are torn every time a session
+            # starts or exits.
+            logger.info("%s changed while it was read: %s went away", directory, path.name)
+            unreadable = True
+            changed = True
+            continue
+        except Exception as exc:  # noqa: BLE001 — one bad entry costs itself, not its neighbours
+            # THE REASON IS IN THE LINE rather than in a traceback: the condition is
+            # expected from time to time (a torn write, a record from a build that
+            # is not this one), and one ``warning`` the operator can act on beats a
+            # stack they have to read. ``logger.debug`` still has the whole thing.
+            logger.warning(
+                "unreadable record %s in %s (%s): it may name any generation, so "
+                "every generation is kept until it is dealt with",
+                path.name,
+                directory,
+                type(exc).__name__,
+            )
+            logger.debug("unreadable record %s", path, exc_info=True)
+            unreadable = True
+            torn = True
+            continue
+        if record is None:
+            logger.warning(
+                "record %s in %s is not a record of this kind: it may name any "
+                "generation, so every generation is kept until it is dealt with",
+                path.name,
+                directory,
+            )
+            unreadable = True
+            torn = True
+            continue
+        records.append(record)
+    # A TORN ENTRY OUTRANKS A VANISHED ONE in the words, because it is the condition
+    # an operator can act on; the vanished-only case says only what it knows.
+    if torn:
+        note = (
+            f"{directory} holds a record that could not be read, so every generation "
+            "is kept until it is dealt with"
+        )
+    elif changed:
+        note = f"{directory} changed while it was read, so this pass kept every generation"
+    else:
+        note = ""
+    return _NamespaceRead(tuple(_roots_from(records, field)), unreadable, note)
+
+
+def _entry_names(config_root: Path, dirname: str) -> tuple[str, ...] | None:
+    """The record file NAMES a namespace holds, listed WITHOUT reading them.
+
+    Names beside a parse are what tell the registry-backed readers whether they saw
+    everything: ``registry.scan`` returns one entry per file it could parse and
+    silently drops the rest, so a listing that does not match IS the unreadable
+    signal (see :func:`_records_under`) without a second parse pass that could
+    disagree with the first. NAMES RATHER THAN A COUNT, because the two listings
+    that bracket ``scan`` are also how a record that could not be parsed is told
+    apart from a namespace that changed under the read (review round 3, MINOR 3) —
+    the counts of the two shapes are identical, and a count cannot say which one
+    happened. ``None`` means the directory could not be listed at all.
+
+    The path is spelled here rather than asked for through ``registry.run_dir``,
+    which CREATES the directory: this whole traversal is a read, and the same rule
+    the sidecar reader states — a read must not leave a directory behind on a
+    machine whose only problem is that something died — binds the listing too.
+    """
+    try:
+        return tuple(sorted(entry.name for entry in (config_root / dirname).glob("*.json")))
+    except OSError:
+        return None
+
+
+def _unreachable_namespace(config_root: Path, dirname: str) -> _NamespaceRead | None:
+    """An ANSWER when a namespace cannot be read at all, or ``None`` to go and read it.
+
+    TWO STATES LOOK ALIKE AND ARE NOT (review round 3, MAJOR 1). A namespace that was
+    never created names nothing, and reading it must not create it (round 2, MINOR 1:
+    ``registry.scan`` resolves its directory through ``run_dir``, which mkdirs). A
+    namespace whose PATH EXISTS AND IS NOT A DIRECTORY — a stray file, an unpacked
+    archive, a partial restore, a clobbered ``run/`` — used to get the same "empty,
+    complete" answer through the same check, and that is a different fact: the
+    records that were there are gone, and every runtime still importing from a
+    generation has no record left to name it. Answering the obstructed path complete
+    removed three generations where the build before it removed none.
+
+    THE PARENT IS PART OF THE QUESTION, because the obstruction can BE the parent:
+    with ``run/`` a regular file, ``run/mobile`` cannot exist, so a test on the leaf
+    alone would file a clobbered ``run/`` under "never created".
+
+    THE ABSENT BRANCH IS ALSO WHAT KEEPS ROUND 2'S MINOR 1 CLOSED: one
+    ``referenced_install_roots()`` on a machine with nothing under ``run/`` created
+    ``run/``, ``run/mobile`` and ``run/serve`` (measured), because both readers
+    called ``scan``, which resolves its directory through ``run_dir``. Answering
+    here, before ``scan``, is the fix; round 3 changed only which states are filed
+    under it.
+    """
+    namespace = config_root / dirname
+    if namespace.is_dir():
+        return None
+    if not namespace.exists() and (namespace.parent.is_dir() or not namespace.parent.exists()):
+        # NEVER CREATED, or its parent is a directory that holds nothing: either way
+        # there is nothing to protect, and answering without calling ``scan`` is what
+        # keeps this read from creating the directories it was pointed at.
+        return _NamespaceRead()
+    if namespace.exists():
+        note = f"{namespace} is not a directory, so its records could not be read"
+    else:
+        note = f"{namespace} cannot be listed: its parent {namespace.parent} is not a directory"
+    logger.warning("%s: every generation is kept until it is dealt with", note)
+    return _NamespaceRead(unreadable=True, note=f"{note}, so every generation is kept")
+
+
+def _verdict_from_listing(
+    namespace: Path,
+    before: tuple[str, ...] | None,
+    after: tuple[str, ...] | None,
+    parsed: int,
+) -> tuple[bool, str]:
+    """Whether one registry-backed read was COMPLETE, and — when not — why, in words.
+
+    THREE SHAPES, and the level each is logged at follows from what it can honestly
+    claim (review round 3, MINOR 3):
+
+    * UNLISTABLE — the namespace cannot be listed at all: ``warning``, read
+      incomplete.
+    * TORN — the listing did not change and fewer records came back than it holds, so
+      a record that was there for the whole read could not be parsed: ``warning``,
+      because this is the condition an operator can clear.
+    * CHANGED — the listing changed under the read, i.e. a session started or exited
+      between the two listings: ``info``, because the count mismatch this reader keys
+      on is ALSO what ordinary churn produces, and a ``warning`` claiming a corrupt
+      record every time a session starts or exits is how an operator learns to
+      ignore the one that matters. The read is still INCOMPLETE either way — the
+      record that appeared may name a tree, and the one that went away may have named
+      another — so only the sentence changes, never the direction.
+    """
+    if before is None or after is None:
+        logger.warning(
+            "%s could not be listed: every generation is kept until it is dealt with", namespace
+        )
+        return True, f"{namespace} could not be listed, so every generation is kept"
+    if before == after and len(before) == parsed:
+        return False, ""
+    if before == after:
+        logger.warning(
+            "%s holds a record this build could not read (%s listed, %s parsed): every "
+            "generation is kept until it is dealt with",
+            namespace,
+            len(before),
+            parsed,
+        )
+        return True, (
+            f"{namespace} holds a record that could not be read, so every generation is "
+            "kept until it is dealt with"
+        )
+    logger.info(
+        "%s changed while it was read (%s records before, %s after, %s parsed): every "
+        "generation is kept for this pass",
+        namespace,
+        len(before),
+        len(after),
+        parsed,
+    )
+    return True, f"{namespace} changed while it was read, so this pass kept every generation"
+
+
+def _session_records_under(config_root: Path) -> _NamespaceRead:
+    """``(record, install_root)`` from every live session record under one root.
+
+    READ IN READER MODE (``reap=False``), and that is a decision rather than
+    tidiness: the reaping scan DELETES a record it cannot parse ("unparseable
+    records are deleted, not moved", ``registry.scan``). A prune that swept would
+    therefore destroy the one artifact that might have named a tree and delete that
+    tree on its NEXT run, having found a clean namespace — a read whose whole
+    purpose is to decide whether a tree is named must not be the thing that erases
+    the answer. Reader mode leaves every record where it is, and the count of
+    entries beside the count of parsed records is then what says whether the
+    namespace was read whole.
+
+    AN ABSENT NAMESPACE IS ANSWERED WITHOUT CALLING ``scan``, because ``scan``
+    creates it, and so is one that cannot be a directory at all — see
+    :func:`_unreachable_namespace`, which draws the line between the two. The absent
+    branch says the same thing the parse would — no records — so the only difference
+    is the directory left behind on a machine where the only thing that happened was
+    a read.
+    """
+    from local_operator.session.runtime.types import RUN_DIRNAME
+
+    unreachable = _unreachable_namespace(config_root, RUN_DIRNAME)
+    if unreachable is not None:
+        return unreachable
     try:
         from local_operator.session.runtime import registry
         from local_operator.session.runtime.types import SessionRecord
 
-        for record, _state in registry.scan(config_root, parse=SessionRecord.from_json):
-            value = str(getattr(record, "install_root", "") or "")
-            if value:
-                found.append(Path(value))
-    except Exception:  # noqa: BLE001 — no readable records means no objection to keep
-        logger.debug("session records unreadable under %s", config_root, exc_info=True)
-    return found
+        # THE LISTING BRACKETS THE READ (review round 3, MINOR 3): the mismatch that
+        # says "something did not come back" cannot also say WHY it did not, and the
+        # two names can.
+        before = _entry_names(config_root, RUN_DIRNAME)
+        parsed = registry.scan(config_root, parse=SessionRecord.from_json, reap=False)
+        after = _entry_names(config_root, RUN_DIRNAME)
+        unreadable, note = _verdict_from_listing(
+            config_root / RUN_DIRNAME, before, after, len(parsed)
+        )
+        return _NamespaceRead(
+            tuple(_roots_from([record for record, _state in parsed], "install_root")),
+            unreadable=unreadable,
+            note=note,
+        )
+    except Exception:  # noqa: BLE001 — unreadable is not empty; see ``_records_under``
+        logger.warning(
+            "session records unreadable under %s: every generation is kept until "
+            "they are dealt with",
+            config_root,
+            exc_info=True,
+        )
+        return _NamespaceRead(
+            unreadable=True,
+            note=(f"{config_root / RUN_DIRNAME} could not be read, so every generation is kept"),
+        )
 
 
-def _serve_roots_under(config_root: Path) -> list[Path]:
-    """``prefix`` from every ``lop serve`` record under one config root."""
-    found: list[Path] = []
+def _serve_records_under(config_root: Path) -> _NamespaceRead:
+    """``(record, prefix)`` from every ``lop serve`` record under one root.
+
+    The same reader mode and the same count-beside-parse as the session namespace,
+    for the same two reasons: this reader must not delete what it cannot read, and
+    a daemon record that did not come back has to be distinguishable from one that
+    was never there.
+
+    THIS NAMESPACE'S HALF OF REVIEW ROUND 2's MAJOR 1 lives in the mismatch branch
+    below. ``run/serve`` had no production reaper at all until
+    :func:`server.registry.prune_serve_records` — the daemon's own boot now reaps
+    it, past ``registry.REAPED_MAX_AGE_S`` so fresh evidence survives the first boot
+    (review round 3, MINOR 2) — so an unreadable entry here used to pin this reader
+    to ``complete=False`` on every later ``lop update``, for good. The reader still
+    does not sweep (that is what makes it safe); what it does now is SAY SO, naming
+    the namespace at a level an operator reads.
+    """
+    from local_operator.session.runtime.types import SERVE_RUN_DIRNAME
+
+    unreachable = _unreachable_namespace(config_root, SERVE_RUN_DIRNAME)
+    if unreachable is not None:
+        return unreachable
     try:
         from local_operator.server import registry as serve_registry
 
-        for serve_record, _state in serve_registry.scan(config_root):
-            value = str(getattr(serve_record, "prefix", "") or "")
-            if value:
-                found.append(Path(value))
+        before = _entry_names(config_root, SERVE_RUN_DIRNAME)
+        parsed = serve_registry.scan(config_root, reap=False)
+        after = _entry_names(config_root, SERVE_RUN_DIRNAME)
+        unreadable, note = _verdict_from_listing(
+            config_root / SERVE_RUN_DIRNAME, before, after, len(parsed)
+        )
+        return _NamespaceRead(
+            tuple(_roots_from([record for record, _state in parsed], "prefix")),
+            unreadable=unreadable,
+            note=note,
+        )
     except Exception:  # noqa: BLE001 — same direction as above
-        logger.debug("serve records unreadable under %s", config_root, exc_info=True)
-    return found
+        logger.warning(
+            "serve records unreadable under %s: every generation is kept until they "
+            "are dealt with",
+            config_root,
+            exc_info=True,
+        )
+        return _NamespaceRead(
+            unreadable=True,
+            note=(
+                f"{config_root / SERVE_RUN_DIRNAME} could not be read, so every generation "
+                "is kept"
+            ),
+        )
+
+
+def _reaped_records_under(config_root: Path) -> _NamespaceRead:
+    """``(record, root)`` from every reaped sidecar record under one config root.
+
+    BOTH session namespaces, because ``registry.scan`` reaps whichever directory
+    it is asked about and a serve daemon's record moves into its own sidecar. The
+    records are parsed with the SAME types the live reader uses — a sidecar is a
+    record that moved, not a different kind of file — so the two readers cannot
+    come to disagree about what a root field means.
+
+    EACH SIDECAR'S NOTE IS CARRIED OUT (review round 4, MAJOR 1). ``unreadable``
+    alone said the read was incomplete without saying WHICH namespace failed, and
+    this reader is the only route to the sidecars: a clobbered ``run/mobile/reaped``
+    would then reach the operator as the generic "this build could not read" line,
+    which is the naming that round 3's NIT 2 exists to require (it is also what
+    lets the test assert the namespace by name rather than infer it from a count).
+    """
+    entries: list[tuple[Any, str]] = []
+    unreadable = False
+    notes: list[str] = []
+    try:
+        from local_operator.server.registry import ServeRecord
+        from local_operator.session.runtime.types import (
+            RUN_DIRNAME,
+            SERVE_RUN_DIRNAME,
+            SessionRecord,
+        )
+
+        for dirname, field, parse in (
+            (RUN_DIRNAME, "install_root", SessionRecord.from_json),
+            (SERVE_RUN_DIRNAME, "prefix", ServeRecord.from_json),
+        ):
+            read = _sidecar_records(config_root, dirname, parse, field)
+            entries.extend(read.entries)
+            unreadable = unreadable or read.unreadable
+            if read.note:
+                notes.append(read.note)
+    except Exception:  # noqa: BLE001 — same direction as above
+        logger.debug("reaped records unreadable under %s", config_root, exc_info=True)
+        unreadable = True
+        notes.append(f"{config_root} holds reaped records this build could not read")
+    return _NamespaceRead(tuple(entries), unreadable=unreadable, note="; ".join(notes))
+
+
+def _sidecar_records(config_root: Path, dirname: str, parse: Any, field: str) -> _NamespaceRead:
+    """Every record in one namespace's ``reaped/`` sidecar, and whether it was all readable.
+
+    GLOBBED rather than asked for through ``registry.reaped_dir``, which CREATES
+    the directory (and its 0700 mode) on first use: a read must not leave a
+    directory behind on a machine whose only problem is that something died. This
+    is the same rule and the same reason ``attention._run_record_evidence``
+    states for this sidecar.
+
+    AND THE TREE A TORN SIDECAR NAMED IS KEPT, which is the second half of what a
+    malformed entry costs. "A torn sidecar must not be why a prune stops protecting
+    the other twenty-nine" is a bound on the OTHER records; it is not an exemption
+    for the tree the torn one named, because that tree may be the one a live
+    runtime is importing from and the record is unreadable precisely where it would
+    have said so (review round 1, MINOR 4; QA round 1, Q3).
+
+    A SIDECAR THAT IS NOT A DIRECTORY IS UNREADABLE, NOT EMPTY, for exactly the
+    reason :func:`_unreachable_namespace` gives for the live namespaces (review
+    round 4, MAJOR 1). ``_entries_in_directory`` lists through ``Path.glob``, and
+    ``Path.glob`` SWALLOWS the ``OSError`` a path under a non-directory raises —
+    measured, with ``reaped`` clobbered: ``list((root / dirname / "reaped").glob(
+    "*.json")) == []``, not a raised error. A zero-entry listing is an "empty,
+    complete" read, so the records that were there are gone from the answer while
+    the plan still calls the namespace read whole, and the prune then removes a
+    generation only this sidecar named. The predicate is asked at the LEAF, and
+    its parent arm covers a ``run/<namespace>`` that is itself the obstruction.
+    """
+    from local_operator.session.runtime.registry import REAPED_DIRNAME
+
+    unreachable = _unreachable_namespace(config_root, f"{dirname}/{REAPED_DIRNAME}")
+    if unreachable is not None:
+        return unreachable
+    return _entries_in_directory(config_root / dirname / REAPED_DIRNAME, parse, field)
+
+
+def _boot_records_under(config_root: Path) -> _NamespaceRead:
+    """``(record, install_root)`` from every ``run/host`` boot record under one root.
+
+    THE WINDOW THIS CLOSES. A runtime publishes its boot record before its first
+    heartbeat — the design measured that gap at ~1.2 s — and the boot record is the
+    only artifact that names the tree such a runtime is importing from during it.
+    A prune in that window saw a superseded-looking tree with no record holding it
+    and deleted the tree a runtime was mid-start on. The boot namespace is read
+    here for the same reason ``journal.prune_boot_records`` reads it: it is the only
+    place a starting runtime is visible at all.
+
+    AND AN OBSTRUCTED ``run/host`` IS UNREADABLE, NOT EMPTY (review round 4, MAJOR
+    1). This reader was left outside the predicate the live readers were moved
+    onto, and ``Path.glob`` swallows the ``OSError`` a path under a non-directory
+    raises, so a clobbered ``run/host`` — the same stray file, unpacked archive or
+    partial restore the live namespaces are guarded against — read as zero boot
+    records and ``unreadable=False``. Measured on a store of four generations with
+    a real boot record naming one of them: ``complete=True``, and the prune removed
+    the generation that record was the only witness for. The consequence is the
+    direction this whole traversal exists to forbid, on the ONE artifact that names
+    a runtime during its ~1.2 s pre-heartbeat window.
+    """
+    try:
+        from local_operator.session.runtime.journal import BootRecord
+        from local_operator.session.runtime.types import HOST_RUN_DIRNAME
+
+        unreachable = _unreachable_namespace(config_root, HOST_RUN_DIRNAME)
+        if unreachable is not None:
+            return unreachable
+        return _entries_in_directory(
+            config_root / HOST_RUN_DIRNAME, BootRecord.from_json, "install_root"
+        )
+    except Exception:  # noqa: BLE001 — same direction as above
+        logger.debug("boot records unreadable under %s", config_root, exc_info=True)
+        return _NamespaceRead(unreadable=True)
+
+
+#: The front end's own name for each act that can take an install tree away from
+#: under a running runtime, stamped as the ``actor`` field of the stop marker that
+#: act stages (see :func:`note_doomed_runtimes`).
+#:
+#: A CONSTANT RATHER THAN THIS PROCESS'S ``argv``, deliberately: the same act
+#: reaches here from a direct ``lop install prune``, from an upgrade's own prune,
+#: and — later — from whatever wraps them, and what a reader needs is the NAME OF
+#: THE ACT rather than the spelling of whichever layer happened to be on top.
+#: ``control._stop_marker_payload`` records this process's argv0 beside it, so the
+#: artifact still answers "which process" as well as "what did it do".
+ACTOR_PRUNE = "lop install prune"
+ACTOR_UPGRADE = "lop update"
+
+#: The mechanism tokens those markers carry.
+#:
+#: The operator-facing words live with the renderer
+#: (``incidents.INVOLUNTARY_MECHANISM_LABELS``); the tokens are spelled at the
+#: write site for the same reason ``control`` spells its rung tokens
+#: (``"socket"``/``"sigterm"``/``"sigkill"``) literally — one vocabulary, and a
+#: renderer that does not know a token degrades to naming the actor alone rather
+#: than leaking the writer's spelling onto an operator's screen.
+MECHANISM_GENERATION_PRUNE = "generation-prune"
+MECHANISM_IN_PLACE_INSTALL = "in-place-install"
+
+
+def _record_index() -> list[tuple[Any, Path]]:
+    """``(record, config root)`` for every record published under every config root.
+
+    The same traversal :func:`referenced_install_roots` makes, carrying the config
+    root alongside because a marker must be written into the CONVERSATION DIR that
+    lives under it — the run key alone says which session died, not where its
+    evidence goes.
+
+    GATHERED ONCE PER REMOVAL PASS AND REUSED FOR EVERY CANDIDATE, which is a
+    window rather than an accident (review round 1, NIT 3): the caller holds one
+    index for the whole pass, so a runtime that publishes between candidate *k* and
+    candidate *k+1* is attested by nothing for the candidates already behind it.
+    Re-gathering per candidate would close that window in one direction and open a
+    wider one in the other — a scan per candidate on a machine with two hundred
+    sessions, inside a removal pass — so the window is stated rather than closed,
+    and it is bounded by what the caller snapshot BEFORE the pass began: a tree
+    named by a record that existed then is not removed at all.
+
+    AN INCOMPLETE READ IS NOT A REASON TO ATTEST LESS. The flag is dropped here on
+    purpose: an unreadable record means fewer victims can be NAMED, and a marker
+    written for the ones this read did see is still a name where there would
+    otherwise be none. The prune does not reach this function at all on an
+    incomplete read — it removes nothing — so this is the in-place install's own
+    path, where the choice is "name what we can" or "name nothing".
+    """
+    index: list[tuple[Any, Path]] = []
+    for config_root in _config_roots():
+        records, _gaps = _records_under(config_root)
+        for record, _value in records:
+            index.append((record, config_root))
+    return index
+
+
+def note_doomed_runtimes(
+    tree: Path,
+    *,
+    mechanism: str,
+    actor: str = "",
+    records: Sequence[tuple[Any, Path]] | None = None,
+) -> list[tuple[Any, Path]]:
+    """Attest, for every runtime importing from ``tree``, that ``tree`` is going away.
+
+    EVERY HARNESS-CAUSED DEATH NAMES ITS ACTOR, and this is the call that makes the
+    deletions do it. Called by the process that is about to remove the tree,
+    immediately before it does, because from that moment the runtimes inside it
+    cannot record anything themselves: an install that ran over a busy fleet left
+    every session on the machine dead mid-turn with no exit record anywhere
+    (AGENTS.md, "Installing over a live fleet"), and the 2026-09-18 sweep of 25
+    runtimes in 13 s left no artifact naming any actor at all. A marker staged here
+    turns both into attributable deaths — ``runtime-killed`` with the mechanism and
+    actor on the reason — instead of a silent disappearance.
+
+    ONLY THE RUNTIMES THE TREE ACTUALLY FEEDS are attested, by install root rather
+    than by record kind: a session mid-turn, a session whose record has already been
+    reaped (its runtime may still hold the tree), one that has booted but not yet
+    heartbeated, and the ``serve`` daemon serving from it are all in
+    :func:`_records_under`. A record with no conversation to write into — the serve
+    daemon's — is skipped by ``control.note_involuntary_stop`` itself, which is why
+    the returned list is the records a marker was actually written for and not the
+    records that named the tree.
+
+    ``records`` lets a caller that has already made the traversal hand it over; the
+    prune does, so one removal pass costs one scan rather than one per candidate.
+
+    THE RETURN VALUE IS ``(record, config root)`` PAIRS, not bare records, and the
+    second element is carried for the one caller that has to take an attestation
+    BACK: a marker is written into the conversation directory under that root, so
+    that is what a withdrawal has to be able to name (see
+    ``control.withdraw_involuntary_stop``, which the prune and the in-place install
+    call when the act they attested does not complete).
+
+    THE ONLY TREE THIS CAN STILL FIRE FOR is one the reader could not see, because a
+    tree any record names is now kept by :func:`prune_generations` itself. The window
+    that remains is real rather than theoretical: the caller takes its ``referenced``
+    snapshot before the removal pass, so a runtime that publishes its boot record in
+    between — the ~1.2 s a starting runtime spends with no heartbeat — is named by the
+    fresh index here and by nothing in that snapshot. This is the SECOND line of
+    defence for exactly the case the first one cannot see, and its output is what turns
+    a lost race from an unattributed wave into a named act.
+    """
+    target = _real(tree)
+    attested: list[tuple[Any, Path]] = []
+    index = _record_index() if records is None else records
+    for record, config_root in index:
+        # TWO SPELLINGS, ONE MEANING, and both are named here rather than reached
+        # for by a third reader (review round 1, NIT 4): a session record (live,
+        # reaped, or boot) spells the tree ``install_root``, and the ``lop serve``
+        # record spells the same fact ``prefix``. A record kind carrying a third
+        # spelling would attest nothing at all here, silently — which is why the
+        # readers that PARSE those kinds pass the field explicitly
+        # (:func:`_roots_from`) and only this caller, which holds a record of
+        # either kind without knowing which, reads both.
+        value = str(getattr(record, "install_root", "") or getattr(record, "prefix", "") or "")
+        if not value:
+            continue
+        install_root = _real(Path(value))
+        if install_root != target and target not in install_root.parents:
+            continue
+        if _attests(record, config_root, mechanism=mechanism, actor=actor):
+            attested.append((record, config_root))
+            continue
+        # A RUNTIME THAT COULD NOT BE ATTESTED IS ITSELF WORTH A LINE. The marker
+        # goes into the victim's conversation directory and ``registry.write_stop_marker``
+        # deliberately does not create one (a stop must not leave a directory behind
+        # for a session that never existed) — so a record whose conversation was
+        # deleted, or a serve daemon that has no conversation at all, cannot be
+        # attested. That is a real gap in the artifact, and the acting process is the
+        # only party that can say so: silent here, it would read afterwards as "nobody
+        # was affected", which is the exact confusion this whole path exists to end.
+        logger.warning(
+            "removing %s could not attest pid %s: no conversation directory under %s",
+            tree,
+            getattr(record, "pid", "?"),
+            config_root,
+        )
+    return attested
+
+
+def _attests(record: Any, config_root: Path, *, mechanism: str, actor: str) -> bool:
+    """``note_involuntary_stop``, with its failures LOUD rather than fatal.
+
+    The marker write is best-effort by contract, but this caller must not be its
+    exception path either: a prune that raised here would abort with some
+    generations already deleted and the rest standing — a worse outcome than an
+    unattested deletion, and one no operator asked for. A record shape this writer
+    cannot read is logged as the gap it is (never swallowed silently) and the
+    deletion proceeds, because the alternative is a prune that cannot run at all.
+    """
+    from local_operator.session.runtime.control import note_involuntary_stop
+
+    try:
+        return note_involuntary_stop(record, config_root, mechanism=mechanism, actor=actor)
+    except Exception:  # noqa: BLE001 — the deletion outranks the paperwork
+        logger.warning(
+            "could not attest pid %s before removing its tree",
+            getattr(record, "pid", "?"),
+            exc_info=True,
+        )
+        return False
+
+
+def withdraw_involuntary_stops(attested: Iterable[tuple[Any, Path]], *, mechanism: str) -> None:
+    """Take back the attestations of an act that did NOT complete.
+
+    The counterpart of :func:`note_doomed_runtimes`, for the same reason the stop
+    ladder has one: a marker is keyed to the live RUN (session, pid, start time),
+    so it covers every later death of that same process until something displaces
+    it — and an act that failed, or never started, leaves a verdict on disk that
+    names it for a death it may have had nothing to do with. The tree is still
+    there and the command says so (``_REMOVAL_FAILED_REASON``, or the raised
+    ``UpdateError``), so the artifact has to agree with the report the operator
+    read (review round 1, MINOR 2).
+
+    THE RESIDUAL GAP IS STATED RATHER THAN HIDDEN. A FAILED act can still have
+    touched part of a tree — ``shutil.rmtree`` continues past an entry it cannot
+    remove, and pip rewrites as it goes — so a runtime that dies afterwards reads
+    ``unattributed`` where a name would have been possible. That is the gap
+    :data:`incidents.KILL_UNATTRIBUTED` exists to state affirmatively, and it is
+    the direction this file already prefers: a false attribution is worse than
+    none, because it sends an investigation at a party that did not act.
+
+    Best-effort like every other evidence write, and per record: one withdrawal
+    that raises must not leave the rest on disk, so each is attempted and the
+    failure is logged as the gap it is.
+    """
+    try:
+        from local_operator.session.runtime import control
+
+        for record, config_root in attested:
+            try:
+                control.withdraw_involuntary_stop(record, config_root, mechanism=mechanism)
+            except Exception:  # noqa: BLE001 — cleanup of one marker never fails the act's report
+                logger.warning(
+                    "could not withdraw the attestation for pid %s",
+                    getattr(record, "pid", "?"),
+                    exc_info=True,
+                )
+    except Exception:  # noqa: BLE001 — see above
+        logger.warning("could not withdraw involuntary stop markers", exc_info=True)
 
 
 def _real(path: Path) -> Path:
@@ -2700,10 +3494,27 @@ class PrunePlan:
     remove`` with three different meanings, and made the one tree a live session
     was still running from — the single most important thing that output could
     say — invisible (design review round 1, D3).
+
+    ``references_complete`` IS PART OF THE ANSWER for the same reason, and it is
+    the one field here that is about the READ rather than about a generation
+    (review round 2, MAJOR 1). When it is ``False`` every candidate carries
+    ``_UNREADABLE_RECORD_REASON``, and a caller that prints only removals
+    therefore prints NOTHING on every subsequent run — the operator sees a prune
+    that reclaims no disk and says nothing, on a machine whose generation count is
+    the reason this function exists at all. The flag travels with the plan so that
+    the automatic path (:func:`prune_notice_lines`) can say so in one line.
     """
 
     removed: tuple[Path, ...]
     decisions: tuple[PruneDecision, ...]
+    #: Whether the record read behind this plan finished. ``False`` means at least
+    #: one namespace could not be read whole, so nothing was removed and the
+    #: condition is the one an operator has to clear (see the class docstring).
+    references_complete: bool = True
+    #: WHY it did not finish, one clause per namespace, in the words the notice line
+    #: reads — carried rather than reconstructed, because "a record could not be
+    #: read" is a claim the churn case does not support (review round 3, MINOR 3).
+    references_gaps: tuple[str, ...] = ()
 
     @property
     def kept(self) -> tuple[PruneDecision, ...]:
@@ -2714,8 +3525,9 @@ class PrunePlan:
 def prune_generations(
     *,
     keep: int = DEFAULT_KEEP_GENERATIONS,
-    referenced: Iterable[str | Path] = (),
+    referenced: Iterable[str | Path] | ReferencedTrees = (),
     now: float | None = None,
+    actor: str = "",
 ) -> PrunePlan:
     """Delete the generations nothing can still be importing from.
 
@@ -2725,6 +3537,15 @@ def prune_generations(
     two are the reason this is safe to run while the machine is busy: a runtime's
     own tree is never a candidate, and the count is only the margin for a session
     that has no record yet.
+
+    EVERY REMOVAL IS ATTESTED FIRST (:func:`note_doomed_runtimes`), because this is
+    the one place in the harness that deletes an install out from under runtimes
+    that are importing from it: a live record can only protect a tree the reader
+    COULD SEE, and the incidents where it did not — a boot record in its first
+    second, a record already reaped to the sidecar — are exactly the ones that left
+    no artifact naming an actor. ``actor`` is the front end's own name for the
+    request (see :data:`ACTOR_PRUNE`), recorded in the marker beside the acting
+    process's pid.
 
     Deletion is what makes the layout affordable rather than a leak — each
     generation is a whole venv — so it runs after every successful install as
@@ -2744,11 +3565,40 @@ def prune_generations(
     hold one of the ``keep`` places while itself being skipped by the age rule,
     so the margin protected one fewer finished generation than it promises,
     exactly while an install was running (QA round 2, Q3).
+
+    AN UNREADABLE RECORD KEEPS THE TREE IT MIGHT NAME, and this is the one rule here
+    that trades disk for certainty rather than the other way round (review round 1,
+    MINOR 4; QA round 1, Q2/Q3). ``referenced`` may arrive as a
+    :class:`ReferencedTrees` whose read was INCOMPLETE — an entry that would not
+    parse, a namespace that could not be listed — and an incomplete read proves
+    nothing by omission: the record it could not read may name any candidate, so
+    every candidate is kept instead of one of them being deleted on the strength of
+    a read that did not finish. The unsafe direction is not the default because it
+    is not recoverable: a tree deleted while a runtime imports from it kills that
+    runtime mid-turn, and the runtime's own record cannot be written afterwards —
+    which is the incident this whole change set exists to end. A plain iterable of
+    roots carries no such fact and is complete by construction, which is what a
+    caller that resolved its own tree list is saying.
+
+    AND AN INCOMPLETE READ IS REPORTED RATHER THAN ONLY OBEYED. The read being
+    incomplete is the reason nothing is removed here, so it is carried out on the
+    plan (:attr:`PrunePlan.references_complete`, with the reason it did not finish
+    in :attr:`PrunePlan.references_gaps`) and printed by :func:`prune_notice_lines`
+    — a prune that keeps everything must not look, on the upgrade path, like a
+    prune that had nothing to do. Both readers that can discover the condition
+    already log it with the file and the namespace; this is the same fact on the
+    surface the operator is actually looking at.
     """
     generations = generations_dir()
     if not generations.is_dir():
         return PrunePlan(removed=(), decisions=())
     moment = time.time() if now is None else now
+    references_complete = True
+    references_gaps: tuple[str, ...] = ()
+    if isinstance(referenced, ReferencedTrees):
+        references_complete = referenced.complete
+        references_gaps = referenced.gaps
+        referenced = referenced.roots
     wanted: set[Path] = set()
     current = current_generation()
     if current is None and pointer_path().is_symlink():
@@ -2770,6 +3620,8 @@ def prune_generations(
                 PruneDecision(path, False, "the pointer does not resolve, so nothing is removed")
                 for path in everything
             ),
+            references_complete=references_complete,
+            references_gaps=references_gaps,
         )
     if current is not None:
         wanted.add(_real(current))
@@ -2809,6 +3661,11 @@ def prune_generations(
 
     removed: list[Path] = []
     decisions: list[PruneDecision] = []
+    # GATHERED AT MOST ONCE, AND ONLY IF SOMETHING IS ACTUALLY REMOVED: a caller
+    # that already passed ``referenced`` has paid for one traversal, and a prune
+    # that keeps everything must not pay for a second one to attest nothing. The
+    # same traversal is reused for every doomed candidate below.
+    index: list[tuple[Any, Path]] | None = None
     for path in entries:
         resolved = _real(path)
         if current is not None and resolved == _real(current):
@@ -2819,7 +3676,9 @@ def prune_generations(
             continue
         removal_reason = "superseded, unreferenced"
         if not _marker(path):
-            removal_reason = f"no .lop-source: crash debris, older than {_ttl_label()}"
+            removal_reason = (
+                f"no .lop-source: crash debris, older than {retention_label(_PARTIAL_TTL_S)}"
+            )
             try:
                 in_flight = moment - path.stat().st_mtime < _PARTIAL_TTL_S
             except OSError:  # pragma: no cover — vanished under us, nothing to do
@@ -2830,22 +3689,53 @@ def prune_generations(
         elif resolved not in removable:
             decisions.append(PruneDecision(path, False, f"unreferenced, but within --keep {keep}"))
             continue
+        if not references_complete:
+            # AN UNREADABLE RECORD KEEPS THE TREE IT MIGHT NAME, which is the only
+            # reason this check sits HERE rather than at the top of the function:
+            # every keep above has a reason of its own and keeps its own wording,
+            # and only a candidate that would otherwise be REMOVED needs the
+            # unreadable read to speak for it (see the docstring). Nothing is
+            # attested below either — with no removal there is no act to name.
+            decisions.append(PruneDecision(path, False, _UNREADABLE_RECORD_REASON))
+            continue
+        if index is None:
+            index = _record_index()
+        # ATTEST BEFORE THE TREE GOES. This is the one place in the harness that
+        # deletes an install out from under runtimes that are importing from it,
+        # and until this call existed the deletion was silent: the runtimes died
+        # torn and wrote no exit record of their own (AGENTS.md, "Installing over a
+        # live fleet"), so the artifact an investigation needs was the one nobody
+        # wrote. It goes HERE rather than at the top of the function because a
+        # candidate that is kept — by the pointer, by a record, by the age rule, by
+        # the margin — is not a doom, and a marker for a tree that survives would be
+        # a false attribution, which is worse than none.
+        attested = note_doomed_runtimes(
+            path,
+            mechanism=MECHANISM_GENERATION_PRUNE,
+            actor=actor,
+            records=index,
+        )
         if _remove_tree(path):
             removed.append(path)
             decisions.append(PruneDecision(path, True, removal_reason))
         else:
             # A removal candidate that survived the attempt is NOT a removal: it
             # is kept, and said so, rather than dropped from the answer.
+            #
+            # AND THE ATTESTATION GOES WITH IT (review round 1, MINOR 2). The line
+            # above says the tree KEPT; a marker still on disk would say it was
+            # pruned — and the marker is keyed to the live RUN, so it covers every
+            # later death of that same process: an unrelated crash an hour later
+            # would be narrated by this act. Which artifact is wrong is not a close
+            # call when the command's own report is the one the operator read.
+            withdraw_involuntary_stops(attested, mechanism=MECHANISM_GENERATION_PRUNE)
             decisions.append(PruneDecision(path, False, _REMOVAL_FAILED_REASON))
-    return PrunePlan(removed=tuple(removed), decisions=tuple(decisions))
-
-
-def _ttl_label() -> str:
-    """``_PARTIAL_TTL_S`` in the words a person reads: ``1h``, ``30m``."""
-    hours = _PARTIAL_TTL_S / 3600
-    if hours >= 1:
-        return f"{hours:g}h"
-    return f"{_PARTIAL_TTL_S / 60:g}m"
+    return PrunePlan(
+        removed=tuple(removed),
+        decisions=tuple(decisions),
+        references_complete=references_complete,
+        references_gaps=references_gaps,
+    )
 
 
 def install_prune_command(*, keep: int = DEFAULT_KEEP_GENERATIONS) -> int:
@@ -2853,7 +3743,7 @@ def install_prune_command(*, keep: int = DEFAULT_KEEP_GENERATIONS) -> int:
     if not generations_dir().is_dir():
         print("no install generations on this machine — nothing to prune")
         return 0
-    plan = prune_generations(keep=keep, referenced=referenced_install_roots())
+    plan = prune_generations(keep=keep, referenced=referenced_install_roots(), actor=ACTOR_PRUNE)
     for line in prune_lines(plan):
         print(line)
     return 0
@@ -2939,8 +3829,31 @@ def prune_notice_lines(plan: PrunePlan) -> list[str]:
     upgrade is reporting a side effect it had to perform, while ``lop install
     prune`` is answering a question about the retention decision, which needs the
     keeps and their reasons (design review D3/D4).
+
+    ONE EXCEPTION, AND IT IS THE ONE THIS FUNCTION EXISTS FOR (review round 2,
+    MAJOR 1): when the record read did not finish, this path removed nothing and
+    printed nothing — forever, on every later ``lop update``, with the condition
+    only visible to someone reading the debug log. "Nothing was reclaimed because
+    a record could not be read" is not a removal, but it is exactly what an
+    operator needs to be told by the path that is supposed to reclaim disk, so the
+    incomplete read gets a line even though no generation does.
+
+    THE LINE SAYS WHAT THE READ FOUND, not the worst case it could have been
+    (review round 3, MINOR 3 and NIT 2). The reasons travel on the plan
+    (:attr:`PrunePlan.references_gaps`) naming the namespace they come from, because
+    the two shapes are different facts: a record that is there and will not parse is
+    the operator's to clear, while a namespace that changed under the read is
+    ordinary churn — a session starting or exiting between the listings — which
+    clears itself, and calling that one "a record could not be read" is how a
+    warning on a healthy machine teaches an operator to ignore it.
     """
     lines: list[str] = []
+    if not plan.references_complete:
+        why = "; ".join(plan.references_gaps) or (
+            "a session or serve record could not be read, so every generation is kept "
+            "until it is dealt with"
+        )
+        lines.append(f"no generations reclaimed: {why}")
     for decision in plan.decisions:
         if not decision.removed:
             continue
@@ -3496,7 +4409,7 @@ def perform_upgrade(
         # has already succeeded, and a caller that cannot read the record
         # directory must not be told otherwise.
         try:
-            plan = prune_generations(referenced=referenced_install_roots())
+            plan = prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
         except Exception:  # noqa: BLE001 — pruning never fails an upgrade
             logger.debug("generation prune failed", exc_info=True)
         else:
@@ -3516,9 +4429,43 @@ def perform_upgrade(
     if run is not None:
         # The injected runner sees the argv alone: it is a seam for tests and for
         # callers that observe the installer, not a way to spawn anything.
+        #
+        # IT IS ALSO WHY NOTHING IS ATTESTED ON THIS BRANCH: an injected runner
+        # does not rewrite any tree, so a marker written here would describe an act
+        # that did not happen — the one shape of evidence worse than no evidence.
         code = run(argv)
     else:
-        code = _run_installer(argv, executable=image)
+        # THE IN-PLACE INSTALL IS THE ONE HAZARD THIS FUNCTION STILL COMMITS, and
+        # now it says so before it does it. pip and pipx have no generation layout
+        # to install into, so the site-packages tree under the running fleet is
+        # rewritten where it stands (see this function's docstring): the runtimes
+        # importing from it die mid-turn and cannot record anything themselves,
+        # which is why a measured install over a busy fleet took every session on
+        # the machine down with no exit record (AGENTS.md, "Installing over a live
+        # fleet", 2026-09-15 19:23). The attestation is staged immediately before
+        # the installer runs, for the same reason the control ladder stages its own
+        # marker before a signal: after the fact, the party that could say what
+        # happened is the party that was killed.
+        attested = note_doomed_runtimes(
+            Path(prefix) if prefix is not None else Path(sys.prefix),
+            mechanism=MECHANISM_IN_PLACE_INSTALL,
+            actor=ACTOR_UPGRADE,
+        )
+        # AN ATTESTATION FOR AN ACT THAT DID NOT COMPLETE IS A FALSE NAME, and this
+        # marker outlives the attempt: it is keyed to the live RUN, so it would
+        # narrate any later death of these runtimes as this install's doing (review
+        # round 1, MINOR 2). Both failure shapes withdraw, because in both the
+        # caller reports a failed upgrade and the evidence has to agree with the
+        # report the operator read; the residual gap this leaves — an aborted
+        # install can still have rewritten part of the tree — is stated in
+        # ``withdraw_involuntary_stops``.
+        try:
+            code = _run_installer(argv, executable=image)
+        except BaseException:
+            withdraw_involuntary_stops(attested, mechanism=MECHANISM_IN_PLACE_INSTALL)
+            raise
+        if code != 0:
+            withdraw_involuntary_stops(attested, mechanism=MECHANISM_IN_PLACE_INSTALL)
     if code != 0:
         raise UpdateError(f"installer exited {code}")
 
@@ -4177,7 +5124,9 @@ def _generation_upgrade(total: int, *, services: bool = True) -> int:
     leaving a daemon where it is.
     """
     _print_current_generation()
-    for line in prune_notice_lines(prune_generations(referenced=referenced_install_roots())):
+    for line in prune_notice_lines(
+        prune_generations(referenced=referenced_install_roots(), actor=ACTOR_UPGRADE)
+    ):
         print(line)
     if services:
         _services_stage()

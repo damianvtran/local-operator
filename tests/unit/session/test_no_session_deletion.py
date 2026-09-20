@@ -87,8 +87,15 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
     (
         "local_operator/procname.py::_plant_hardlink",
         "os.unlink",
-        "Clears this pid's own .tmp link in <venv>/bin before/after linking",
-        2,
+        # THREE calls, and each is the SAME ``tmp`` name (``.<brand>.<pid>.tmp``)
+        # in the merged venv's ``bin/``: before the link (a leftover from this
+        # pid), after ``os.replace`` (a same-inode replace is a documented no-op
+        # and consumes nothing, so the temp would otherwise leak once per replant
+        # — 609 leftovers across 16 generations measured on the reporting host),
+        # and on the error path. Never ``link`` itself, and never a path derived
+        # from a session id or a config dir.
+        "Clears this pid's own .tmp link in <venv>/bin before, after and on error",
+        3,
     ),
     (
         "local_operator/procname.py::_plant_libpython",
