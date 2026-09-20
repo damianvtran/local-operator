@@ -2942,9 +2942,17 @@ def _reaped_records_under(config_root: Path) -> _NamespaceRead:
     records are parsed with the SAME types the live reader uses — a sidecar is a
     record that moved, not a different kind of file — so the two readers cannot
     come to disagree about what a root field means.
+
+    EACH SIDECAR'S NOTE IS CARRIED OUT (review round 4, MAJOR 1). ``unreadable``
+    alone said the read was incomplete without saying WHICH namespace failed, and
+    this reader is the only route to the sidecars: a clobbered ``run/mobile/reaped``
+    would then reach the operator as the generic "this build could not read" line,
+    which is the naming that round 3's NIT 2 exists to require (it is also what
+    lets the test assert the namespace by name rather than infer it from a count).
     """
     entries: list[tuple[Any, str]] = []
     unreadable = False
+    notes: list[str] = []
     try:
         from local_operator.server.registry import ServeRecord
         from local_operator.session.runtime.types import (
@@ -2960,10 +2968,13 @@ def _reaped_records_under(config_root: Path) -> _NamespaceRead:
             read = _sidecar_records(config_root, dirname, parse, field)
             entries.extend(read.entries)
             unreadable = unreadable or read.unreadable
+            if read.note:
+                notes.append(read.note)
     except Exception:  # noqa: BLE001 — same direction as above
         logger.debug("reaped records unreadable under %s", config_root, exc_info=True)
         unreadable = True
-    return _NamespaceRead(tuple(entries), unreadable)
+        notes.append(f"{config_root} holds reaped records this build could not read")
+    return _NamespaceRead(tuple(entries), unreadable=unreadable, note="; ".join(notes))
 
 
 def _sidecar_records(config_root: Path, dirname: str, parse: Any, field: str) -> _NamespaceRead:
@@ -2981,9 +2992,23 @@ def _sidecar_records(config_root: Path, dirname: str, parse: Any, field: str) ->
     for the tree the torn one named, because that tree may be the one a live
     runtime is importing from and the record is unreadable precisely where it would
     have said so (review round 1, MINOR 4; QA round 1, Q3).
+
+    A SIDECAR THAT IS NOT A DIRECTORY IS UNREADABLE, NOT EMPTY, for exactly the
+    reason :func:`_unreachable_namespace` gives for the live namespaces (review
+    round 4, MAJOR 1). ``_entries_in_directory`` lists through ``Path.glob``, and
+    ``Path.glob`` SWALLOWS the ``OSError`` a path under a non-directory raises —
+    measured, with ``reaped`` clobbered: ``list((root / dirname / "reaped").glob(
+    "*.json")) == []``, not a raised error. A zero-entry listing is an "empty,
+    complete" read, so the records that were there are gone from the answer while
+    the plan still calls the namespace read whole, and the prune then removes a
+    generation only this sidecar named. The predicate is asked at the LEAF, and
+    its parent arm covers a ``run/<namespace>`` that is itself the obstruction.
     """
     from local_operator.session.runtime.registry import REAPED_DIRNAME
 
+    unreachable = _unreachable_namespace(config_root, f"{dirname}/{REAPED_DIRNAME}")
+    if unreachable is not None:
+        return unreachable
     return _entries_in_directory(config_root / dirname / REAPED_DIRNAME, parse, field)
 
 
@@ -2997,11 +3022,25 @@ def _boot_records_under(config_root: Path) -> _NamespaceRead:
     and deleted the tree a runtime was mid-start on. The boot namespace is read
     here for the same reason ``journal.prune_boot_records`` reads it: it is the only
     place a starting runtime is visible at all.
+
+    AND AN OBSTRUCTED ``run/host`` IS UNREADABLE, NOT EMPTY (review round 4, MAJOR
+    1). This reader was left outside the predicate the live readers were moved
+    onto, and ``Path.glob`` swallows the ``OSError`` a path under a non-directory
+    raises, so a clobbered ``run/host`` — the same stray file, unpacked archive or
+    partial restore the live namespaces are guarded against — read as zero boot
+    records and ``unreadable=False``. Measured on a store of four generations with
+    a real boot record naming one of them: ``complete=True``, and the prune removed
+    the generation that record was the only witness for. The consequence is the
+    direction this whole traversal exists to forbid, on the ONE artifact that names
+    a runtime during its ~1.2 s pre-heartbeat window.
     """
     try:
         from local_operator.session.runtime.journal import BootRecord
         from local_operator.session.runtime.types import HOST_RUN_DIRNAME
 
+        unreachable = _unreachable_namespace(config_root, HOST_RUN_DIRNAME)
+        if unreachable is not None:
+            return unreachable
         return _entries_in_directory(
             config_root / HOST_RUN_DIRNAME, BootRecord.from_json, "install_root"
         )

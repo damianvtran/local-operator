@@ -863,23 +863,39 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
        runtime was asked to leave, wrote the signal down, and was killed before
        its turn ended. First-hand evidence, so it outranks everything below.
     2. **the row's own recorded exit cause, when it is a token this taxonomy
-       knows** → that token. The runtime wrote it on its way out
-       (``Session.note_cut_off`` -> ``TurnJournal.note_exit``), which makes it
-       first-hand in the same way rung 1 is, and it is the ONLY rung that can
-       carry a bound: the bounded handover records ``runtime-overdue``
-       (:data:`types.BUILD_DRAIN_OVERDUE_CAUSE`) and the sentence that names its
-       bound, where the inferences below can only speak about the install or about
-       a death nobody recorded. It outranks rung 3 because "the install moved since
-       this build" is an inference from the DISK, while this is a statement about
-       itself — and for a drained runtime the install has usually moved, so the
-       inference used to win by default (QA round 1, Q-2).
+       knows AND IS NOT A VERDICT** → that token. The runtime wrote it on its
+       way out (``Session.note_cut_off`` -> ``TurnJournal.note_exit``), which
+       makes it first-hand in the same way rung 1 is, and it is the ONLY rung
+       that can carry a bound: the bounded handover records
+       ``runtime-overdue`` (:data:`types.BUILD_DRAIN_OVERDUE_CAUSE`) and the
+       sentence that names its bound, where the inferences below can only speak
+       about the install or about a death nobody recorded. It outranks rung 3
+       because "the install moved since this build" is an inference from the
+       DISK, while this is a statement about itself — and for a drained runtime
+       the install has usually moved, so the inference used to win by default
+       (QA round 1, Q-2).
+
+       ``KILL_CAUSE`` IS EXCLUDED BY THE PREDICATE, NOT BY A LEAD (review
+       round 4, MINOR 1). ``incidents.CUT_OFF_CAUSES`` holds the very token the
+       arm below answers with, because that table is the taxonomy's vocabulary
+       and rung 4 is one of its causes; matching on membership alone would let a
+       row that recorded ``runtime-killed`` be answered by itself, rendering a
+       harness-caused death with no actor — the thing this ordering exists to
+       forbid. No writer records it today (``note_exit`` is reached only from
+       ``process._clean_exit`` and the direct-dispose path, and neither passes
+       it), so this is an invariant held against a future writer rather than a
+       live defect; the alternative fix, passing ``KILL_UNATTRIBUTED`` as this
+       rung's lead, is wrong because the exclusion must not be reachable either
+       way. Rung 2 keeps no lead for the tokens it DOES answer:
+       ``runtime-overdue`` already names its own mechanism and bound, and that
+       sentence is pinned by ``test_a_recorded_bound_outranks_the_install_inference``.
     3. **an install that moved since the row's build** → ``install-mid-update``
        — the install-window tear.
     4. **nothing else** → ``runtime-killed``, now carried by positive evidence
        (this turn was in flight and never ended) instead of by the absence of a
        record.
 
-    RUNG 3 IS EXPLICITLY UNATTRIBUTED, and the word is part of the answer rather
+    RUNG 4 IS EXPLICITLY UNATTRIBUTED, and the word is part of the answer rather
     than a decoration. Nothing that reads this arm has seen a marker — a marker
     covering this run is consumed by ``attention._classify_orphaned_run`` before
     the row is ever consulted — so "this turn died and no act was recorded" is
@@ -887,7 +903,9 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
     event from "we cannot tell you why" into "none of these deaths had a recorded
     actor". ``incidents.KILL_UNATTRIBUTED`` is the same word the classifier's
     marker arms use when a marker names no actor, so a reader comparing a
-    marked death with an unmarked one sees one vocabulary rather than two.
+    marked death with an unmarked one sees one vocabulary rather than two. It is
+    also the arm a row that recorded ``KILL_CAUSE`` lands on, which is why rung 2
+    refuses that token (review round 4, MINOR 1).
 
     ``CUT_OFF_UNKNOWN`` is unreachable from this function and that is the point:
     it is the taxonomy's statement that nothing on disk could say what happened,
@@ -897,6 +915,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
     """
     from local_operator.incidents import (
         CUT_OFF_CAUSES,
+        KILL_CAUSE,
         KILL_UNATTRIBUTED,
         render_cut_off_reason,
     )
@@ -911,11 +930,15 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
             ),
         )
     recorded = str(row.exit_cause or "")
-    if recorded in CUT_OFF_CAUSES:
+    if recorded in CUT_OFF_CAUSES and recorded != KILL_CAUSE:
         # The runtime's own last word, and a token only if it is one: every other
         # caller of ``note_exit`` passes a sentence ("retiring for 0.59.9"), and a
         # sentence is not a rung of this taxonomy — it would render as itself, which
-        # is how the bound used to be invisible to a successor.
+        # is how the bound used to be invisible to a successor. ``KILL_CAUSE`` is
+        # held out of the match rather than given a lead: it is this function's own
+        # verdict for a death with no recorded act, so a row carrying it belongs on
+        # the unattributed arm below, which is the one that names its actor (review
+        # round 4, MINOR 1).
         return (
             "error",
             recorded,
@@ -930,8 +953,8 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         )
     return (
         "error",
-        "runtime-killed",
-        render_cut_off_reason("runtime-killed", detail=row_detail(row, lead=KILL_UNATTRIBUTED)),
+        KILL_CAUSE,
+        render_cut_off_reason(KILL_CAUSE, detail=row_detail(row, lead=KILL_UNATTRIBUTED)),
     )
 
 

@@ -408,6 +408,22 @@ def _update_failed_cause_sentence() -> str:
     )
 
 
+#: The cause token for a runtime that vanished with its turn still in flight —
+#: the verdict :func:`journal.death_verdict`'s unattributed arm RETURNS, and the
+#: one key of :data:`CUT_OFF_CAUSES` that is a reader's conclusion rather than a
+#: runtime's own last word.
+#:
+#: NAMED BECAUSE ONE READER HAS TO REFUSE IT (review round 4, MINOR 1).
+#: ``death_verdict``'s rung 2 narrates whatever token a row recorded, with no lead,
+#: and that is right for a token the runtime writes about ITSELF —
+#: ``runtime-overdue`` names its own mechanism and its bound. It is wrong for this
+#: one: its whole meaning is that the act was never recorded, so a row carrying it
+#: must reach the arm that says so rather than be answered by itself. Neither side
+#: may be re-spelt, because the two sides are a key of one dict and a return value a
+#: few lines apart, and a rename that moved only one of them would put a
+#: harness-caused death on the arm that cannot name its actor.
+KILL_CAUSE = "runtime-killed"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
@@ -430,7 +446,7 @@ CUT_OFF_CAUSES: dict[str, str] = {
     # update narrated as an ordinary retirement is invisible in exactly the durable
     # account an operator opens to ask why a session is still on yesterday's build.
     "runtime-update-failed": _update_failed_cause_sentence(),
-    "runtime-killed": (
+    KILL_CAUSE: (
         # The trailing clause is the POST-MARKER meaning of this token, and it
         # is decidable now in a way it was not before the durable marker
         # existed: "disappeared without exiting cleanly" describes what the
