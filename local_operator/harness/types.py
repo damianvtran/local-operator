@@ -2846,11 +2846,17 @@ class StreamReasoningDelta(BaseModel):
     output" without it, and the two call for opposite responses (re-prompt the
     model / fix the client).
 
-    Emitted on the reasoning channel only. It is deliberately NOT reasoning
-    rendered anywhere user-visible: private reasoning never enters the
-    transcript or the model-visible context, and no consumer is required to
-    act on this event. It exists so a caller that wants to know whether the
-    model produced anything can ask.
+    Emitted on the reasoning channel only, and the harness turns every fragment
+    into an ``ReasoningDeltaEvent`` (the loop's stream dispatch), which is
+    DISPLAY-ONLY: it reaches the front ends -- the TUI's transient block, the
+    SSE ``reasoning.delta`` name, the desktop frames, the mobile projection and
+    exec's JSON channel -- and never enters the transcript, the model-visible
+    context, or the next request. So private reasoning stays private on the
+    wire while the user can watch the phase happen. No consumer is REQUIRED to
+    act on it: a consumer that does not simply renders what it rendered before,
+    and the two that know the event and still drop it (a subagent's bounded
+    trajectory, the record-keyed SSE channel) do so deliberately, because
+    neither surface has a row to put it in.
     """
 
     type: Literal["reasoning_delta"] = "reasoning_delta"

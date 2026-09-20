@@ -306,7 +306,7 @@ from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
 )
-from local_operator.tui.widgets.reasoning import ReasoningBlock
+from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
@@ -41169,11 +41169,13 @@ class OperatorApp(App[None]):
         return block
 
     def _retire_reasoning_block(self) -> None:
-        """Freeze the live reasoning phase, if any, and let go of it.
+        """Close the live reasoning phase, if any, and let go of it.
 
         Called when the answer starts and on every terminal path. The block is
-        frozen rather than removed: the rows a user just watched arrive must not
-        vanish from under their cursor when the answer lands. Letting go of the
+        COLLAPSED rather than removed or left expanded: removing it would delete
+        rows from under the reader's cursor, and leaving it was one ~7-row block
+        per model call with no way to dismiss them (UX review round 1, U1). It
+        keeps its header row, which says this call reasoned. Letting go of the
         reference is what lets the NEXT model call of the same turn open a fresh
         phase -- ``SPACING_TRANSIENT`` means the retired one takes no gap.
         """
@@ -41186,10 +41188,17 @@ class OperatorApp(App[None]):
 
     def on_reasoning_delta(self, message: ReasoningDelta) -> None:
         """The model's private reasoning, streamed dim above the answer it will write."""
-        # Empty text is not reasoning: flushing one would mount a header row
-        # that then sits above nothing, which is the hole
-        # ``on_assistant_delta`` avoids for the same reason.
-        if not message.text:
+        # Whitespace-only text is not reasoning either: mounting on it paints a
+        # labelled header with nothing under it, which design round 1 caught as
+        # a frame (D5). `on_assistant_delta`'s guard is the same shape.
+        if not message.text.strip():
+            return
+        # `display.reasoning` is this channel's escape hatch (UX review round 1,
+        # U1). Read at MOUNT, not cached on the app, so a write from `/settings`
+        # applies to the next phase; a mid-session flip is forward-only, like
+        # `display.narration`, because re-projecting mounted blocks in one
+        # synchronous pass is what paints a blank frame.
+        if not settings_get("display.reasoning", DEFAULT_REASONING):
             return
         self._ensure_reasoning_block().update_text(message.text)
 
