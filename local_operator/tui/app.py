@@ -1175,6 +1175,24 @@ def _retiring_notice_text(error: BaseException) -> str:
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
 
+#: How often the terminal asks whether this machine's connector parked itself.
+#:
+#: A small local file, not HTTP and not a poll of a gateway that is not running
+#: (`tunnels/state.py` — the park is exactly the state where nothing is
+#: listening). The condition changes when the operator signs in, which is a
+#: human timescale, so the interval is set by how long a stale notice may linger
+#: on screen rather than by how fast the read is: five seconds is short enough
+#: that a sign-in completed in another window withdraws the card while the user
+#: is still looking at the app.
+TUNNEL_PARK_POLL_S = 5.0
+
+#: Owner tag for the parked-connector notice.
+#:
+#: The toast slot is shared, and `Toast.withdraw` retires by OWNER, so this is
+#: what keeps the mention of remote access from pulling an MCP failure out from
+#: under the user (see the rationale on `Toast.withdraw`).
+TUNNEL_PARK_NOTICE = object()
+
 #: Bucket the dock's expiry clock to this many seconds. Rows whose settle
 #: stamps fall in the same bucket therefore cross the window on the SAME
 #: repaint, so a fan-out that finished together leaves together — one visible
@@ -3641,6 +3659,10 @@ class OperatorApp(App[None]):
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
+        #: The park reason this app has already announced, so a 5-second poll
+        #: raises one card per episode rather than holding the toast slot
+        #: forever (see `_poll_tunnel_park`).
+        self._tunnel_park_notice: str | None = None
         #: Unsubscribes this app from the process config watcher (see
         #: :meth:`_watch_config`). ``None`` until the first session is adopted.
         self._unsubscribe_config_watch: Callable[[], None] | None = None
@@ -9156,6 +9178,11 @@ class OperatorApp(App[None]):
         # Keep the active provider's quota warm in the shared cache so `/usage`
         # answers from disk (see USAGE_WARM_INTERVAL_S).
         self.set_interval(USAGE_WARM_INTERVAL_S, self._warm_usage_background)
+        # Remote access is off for a reason only a FILE on this machine knows
+        # (see TUNNEL_PARK_POLL_S). Registered with the other always-on polls
+        # rather than on a panel's timer: nothing else in the app is watching
+        # for this, and the notice is the only place the terminal admits it.
+        self.set_interval(TUNNEL_PARK_POLL_S, self._poll_tunnel_park)
         # ALWAYS ON, deliberately not on `_sidebar_timer`. That timer is
         # registered with `pause=True` and is paused whenever the sidebar is
         # closed, so hanging the reap off it would mean a user who closes the
@@ -26321,6 +26348,59 @@ class OperatorApp(App[None]):
         # free — and never raises, since a status surface may not take the app
         # down (see the panels' own docstrings).
         self._refresh_band()
+
+    def _poll_tunnel_park(self) -> None:
+        """Tell the user once when this machine's remote access needs a person.
+
+        The connector cannot report it itself: parking means it exited
+        SUCCESSFULLY (the only exit a supervisor reads as "do not retry me"),
+        so no process is left to say anything, and the state file is the only
+        thing that knows. Read from disk, never over the network — when the
+        login is dead the tunnel is the last route that could carry an answer,
+        and a probe of the gateway would report "nothing is listening" for a
+        cause it cannot name.
+
+        One card per EPISODE, not per tick: ``show`` re-arms its dismissal timer
+        on every call, so re-raising on a five-second tick would hold a
+        ten-second card on screen forever — a worse nag than the one it
+        replaced. A user who dismisses it is not chased again until the
+        condition clears and comes back, and `lop tunnel status` remains the
+        place that answers the question on demand.
+
+        Never fires for a machine with no tunnel, or one the operator stopped:
+        `state.nag` owns that gate, because it is a fact about the state file
+        rather than about this widget.
+        """
+        from local_operator.tunnels import gateway, state
+
+        notice = state.nag()
+        reason = str(notice.get("reason") or "") if notice else ""
+        if not reason:
+            if self._tunnel_park_notice is not None:
+                # WITHDRAWN, not merely left to stop re-showing: a card still on
+                # screen after the condition cleared would contradict the
+                # recovery the user just performed. `withdraw` refuses any card
+                # that is not this owner's, so an unrelated notice in the shared
+                # slot is safe.
+                self.query_one(Toast).withdraw(TUNNEL_PARK_NOTICE)
+                self._tunnel_park_notice = None
+            return
+        if reason == self._tunnel_park_notice:
+            return
+        self._tunnel_park_notice = reason
+        remedy = notice.get("remedy") if notice else None
+        command = str(remedy.get("command") or "") if isinstance(remedy, dict) else ""
+        if reason == gateway.LOGIN_REQUIRED:
+            # The cause the copy was written for, and the one whose remedy the
+            # user can run without leaving the app.
+            text = "Radient sign-in needed — run /login radient"
+        else:
+            text = f"Remote access is off ({gateway.reason_label(reason)})"
+            text += f" — run {command}" if command else ""
+        # A FAILURE-length card (`TOAST_FAILURE_MS`), which is this app's one
+        # marker for "the user has to act on this": it claims the shared slot
+        # against courtesy receipts instead of being evicted by one.
+        self.query_one(Toast).show(text, duration_ms=TOAST_FAILURE_MS, owner=TUNNEL_PARK_NOTICE)
 
     def _sync_band_inset(self) -> None:
         """Give the band its top inset only while it actually holds a slot.
