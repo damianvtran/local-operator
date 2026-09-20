@@ -1413,17 +1413,6 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """
         ...
 
-    def set_operator_prompt_notice(self, handler: Callable[[str], None] | None) -> None:
-        """Arm the sink that paints "what this signature is about to authorise".
-
-        Viewer-only for the same reason the three above are, and one more: the
-        sentence describes a PRESENCE PROMPT this machine's key is about to raise,
-        and the only surface with a human standing at it is an attached pane. An
-        owner ``Session`` runs the loop where the prompt is raised and has no host
-        above it to paint on.
-        """
-        ...
-
     def set_steer_failure(self, resolver: Callable[[str], None] | None) -> None:
         """Called with the id of a queued steer whose bind was refused.
 
