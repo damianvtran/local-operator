@@ -186,6 +186,13 @@ def _init(args: argparse.Namespace) -> int:
             print(f"  staged : {staged} (the anchor statement was missing, so it was written)")
         elif staged.exists():
             print(f"  staged : {staged}")
+        else:
+            # EVERY OTHER STATE PRINTS A VALUE (UX round 10, U4): with the anchor
+            # installed and no carrier on disk this slot was simply absent, which reads
+            # as "not reported" rather than as "there is none". Nothing is wrong with
+            # that state — `--revoke` and `--authorise` re-stage on demand — so it says
+            # so instead of leaving a gap.
+            print(f"  staged : (none at {staged} — `--revoke` or `--authorise` re-stages)")
         if loaded.exists:
             print(f"  anchor : {loaded.path} (installed: {loaded.usable})")
         print()
