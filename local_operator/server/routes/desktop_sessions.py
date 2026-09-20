@@ -2327,6 +2327,15 @@ async def archive(session_id: str, body: Archive, request: Request):
     show a delegated run and a state the user can see must be a state the user
     can change.
 
+    THE 200 REPORTS THE STATE THAT WAS ASKED FOR, which on a config root this
+    process cannot write is not the state the store holds: ``set_archived``
+    swallows its ``OSError`` and echoes the desired value, as ``set_pin`` does.
+    The pin route's discipline, restated here because a reader of THIS docstring
+    should not have to know the other one to learn that the response is a
+    statement about intent rather than a durability claim (review round 1, NIT).
+    A client that needs the store's own answer re-reads the listing, which is
+    also what settles the two-writers race this route accepts.
+
     WHAT IT DOES NOT DO, because the pin route's silence about it was reasoned:
     archiving NEVER removes anything, so there is no guard, no refusal and no
     409 — the worst case is a flag on a conversation that is still on disk and

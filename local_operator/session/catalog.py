@@ -568,7 +568,11 @@ DECORATION_SOURCES = (DECORATION_LIVENESS, DECORATION_WAKES, DECORATION_ATTENTIO
 
 
 def decorate_rows(
-    directory: Path, rows: list[SessionRow], *, include_live: bool = False
+    directory: Path,
+    rows: list[SessionRow],
+    *,
+    include_live: bool = False,
+    include_archived: bool = False,
 ) -> list[SessionRow]:
     """Fill in each row's runtime state, and float the ones needing a person.
 
@@ -646,7 +650,25 @@ def decorate_rows(
 
     if include_live:
         from local_operator.resume import is_user_session
+        from local_operator.session.archived import archived_ids
 
+        # THE ARCHIVE PREDICATE APPLIES TO THE LIVE ROWS TOO, and this is the
+        # second place it has to be asked rather than the one place it is
+        # documented (QA round 1, Q1). A live record the scan did not carry is
+        # appended from the REGISTRY, which knows nothing about archives — so an
+        # archived conversation that happens to be running was re-added here with
+        # `archived` left at the dataclass default, and both listings that go
+        # through this function (the TUI sidebar and the desktop catalogue)
+        # then offered it while reporting `archived: false`. That is the flow the
+        # command exists for — `/archive` acts on the CURRENT conversation, and
+        # the desktop archives the conversation being viewed — so the receipt's
+        # promise was broken in the only state a user reaches it from, and the
+        # wire contradicted its own always-present-with-the-true-value contract.
+        #
+        # Read LAZILY, on the first live row that is actually about to be
+        # appended: a store with no live records (or none missing from the scan)
+        # pays nothing, which is the same rule the scan follows.
+        archived: frozenset[str] | None = None
         known = {row.id for row in rows}
         rows = list(rows)
         for session_id, (record, _state) in live.items():
@@ -654,6 +676,11 @@ def decorate_rows(
                 continue
             session_dir = directory / "sessions" / session_id
             if session_id not in known and session_dir.is_dir() and is_user_session(session_dir):
+                if archived is None:
+                    archived = archived_ids(directory)
+                is_archived = session_id in archived
+                if is_archived and not include_archived:
+                    continue
                 rows.append(
                     SessionRow(
                         session_id,
@@ -661,6 +688,11 @@ def decorate_rows(
                         str(getattr(record, "conversation_name", "") or "Untitled conversation"),
                         created_at=session_created_at(session_dir),
                         degraded=degraded,
+                        # Stamped from the store's own answer, never the
+                        # default: this row is revealed by `include_archived`
+                        # only when it IS archived, and a renderer paints the
+                        # mark from this flag.
+                        archived=is_archived,
                     )
                 )
     updated: list[SessionRow] = []
@@ -1186,7 +1218,7 @@ def load_catalog(
     # ranks them as candidates and its archive predicate never saw them.
     if marker_rows_added and not include_archived:
         rows = [row for row in rows if row.id not in (archived_marker_rows or frozenset())]
-    rows = decorate_rows(directory, rows, include_live=True)
+    rows = decorate_rows(directory, rows, include_live=True, include_archived=include_archived)
     identities = {row.id: conversation_identity(directory / "sessions" / row.id) for row in rows}
     attention: dict[str, dict[str, Any]] = {}
     try:

@@ -343,3 +343,84 @@ def test_the_retention_guard_still_ranks_an_archived_session(tmp_path: Path) -> 
     set_archived(tmp_path, B, True)
 
     assert set(_picker_rows(tmp_path)) == {A, B}
+
+
+# ---------------------------------------------------------------------------
+# The LIVE row: the second place the predicate has to be asked (QA round 1, Q1)
+# ---------------------------------------------------------------------------
+
+
+def _publish_live(root: Path, session_id: str, name: str = "synthetic owner record") -> None:
+    """A running owner's discovery record for ``session_id``.
+
+    Through the real writer with the real model, because ``decorate_rows`` reads
+    the registry's own ``scan``/``classify`` and a hand-written JSON file would
+    agree with a wrong implementation. ``os.getpid()`` is alive and the heartbeat
+    is stamped by ``publish``, which is what makes the record classify ``live``.
+    """
+    import os
+
+    from local_operator.session.runtime.registry import publish
+    from local_operator.session.runtime.types import SessionRecord
+
+    publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=session_id,
+            conversation_name=name,
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="synthetic",
+        ),
+        root,
+    )
+
+
+def _transcript_less_session(root: Path, session_id: str) -> Path:
+    """A user's session directory the SCAN cannot carry, so a live row is needed.
+
+    No transcript and no inbox means no activity, so ``_scan_sessions`` emits no
+    row for it — the exact population ``decorate_rows(include_live=True)``
+    re-adds from the registry, which is where the archive predicate was missing.
+    """
+    directory = root / "sessions" / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "created_at.json").write_text("1700000000", encoding="utf-8")
+    return directory
+
+
+def test_a_live_archived_session_is_not_offered_and_is_stamped_when_revealed(
+    tmp_path: Path,
+) -> None:
+    """THE DEFECT QA FOUND (Q1), at the catalogue it was found in.
+
+    The live row is appended from the REGISTRY, which knows nothing about
+    archives, so an archived conversation that is still running was re-added
+    with the dataclass default — offered by the sidebar and reported
+    ``archived: false`` while the store held it archived. That is the flow the
+    command exists for: ``/archive`` acts on the CURRENT conversation.
+    """
+    _transcript_less_session(tmp_path, A)
+    _transcript_less_session(tmp_path, B)
+    _publish_live(tmp_path, A)
+
+    # The live row is listed while it is not archived — the mechanism still works.
+    assert [entry.id for entry in load_catalog(tmp_path)] == [A]
+
+    set_archived(tmp_path, A, True)
+
+    assert load_catalog(tmp_path) == [], "a live archived row is not offered"
+    [entry] = load_catalog(tmp_path, include_archived=True)
+    assert entry.id == A
+    assert entry.row.archived is True, "the re-added row must carry the store's answer"
+
+    # ...and the other live-shaped surface's sibling, the row with a transcript,
+    # is unaffected: that one comes from the scan and was always stamped.
+    _session(tmp_path, B)
+    set_archived(tmp_path, B, True)
+    assert {entry.id for entry in load_catalog(tmp_path)} == set()
+    assert {
+        entry.id: entry.row.archived for entry in load_catalog(tmp_path, include_archived=True)
+    } == {A: True, B: True}

@@ -454,3 +454,63 @@ async def test_the_command_route_answers_the_delete_action_rather_than_running_i
     assert result["result"]["kind"] == "native_action"
     assert result["result"]["data"]["submit"]["method"] == "DELETE"
     assert (root / "sessions" / MINE).is_dir(), "the server must not have deleted anything"
+
+
+# ---------------------------------------------------------------------------
+# The LIVE row, over the wire (QA round 1, Q1's second surface)
+# ---------------------------------------------------------------------------
+
+
+def _publish_live(root: Path, session_id: str) -> None:
+    """A running owner's discovery record, through the real writer.
+
+    ``decorate_rows`` reads the registry's own ``scan``/``classify``, so a
+    hand-written record file would agree with a wrong implementation; the live
+    pid and the heartbeat ``publish`` stamps are what make it classify ``live``.
+    """
+    from local_operator.session.runtime.registry import publish
+    from local_operator.session.runtime.types import SessionRecord
+
+    publish(
+        SessionRecord(
+            pid=os.getpid(),
+            kind="tui",
+            session_id=session_id,
+            conversation_name="synthetic owner record",
+            cwd=str(root),
+            model_label="test/model",
+            control_port=0,
+            control_key="synthetic",
+        ),
+        root,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_live_archived_session_is_hidden_and_stamped_over_the_wire(archive_api) -> None:
+    """The catalogue route must agree with the archive store about a LIVE session.
+
+    THE DEFECT QA FOUND (Q1): the live row is appended by
+    ``decorate_rows`` from the registry, which knows nothing about archives, so
+    this endpoint answered a row for an archived conversation carrying
+    ``archived: false`` — while the same request family returned
+    ``archived: true`` for that id under ``include_archived``. Two answers about
+    one row, and the row was the conversation a user archives from inside it.
+    """
+    client, root = archive_api
+    directory = root / "sessions" / MINE
+    directory.mkdir(parents=True)
+    (directory / "created_at.json").write_text("1700000000")
+    _publish_live(root, MINE)
+
+    listed = _rows((await client.get("/v1/desktop/sessions")).json())
+    assert {row["id"]: row["archived"] for row in listed} == {MINE: False}
+
+    assert (await _archive(client, MINE)).status_code == 200
+
+    listed = _rows((await client.get("/v1/desktop/sessions")).json())
+    assert MINE not in {row["id"] for row in listed}, "no live row for an archived session"
+
+    revealed = _rows((await client.get("/v1/desktop/sessions?include_archived=true")).json())
+    row = next(item for item in revealed if item["id"] == MINE)
+    assert row["archived"] is True, "the row the reveal returns must state the truth"

@@ -135,6 +135,16 @@ same call the automatic path makes). The pin store, the archive store and the
 search cache need nothing: the first two prune at read, and the cache is keyed by
 ids a caller lists.
 
+**The LIVE row is the second place the predicate is asked.** A session directory
+the scan cannot rank (no transcript, no inbox — a conversation whose owner is
+running but which has not been written to yet) is re-added to the catalogue from
+the RUNTIME REGISTRY by `catalog.decorate_rows(include_live=True)`. That walk
+knows nothing about archives, so it asks the same index, skips a live archived id
+unless the caller asked for archived rows, and stamps `archived` from the store
+rather than from the dataclass default — the omission that made the sidebar and
+`GET /v1/desktop/sessions` disagree with the store about a session a user had
+just archived from inside it (QA round 1, Q1).
+
 **The refusal is a sentence, not a status.** The desktop route answers 409 with
 `{"code": "session_delete_refused", "message": "<the sentence>"}` — the code is
 the machine contract, the sentence names the remedy, and a client that rendered
@@ -142,20 +152,53 @@ only the code would have to invent four remedies itself.
 
 ## 5. Surfaces
 
+**Where the three commands run, and why that is the frontend's own process.**
+`/archive`, `/unarchive` and `/delete` are `_FRONTEND_LOCAL_SLASHES`
+(`session/frontend_state.py`), answered by the terminal the user is typing in
+rather than routed to the session's runtime owner — `/stop`'s classification, for
+`/notifications`' machine-boundary reason plus one of its own:
+
+* The store they write is `config_dir()/archived-sessions.json` and the session
+they remove is a directory in `config_dir()/sessions/`. Both are THIS machine's,
+and so is the sidebar and picker that render the result. Routed, a follower
+attached to a runtime on another host would archive a conversation on the
+runtime's machine while the receipt promised the sidebar on screen.
+* **The conversation a user wants to delete is the one they are in, and by
+  construction it has a live owner.** An attached viewer's owner holds both
+  `.session.pid` and `.execution-lease`, so the owner-side delete is refused by
+the same guard it applies to every other session. The reachable flow is
+`/stop` — which releases both markers — then `/delete`, and that only works if
+`/delete` is answered here: a stopped facade's pre-route answer ("this session
+was stopped; /resume …") intercepts every *routed* command, so the remedy the
+refusal sentence names could not be carried out in the terminal that printed it
+(review round 1, MAJOR-1). The refusal sentence is unchanged and still accurate;
+what changed is that carrying it out now works.
+
 * **TUI.** `/archive` (acts on the current session, receipt names the way back),
   `/unarchive` (offered ONLY while the current session is archived, filtered out
   of the suggestion list; typed when it does not apply it answers with a sentence
   rather than silence), `/delete` (typed confirmation: bare `/delete` is a
   rehearsal that reports exactly what the real one would remove, `/delete yes`
   performs it; the picker paints the row as dangerous and one Enter only fills
-  the word). After a successful delete of the current session the app lands on a
-  fresh conversation, because the one it was standing on no longer exists.
+  the word). A successful delete of the current session lands the app on a fresh
+  conversation, because the one it was standing on no longer exists — reachable
+  from an attached viewer as `/stop` then `/delete yes`, and from any viewer whose
+  session is not held by a live owner directly. A viewer attached to an owner
+  running OLDER code advertises these three as `authoritative_session` from a
+  capability snapshot taken when the socket opened; the frontend's own
+  classification wins over that advertisement, so the local answer runs either
+  way.
 * **`/resume` picker.** Archived rows are excluded from the list and from search;
   an `Archived (N)` toggle at the top of the list pane reveals them, is
   **clickable** as well as reachable by `ctrl+a`, and is drawn **only when the
   store actually holds an archived conversation**. Revealed rows carry an
   `[archived]` mark, and the column's cells are reserved for the whole result set
-  so the mark does not rag the name column.
+  so the mark does not rag the name column. The reveal filters on the row's NAME
+  and ID only, never its body — the picker's filter was never a body search for
+  any session (the body digest index is built for the search surfaces), so the
+  toggle reveals a POPULATION rather than changing how filtering works. The
+  desktop search, which a user reaches when searching textually, DOES match body
+  text through `include_archived` (QA round 1, Q2).
 * **Desktop.** `GET /v1/desktop/sessions?include_archived=`,
   `GET /v1/desktop/sessions/search?include_archived=`, `POST .../{id}/archive`
   (desired state, receipt-free, idempotent) and `DELETE .../{id}` with a required
@@ -187,3 +230,12 @@ only the code would have to invent four remedies itself.
   accept is not a conversation the store can hide.
 * **No undo for delete.** It is a removal; the guards and the confirmation are the
   whole of the protection, and nothing is kept on the side.
+* **The archive is capped at 200 conversations, and reaching the cap puts the
+  OLDEST one back in every list.** `ARCHIVED_LIMIT` bounds the file by dropping
+  its oldest entry, so archiving a 201st conversation makes the first one
+  reappear in the picker, the sidebar, the desktop catalogue and search. The
+  receipt says so at the moment it happens, naming the conversation that came
+  back (`session.archived.eviction_clause`), because silence there reads as the
+  archive forgetting — and the desktop route cannot say it on the wire: the
+  response shape is frozen and carries state, not a report (review round 1,
+  MINOR-2).

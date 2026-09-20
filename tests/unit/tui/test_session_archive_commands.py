@@ -28,12 +28,20 @@ from pathlib import Path
 
 import pytest
 
-from local_operator.session.archived import read_archived
+from local_operator.session.archived import ARCHIVED_LIMIT, read_archived
 from local_operator.tui.app import OperatorApp
 from local_operator.tui.widgets.command_picker import PickerMode
 from local_operator.tui.widgets.editor import Editor
 from local_operator.tui.widgets.transcript import NoticeBlock, TranscriptView
-from tests.unit.tui.test_app_pilot import FakeSession, _factory, _resume_factory
+from tests.unit.tui.test_app_pilot import (
+    FakeSession,
+    _await_session,
+    _factory,
+    _resume_factory,
+    _StoppedFollowerSession,
+    _transcript_text,
+    _unwrapped,
+)
 from tests.unit.tui.test_slash_echo import _submit
 
 SESSION = "sess"
@@ -277,3 +285,145 @@ async def test_the_delete_row_is_painted_dangerous_and_one_enter_only_fills_it(
             if not (root / "sessions" / SESSION).exists():
                 break
         assert not (root / "sessions" / SESSION).exists(), "the second Enter is the confirmation"
+
+
+# ---------------------------------------------------------------------------
+# The state a user is ACTUALLY in: an attached viewer, and a stopped one
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_works_on_a_stopped_owner_that_still_advertises_the_slash(
+    root: Path,
+) -> None:
+    """``/delete yes`` removes the conversation in the state ``/stop`` leaves behind.
+
+    THE DEFECT THIS PINS (review round 1, MAJOR-1) was not in the delete itself
+    but in where the command was answered. ``/delete`` was classified
+    ``authoritative_session``, so it routed to the runtime owner — and the
+    conversation a viewer is standing in is by construction the one with a live
+    owner, which holds both ``.session.pid`` and ``.execution-lease``, so the
+    owner refused with "open in a running session. Stop it before deleting it."
+    Stopping did not help: a stopped facade's pre-route answer ("this session was
+    stopped; /resume …") intercepts every ROUTED command, so the remedy the
+    sentence named could not be carried out in the terminal that printed it.
+
+    Two claims are therefore asserted together, and either one alone would pass
+    on the broken build:
+
+    * **NOTHING IS ROUTED** — ``session.routed`` stays empty, which is what the
+      frontend-local classification buys;
+    * **THE CONVERSATION IS GONE** — the directory is removed and the app booted
+      a fresh conversation, which is what the pre-route exemption buys (the
+      fixture advertises ``delete`` as authoritative from the STALE capability
+      snapshot an owner leaves behind, so a pre-route that trusted the
+      advertisement alone would answer "/resume" here and delete nothing).
+    """
+    boots: list[str | None] = []
+    session = _StoppedFollowerSession(cold=True, commands=("model", "delete", "archive"))
+    app = OperatorApp(lambda: _factory(session), resume_factory=_resume_factory(boots))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        # The viewer is a follower whose owner was stopped: the id is recorded
+        # before the socket closes, and the facade is cold.
+        app._stopped_session_id = SESSION
+        app._run_slash_command("/delete yes")
+        # The receipt is published ACROSS the transition to the fresh
+        # conversation, so the screen is mid-rebuild for a tick: wait for the
+        # directory to be gone AND the transcript to be back before reading it.
+        for _ in range(60):
+            await pilot.pause()
+            if not (root / "sessions" / SESSION).exists() and app.query(TranscriptView):
+                break
+        receipt = _unwrapped(_transcript_text(app))
+
+    assert session.routed == [], "the command must be answered by this frontend"
+    assert not (root / "sessions" / SESSION).exists()
+    assert "deleted" in receipt, receipt
+    assert boots == [None], boots
+
+
+@pytest.mark.asyncio
+async def test_archive_on_a_stopped_owner_writes_this_terminals_store(root: Path) -> None:
+    """``/archive`` hides the row THIS sidebar paints, even on a stopped follower.
+
+    The wrong-machine half of MAJOR-1: the store is ``config_dir()/
+    archived-sessions.json`` and the sidebar and picker read THAT file, so
+    routing the write to a runtime would hide the conversation on the runtime's
+    host while the receipt promised the sidebar in front of the user.
+    """
+    session = _StoppedFollowerSession(cold=True, commands=("model", "archive"))
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _await_session(app, pilot)
+        app._stopped_session_id = SESSION
+        app._run_slash_command("/archive")
+        await pilot.pause()
+        await pilot.pause()
+
+    assert session.routed == []
+    assert read_archived(root) == [SESSION], "the local root's store is the one written"
+
+
+# ---------------------------------------------------------------------------
+# The conditional offer survives every path that re-hands the composer a list
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_closing_an_aside_does_not_re_offer_unarchive(root: Path) -> None:
+    """The aside-close restore path hands over the INVOKER's list (MINOR-1).
+
+    ``_close_aside`` used to hand the composer the raw registry while its sibling
+    restore path had already been moved to ``_offered_commands()``, so opening
+    and closing an aside on any session re-offered ``/unarchive`` for a
+    conversation that is not archived — the one command whose contract is that it
+    appears only in the state it can act on.
+    """
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        before = _offered(app)
+        assert "unarchive" not in before
+
+        app._open_aside()
+        await pilot.pause()
+        assert app._close_aside() is True
+        await pilot.pause()
+
+        assert _offered(app) == before, _offered(app) - before
+        assert "unarchive" not in _offered(app)
+
+
+# ---------------------------------------------------------------------------
+# The cap's consequence is said out loud when it happens
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reaching_the_cap_names_the_conversation_put_back_in_the_lists(
+    root: Path,
+) -> None:
+    """Archiving the 201st conversation revives the oldest, and the receipt says so.
+
+    ``ARCHIVED_LIMIT`` bounds the FILE by dropping its oldest entry, which puts a
+    conversation the user deliberately hid back into the picker, the sidebar, the
+    desktop catalogue and search. Silence there reads as the archive forgetting
+    (review round 1, MINOR-2), so the evicted id is named in the receipt.
+    """
+    filled = [f"{index:012x}" for index in range(ARCHIVED_LIMIT)]
+    for session_id in filled:
+        (root / "sessions" / session_id).mkdir(parents=True)
+    (root / "archived-sessions.json").write_text(json.dumps(filled), encoding="utf-8")
+
+    app = OperatorApp(lambda: _factory(FakeSession()))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        await _submit(pilot, app, "/archive")
+
+        receipt = _notices(app)
+        assert SESSION in receipt
+        assert filled[-1] in receipt, "the evicted conversation is named"
+        assert f"at most {ARCHIVED_LIMIT}" in receipt, receipt
+        assert read_archived(root)[0] == SESSION
+        assert filled[-1] not in read_archived(root)
