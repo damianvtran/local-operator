@@ -2950,9 +2950,7 @@ def _read_staged_as_root_owned(config_root: Path) -> Any:
     body = _json.loads(staging_path(config_root).read_text())
     parsed = OperatorAnchor.from_json(body)
     assert parsed is not None, "the rig staged an anchor the product cannot parse"
-    return AnchorLoad(
-        anchor=parsed, path=anchor_path(), root_owned=True, exists=True, reason="ok"
-    )
+    return AnchorLoad(anchor=parsed, path=anchor_path(), root_owned=True, exists=True, reason="ok")
 
 
 @pytest.mark.asyncio
@@ -3254,6 +3252,6 @@ def test_the_prompt_copy_is_wired_at_the_surfaces_that_can_show_it() -> None:
         for node in ast.walk(app_tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert "set_operator_prompt_notice" in called, (
-        "nothing installs the pane's prompt handler, so the copy has nowhere to land"
-    )
+    assert (
+        "set_operator_prompt_notice" in called
+    ), "nothing installs the pane's prompt handler, so the copy has nowhere to land"
