@@ -952,8 +952,11 @@ def format_shape_incident_message(
     that text is journaled in plaintext, replays into later requests, and may end
     up in training data, and none of that can be undone by anyone here — so the
     operator has to rotate the credential, and that is the escalated text. That
-    case is exactly the one the mask could not cover, and it is carried in by
-    ``reached_model``.
+    case is the one where readable credential material survives in the text the
+    model reads — which is NOT always a mask that fell short, because a rule can
+    preserve a run by design (the DSN rule keeps its userinfo username, so
+    ``amqp://guest:guest@…`` reads back the password as the username) — and it is
+    carried in by ``reached_model``.
 
     Everything else is CONTAINED. A value that reached `bash` (in a command's
     ``argv``, in a child's environment), that lived in this process's memory, or
@@ -993,10 +996,21 @@ def format_shape_incident_message(
     # on "[credential redaction] " (``harness/rows.py``), and a row that painted as
     # the user's own words would be worse than a jargon-first one.
     if reached_model:
+        # The CAUSE has to be true in both directions the escalation covers. The
+        # `amqp` DSN case masks its password whole and still escalates, because the
+        # DSN rule keeps the userinfo username by design and an operator who used
+        # one string for both leaves the value readable there — so "could not be
+        # fully masked" named a mechanism this notice cannot prove, and this
+        # module's doctrine is that an unprovable claim is worse than silence
+        # (agent review R2, finding 1). What the check measured is stated instead:
+        # the value is readable in the text the model gets, by either route, and
+        # the notice does not pick one it cannot distinguish. The rotate
+        # instruction is untouched — it is the reason the wording exists.
         return (
             f"[credential redaction] rotate it — a credential ({shapes}) reached "
-            f"{tool_name} and could not be fully masked, so it is in this "
-            f"session's context.{where} A value that reached the model may be in "
+            f"{tool_name} and its value is readable in this session's context: "
+            f"either the mask did not cover it fully, or it survives in the text "
+            f"another way.{where} A value that reached the model may be in "
             "training data, so treat it as compromised: the operator has to rotate "
             "it. Do not re-run the command to read the value."
         )

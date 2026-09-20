@@ -1060,12 +1060,18 @@ def _fold_incident_row(custom_type: str, text: str) -> list[str]:
 #:   IS masked, and what survives is the host and path, which stay readable BY DESIGN
 #:   (the operator needs to see which endpoint was called). Not secret material.
 _PARTIAL_MASK_RESIDUAL = {
-    # All three of these are the SYNTHETIC case only, and the proof is the same one:
-    # the quote is injected INSIDE the fixed marker phrase (`-----B'EGIN RSA PRIVATE
-    # KEY-----`) or inside a PEM body, and NEITHER ALPHABET CONTAINS A QUOTE — a PEM
-    # header is dashes, spaces and capitals, and a body is base64 (`A-Za-z0-9+/=`). A
-    # quote cannot occur there in real output, which is why these counts are allowed
-    # to stand rather than fixed.
+    # The two PEM/body classes are the SYNTHETIC case only, and the proof is the
+    # same one: the quote is injected INSIDE the fixed marker phrase (`-----B'EGIN
+    # RSA PRIVATE KEY-----`) or inside a PEM body, and NEITHER ALPHABET CONTAINS A
+    # QUOTE — a PEM header is dashes, spaces and capitals, and a body is base64
+    # (`A-Za-z0-9+/=`). A quote cannot occur there in real output, which is why
+    # these counts are allowed to stand rather than fixed.
+    # `credential-url-value` is NOT this case — its value class is a whole URL and
+    # DOES contain a quote — and it has its own reason in the bullet above (the
+    # password inside it IS masked; the host and path stay readable BY DESIGN).
+    # Splitting the two was a correction: this comment used to claim all three
+    # classes rested on the alphabet argument we could not make for the third
+    # (agent review R2, finding 4).
     #
     # The numbers fall as real fixes land and must be updated in the SAME commit as
     # the fix that moves them (the ratchet asserts exact equality): `pem-private-key`

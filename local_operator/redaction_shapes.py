@@ -1861,6 +1861,36 @@ class _GramIndex:
     is genuinely SLOWER than the loop it replaces, and the memory is proportional to
     the text. Both facts are why it stays lazy and why most results never touch it.
 
+    **How large that memory gets, measured, because 76 MB is the small end and
+    nothing below bounds it (agent review R2, finding 2).** The peak is set by the
+    TEXT and not by the credential — one six-character run per text position, each a
+    fresh string rather than a slice, at roughly **100 bytes of transient set per
+    byte of text** — so it grows linearly with no plateau. Measured through the
+    shipped entry point on this host, one masked 40-character credential inside a
+    high-entropy hex result, one process per reading (peak RSS delta against the
+    same text built without the scan; the pre-index column is
+    ``_credential_fragments_survive`` at ``91d70791``):
+
+    * 1 MB text — pre-index **3.0 MB**, this index **101.7 MB** (~761,000 runs),
+      and the index is slower here too: **0.39 s** against **0.25 s**, because the
+      mask pass dominates and the build is pure addition. In the single-hit shape it
+      is therefore strictly memory-negative — it buys no wall time and pays ~100 MB;
+    * 4 MB text — this index **391.0 MB** (~2,719,000 runs), i.e. the same ~98 bytes
+      per text byte, i.e. linear in the text.
+
+    So a multi-megabyte tool result carrying ONE secret pays hundreds of megabytes
+    transiently, on a check that runs per tool result. Read the ratio rather than
+    the megabyte — the absolute figure follows the text's distinct-run count (1 MB
+    of one repeated line is far cheaper than 1 MB of random hex) — and read it as a
+    disclosure, not a bound: the build is bounded only by the length of the text
+    handed in.
+
+    Reproduce a row by loading this module by path in one process (it has no
+    intra-package imports, so the pre-index revision loads beside it), building the
+    text, and diffing ``resource.getrusage(RUSAGE_SELF).ru_maxrss`` around a single
+    ``scrub_shapes_with_hits`` call — one process per reading, since ``ru_maxrss`` is
+    a high-water mark and never falls back.
+
     LAZY, because most results contain no hit at all: nothing is built unless a hit
     needs a fragment tested, so the ordinary-text path is untouched. Most results
     are also far too small for either side to matter — every text in the credential
@@ -1870,10 +1900,10 @@ class _GramIndex:
     writes, never material a mask left behind, and a run straddling one would
     otherwise match a credential whose own value IS the marker — the two ``.npmrc``
     cases and the cookie-header case QA round 1 found escalating on nothing readable
-    at all. The seam the strip creates is harmless (a credential's
-    own characters are never joined by it, and a seam match would require the value
-    to spell the joined run contiguously, which is a real survivor anyway); what it
-    does cost is stated in :func:`_credential_fragments_survive`.
+    at all. The seam the strip creates is harmless (a credential's own characters
+    are never joined by it, and a seam match would require the value's characters
+    to be readable on both sides of a marker, which is a real survivor anyway); what
+    it does cost is stated in :func:`_credential_fragments_survive`.
     """
 
     __slots__ = ("_text", "_grams")
