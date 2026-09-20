@@ -1,5 +1,34 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @import "./themes.generated.css";
+
+/*
+ * EXPLICIT SOURCES — `source(none)` above, and the two `@source` globs below.
+ *
+ * Tailwind's automatic detection resolves a project root out of whatever
+ * surrounds the stylesheet. That works in this checkout, where the `.git` root
+ * and its ignore rules are above it, and it produced NOTHING in an installed
+ * tree — `site-packages/`, or a `lop-update` generation snapshot under
+ * /var/folders — so `pnpm build` exited 0 with a utility-less 31 kB stylesheet:
+ * the phone rendered unstyled, no error, no warning, nothing in a log to say
+ * why. Naming the candidates here makes the emitted CSS a function of the
+ * sources alone, so an installed tree builds what this checkout builds.
+ *
+ * The two globs are the candidate set the repo build already scanned, checked
+ * by byte-identity with the published bundle (dist/assets/*.css must be
+ * 50253 bytes for these sources; `scripts/check-bundle.mjs` fails the build if
+ * it is not). `src/` carries every class the app names today; `index.html` is
+ * here because it is the entry document and the one place a class could be
+ * added without touching `src/`.
+ */
+@source "../**/*.{ts,tsx}";
+@source "../../index.html";
+/* `scripts/` only because the PUBLISHED 0.59.11 bundle carries a rule this
+ * tree's sources never name: `.bg-canvas`, a utility contributed by a class
+ * name mentioned in a comment in scripts/generate-theme-css.mjs, which
+ * automatic detection scanned. Matching the published bytes exactly is the
+ * point — a build that silently drops a selector is the defect being fixed,
+ * not the shape of the fix — so the file the reference got it from is listed. */
+@source "../../scripts/*.mjs";
 
 /*
  * The single token source for the phone web client.
