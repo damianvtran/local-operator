@@ -561,3 +561,146 @@ def test_the_phrase_less_signal_frame_is_read_as_a_signal() -> None:
     # with the sentence true of any drain.
     assert leaving_phrase_for_frame("", "") == ""
     assert leaving_phrase_for_frame("something a newer build invented", "") == ""
+
+
+# --- when each way out is armed ---------------------------------------------
+# ``amain`` has three ways to be asked to leave: SIGTERM, SIGINT and the socket
+# ``stop`` op. The signals are armed by ``install_loop_signal_handlers``, the op
+# by assigning ``handle.on_stop_requested``, and both must happen BEFORE
+# ``RuntimeServer.start()`` — the statement that publishes the record every
+# sender reads to find this process. Pinned against the source, because the
+# runtime observable is a race and a passing race is not evidence.
+
+#: The PRE-FIX statement order, kept as the negative control for the check
+#: below: this is what ``amain`` looked like while the window was open (the
+#: handlers armed after the wait for publication, the stop hook after that).
+_PRE_FIX_ARMING_ORDER = """\
+async def amain() -> int:
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    await runtime.wait_until_published()
+
+    def _on_signal(sig: object) -> None:
+        stop.set()
+
+    install_loop_signal_handlers(loop, {})
+    handle.on_stop_requested = _on_socket_stop
+    return 0
+"""
+
+
+def _arming_lines(source: str) -> dict[str, int]:
+    """Where in ``amain``'s OWN body each way out is armed, as statement line numbers.
+
+    PARSED, NOT SUBSTRING-MATCHED — and a paragraph is not a statement. This
+    file's sibling ``test_inbox`` lost that argument once already: its ordering
+    assertion was written with ``source.index(...)`` and spent a while passing
+    against the comment that explained the move it was supposed to police.
+
+    A nested scope is excluded, which matters here rather than being tidiness:
+    the signal handler IS a nested ``def``, and a call inside one is not part of
+    the statement order this asserts.
+    """
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(source))
+    body: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(tree.body[0]))
+    while stack:
+        node = stack.pop()
+        body.append(node)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+
+    runtime = ""
+    for node in body:
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "RuntimeServer"
+        ):
+            runtime = getattr(node.targets[0], "id", "")
+    assert runtime, "amain no longer constructs a RuntimeServer"
+
+    lines: dict[str, int] = {}
+    for node in body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.attr == "on_stop_requested"
+                ):
+                    lines.setdefault("socket_hook", node.lineno)
+        if not isinstance(node, ast.Call):
+            continue
+        called = node.func
+        if isinstance(called, ast.Name) and called.id == "install_loop_signal_handlers":
+            lines.setdefault("install", node.lineno)
+        if (
+            isinstance(called, ast.Attribute)
+            and called.attr == "start"
+            and isinstance(called.value, ast.Name)
+            and called.value.id == runtime
+        ):
+            lines.setdefault("start", node.lineno)
+    missing = {"install", "start", "socket_hook"} - set(lines)
+    assert not missing, f"amain no longer arms {sorted(missing)}"
+    return lines
+
+
+def test_the_ways_out_are_armed_before_the_record_makes_this_process_addressable() -> None:
+    """THE ordering guarantee, asserted against the source that provides it.
+
+    MEASURED FAILURE THIS PINS. With the handlers installed after the wait for
+    publication, a runtime was addressable while a SIGTERM still killed it with
+    the default disposition: ``tests/e2e/test_signal_drain_e2e.py``'s idle cell
+    went red on CI twice, on two platforms, with exit ``-15`` and an EMPTY
+    runtime-log tail apart from the interpreter's default kill (no
+    ``exiting (SIGTERM`` line at all), which is the whole symptom — the record
+    was never unpublished, the lease was never released, and the documented
+    drain never ran, because the process simply stopped.
+
+    WAITING ON PUBLICATION IS NOT A SUBSTITUTE, which is what made the window
+    reachable: ``wait_until_published`` settles at the END of ``_serve``'s boot
+    prologue, so the record — written inside ``RecordPublisher.__init__`` — is
+    already readable for as long as those two boot registrations take to come
+    back from the session's loop.
+
+    THE SOCKET HOOK IS THE SAME WINDOW, IN A QUIETER SHAPE, which is why it is
+    asserted here too: ``ServingSessionHandle.request_stop`` falls back to
+    disposing the session in place when ``on_stop_requested`` is unset, and that
+    fallback sets no stop event, so a ``stop`` op landing before the assignment
+    leaves a runtime that never exits, behind a record that still reads live.
+
+    ASSERTED STRUCTURALLY, on the order of the statements, because there is no
+    runtime observable that distinguishes "armed first" from "armed fast
+    enough": the e2e cell that catches this is a schedule accident — it PASSED
+    on the unfixed tree on this host — so its green is not evidence the
+    ordering holds. This fails if either arming moves back below ``start()``.
+    """
+    import inspect
+
+    real = _arming_lines(inspect.getsource(process.amain))
+    assert real["install"] < real["start"], (
+        "the SIGTERM/SIGINT handlers must be installed BEFORE RuntimeServer.start(): "
+        "start() is what publishes the record on its thread, and the record is what "
+        "makes this process addressable — a signal in that window kills the runtime "
+        "with the default disposition, unpublishing nothing and releasing no lease"
+    )
+    assert real["socket_hook"] < real["start"], (
+        "the socket stop hook must be armed BEFORE RuntimeServer.start(), for the same "
+        "reason and in the same window: an unset on_stop_requested makes request_stop "
+        "dispose in place and set no stop event, so the process would never exit"
+    )
+
+    # THE CHECK DISCRIMINATES, asserted rather than assumed: the pre-fix order
+    # must read as out of order, or this cell is decoration that can never go
+    # red — the failure mode AGENTS.md's "Prove the test can still fail" exists
+    # for. Both arming sites are checked, so swapping either one back is caught.
+    before = _arming_lines(_PRE_FIX_ARMING_ORDER)
+    assert before["install"] > before["start"]
+    assert before["socket_hook"] > before["start"]
