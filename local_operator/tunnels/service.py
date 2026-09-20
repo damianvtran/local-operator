@@ -8,29 +8,83 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime
 import os
 import shutil
 import signal
 import socket
 import subprocess
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
 import httpx
 
 from local_operator.mobile.auth import load_password
 from local_operator.procstate import install_loop_signal_handlers
-from local_operator.tunnels import config
+from local_operator.providers.auth_store import CredentialInvalidError
+from local_operator.tunnels import config, state
 from local_operator.tunnels.api import RadientTunnels
-from local_operator.tunnels.gateway import REFUSED, UNREACHABLE, Gateway
+from local_operator.tunnels.errors import (
+    LocalPrerequisite,
+    LoginRequired,
+    ReenrolmentRequired,
+)
+from local_operator.tunnels.gateway import (
+    LOCAL_PREREQUISITE,
+    LOGIN_REQUIRED,
+    REENROLMENT_REQUIRED,
+    REFUSED,
+    TERMINAL_DETAIL,
+    UNREACHABLE,
+    Gateway,
+)
 
 POLL_SECONDS = 10
+
+#: The kinds a supervisor must never retry, because nothing the process can do
+#: changes them: each one needs an act by the operator.
+PARKING_KINDS = frozenset({"terminal_login", "terminal_remote", "terminal_config"})
+
+
+class Failure(NamedTuple):
+    """What a failure means for the supervisor, not what it said.
+
+    ``reason`` and ``detail`` come from `gateway`'s vocabulary wherever it has
+    an entry, because the same cause reaches a phone's 503, `lop tunnel
+    status` and this service log, and one cause must not become three wordings.
+    """
+
+    kind: Literal["transient", "terminal_login", "terminal_remote", "terminal_config", "crash"]
+    reason: str
+    detail: str
+
+
+def _announce(message: str) -> None:
+    """One timestamped, self-describing line: this log's only shape.
+
+    launchd and systemd capture this process's stdout verbatim, so these lines
+    are read beside every other unit's and by an operator who was not watching
+    when they were written. Until this existed they carried neither a time nor
+    which process authored them: the incident's 870 restarts left 870 identical
+    sentences with no way to tell a dead grant from a first attempt.
+
+    Local time with an explicit offset, not UTC: the question a line answers is
+    "when did this happen on this machine".
+    """
+    stamp = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+    print(f"{stamp} local_operator.tunnels.service: {message}", flush=True)
 
 
 def cloudflared_binary(configured: str | None = None) -> str:
     binary = configured or shutil.which("cloudflared")
     if not binary:
-        raise ValueError("Install cloudflared 2025.4.0 or newer, then run lop tunnel install.")
+        # LocalPrerequisite, not ValueError: the supervisor must stop retrying
+        # (see `classify_failure`), and the remedy is a local install that
+        # re-arms the connector.
+        raise LocalPrerequisite(
+            "Install cloudflared 2025.4.0 or newer, then run lop tunnel install."
+        )
     result = subprocess.run(
         [binary, "tunnel", "run", "--help"],
         capture_output=True,
@@ -38,7 +92,9 @@ def cloudflared_binary(configured: str | None = None) -> str:
         timeout=10,
     )
     if result.returncode or "--token-file" not in result.stdout:
-        raise ValueError("Update cloudflared to 2025.4.0 or newer (token-file support required).")
+        raise LocalPrerequisite(
+            "Update cloudflared to 2025.4.0 or newer (token-file support required)."
+        )
     return binary
 
 
@@ -124,15 +180,36 @@ def enforce_harness_ports(connection: dict[str, Any], value: dict[str, Any]) -> 
             # remedy is the same, but reporting it as a port change describes
             # an event that did not happen and sends the operator hunting for
             # a port they never set.
-            raise ValueError(
+            raise ReenrolmentRequired(
                 f"Harness {harness['id']} is not approved on this device. "
                 "Run lop tunnel connect again."
             )
         if approved != harness["port"]:
-            raise ValueError(
+            raise ReenrolmentRequired(
                 f"Harness port for {harness['id']} changed in the console. "
                 "Run lop tunnel connect again."
             )
+
+
+def _failure_chain(failure: BaseException) -> Iterator[BaseException]:
+    """The failure and everything it was chained from, each visited once.
+
+    Both links are followed, deliberately, including a context Python would
+    otherwise suppress: the questions asked of the chain (did we reach the
+    control plane at all? did the store judge the grant dead?) are about what
+    happened, not about which link the raise site chose to publish. The walk is
+    depth-first and the order does not matter, because every question is a
+    boolean; the `seen` set is what makes a self-referential chain terminate.
+    """
+    seen: set[int] = set()
+    pending: list[BaseException] = [failure]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        pending.extend(link for link in (current.__cause__, current.__context__) if link)
 
 
 def _could_not_reach_control_plane(failure: BaseException) -> bool:
@@ -147,22 +224,23 @@ def _could_not_reach_control_plane(failure: BaseException) -> bool:
     it to "the login expired" is exactly the misdirection this classification
     exists to remove.
     """
-    seen: set[int] = set()
-    pending: list[BaseException] = [failure]
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, httpx.TransportError):
-            return True
-        # Both links, deliberately, including a context Python would otherwise
-        # suppress: this asks whether anything in the failure was a transport
-        # error, and the cost of missing one is an operator sent to /login for a
-        # network fault. The walk is depth-first — the stack is popped LIFO — and
-        # the order does not matter, because the answer is a boolean.
-        pending.extend(link for link in (current.__cause__, current.__context__) if link)
-    return False
+    return any(isinstance(link, httpx.TransportError) for link in _failure_chain(failure))
+
+
+def _is_a_dead_login(failure: BaseException) -> bool:
+    """Whether the credential store judged the tunnel's grant unusable.
+
+    Two signals, and the chain is what unifies them. `LoginRequired` is what the
+    tunnel client raises for the login cases it can name without echoing a
+    provider body; `CredentialInvalidError` is the store's own verdict, the same
+    one `/usage` and the routing cascade read. Reading the chain rather than the
+    outermost type is what keeps this correct if either wrapper changes: the
+    verdict belongs to the store, and the client is only its reporter.
+    """
+    return any(
+        isinstance(link, (LoginRequired, CredentialInvalidError))
+        for link in _failure_chain(failure)
+    )
 
 
 def authorization_failure_reason(failure: BaseException) -> str:
@@ -190,6 +268,114 @@ def authorization_failure_reason(failure: BaseException) -> str:
     return REFUSED
 
 
+def classify_failure(failure: BaseException) -> Failure:
+    """Decide whether the supervisor should retry this failure, or stop.
+
+    `run()` used to end every cold-start failure the same way: one sentence, exit
+    1, and a supervisor that restarts the unit forever (launchd
+    `KeepAlive{SuccessfulExit:false}` + `ThrottleInterval 10`). That is correct
+    for a fault that clears itself and catastrophic for one that cannot: the
+    incident this exists for logged 870 identical sentences over a dead login,
+    and the phone was unusable throughout.
+
+    So each failure is placed on one side of a single question — *can a retry
+    change the outcome?* — and an unclear answer stays on the retrying side. That
+    default is deliberate and asymmetric: parking WITHDRAWS remote access until a
+    person acts, so only a failure this function can name earns it, and a bug or a
+    cloud-side change we do not recognise keeps today's behaviour.
+
+    ``transient`` — a transport fault, or anything unclassified. Unchanged: exit
+    1, and the supervisor's 10-second floor is the documented backoff.
+
+    ``terminal_login`` — the store judged the grant dead (a token-endpoint
+    refusal, prose or code, or a row that no longer holds a usable credential).
+    Parked, and re-armed by the login that fixes it.
+
+    ``terminal_remote`` — the cloud's answer invalidates this device's enrolment
+    (a console harness or gateway-port change): the same local command that
+    renews the record is what clears the park.
+
+    ``terminal_config`` — a local prerequisite is missing. Parked; installing it
+    re-arms the connector.
+
+    ``crash`` — reserved for a failure raised outside this module's control;
+    `main` deliberately keeps propagating those (fail closed, with a traceback)
+    rather than parking on a shape it cannot describe.
+    """
+    if _could_not_reach_control_plane(failure):
+        return Failure("transient", UNREACHABLE, TERMINAL_DETAIL[UNREACHABLE])
+    if _is_a_dead_login(failure):
+        return Failure("terminal_login", LOGIN_REQUIRED, TERMINAL_DETAIL[LOGIN_REQUIRED])
+    if isinstance(failure, LocalPrerequisite):
+        # The sentence is the failure's own, and that is safe: every ValueError
+        # this package raises is a fixed module literal (see `main`), and these
+        # two kinds describe local state rather than anything a provider said.
+        return Failure("terminal_config", LOCAL_PREREQUISITE, str(failure))
+    if isinstance(failure, ReenrolmentRequired):
+        return Failure("terminal_remote", REENROLMENT_REQUIRED, str(failure))
+    # Everything else keeps today's behaviour, including a tunnel the cloud says
+    # is suspended or disabled: that one RESUMES by itself at the 10-second floor
+    # once the operator tops up credit or reactivates it (see the poller below),
+    # so parking it would delete a self-heal rather than remove a retry loop.
+    return Failure("transient", REFUSED, TERMINAL_DETAIL[REFUSED])
+
+
+def _park(verdict: Failure) -> None:
+    """Record the park and say so once, on a transition.
+
+    Exit 0, which is this module's documented "the supervisor must not retry"
+    idiom (`run`'s stopped branch) and the only one that works on both launchd
+    and systemd: neither can exempt a code under a successful-exit rule.
+    """
+    announce = state.mark_parked(
+        reason=verdict.reason, detail=verdict.detail, credential_id=_parked_credential_id()
+    )
+    if not announce:
+        # Rate-limited while unchanged, and the limit lives in the state file
+        # because the process is what a restart loop throws away. Silence here is
+        # the point: a second identical park is not news, and 870 repetitions of
+        # one sentence is what made the incident's log unreadable.
+        return
+    record = state.parked() or {}
+    remedy = record.get("remedy", {}).get("command", "")
+    _announce(
+        f"connector parked reason={verdict.reason} attempts={record.get('attempts', 1)}"
+        f"{f' — run {remedy}' if remedy else ''}: {verdict.detail}"
+    )
+
+
+def _parked_credential_id() -> int | None:
+    """The credential this device's tunnel owns, or None if that is unreadable.
+
+    Read here rather than threaded through `run` because the park is written by
+    `main`, which sees the failure and not the configuration, and because a
+    tunnel whose config cannot be read is exactly one of the failures that must
+    still record a reason.
+    """
+    try:
+        value = config.load()
+    except (OSError, ValueError):
+        return None
+    identifier = value.get("credential_id")
+    return identifier if isinstance(identifier, int) and not isinstance(identifier, bool) else None
+
+
+def _withdraw_park(*, because: str) -> None:
+    """Withdraw a park, saying once why it no longer describes this connector.
+
+    Every surface reads the state file as the truth about a process none of them
+    can see, so a park that outlived its condition would have the terminal, `lop
+    tunnel status` and the desktop route all describing a connector that is
+    running without it. Both callers pass the fact that made it false: the
+    connector is serving, or the connector is retrying (a transient fault means
+    it is NOT waiting for a person, whatever it was parked for before).
+    """
+    previous = state.parked()
+    state.clear()
+    if previous is not None:
+        _announce(f"park withdrawn ({because}); was reason={previous.get('reason')}")
+
+
 def active(record: Any) -> bool:
     return (
         isinstance(record, dict)
@@ -205,10 +391,23 @@ def active(record: Any) -> bool:
 async def run() -> int:
     import uvicorn
 
-    value = config.load()
+    try:
+        value = config.load()
+    except ValueError as failure:
+        # No tunnel configured on this device, or a config.json nothing can
+        # parse. No retry produces either, and every remedy (`lop tunnel create`,
+        # repairing the file) runs through `lop tunnel install`, which re-arms a
+        # parked connector.
+        raise LocalPrerequisite(str(failure)) from failure
     if value.get("stopped"):
         # A user-level service may run again at the next login. A persisted
         # explicit stop is successful, so supervisors must not keep retrying it.
+        #
+        # A park is withdrawn here too: a connector the operator stopped is not
+        # "waiting for a person" behind that stop, and a stale park would have
+        # the TUI and `lop tunnel status` describe a tunnel this file says is not
+        # in use at all.
+        state.clear()
         return 0
     binary = cloudflared_binary(value.get("cloudflared_path"))
     # Bind before contacting the cloud or starting cloudflared: a conflicting
@@ -241,11 +440,21 @@ async def run() -> int:
                 await api.request("POST", tunnel_path(value) + "/connect")
             )
             if not active(connection["tunnel"]):
+                # Deliberately NOT parked. A suspended or disabled tunnel resumes
+                # by itself — the operator tops up credit or reactivates it in the
+                # console and the next attempt (the supervisor's 10-second floor)
+                # picks it up, which is what this same branch documents in the
+                # poller below. Parking would trade retry noise for a device that
+                # does not come back until someone runs a local command, and no
+                # local command is the remedy here.
                 raise ValueError(
                     "Tunnel disabled or billing suspended. Review it in the Radient console."
                 )
             if connection["gateway_port"] != value["gateway_port"]:
-                raise ValueError(
+                # ReenrolmentRequired: retrying re-sends a /connect the cloud will
+                # keep answering the same way, and the remedy (lop tunnel connect)
+                # re-arms a parked connector.
+                raise ReenrolmentRequired(
                     "Gateway port changed in the console. Run lop tunnel connect again."
                 )
             enforce_harness_ports(connection, value)
@@ -257,7 +466,7 @@ async def run() -> int:
             if needs_mobile and password is None:
                 password = value.get("mobile_password")
             if needs_mobile and not password:
-                raise ValueError("Install the mobile relay with lop mobile install first.")
+                raise LocalPrerequisite("Install the mobile relay with lop mobile install first.")
             gateway = Gateway(
                 connection,
                 client,
@@ -351,6 +560,13 @@ async def run() -> int:
                             # Resume after console reactivation or a credit
                             # top-up. User services retry at their 10s floor;
                             # /connect refuses publication while suspended.
+                            #
+                            # Deliberately still a restart rather than a park, for
+                            # both conditions: a suspended tunnel clears at that
+                            # floor once the operator tops up, and a console change
+                            # makes the next /connect mint a fresh proof context. The
+                            # cold-start re-enrolment case is the one that cannot,
+                            # and that is where the park belongs.
                             restart = True
                             gateway.revoked = True
                             stop.set()
@@ -363,6 +579,10 @@ async def run() -> int:
 
             scanner = asyncio.create_task(poll())
             serve_task = asyncio.create_task(server.serve(sockets=[listener]))
+            # Serving, so the park is over: this is the only point at which the
+            # connector is genuinely back, and every surface reads the state file
+            # as the truth about a process none of them can see.
+            _withdraw_park(because="the connector is serving")
             stopping = asyncio.create_task(stop.wait())
             exited = asyncio.create_task(child.wait())
             try:
@@ -417,6 +637,7 @@ def main() -> int:
     try:
         return asyncio.run(run())
     except ValueError as failure:
+        verdict = classify_failure(failure)
         # Service logs contain operational state, never upstream bodies,
         # request URLs, or a traceback containing credential arguments, and
         # printing a ValueError's text keeps that property: every ValueError
@@ -429,14 +650,32 @@ def main() -> int:
         # This is the only place the remedy is written down: suppressing it is
         # what left the harness-port refusal telling the operator to check a
         # Radient login that is fine, with nothing naming lop tunnel connect.
-        print(f"Tunnel connector stopped: {failure}", flush=True)
+        if verdict.kind in PARKING_KINDS:
+            # Exit 0 IS the report: this module's contract is that launchd and
+            # systemd supervise it, and a successful exit is the one idiom both
+            # honour as "do not restart me". Parking is therefore how the crash
+            # loop ends -- not a longer sleep, not a distinct exit code, both of
+            # which were evaluated and neither of which can exempt a code under
+            # launchd's `KeepAlive{SuccessfulExit:false}`.
+            _park(verdict)
+            return 0
+        # RETRYING, which is not parked. A park says "stopped, waiting for a
+        # person"; exiting 1 says the supervisor should try again in 10 seconds,
+        # and a stale park left beside a retrying connector would have the
+        # terminal nagging about a login for a machine already trying on its own.
+        _withdraw_park(because="the connector is retrying")
+        _announce(f"connector stopped reason={verdict.reason}: {failure}")
         return 1
-    except (OSError, httpx.HTTPError):
+    except (OSError, httpx.HTTPError) as failure:
         # These carry text this module did not author: httpx echoes the full
         # request URL (query string included) and OSError echoes filesystem
-        # paths, so only the generic line is safe here.
-        print(
-            "Tunnel connector stopped; check lop tunnel status and your Radient login.", flush=True
+        # paths, so only the generic line is safe here. The reason code is this
+        # module's own vocabulary and stays: without it an outage and a bug read
+        # as the same line, which is the property this log was rebuilt for.
+        _withdraw_park(because="the connector is retrying")
+        _announce(
+            f"connector stopped reason={classify_failure(failure).reason}; "
+            "check lop tunnel status and your Radient login."
         )
         return 1
 

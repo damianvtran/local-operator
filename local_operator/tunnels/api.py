@@ -7,8 +7,13 @@ from typing import Any
 
 import httpx
 
-from local_operator.providers.auth_store import AuthStore, AuthStoreError
+from local_operator.providers.auth_store import (
+    AuthStore,
+    AuthStoreError,
+    CredentialInvalidError,
+)
 from local_operator.tunnels.config import DEFAULT_API_URL
+from local_operator.tunnels.errors import LoginRequired
 
 
 def credential_id(selected: int | None = None) -> int:
@@ -47,7 +52,10 @@ class RadientTunnels:
         with closing(AuthStore()) as store:
             row = store.get_credential(self.selected)
             if row is None or row.provider != "radient" or row.credential_type != "oauth":
-                raise ValueError("The tunnel's Radient login is unavailable; log in again.")
+                # LoginRequired, not ValueError: no retry can conjure a credential
+                # row back, and the connector's supervisor must be told to stop
+                # retrying rather than to keep trying every 10 seconds forever.
+                raise LoginRequired("The tunnel's Radient login is unavailable; log in again.")
             try:
                 credentials = await store.ensure_oauth_fresh_or_raise(self.selected)
             except AuthStoreError as failure:
@@ -57,10 +65,21 @@ class RadientTunnels:
                 # whether the fault is their network or their login: reporting
                 # the first as an expired login is what sent a lost network to
                 # /login. `authorization_failure_reason` reads `__cause__`.
+                #
+                # The store names a dead grant with its own type (the store-level
+                # face of a token-endpoint refusal the classifier could name), and
+                # that distinction is carried in the CLASS the supervisor sees, so
+                # the one terminal case is never inferred from this sentence --
+                # which is deliberately the same for both, because the redaction
+                # rule below forbids echoing what the provider actually said.
+                if isinstance(failure, CredentialInvalidError):
+                    raise LoginRequired(
+                        "The tunnel's Radient login could not be refreshed."
+                    ) from failure
                 raise ValueError("The tunnel's Radient login could not be refreshed.") from failure
         token = credentials.get("access") if credentials else None
         if not isinstance(token, str) or not token:
-            raise ValueError("The tunnel's Radient login expired; log in again.")
+            raise LoginRequired("The tunnel's Radient login expired; log in again.")
         headers = {"Authorization": f"Bearer {token}"}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key

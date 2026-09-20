@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import datetime
 import hashlib
 import json
 import socket
@@ -25,7 +26,7 @@ from jwt.algorithms import RSAAlgorithm
 
 from local_operator.mobile.auth import COOKIE_NAME, verify_cookie
 from local_operator.providers.auth_store import AuthStore
-from local_operator.tunnels import config
+from local_operator.tunnels import config, state
 from local_operator.tunnels.arguments import add_parser
 from local_operator.tunnels.cli import (
     _billing_summary,
@@ -36,6 +37,7 @@ from local_operator.tunnels.cli import (
 from local_operator.tunnels.gateway import (
     CONSOLE_URL,
     LEASE_PENDING,
+    LOGIN_REQUIRED,
     MAX_BODY_BYTES,
     NOT_AUTHORIZED,
     PROOF_HEADER,
@@ -950,7 +952,12 @@ def test_the_refusal_reaches_the_operator_through_the_supervised_entry_point(
     launched = AsyncMock(side_effect=AssertionError("connector launched on an unpinned port"))
     monkeypatch.setattr(service.asyncio, "create_subprocess_exec", launched)
 
-    assert service.main() == 1
+    # 0, not 1: this refusal cannot be retried away — a console port change is
+    # only repaired by `lop tunnel connect` on this device — so the connector
+    # PARKS (exits successfully, which is the one idiom both supervisors read as
+    # "do not restart me") and names the remedy once. It used to exit 1, which
+    # launchd answered with a fresh attempt every 10 seconds forever.
+    assert service.main() == 0
 
     logged = capsys.readouterr().out
     assert "Harness port for local-operator changed in the console." in logged
@@ -958,6 +965,10 @@ def test_the_refusal_reaches_the_operator_through_the_supervised_entry_point(
     # The old generic line sent the operator to two places that are both fine.
     assert "your Radient login" not in logged
     launched.assert_not_called()
+    parked = json.loads((tmp_path / "tunnel" / "state.json").read_text())
+    assert parked["state"] == "parked"
+    assert parked["reason"] == "reenrolment_required"
+    assert parked["remedy"]["command"] == "lop tunnel connect"
 
 
 def test_main_still_withholds_error_text_it_did_not_author(tmp_path, monkeypatch, capsys):
@@ -1317,7 +1328,7 @@ async def test_tunnel_status_prints_the_reason_the_relay_is_refusing(
     cause: the network case needs no local command at all, so printing nothing
     is what sends an operator to re-enroll a healthy tunnel.
     """
-    from local_operator.tunnels import cli
+    from local_operator.tunnels import cli, report
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     config.save(_stored(connection))
@@ -1347,15 +1358,17 @@ async def test_tunnel_status_prints_the_reason_the_relay_is_refusing(
                 },
             )
 
-    monkeypatch.setattr(
-        cli, "httpx", SimpleNamespace(AsyncClient=FakeClient, HTTPError=httpx.HTTPError)
-    )
+    # The loopback probe moved into `tunnels/report.py`, which is where the
+    # shared assembly lives now: patch the module that actually owns the client.
+    fake = SimpleNamespace(AsyncClient=FakeClient, HTTPError=httpx.HTTPError)
+    monkeypatch.setattr(cli, "httpx", fake)
+    monkeypatch.setattr(report, "httpx", fake)
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
     receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
     # Not "stopped": the gateway answered and reported `connected: true`, so a
     # state word contradicting it would be the command arguing with its own input.
-    assert "Local connector: not serving" in receipt
+    assert "Connector: not serving" in receipt
     assert TERMINAL_DETAIL[UNREACHABLE] in receipt
     assert "no local command is needed" in receipt
     assert RELAY_DETAIL[UNREACHABLE] not in receipt
@@ -1371,7 +1384,7 @@ async def test_tunnel_status_survives_a_foreign_listener_on_the_gateway_port(
     listener on the gateway port — answering 200 with `null` or a list — an
     AttributeError from a read-only status command.
     """
-    from local_operator.tunnels import cli
+    from local_operator.tunnels import cli, report
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
     config.save(_stored(connection))
@@ -1391,13 +1404,15 @@ async def test_tunnel_status_survives_a_foreign_listener_on_the_gateway_port(
         async def get(self, url, **kwargs):
             return httpx.Response(200, json=["someone else's server"])
 
-    monkeypatch.setattr(
-        cli, "httpx", SimpleNamespace(AsyncClient=FakeClient, HTTPError=httpx.HTTPError)
-    )
+    # The loopback probe moved into `tunnels/report.py`, which is where the
+    # shared assembly lives now: patch the module that actually owns the client.
+    fake = SimpleNamespace(AsyncClient=FakeClient, HTTPError=httpx.HTTPError)
+    monkeypatch.setattr(cli, "httpx", fake)
+    monkeypatch.setattr(report, "httpx", fake)
     parser = argparse.ArgumentParser()
     add_parser(parser.add_subparsers())
     receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
-    assert "Local connector: not serving" in receipt
+    assert "Connector: not serving" in receipt
 
 
 @pytest.mark.asyncio
@@ -1406,20 +1421,20 @@ async def test_tunnel_status_survives_a_foreign_listener_on_the_gateway_port(
     [
         (
             httpx.ConnectError("network is unreachable"),
-            "could not reach Radient to renew the relay authorization",
-            "check /login radient",
+            TERMINAL_DETAIL[UNREACHABLE],
+            "authorization check",
         ),
         (
             ValueError("The tunnel's Radient login expired; log in again."),
-            "check /login radient",
+            TERMINAL_DETAIL[REFUSED],
             "could not reach Radient to renew the relay authorization",
         ),
         # A refresh that could not reach Radient is a ValueError too, so the
         # exception class cannot carry this decision: only the chain can.
         (
             _refusal_from_an_unreachable_control_plane(),
-            "could not reach Radient to renew the relay authorization",
-            "check /login radient",
+            TERMINAL_DETAIL[UNREACHABLE],
+            "authorization check",
         ),
     ],
 )
@@ -1430,7 +1445,12 @@ async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
 
     They are different jobs for the operator — one is a connection, the other an
     interactive login — and the cloud read is unavailable for both, so the status
-    command is the only place that can tell them apart.
+    command is the only place that can tell them apart. The split now has two
+    halves: the CLOUD line repeats the vocabulary sentence the relay would show a
+    phone for this cause, and the LOGIN line is a separate fact decided on this
+    device (its absence here is the assertion that a refused cloud read is not
+    blamed on a credential this machine can still use, which is the failure mode
+    that sent a lost network to /login).
     """
     from local_operator.tunnels import cli
 
@@ -1444,6 +1464,8 @@ async def test_tunnel_status_separates_a_network_fault_from_an_unusable_login(
     receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
     assert expected in receipt
     assert absent not in receipt
+    # A cached read must never read as a live one, whichever half failed.
+    assert "Status: active (cached — cloud read failed)" in receipt
 
 
 @pytest.mark.asyncio
@@ -1540,3 +1562,561 @@ async def test_a_dead_poller_restarts_the_unit_instead_of_serving_a_stale_lease(
         service.asyncio, "create_subprocess_exec", AsyncMock(return_value=_Connector())
     )
     assert await asyncio.wait_for(asyncio.create_task(service.run()), timeout=15) == 1
+
+
+# ---------------------------------------------------------------------------
+# A dead login PARKS the connector instead of restarting it forever
+# ---------------------------------------------------------------------------
+
+#: The body the operator's own token endpoint returned for a revoked refresh
+#: token, verbatim from the incident. Prose in the `error` field rather than an
+#: RFC 6749 code -- the shape every code-only rule reads as retryable.
+RADIENT_PROSE_REFUSAL = '{"error": "Token refresh failed: refresh token is expired or revoked"}'
+
+
+def _free_port() -> int:
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _dead_grant_service(tmp_path, monkeypatch, connection, *, stopped: bool = False):
+    """A connector whose Radient refresh is refused by the REAL provider flow.
+
+    Returns `(service, credential_id)`. The refresh POSTs to a stub token
+    endpoint that answers the incident's own 401, so `main()` classifies the
+    failure the operator's machine actually produced rather than a hand-made
+    exception shaped like it — the distinction the earlier round of this work
+    (M1) had to be fixed for once already.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.providers.oauth.radient import refresh_radient_token
+    from local_operator.tunnels import service
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(service, "cloudflared_binary", lambda *_: "/trusted/cloudflared")
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "stale-access",
+                "refresh": "revoked-refresh",
+                # A past expiry is what makes the store refresh at all: without
+                # one the stored token is served as-is and nothing is refused.
+                "expires": 1,
+            },
+        )
+    stored = _stored(connection, credential_id=row.id, gateway_port=_free_port())
+    stored["stopped"] = stopped
+    config.save(stored)
+
+    async def refuse(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text=RADIENT_PROSE_REFUSAL)
+
+    async def refresh(credentials):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
+            return await refresh_radient_token(credentials, http_client=client)
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: refresh)
+    return service, row.id
+
+
+def test_classify_failure_places_every_failure_on_the_retry_or_stop_side() -> None:
+    """The one decision this change makes, in one table.
+
+    A retry can only help where the fault is remote and temporary; everything a
+    person has to act on parks. The `transient` default is deliberate and
+    asymmetric — parking WITHDRAWS remote access — so an unclear failure keeps
+    today's retrying behaviour.
+    """
+    from local_operator.providers.auth_store import CredentialInvalidError
+    from local_operator.tunnels import service
+    from local_operator.tunnels.errors import (
+        LocalPrerequisite,
+        LoginRequired,
+        ReenrolmentRequired,
+    )
+
+    cases = [
+        ("terminal_login", LoginRequired("login unavailable"), LOGIN_REQUIRED),
+        ("terminal_login", CredentialInvalidError("grant is dead"), LOGIN_REQUIRED),
+        ("terminal_config", LocalPrerequisite("Install cloudflared"), "local_prerequisite"),
+        (
+            "terminal_remote",
+            ReenrolmentRequired("Gateway port changed in the console."),
+            "reenrolment_required",
+        ),
+        ("transient", httpx.ConnectTimeout("no answer"), UNREACHABLE),
+        (
+            "transient",
+            ValueError("Tunnel disabled or billing suspended."),
+            REFUSED,
+        ),
+        ("transient", sqlite3.OperationalError("database is locked"), REFUSED),
+    ]
+    for kind, failure, reason in cases:
+        verdict = service.classify_failure(failure)
+        assert verdict.kind == kind, failure
+        assert verdict.reason == reason, failure
+    # A dead grant is recognised even when a wrapper is the outermost type:
+    # `tunnels/api.py` raises `LoginRequired` for it, and this is the chain.
+    try:
+        raise ValueError("The tunnel's Radient login could not be refreshed.") from (
+            CredentialInvalidError("grant is dead")
+        )
+    except ValueError as wrapped:
+        assert service.classify_failure(wrapped).kind == "terminal_login"
+    # A transport fault outranks a dead grant: a refresh that could not REACH
+    # the endpoint has not been told anything about the grant.
+    try:
+        try:
+            raise httpx.ConnectError("network is unreachable")
+        except httpx.ConnectError as transport:
+            raise CredentialInvalidError("ambiguous") from transport
+    except CredentialInvalidError as both:
+        assert service.classify_failure(both).kind == "transient"
+
+
+def test_a_real_radient_prose_refusal_parks_instead_of_looping(
+    tmp_path, monkeypatch, connection, capsys
+):
+    """The incident, at the supervised entry point.
+
+    Before: this failure printed the same sentence and returned 1, and launchd's
+    `KeepAlive{SuccessfulExit:false}` restarted the connector every 10 seconds
+    (measured: 870 identical lines, `runs = 633`). The assertions that matter
+    are the exit code — 0 is the only value both supervisors honour as "do not
+    retry me" — and the state file, because the phone and every terminal read
+    the park from there.
+    """
+    service, credential = _dead_grant_service(tmp_path, monkeypatch, connection)
+
+    # SYNCHRONOUS, and `main()` rather than `run()`: main() is what launchd
+    # executes, and it owns the event loop whose exit code the supervisor reads.
+    assert service.main() == 0
+
+    logged = capsys.readouterr().out
+    assert "connector parked reason=login_required" in logged
+    # Timestamped and self-describing: the incident's 870 lines carried neither
+    # a time nor which process authored them.
+    assert datetime.date.today().isoformat() in logged[:32]
+    assert "local_operator.tunnels.service" in logged
+    # The remedy sentence comes from the vocabulary the phone's 503 uses, so one
+    # cause cannot be worded two ways.
+    assert TERMINAL_DETAIL[LOGIN_REQUIRED] in logged
+    # Redaction: the provider's body never reaches the log, only its class.
+    assert "refresh token is expired or revoked" not in logged
+
+    parked = state.read()
+    assert parked is not None
+    assert parked["state"] == "parked"
+    assert parked["reason"] == LOGIN_REQUIRED
+    assert parked["credential_id"] == credential
+    assert parked["attempts"] == 1
+    assert parked["remedy"]["command"] == "lop login radient"
+    assert parked["remedy"]["url"] == CONSOLE_URL
+
+
+def test_a_transient_failure_keeps_the_retry_and_records_no_park(
+    tmp_path, monkeypatch, connection, capsys
+):
+    """The other half of the split, and the reason it is not "park everything".
+
+    A network fault clears itself at the supervisor's documented 10-second
+    floor, so it must keep exiting 1 — and it must NOT write a park, because
+    every surface reads a park as "a person is needed here".
+    """
+    from local_operator.tunnels import service
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(service, "cloudflared_binary", lambda *_: "/trusted/cloudflared")
+    config.save(_stored(connection, gateway_port=_free_port()))
+    api = AsyncMock()
+    api.request.side_effect = _refusal_from_an_unreachable_control_plane()
+    monkeypatch.setattr(service, "RadientTunnels", lambda *args: api)
+    # An OLD park, from before the login was fixed. Exiting 1 says the connector
+    # is retrying, so it is not parked any more: leaving this file behind would
+    # have every surface nagging about a login for a machine that is already
+    # trying on its own.
+    state.mark_parked(reason=LOGIN_REQUIRED, detail="dead grant", credential_id=7)
+
+    assert service.main() == 1
+    assert state.read() is None, "a retrying connector is not a parked one"
+    logged = capsys.readouterr().out
+    assert "reason=control_plane_unreachable" in logged
+    assert "park withdrawn (the connector is retrying)" in logged
+
+
+def test_a_park_is_private_and_announced_once_per_transition(tmp_path, monkeypatch) -> None:
+    """The rate limit lives in the state file, because the process is what a
+    restart loop throws away — and the file it lands in is 0600 inside 0700."""
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+
+    assert state.mark_parked(reason=LOGIN_REQUIRED, detail="first", now=1_000) is True
+    # A repeat of the same cause is not news. This is what stops a supervisor
+    # that does reload the unit from refilling the log: 870 lines is the defect.
+    assert state.mark_parked(reason=LOGIN_REQUIRED, detail="first", now=1_001) is False
+    # …until the heartbeat terms elapse, so a long-lived park still shows a
+    # recent line rather than going silent for hours.
+    assert state.mark_parked(reason=LOGIN_REQUIRED, detail="first", now=1_000 + 900) is True
+    record = state.read()
+    assert record is not None
+    assert record["attempts"] == 3
+    assert record["first_at"] == 1_000, "the park's own age survives re-stating it"
+    assert record["logged_at"] == 1_900
+
+    # The attempts term is independent of the clock.
+    for step in range(2, 51):
+        state.mark_parked(reason=LOGIN_REQUIRED, detail="first", now=1_900 + step)
+    assert state.mark_parked(reason=LOGIN_REQUIRED, detail="first", now=1_952) is True
+
+    # A DIFFERENT cause is a transition, whatever the clock says.
+    assert state.mark_parked(reason="local_prerequisite", detail="x", now=1_953) is True
+    record = state.read()
+    assert record is not None and record["attempts"] == 1
+
+    path = state.path()
+    assert path.stat().st_mode & 0o077 == 0
+    assert path.parent.stat().st_mode & 0o077 == 0
+    state.clear()
+    assert state.read() is None
+
+
+@pytest.mark.asyncio
+async def test_a_fixed_login_re_arms_the_parked_connector(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """Park → sign in → the connector comes back by itself.
+
+    The whole reason a park is safe: nothing else notices, because the connector
+    exited successfully and its supervisor is, correctly, not retrying it. This
+    drives the real hook — a credential write through the store — with the
+    guards' two decisions stubbed (`service_path`, the real-home check) and
+    `launchctl` recorded rather than run, because a test suite must never reach
+    the operator's own launchd.
+    """
+    from local_operator.providers.auth_store import AuthStore as Store
+    from local_operator.tunnels import install
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
+    plist = tmp_path / "com.local-operator.tunnel.plist"
+    plist.write_text("plist")
+    monkeypatch.setattr(install.sys, "platform", "darwin", raising=False)
+    monkeypatch.setattr(install, "service_path", lambda: plist)
+    monkeypatch.setattr(install.launchd, "config_lives_in_real_home", lambda _base: True)
+    kicks: list[tuple[str, ...]] = []
+
+    def launchctl(*args: str):
+        kicks.append(args)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(install, "_launchctl", launchctl)
+    config.save(_stored(connection, credential_id=7, gateway_port=_free_port()))
+    state.mark_parked(reason=LOGIN_REQUIRED, detail="x", credential_id=7)
+
+    # The login this tunnel owns, written again: the guard is the credential ID,
+    # so the row has to BE row 7, and re-writing the tunnel's own identity is how
+    # a re-login of the same account lands here.
+    with closing(Store()) as store:
+        for index in range(6):
+            store.upsert_credential(
+                "radient",
+                {"type": "oauth", "account_id": f"filler-{index}", "access": "a", "refresh": "r"},
+            )
+        rows = {}
+        for index, account in enumerate(("qa", "someone-else")):
+            rows[account] = store.upsert_credential(
+                "radient", {"type": "oauth", "account_id": account, "access": "a", "refresh": "r"}
+            ).id
+    assert rows == {"qa": 7, "someone-else": 8}, "the fixture's ids are load-bearing"
+    assert kicks == [
+        ("kickstart", "-k", f"gui/{install.os.getuid()}/com.local-operator.tunnel")
+    ], "only the row the tunnel owns may start it"
+
+    # An unrelated provider's login, and a DIFFERENT radient account, touch
+    # nothing: the guard is the credential id AND the provider, not the fact that
+    # some credential was written. That is what makes this hook safe on a path
+    # every writer process runs.
+    with closing(Store()) as store:
+        store.upsert_credential("anthropic", {"type": "oauth", "access": "a", "refresh": "r"})
+        store.upsert_credential(
+            "radient",
+            {"type": "oauth", "account_id": "someone-else", "access": "a", "refresh": "r"},
+        )
+    assert len(kicks) == 1
+
+    # And a tunnel the operator deliberately stopped is not waiting on anyone.
+    value = config.load()
+    value["stopped"] = True
+    config.save(value)
+    with closing(Store()) as store:
+        store.upsert_credential(
+            "radient", {"type": "oauth", "account_id": "qa", "access": "a", "refresh": "r"}
+        )
+    assert len(kicks) == 1
+
+    # The explicit test opt-out leaves the same parked state alone.
+    monkeypatch.setenv("LOP_TUNNEL_NO_REARM", "1")
+    value["stopped"] = False
+    config.save(value)
+    with closing(Store()) as store:
+        store.upsert_credential(
+            "radient", {"type": "oauth", "account_id": "qa", "access": "a", "refresh": "r"}
+        )
+    assert len(kicks) == 1
+
+    # `lop tunnel status` is the same self-heal for a login fixed elsewhere.
+    monkeypatch.delenv("LOP_TUNNEL_NO_REARM")
+    assert "starting again" in install.rearm_if_parked(provider="radient", credential_id=7)
+    assert len(kicks) == 2
+
+
+def test_rearm_declines_everything_that_is_not_this_tunnel(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """Each guard, on its own, with the launchd seam stubbed out.
+
+    These are the conditions under which a credential write must NOT start a
+    supervised service. The first guard is the cheap one (nothing is parked, so
+    nothing is read), which is the case every ordinary login takes.
+    """
+    from local_operator.tunnels import install
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
+    plist = tmp_path / "com.local-operator.tunnel.plist"
+    plist.write_text("plist")
+    monkeypatch.setattr(install.sys, "platform", "darwin", raising=False)
+    monkeypatch.setattr(install, "service_path", lambda: plist)
+    monkeypatch.setattr(install.launchd, "config_lives_in_real_home", lambda _base: True)
+    kicks: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *args: kicks.append(args) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    config.save(_stored(connection, credential_id=7, gateway_port=4100))
+    assert install.rearm_if_parked(provider="radient", credential_id=7) == ""
+    assert kicks == [], "nothing is parked, so nothing may be started"
+
+    # Parked, right credential — but for something other than the login.
+    state.mark_parked(reason="local_prerequisite", detail="Install cloudflared")
+    assert install.rearm_if_parked(provider="radient", credential_id=7) == ""
+    assert kicks == []
+
+    # Parked for the login, wrong credential: the login that was just written is
+    # not the one this tunnel owns, so starting it would only park it again.
+    state.mark_parked(reason=LOGIN_REQUIRED, detail="x", credential_id=7)
+    assert install.rearm_if_parked(provider="anthropic", credential_id=7) == ""
+    assert install.rearm_if_parked(provider="radient", credential_id=99) == ""
+    assert kicks == []
+
+    # A unit that is not installed cannot be started.
+    plist.unlink()
+    assert install.rearm_if_parked(provider="radient", credential_id=7) == ""
+    assert kicks == []
+
+    # Something answered but refused: reported, never raised, because a login
+    # must not fail over a service that could not be started.
+    plist.write_text("plist")
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *args: SimpleNamespace(returncode=1, stdout="", stderr="no such service"),
+    )
+    assert "could not be restarted" in install.rearm_if_parked(provider="radient", credential_id=7)
+
+
+@pytest.mark.asyncio
+async def test_status_json_reports_the_park_the_login_and_the_remedy(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The machine-readable shape the desktop route also serves."""
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    config.save(_stored(connection))
+    state.mark_parked(
+        reason=LOGIN_REQUIRED,
+        detail=TERMINAL_DETAIL[LOGIN_REQUIRED],
+        credential_id=7,
+        now=1_800_000_000,
+    )
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
+
+    assert payload["tunnel_id"] == connection["tunnel"]["id"]
+    assert payload["cloud"]["source"] == "cached"
+    assert payload["cloud"]["reason"] == UNREACHABLE
+    # The park outranks the probe: the gateway is not running because the
+    # connector parked, and "stopped" would describe that as an accident.
+    assert payload["connector"]["state"] == "parked"
+    assert payload["connector"]["reason"] == LOGIN_REQUIRED
+    assert payload["connector"]["since"] == 1_800_000_000
+    # No credential row exists for this config's id, which is itself a reason to
+    # sign in — and a local answer, which is the only answer available here.
+    assert payload["login"]["state"] == "login_required"
+    assert payload["remedy"]["command"] == "lop login radient"
+
+
+@pytest.mark.asyncio
+async def test_status_json_says_ok_for_a_usable_login_and_offers_no_remedy(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The positive case is in the machine shape too, and the negative claims
+    are absent from it: a consumer must be able to tell "checked, fine" from
+    "could not check"."""
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "live-access",
+                "refresh": "live-refresh",
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+    api = AsyncMock()
+    api.request.return_value = connection["tunnel"]
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    payload = json.loads(await dispatch(parser.parse_args(["tunnel", "status", "--json"])))
+
+    assert payload["login"] == {"credential_id": row.id, "state": "ok"}
+    assert payload["cloud"]["source"] == "live"
+    assert payload["remedy"] is None
+    human = await dispatch(parser.parse_args(["tunnel", "status"]))
+    assert "Login:" not in human
+
+
+@pytest.mark.asyncio
+async def test_status_names_a_dead_login_even_while_radient_is_unreachable(
+    tmp_path, monkeypatch, connection
+):
+    """The incident's exact combination, which no surface could describe.
+
+    The access token was still unexpired while the grant behind it was revoked,
+    so the cloud read failed AND the local check was the only thing that could
+    say why. Both halves have to appear, in their own words: the network is the
+    cloud line's, the credential is the login line's.
+    """
+    from local_operator.providers import auth_store
+    from local_operator.providers.oauth.callback_server import InvalidGrantError
+    from local_operator.tunnels import cli
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    with closing(AuthStore()) as store:
+        row = store.upsert_credential(
+            "radient",
+            {
+                "type": "oauth",
+                "account_id": "qa",
+                "access": "unexpired-but-revoked",
+                "refresh": "revoked",
+                "expires": 1,
+            },
+        )
+    config.save(_stored(connection, credential_id=row.id))
+
+    async def refresh(credentials):
+        raise InvalidGrantError("Radient refresh failed: HTTP 401 " + RADIENT_PROSE_REFUSAL)
+
+    monkeypatch.setattr(auth_store.AuthStore, "_refresh_fn", lambda self, provider: refresh)
+    api = AsyncMock()
+    api.request.side_effect = httpx.ConnectError("network is unreachable")
+    monkeypatch.setattr(cli, "RadientTunnels", lambda *_: api)
+    parser = argparse.ArgumentParser()
+    add_parser(parser.add_subparsers())
+
+    receipt = await dispatch(parser.parse_args(["tunnel", "status"]))
+
+    assert "Login: needs re-authentication — run lop login radient" in receipt
+    assert TERMINAL_DETAIL[UNREACHABLE] in receipt
+    assert "Status: active (cached — cloud read failed)" in receipt
+
+
+@pytest.mark.asyncio
+async def test_a_successful_connect_withdraws_the_park_and_says_so(
+    tmp_path, monkeypatch, connection, capsys
+):
+    """The other end of the round trip: the connector comes back and the park goes.
+
+    Every surface reads the state file as the truth about a process none of them
+    can see, so a park that outlived its condition would have the terminal, `lop
+    tunnel status` and the desktop route all describing a connector that is
+    serving. Driven through `run()` itself — a stubbed `/connect` is the only
+    substitution, exactly as the other service tests do it.
+    """
+    port = _synthetic_port()
+    service, _served, _api = _service_fixture(
+        tmp_path, monkeypatch, connection, port, pinned_port=port
+    )
+    # A park left by an earlier attempt, whose reason is now fixed.
+    state.mark_parked(reason=LOGIN_REQUIRED, detail="dead grant", credential_id=7)
+    assert state.parked() is not None
+    # `run()` serves until something stops it, so the test stops it the way a
+    # real shutdown arrives: cloudflared's child exits.
+    connector = _Connector()
+    monkeypatch.setattr(
+        service.asyncio, "create_subprocess_exec", AsyncMock(return_value=connector)
+    )
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.3)
+        connector.terminate()
+
+    stopper = asyncio.create_task(stop_soon())
+    try:
+        assert await asyncio.wait_for(asyncio.create_task(service.run()), timeout=15) == 1
+    finally:
+        await stopper
+
+    assert state.read() is None, "a serving connector must not leave a park behind"
+    assert "park withdrawn" in capsys.readouterr().out
+
+
+def test_rearm_refuses_a_configuration_with_no_usable_credential_id(
+    tmp_path, monkeypatch, connection
+) -> None:
+    """The ownership guard may not match on two `None`s.
+
+    A hand-edited `config.json` that lost its `credential_id` would otherwise
+    compare equal to a caller passing nothing, and the guard's whole job is the
+    claim "this is the credential THIS tunnel owns".
+    """
+    from local_operator.tunnels import install
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("LOP_TUNNEL_NO_REARM", raising=False)
+    plist = tmp_path / "com.local-operator.tunnel.plist"
+    plist.write_text("plist")
+    monkeypatch.setattr(install.sys, "platform", "darwin", raising=False)
+    monkeypatch.setattr(install, "service_path", lambda: plist)
+    monkeypatch.setattr(install.launchd, "config_lives_in_real_home", lambda _base: True)
+    kicks: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install,
+        "_launchctl",
+        lambda *args: kicks.append(args) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    stored = _stored(connection, gateway_port=_free_port())
+    del stored["credential_id"]
+    config.save(stored)
+    state.mark_parked(reason=LOGIN_REQUIRED, detail="x")
+
+    assert install.rearm_if_parked(provider="radient", credential_id=0) == ""
+    assert kicks == []

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import json
 import os
 import socket
@@ -15,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from local_operator.tunnels import config, gateway
+from local_operator.tunnels import config, gateway, report, state
 from local_operator.tunnels.api import RadientTunnels, credential_id
 from local_operator.tunnels.service import (
     authorization_failure_reason,
@@ -65,11 +66,32 @@ def _harnesses(
     return list(rows.values())
 
 
-def _summary(record: dict[str, Any]) -> str:
+def _summary(record: dict[str, Any], source: str = "live", cloud_reason: str = "") -> str:
+    """The cloud's own view of the tunnel, with its provenance on the status line.
+
+    `source` is what stops the stale copy reading as live: when the cloud read
+    fails, this command falls back to the record stored locally at the last
+    `create`/`connect`/`configure`, and an operator reading `Status: active` off
+    a cached copy — with the caveat trailing three lines below — is exactly how
+    a withdrawn tunnel looked healthy.
+
+    `cloud_reason` separates the two ways that read can fail, which is the job
+    the old trailing caveat did badly — it named neither. Both sentences come
+    from the vocabulary, so this surface and the phone's 503 cannot word one
+    cause two ways, and neither of them can be confused with the LOGIN line
+    above, which reports what this device's credential store says rather than
+    what the cloud refused.
+    """
+    provenance = "" if source == "live" else " (cached — cloud read failed)"
     lines = [
         f"Tunnel: {record.get('id', 'not created')}",
-        f"Status: {record.get('status', 'configured')}",
+        f"Status: {record.get('status', 'configured')}{provenance}",
     ]
+    if source != "live":
+        lines.append(
+            "Cloud status unavailable. "
+            + gateway.terminal_detail(cloud_reason, gateway.TERMINAL_DETAIL[gateway.REFUSED])
+        )
     for harness in record.get("harnesses", []):
         if harness.get("enabled") and harness.get("hostname"):
             lines.append(f"{harness['id']}: https://{harness['hostname']}")
@@ -82,6 +104,51 @@ def _summary(record: dict[str, Any]) -> str:
             "Add Radient credit and reactivate from "
             "https://console.radienthq.com/dashboard/tunnels."
         )
+    return "\n".join(lines)
+
+
+def _stamp(seconds: Any) -> str:
+    """A park's age on one line: the clock time today, the date too otherwise.
+
+    A bare `14:32` on a park from last week would read as this afternoon, which
+    is the one thing an operator must not get wrong about a state that has been
+    holding since before they looked.
+    """
+    if not isinstance(seconds, int) or isinstance(seconds, bool):
+        return ""
+    when = datetime.datetime.fromtimestamp(seconds).astimezone()
+    if when.date() == datetime.datetime.now().astimezone().date():
+        return when.strftime("%H:%M")
+    return when.strftime("%Y-%m-%d %H:%M")
+
+
+def _status_text(payload: dict[str, Any], record: dict[str, Any], source: str) -> str:
+    """`lop tunnel status`, human form: the connector leads, then the login.
+
+    The connector first because that is the thing the operator is asking about,
+    and because the old order put a cached cloud record — which can read
+    `active` for a connector that is not running — at the top of the answer.
+    """
+    connector = payload["connector"]
+    line = f"Connector: {connector['state']}"
+    if connector["reason"]:
+        line += f" — {gateway.reason_label(connector['reason'])}"
+    since = _stamp(connector.get("since"))
+    if since:
+        line += f" (since {since})"
+    if connector["detail"]:
+        line += f": {connector['detail']}"
+    lines = [line]
+    login = payload["login"]
+    if login["state"] == "login_required":
+        command = gateway.TERMINAL_REMEDY[gateway.LOGIN_REQUIRED]
+        lines.append(f"Login: needs re-authentication — run {command}")
+    elif login["state"] == "unknown":
+        # Never "needs re-authentication": this state means the check itself
+        # could not run, and naming it anything else sends an operator whose
+        # network is down to a login that cannot help them.
+        lines.append("Login: could not be checked (a refresh could not reach Radient).")
+    lines.extend(_summary(record, source, payload["cloud"].get("reason", "")).splitlines())
     return "\n".join(lines)
 
 
@@ -322,7 +389,14 @@ async def dispatch(args: argparse.Namespace) -> str:
         return _summary(record) + "\nRun lop tunnel install to enable remote access on this device."
     value = config.load()
     if action == "status":
+        # Self-heal first, silently: a parked connector plus a login that already
+        # works (the operator re-authenticated before this build, or from another
+        # surface) should not need a second command. This is the same call the
+        # credential-write hook makes, so both paths agree on what re-arms.
+        install.rearm_if_parked(provider="radient", credential_id=value["credential_id"])
         record = value["record"]
+        source = "live"
+        cloud_reason = ""
         try:
             async with httpx.AsyncClient(trust_env=False) as client:
                 record = await RadientTunnels(value["credential_id"], client).request(
@@ -335,64 +409,34 @@ async def dispatch(args: argparse.Namespace) -> str:
             # that could not reach Radient during this very request arrives as a
             # ValueError too (see `RadientTunnels.request`), and the cloud read is
             # unavailable in both cases, so this is the only surface that can.
-            if authorization_failure_reason(failure) != gateway.UNREACHABLE:
-                return _summary(record) + "\nCloud status unavailable; check /login radient."
-            return (
-                _summary(record)
-                + "\nCloud status unavailable. "
-                + gateway.TERMINAL_DETAIL[gateway.UNREACHABLE]
-            )
-        healthy = False
-        connected = False
-        served = False
-        refusal = ""
-        try:
-            async with httpx.AsyncClient(trust_env=False) as client:
-                reply = await client.get(
-                    f"http://127.0.0.1:{value['gateway_port']}/_lop_tunnel/health", timeout=2
-                )
-                served = reply.status_code == 200
-                payload = reply.json() if served else {}
-                if not isinstance(payload, dict):
-                    # A stale or foreign listener on this port can answer 200 with
-                    # any JSON at all. Anything but an object is not a health
-                    # payload, and a status command must not raise over it.
-                    payload = {}
-                healthy = served and payload.get("ok") is True
-                connected = healthy and payload.get("connected") is True
-                if not healthy:
-                    # The gateway names why it is refusing relayed requests, and
-                    # this is the surface where a command can be offered at all.
-                    # A reason this build does not know falls back to the relay's
-                    # own sentence rather than printing nothing.
-                    refusal = gateway.terminal_detail(
-                        str(payload.get("reason") or ""), str(payload.get("detail") or "")
-                    )
-        except (httpx.HTTPError, ValueError):
-            # A stopped connector and a gateway that is not there are also
-            # different jobs: the first is this process, the second is the unit.
-            refusal = (
-                "The local relay gateway is not answering on "
-                f"127.0.0.1:{value['gateway_port']}; run lop tunnel install to restore it"
-            )
-        if connected:
-            state = "connected"
-        elif healthy:
-            state = "connecting"
-        elif served:
-            # The gateway answered and is refusing to serve. That is not a stopped
-            # connector — cloudflared may still hold the edge connection — and
-            # "stopped" beside a sentence promising it clears itself would
-            # contradict the payload this command just read.
-            state = "not serving"
-        else:
-            state = "stopped"
-        return (
-            _summary(record) + f"\nLocal connector: {state}" + (f" — {refusal}" if refusal else "")
+            #
+            # The read failing is not fatal to the command any more: the cached
+            # record is still printed, now clearly marked as cached, and the
+            # connector's own state is read from this device where the answer
+            # actually is.
+            source = "cached"
+            cloud_reason = authorization_failure_reason(failure)
+        connector = await report.connector_state(value)
+        login = await report.login_verdict(value)
+        payload = report.payload(
+            value,
+            record,
+            source=source,
+            cloud_reason=cloud_reason,
+            connector=connector,
+            login=login,
         )
+        if getattr(args, "json", False):
+            return json.dumps(payload, allow_nan=False)
+        return _status_text(payload, record, source)
     if action == "stop":
         value["stopped"] = True
         config.save(value)
+        # A deliberate stop is not a park: the operator is not using the tunnel,
+        # so every surface must stop describing a connector that is waiting on
+        # them. Cleared here as well as in `run` because `bootout` can take the
+        # process out without it ever reaching its own stopped branch.
+        state.clear()
         try:
             install.action("stop")
         except ValueError:
@@ -404,6 +448,7 @@ async def dispatch(args: argparse.Namespace) -> str:
     if action == "revoke":
         value["stopped"] = True
         config.save(value)
+        state.clear()
         try:
             install.action("stop")
         except ValueError:
@@ -419,6 +464,7 @@ async def dispatch(args: argparse.Namespace) -> str:
     if action == "uninstall":
         value["stopped"] = True
         config.save(value)
+        state.clear()
         install.uninstall()
         return "Local connector uninstalled. Use lop tunnel revoke to delete cloud routes too."
     if action in {"install", "start", "restart"}:
