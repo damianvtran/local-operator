@@ -60,7 +60,41 @@ export const CONSENT_KEYS: Record<string, string> = {
  *  that links to the wrong install's id is worse than one that names the path a
  *  user can follow for either. */
 export const SWITCH_LOCATION =
-  "the Local Operator extension's options page (chrome://extensions -> Details -> Extension options)";
+  "the Local Operator extension's options page (the Local Operator toolbar icon → Settings, or chrome://extensions → Details → Extension options)";
+
+/** How long the options page waits for Chrome's permission prompt.
+ *
+ * A human is answering a browser dialog, so the bound is generous — but it is
+ * FINITE, and it is deliberately not `CHROME_API_DEADLINE_MS`. Measured on Chrome
+ * 153.0.8013.53 (headless, this host): `chrome.permissions.request` can fail to
+ * settle AT ALL — the promise stayed pending past 25 s, and past a 120 s
+ * `Runtime.evaluate` wait — so an unbounded await leaves the switch disabled and
+ * silent forever, which is both round-1 U1 and how R5 recorded consent for a grant
+ * that was never made. "We never heard back" must resolve to "not granted".
+ */
+export const PERMISSION_REQUEST_DEADLINE_MS = 120_000;
+
+/** What the page says while that dialog is unanswered (round-1 U1).
+ *
+ * The switch reads OFF in this window — the effective state, not the click's
+ * optimism — and this sentence says what the page is waiting for, so a user whose
+ * dialog opened behind another window can tell a pending grant from a broken one.
+ */
+export const PERMISSION_REQUEST_PENDING =
+  "Waiting for Chrome's permission prompt. If you do not see a dialog, look for a Chrome window " +
+  "behind this one — downloads stay off until the prompt is answered.";
+
+/** The ONE sentence for a grant this extension wants and does not hold.
+ *
+ * Covers both arrivals, which is why it says "does not hold" rather than
+ * "removed": Chrome can take the permission away while this page is closed, and a
+ * stored flag with no grant behind it then has to be repaired and explained on the
+ * next LOAD (round-1 D1 — before this, that state rendered as an untouched default
+ * while the stored consent still said otherwise).
+ */
+export const PERMISSION_MISSING_MESSAGE =
+  "Chrome does not hold the downloads permission for this extension, so downloads are off. " +
+  "Turn the switch on again to ask for it once more.";
 
 /** The Chrome permission a switch must hold, or `""` when it needs none.
  *
@@ -203,5 +237,14 @@ export function consentOffMessage(method: string): string {
  */
 export async function requireConsent(method: string): Promise<void> {
   if (await capabilityEnabled(method)) return;
-  throw new BridgeCommandError("capability_unsupported", consentOffMessage(method));
+  // The identity of the refusal travels WITH it (round-1 R4). Without `method` the
+  // harness's copy named no capability at all, and without `disabled_by_operator`
+  // an empty payload fell through its "no browser is attached" branch — so this
+  // last-gate consent refusal reached the model as a connection problem, sending
+  // the user to look at their browser instead of at the switch.
+  throw new BridgeCommandError("capability_unsupported", consentOffMessage(method), {
+    method,
+    disabled_by_operator: true,
+    switch: switchLabel(method),
+  });
 }

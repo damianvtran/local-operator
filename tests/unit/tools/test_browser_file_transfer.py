@@ -385,6 +385,11 @@ def test_download_fails_when_the_host_reports_a_file_that_never_landed() -> None
     host = FakeHost(
         methods=("download",),
         result={
+            # The url is what the item is attributed to, and the real extension
+            # always reports one: without it the harness cannot tell whose download
+            # an item is and refuses for THAT reason (round-1 R3), which would mask
+            # the sentence this test exists to pin.
+            "url": "http://127.0.0.1:9/page",
             "files": [{"name": "receipt.pdf", "path": "/nowhere/receipt.pdf", "bytes": 10}],
             "armed": True,
             "reason": "",
@@ -401,12 +406,16 @@ def test_download_fails_when_the_host_reports_a_file_that_never_landed() -> None
     assert result.is_error
     # The intake refuses it, and the sentence has to say the right thing about the
     # right file: nothing was saved (the check this design rests on), the path the
-    # host named was not there, and the entry was NOT deleted — a path we cannot
-    # corroborate might be the user's own file, so the report must not claim we
-    # cleaned it up (the R2/N7 over-reporting rule).
+    # host named was not there, and the entry is reported as NOTHING TO REMOVE —
+    # not as "left in place" and not as "could not be removed — still on disk".
+    # A path we cannot corroborate might be the user's own file, so the report must
+    # neither claim we cleaned it up nor claim we failed to (R2/N7, round-1 Q2).
     assert "nothing was saved" in result.text
     assert "not there" in result.text
-    assert "NOT deleted" in result.text
+    # The words matter as much as the sentence (round-1 Q2): an entry that was never
+    # there must not be reported as one this call failed to remove.
+    assert "nothing to remove" in result.text
+    assert "NOT deleted" not in result.text
 
 
 def test_download_deletes_executable_content_even_when_the_host_calls_it_a_pdf(
@@ -1398,3 +1407,98 @@ def test_an_absent_client_is_a_typed_refusal_not_an_attribute_error() -> None:
     # that must answer before touching a socket.
     assert "no browser is attached" in result.text
     assert (result.details or {}).get("error_code") == "capability_unsupported"
+
+
+# --- the extension's shape, driven through the tool (round-1 R8) -------------
+
+
+def _extension_download(
+    tmp_path: Path, *, referrer: str, origin: str = "https://example.test"
+) -> tuple[FakeHost, Path, bytes]:
+    """A host that behaves like the EXTENSION: it writes OUTSIDE the directory and
+    reports the absolute path Chrome chose (the app host's shape, bytes in the
+    composed directory, is covered above)."""
+    landing = tmp_path / "Downloads"
+    landing.mkdir(exist_ok=True)
+    payload = b"%PDF-1.4\n" + b"y" * 40
+    landed = landing / "receipt.pdf"
+
+    def write_it(method: str, params: dict[str, Any]) -> None:
+        landed.write_bytes(payload)
+
+    host = FakeHost(
+        methods=("download",),
+        version="0.1.19",
+        switches_known=True,
+        result={
+            "armed": True,
+            "url": f"{origin}/export",
+            "files": [
+                {
+                    "name": "receipt.pdf",
+                    "path": str(landed),
+                    "bytes": len(payload),
+                    "state": "complete",
+                    "cancelled": "",
+                    "referrer": referrer,
+                }
+            ],
+        },
+        on_call=write_it,
+    )
+    return host, landed, payload
+
+
+def test_download_relocates_the_file_the_extension_landed(tmp_path: Path) -> None:
+    """The architecture the operator's decision actually ships, at the tool level.
+
+    Every other test in this file drives the APP host's shape (bytes in the directory
+    the harness composed). Nothing drove the extension's: a host that cannot write
+    into the session directory, reports the absolute path Chrome chose, and leaves
+    Python to move the file in, chmod it and delete the original. A regression in
+    that wiring would leave every other assertion here green while the feature saved
+    nothing.
+    """
+    host, landed, payload = _extension_download(tmp_path, referrer="https://example.test/export")
+
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+
+    assert not result.is_error, result.text
+    facts = (result.details or {}).get("files") or []
+    assert [fact["name"] for fact in facts] == ["receipt.pdf"]
+    assert facts[0]["bytes"] == len(payload)
+    # The directory is STAMPED per call (`<stamp>-<session8>`), so the assertion
+    # finds the file the tool actually wrote rather than recomposing the name and
+    # comparing against a second, differently-stamped directory.
+    saved = list(bf.downloads_root().glob("*-sess0001*/receipt.pdf"))
+    assert len(saved) == 1, saved
+    assert saved[0].read_bytes() == payload
+    assert stat.S_IMODE(saved[0].stat().st_mode) == 0o600
+    assert not landed.exists(), "the original must be gone from the user's Downloads"
+
+
+def test_download_leaves_another_pages_download_where_it_is(tmp_path: Path) -> None:
+    """A file this call did not cause is refused, and NOT removed (round-1 R2)."""
+    host, landed, _ = _extension_download(tmp_path, referrer="https://elsewhere.example/account")
+
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+
+    assert landed.exists(), "a download another page started is not ours to remove"
+    assert result.is_error
+    assert "a page this session is not driving" in result.text
+    assert "left in place" in result.text
+    assert "still on disk" not in result.text

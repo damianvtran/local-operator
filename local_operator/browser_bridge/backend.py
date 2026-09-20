@@ -632,6 +632,49 @@ def capability_refusal(
     )
 
 
+def _switch_refusal_sentence(method: str) -> str:
+    """The consent refusal, with the permission mechanics the user is about to meet.
+
+    ONE function, because two arrivals must read identically: the harness refusing
+    on the RECORD (the switch was off when the extension last dialled) and the
+    extension's own last gate refusing at execution. They used to differ — the
+    record's sentence was the full one, and the peer's was a bare
+    `capability_unsupported` with empty data that rendered as "no browser is
+    attached" and named no method (round-1 R4/R5) — so the model's remedy depended
+    on which of two paths had produced the same fact.
+
+    The grant clause is load-bearing and came from the extension's own copy
+    (round-1 D5): turning the switch on asks Chrome for a permission, and an agent
+    that tells the user "turn it on" without saying a browser prompt will appear
+    has sent them into a dialog nothing warned them about. "has not enabled" rather
+    than "has not turned on" for the same reason the sentence carries a location:
+    the state it describes holds whether the user never turned it on or turned it
+    on and had the grant refused, and the switch ends up OFF in both.
+    """
+    from local_operator.browser_bridge.protocol import (
+        CAPABILITY_SWITCH_LABEL,
+        CAPABILITY_SWITCH_LOCATION,
+        CAPABILITY_SWITCH_PERMISSION,
+    )
+
+    label = CAPABILITY_SWITCH_LABEL.get(method)
+    if not label:
+        return ""
+    permission = CAPABILITY_SWITCH_PERMISSION.get(method)
+    grant = (
+        f" Turning it on asks Chrome for the '{permission}' permission; if the user refuses "
+        "that, the switch stays off."
+        if permission
+        else ""
+    )
+    return (
+        f"'{method}' is switched off in the browser extension: the operator has not enabled "
+        f'"{label}" in {CAPABILITY_SWITCH_LOCATION}.{grant} Ask the user to turn it on there, '
+        "then retry — nothing else about this tab is affected. (No update is involved: this "
+        "build can already serve it.)"
+    )
+
+
 def _capability_message(error: BridgeError, *, host: str) -> str:
     """The model-facing sentence for a `capability_unsupported`.
 
@@ -670,14 +713,20 @@ def _capability_message(error: BridgeError, *, host: str) -> str:
         # switch label comes from `CAPABILITY_SWITCH_LABEL` and the same generated
         # table backs the extension's copy, so the user reads the same words in
         # both places.
-        label = CAPABILITY_SWITCH_LABEL.get(method)
-        if label:
-            return (
-                f"'{method}' is switched off in the browser extension: the operator has not "
-                f'turned on "{label}" in {CAPABILITY_SWITCH_LOCATION}. Ask the user to turn '
-                f"it on there, then retry — nothing else about this tab is affected. (No "
-                "update is involved: this build can already serve it.)"
-            )
+        sentence = _switch_refusal_sentence(method)
+        if sentence:
+            return sentence
+    if error.data.get("disabled_by_operator"):
+        # The PEER's own last gate refused it (`consent.ts::requireConsent`), so
+        # this is consent and never a version — and the payload carries no record,
+        # because the refusal never reached the advertisement: `advertised`,
+        # `capabilities_known` and `extension_version` are all absent. Which is
+        # exactly why this branch sits BEFORE the "no browser is attached"
+        # fallback an empty payload used to fall through to, rendering a consent
+        # refusal as a connection problem with no method named (round-1 R4).
+        sentence = _switch_refusal_sentence(method)
+        if sentence:
+            return sentence
     if not peer:
         return (
             f"no browser is attached, so '{method}' cannot run. Ask the user to open their "

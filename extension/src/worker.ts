@@ -452,11 +452,16 @@ async function announceCapabilities(target?: WebSocket): Promise<void> {
     (method) => !hasConsentSwitch(method) || !disabled.includes(method),
   );
   const frames: ExtensionEvent[] = [
-    // The switch answer FIRST: a reader that lands between the two frames must
-    // never see a method absent from `methods` without the reason that separates
-    // "cannot" from "not enabled".
-    { event: "capability_switches", disabled, version },
+    // `capabilities` FIRST, and the order is load-bearing (round-1 Q3). A reader
+    // that lands between the two frames sees one of two contradictions: with this
+    // order it may still find the method in the STALE `disabled` list while the
+    // new advertisement already serves it — harmless, because the method is
+    // present and the call is accepted — whereas the other order leaves a
+    // just-enabled method absent from `capabilities` AND absent from `disabled`,
+    // which is the wedge shape the harness renders as "neither can serve this nor
+    // has a switch", for the ~15 ms it takes the second frame to arrive.
     { event: "capabilities", methods, version },
+    { event: "capability_switches", disabled, version },
   ];
   for (const frame of frames) {
     const body = JSON.stringify(frame);
@@ -470,6 +475,25 @@ async function announceCapabilities(target?: WebSocket): Promise<void> {
     send(frame);
   }
 }
+
+/* THE WORKER'S OWN HALF OF A REVOKED GRANT (round-1 R6).
+ *
+ * The options page repaints itself when Chrome takes the permission away, but the
+ * ADVERTISEMENT is what the daemon gates on: without this, an extension that has
+ * lost `downloads` keeps claiming it until the socket happens to drop, the daemon
+ * sends the method, and the last gate refuses with a consent sentence about a
+ * switch the user never touched — a correct refusal for the wrong reason, and a
+ * user sent to the wrong remedy. Both directions are handled: a removal withdraws
+ * the capability, and a grant restored in chrome://extensions does not by itself
+ * enable anything (the switch is the consent) but does change the answer to "is the
+ * permission held", so both frames are recomputed and re-sent either way.
+ *
+ * Best-effort by construction: `announceCapabilities` recomputes from live state
+ * and `send` no-ops without an open socket, so the cost of a fire-and-forget here
+ * is one storage read per Chrome event.
+ */
+chrome.permissions?.onRemoved?.addListener(() => void announceCapabilities());
+chrome.permissions?.onAdded?.addListener(() => void announceCapabilities());
 
 async function connect(): Promise<void> {  // `connecting` guards the window between `new WebSocket()` and `onopen`, when
   // `connected` is still false: without it, a `chrome.alarms` tick (or a wake

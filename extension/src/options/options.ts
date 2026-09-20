@@ -2,10 +2,15 @@ import { DEFAULT_PORT, getLocal } from "../state";
 import { PROTO_VERSION } from "../protocol.gen";
 import {
   capabilityEnabled,
+  PERMISSION_MISSING_MESSAGE,
+  PERMISSION_REQUEST_DEADLINE_MS,
+  PERMISSION_REQUEST_PENDING,
   permissionHeld,
+  storedSwitch,
   switchPermission,
   writeSwitch,
 } from "../consent";
+import { deadline } from "../driver/deadline";
 import { allowAllView, nextAllowAllView, type AllowAllAction, type AllowAllView } from "./allow-all-flow";
 import { grantRows, removeGrantAccessibleName, revokeMessageFor } from "./grant-list";
 import { runWorkerMutation } from "./mutation-flow";
@@ -163,6 +168,7 @@ const allowDownloads = document.getElementById("allow-downloads") as HTMLInputEl
 const allowUploads = document.getElementById("allow-uploads") as HTMLInputElement;
 const downloadsNotice = document.getElementById("downloads-notice") as HTMLParagraphElement;
 const uploadsNotice = document.getElementById("uploads-notice") as HTMLParagraphElement;
+const consentState = document.getElementById("consent-state") as HTMLParagraphElement;
 
 /* The two file-transfer switches.
  *
@@ -172,9 +178,23 @@ const uploadsNotice = document.getElementById("uploads-notice") as HTMLParagraph
  * what stops the page showing "on" for a capability Chrome has since revoked.
  */
 
-function notice(target: HTMLParagraphElement, message: string): void {
+/* Paint a notice, in one of two WEIGHTS.
+ *
+ * Success and refusal used to be the same box, so "Downloads are on" and "Chrome
+ * did not grant the permission" differed only in their words (round-1 D2) — on the
+ * one part of this page that asks the user to go and do something. `attention` is
+ * for the notices that need an ACTION (a grant refused, a grant taken away, a
+ * dialog still unanswered): same place, same sentence structure, visibly the one to
+ * read first.
+ */
+function notice(
+  target: HTMLParagraphElement,
+  message: string,
+  kind: "info" | "attention" = "info",
+): void {
   target.textContent = message;
   target.classList.toggle("hidden", message === "");
+  target.classList.toggle("consent-note--attention", kind === "attention" && message !== "");
 }
 
 /** Paint both switches (and their notices) from live state. */
@@ -185,10 +205,36 @@ async function renderConsent(): Promise<void> {
   ]);
   allowDownloads.checked = downloadsOn;
   allowUploads.checked = uploadsOn;
+  // The state in WORDS as well as in pixels, beside the other cards' own state
+  // lines (round-1 D3: the only thing carrying the off switch was a 14×14 knob at
+  // 1.13:1 against the card, and no sentence said which way either switch points).
+  if (downloadsOn && uploadsOn) {
+    consentState.textContent = "Downloads and uploads are both on for this browser.";
+  } else if (downloadsOn) {
+    consentState.textContent = "Downloads are on. Uploads are off.";
+  } else if (uploadsOn) {
+    consentState.textContent = "Uploads are on. Downloads are off.";
+  } else {
+    consentState.textContent =
+      "Downloads and uploads are both off, so the agent can neither save nor attach files on this browser.";
+  }
   // A notice is only ever painted by an ACTION (a denial, a revocation, a
   // refusal to drop the grant), so painting clears nothing on a plain render:
   // the state the user has to read must survive a repaint, but a stale notice
-  // about an action they have since answered must not.
+  // about an action they have since answered must not. With ONE exception, which
+  // is a STATE rather than an action: a stored flag with no grant behind it.
+  //
+  // Chrome can take the permission away while this page is closed (round-1 D1),
+  // and the flag then outlives it — so the page rendered an untouched default
+  // (both switches off, empty note) while the stored consent still said "on",
+  // identical to a fresh install and identical between GRANTED, REFUSED and
+  // REVOKED. The flag is repaired here — it is this page's own storage, and a flag
+  // its permission no longer justifies is not consent — and the reason is painted
+  // with the same sentence the revocation path owns.
+  if ((await storedSwitch("download")) && !downloadsOn) {
+    await writeSwitch("download", false);
+    notice(downloadsNotice, PERMISSION_MISSING_MESSAGE, "attention");
+  }
 }
 
 /** Turn `Allow downloads` on: the permission request happens HERE, on the click.
@@ -203,29 +249,47 @@ async function renderConsent(): Promise<void> {
 async function enableDownloads(): Promise<void> {
   const permission = switchPermission("download");
   const api = chrome.permissions;
-  let granted = true;
+  // The pending window, stated BEFORE the dialog can appear: the switch paints the
+  // EFFECTIVE state (off) rather than the click's optimism, and the note says what
+  // the page is waiting for. Round-1 U1 measured the old shape — switch ON,
+  // disabled, silent, unchanged after 25 s — which tells a user whose dialog
+  // opened behind another window that the capability is on when nothing has been
+  // granted, and leaves them no way to undo it from this page.
+  await renderConsent();
+  notice(downloadsNotice, PERMISSION_REQUEST_PENDING);
+  let granted = false;
   if (permission && api?.request) {
     try {
-      granted = await api.request({
-        permissions: [permission as chrome.runtime.ManifestPermissions],
-      });
+      // BOUNDED, and VERIFIED (round-1 R5). Measured on Chrome 153.0.8013.53 on
+      // this host: the call can fail to SETTLE at all — the promise stayed pending
+      // past 25 s, and past a 120 s `Runtime.evaluate` wait — so an unbounded await
+      // leaves the switch disabled with no note forever. And the resolved value is
+      // not evidence of a grant: the user can answer the dialog and have it
+      // refused, so the only proof is asking Chrome whether it holds the
+      // permission. Truthiness of the request alone stored the flag `true` and
+      // flashed "Downloads are now allowed." with nothing behind it.
+      const answer = await deadline(
+        api.request({ permissions: [permission as chrome.runtime.ManifestPermissions] }),
+        PERMISSION_REQUEST_DEADLINE_MS,
+        `chrome.permissions.request(${permission})`,
+      ).catch(() => false);
+      granted = answer === true && (await permissionHeld(permission));
     } catch {
       // A thrown request is not a grant. Same direction as a denial, because the
       // only safe reading of "we could not ask" is "not granted".
       granted = false;
     }
-  } else if (permission) {
-    granted = false;
   }
   if (!granted) {
-    // The switch must not stay where the user put it: Chrome refused, so the
-    // capability is not available and a switch reading ON would be a lie the
-    // very next refusal would contradict.
+    // The switch must not stay where the user put it: Chrome refused, or never
+    // answered, so the capability is not available and a switch reading ON would be
+    // a lie the very next refusal would contradict.
     await writeSwitch("download", false);
     await renderConsent();
     notice(
       downloadsNotice,
       `Chrome did not grant the '${permission}' permission, so downloads stay off. You can turn this on again — Chrome will ask once more.`,
+      "attention",
     );
     return;
   }
@@ -263,6 +327,7 @@ async function disableDownloads(): Promise<void> {
     removed
       ? "Downloads are off, and the downloads permission has been handed back to Chrome."
       : `Downloads are off. Chrome still lists the '${permission}' permission for this extension — remove it in chrome://extensions if you want it gone as well.`,
+    removed ? "info" : "attention",
   );
   flash("Downloads are no longer allowed.");
 }
@@ -300,10 +365,11 @@ chrome.permissions?.onRemoved?.addListener((removed) => {
     if (permission && removed.permissions?.includes(permission as chrome.runtime.ManifestPermissions)) {
       await writeSwitch("download", false);
       await renderConsent();
-      notice(
-        downloadsNotice,
-        "Chrome removed the downloads permission, so downloads are off. Turn the switch on again to ask for it once more.",
-      );
+      // The SAME sentence the load-time repair paints (`PERMISSION_MISSING_MESSAGE`):
+      // a grant taken away while this page was open, a grant taken away while it was
+      // closed and a grant that was never made are one state, and one spelling of it
+      // is what lets a user recognise the state they are in.
+      notice(downloadsNotice, PERMISSION_MISSING_MESSAGE, "attention");
     }
   })();
 });

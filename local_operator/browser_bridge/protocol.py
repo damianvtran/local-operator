@@ -121,13 +121,16 @@ CAPABILITY_SWITCH_PERMISSION: dict[str, str] = {"download": "downloads"}
 
 #: Where the switches live, in the ONE spelling every refusal uses.
 #:
-#: A refusal that names a switch but not where to find it leaves the user
-#: hunting; naming a URL we cannot know (the extension id differs between an
-#: unpacked and a store install) would be worse, so the copy names the two
-#: Chrome surfaces that lead there for any install.
+#: A refusal that names a switch but not where to find it leaves the user hunting;
+#: naming a URL we cannot know (the extension id differs between an unpacked and a
+#: store install) would be worse, so the copy names the route a user can follow for
+#: either. The toolbar route comes FIRST because the popup's footer already carries
+#: a one-click "Settings" link (round-1 UX, U2/U3): sending the user through
+#: chrome://extensions when one click reaches the same page is a worse instruction
+#: than the product already offers.
 CAPABILITY_SWITCH_LOCATION = (
-    "the Local Operator extension's options page "
-    "(chrome://extensions -> Details -> Extension options)"
+    "the Local Operator extension's options page (the Local Operator toolbar icon → "
+    "Settings, or chrome://extensions → Details → Extension options)"
 )
 
 #: The methods a host must ADVERTISE before the daemon will send them.

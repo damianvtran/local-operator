@@ -11551,7 +11551,7 @@ async def _browser_download(
         # The same two words every other refusal uses, from the same function: a
         # cancelled transfer, an uncorroborated path and a name already in the
         # session all have to say what happened to the entry (review round 2, N7).
-        word, trail = _delete_outcome(entry.deleted)
+        word, trail = _disposition_outcome(entry.disposition)
         refused_intake.append(f"{entry.name}: {word} — {entry.reason}")
         _download_audit(
             call_id=call_id,
@@ -12053,6 +12053,35 @@ def _delete_outcome(removed: bool) -> tuple[str, str]:
     if removed:
         return "refused and deleted", "the entry was removed"
     return "refused, NOT deleted", "the entry could NOT be removed — it is still on disk"
+
+
+def _disposition_outcome(disposition: str) -> tuple[str, str]:
+    """What happened to a refused ENTRY, for every outcome intake can report.
+
+    FOUR outcomes, not two (round-1 Q2). "We could not remove it" and "we chose
+    to leave it" are different facts, and a third is that there was nothing to
+    remove — which the two-word vocabulary spelled as "could NOT be removed — it is
+    still on disk", in the same sentence as "already gone", about an entry that had
+    never been there. A deliberate decision read as a failure, too: the file was
+    left because it was never ours to delete.
+
+    Keyed on the VALUE `browser_files` reports rather than on a boolean, so a later
+    outcome cannot be silently collapsed into one of these four.
+    """
+    # Imported here rather than at module scope, matching every other
+    # `browser_files` use in this module: the alias is what keeps this file's import
+    # graph from dragging the browser layer into a process that only wants tools.
+    from local_operator import browser_files as files
+
+    return {
+        files.DELETED: ("refused and deleted", "the entry was removed"),
+        files.KEPT: ("refused, left in place", "the entry was left where it is, on purpose"),
+        files.FAILED: (
+            "refused, NOT deleted",
+            "the entry could NOT be removed — it is still on disk",
+        ),
+        files.ABSENT: ("refused, nothing to remove", "there was no entry to remove"),
+    }.get(disposition, ("refused", "the outcome of that entry is unknown"))
 
 
 def _unlink_quietly(path: Path) -> bool:

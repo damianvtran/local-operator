@@ -50,6 +50,12 @@ function item(id, overrides = {}) {
     exists: true,
     paused: false,
     error: "",
+    // The driven tab's own origin, because OWNERSHIP is now a gate: the handler
+    // only cancels a transfer it can attribute to the page this session is driving
+    // (round-1 R2/R7), and Chrome reports this referrer for a download the page
+    // started. A fixture without one describes a transfer the extension does not
+    // own — which is why the foreign case has its own test below.
+    referrer: "https://example.test/export",
     ...overrides,
   };
 }
@@ -266,6 +272,32 @@ test("several downloads in one gesture are all reported, at their own paths", as
       report.files.map((file) => file.state),
       ["complete", "complete"],
     );
+  } finally {
+    await module.close();
+  }
+});
+
+
+test("a download another page started is reported and never cancelled", async () => {
+  // The destructive half of the ownership gate (round-1 R2/R7). `chrome.downloads`
+  // is browser-wide and a DownloadItem carries no tabId, so before this rule a
+  // large manual download — one the user started in another tab — was cancelled by
+  // a ceiling this call set for its own transfer, and its partial file left in the
+  // user's folder. It is still REPORTED (the harness refuses it without touching
+  // it), and it must not consume a per-call slot either.
+  const fake = installChrome({
+    42: [
+      () => item(42, { referrer: "https://elsewhere.example/account" }),
+      () => item(42, { referrer: "https://elsewhere.example/account", bytesReceived: 300 * 1024 * 1024 }),
+    ],
+  });
+  const module = await load("src/commands/download.ts");
+  try {
+    const report = await module.loaded.download({ tab: SURFACE, timeout_s: 20 }, "r-foreign");
+    assert.deepEqual(fake.cancels, [], "another page's transfer is not ours to cancel");
+    const [file] = report.files;
+    assert.equal(file.cancelled, "");
+    assert.equal(file.referrer, "https://elsewhere.example/account");
   } finally {
     await module.close();
   }
