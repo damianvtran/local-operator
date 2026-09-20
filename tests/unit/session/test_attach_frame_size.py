@@ -30,6 +30,7 @@ from typing import Any, Sequence, cast
 
 import pytest
 
+from local_operator.harness.jobs import AsyncJob
 from local_operator.harness.types import (
     AgentStartEvent,
     ImageContent,
@@ -76,6 +77,8 @@ from local_operator.session.frontend_state import (
     TodoItemState,
     TodoPhaseState,
     _folded_components,
+    _released_row,
+    _with_lineage,
     filter_update_trajectories,
     oversized_frame_report,
     sync_wire_payload,
@@ -90,6 +93,14 @@ from local_operator.session.runtime import registry
 from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
 from local_operator.tui.costs import job_cost
 from tests.unit.session.runtime.test_server import FakeHandle
+
+#: Wire budget for the `roster_released` key on ONE released row, in bytes.
+#: Measured at 25 (`"roster_released":true,` and its separator) against a
+#: certified ceiling with 168 bytes of slack across a 200-row roster, so this
+#: bound is deliberately tight rather than generous: a change to the key's
+#: encoding has to trip `test_the_released_flag_costs_a_bounded_number_of_bytes_per_row`
+#: and be re-derived against the ceiling (QA round 1, Q1).
+_RELEASED_FLAG_WIRE_BUDGET_BYTES = 32
 
 #: A tool result big enough to be realistic. The point of the cap is that ONE
 #: event carries an unbounded payload, so a small filler would test the row
@@ -592,6 +603,77 @@ def test_shareable_state_fields_are_real_and_immutable() -> None:
         "`read_field` shares the store's own object, so anything a caller can mutate "
         "in place — a model, a dict, a list — must read through `state` instead and "
         "pay for its deep copy."
+    )
+
+
+def test_the_released_flag_costs_a_bounded_number_of_bytes_per_row() -> None:
+    """`roster_released` is a per-row cost against a ceiling with ~168 B of slack.
+
+    QA ROUND 1 (Q1). Setting `roster_released` on the calibrated
+    ``ran_all_year`` fixture's 200 rows takes the attach frame from 1,048,408
+    to 1,054,200 bytes -- over the 1 MiB line -- so about six rows of that shape
+    are the whole margin. That fixture cannot express the shape itself: its rows
+    are ``status="running"``, and `retention_expired` refuses a running row
+    before it looks at the clock, so the roster window can never release one.
+
+    This pins the arithmetic instead, from the two directions that make it a
+    ceiling question rather than an accident:
+
+    * the key's OWN wire cost, bounded rather than pinned to a point, so a
+      change to its encoding has to pass through here; and
+    * that releasing a row does NOT shrink it on the ATTACH path. It is tempting
+      to argue the per-row flag pays for itself by shedding the retained window,
+      and it does not: `sync_wire_payload` already elides the window from this
+      path (the fixture's rows ship `trajectory_length` with an empty
+      `trajectory`), so on the attach frame the released projection is strictly
+      LARGER than the member projection of the same job.
+
+    Both are asserted against the real wire, so the next person to touch
+    `_released_row` or the frame's caps sees the cost here.
+    """
+    job = AsyncJob(
+        id="job0",
+        type="task",
+        label="child 0",
+        status="completed",
+        start_time=1_699_000_000.0,
+        settled_at=1_700_000_000.0,
+        trajectory=[_event(row) for row in range(500)],
+        result_text="r" * 40_000,
+    )
+    comms = SimpleNamespace(node=lambda _job_id: None)
+
+    def wire_bytes(row: JobState, *, drop_flag: bool = False) -> int:
+        store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1", jobs=[row]))
+        frame = {
+            "op": "frontend_sync",
+            "data": sync_wire_payload(store.subscribe(lambda _u: None).sync),
+        }
+        if drop_flag:
+            # The key's own cost, taken off the SERIALIZED row: a JobState is
+            # frozen, so neither `model_copy(update=...)` nor `model_validate`
+            # on its own dump can change a field (both measured while writing
+            # this test).
+            for serialized in frame["data"]["snapshot"]["jobs"]:
+                serialized.pop("roster_released", None)
+        return _line_bytes(frame)
+
+    member = JobState.from_job(job)
+    released = _with_lineage(_released_row(job), comms)
+
+    assert wire_bytes(released) >= wire_bytes(member), (
+        "the released projection is now smaller than the member projection on the "
+        "attach path, which would mean the window is no longer elided here -- that "
+        "is a change to this test's premise, and the per-row flag's cost below is "
+        "the thing to re-derive if it happens."
+    )
+
+    marginal = wire_bytes(released) - wire_bytes(released, drop_flag=True)
+    assert marginal <= _RELEASED_FLAG_WIRE_BUDGET_BYTES, (
+        f"the `roster_released` key costs {marginal} bytes on each released row, "
+        f"over its {_RELEASED_FLAG_WIRE_BUDGET_BYTES}-byte budget. The attach "
+        "ceiling this file certifies has 168 bytes of slack across a 200-row "
+        "roster, so this is a ceiling question, not a rounding one."
     )
 
 
