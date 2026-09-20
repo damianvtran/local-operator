@@ -2229,9 +2229,15 @@ gone, the pair round-1 D3 exists to keep together); the row now holds its 12 px 
 and the notice clips instead. **The threshold, recorded rather than hidden:** at 380 px
 width the row and a full notice are 455 px apart, and with the row at that floor the
 notice's tail clips below roughly **505 px** of viewport height — measured, and
-corrected from round 3's 460 px (round-4 U2). The knob, its state line and the notice's
-first lines stay visible, which is the right way round. The clip is 65 px at 380x440,
-and the clipped part is the explanation's tail, not its opening.
+corrected from round 3's 460 px (round-4 U2). **What stays visible differs by notice,
+and round 5 (R5-2) is right that the earlier wording claimed it for both:** for the
+SHORT notice (uploads, ~57 px) the knob, its state line and the notice's first lines are
+on screen at every probed size; for the LONGER pending notice (~96 px) below its own
+threshold, **nothing of the notice is visible at all** — at nominal 380x300 (actual
+viewport 500x213) the reveal puts the pressed row at its 12 px floor and the notice at
+332–428, entirely below the fold. What is true in both cases is the part that matters:
+the pressed row and its state line are on screen, so the user sees what they pressed and
+where the answer is, rather than a bare knob.
 
 **U5 — one statement about the load-time reveal, not two.** `notice()`'s docstring
 said a page must not scroll itself as it opens while the repair's call site argued for
@@ -2288,7 +2294,13 @@ fight: scroll down by whatever the notice needs, then pull back up if that would
 the pressed row off the top (the row wins when both cannot be satisfied). Re-measured,
 uploads press, this rig's viewport heights:
 
-| size | viewport h | uploads row | uploads notice | clipped |
+The table's first column is the NOMINAL window size, as the probes were invoked; the
+viewport is what the page actually got, and the width is clamped — every "380" and
+"420" row above is a **500 px** viewport, which is why the two labels are the same
+measurement (round-5 R5-1/D2 caught the labels, not the numbers). Re-measured with the
+width recorded:
+
+| size | actual viewport h | uploads row | uploads notice | clipped |
 |---|---|---|---|---|
 | 380x300 | 213 | 12 | 189–246 | 33 px (round 3: **all** of it) |
 | 420x400 | 313 | 67 | 244–301 | **0** (round 3: clipped) |
@@ -2310,11 +2322,20 @@ at 380x500; 580/703 at 900x620). Only the scroll offset moves.
 floor, the notice is clipped until the viewport can hold *row floor + row→notice
 distance + notice height*, and that distance depends on how much prose sits between the
 row and the notice — which is why one absolute number was always going to be wrong.
-Measured in this rig at 380 wide: the **uploads** notice needs a viewport of ~246 px,
-and the **longer pending downloads** notice ~428 px (clipped by 215 / 75 / 15 px at
-213 / 353 / 413, and 0 at 433). In the streams' rig, where the reported viewport height
-equals the nominal window height, the same measurement is the ≈505 px round 4 reports;
-round 3's 460 px was that number read without the downloads notice's extra length.
+Measured in this rig, with the pressed row at its 12 px floor: the **uploads** notice
+overflows by 33 px at a 213 px viewport, so it fits from **~246 px**; the **longer pending
+downloads** notice overflows by 215 / 75 / 15 px at viewport heights 213 / 353 / 413 and
+fits from **~428 px**. In the streams' rig, where the reported viewport height equals the
+nominal window height, the same measurement is the ≈505 px round 4 reports; round 3's
+460 px was that number read without the downloads notice's extra length.
+
+**The threshold is a property of the surrounding copy, which is why round 5 (R5-1/D2/Q5-1)
+is right to press on it and why no single number will hold.** The distance between the
+pressed row and its notice includes the STATE LINE — the sentence between them — and that
+sentence's own length changes with the page's state (up to ~39 px more when it carries the
+full both-off clause than when it says the one short clause the referenced state shows).
+A copy edit anywhere on that path moves the threshold. So the rule is the durable
+statement, and the numbers above are this head's readings of it.
 
 **U1 — the escape now says itself.** The pending sentence is: *"Waiting for Chrome's
 permission prompt. Press the switch again to stop waiting — downloads stay off until
@@ -2337,4 +2358,61 @@ downloads notice naming the wait. One-notice states say only the other capabilit
 means the `change` event never fires while a request is in flight, so the second guard
 was unreachable for any human gesture and read like a live one. The comment says what
 replaced it, and names the synthetic `change` shape it used to answer to.
+
+---
+
+### 17.18 Round-5 remediation: two sentences, two labels, and one inert declaration
+
+Minors only, one commit on `5300a59b`, and none of it behaviour:
+
+**D1 == UX U2 — "as well" needed an antecedent, and the broadened predicate took it
+away.** Widening "is this capability accounted for" from attention notices to any notice
+was right (round 4), but "as well" asserts a RELATION to the capability the covering
+notice is about, and that relation only holds when the covering notice is reporting that
+capability OFF. Under *"Uploads are on. Turn this off…"* — a quiet notice reporting an
+action — *"Downloads are off as well."* claimed a relation that was not there. The phrase
+now appears only when the covering notice carries the attention weight, which is the same
+test the rest of this file uses for "this capability is off". Measured, this head:
+uploads notice reporting ON → state line **"Downloads are off."**; the pending attention
+notice → **"Uploads are off as well."**; the quiet cancel notice → **"Uploads are off."**
+Both directions of the mirror checked.
+
+**UX U1 — the way out leads the sentence.** Round 4 named the escape; round 5 measured
+that naming it in second position was not enough at short heights, because the reveal
+clips the notice's tail and the way out was the part that disappeared. The pending copy is
+now *"Press the switch again to stop waiting. Chrome is waiting for your answer to its
+permission prompt — downloads stay off until it is answered, and if you do not see a
+dialog, look for a Chrome window behind this one."* — same three facts, order changed, so
+the clause that survives a clip is the actionable one. The notice's height is unchanged
+(96 px at 500 px width).
+
+**R5-1 / D2 / Q5-1 — the labels were wrong; here is what they actually were.** The probes
+were invoked as *nominal* window sizes, and the page's rendered width is clamped: every
+"380"- and "420"-wide run is a **500 px** viewport, so those two labels were the same
+measurement, and the actual heights are 213 / 313 / 353 / 413 / 433 / 473 for the nominal
+300 / 400 / 440 / 500 / 520 / 560. Both tables now carry the nominal size with the actual
+viewport beside it.
+
+The thresholds are re-stated on this head, with the row at its 12 px floor: the uploads
+notice fits from **~246 px**, the longer pending notice from **~428 px**, and the section
+says plainly that a single number cannot hold, because the distance the reveal has to
+cover includes the **state line** whose own length changes with the page's state — up to
+~39 px more when it carries the full both-off clause. That is the property R5-1/D2/Q5-1
+is pointing at, and it is now stated rather than implied by one figure.
+
+**R5-2 — "the notice's first lines stay visible" is true for one notice and false for the
+other.** Corrected in §17.16: the short uploads notice keeps its opening lines on screen
+at every probed size; the longer pending notice below its threshold is **entirely**
+invisible (at a 500x213 viewport the pressed row is at its floor and the notice sits at
+332–428). What holds in both cases is the part that matters — the pressed row and its
+state line are on screen.
+
+**R5-4 — the CSS `scroll-margin-*` are removed rather than duplicated.** They are honoured
+only by `scrollIntoView`, which the reveal no longer calls, so they had become a second
+and inert source of truth for the same 12 px; `FLOOR` in `revealNotice` supplies it. The
+comment where each was removed records the round-3 measurement that produced the number,
+and `revealNotice` now notes that near the threshold the gap is **best-effort** — measured
+3.9 px rather than 12 px in one compressed case, because the row constraint is applied
+after the notice's and can claw part of it back. Below the threshold something has to give
+and it is the gap, not the control.
 

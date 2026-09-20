@@ -80,15 +80,15 @@ export const PERMISSION_REQUEST_DEADLINE_MS = 120_000;
  * optimism — and this sentence says what the page is waiting for, so a user whose
  * dialog opened behind another window can tell a pending grant from a broken one.
  *
- * It also has to name the way OUT (round-4 U1). The escape exists — a second press
- * cancels the wait — but nothing said so, and the neighbouring no-grant sentence
- * teaches "turn the switch on again to ask Chrome once more", which in this state is
- * the cancel. A user who wanted to stop waiting had no way to find that out, so the
- * sentence says it.
+ * The WAY OUT leads the sentence (round-4 U1 named it; round-5 UX U1 measured that
+ * naming it was not enough — at short viewport heights the reveal clips the notice's
+ * tail, so a clause in second position is the first to disappear, and the way out was
+ * exactly what got clipped). The three facts are unchanged; only their order is.
  */
 export const PERMISSION_REQUEST_PENDING =
-  "Waiting for Chrome's permission prompt. Press the switch again to stop waiting — downloads stay off " +
-  "until the prompt is answered. If you do not see a dialog, look for a Chrome window behind this one.";
+  "Press the switch again to stop waiting. Chrome is waiting for your answer to its permission prompt — " +
+  "downloads stay off until it is answered, and if you do not see a dialog, look for a Chrome window " +
+  "behind this one.";
 
 /** The ONE sentence for a grant this extension wants and does not hold.
  *
