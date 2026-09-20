@@ -214,14 +214,17 @@ not 44 — where the command's copy renders as **12 rows** and the card's as **6
 **The block does not fit at every height, and the copy's order is the reason it
 matters.** Measured at 44x20 on this head, the transcript's content area is
 **13 rows** in the pin's staging, **11 rows** in a conversation (`refusal-44x20`:
-`size [41,11] virtual [40,15]`, `scroll_y=4`, vertical bar — the block's first
-**two** rows are above the fold, so what the operator reads first is the remainder
-of the reason sentence, not its opening words), and **2 rows** with the re-armed
-card docked (`region [1,1,42,4] size [41,2] virtual [40,8] scroll_y=6`, the notice
+`region [1,1,42,13] size [41,11] virtual [40,15]`, `scroll_y=4` — the maximum,
+15 − 11, i.e. scrolled to the bottom; the notice is `region [2,1,40,12] size
+[40,12]`, so **exactly ONE row of it is above the fold** — its first. The other
+three rows off the top are the prompt's own two (`UserBlock region [2,-2,40,2]`)
+and the container's adaptive gap row, not more of the notice. What the operator
+reads first is therefore the remainder of the reason sentence, not its opening
+words), and **2 rows** with the re-armed card docked (`region [1,1,42,4] size [41,2] virtual [40,8] scroll_y=6`, the notice
 itself at `region [2,-2,40,6]`), where the rows that paint are the block's **last
 two** — `blocked until someone does.` / `Denying it works from here.` So at 44
-columns the operator gets the reason and the remedies — minus the first two rows —
-in a conversation, and gets **the notice's tail with the card up**, which is the
+columns the operator gets the reason and the remedies — minus the block's first
+row — in a conversation, and gets **the notice's tail with the card up**, which is the
 frame where the card is the thing that has to be answered anyway and the notice's
 detail is recoverable once it is.
 Both block heights are pinned as exact numbers in
