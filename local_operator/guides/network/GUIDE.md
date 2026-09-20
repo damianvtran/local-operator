@@ -71,29 +71,47 @@ rendering is not a contract.
    an empty list.
 6. Tell the user what they now have: a relay this device supervises, an identity
    keypair other networks will address it by, and a member list they can inspect.
-   The next section says which of the session features are not in this build yet.
+   The next section says what the session plane can and cannot do across the mesh.
 
 ## Which device should run this session
 
-Not yet available in this build. The design puts session placement here
-(`lop sessions --all-peers`, `lop exec --peer`, `lop sessions move <id> --to
-<peer>|local`, `/new remote <peer>`, `/move`), but the relay answers every
-session-plane op by name:
+A session can be listed, created, warmed and stopped ON a peer over a paired
+mesh. From a shell:
 
-```
-net_forward_session -> unknown local op    (mesh-session-mobility.md owns it)
-```
+| Command | Effect |
+|---|---|
+| `lop network sessions --all-peers --json` | every peer's sessions, merged; each row names the device holding it |
+| `lop network sessions --peer <id\|name> --json` | one device's own catalogue |
+| `lop sessions --peer <id\|name>` / `--all-peers` | the same rows through the ordinary session list |
+| `lop network sessions --peer <id> --create --name <n> [--prompt <p>]` | create the session ON the peer, which mints its id |
+| `lop network sessions --peer <id> --engage <session>` | warm a stored session on the peer |
+| `lop network sessions --peer <id> --stop <session>` | stop it where it lives |
 
-Until that slice lands, do not promise a user that a session can be created on,
-driven from, or moved to a peer, and do not retry those verbs hoping for a
-different answer. What works today is pairing, membership, the peer table, the
-audit log and the incident controls — the transport half of the network.
+WHAT IS **NOT** IN THIS BUILD, although the design names it: `lop exec --peer`,
+`lop send --peer`, `lop sessions move <id> --to <peer>|local`, and the TUI's
+`/new remote` and `/move`. Do not promise a user that a session can be MOVED
+between devices, and do not retry those verbs hoping for a different answer —
+`--peer` is not a flag on `exec` or `send`, and `move` is not a `sessions`
+subcommand. Credentials are the other gap (next section): a session created on a
+peer needs a model THAT PEER can reach, and this build does not broker one.
 
-The rule the design fixes, which will hold when it lands: a session with a
-strong local dependency (a repository that exists only on this machine, an
-attached browser, a terminal the user is watching) should stay where it is.
-Mobility is for work that follows the person, not for work that follows the
-machine.
+DIAL-ONLY DEVICES. A machine with no inbound path (behind NAT, or
+`network.listen_address: 127.0.0.1`) can reach a peer but cannot be reached by
+one. That is a supported configuration, not a fault, and the rule is symmetric:
+whichever side can dial forms the link, and the link is then bidirectional. So a
+peer's listing works from the dial-only side, and a session on the dial-only
+device is best created from there. `lop network peers --json` says which kind each
+member is, with the reason in `reason`: `no_endpoint` means that member never
+declared an address (admitted by an older build), `connect_failed:*` means nothing
+answered at the address it declared, and `not probed: the listing budget ran out`
+means the listing gave up waiting rather than claiming anything. `lop network
+doctor --json` reports the same per link, and its top-level `ok` is FALSE whenever
+any check in its own array is false.
+
+The rule the design fixes: a session with a strong local dependency (a repository
+that exists only on this machine, an attached browser, a terminal the user is
+watching) should stay where it is. Mobility is for work that follows the person,
+not for work that follows the machine.
 
 ## Credentials on a peer
 
@@ -220,17 +238,20 @@ is for a suspected key compromise, and the previous id is gone for good.
 **What is not implemented in this build**, so nothing above should be promised as
 existing:
 
-- Session placement, forwarding and mobility (`mesh-session-mobility.md`).
+- Session MOBILITY — `lop sessions move <id> --to <peer>|local`, move-with-`--keep`
+  (fork), and the TUI's `/move` and `/new remote`. Creating, listing, warming and
+  stopping a session ON a peer IS implemented (see "Which device should run this
+  session"); moving one is not (`mesh-session-mobility.md`).
 - Credential brokering (`mesh-credentials.md`).
 - The console/relay UI surfaces (`mesh-ui.md` §1–2).
-- `uninstall --purge` is narrower than its step message claims: it removes files
-  directly under the network directory (the audit log) and reports "deleted this
-  device's mesh identity and network records", but the identity and the network
-  records live in subdirectories and survive. The design splits this properly —
-  `--purge` for a network's records, invites and outbox, and a separate
-  `--purge-identity` with a TTY confirmation naming every network the identity
-  knows — and neither that split nor `--purge-identity` exists yet. Tell the user
-  what actually happens; to leave a single network, `lop network rm <network>`.
+
+`lop network uninstall --purge` removes this device's NETWORK records, invite
+token files, outbound queues, parked pairings and the audit log, and deliberately
+KEEPS the identity keypair — every network addresses this device by it, and losing
+it silently would break networks this purge does not cover. `--purge-identity` is
+the separate verb that deletes the keypair; it needs a terminal to confirm and
+names every network the identity knows. On a host with no launchd (Linux) neither
+verb needs launchd: `lop network serve` is how the relay runs there.
 
 **File locations** (under the config directory — `LOCAL_OPERATOR_CONFIG_DIR`, by
 default `~/.local-operator`): the network directory holds `identity/device.json`

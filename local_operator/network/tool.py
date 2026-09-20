@@ -520,9 +520,24 @@ async def execute_network(
 
     scrubbed = _scrub(payload)
     if code != 0 or scrubbed.get("ok") is False:
-        message = str(scrubbed.get("error") or _clean(stderr) or f"exited {code}")
+        # ``code`` + ``message`` IS THE REFUSAL FAMILY'S SHAPE, so it is read
+        # before ``error`` (which only the install/uninstall diagnostics still
+        # use) and before stderr, which in ``--json`` mode is empty BY DESIGN —
+        # reading it first is how a refusal became the bare text "exited 1", which
+        # tells an agent neither what happened nor what to do (QA round 1, F-6).
+        reason = str(scrubbed.get("code") or "")
+        message = str(
+            scrubbed.get("message")
+            or scrubbed.get("error")
+            or _clean(stderr)
+            or f"exited {code}"
+        )
         hint = _hint(params.action)
-        return _error(tool_call_id, _TOOL, message + (f"\n{hint}" if hint else ""))
+        return _error(
+            tool_call_id,
+            _TOOL,
+            (f"{reason}: {message}" if reason else message) + (f"\n{hint}" if hint else ""),
+        )
 
     body = "\n".join(_render(params.action, scrubbed))
     text, spill = spill_truncate(body, _TOOL, context)

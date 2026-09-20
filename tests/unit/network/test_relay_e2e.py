@@ -120,6 +120,7 @@ def _join(
     token: str,
     envelope: Any,
     typed_code: str = "000000",
+    settings: relay.NetworkSettings | None = None,
 ) -> Any:
     """Drive the joining side's ceremony, with the human step supplied by the test.
 
@@ -141,7 +142,7 @@ def _join(
         token=token,
         envelope=envelope,
         identity=server_b.identity,
-        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+        settings=settings or relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
         args=args,
         wire=wire,
         Handshake=Handshake,
@@ -264,8 +265,17 @@ def test_a_wrong_transcription_burns_the_invite_and_admits_nothing(
     token, envelope = _mint_invite(server_a, record)
     _type_the_code(monkeypatch, code="999999")
 
-    with pytest.raises(Exception):
+    with pytest.raises(types.PairingRefusal) as excinfo:
         _join(server_b, host=host, port=port, token=token, envelope=envelope)
+
+    # THE JOINER'S OWN HALF OF THE REFUSAL. This assertion is the one that was
+    # missing: the inviter's invite outcome was checked below and the joiner's
+    # path was not, so a call to a helper that lives in a different module
+    # (``invite.sas_mismatch_sentence``) reached production and turned every wrong
+    # transcription — the normal user path — into an AttributeError instead of a
+    # refusal sentence (QA round 1, F-1).
+    assert excinfo.value.code == "sas_mismatch"
+    assert "digit" in excinfo.value.sentence or "code" in excinfo.value.sentence
 
     refreshed = store.load(record.network_id, server_a.root)
     assert refreshed.member(server_b.identity.device_id) is None
@@ -366,8 +376,12 @@ def test_a_replayed_invite_is_refused(
         thread.join(10)
     # Redeem the SAME token again: the record says consumed, so the listener refuses
     # BEFORE the challenge — silently, so the second attempt does not even learn
-    # whether the invite was ever valid.
-    assert _join(server_b, host=host, port=port, token=token, envelope=envelope) is None
+    # whether the invite was ever valid. The joiner reports WHAT HAPPENED AT THE
+    # HOST rather than a bare failure, which is the best it can do without an
+    # oracle: a sentence, not a success (QA round 1, F-4).
+    second = _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    assert isinstance(second, str), second
+    assert not isinstance(second, tuple)
     refreshed = store.load(record.network_id, server_a.root)
     assert len(refreshed.active_members()) == 2
     assert refreshed.invites[0].state == "consumed"
@@ -391,6 +405,7 @@ def _pair(
     role: str = "drive",
     ttl_s: float = 600.0,
     admit: bool = True,
+    settings: relay.NetworkSettings | None = None,
 ) -> tuple[types.NetworkRecord, str, int]:
     server_a, server_b, host, port = devices
     record = _init_network(server_a)
@@ -418,7 +433,14 @@ def _pair(
     thread = threading.Thread(target=_answer_and_record, daemon=True)
     thread.start()
     try:
-        joined = _join(server_b, host=host, port=port, token=minted.token, envelope=minted.envelope)
+        joined = _join(
+            server_b,
+            host=host,
+            port=port,
+            token=minted.token,
+            envelope=minted.envelope,
+            settings=settings,
+        )
     finally:
         thread.join(10)
     # An exception inside the answering thread would otherwise present as the JOINER
@@ -606,6 +628,68 @@ def test_a_second_live_claim_on_one_device_id_evicts_and_audits(
     assert verdict.evicted is not None
     server_a._note_duplicate("d_copy", "i_two")  # noqa: SLF001 — the relay's own audit path
     assert "duplicate_identity" in _events(server_a)
+
+
+# ---------------------------------------------------------------------------
+# F-2 — an endpoint a PEER can dial, without being told the address
+# ---------------------------------------------------------------------------
+
+
+def test_a_paired_device_is_dialable_from_its_record_alone(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each side records an address for the other that `_ensure_link` can dial.
+
+    QA round 1's blocker (F-2), as a property. After a real join each side must
+    hold an endpoint for the other that IT never observed, and a relay with nothing
+    in memory — the production shape, where the process that pairs is not the
+    process that later lists — must form the link by dialling it. Before this, the
+    self row was written `endpoints: []` and the only other address ever recorded
+    was the observed source address (an ephemeral NAT port), so a paired peer was
+    permanently unreachable and every remote-session verb refused.
+    """
+    server_a, server_b, host, port = devices
+    # B IS BOUND AND LISTENING so the reciprocal dial can be proven, not asserted.
+    host_b, port_b = server_b.bind()
+    server_b.bind_control()
+    server_b.start()
+    record, _host_a, _port_a = _pair(
+        devices,
+        monkeypatch,
+        settings=relay.NetworkSettings(port=port_b, listen_address="127.0.0.1"),
+    )
+
+    # B holds A's endpoint even though B never dialled A: it came from A's welcome.
+    joined = store.load(record.network_id, server_b.root)
+    inviter_row = joined.member(server_a.identity.device_id)
+    assert inviter_row is not None and inviter_row.endpoints
+    # F-7: B's durable record advertises B, NOT the address B happened to dial.
+    assert joined.listen.get("advertised") == [f"127.0.0.1:{port_b}"]
+
+    # A FRESH RELAY on B's saved root, with nothing in memory, dials A from the row.
+    # This is the production path: the relay that pairs is not the relay that lists.
+    fresh = relay.RelayServer(
+        root=server_b.root,
+        settings=relay.NetworkSettings(port=port_b, listen_address="127.0.0.1"),
+        identity=server_b.identity,
+        audit=audit_mod.AuditLog(server_b.root),
+    )
+    link, reason = fresh._ensure_link_with_reason(  # noqa: SLF001 — the production dial path
+        server_a.identity.device_id
+    )
+    assert link is not None, f"the joiner could not dial the inviter from its record: {reason}"
+    link.close("test")
+
+    # ...and the reciprocal: A holds B's DECLARED endpoint, from B's hello.
+    a_record = store.load(record.network_id, server_a.root)
+    b_row = a_record.member(server_b.identity.device_id)
+    assert b_row is not None and b_row.endpoints == [f"{host_b}:{port_b}"], b_row
+    back, back_reason = server_a._ensure_link_with_reason(  # noqa: SLF001
+        server_b.identity.device_id
+    )
+    assert back is not None, back_reason
+    back.close("test")
 
 
 # ---------------------------------------------------------------------------

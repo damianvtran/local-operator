@@ -46,7 +46,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 # stdlib-only and import-cheap by construction (os/sys/pathlib/logging), so it
 # does not violate this module's no-heavy-module-level-imports rule.
@@ -3563,53 +3563,106 @@ _REMOTE_ROW_FILL: dict[str, Any] = {
 }
 
 
-def _remote_session_rows(*, peer: str = "", all_peers: bool = False) -> list[dict[str, Any]] | None:
+class _RemoteListing(NamedTuple):
+    """What the relay said about the peers: rows, why the rest are missing, and —
+    when an explicitly named peer cannot be reached — the sentence to refuse with.
+
+    ``notes`` is why this is a type rather than a bare list. An ``--all-peers``
+    listing that returned ``[]`` could not be told from "every peer is
+    unreachable", and an unreachable peer's reason is a sentence the human needs
+    (QA round 1, F-2). The notes go to stderr so the JSON document on stdout keeps
+    its published shape. ``refusal`` is non-empty only for a NAMED peer, and the
+    caller turns it into a rc=1 refusal rather than an empty table.
+    """
+
+    rows: list[dict[str, Any]]
+    notes: list[str]
+    refusal: str = ""
+
+
+def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListing | None:
     """Sessions held by other devices, read through this device's relay.
 
     Asked of the RELAY because that is the only process holding peer links and
     the only one that speaks the mesh. ``None`` means "I could not ask, or nobody
-    by that name answered" — distinct from ``[]``, which is "asked, and it holds
-    nothing": the first is why the caller reports a sentence and a non-zero exit,
-    and collapsing them would make an unreachable device look empty.
+    by that name answered" — distinct from an empty listing, which is "asked, and
+    it holds nothing": the first is why the caller reports a sentence and a
+    non-zero exit, and collapsing them would make an unreachable device look
+    empty.
 
     NO NETWORK, NO RELAY, NO ROWS. Either may be absent for reasons that are not
     errors (never joined, or the relay is not running), so both degrade to an
     empty answer for ``--all-peers`` — while an explicitly named ``--peer`` gets
     ``None`` so the operator is told instead of shown an empty table.
     """
+    empty = _RemoteListing([], [])
     try:
         from local_operator.network import relay, store
     except Exception:  # noqa: BLE001 — a mesh that cannot load is no mesh
-        return None if peer else []
+        return None if peer else empty
     try:
         record = store.find_own_relay()
         if record is None:
-            return None if peer else []
-        reply = relay.control_request(record, "peer_session_rows")
+            return None if peer else empty
+        # The relay PROBES each peer here, so the client waits out the relay's own
+        # listing budget instead of timing out on it and reporting a running relay
+        # as absent.
+        reply = relay.control_request(
+            record, "peer_session_rows", timeout=relay.LISTING_PROBE_BUDGET_S + 8.0
+        )
         if reply is None or reply.get("op") != "ack":
-            return None if peer else []
+            return None if peer else empty
         payload = reply.get("detail") or {}
         remote = list(payload.get("sessions") or [])
+        blocks = payload.get("peers") or {}
+        notes = [
+            f"{str((block or {}).get('name') or device_id)}: unreachable "
+            f"({str((block or {}).get('reason') or 'no reason recorded')})"
+            for device_id, block in blocks.items()
+            if isinstance(block, dict) and not block.get("reachable")
+        ]
         if peer:
             wanted = str(peer).lower()
-            matches = [
+            # WHICH DEVICE IS MEANT, resolved against the PEER BLOCKS rather than the
+            # rows. Matching rows alone made a KNOWN device with an empty catalogue
+            # read as an unknown one ("no device called ... is reachable"), and the
+            # old name map dropped the device-id key, so asking BY ID — how a script
+            # asks, and what a row carries — never matched at all.
+            matched = ""
+            block: dict[str, Any] = {}
+            for device_id, candidate in blocks.items():
+                candidate = candidate if isinstance(candidate, dict) else {}
+                if wanted in (
+                    str(device_id).lower(),
+                    str(candidate.get("name") or "").lower(),
+                ):
+                    matched = str(device_id)
+                    block = candidate
+                    break
+            if not matched:
+                return None
+            if not block.get("reachable"):
+                return _RemoteListing(
+                    [],
+                    notes,
+                    refusal=(
+                        f"{block.get('name') or matched} is in the network but cannot be "
+                        f"reached from here ({block.get('reason') or 'no reason recorded'})"
+                    ),
+                )
+            remote = [
                 item
                 for item in remote
-                if str((item.get("peer") or {}).get("device_id") or "").lower() == wanted
-                or str((item.get("peer") or {}).get("name") or "").lower() == wanted
+                if str((item.get("peer") or {}).get("device_id") or "") == matched
             ]
-            if not matches:
-                peers = {
-                    str((block or {}).get("name") or "").lower(): device_id
-                    for device_id, block in (payload.get("peers") or {}).items()
-                }
-                if wanted not in peers:
-                    return None
-                return []
-            remote = matches
-        return [{**_REMOTE_ROW_FILL, **dict(item)} for item in remote if isinstance(item, dict)]
+        rows = [
+            {**_REMOTE_ROW_FILL, **dict(item)}
+            for item in remote
+            if isinstance(item, dict)
+        ]
+        return _RemoteListing(rows, notes)
     except Exception:  # noqa: BLE001 — a broken mesh must not break a listing
-        return None if peer else []
+        return None if peer else empty
 
 
 def sessions_command(args: argparse.Namespace) -> int:
@@ -3651,18 +3704,32 @@ def sessions_command(args: argparse.Namespace) -> int:
     remote_rows: list[dict[str, Any]] = []
     peer_name = getattr(args, "peer", None)
     if peer_name or getattr(args, "all_peers", False):
-        remote_rows = _remote_session_rows(
-            peer=str(peer_name or ""), all_peers=bool(args.all_peers)
-        )
-        if peer_name and remote_rows is None:
-            print(
-                f"no device called {peer_name!r} is reachable over the mesh from here",
-                file=sys.stderr,
+        listing = _remote_listing(peer=str(peer_name or ""), all_peers=bool(args.all_peers))
+        if peer_name and (listing is None or listing.refusal):
+            message = (
+                listing.refusal
+                if listing is not None
+                else f"no device called {peer_name!r} is reachable over the mesh from here"
             )
+            if args.json:
+                # ``--json`` MEANS THE CALLER PARSES THIS, so a refusal has to be a
+                # document. stdout used to be empty with rc=1 and the sentence only
+                # on stderr, which a parser reads as a crash or as no answer at all
+                # (QA round 1, F-5).
+                print(
+                    _json.dumps({"ok": False, "code": "peer_unreachable", "message": message})
+                )
+            else:
+                print(message, file=sys.stderr)
             return 1
+        remote_rows = listing.rows if listing else []
+        # WHY a peer contributes no rows, for the human. Stderr, so an ``--all-peers
+        # --json`` consumer keeps its unchanged stdout contract (QA round 1, F-2).
+        for note in listing.notes if listing else []:
+            print(note, file=sys.stderr)
         if peer_name:
             rows = []
-        rows = rows + (remote_rows or [])
+        rows = rows + remote_rows
 
     if args.json:
         print(_json.dumps(rows, indent=2))

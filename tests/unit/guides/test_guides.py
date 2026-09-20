@@ -223,9 +223,23 @@ def test_network_guide_names_the_human_step_and_the_real_commands() -> None:
     # R17's controls, with the rule that guards them.
     assert "lop network panic" in body
     assert "never as a retry after a failed command" in body
-    # The unbuilt halves are named, not sold: session placement, brokering, and
-    # the one flag whose scope in the CLI is narrower than its message.
-    assert "Not yet available in this build" in body
+    # THE SESSION PLANE IS NAMED AS BUILT, because it is: the relay serves
+    # net_session_create/engage/stop/lifecycle and the CLI drives them. The guide
+    # used to tell agents the opposite ("Not yet available in this build") while
+    # those verbs worked, which is the failure R19 exists to prevent, in the other
+    # direction (QA round 1, F-8).
+    assert "lop network sessions --all-peers --json" in body
+    assert "--create --name" in body
+    # ...and what is still NOT built is named as unbuilt rather than implied.
+    assert "IN THIS BUILD" in body
+    assert "lop exec --peer" in body and "lop send --peer" in body
+    assert "lop sessions move" in body
+    # A dial-only device is a supported configuration, and the guide must say so
+    # rather than let an agent read an unreachable peer as a fault (F-2).
+    assert "DIAL-ONLY DEVICES" in body
+    # The doctor's summary key means the mesh, not the command (F-8's sibling).
+    assert "ok` is FALSE whenever" in body
+    # Brokering is still unbuilt, and `--purge`'s scope is still spelled out.
     assert "--purge-identity" in body and "does not" in body
     # The two-phase pair the design sketches does not exist in this CLI, so the
     # guide must not teach it.

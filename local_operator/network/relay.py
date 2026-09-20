@@ -62,7 +62,7 @@ import time
 import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from local_operator.network import dial as session_dial
 from local_operator.network import store, wire
@@ -70,6 +70,7 @@ from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.authorizer import Authorizer, NetworkState
 from local_operator.network.handshake import (
     HANDSHAKE_TIMEOUT_S,
+    MAX_DECLARED_ENDPOINTS,
     REASON_SELF,
     Credential,
     Handshake,
@@ -200,6 +201,64 @@ class NetworkSettings:
             max_links=int(read(("network", "max_links"), DEFAULT_MAX_LINKS)),
             autostart=bool(read(("network", "autostart"), DEFAULT_AUTOSTART)),
         )
+
+
+#: How long a LISTING may spend probing peers before it stops trying and says so.
+#: A listing is a read: it must return even when one member's address is a black
+#: hole, and a surface that hung for a dead peer would be worse than one that
+#: reports it as unreachable. Sized to cover a handshake (``HANDSHAKE_TIMEOUT_S``)
+#: on a couple of endpoints, not to wait out an unreachable fleet.
+LISTING_PROBE_BUDGET_S = 12.0
+
+
+def advertise_endpoints(
+    settings: NetworkSettings, *, declared: Sequence[str] = ()
+) -> list[str]:
+    """Where peers should TRY to reach a device, in preference order.
+
+    THE UNION THE DESIGN ASKS FOR (§10.4: "from ``network.advertise_hosts`` PLUS
+    detected local addresses"). What the operator declared comes first — only they
+    know about a tunnel or a public address — then where this process can actually
+    be reached, and the live listen port is what that second part is built from.
+
+    A UNION RATHER THAN THE FIRST NON-EMPTY LIST, because the two sources answer
+    different questions and either can be stale. A record's declared host is
+    written by the process that ran `init`/`join`, from ITS config; a relay started
+    with `--port` that differs from the config listens somewhere else. Keeping only
+    the declared entry made the record's one-off value hide the live port, which is
+    the same "nothing can dial it" outcome by a different route (QA round 1, F-2).
+    ``_ensure_link`` tries them in order, so a stale first entry costs one failed
+    dial rather than a lost peer.
+
+    Module-level rather than a ``Relay`` method because ``init`` and ``join`` need
+    the same answer in the CLI process, where no relay exists — and a second
+    implementation of "what do we advertise" is how the row and the peer record
+    disagreed in the first place.
+    """
+    hosts: list[str] = []
+
+    def add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in hosts:
+            hosts.append(text)
+
+    for host in (*declared, *settings.advertise_hosts):
+        add(host)
+    if settings.listen_address == "127.0.0.1":
+        # DIAL-ONLY: loopback is the honest answer, and it says "you cannot reach
+        # me from another machine" rather than naming an address that only fails.
+        add(f"127.0.0.1:{settings.port}")
+    else:
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                address = info[4][0]
+                if not address.startswith("127."):
+                    add(f"{address}:{settings.port}")
+        except OSError:
+            pass
+    # Bounded by the number a RECEIVER keeps, so nothing published here is dropped
+    # at the other end and silently missing from the row `_ensure_link` dials.
+    return hosts[:MAX_DECLARED_ENDPOINTS]
 
 
 # ---------------------------------------------------------------------------
@@ -1330,14 +1389,22 @@ class RelayServer:
         instance_id: str | None = None,
         audit: AuditLog | None = None,
     ) -> None:
-        self.root = root
-        self.settings = settings or NetworkSettings.from_config(root)
-        self.identity = identity or load_or_mint(root)
+        # ROOT IS ALWAYS A REAL PATH. ``store`` and ``audit`` treat ``None`` as "the
+        # ambient config dir" and resolve it per call, but code that BUILDS a path
+        # from it does not: ``read_stamp(self.root, ...)`` and the create path's
+        # ``self.root / "sessions" / session_id`` raise ``TypeError`` on None.
+        # ``lop network serve`` constructs this with no root, so on the real path
+        # every federated listing and every session a peer asked for failed with a
+        # TypeError — while the in-process tests all pass an explicit root, which is
+        # why CI never saw it (QA round 1: both failures sat behind F-2's link).
+        self.root = Path(root) if root is not None else config_dir()
+        self.settings = settings or NetworkSettings.from_config(self.root)
+        self.identity = identity or load_or_mint(self.root)
         self.instance_id = instance_id or mint_instance_id()
         # `from_config`, not the default constructor: the cap, the generation count
         # and the age bound are registered settings (settings_io.SETTINGS, section
         # `network`), and an explicit `audit=` argument still wins for a test.
-        self.audit = audit or AuditLog.from_config(root)
+        self.audit = audit or AuditLog.from_config(self.root)
         self.store_view = StoreView(root, sessions=lambda: local_session_ids(root))
         #: Forwarded viewer streams, keyed by an unpredictable id (os.urandom).
         #: On the device the viewer sits at these are streams it OPENED; on the
@@ -1409,6 +1476,14 @@ class RelayServer:
         listener.listen(16)
         self._listener = listener
         host, port = listener.getsockname()[:2]
+        # RECORD WHAT WE ACTUALLY BOUND. Every advertised endpoint is built from
+        # `settings.port`, and with `port = 0` the kernel chooses — so leaving the
+        # configured 0 in place would publish `127.0.0.1:0` into our own member row,
+        # our peer record, and every peer that reads either: an address nothing can
+        # dial, which is the same class of lie as the observed-address row F-2 was
+        # about. `replace` rather than assignment so a settings object shared with
+        # a second relay is not rewritten underneath it.
+        self.settings = replace(self.settings, port=int(port))
         return str(host), int(port)
 
     def bind_control(self) -> tuple[str, int]:
@@ -1427,6 +1502,9 @@ class RelayServer:
         if self._control is None:
             self.bind_control()
         assert self._listener is not None and self._control is not None
+        # BEFORE the accept loop starts: a peer that handshakes in the first
+        # millisecond must find this device's endpoints already on the self row.
+        self.sync_self_endpoints()
         for target, name in (
             (self._accept_loop, "mesh-accept"),
             (self._control_loop, "mesh-control"),
@@ -1483,28 +1561,77 @@ class RelayServer:
 
     # -- discovery record ---------------------------------------------------
 
+    def declared_endpoints(self) -> list[str]:
+        """The endpoints this device's own records declare for peers to dial.
+
+        ``lop network init --advertise-host`` writes them into
+        ``record.listen.advertised``, and that value is the operator's sanctioned
+        way to name a tunnel hostname or a public address. Before this was read
+        here, the flag was written to the record and never published: a peer-b
+        that was told to advertise ``52.27.70.210:4200`` still advertised its
+        private ``172.31.36.64``, because only the config key reached
+        ``advertised_endpoints`` (QA round 1, F-2).
+        """
+        hosts: list[str] = []
+        for record in store.list_networks(self.root):
+            for host in record.listen.get("advertised") or ():
+                text = str(host or "").strip()
+                if text and text not in hosts:
+                    hosts.append(text)
+        return hosts
+
     def advertised_endpoints(self) -> list[str]:
         """Where peers should try to reach this device.
 
-        ``network.advertise_hosts`` first (the sanctioned way to name a tunnel
+        The records' declared hosts first (``--advertise-host``), then
+        ``network.advertise_hosts`` (the sanctioned way to name a tunnel
         hostname), then the detected local addresses. Loopback is included ONLY in
         dial-only mode, where it is the honest answer: it says "you cannot reach me
         from another machine", which is exactly what a peer needs to know.
         """
-        hosts = list(self.settings.advertise_hosts)
-        if hosts:
-            return hosts
-        if self.settings.listen_address == "127.0.0.1":
-            return [f"127.0.0.1:{self.settings.port}"]
-        addresses: list[str] = []
-        try:
-            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                address = info[4][0]
-                if address not in addresses and not address.startswith("127."):
-                    addresses.append(address)
-        except OSError:
-            addresses = []
-        return [f"{address}:{self.settings.port}" for address in addresses]
+        return advertise_endpoints(self.settings, declared=tuple(self.declared_endpoints()))
+
+    def sync_self_endpoints(self) -> None:
+        """Write this device's advertised endpoints into its OWN member row.
+
+        The self row is the one row every other device receives at admission and
+        in a member list, so it is where a peer learns how to dial us back. At
+        ``init`` the row was written with ``endpoints=[]`` and nothing ever filled
+        it, which is why a joiner held a member row for the inviter with no
+        address to dial (QA round 1, F-2). Only writes when the value CHANGES,
+        because this runs on every heartbeat.
+        """
+        endpoints = self.advertised_endpoints()
+        if not endpoints:
+            return
+        for record in store.list_networks(self.root):
+            member = record.member(self.identity.device_id)
+            if member is None or list(member.endpoints) == endpoints:
+                continue
+            member.endpoints = list(endpoints)
+            store.save(record, self.root)
+
+    def _note_peer_endpoints(
+        self, record: NetworkRecord, device_id: str, endpoints: list[str]
+    ) -> None:
+        """Record where a peer says it can be reached, on its member row.
+
+        THE ROW IS THE ONLY PLACE ``_ensure_link`` DIALS, so a declaration that
+        never lands here is a peer that is permanently unreachable. A peer that
+        declares NOTHING leaves the row alone: the only address this device would
+        otherwise have is the observed source address of the connection, whose
+        port is ephemeral and closed by the time anything dials it, and writing
+        that would be a worse lie than an honest empty list.
+        """
+        if not endpoints or not device_id:
+            return
+        member = record.member(device_id)
+        if member is None or not member.active:
+            return
+        if list(member.endpoints) == list(endpoints):
+            return
+        member.endpoints = list(endpoints)
+        store.save(record, self.root)
 
     def peer_record(self) -> PeerRecord:
         networks = []
@@ -1549,6 +1676,10 @@ class RelayServer:
         )
 
     def publish(self) -> None:
+        # The self member row is refreshed BEFORE the record is published: a peer
+        # that reads our peer record and then handshakes must find the same
+        # endpoints in both places.
+        self.sync_self_endpoints()
         store.publish_peer_record(self.peer_record(), self.root)
 
     def _heartbeat_loop(self) -> None:
@@ -1673,6 +1804,7 @@ class RelayServer:
             capabilities=list(wire.LINK_CAPABILITIES),
             members_digest=members_digest_of(record) if record else "",
             network_name=record.name if record else "",
+            endpoints=self.advertised_endpoints(),
         )
         try:
             handshake.send_welcome(sock, welcome)
@@ -1773,6 +1905,25 @@ class RelayServer:
         with self._links_lock:
             self.links[result.link_id] = link
         link.start()
+        # Learn where the peer can be dialled back. This is a DIFFERENT direction
+        # from the endpoints we just declared in our own welcome: the hello the
+        # peer sent carries ITS endpoints, and this device is the only one that
+        # saw it. A dial-only peer declares loopback, which is honest and simply
+        # means "do not try to call me first".
+        #
+        # A RECORD THAT CANNOT BE RELOADED IS NOT AN ERROR HERE: the link is
+        # already established and useful, and losing the address hint costs a
+        # future dial attempt, not this connection.
+        record = next(
+            (
+                item
+                for item in store.list_networks(self.root)
+                if item.network_id == result.network_id
+            ),
+            None,
+        )
+        if record is not None:
+            self._note_peer_endpoints(record, result.peer_device_id, handshake.peer_endpoints)
         self.audit.record(
             AuditEvent(
                 event="link_opened",
@@ -1909,6 +2060,13 @@ class RelayServer:
                     epoch=link.epoch,
                     outcome="failed",
                     cause="internal",
+                    # THE EXCEPTION TEXT IS NOT RECORDED HERE, on purpose: the audit
+                    # writer's per-event ``detail`` whitelist drops keys it does not
+                    # know, so an ``error`` field here would never reach the file
+                    # and would look like it had. The sentence goes to the PEER
+                    # instead (below), and ``_fan_out_catalog`` now carries the
+                    # peer's sentence into the listing's ``reason``, which is where
+                    # the operator reads it.
                     detail={"op": granted.action, "capability": ""},
                 )
             )
@@ -2985,15 +3143,50 @@ class RelayServer:
         found = self._link_for(device_id)
         if found is not None:
             return found
+        return self._ensure_link_with_reason(device_id)[0]
+
+    def _ensure_link_with_reason(
+        self, device_id: str, *, probe_timeout_s: float | None = None
+    ) -> tuple["PeerLink | None", str]:
+        """``_ensure_link`` plus WHY it failed, for a surface that must say so.
+
+        A listing that reports ``reachable: false`` with no reason is the
+        dead-instrument failure this repo warns about: it cannot be told from
+        "the peer holds no sessions". The three honest answers are
+        ``no_endpoint`` (nothing was ever declared for this member — the state
+        every paired peer was in before F-2), the dial's own refusal code, and
+        ``not_a_member`` when no network record knows the device at all.
+
+        ``probe_timeout_s`` bounds the WHOLE probe, across every endpoint: a
+        listing must return even when a member's address is a black hole, and a
+        surface that hung for one dead peer would be worse than one that says it
+        could not reach it.
+        """
+        found = self._link_for(device_id)
+        if found is not None:
+            return found, ""
+        deadline = None if probe_timeout_s is None else time.monotonic() + probe_timeout_s
+        reason = "not_a_member"
         for record in store.list_networks(self.root):
             member = record.member(device_id)
             if member is None or not member.active:
                 continue
-            for endpoint in member.endpoints or ():
-                link, _reason = self.dial(record.network_id, host=endpoint, epoch=record.epoch)
+            if not member.endpoints:
+                reason = "no_endpoint"
+                continue
+            for endpoint in member.endpoints:
+                budget = None
+                if deadline is not None:
+                    budget = deadline - time.monotonic()
+                    if budget <= 0:
+                        return None, reason if reason != "not_a_member" else "unreachable"
+                link, dial_reason = self.dial(
+                    record.network_id, host=endpoint, epoch=record.epoch, timeout_s=budget
+                )
                 if link is not None:
-                    return link
-        return None
+                    return link, ""
+                reason = dial_reason or "unreachable"
+        return None, reason
 
     def _open_viewer_stream(self, frame: dict[str, Any]) -> tuple[dict[str, Any], _Stream | None]:
         """The `stream_open` local op: reach a peer and open the pipe.
@@ -3304,6 +3497,12 @@ class RelayServer:
         them: an attacker's next attempt then needs a fresh invite, which is
         another human action on the inviter.
         """
+        # OUR OWN ENDPOINTS MUST BE ON THE SELF ROW OF THE FRAME THIS JOINER IS
+        # ABOUT TO RECEIVE. The admission frame is the one carrier a joiner gets,
+        # and a row written by `init` carries only what init could see. Syncing
+        # here (once per pairing) makes the frame authoritative, and it is what
+        # gives the joiner an endpoint to dial back (QA round 1, F-2).
+        self.sync_self_endpoints()
         record = store.load(result.network_id, self.root)
         invite_id = str(handshake.join_block.get("invite_id") or "")
         joiner_id = result.peer_device_id
@@ -3355,7 +3554,12 @@ class RelayServer:
                 capabilities=sorted(_invite_capabilities(record, invite_id)),
                 added_by=record.self_device_id,
                 added_via="invite",
-                endpoints=[peer_addr],
+                # What the JOINER declared about itself in its hello, falling back
+                # to the observed source address only when it declared nothing.
+                # The observed address is an ephemeral port, so it is a last
+                # resort: it is why every paired peer used to be unreachable the
+                # moment the pairing link closed (QA round 1, F-2).
+                endpoints=list(handshake.peer_endpoints) or [peer_addr],
                 root=self.root,
             )
             consume(record, invite_id, outcome="admitted")
@@ -3514,6 +3718,7 @@ class RelayServer:
         invite: str = "",
         invite_material: str = "",
         joiner_name: str = "",
+        timeout_s: float | None = None,
     ) -> tuple[PeerLink | None, str]:
         """Dial a peer and complete the handshake. Returns the link and a reason.
 
@@ -3524,7 +3729,13 @@ class RelayServer:
         credential is that token — the joiner does not hold the network secret yet,
         which is the point of a join — so it arrives as a parameter rather than
         being looked up, because on this side there is nothing to look it up from.
+
+        ``timeout_s`` OVERRIDES the handshake budget for one dial. A probe (a
+        listing asking "is this peer reachable?") needs a bound shorter than the
+        budget a real session op should get, and it must be able to say "could
+        not reach it" rather than hang.
         """
+        budget = self.settings.handshake_timeout_s if timeout_s is None else float(timeout_s)
         record = store.load(network_id, self.root)
         state = store.require_secrets(network_id, self.root)
         address, _, port_text = host.rpartition(":")
@@ -3533,12 +3744,10 @@ class RelayServer:
         except ValueError:
             return None, "bad_endpoint"
         try:
-            sock = socket.create_connection(
-                (address or host, port), timeout=self.settings.handshake_timeout_s
-            )
+            sock = socket.create_connection((address or host, port), timeout=budget)
         except OSError as exc:
             return None, f"connect_failed:{exc.__class__.__name__}"
-        deadline = wire.deadline_in(self.settings.handshake_timeout_s)
+        deadline = wire.deadline_in(budget)
         try:
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             handshake = Handshake.new(
@@ -3551,6 +3760,11 @@ class RelayServer:
                 mode="join" if mode == "join" else "member",
                 capabilities=list(wire.LINK_CAPABILITIES),
                 build=self.build,
+                # We DECLARE where we can be reached on every dial, so a peer that
+                # can only ever answer learns an address to dial back. A dial-only
+                # install declares loopback, which is the honest "not reachable"
+                # answer rather than a private address that can only fail.
+                endpoints=self.advertised_endpoints(),
             )
             if mode == "join":
                 handshake.join_block = {
@@ -3586,6 +3800,9 @@ class RelayServer:
             with self._links_lock:
                 self.links[result.link_id] = link
             link.start()
+            # The listener's endpoints arrive in its ``welcome``; they are how this
+            # device will re-open the link without being told the address again.
+            self._note_peer_endpoints(record, result.peer_device_id, handshake.peer_endpoints)
             return link, "ok"
         except MeshRefusal as refusal:
             _close_quietly(sock)
@@ -4153,6 +4370,7 @@ class RelayServer:
         """
         peers: dict[str, dict[str, Any]] = {}
         sessions: list[dict[str, Any]] = []
+        deadline = time.monotonic() + LISTING_PROBE_BUDGET_S
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == self.identity.device_id:
@@ -4162,25 +4380,47 @@ class RelayServer:
                 # reach as unreachable, which is the one thing the reachability
                 # field must never say. It dials the member's own recorded
                 # endpoints, so a dial-only install lists like any other.
-                link = self._ensure_link(member.device_id)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    link, unreachable_reason = None, "not probed: the listing budget ran out"
+                else:
+                    link, unreachable_reason = self._ensure_link_with_reason(
+                        member.device_id, probe_timeout_s=remaining
+                    )
                 block = {
                     "device_id": member.device_id,
                     "name": member.name,
                     "network_id": record.network_id,
                     "reachable": link is not None,
                     "age_s": 0.0,
-                    "reason": "" if link is not None else "not connected to this device",
+                    "endpoints": list(member.endpoints),
+                    # WHY, not just that it is false: "no_endpoint" and
+                    # "connect_failed:ConnectionRefusedError" are different
+                    # operator actions, and an empty list of rows must not be
+                    # indistinguishable from an unreachable device.
+                    "reason": unreachable_reason,
                 }
                 if link is None:
                     peers.setdefault(member.device_id, block)
                     continue
                 reply = link.request(
                     {"op": "net_catalog", "req": self._next_relay_req(), "locality": "remote"},
-                    timeout=self.settings.op_wait_s,
+                    timeout=max(0.5, min(self.settings.op_wait_s, deadline - time.monotonic())),
                 )
-                if reply is None or reply.get("op") != "ack":
+                if reply is None:
                     block["reachable"] = False
                     block["reason"] = "asked, and it did not answer"
+                    peers.setdefault(member.device_id, block)
+                    continue
+                if reply.get("op") != "ack":
+                    # THE PEER'S OWN SENTENCE, not a shrug. A refusal frame carries a
+                    # message (the authoriser's refusal, or a handler failure), and
+                    # reporting "it did not answer" while holding a reason is how a
+                    # listing withholds the one fact the operator needs (QA round 1).
+                    block["reachable"] = False
+                    block["reason"] = str(
+                        reply.get("message") or "the peer refused the listing"
+                    )[:200]
                     peers.setdefault(member.device_id, block)
                     continue
                 peers[member.device_id] = block
@@ -4296,19 +4536,36 @@ class RelayServer:
         return base
 
     def peer_status(self) -> list[dict[str, Any]]:
+        """The peer table: every other member, and whether we can reach it NOW.
+
+        A LIVE PROBE, not a link lookup. ``reachable`` answers "can I reach this
+        device?", and a listing that read only the links it happened to hold
+        would report a peer it can dial as unreachable — which is exactly the
+        false negative that made every paired device look dead (QA round 1,
+        F-2). The probe is bounded by ``LISTING_PROBE_BUDGET_S`` so the table
+        still returns when a member's address is a black hole, and a peer that
+        could not be probed says so in ``reason``.
+        """
         peers: list[dict[str, Any]] = []
+        deadline = time.monotonic() + LISTING_PROBE_BUDGET_S
         for record in store.list_networks(self.root):
             for member in record.active_members():
                 if member.device_id == record.self_device_id:
                     continue
-                link = self._link_for(member.device_id)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    link, reason = None, "not probed: the listing budget ran out"
+                else:
+                    link, reason = self._ensure_link_with_reason(
+                        member.device_id, probe_timeout_s=remaining
+                    )
                 peers.append(
                     {
                         "device_id": member.device_id,
                         "name": member.name,
                         "network_id": record.network_id,
-                        "reachable": bool(link and link.alive),
-                        "reason": "" if link else "no_link",
+                        "reachable": link is not None,
+                        "reason": reason,
                         "endpoints": list(member.endpoints),
                         "last_seen_at": member.last_seen_at,
                         "suspect": member.suspect,
@@ -4759,23 +5016,34 @@ def uninstall(
         )
 
     if not dry_run:
-        # The launchctl half is skipped when this run is not the real home's: the
-        # guard inside `launchd` is right, and the honest answer to "why did nothing
-        # happen" belongs in this message rather than in a launchd detail string.
+        # THE LAUNCHCTL CALL IS GATED ON ``is_supported()`` AS WELL AS ON
+        # ``_plist_is_addressable()``. ``launchd.is_own_plist`` has no platform
+        # check, so on Linux the second guard alone said "yes" and
+        # ``subprocess.run(["launchctl", ...])`` raised ``FileNotFoundError``
+        # BEFORE any of this verb's work — so `lop network uninstall` could not
+        # clean anything up on the platform the peers actually run (QA round 1,
+        # F-9). `install` has always consulted the platform guard; removal is the
+        # other half of the same surface and must consult it too.
         addressable = _plist_is_addressable()
-        if addressable:
+        if addressable and is_supported():
             _launchctl("bootout", _domain(), str(plist_path()))
         if plist_path().exists():
             plist_path().unlink()
-        steps.append(
-            "removed the LaunchAgent and its plist"
-            if addressable
-            else (
-                "no LaunchAgent to remove here: this run's HOME is not the one launchd "
-                "supervises, so nothing was loaded or unloaded. `--no-start` (or "
-                "`serve --no-launchd`) is how to run without launchd at all."
+        if not is_supported():
+            steps.append(
+                "no launchd on this platform: nothing was loaded or unloaded. `lop "
+                "network serve` (or `--no-start`) is how the relay runs here."
             )
-        )
+        else:
+            steps.append(
+                "removed the LaunchAgent and its plist"
+                if addressable
+                else (
+                    "no LaunchAgent to remove here: this run's HOME is not the one launchd "
+                    "supervises, so nothing was loaded or unloaded. `--no-start` (or "
+                    "`serve --no-launchd`) is how to run without launchd at all."
+                )
+            )
     receipt: dict[str, Any] = {
         "ok": True,
         "steps": steps,
@@ -4878,7 +5146,24 @@ def _plist_is_addressable() -> bool:
 
 
 def service_action(action: str) -> dict[str, Any]:
-    """start|stop|restart via launchctl, bootstrapping a plist that was never loaded."""
+    """start|stop|restart via launchctl, bootstrapping a plist that was never loaded.
+
+    PLATFORM FIRST, HOME SECOND. ``_plist_is_addressable`` is a HOME question and
+    answers "no" on a Linux host only by accident (the real home has no plist
+    there), which would print the redirected-HOME explanation to an operator
+    whose actual problem is that there is no launchd at all. `install` and
+    `uninstall` both consult ``is_supported()`` first; this is the third half of
+    one surface and does the same.
+    """
+    if not is_supported():
+        return {
+            "ok": False,
+            "reason": "no_launchd",
+            "error": (
+                f"`lop network {action}` drives launchd, and this platform has none. Run "
+                "the relay in the foreground with `lop network serve` instead."
+            ),
+        }
     if not _plist_is_addressable():
         return {
             "ok": False,

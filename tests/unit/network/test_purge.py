@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -200,3 +201,53 @@ def test_uninstall_reports_an_isolated_home_instead_of_a_launchd_error(root: Pat
     assert action.get("reason") == "isolated_home"
 
     assert json.dumps(result, default=str)  # a receipt is JSON-serialisable for --json
+
+
+def test_uninstall_never_reaches_for_launchctl_where_there_is_none(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-9: on a host with no launchd, removal is removal — not a crash.
+
+    ``launchd.is_own_plist`` has no platform check, so on Linux the isolated-home
+    guard answered "yes" and ``subprocess.run(["launchctl", ...])`` raised
+    ``FileNotFoundError`` BEFORE any of the verb's work — the store stayed fully
+    present, so the peers this design connects could not be cleaned up the way the
+    design intends (QA round 1, F-9). ``sys.platform`` and ``shutil.which`` are
+    patched to the Linux answer rather than stubbing the guard, so the test
+    exercises the real ``is_supported()`` expression.
+    """
+    record, _state = _device(root)
+    identity.mint(root)
+    attempts: list[tuple[str, ...]] = []
+
+    def _no_launchctl(*args: str) -> Any:
+        attempts.append(args)
+        raise AssertionError("launchctl was invoked on a host with no launchd")
+
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    monkeypatch.setattr(relay.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(relay, "_launchctl", _no_launchctl)
+
+    result = relay.uninstall(purge=True, root=root)
+    assert result["ok"] is True, result
+    assert attempts == []
+    # THE STORE REALLY WENT. This is the half QA could not reach on Linux.
+    assert store.record_path(record.network_id, root).exists() is False
+    assert any("no launchd on this platform" in step for step in result["steps"]), result
+    # The identity is still kept: that is what `--purge` alone promises.
+    assert identity.identity_path(root).exists()
+
+
+def test_service_action_names_the_missing_launchd_rather_than_the_home(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third half of one surface: an isolated HOME and a platform with no
+    launchd at all are different problems, and only one of them is fixed by
+    $HOME."""
+    identity.mint(root)
+    monkeypatch.setattr(relay.sys, "platform", "linux")
+    monkeypatch.setattr(relay.shutil, "which", lambda _name: None)
+    action = relay.service_action("start")
+    assert action["ok"] is False
+    assert action.get("reason") == "no_launchd"
+    assert "serve" in str(action["error"])

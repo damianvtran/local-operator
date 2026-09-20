@@ -364,11 +364,39 @@ def test_doctor_reports_identity_missing_rather_than_claiming_reachability(
     root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A dead instrument returns a reading, not an error — and a reading that has not
-    been taken must not be presented as a result."""
+    been taken must not be presented as a result.
+
+    ``ok`` IS THE READING: it is false here because the identity check failed, and
+    the exit code follows it. When the top-level ``ok`` was hardcoded true, an agent
+    that read the summary and not the array read a failing mesh as a passing one
+    (QA round 1).
+    """
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
     args = Namespace(json=True, peer="")
-    assert net_cli._cmd_doctor(args) == 0  # noqa: SLF001
+    assert net_cli._cmd_doctor(args) == 1  # noqa: SLF001
     payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["code"] == "unhealthy"
+    assert "identity" in payload["message"]
     assert payload["identity_present"] is False
     checks = {check["check"] for check in payload["checks"]}
     assert "identity" in checks
+
+
+def test_doctor_is_healthy_and_exits_zero_when_no_check_fails(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other half of the contract: ``ok: true`` must be EARNED.
+
+    Without this the change could be satisfied by refusing everything, which would
+    be a worse instrument than the one it replaced.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    import local_operator.network.identity as identity_mod
+
+    identity_mod.load_or_mint()
+    args = Namespace(json=True, peer="")
+    assert net_cli._cmd_doctor(args) == 0  # noqa: SLF001
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert "code" not in payload
