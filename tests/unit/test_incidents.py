@@ -586,29 +586,33 @@ def test_mcp_unavailable_warning_reads_as_a_capability_not_a_failure() -> None:
     for ``minerva-qa`` produced ``[session incident (deepseek/deepseek-flash)]
     mcp: …`` followed by ``suggested action:`` and then "This is why the
     previous turn ended." — on an event that ended no turn and failed nothing.
-    The three assertions below are the three things that were wrong: the head,
-    the incident scaffolding, and the false claim about the turn.
+    The assertions below are what was wrong and what design review round 1
+    changed: the head, the incident scaffolding, the false claim about the turn,
+    the promised self-heal (D2) and the label-less imperative (D5).
+
+    The reason is passed in the shape the manager now sends it — the remedy
+    ALONE — because a redundant ``MCP authorization failed;`` in front of it is
+    what pushed the command off the front of the line (D3).
     """
-    text = format_mcp_unavailable_message(
-        "minerva-qa", "MCP authorization failed; /mcp reauth minerva-qa — sign-in expired"
-    )
+    text = format_mcp_unavailable_message("minerva-qa", "/mcp reauth minerva-qa — sign-in expired")
     lines = text.split("\n")
     assert text.startswith(_MCP_UNAVAILABLE_HEAD), text
-    assert "MCP server 'minerva-qa' is unavailable" in lines[0]
-    assert "its tools are gone until it reconnects" in lines[0]
-    assert lines[1] == (
-        "Reason: MCP authorization failed; /mcp reauth minerva-qa — sign-in expired"
+    assert lines[0] == (
+        "[session warning] MCP server 'minerva-qa' is unavailable: its tools are gone for now."
     )
-    # The instruction line is the model's own action: name the server, do not
-    # hammer its tools.
-    assert "Do not call that server's tools in a tight loop" in lines[2]
-    assert "tell the user which server is down rather than retrying" in lines[2]
+    assert lines[1] == "Reason: /mcp reauth minerva-qa — sign-in expired"
+    # The last line is read by the model AND painted for the operator, so it is
+    # a statement about the agent rather than an order to whoever is reading,
+    # it names the manual recovery, and it keeps the no-hammering rule (D5).
+    assert lines[2] == (
+        "Its tools are not callable until the user restores it, and the agent "
+        "should not retry them in a loop."
+    )
     assert len(lines) == 3
     # Nothing may claim a turn ended, and no incident scaffolding may appear —
     # the whole reason this has its own formatter instead of classify_incident.
-    # The reason line is the MANAGER's own wording and legitimately says
-    # "authorization failed", so the forbidden list names the incident
-    # scaffolding and the turn claim, never the bare word "failed".
+    # The reason line is the MANAGER's own wording, so the forbidden list names
+    # the incident scaffolding and the turn claim, never the bare word "failed".
     for forbidden in (
         "session incident",
         "suggested action:",
@@ -617,6 +621,40 @@ def test_mcp_unavailable_warning_reads_as_a_capability_not_a_failure() -> None:
     ):
         assert forbidden not in text, f"{forbidden!r} leaked into the warning: {text!r}"
     assert not text.endswith("\n")
+
+
+def test_the_warning_promises_no_self_heal() -> None:
+    """D2: "until it reconnects" asserted a future that never arrives.
+
+    The row is written for two families and neither heals by waiting: an expired
+    grant is refused by design (auto-reconnect is non-interactive, so only
+    ``/mcp reauth`` restores it) and a tripped breaker has auto-reconnect
+    SUSPENDED at the moment the row is written. The head is therefore
+    reason-agnostic and says "for now", and the last line puts the recovery in
+    the user's hands. Pinned as an absence because a well-meaning rewording is
+    exactly how the promise would come back: a phrase like "until it
+    reconnects" reads as "wait and it comes back" and is the sentence most
+    readers take away.
+    """
+    for reason in (
+        "/mcp reauth minerva-qa — sign-in expired",
+        "auto-reconnect suspended after >5 attempts in 60s; its tools are "
+        "unavailable until a reconnect succeeds",
+        "",
+    ):
+        text = format_mcp_unavailable_message("minerva-qa", reason)
+        for promise in (
+            "until it reconnects",
+            "will reconnect",
+            "reconnects the tools",
+            "available again",
+            "comes back",
+            "wait ",
+        ):
+            assert promise not in text, f"{promise!r} promises a self-heal: {text!r}"
+        # The manual-recovery FACT is what replaces it, and it must be on every
+        # variant — including the one with no reason line to name a command.
+        assert "not callable until the user restores it" in text
 
 
 def test_mcp_unavailable_warning_omits_an_empty_reason() -> None:

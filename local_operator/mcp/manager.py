@@ -3396,10 +3396,21 @@ class McpManager:
                         # warning row, not as a session incident: a missing
                         # capability is not a failed turn (see
                         # ``incidents.format_mcp_unavailable_message``).
+                        #
+                        # The reason is the remedy ALONE, with no "MCP
+                        # authorization failed;" in front of it. That prefix
+                        # restated what the row's own head already says and
+                        # pushed the command off the front of the line, where at
+                        # 64 columns ``/mcp reauth`` and its server name wrapped
+                        # apart (design review round 1, D3); the live toast for
+                        # this same command is command-first for that reason.
+                        # Nothing here parses the string — `_auth_failure_text`
+                        # is still the one dispatcher, and the auth classifier
+                        # (`is_mcp_auth_failure`) reads RENDERED transport
+                        # errors, never this payload.
                         sink(
                             name,
-                            "MCP authorization failed; "
-                            f"{self._auth_failure_text(name, auth_exc)}",
+                            self._auth_failure_text(name, auth_exc),
                         )
                         # Arm the recovery notice. This line MUST stay INSIDE
                         # the ``if sink is not None`` branch and after a
@@ -4233,13 +4244,15 @@ class McpManager:
             logger.info("MCP reconnect needs authorization for %r", name)
             # Model-visible WARNING: the agent must know the server's tools are
             # gone until a login, or it hammers them. Same fire-and-forget guard
-            # as the breaker path.
+            # as the breaker path. The reason is the remedy alone, unprefixed,
+            # for the wrap reason the other auth site documents (design review
+            # round 1, D3).
             sink = getattr(self, "on_incident", None)
             if sink is not None:
                 try:
                     sink(
                         name,
-                        f"MCP authorization failed; {self._auth_failure_text(name, exc)}",
+                        self._auth_failure_text(name, exc),
                     )
                     # Arm the recovery notice — INSIDE the ``if sink is not
                     # None`` branch, deliberately: the gate means "the MODEL

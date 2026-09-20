@@ -9460,6 +9460,18 @@ class Session:
         overtake this row: this method awaits a transcript write and
         :meth:`journal_mcp_recovery` awaits nothing, so without the lock the
         superseding notice lands FIRST and leaves the warning as the last word.
+
+        An empty ``server`` is DROPPED, and that is a deliberate divergence from
+        :meth:`journal_incident`, which journalled it (review round 1, R3). The
+        row's whole subject is the server: a record reading "MCP server '' is
+        unavailable" tells the model nothing it can act on and would be the only
+        journal entry in the transcript with a blank subject, so the writer
+        refuses it. The manager still arms ``_incident_announced`` off its own
+        ``sink(...)`` call, so an empty name would leave a recovery armed with no
+        warning behind it — unreachable today, because all three ``on_incident``
+        sites pass a name taken from the configured server table, which cannot
+        hold an empty key. If a caller is ever added that can pass one, that
+        arming has to move rather than this guard being relaxed.
         """
         from local_operator.incidents import format_mcp_unavailable_message
 
@@ -9469,7 +9481,16 @@ class Session:
         message = CustomMessage(
             custom_type=SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE,
             attribution="system",
-            details={"text": text, "server": server, "reason": reason},
+            details={
+                "text": text,
+                "server": server,
+                # Bounded like :meth:`journal_incident`'s ``raw``: the RENDERED
+                # line is clipped to 200 characters, so an unbounded copy here
+                # would persist exactly what the reader is not shown — a whole
+                # provider error envelope, most of it a restatement (review
+                # round 1, R2).
+                "reason": reason[:1000],
+            },
         )
         try:
             async with self._journal_lock:
@@ -9483,12 +9504,12 @@ class Session:
 
         The symmetric counterpart to :meth:`journal_mcp_unavailable`. Without
         it, an operator who fixed a server mid-session — ``/mcp login
-        minerva-qa``, or simply waiting for the backoff reconnect the warning
-        text itself promises — left the model holding a death notice, and its
-        advice "its tools are gone ... Do not call its tools", for the rest of
-        the session. The tools were genuinely back (``refresh_tools`` swaps the
-        inventory mid-turn) but the model had been told not to use them and had
-        no reason to re-check.
+        minerva-qa``, which is now the ONLY thing that restores an expired
+        grant, or the backoff reconnect while it is still running — left the
+        model holding a death notice, and its advice "its tools are gone ...
+        Do not call its tools", for the rest of the session. The tools were
+        genuinely back (``refresh_tools`` swaps the inventory mid-turn) but the
+        model had been told not to use them and had no reason to re-check.
 
         LIVE CONTEXT ONLY, deliberately: there is no
         ``_transcript.append_message`` here and the type is absent from

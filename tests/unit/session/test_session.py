@@ -5026,7 +5026,7 @@ async def test_mcp_unavailability_is_journalled_as_a_warning_not_an_incident(tmp
     stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
     session = make_session(tmp_path, stream)
 
-    session._on_mcp_incident("minerva-qa", "MCP authorization failed; /mcp reauth minerva-qa")
+    session._on_mcp_incident("minerva-qa", "/mcp reauth minerva-qa — sign-in expired")
     await _drain_journal_tasks(session)
 
     assert SESSION_MCP_UNAVAILABLE_MESSAGE_TYPE == _MCP_UNAVAILABLE_WIRE
@@ -5037,12 +5037,37 @@ async def test_mcp_unavailability_is_journalled_as_a_warning_not_an_incident(tmp
     )
     row = journalled[0]
     assert row.details["server"] == "minerva-qa"
-    assert row.details["reason"] == "MCP authorization failed; /mcp reauth minerva-qa"
+    assert row.details["reason"] == "/mcp reauth minerva-qa — sign-in expired", (
+        "the reason must arrive in the command-first shape the manager sends "
+        "(D3); a redundant 'MCP authorization failed;' in front of it is what "
+        "pushed the remedy off the front of the line"
+    )
     text = row.details["text"]
     assert text.startswith("[session warning] ")
     assert "MCP server 'minerva-qa' is unavailable" in text
     assert "previous turn ended" not in text
     assert "suggested action:" not in text
+    await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_persisted_reason_is_bounded_like_its_sibling(tmp_path):
+    """R2: the rendered line is clipped at 200 characters; the copy was not.
+
+    ``details["reason"]`` is read back by the phone fold and by anything that
+    re-renders the row, so an unbounded copy persists exactly what the reader is
+    never shown — a whole provider error envelope. ``journal_incident`` bounds
+    its ``raw`` at 1000 for the same reason, and this mirrors it rather than
+    inventing a second bound.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")]])
+    session = make_session(tmp_path, stream)
+
+    await session.journal_mcp_unavailable("files", "x" * 5000)
+
+    row = [m for m in session._context.messages if isinstance(m, CustomMessage)][-1]
+    assert len(row.details["reason"]) == 1000
+    assert len(row.details["text"].split("\n")[1]) == len("Reason: ") + 200
     await session.dispose()
 
 
@@ -5069,7 +5094,7 @@ async def test_mcp_unavailability_is_persisted_and_reaches_the_model_as_a_user_t
     rendered = [m for m in stream.requests[1].messages if getattr(m, "role", "") == "user"]
     texts = "\n".join(getattr(m, "text", "") for m in rendered)
     assert "[session warning] MCP server 'files' is unavailable" in texts
-    assert "Do not call that server's tools in a tight loop" in texts
+    assert "Its tools are not callable until the user restores it" in texts
     assert "previous turn ended" not in texts
 
     dumped = "\n".join(

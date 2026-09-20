@@ -874,24 +874,41 @@ def format_mcp_unavailable_message(server: str, reason: str) -> str:
     * ``Reason:`` carries the operator's own remedy (``/mcp reauth <server>``,
       a breaker that suspended auto-reconnect), which is what lets the model
       tell the user what to do rather than only that something is wrong;
-    * the last line forbids the tight retry loop and asks for the server to be
-      NAMED instead — the one action the model can take on its own.
+    * the last line states the manual-recovery fact and keeps the model's
+      instruction not to hammer the tools.
+
+    **"for now", never "until it reconnects".** The first draft promised a
+    self-heal, and there is none for either family this row is written for: an
+    expired grant never heals by retrying (auto-reconnect is non-interactive by
+    design, so only ``/mcp reauth`` restores it) and a tripped breaker has
+    auto-reconnect SUSPENDED at the moment this row is written. "Until it
+    reconnects" also implied an action nobody had taken. Design review round 1
+    (D2): the promise has to be true for both families, which is why the head is
+    reason-agnostic and the last line says the user has to restore it.
+
+    The last line is read by TWO audiences — it rides the model's context and
+    the transcript row the operator sees — so it is phrased as a fact about the
+    agent rather than as an imperative addressed to whoever is reading (design
+    review round 1, D5). An imperative with no label in front of it reads, to
+    the human, as an instruction to them; the incident shape carried the same
+    instruction, but under a ``suggested action:`` label that marked whose it
+    was.
 
     No failure category and no ``suggested action:`` line, both of which belong
     to the incident shape this record is deliberately not. The reason is bounded
     at 200 characters exactly as :func:`format_model_switch_message` bounds its
     own, and is OMITTED when blank rather than printed empty: a dangling
-    ``Reason:`` reads as a truncation.
+    ``Reason:`` reads as a truncation. It is shaped COMMAND-FIRST by its callers
+    (``mcp/manager.py``), so the one part a reader must not lose lands at the
+    front of the line rather than mid-line after a restatement (design review
+    round 1, D3).
     """
-    lines = [
-        f"[session warning] MCP server '{server}' is unavailable: its tools are "
-        "gone until it reconnects."
-    ]
+    lines = [f"[session warning] MCP server '{server}' is unavailable: its tools are gone for now."]
     if reason.strip():
         lines.append(f"Reason: {reason.strip()[:200]}")
     lines.append(
-        "Do not call that server's tools in a tight loop; tell the user which "
-        "server is down rather than retrying."
+        "Its tools are not callable until the user restores it, and the agent "
+        "should not retry them in a loop."
     )
     return "\n".join(lines)
 
