@@ -10149,6 +10149,60 @@ def _ui_liveness() -> tuple[Any, Any]:
     return ui_liveness()
 
 
+# ---------------------------------------------------------------------------
+# The desktop app's console: the same discovery answers again, because the
+# console rides the SAME process and the SAME record as the browser host above.
+# What is NOT shared is the gate's capability clause — the console requires the
+# record's ``console`` bit as well as a live heartbeat — so the wrappers live
+# here rather than being borrowed from the browser's, where a call would answer
+# the wrong question (a host whose console is off still has a browser).
+# ---------------------------------------------------------------------------
+
+
+def ui_console_available() -> bool:
+    """Cheap file-only discovery of the desktop app's console capability."""
+    from local_operator.ui_console.backend import ui_console_available as available
+
+    return available()
+
+
+def ui_console_advertisable() -> bool:
+    """Tool-GATING discovery: cheap, file-only, and honest about a stale host.
+
+    The console's ONE `createIf` predicate. Accepts a STALE-but-alive heartbeat
+    (advertising only promises the agent can ASK) and requires the record's
+    console capability (a host that says its console is off must not put a tool
+    in the inventory whose every action would refuse).
+    """
+    from local_operator.ui_console.backend import (
+        ui_console_advertisable as advertisable,
+    )
+
+    return advertisable()
+
+
+async def ui_console_reachable(classified: tuple[Any, Any] | None = None) -> bool:
+    """Console-path availability for the desktop app's console.
+
+    Mirrors :func:`ui_browser_reachable` step for step, including the
+    short-circuit: the file probe answers `True` for free and only a
+    STALE-but-alive record spends the one bounded `/health` dial that can acquit
+    it.
+    """
+    if ui_console_available():
+        return True
+    from local_operator.ui_console.backend import ui_console_reachable as reachable
+
+    return await reachable(classified=classified)
+
+
+def _ui_console_liveness() -> tuple[Any, Any]:
+    """Classify the console capability from the file, never raising."""
+    from local_operator.ui_console.backend import ui_console_liveness
+
+    return ui_console_liveness()
+
+
 def _bridge_absent_result(tool_call_id: str, current: Any) -> ToolResult:
     """The demotion diagnostic for a bridge that is UP with no browser attached.
 
@@ -12988,6 +13042,1055 @@ def build_browser_tool(context: ToolContext | None) -> AgentTool | None:
         concurrency="shared",
         interruptible=False,
         execute=execute_browser,
+    )
+
+
+# ---------------------------------------------------------------------------
+# console — the desktop app's REAL terminal, driven by an agent
+# ---------------------------------------------------------------------------
+# The tool's own section of the design authority is `docs/design/ui-console-tab.md`
+# (§10 the vocabulary, §11 approval/sudo/secrets, §13 capture, §14 this tool,
+# §15 the refusals). The playbook the model reads on demand is `guide://console`;
+# the operator-facing doc is `docs/CONSOLE.md`.
+#
+# Why a tool at all, given `bash` exists: `bash` cannot host a full-screen TUI, a
+# REPL, an installer or an interactive prompt, and it cannot leave a process
+# running behind the turn. Every one of those needs a pty with a real grid and a
+# lifetime longer than a tool call, which is what the app's console surfaces are.
+# The description therefore differentiates on CONSEQUENCES rather than preference,
+# and the discouragement is prose plus the role seeds' allowlists — never the
+# approval tier, which records intent and is explicitly not the protection
+# (§14.6, and the same caveat the browser tool carries).
+
+#: Surface handles name their host, like the browser's `ui:`/`bridge:` prefixes:
+#: `con:<n>:<nonce>` (§6.5). Checked locally only to refuse a handle that is
+#: plainly some OTHER terminal's, which is the one fact an agent asked about "the
+#: terminal" (R18) gets wrong; everything else about a handle's validity is the
+#: app's answer, not ours.
+CONSOLE_SURFACE_PREFIX = "con:"
+
+#: The methods the tool exposes, i.e. the wire's `console_*` names minus the
+#: prefix. The short spelling is what a caller types, and `§14.3`'s description
+#: and parameter docs use it.
+CONSOLE_ACTIONS: tuple[str, ...] = (
+    "list",
+    "create",
+    "status",
+    "read",
+    "screenshot",
+    "input",
+    "keys",
+    "resize",
+    "secure",
+    "close",
+)
+
+#: The methods whose approval tier is `read`; every other console method is
+#: `exec` (§11.1). A frozenset rather than a list because the question asked of it
+#: is membership only, and the tier hook runs per call.
+CONSOLE_READ_ACTIONS = frozenset({"list", "status", "read", "screenshot"})
+
+#: Guard on a scrollback window. The app clamps further; this bounds what ONE
+#: tool result can carry, because a paged read that returns 5,000 lines costs more
+#: context than the answer it was looking for (`§13.1`'s own reason for windowing
+#: rather than returning the whole buffer).
+CONSOLE_SCROLLBACK_MAX_ROWS = 2000
+
+#: How much of a text payload the approval prompt shows. Long enough to recognise
+#: what is being typed, short enough that the prompt names the decision rather than
+#: reproducing the payload — the same job `bash`'s describer does for a command.
+CONSOLE_APPROVAL_PREVIEW_CHARS = 160
+
+#: A leading modifier word and the separator a caller wrote after it, so it can be
+#: folded to the `+` the encoder spells its names with (`ctrl-c`, `CTRL_C` and
+#: `control c` all become `ctrl+c`). `page-up` is deliberately NOT matched: `page`
+#: is not a modifier, so that spelling falls through to the whole-name aliases
+#: below rather than being rebuilt as `page+up`.
+_CONSOLE_MODIFIER = re.compile(
+    r"^(ctrl|control|shift|alt|meta|cmd|command|opt|option|super)[-+_]",
+    re.IGNORECASE,
+)
+
+#: The canonical word for each modifier a caller might write. Only `ctrl` and
+#: `shift` combinations exist in the encoder's vocabulary today; the others are
+#: folded to the same shape so an unsupported `meta-c` is refused by the app under
+#: a spelling the caller recognizes, and this side never asserts they exist.
+_CONSOLE_MODIFIER_WORDS: dict[str, str] = {
+    "ctrl": "ctrl",
+    "control": "ctrl",
+    "shift": "shift",
+    "alt": "alt",
+    "meta": "meta",
+    "cmd": "cmd",
+    "command": "cmd",
+    "opt": "opt",
+    "option": "opt",
+    "super": "super",
+}
+
+#: Names whose separators a caller may insert (`page-up`, `page_up`, `back-space`).
+#: The folded spelling IS the encoder's name for these, and the list is written out
+#: rather than derived from the vocabulary: deriving it would mean carrying the
+#: encoder's whole name list on this side, which is the second source of truth the
+#: aliases exist to avoid. Every entry is a name the guide already documents, and
+#: an entry can only ADD a spelling to it — never a name the encoder does not have.
+#: `page` is not a modifier word, so the modifier branch above cannot fold these.
+_CONSOLE_FOLDABLE_NAMES = frozenset({"pageup", "pagedown", "backspace"})
+
+
+#: Whole-name spellings a model writes, mapped to the name the encoder has. Keyed
+#: on the name with its separators removed, so `pg-up` and `pg_up` are one entry.
+#: Nothing here carries a BYTE: the encoder is the app's (design §10.5 keeps one
+#: table, pinned against the mirror's DOM handler), and a byte table on this side
+#: would be the second encoder that invariant exists to prevent.
+_CONSOLE_KEY_ALIASES: dict[str, str] = {
+    "esc": "escape",
+    "cr": "enter",
+    "return": "enter",
+    "pgup": "pageup",
+    "pgdn": "pagedown",
+    "ins": "insert",
+    "del": "delete",
+}
+
+
+def _console_key_name(key: str) -> str:
+    """One `keys` entry, in the spelling the app's encoder accepts.
+
+    WHY THIS EXISTS AT ALL (QA round 2, Q-2): the encoder's names use `+`
+    (`ctrl+c`, `shift+tab`) because that is also this repository's own notation
+    everywhere else (`ASIDE_SCROLL_BACK_KEY = "ctrl+pageup"` in `tui/app.py`), while
+    the shipped guide documented the `-` form — so every control key a model read
+    about was refused by the only real host, with `Unknown key name: ctrl-c`. A
+    model that has to guess a spelling fails a TUI test for the wrong reason, and
+    the fix belongs on this side: the app's vocabulary is frozen by the UI half of
+    the split, and its encoder is the one table.
+
+    An unrecognised name is returned UNCHANGED rather than refused here: the app's
+    `unknown_key` refusal carries the accepted set as `data["accepted"]`, so a
+    local grammar that guessed would replace the authoritative answer with a
+    second, staler one.
+    """
+    raw = re.sub(r"\s+", "", key).lower()
+    if not raw:
+        return ""
+    match = _CONSOLE_MODIFIER.match(raw)
+    if match:
+        head = _CONSOLE_MODIFIER_WORDS[match.group(1)]
+        return f"{head}+{raw[match.end() :]}"
+    # Caret notation, which is a spelling models write for control keys in prose
+    # (`^C`, `^[`) and which maps exactly onto the encoder's `ctrl+` names — the
+    # bracket and underscore controls included.
+    if len(raw) == 2 and raw.startswith("^") and (raw[1].isalpha() or raw[1] in "[\\]^_ "):
+        return f"ctrl+{raw[1]}"
+    folded = raw.replace("-", "").replace("_", "")
+    if folded in _CONSOLE_FOLDABLE_NAMES:
+        return folded
+    return _CONSOLE_KEY_ALIASES.get(folded, raw)
+
+
+#: One tool with a `method` parameter is ONE schema in the prompt-cache prefix,
+#: where ten tools would be ten — the same shape `BrowserParams` uses for the same
+#: reason. The per-method detail lives in the parameter descriptions below (where a
+#: model reads it while choosing arguments) and in `guide://console`; the class
+#: deliberately carries no docstring: pydantic copies a class docstring into the
+#: emitted schema's ``description``, and that schema ships on every request, so a
+#: rationale paragraph here would be a permanent per-call tax on the sentence a
+#: model reads once.
+class ConsoleParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    method: str = Field(
+        description="list | create | status | read | screenshot | input | keys | resize "
+        "| secure | close. `list` includes surfaces the USER opened; `read` returns text; "
+        "`screenshot` writes a PNG file; `input` types text or a stored secret; `keys` "
+        "sends named keys; `secure` is the user's own do-not-capture switch."
+    )
+    surface: str = Field(
+        default="",
+        description="The handle from 'list'/'create', e.g. 'con:1:9f2a'. Required for every "
+        "method but 'list'/'create'. A console handle starts with 'con:': a terminal in "
+        "another window has none and is not readable by this tool.",
+    )
+    cwd: str = Field(
+        default="", description="'create': the working directory (default: the user's home)."
+    )
+    command: str = Field(
+        default="", description="'create': the program to run (default: the user's shell)."
+    )
+    args: list[str] = Field(
+        default_factory=list,
+        description="'create': the argument vector after 'command', one element each.",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="'create': extra environment variables. TERM, COLORTERM and the console "
+        "markers are set by the app.",
+    )
+    cols: int | None = Field(
+        default=None, description="'create'/'resize': grid columns (default 100)."
+    )
+    rows: int | None = Field(default=None, description="'create'/'resize': grid rows (default 30).")
+    reveal: str = Field(
+        default="",
+        description="'create': none (default, pane untouched) | session (open the pane only "
+        "if the app is showing THIS session) | open (claim and focus the pane, only when "
+        "the app's window is already focused). No value raises the OS window; a downgrade "
+        "comes back as revealed=false.",
+    )
+    retain: bool | None = Field(
+        default=None,
+        description="'create'/'close': keep the output in the app's history (default true); "
+        "false discards it on close.",
+    )
+    input: str = Field(
+        default="",
+        description="'create': bytes to write to the new surface's stdin once it starts.",
+    )
+    mode: str = Field(
+        default="",
+        description="'read': viewport (default; the visible rows, i.e. what a person looking "
+        "at the pane sees) | scrollback (a history window, positioned by start/count).",
+    )
+    start: int | None = Field(
+        default=None, description="'read' scrollback: the first history row to return."
+    )
+    count: int | None = Field(
+        default=None,
+        description=f"'read' scrollback: how many rows (max {CONSOLE_SCROLLBACK_MAX_ROWS}).",
+    )
+    text: str = Field(
+        default="",
+        description="'input': the text to type. NEVER a credential: use 'secret_ref' so the "
+        "value stays out of the transcript.",
+    )
+    secret_ref: str = Field(
+        default="",
+        description="'input': the NAME of a stored secret to type instead of 'text' (e.g. "
+        "'SUDO_PASSWORD'). Resolved from the encrypted store; never shown in the result, a "
+        "trace or a log, and registered for redaction.",
+    )
+    paste: bool = Field(
+        default=False,
+        description="'input': wrap the payload in the bracketed-paste sequence when the "
+        "surface has that mode on.",
+    )
+    keys: list[str] = Field(
+        default_factory=list,
+        description="'keys': named keys in the encoder's spelling — ['ctrl+c'], ['up'], "
+        "['shift+tab'] — with synonyms ('ctrl-c', 'CTRL+C', 'shift-tab', 'esc', "
+        "'pgup') normalised first. The names are in guide://console; an unknown one "
+        "is refused with the accepted set.",
+    )
+    on: bool | None = Field(
+        default=None,
+        description="'secure': true turns the surface's do-not-capture span on (the app then "
+        "refuses reads and screenshots of it), false turns it off. The user can toggle the "
+        "same switch from the pane.",
+    )
+    kill: bool | None = Field(
+        default=None,
+        description="'close': true kills the surface's process instead of asking it to exit.",
+    )
+
+
+def _console_wire_params(params: ConsoleParams, session_id: str) -> tuple[dict[str, Any], str]:
+    """The wire params for one call, or ``({}, message)`` when the args are short.
+
+    Assembly is per method rather than a dump of the whole model: the wire takes
+    only what the method defines (`§10.2`), a pass-through would put every unrelated
+    argument on the wire, and this is also the place the mutually-exclusive
+    arguments are refused with a sentence a caller can act on instead of a schema
+    error naming a field it did not know about.
+    """
+    method = params.method
+
+    def optional(target: dict[str, Any]) -> None:
+        """Copy the arguments that are meaningful for more than one method."""
+        if params.cols is not None:
+            target["cols"] = params.cols
+        if params.rows is not None:
+            target["rows"] = params.rows
+
+    if method == "list":
+        # The session filter is the CALLER's own session, always. It is not a
+        # parameter: a surface belongs to the session that created it, another
+        # session's surfaces are refused with `surface_not_owned`, and offering the
+        # filter would only invite a caller to look for a way round that.
+        return {"session_id": session_id}, ""
+    if method == "create":
+        wire: dict[str, Any] = {"session_id": session_id}
+        optional(wire)
+        for key, value in (
+            ("cwd", params.cwd.strip()),
+            ("command", params.command.strip()),
+            ("input", params.input),
+            ("reveal", params.reveal.strip()),
+        ):
+            if value:
+                wire[key] = value
+        if params.args:
+            wire["args"] = list(params.args)
+        if params.env:
+            wire["env"] = dict(params.env)
+        if params.retain is not None:
+            wire["retain"] = params.retain
+        return wire, ""
+    if method == "status":
+        return {"surface": params.surface}, ""
+    if method == "read":
+        mode = params.mode.strip().lower() or "viewport"
+        if mode not in ("viewport", "scrollback"):
+            return {}, f"'read' mode must be 'viewport' or 'scrollback', not {params.mode!r}."
+        wire = {"surface": params.surface, "mode": mode}
+        if mode == "viewport" and (params.start is not None or params.count is not None):
+            # Refused rather than ignored: silently dropping a window would answer a
+            # question about history with the current screen, which reads as a
+            # truncated buffer rather than as a wrong call.
+            return {}, "'read' takes start/count only with mode='scrollback'."
+        if params.start is not None:
+            wire["start"] = params.start
+        if params.count is not None:
+            wire["count"] = params.count
+        return wire, ""
+    if method == "screenshot":
+        # No destination parameter: the app returns pixels and the harness owns
+        # where they are written, exactly as the browser tool does. `format` is
+        # omitted for the same reason a one-value argument earns no schema slot.
+        return {"surface": params.surface}, ""
+    if method == "input":
+        if params.text and params.secret_ref.strip():
+            return {}, "'input' takes 'text' or 'secret_ref', not both."
+        if not params.text and not params.secret_ref.strip():
+            return {}, "'input' needs 'text' or a 'secret_ref' naming a stored secret."
+        wire = {"surface": params.surface}
+        if params.paste:
+            wire["paste"] = True
+        return wire, ""
+    if method == "keys":
+        # Normalised HERE, before the wire, so the spelling a model wrote never
+        # decides whether the call works — see `_console_key_name` for why this
+        # side owns the aliases and not the bytes.
+        keys = [name for name in (_console_key_name(key) for key in params.keys) if name]
+        if not keys:
+            return {}, "'keys' needs at least one named key (e.g. ['ctrl+c'])."
+        return {"surface": params.surface, "keys": keys}, ""
+    if method == "resize":
+        if params.cols is None or params.rows is None:
+            return {}, "'resize' needs both 'cols' and 'rows'."
+        return {"surface": params.surface, "cols": params.cols, "rows": params.rows}, ""
+    if method == "secure":
+        if params.on is None:
+            return {}, "'secure' needs 'on' (true to turn the do-not-capture span on)."
+        return {"surface": params.surface, "on": params.on}, ""
+    if method == "close":
+        wire = {"surface": params.surface}
+        if params.kill is not None:
+            wire["kill"] = params.kill
+        if params.retain is not None:
+            wire["retain"] = params.retain
+        return wire, ""
+    return {}, f"unknown console method: {method} (expected one of {', '.join(CONSOLE_ACTIONS)})"
+
+
+def _console_handle_refusal(surface: str) -> str:
+    """The sentence for a handle that is not this console's — or ``""`` when it is.
+
+    Deliberately a PREFIX check, not a grammar: the handle's nonce is the app's to
+    mint and to validate, and a local grammar that drifted from it would refuse a
+    surface that exists — the worst possible failure for a tool whose whole R18
+    job is to be able to say "no, that window is not the one you mean".
+    """
+    if surface.startswith(CONSOLE_SURFACE_PREFIX):
+        return ""
+    return (
+        f"{surface!r} is not a Local Operator console surface: a console handle starts "
+        f"with {CONSOLE_SURFACE_PREFIX!r}, and the ones this session can read are those "
+        "`method='list'` reports. A terminal in another window (Terminal.app, iTerm, "
+        "cmux, an ssh session) is NOT readable by this tool — say that rather than "
+        "guessing at its contents."
+    )
+
+
+def _console_resource_keys(args: dict[str, Any], cwd: str) -> tuple[str, ...]:
+    """Declare which calls conflict, so two surfaces can run in one batch.
+
+    A surface is the unit of ordering: `input` then `read` on ONE surface must not
+    race (the read would answer a question about a screen the write has not
+    reached yet), while a read of surface A and a read of surface B have nothing
+    to do with each other and should run together. The loop's rule is that tools
+    declaring disjoint resources may batch, so this is the whole mechanism.
+
+    `list`/`create` declare NOTHING — an empty tuple — because they name no
+    surface: `list` observes whatever the set is at the moment it runs, and a
+    `create` racing another `create` is bounded by the app's own per-session cap,
+    which answers the loser with a typed refusal rather than by corrupting
+    anything. Raising is not reachable here (a missing handle is a schema error
+    before this runs) and would in any case only fall back to the global barrier.
+    """
+    del cwd
+    surface = args.get("surface")
+    if not isinstance(surface, str) or not surface.strip():
+        return ()
+    return (f"console:surface:{surface.strip()}",)
+
+
+def _console_tier_for(args: dict[str, Any]) -> Literal["read", "write", "exec"]:
+    """The per-CALL approval tier (§11.1).
+
+    Reads are `read`; every other console method is `exec`, because each one writes
+    into a pty, changes a grid, or ends a process the user may be watching. This is
+    bookkeeping and NOT the protection — the browser tool's own comment spells out
+    why (one gate callback for both tiers today, and `tool_approval_mode: auto`
+    installs no gate at all), and §14.6 forbids claiming otherwise.
+    """
+    method = str(args.get("method") or "").strip().lower()
+    return "read" if method in CONSOLE_READ_ACTIONS else "exec"
+
+
+def _console_approval_preview(text: str) -> str:
+    """A bounded, single-line preview of what is about to be written to a pty."""
+    flat = " ".join(text.split())
+    if len(flat) <= CONSOLE_APPROVAL_PREVIEW_CHARS:
+        return repr(flat)
+    return repr(flat[:CONSOLE_APPROVAL_PREVIEW_CHARS]) + "…"
+
+
+def _describe_console_approval(
+    args: dict[str, Any], cwd: str, *, context: ToolContext | None = None
+) -> str:
+    """The sentence the approval prompt shows for one console call.
+
+    It names the SURFACE, the SESSION and the exact bytes or keys about to be
+    written (§11.1), because those are the three things a person is being asked to
+    authorise and the JSON fallback buries all three. A `secret_ref` is named by
+    its NAME only — the value is not in the arguments and never enters this
+    sentence; the whole point of the ref is that the prompt can say what will
+    happen without holding the credential.
+    """
+    method = str(args.get("method") or "").strip().lower() or "?"
+    surface = str(args.get("surface") or "").strip() or "(a new surface)"
+    session = getattr(context, "session_id", "") or "this session"
+    where = f"{surface} in session {session}"
+    if method == "input":
+        ref = str(args.get("secret_ref") or "").strip()
+        if ref:
+            return f"console: type the stored secret '{ref}' into {where}"
+        return (
+            f"console: type {_console_approval_preview(str(args.get('text') or ''))} into {where}"
+        )
+    if method == "keys":
+        keys = [str(key) for key in (args.get("keys") or [])]
+        return f"console: send keys {', '.join(keys)} to {where}"
+    if method == "create":
+        argv = [str(args.get("command") or "").strip(), *[str(a) for a in (args.get("args") or [])]]
+        program = " ".join(part for part in argv if part) or "the user's shell"
+        directory = str(args.get("cwd") or "").strip() or cwd or "the user's home"
+        return f"console: start `{program}` in {where}, working directory {directory}"
+    if method == "secure":
+        state = "on" if args.get("on") else "off"
+        return (
+            f"console: turn secure input {state} for {where} — while it is on the app "
+            "refuses to read or capture that surface"
+        )
+    if method == "close":
+        how = "kill its process" if args.get("kill") else "close it"
+        return f"console: {how} for {where}"
+    if method == "resize":
+        return f"console: resize {where} to {args.get('cols')}x{args.get('rows')}"
+    return f"console: {method} on {where}"
+
+
+def build_console_tool(context: ToolContext | None) -> AgentTool | None:
+    """Advertise the console tool when the desktop app publishes a console host.
+
+    One `createIf` entry and one file-only predicate, the same shape as
+    :func:`build_browser_tool` — no second gating convention beside it
+    (`AGENTS.md`'s tool-surface ladder). Two consequences of that shape, both
+    deliberate:
+
+    * **It is NOT hidden.** A concealed tool cannot be discouraged, it can only be
+      absent, and R7 needs an agent asked to test a TUI to know the capability
+      exists (§14.2). The one shipped use of `hidden` is a transport tool nobody
+      invokes.
+    * **File-only and synchronous**, because this runs while constructing every
+      session on the machine, and it never raises: an unreadable record degrades to
+      "no console", which is the honest answer and the one `createIf` exists for.
+
+    The description is deliberately SHORT and its per-method detail lives in the
+    parameter descriptions and in ``guide://console``, for the reason the browser
+    tool's `Footprint:` comment gives: this string rides in every session's
+    prompt-cache prefix, and `scripts/bench_context_budget.py` measures it.
+    """
+    del context  # gating is on the machine's app, not on session state
+    if not ui_console_advertisable():
+        return None
+    return AgentTool(
+        name="console",
+        label="Console",
+        describe_approval=_describe_console_approval,
+        description=(
+            "Drive a real interactive terminal inside the Local Operator desktop app: a pty "
+            "running a command, with a real terminal grid, that keeps running and keeps its "
+            "output while its tab is closed. Use it for things `bash` cannot host — a "
+            "full-screen TUI, a REPL, an installer, an interactive prompt — and NOT for "
+            "ordinary commands: `bash` returns output directly, cannot wedge on a prompt, and "
+            "cannot leave a process running behind your turn. The surface handle names this "
+            "host (`con:`). `list` shows surfaces the USER opened too; read those rather than "
+            "asking them to repeat their output. Playbook: `guide://console`."
+        ),
+        parameters=ConsoleParams.model_json_schema(),
+        # The tool's tier is the HIGHEST of its ops (create/input/keys/resize/
+        # secure/close are `exec`), with the per-call hook taking the four read
+        # methods back down to `read` (§11.1). Not a differentiation mechanism from
+        # `bash` — that is `exec` unconditionally — and not the protection either:
+        # the gate is one callback for both tiers and `auto` mode installs none.
+        approval_tier="exec",
+        call_approval_tier=_console_tier_for,
+        # Shared with declared resources rather than exclusively: two calls on
+        # DIFFERENT surfaces have nothing to do with each other, and serialising
+        # them behind one barrier would make a fleet of consoles take turns.
+        concurrency="shared",
+        resource_keys=_console_resource_keys,
+        # A call that is abandoned mid-flight may have already created a surface or
+        # written to one, and the model would then be reasoning about a terminal it
+        # does not know exists. `bash` can be interrupted because its process group
+        # is reaped; a surface deliberately outlives the call, so this one is not.
+        interruptible=False,
+        execute=execute_console,
+    )
+
+
+def _console_list_text(result: dict[str, Any]) -> str:
+    """Render `console_list` for a model that needs to CHOOSE a surface by name.
+
+    One line per surface, the load-bearing fields first, and the provenance in the
+    second column because §6.5 puts it there for a reason: a surface a person opened
+    is the ordinary case an agent is asked to look at, and a listing that made the
+    agent infer it from a command name would be guessing.
+    """
+    # The list arrives under `surfaces`: the design's §10.2 shows a bare array, but
+    # the shared `Response` envelope types `result` as a dict, so what actually
+    # crosses the wire is the wrapped spelling — and a host that answered with an
+    # empty or unexpected payload must render as "no surfaces" rather than raising
+    # inside a tool that is only trying to tell the model what it can read.
+    entries = result.get("surfaces")
+    if not isinstance(entries, list):
+        entries = []
+    if not entries:
+        return (
+            "No console surfaces in this session. `create` starts one; a surface the user "
+            "opened in the app appears here too."
+        )
+    lines = [f"{len(entries)} console surface(s) in this session:"]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        surface = str(entry.get("surface") or "?")
+        origin = str(entry.get("origin") or ("agent" if entry.get("agent_owned") else "user"))
+        session = str(entry.get("session_id") or "").strip()
+        command = " ".join(
+            str(part).strip()
+            for part in [entry.get("command") or "zsh", *(entry.get("argv_tail") or [])]
+            if str(part).strip()
+        )
+        bits = [
+            surface,
+            origin,
+            # §6.5 and §13.4 put the owning session IN THE LISTING, and it is not
+            # decorative: a surface the user opened is the ordinary case an agent is
+            # asked to read, and "is this one mine to read" is a question the listing
+            # is what answers — the app filters by session, and the agent can only
+            # verify the answer if the row carries it.
+            f"session {session}" if session else "",
+            command or "?",
+            str(entry.get("cwd") or ""),
+            f"{entry.get('cols')}x{entry.get('rows')}",
+        ]
+        if entry.get("running") is False or entry.get("exit_code") is not None:
+            bits.append(
+                f"exited({entry.get('exit_code')})"
+                if entry.get("exit_code") is not None
+                else "exited"
+            )
+        else:
+            bits.append("running" if entry.get("running", True) else "ended")
+        if entry.get("live") is False:
+            bits.append("not live (from history)")
+        last = entry.get("last_activity") or entry.get("last_output_at")
+        if last:
+            bits.append(f"last output {last}")
+        lines.append("  " + "  ".join(str(bit) for bit in bits if str(bit)))
+    return "\n".join(lines)
+
+
+def _console_cursor_text(cursor: Any) -> str:
+    """Describe the app's cursor without asserting a shape the contract does not fix.
+
+    The FROZEN wire shape is the emulator's own, `{x, y}` — `x` is the COLUMN and
+    `y` the ROW, because that is what `@xterm/headless`'s `cursorX`/`cursorY` mean
+    and §10.2's rows carry the emulator's grid state unchanged (§5.4, and the
+    spelling published in `docs/CONSOLE.md` and the PR body for the app half).
+
+    The legacy `{row, col}` spelling is still ACCEPTED, defensively: a renderer
+    that required one spelling printed "row None, column None" for a healthy host
+    that used the other, and that is a FALSE statement about the surface in a
+    model-facing result, on the field §13.1 uses to decide where a TUI is.
+
+    Nothing is ever printed as `None`, for the same reason. A shape with no axis
+    names to read is printed AS IT ARRIVED — "the app sent this and this renderer
+    does not know its shape" is true where `None` is not — and a bare two-element
+    pair is read positionally in the frozen shape's own field order (`x`, then
+    `y`), which is the only order this namespace declares.
+    """
+    if isinstance(cursor, dict):
+        column = next(
+            (cursor[key] for key in ("x", "col", "column") if cursor.get(key) is not None),
+            None,
+        )
+        row = next(
+            (cursor[key] for key in ("y", "row") if cursor.get(key) is not None),
+            None,
+        )
+        parts = [
+            f"{name} {value}"
+            for name, value in (("row", row), ("column", column))
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        return ", ".join(parts) if parts else str(cursor)
+    if isinstance(cursor, (list, tuple)) and len(cursor) == 2:
+        first, second = cursor
+        if all(isinstance(value, int) and not isinstance(value, bool) for value in (first, second)):
+            return f"row {second}, column {first}"
+    return str(cursor)
+
+
+def _console_mode_is_on(value: Any) -> bool:
+    """Whether one `modes` entry is on, where §5.4 types the map with TWO kinds.
+
+    The cursor-key/paste flags are booleans, but `mouseTracking` is `IModes`' own
+    STRING (`"none"`, `"vt200"`, …), and a truthiness test read the real app's
+    `"none"` as an on-mode — `modes on: mouseTracking` for a surface with mouse
+    tracking OFF (QA round 2, Q-4: the same class of false statement about the
+    surface as the legacy `{row, col}` cursor). So the booleans are `is True`
+    exactly (anything else a host sends is not a claim this side can render as
+    "on"), and a string is off when it names no mode.
+    """
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() not in ("", "none", "off", "false")
+    return False
+
+
+def _console_status_text(result: dict[str, Any]) -> str:
+    """Render `console_status` without asserting anything the app did not say.
+
+    Every field is read with `.get`, and a field the app did not send is simply not
+    printed. The `last_activity`/`last_output_at` tolerance is DEFENSIVE, not a
+    contract gap: §0.4's revision-4 paragraph settles the spelling (§10.2's table
+    is the vocabulary the app implements and the only one any prose may use, so
+    §11.1's `last_output_at` is that row's `last_activity`, and the idle interval is
+    the agent's own derivation rather than a returned field), and this renderer
+    accepts the legacy pair anyway so a host written before the settlement still
+    renders instead of reading as console-less. What is NOT here is any
+    "waiting for input" verdict — there is no reliable in-band signal for it, the
+    heuristic was explicitly rejected (§11.1), and inventing one would give the
+    model a confident wrong answer about whether a prompt is waiting.
+    """
+    lines: list[str] = []
+    if "running" in result:
+        lines.append(f"running: {bool(result.get('running'))}")
+    if result.get("exit_code") is not None:
+        lines.append(f"exit code: {result.get('exit_code')}")
+    if result.get("cols") is not None and result.get("rows") is not None:
+        lines.append(f"grid: {result.get('cols')}x{result.get('rows')}")
+    for key in ("live", "truncated", "retain", "secure"):
+        if key in result:
+            lines.append(f"{key}: {bool(result.get(key))}")
+    idle = result.get("idle_ms")
+    if idle is not None:
+        lines.append(f"idle: {float(idle) / 1000:.1f}s since the last output")
+    elif result.get("last_output_at") or result.get("last_activity"):
+        lines.append(f"last output: {result.get('last_output_at') or result.get('last_activity')}")
+    if result.get("cursor") is not None:
+        lines.append(f"cursor: {_console_cursor_text(result.get('cursor'))}")
+    modes = result.get("modes")
+    if isinstance(modes, dict):
+        # A string-valued axis prints its actual value (`mouseTracking=vt200`)
+        # rather than the axis name: §5.4's type is the emulator's own, and the
+        # value is what tells a reader whether the program has asked for mouse
+        # reports at all.
+        active = sorted(
+            f"{name}={value}" if isinstance(value, str) else name
+            for name, value in modes.items()
+            if _console_mode_is_on(value)
+        )
+        lines.append("modes on: " + (", ".join(active) if active else "none"))
+    if lines:
+        lines.append("An idle surface can equally be a program waiting for input: read it to see.")
+    return "\n".join(lines) if lines else "The app returned no status fields."
+
+
+def _console_read_text(result: dict[str, Any]) -> str:
+    """Render `console_read`: the text, then what an agent needs to page it.
+
+    stdout and stderr are ONE stream and the footer says so — that is what a pty is,
+    and the description says it too, so the model does not go looking for a way to
+    separate them (§13.1).
+    """
+    text = result.get("text")
+    body = text if isinstance(text, str) else ""
+    footer: list[str] = []
+    if result.get("cols") is not None and result.get("rows") is not None:
+        footer.append(f"{result.get('cols')}x{result.get('rows')}")
+    if result.get("mode"):
+        footer.append(f"mode {result.get('mode')}")
+    cursor = result.get("cursor")
+    if cursor is not None:
+        footer.append(f"cursor {_console_cursor_text(cursor)}")
+    if result.get("truncated"):
+        footer.append("truncated by the app")
+    if result.get("live") is False:
+        footer.append("not live: this is the retained history of a surface whose app has gone")
+    tail = " [stdout and stderr are one pty stream]"
+    if footer:
+        tail = " [" + "; ".join(str(part) for part in footer) + "]" + tail
+    return body + ("\n" + tail if body else tail.strip())
+
+
+def _console_screenshot_result(
+    tool_call_id: str, surface: str, result: dict[str, Any]
+) -> ToolResult:
+    """Write the PNG the app captured and report where it went (§13.2).
+
+    The path is chosen here, not by the caller: the wire's screenshot method takes
+    a surface and returns pixels, and the browser tool's precedent is the same
+    split (the host returns bytes, the Python side owns path resolution, PNG
+    validation and the write). The magic is re-verified before the file is
+    reported — a "screenshot" that is HTML, a JSON error, or blank is a capture
+    failure that must not be handed on as an image.
+    """
+    import tempfile
+
+    try:
+        payload = base64.b64decode(str(result.get("image_base64") or ""), validate=True)
+    except ValueError:
+        return _error(tool_call_id, "console", "the app returned invalid screenshot data")
+    if not payload.startswith(PNG_MAGIC):
+        return _error(
+            tool_call_id,
+            "console",
+            f"the app's capture of {surface} is not a PNG ({len(payload)} bytes), so no "
+            "file was written; read the surface as text instead.",
+        )
+    safe_surface = re.sub(r"[^A-Za-z0-9_-]", "-", surface) or "surface"
+    target = os.path.join(tempfile.gettempdir(), f"lo-console-{safe_surface}.png")
+    try:
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_bytes(payload)
+    except OSError as exc:
+        return _error(tool_call_id, "console", f"could not write the screenshot to {target}: {exc}")
+    # `rendered` is the honest part of the answer and rides in the text, not only in
+    # `details`: a frame reconstructed from the record is not a photograph of a live
+    # screen, and a consumer that cares has to be able to see which it got.
+    rendered = str(result.get("rendered") or "displayed")
+    how = (
+        "the pane as displayed"
+        if rendered == "displayed"
+        else "an offscreen reconstruction from the surface's record"
+    )
+    extras = (
+        [f"rendered: {rendered}", f"theme: {result.get('theme')}"] if result.get("theme") else []
+    )
+    if result.get("live") is False:
+        extras.append("not live (replayed history)")
+    suffix = f" ({'; '.join(str(part) for part in extras)})" if extras else ""
+    return _text(
+        tool_call_id,
+        "console",
+        f"Screenshot of {surface} — {how} — saved to {target} ({len(payload)} bytes){suffix}.",
+        details={
+            "path": target,
+            "bytes": len(payload),
+            "surface": surface,
+            "rendered": rendered,
+        },
+    )
+
+
+def _console_input_params(
+    tool_call_id: str,
+    params: ConsoleParams,
+    wire: dict[str, Any],
+    context: ToolContext | None,
+) -> ToolResult | None:
+    """Resolve a `secret_ref` into the wire payload, or explain why it could not be.
+
+    The value is resolved HERE, in the session, from the same encrypted store the
+    `secret` tool writes (`§11.3`), and it is put on the wire in this one call's
+    params — the app is the only process that can write to a pty. Two things happen
+    around it, and both are the reason the ref exists at all:
+
+    * **The model's argument is the ref, not the value**, so the tool call in the
+      transcript says `secret_ref: "SUDO_PASSWORD"`;
+    * **the value is registered with the session's redaction sink**
+      (:meth:`VariableStore.register_redaction`) BEFORE the call is made, so any
+      later appearance of it — in a rendered trace, a tool result, or a transcript
+      write — comes back as `[redacted]` (`§11.3`, `redaction_shapes.py`).
+
+    Returns `None` when the wire payload is ready, and the error result to hand back
+    when it is not. The error path names the secret and the failure, never a byte of
+    the value — there is no value to name when resolution fails, and there is a
+    registered value to protect when it succeeds.
+
+    **What containment of a READ is, stated because it is easy to claim more:** this
+    function returns nothing, and :func:`execute_console` hands the app's output
+    back VERBATIM. A value that a program echoes (or that the shell prints with
+    `set -x`) therefore reaches the transcript only as far as the session loop lets
+    it: the masking is `redact_tool_result`, at the loop's model-visible choke
+    point, which is where §19.3's "never appears in the tool result" is actually
+    enforced for a read-after-echo. What this function guarantees is the other half
+    — the sink is registered BEFORE the bytes leave, and a session with no sink
+    refuses to type the value at all — so the value is contained at both ends of the
+    round trip rather than by the tool alone.
+
+    **A store that cannot register is a REFUSAL, not a downgrade.** The registration
+    is what contains the value after this call, and a program that echoes its input
+    (a `set -x` shell, an installer that logs its arguments) would otherwise put the
+    plaintext into a tool result with nothing to mask it. So the missing sink fails
+    closed and names a path that does contain the value, rather than typing it in and
+    hoping. `register_redaction` is read with `getattr` because
+    `ToolContext.variables` is typed as
+    :class:`~local_operator.harness.types.VariableStoreProtocol` — the slice the
+    *variable tools* read — and that protocol does not declare it; every store this
+    repo constructs is a real :class:`~local_operator.variables.VariableStore`, which
+    has it.
+    """
+    ref = params.secret_ref.strip()
+    if not ref:
+        wire["text"] = params.text
+        return None
+    store = getattr(context, "variables", None) if context is not None else None
+    register = getattr(store, "register_redaction", None)
+    if not callable(register):
+        return _error(
+            tool_call_id,
+            "console",
+            "this session has no redaction sink, so a value sent through secret_ref "
+            "could not be contained after the call — and the app may echo it back as "
+            "output. Ask the user to type the secret into the surface themselves (the "
+            "app records no keystrokes), or use `bash` with $(lop secret get "
+            f"{ref}) which announces the value to the session before it is used.",
+        )
+    try:
+        from local_operator.secrets.access import retrieve_secret
+
+        value = retrieve_secret(ref).decode("utf-8", errors="surrogateescape")
+    except Exception as exc:  # noqa: BLE001 - every failure here is reportable, none fatal
+        return _error(
+            tool_call_id,
+            "console",
+            f"could not resolve secret_ref {ref!r}: {exc}. Store the value with the `secret` "
+            "tool (or have the user type it into the surface) and retry — do not put the "
+            "value itself in `text`.",
+        )
+    register(value)
+    wire["text"] = value
+    return None
+
+
+async def execute_console(
+    tool_call_id: str,
+    args: dict[str, Any],
+    signal: AbortSignal | None = None,
+    on_update: Callable[[AgentToolUpdate], None] | None = None,
+    context: ToolContext | None = None,
+) -> ToolResult:
+    """Dispatch one console method against the app's loopback host.
+
+    The shape of the failure handling is the design's §15 rather than a try/except
+    around a transport: absence is reported as ABSENCE (the file-only record says
+    there is no app, so the model is told the surfaces ended rather than being sent
+    at a socket that will refuse), and every mid-flight refusal is a TYPED code
+    whose sentence comes from `console_error_text`, so a caller never
+    substring-matches a message. Nothing here can hang: the client's per-method
+    budget bounds every call.
+    """
+    del signal, on_update
+    try:
+        params = ConsoleParams(**args)
+    except ValidationError as exc:
+        return _validation_error(tool_call_id, "console", exc)
+    method = params.method.strip().lower()
+    if method not in CONSOLE_ACTIONS:
+        return _error(
+            tool_call_id,
+            "console",
+            f"unknown console method: {params.method!r} (expected one of "
+            f"{', '.join(CONSOLE_ACTIONS)})",
+        )
+    surface = params.surface.strip()
+    if method not in ("list", "create"):
+        if not surface:
+            return _error(
+                tool_call_id,
+                "console",
+                f"'{method}' needs the surface handle ('list' shows the live ones).",
+            )
+        refusal = _console_handle_refusal(surface)
+        if refusal:
+            return _error(tool_call_id, "console", refusal)
+    session_id = str(getattr(context, "session_id", "") or "").strip()
+    if method in ("list", "create") and not session_id:
+        # A surface is keyed by the session that owns it, so a create with no
+        # session would make a surface nobody can list or read. Names the reason
+        # rather than sending an empty id the app would have to guess about.
+        return _error(
+            tool_call_id,
+            "console",
+            "this session has no id, so the app cannot own a console surface for it; "
+            "run the call from a session rather than from a bare tool context.",
+        )
+    wire, problem = _console_wire_params(params, session_id)
+    if problem:
+        return _error(tool_call_id, "console", problem)
+    if method == "input":
+        failed = _console_input_params(tool_call_id, params, wire, context)
+        if failed is not None:
+            return failed
+
+    from local_operator.browser_bridge.backend import BridgeError, BridgeUnreachable
+    from local_operator.ui_console.backend import (
+        CONSOLE_ABSENT_COPY,
+        CONSOLE_FEATURE_OFF_COPY,
+        ConsoleHostClient,
+        console_error_text,
+    )
+    from local_operator.ui_console.state import Liveness
+
+    # The file-only refusal, BEFORE any socket. Two states are worth answering
+    # without a dial: no app at all (its surfaces are gone with it — that is the
+    # fact the model needs, and it arrives in milliseconds instead of after a
+    # connect timeout) and an app whose console feature is off.
+    status, current = _ui_console_liveness()
+    if current is None or status is Liveness.ABSENT:
+        return _error(tool_call_id, "console", CONSOLE_ABSENT_COPY)
+    if not current.console:
+        return _error(tool_call_id, "console", CONSOLE_FEATURE_OFF_COPY)
+
+    client = ConsoleHostClient()
+    try:
+        result = await client.call(f"console_{method}", wire)
+    except BridgeUnreachable as exc:
+        return _error(tool_call_id, "console", str(exc))
+    except BridgeError as exc:
+        return _error(tool_call_id, "console", console_error_text(exc))
+
+    if method == "list":
+        surfaces = result.get("surfaces") if isinstance(result, dict) else None
+        return _text(
+            tool_call_id,
+            "console",
+            _console_list_text(result if isinstance(result, dict) else {}),
+            details={"surfaces": surfaces or []},
+        )
+    if method == "create":
+        handle = str(result.get("surface") or "").strip()
+        grid = (
+            f"{result.get('cols')}x{result.get('rows')}"
+            if result.get("cols") is not None and result.get("rows") is not None
+            else "the default grid"
+        )
+        revealed = (
+            "the pane was opened"
+            if result.get("revealed")
+            else "the pane was left alone (a reveal that would have had to raise the app's "
+            "window is downgraded to none)"
+        )
+        return _text(
+            tool_call_id,
+            "console",
+            f"Started console surface {handle} at {grid} (pid {result.get('pid', '?')}); "
+            f"{revealed}. Read it with method='read'.",
+            details={"surface": handle, "cols": result.get("cols"), "rows": result.get("rows")},
+        )
+    if method == "status":
+        return _text(tool_call_id, "console", f"{surface}: " + _console_status_text(result))
+    if method == "read":
+        return _text(
+            tool_call_id,
+            "console",
+            _console_read_text(result),
+            details={"surface": surface, "mode": result.get("mode")},
+        )
+    if method == "screenshot":
+        return _console_screenshot_result(tool_call_id, surface, result)
+    if method == "input":
+        if params.secret_ref.strip():
+            # Naming the ref and the byte count, never the value. The count is what a
+            # caller needs to tell "the secret was written" from "the app swallowed
+            # nothing", and it cannot be inverted into the value.
+            body = (
+                f"Wrote the secret stored as {params.secret_ref.strip()!r} "
+                f"({result.get('bytes', '?')} bytes) into {surface}. The value is not shown "
+                "here and is registered for redaction for the rest of this session."
+            )
+        else:
+            body = f"Wrote {result.get('bytes', '?')} bytes into {surface}."
+        return _text(tool_call_id, "console", body, details={"surface": surface})
+    if method == "keys":
+        encoded = result.get("encoded") or []
+        return _text(
+            tool_call_id,
+            "console",
+            f"Sent {', '.join(str(key) for key in params.keys)} to {surface}"
+            + (f" (encoded as {', '.join(str(item) for item in encoded)})" if encoded else ""),
+            details={"surface": surface},
+        )
+    if method == "resize":
+        return _text(
+            tool_call_id,
+            "console",
+            f"{surface} is now {result.get('cols')}x{result.get('rows')}.",
+            details={"surface": surface},
+        )
+    if method == "secure":
+        # The ANSWER, not the request. §10.2 makes `console_secure` return
+        # `{secure}`, and the app is the authority on whether the lock is now on: a
+        # host that declined the toggle, or applied a different state, is invisible
+        # if this echoes `params.on` back. An app that sent no boolean falls back to
+        # what was asked for, which is all a caller can claim in that case.
+        reported = result.get("secure")
+        secure = reported if isinstance(reported, bool) else bool(params.on)
+        state = "on — reads and screenshots of this surface will be refused" if secure else "off"
+        return _text(
+            tool_call_id,
+            "console",
+            f"Secure input for {surface} is {state}.",
+            details={"surface": surface, "secure": secure},
+        )
+    # close
+    if result.get("closed") is False:
+        return _text(
+            tool_call_id,
+            "console",
+            f"The app did not close {surface}: the program is still running"
+            + (
+                f" (exit code {result.get('exit_code')})"
+                if result.get("exit_code") is not None
+                else ""
+            )
+            + ".",
+            details={"surface": surface, "closed": False},
+        )
+    return _text(
+        tool_call_id,
+        "console",
+        f"Closed {surface}"
+        + (f" (exit code {result.get('exit_code')})" if result.get("exit_code") is not None else "")
+        + ".",
+        details={"surface": surface, "closed": True, "exit_code": result.get("exit_code")},
     )
 
 

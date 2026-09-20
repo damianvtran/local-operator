@@ -62,6 +62,17 @@ _AMBIENT_VARS = (
     # trail. Inherited from the operator's own runtime it would write their
     # real session id into a sandboxed store's audit rows.
     "LOCAL_OPERATOR_SESSION_ID",
+    # The marker the desktop app injects into a console surface's environment
+    # (design ui-console-tab §6.5), read by ``local_operator/terminals.py``'s
+    # ``is_local_operator_console`` and therefore by
+    # ``tui/glyphs._nerd_capable_terminal`` — the clause that tells a `lop` TUI
+    # running inside one of those surfaces that the app renders PUA glyphs.
+    # Agents DO run test suites from inside a console surface, and an inherited
+    # value would hand every glyph/host-diagnosis assertion the app's answer
+    # instead of the developer's terminal: a test asserting the plain table
+    # would silently measure the Nerd one. It names a real machine resource (a
+    # surface handle), so it is scrubbed rather than explained.
+    "LOCAL_OPERATOR_CONSOLE_SURFACE",
     # The marker the harness's `bash` tool sets on every command it runs. It
     # now decides whether a `lop` invocation may open a session at all
     # (`local_operator/agent_shell.py`), so an inherited value would refuse the
