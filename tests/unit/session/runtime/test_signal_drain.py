@@ -566,7 +566,8 @@ def test_the_phrase_less_signal_frame_is_read_as_a_signal() -> None:
 # --- when each way out is armed ---------------------------------------------
 # ``amain`` has three ways to be asked to leave: SIGTERM, SIGINT and the socket
 # ``stop`` op. The signals are armed by ``install_loop_signal_handlers``, the op
-# by assigning ``handle.on_stop_requested``, and both must happen BEFORE
+# by assigning ``handle.on_stop_requested``, and the bound is TWO-SIDED: both
+# must sit BELOW the ``RuntimeServer`` they close over and ABOVE
 # ``RuntimeServer.start()`` — the statement that publishes the record every
 # sender reads to find this process. Pinned against the source, because the
 # runtime observable is a race and a passing race is not evidence.
@@ -588,6 +589,21 @@ async def amain() -> int:
     return 0
 """
 
+#: The OTHER way the bound can be broken, and the one the cell used to accept:
+#: the arming block hoisted ABOVE the ``RuntimeServer`` it closes over. It still
+#: satisfies ``install < start``, so the lower bound alone cannot see it — and
+#: under it ``_drain_for_signal(handle, runtime, ...)`` reads ``runtime`` before
+#: the assignment, i.e. the signal raises instead of being answered (F-1, review
+#: round 1).
+_HOISTED_ARMING_ORDER = """\
+async def amain() -> int:
+    install_loop_signal_handlers(loop, {})
+    handle.on_stop_requested = _on_socket_stop
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    return 0
+"""
+
 
 def _arming_lines(source: str) -> dict[str, int]:
     """Where in ``amain``'s OWN body each way out is armed, as statement line numbers.
@@ -596,6 +612,13 @@ def _arming_lines(source: str) -> dict[str, int]:
     file's sibling ``test_inbox`` lost that argument once already: its ordering
     assertion was written with ``source.index(...)`` and spent a while passing
     against the comment that explained the move it was supposed to police.
+
+    THE ``RuntimeServer`` CONSTRUCTION IS REPORTED TOO, not only the call that
+    names the local: the invariant the arming sits in is TWO-SIDED — below the
+    runtime the handlers close over, above ``start()`` — and a reading that
+    yielded only the arming lines could not express the lower bound at all
+    (F-1, review round 1). One scan answers both, so the two bounds cannot
+    disagree about which statement is the constructor.
 
     A nested scope is excluded, which matters here rather than being tidiness:
     the signal handler IS a nested ``def``, and a call inside one is not part of
@@ -615,6 +638,7 @@ def _arming_lines(source: str) -> dict[str, int]:
         stack.extend(ast.iter_child_nodes(node))
 
     runtime = ""
+    construct = 0
     for node in body:
         if (
             isinstance(node, ast.Assign)
@@ -623,9 +647,10 @@ def _arming_lines(source: str) -> dict[str, int]:
             and node.value.func.id == "RuntimeServer"
         ):
             runtime = getattr(node.targets[0], "id", "")
-    assert runtime, "amain no longer constructs a RuntimeServer"
+            construct = node.lineno
+    assert runtime and construct, "amain no longer constructs a RuntimeServer"
 
-    lines: dict[str, int] = {}
+    lines: dict[str, int] = {"construct": construct}
     for node in body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
@@ -681,15 +706,41 @@ def test_the_ways_out_are_armed_before_the_record_makes_this_process_addressable
     enough": the e2e cell that catches this is a schedule accident — it PASSED
     on the unfixed tree on this host — so its green is not evidence the
     ordering holds. This fails if either arming moves back below ``start()``.
+
+    AND THE BOUND IS TWO-SIDED, which is the half the first version of this cell
+    was missing (F-1, agent review round 1): the arming also has to be BELOW the
+    ``RuntimeServer`` the handlers close over, because ``_drain_for_signal``
+    takes that runtime as an argument. Hoisting the block above the constructor
+    keeps ``install < start`` true — so the lower bound alone stayed green — while
+    a signal arriving with boot-prologue work in flight would raise
+    ``UnboundLocalError`` inside the loop's signal callback: the signal is
+    swallowed and the runtime never stops, which is the defect this ordering
+    exists to remove, re-opened in a window the old assertion could not see.
+    Both directions are controlled below, on snippets that are the real source
+    shapes rather than paraphrases of them.
     """
     import inspect
 
     real = _arming_lines(inspect.getsource(process.amain))
+    assert real["construct"] < real["install"], (
+        "the SIGTERM/SIGINT handlers are armed ABOVE the `RuntimeServer` they close "
+        "over: `_drain_for_signal(handle, runtime, ...)` then reads `runtime` before "
+        "it is bound, so a signal with boot work in flight raises UnboundLocalError "
+        "inside the loop's signal callback — the signal is swallowed and the runtime "
+        "never stops"
+    )
     assert real["install"] < real["start"], (
         "the SIGTERM/SIGINT handlers must be installed BEFORE RuntimeServer.start(): "
         "start() is what publishes the record on its thread, and the record is what "
         "makes this process addressable — a signal in that window kills the runtime "
         "with the default disposition, unpublishing nothing and releasing no lease"
+    )
+    assert real["construct"] < real["socket_hook"], (
+        "the socket stop hook is armed ABOVE the `RuntimeServer` it is a way out OF: "
+        "its own closure reads no `runtime` (it sets the stop event through `loop`), "
+        "so the bound asserted here is the BLOCK's — the two arming statements are one "
+        "unit and belong on the same side of the constructor, or a partial hoist "
+        "leaves the signal half above it while this half looks correct"
     )
     assert real["socket_hook"] < real["start"], (
         "the socket stop hook must be armed BEFORE RuntimeServer.start(), for the same "
@@ -702,5 +753,18 @@ def test_the_ways_out_are_armed_before_the_record_makes_this_process_addressable
     # red — the failure mode AGENTS.md's "Prove the test can still fail" exists
     # for. Both arming sites are checked, so swapping either one back is caught.
     before = _arming_lines(_PRE_FIX_ARMING_ORDER)
+    assert before["construct"] < before["install"]
     assert before["install"] > before["start"]
     assert before["socket_hook"] > before["start"]
+
+    # ... and the UPPER bound has its OWN control, because it is the bound that
+    # was missing (F-1). The first assertion below is the point: the hoisted
+    # order satisfies `install < start`, so a control that only re-tested the
+    # lower bound would prove nothing about what this cell now catches.
+    hoisted = _arming_lines(_HOISTED_ARMING_ORDER)
+    assert hoisted["install"] < hoisted["start"], (
+        "the hoisted control must be a case `install < start` alone accepts, or it "
+        "demonstrates nothing about the bound this cell was missing"
+    )
+    assert hoisted["construct"] > hoisted["install"]
+    assert hoisted["construct"] > hoisted["socket_hook"]
