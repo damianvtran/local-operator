@@ -51,6 +51,14 @@ from typing import Any
 from local_operator.operator.verify import decode_point, key_id_for
 
 #: Backend names, in the order the presence ladder prefers them.
+#:
+#: NO BACKEND OFFERS A ``delete``. Removing a key is not in the verb set this
+#: change ships (``lop operator init|trust|install|sign|status``), and a method
+#: that calls ``Path.unlink`` / ``SecItemDelete`` from here would trip the
+#: repository's session-directory guard (``test_no_session_deletion``), which
+#: exists precisely so no module outside ``session/cleanup.py`` can remove a
+#: directory. Rotation is the anchored operation anyway: write a new key, install
+#: a new anchor, and the old public half is simply no longer the pinned one.
 SECURE_ENCLAVE = "secure-enclave"
 CNG_PRESENCE = "cng-presence"
 FILE_ONLY = "file-only"
@@ -194,12 +202,6 @@ class FileKeyBackend:
             format=serialization.PublicFormat.UncompressedPoint,
         )
         return _SoftwareSigner(self._handle(spki), private)
-
-    def delete(self) -> None:
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            return
 
 
 class _SoftwareSigner(Signer):
@@ -486,20 +488,6 @@ class SecureEnclaveBackend:
         )
         return _SecureEnclaveSigner(handle, key, cf)
 
-    def delete(self) -> None:
-        cf = self.cf
-        tag = cf.data(APPLICATION_TAG.encode())
-        query = cf.dict(
-            [
-                (cf.const("kSecClass"), cf.const("kSecClassKey")),
-                (cf.const("kSecAttrApplicationTag"), tag),
-            ]
-        )
-        try:
-            cf.S.SecItemDelete(query)
-        finally:
-            cf.release(query, tag)
-
 
 class _SecureEnclaveSigner(Signer):
     """Signs through the Secure Enclave. EVERY call raises the presence prompt."""
@@ -553,9 +541,6 @@ class CngBackend:  # pragma: no cover — Windows only; CI runs POSIX
         raise KeyBackendError("the CNG presence backend is not implemented on this build")
 
     def load(self) -> Signer | None:  # pragma: no cover
-        return None
-
-    def delete(self) -> None:  # pragma: no cover
         return None
 
 
