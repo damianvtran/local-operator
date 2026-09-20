@@ -1,57 +1,66 @@
-"""Measure TIME TO FIRST TOKEN on the three paths a user actually lives on.
+"""Measure TIME TO FIRST TOKEN on every path a user actually lives on, and gate it.
 
-WHY THIS EXISTS
-===============
+WHAT THIS MEASURES, AND WHY IT IS THE NUMBER THAT MATTERS
+========================================================
 The complaint is not throughput or total turn time — it is the pause between
-hitting Enter and seeing the first streamed character. That pause has three
-different shapes depending on which front end you are in, and they do not share
-a fix:
+hitting Enter and seeing the first streamed character. That pause has a different
+shape on every front end, and they do not share a fix:
 
-* ``tui``      — in-process ``Session``: ``session.prompt()`` to the first
-  ``text_delta`` reaching the stream callback. This is the floor: no HTTP, no
-  runtime process, no bridge.
-* ``desktop-cold`` — the Electron UI's first message in a session that has no
-  runtime yet. The POST carries the cold engage (spawn a child, import the
-  composition root, construct the session, publish a record, bind) before the
-  turn can start. One honest qualification: the harness opens the SSE
-  subscription and posts ``/watch`` before the measured message, and a visible
-  watch lease arms a speculative warm of its own
-  (``server/utils/desktop_sessions.py``), so this could race a spawn the
-  harness started rather than always performing the engage inline. Both arms
-  race the same way, so the comparison holds; the absolute number is "first
-  message on a session somebody is already looking at", which is the real
-  shape in the app.
-* ``desktop-warm`` — the same UI on a session whose runtime is already up. The
-  difference between this and ``desktop-cold`` is exactly what a speculative
-  warm buys; the difference between this and ``tui`` is the cost the daemon
-  plane adds.
+* ``tui``        — in-process ``Session``: submit to the first event the front end
+  can paint. The floor: no HTTP, no runtime process, no bridge.
+* ``desktop``    — the app's first message in a session with no runtime (cold: the
+  POST carries the engage — spawn, import, construct, bind) versus a later message
+  on the same session (warm).
+* ``exec``       — the one-shot console entry point, ``--json``, read line by line.
+* ``mobile``     — the phone's real routes: the relay's projection frames.
+* ``sse-jobs``   — ``POST /v1/chat/async`` then ``GET /v1/sse/jobs/{id}``.
 
 WHAT IS FAKED, AND WHY THAT IS THE POINT
 ========================================
-The PROVIDER is the built-in ``test`` mock: it answers with canned deltas and
-no network at all. Everything measured here is therefore local-operator's own
-overhead — imports, tokenizer, prompt construction, IPC, JSON — which is the
-only part this repository can move. A live provider would bury the signal under
-its own time-to-first-byte and make before/after incomparable. The mock is
-production code (``providers/clients.py``), not a test double.
+The PROVIDER is a loopback OpenAI-compatible endpoint this harness serves itself
+(``scripts/ttft/loopback.py``) and points the real ``openai-compatible`` local
+provider at through the config the app already supports. Everything measured is
+therefore local-operator's own overhead — imports, prompt construction, engage,
+IPC, JSON, SSE — which is the only part this repository can move. A live provider
+would bury the signal under its own time-to-first-byte (measured: 355-514 ms on a
+102-token prompt, 1.55 s on the operator's 227k-token cached p50 prompt — see
+``scripts/probe_provider_ttfb.py``) and make before/after incomparable.
+
+The loopback endpoint is used instead of the built-in ``test`` mock for one
+reason: the mock emits text and NOTHING else, so a mock-provider bench has no
+reasoning delta to be dropped and cannot see the wait the operator is describing.
+``--provider test`` still selects the mock, for continuity with the numbers that
+predate this harness.
 
 Everything else is real: real uvicorn daemon, real HTTP + SSE, real spawned
-``python -m local_operator.session.runtime.process`` child, real transcript.
+``python -m local_operator.session.runtime.process`` children, real console entry
+point, real phone routes, real transcript.
+
+WHAT IS REPORTED AND WHAT IS ASSERTED
+=====================================
+Only :data:`scripts.ttft.metrics.FIRST_EVENT` against a 300 ms budget, only on the
+cells whose floor this repository owns end to end, and only on the p50. The
+PROVIDER columns are reported and budgeted, never asserted — read
+``metrics.BUDGET_MS`` before changing that; it explains, with the measured numbers,
+why asserting a sub-300 ms first provider token would be a lie.
 
 ISOLATION
 =========
-Every run gets a fresh ``HOME``, ``LOCAL_OPERATOR_CONFIG_DIR`` and ``TMPDIR``,
-seeded with ``hosting: test``. The operator's live sessions are never touched
-and a benchmark child can never attach to a real conversation.
+Every run gets a fresh ``HOME``, ``LOCAL_OPERATOR_CONFIG_DIR`` and ``TMPDIR``, and
+every inherited ``CMUX_*``/``LOP_*`` variable is stripped from this process before
+anything is spawned. The operator's live sessions are never touched and a measured
+child can never attach to a real conversation. See ``scripts/ttft/isolate.py``.
 
 USAGE
 =====
     .venv/bin/python scripts/bench_ttft.py --runs 7
-    .venv/bin/python scripts/bench_ttft.py --runs 7 --json out.json
-    .venv/bin/python scripts/bench_ttft.py --scenario tui --runs 20
+    .venv/bin/python scripts/bench_ttft.py --channels tui,desktop --runs 7 --concurrency 1,4,8
+    .venv/bin/python scripts/bench_ttft.py --channels tui --provider test --runs 7
+    .venv/bin/python scripts/bench_ttft.py --channels desktop --provider-reasoning-ms 400
 
-Report the MEDIAN. The first run in a process pays for cold page cache on the
-interpreter and site-packages, and the distribution has a long right tail.
+Report percentiles, never a single run. The first run in a process pays for cold
+page cache on the interpreter and site-packages, and the distribution has a long
+right tail.
 """
 
 from __future__ import annotations
@@ -60,50 +69,45 @@ import argparse
 import asyncio
 import json
 import os
+import platform
 import secrets
 import shutil
-import socket
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-# A benchmark under scripts/ must read the tree it lives in, not whatever tree
-# the venv was installed from (AGENTS.md, "Every feature worktree owns its own
-# venv"). Without this a benchmark run in a worktree silently measures main.
+# A benchmark under scripts/ must read the tree it lives in, not whatever tree the
+# venv was installed from (AGENTS.md, "Every feature worktree owns its own venv").
+# Without this a benchmark run in a worktree silently measures main.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-#: The scenario names this benchmark reports. Kept in one place so the CLI
-#: choices and the summary table cannot drift apart.
-SCENARIOS = ("tui", "desktop-cold", "desktop-warm")
+from scripts.ttft import metrics as M  # noqa: E402
+from scripts.ttft.channels import (  # noqa: E402
+    CHANNELS,
+    ChannelConfig,
+    drive_channel,
+    tui_child_main,
+)
+from scripts.ttft.isolate import (  # noqa: E402
+    make_run,
+    pin_shared_caches,
+    strip_inherited_runtime_env,
+)
+from scripts.ttft.loopback import LoopbackProvider  # noqa: E402
+from scripts.ttft.report import render_report  # noqa: E402
 
-#: How long a single first-token wait may take before the run is called a
-#: failure. Generous: a cold engage on a loaded machine plus a turn is well
-#: under this, and a genuine hang deserves to be reported as one rather than
-#: silently lengthening the median.
-FRAME_TIMEOUT_S = 60.0
+#: Minimum runs before a cell is worth reading. The task's own bar; a shorter run
+#: is allowed for a smoke test and says so in the notes.
+MIN_RUNS = 7
 
-#: The bytecode-cache prefix every measured process runs under, set once per
-#: invocation and shared by every run — the shape the desktop app creates, where
-#: one cache under userData is read by the daemon and by every runtime child.
-#: Set explicitly rather than inherited: the operator's shell may already carry
-#: one pointing at the real app cache, and a benchmark that silently measured
-#: that (warm, populated by unrelated runs) would report the wrong number.
-_PYCACHE_PREFIX: Path | None = None
-
-#: tiktoken downloads ``cl100k_base.tiktoken`` unless it finds the file, and it
-#: looks in ``$TIKTOKEN_CACHE_DIR`` or else ``<TMPDIR>/data-gym-cache``. This
-#: benchmark gives every run a fresh ``TMPDIR`` for isolation, which silently
-#: turned the first use of the tokenizer into a TLS round trip — 413 ms of
-#: ``SSLSocket.read``, 326 ms inside ``load_tiktoken_bpe`` and 115 ms in
-#: ``getaddrinfo``, measured in a profile of the child. That is a property of
-#: the harness, not of local-operator, so the DATA is pinned to one directory
-#: per invocation the way an operator's machine pins it.
-_TIKTOKEN_CACHE_DIR: Path | None = None
+#: The built-in test provider. Kept as a selectable arm for continuity with the
+#: numbers that predate this harness; it cannot show a reasoning phase.
+MOCK_HOSTING = "test"
+MOCK_MODEL = "mock"
 
 
 def _prime_bytecode_cache() -> None:
@@ -112,8 +116,8 @@ def _prime_bytecode_cache() -> None:
     Exists so "before" and "after" can be compared under the desktop app's real
     arrangement: an interpreter that REFUSES bytecode writes, and a cache that
     something long-lived populates once for the children that follow. Run as a
-    subprocess because that is how the daemon does it. Absent on a tree without
-    this module — reported, not fatal, so the same script can measure both arms.
+    subprocess because that is how the daemon does it. Absent on a tree without this
+    module — reported, not fatal, so the same script can measure both arms.
     """
     env = dict(os.environ)
     env["LOP_TTFT_REPO"] = str(Path(__file__).resolve().parents[1])
@@ -143,387 +147,397 @@ def _prime_bytecode_cache() -> None:
     print(f"  bytecode prime: {completed.stdout.decode().strip() or 'FAILED'}", flush=True)
 
 
-def _seed_config(config_dir: Path) -> None:
-    """Write the minimum config a runtime needs to construct.
+def _host_context() -> dict[str, Any]:
+    """The machine the numbers were taken on, because an absolute ms needs it.
 
-    Through ``ConfigManager`` rather than hand-rolled YAML: the metadata block
-    carries fields the loader requires, and a hand-written file raises a
-    ``KeyError`` from inside the child that reads like a startup regression.
+    This host is shared with ~25 concurrent agent sessions and swings between load
+    20 and 600, so a table without its load is not evidence of anything.
     """
-    from local_operator.config import ConfigManager
-
-    config_dir.mkdir(parents=True, exist_ok=True)
-    manager = ConfigManager(config_dir=config_dir)
-    manager.update_config({"hosting": "test", "model_name": "mock"})
-
-
-def _kill_children(config_dir: Path) -> None:
-    """Terminate any runtime this run spawned.
-
-    A benchmark that leaves runtimes resident measures its later runs against a
-    machine it degraded itself — and worse, a leftover child keeps the session's
-    lease, so the next run's engage would find a live owner and report a
-    suspiciously fast cold start.
-    """
-    from local_operator.session.runtime import registry
-
-    for record, _state in registry.scan(config_dir):
-        pid = getattr(record, "pid", None)
-        if isinstance(pid, int) and pid > 0 and pid != os.getpid():
-            try:
-                os.kill(pid, 15)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-
-
-# ---------------------------------------------------------------------------
-# Scenario 1: in-process session (the TUI)
-#
-# Run in a CHILD PROCESS, one process per measurement, because the cost this
-# scenario exists to expose is per-process: a TUI is a single long-lived
-# process, so its FIRST turn ever is the only one that pays the cold caches,
-# and an in-process loop would measure the second turn six times out of seven
-# and report a settled number for a cost the user meets once. Each run also
-# takes a SECOND turn, so the report carries both the cold-process number and
-# the steady-state number the same process reaches once warm.
-# ---------------------------------------------------------------------------
-
-
-async def _tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
-    """Run two turns in THIS process and report each one's first-token time."""
-    import argparse as _argparse
-
-    from local_operator.agents import AgentRegistry
-    from local_operator.config import ConfigManager
-    from local_operator.credentials import CredentialManager
-    from local_operator.harness.types import StreamTextDelta
-    from local_operator.session_factory import create_session, warm_session_imports
-
-    # EXACTLY WHAT THE TUI DOES FIRST, and the reason it is here: the real app
-    # runs this off-loop at boot (``tui/app.py``), and it is the seam that now
-    # carries the tokenizer warm. A benchmark that skipped it would charge the
-    # tokenizer to the first turn — production does not — and would then report
-    # the TUI as unchanged by a change that specifically moves that cost to
-    # boot.
-    await asyncio.to_thread(warm_session_imports)
-
-    args = _argparse.Namespace()
-    for key, value in {
-        "hosting": "test",
-        "model": "mock",
-        "agent_name": None,
-        "agent_id": None,
-        "yolo": True,
-        "train": False,
-        "resume": None,
-        "agent": None,
-    }.items():
-        setattr(args, key, value)
-
-    session = await create_session(
-        args,
-        ConfigManager(config_dir),
-        CredentialManager(config_dir),
-        AgentRegistry(config_dir),
-        cwd=str(cwd),
-    )
-    marks: dict[str, float] = {}
     try:
-        inner = cast(Any, session)._stream_fn
-
-        class TimedStream:
-            """Wrap the session's stream fn to timestamp the first delta."""
-
-            def __init__(self, wrapped: Any, base: float, label: str) -> None:
-                self._wrapped = wrapped
-                self._base = base
-                self._label = label
-
-            def __getattr__(self, name: str) -> Any:
-                return getattr(self._wrapped, name)
-
-            def __call__(self, request: Any, signal: Any = None) -> Any:
-                marks[self._label + "request_built_ms"] = (time.perf_counter() - self._base) * 1000
-                source = self._wrapped(request, signal)
-
-                async def relay() -> Any:
-                    first = self._label + "first_delta_ms"
-                    async for event in source:
-                        if isinstance(event, StreamTextDelta) and first not in marks:
-                            marks[first] = (time.perf_counter() - self._base) * 1000
-                        yield event
-
-                return relay()
-
-        for label in ("cold_", "warm_"):
-            base = time.perf_counter()
-            cast(Any, session)._stream_fn = TimedStream(inner, base, label)
-            await session.prompt("Reply with one short sentence.")
-            marks[label + "turn_ms"] = (time.perf_counter() - base) * 1000
-        return marks
-    finally:
-        await session.dispose()
-
-
-async def _run_tui_child(config_dir: Path, cwd: Path) -> dict[str, float]:
-    """Run :func:`_tui_child` in a fresh interpreter and parse its report."""
-    env = dict(os.environ)
-    env["HOME"] = str(config_dir.parent)
-    env["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
-    env["TMPDIR"] = str(config_dir.parent)
-    env["LOP_TTFT_CHILD"] = "1"
-    env["LOP_TTFT_CWD"] = str(cwd)
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--child-tui",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=env,
-    )
-    out, err = await proc.communicate()
-    for line in out.decode().splitlines():
-        if line.startswith("TTFT_JSON "):
-            return json.loads(line[len("TTFT_JSON ") :])
-    raise AssertionError(f"child reported no timing: {err.decode()[-2000:]}")
-
-
-# ---------------------------------------------------------------------------
-# Scenario 2/3: the desktop plane, over real HTTP + SSE
-# ---------------------------------------------------------------------------
-
-
-def _bind_listener() -> socket.socket:
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    return listener
-
-
-async def _serve(address: socket.socket) -> Any:
-    """Start the real daemon app on ``address``; await readiness."""
-    import uvicorn
-
-    from local_operator.server.app import app
-
-    server = uvicorn.Server(uvicorn.Config(app, log_level="error"))
-    task = asyncio.create_task(server.serve(sockets=[address]))
-    for _ in range(100000):
-        if server.started:
-            break
-        if task.done():
-            await task
-        await asyncio.sleep(0)
-    assert server.started, "daemon did not start"
-    return server, task
-
-
-async def _next_frame(
-    lines: Any, predicate: Any, timeout: float = FRAME_TIMEOUT_S
-) -> dict[str, Any]:
-    """Read SSE frames until one satisfies ``predicate``."""
-
-    async def read() -> dict[str, Any]:
-        async for line in lines:
-            if line.startswith("data: "):
-                frame = json.loads(line[6:])
-                if predicate(frame):
-                    return frame
-        raise AssertionError("stream ended before the expected frame")
-
-    return await asyncio.wait_for(read(), timeout)
-
-
-def _is_text(frame: dict[str, Any]) -> bool:
-    """The first frame that carries streamed assistant text.
-
-    The desktop wire projects streamed text as ``message_update`` frames with a
-    non-empty ``delta`` (``AgentEventBridge``), NOT as the harness's
-    ``text_delta`` stream event — the renderer appends ``delta`` as it arrives,
-    so this is the frame the user is waiting for.
-    """
-    payload = frame.get("payload", {})
-    return (
-        frame.get("type") == "event"
-        and payload.get("type") == "message_update"
-        and bool(payload.get("delta"))
-    )
-
-
-async def _run_desktop(config_dir: Path, cwd: Path, *, warm: bool) -> dict[str, float]:
-    """One message through the desktop HTTP API, to the first streamed token."""
-    import httpx
-
-    address = _bind_listener()
-    server, task = await _serve(address)
-    base_url = f"http://127.0.0.1:{address.getsockname()[1]}"
-    headers = {"Authorization": "Bearer " + os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"]}
-    marks: dict[str, float] = {}
-    try:
-        async with httpx.AsyncClient(base_url=base_url, headers=headers, timeout=120) as client:
-            created = await client.post(
-                "/v1/desktop/sessions",
-                json={"request_id": str(uuid.uuid4()), "cwd": str(cwd)},
-            )
-            created.raise_for_status()
-            session_id = created.json()["result"]["session_id"]
-            target = f"/v1/desktop/sessions/{session_id}"
-
-            async with client.stream("GET", target + "/events") as response:
-                lines = response.aiter_lines()
-                opened = await _next_frame(lines, lambda f: f["type"] == "open")
-                await _next_frame(lines, lambda f: f["type"] == "snapshot")
-                await client.post(
-                    target + "/watch",
-                    json={
-                        "subscription_id": opened["payload"]["subscription_id"],
-                        "visible": True,
-                        "can_notify": False,
-                    },
-                )
-
-                if warm:
-                    # Produce one complete turn first, so the measured turn runs
-                    # on exactly the state a user's SECOND message finds: a live
-                    # runtime, a bound bridge, a populated transcript.
-                    priming = time.perf_counter()
-                    await client.post(
-                        target + "/messages",
-                        json={"request_id": str(uuid.uuid4()), "text": "Priming turn."},
-                    )
-                    await _next_frame(
-                        lines,
-                        lambda f: f["type"] == "event"
-                        and f.get("payload", {}).get("type") == "agent_end",
-                    )
-                    marks["prime_ms"] = (time.perf_counter() - priming) * 1000
-                start = time.perf_counter()
-                admitted = await client.post(
-                    target + "/messages",
-                    json={
-                        "request_id": str(uuid.uuid4()),
-                        "text": "Reply with one short sentence.",
-                    },
-                )
-                admitted.raise_for_status()
-                marks["admitted_ms"] = (time.perf_counter() - start) * 1000
-                await _next_frame(lines, _is_text)
-                marks["first_token_ms"] = (time.perf_counter() - start) * 1000
-        return marks
-    finally:
-        server.should_exit = True
-        with_stop = asyncio.wait_for(task, 30)
-        try:
-            await with_stop
-        except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — teardown is best effort
-            pass
-        address.close()
-        _kill_children(config_dir)
-
-
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
-
-
-def _isolated_root() -> tuple[Path, Path, Path]:
-    root = Path(tempfile.mkdtemp(prefix="lop-ttft-"))
-    config_dir = root / ".local-operator"
-    cwd = root / "workspace"
-    cwd.mkdir(parents=True, exist_ok=True)
-    return root, config_dir, cwd
-
-
-async def _one(scenario: str, index: int) -> dict[str, float]:
-    root, config_dir, cwd = _isolated_root()
-    _seed_config(config_dir)
-    saved = {
-        key: os.environ.get(key)
-        for key in (
-            "HOME",
-            "LOCAL_OPERATOR_CONFIG_DIR",
-            "TMPDIR",
-            "LOCAL_OPERATOR_DESKTOP_TOKEN",
-        )
+        load = list(os.getloadavg())
+    except (OSError, AttributeError):
+        load = []
+    return {
+        "platform": platform.platform(),
+        "cpus": os.cpu_count(),
+        "load_at_start": load,
+        "python": sys.version.split()[0],
     }
-    os.environ["HOME"] = str(root)
-    os.environ["LOCAL_OPERATOR_CONFIG_DIR"] = str(config_dir)
-    os.environ["TMPDIR"] = str(root)
-    os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"] = secrets.token_hex(32)
-    if _TIKTOKEN_CACHE_DIR is not None:
-        os.environ["TIKTOKEN_CACHE_DIR"] = str(_TIKTOKEN_CACHE_DIR)
+
+
+async def _one_run(
+    *,
+    channel: str,
+    arms: tuple[str, ...],
+    concurrency: int,
+    config: ChannelConfig,
+    diagnostics: dict[str, Any],
+    root_prefix: str,
+) -> list[dict[str, Any]]:
+    """One isolated run of one channel: fresh root, then the channel's turns."""
+    run = make_run(prefix=root_prefix)
     try:
-        if scenario == "tui":
-            marks = await _run_tui_child(config_dir, cwd)
-        else:
-            marks = await _run_desktop(config_dir, cwd, warm=scenario == "desktop-warm")
-        marks["run"] = float(index)
-        return marks
-    finally:
-        _kill_children(config_dir)
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        shutil.rmtree(root, ignore_errors=True)
-
-
-async def _run_scenario(scenario: str, runs: int) -> list[dict[str, float]]:
-    results: list[dict[str, float]] = []
-    for index in range(runs):
-        result = await _one(scenario, index)
-        results.append(result)
-        shown = " ".join(
-            f"{key}={value:.0f}ms" for key, value in result.items() if key.endswith("_ms")
+        run.activate()
+        run.seed(
+            hosting=config.hosting,
+            model=config.model,
+            base_url=config.provider.base_url if config.provider is not None else None,
         )
-        print(f"  {scenario} run {index + 1}/{runs}: {shown}", flush=True)
-    return results
+        os.environ["LOCAL_OPERATOR_DESKTOP_TOKEN"] = secrets.token_hex(32)
+        return await drive_channel(
+            channel,
+            run,
+            config=config,
+            concurrency=concurrency,
+            arms=arms,
+            diagnostics=diagnostics,
+        )
+    finally:
+        run.teardown()
 
 
-def _summarize(results: list[dict[str, float]]) -> dict[str, Any]:
-    summary: dict[str, Any] = {"runs": len(results)}
-    keys = sorted({key for result in results for key in result if key.endswith("_ms")})
-    for key in keys:
-        values = [result[key] for result in results if key in result]
-        if not values:
-            continue
-        summary[key] = {
-            "median": round(statistics.median(values), 1),
-            "min": round(min(values), 1),
-            "max": round(max(values), 1),
+def _reduce_cells(
+    samples_by_cell: dict[tuple[str, str, int], list[dict[str, Any]]], runs: int
+) -> list[dict[str, Any]]:
+    """Reduce every cell's pooled samples into percentiles and a budget verdict."""
+    cells: list[dict[str, Any]] = []
+    for (channel, arm, concurrency), samples in sorted(samples_by_cell.items()):
+        stats = {
+            metric: M.reduce_samples(
+                [float(sample[metric]) for sample in samples if metric in sample]
+            )
+            for metric in M.METRICS
         }
-    return summary
+        verdict = M.judge((channel, arm), stats, concurrency=concurrency)
+        warnings: list[str] = []
+        # INSTRUMENT SELF-CHECK: the provider must have put text on the wire
+        # BEFORE any front end could receive it. The reverse is physically
+        # impossible, so it can only mean the provider column is paired to the
+        # wrong request — a harness defect that would otherwise be read as a
+        # product result.
+        provider_text = stats.get(M.PROVIDER_TEXT) or {}
+        first_text = stats.get(M.FIRST_TEXT) or {}
+        if (
+            provider_text.get("n")
+            and first_text.get("n")
+            and float(provider_text["p50"]) > float(first_text["p50"]) + 5
+        ):
+            warnings.append(
+                f"provider_text p50 {provider_text['p50']} > first_text p50 "
+                f"{first_text['p50']} — provider stamps mis-paired, numbers not usable"
+            )
+        # THE FINDING, stated per cell: reasoning existed on the wire and no front
+        # end received it.
+        produced = stats.get(M.PROVIDER_REASONING) or {}
+        surfaced = stats.get(M.FIRST_REASONING) or {}
+        if produced.get("n") and not surfaced.get("n"):
+            warnings.append(
+                f"provider emitted reasoning at p50 {produced['p50']} ms and NO front end "
+                "received it: the turn's first visible event is its first TEXT"
+            )
+        cells.append(
+            {
+                "channel": channel,
+                "arm": arm,
+                "concurrency": concurrency,
+                "runs": runs,
+                "samples": len(samples),
+                "stats": stats,
+                "warnings": warnings,
+                "verdict": {
+                    "status": verdict.status,
+                    "reason": verdict.reason,
+                    "budget_ms": M.BUDGET_MS,
+                },
+            }
+        )
+    return cells
 
 
 async def _amain(args: argparse.Namespace) -> int:
-    scenarios = [args.scenario] if args.scenario else list(SCENARIOS)
-    report: dict[str, Any] = {}
-    if args.prime_bytecode:
-        _prime_bytecode_cache()
-    for scenario in scenarios:
-        print(f"\n=== {scenario} ({args.runs} runs) ===", flush=True)
-        results = await _run_scenario(scenario, args.runs)
-        summary = _summarize(results)
-        report[scenario] = {"summary": summary, "results": results}
-        print(f"--- {scenario} median ---")
-        for key, stat in summary.items():
-            if not isinstance(stat, dict):
-                continue
+    channels = [name.strip() for name in args.channels.split(",") if name.strip()]
+    for name in channels:
+        if name not in CHANNELS:
+            raise SystemExit(f"unknown channel {name!r}; known: {', '.join(CHANNELS)}")
+    concurrencies = [int(value) for value in args.concurrency.split(",") if value.strip()]
+    arms = tuple(arm.strip() for arm in args.arms.split(",") if arm.strip())
+    for arm in arms:
+        if arm not in ("cold", "warm"):
+            raise SystemExit(f"unknown arm {arm!r}; known: cold, warm")
+
+    from scripts import bench_tree
+
+    tree = bench_tree.describe(args.measured_tree)
+    notes: list[str] = []
+    if args.runs < MIN_RUNS:
+        notes.append(
+            f"{args.runs} runs is below the {MIN_RUNS} this harness calls enough; "
+            "percentiles here are indicative only"
+        )
+    stripped = strip_inherited_runtime_env()
+    if stripped:
+        notes.append(f"stripped inherited {', '.join(sorted(stripped))}")
+    if not args.prime_bytecode:
+        notes.append(
+            "bytecode cache not primed (--prime-bytecode): every measured child pays "
+            "compilation the desktop app's daemon pays once for it"
+        )
+
+    pycache = Path(args.pycache_prefix or tempfile.mkdtemp(prefix="lop-ttft-bench-pycache-"))
+    # A STABLE tokenizer cache across invocations when one is given: tiktoken
+    # downloads its BPE table unless it finds the file, so a fresh directory per
+    # invocation makes the first measured child pay a TLS round trip (413 ms of
+    # SSLSocket.read, measured). Pinning it per CAMPAIGN rather than per invocation
+    # is what lets a five-channel sweep be compared without that cost in run 1.
+    tiktoken = Path(args.tiktoken_cache or tempfile.mkdtemp(prefix="lop-ttft-bench-tiktoken-"))
+    # What THIS invocation created, it removes. A cache directory that outlives the
+    # run that made it is a leak on a shared disk, and the two here are large (a
+    # bytecode cache per campaign, a tokenizer table); a caller-pinned one is the
+    # caller's to keep. The roots under /tmp are removed per run by
+    # IsolatedRun.teardown; these two live for the whole invocation instead.
+    created_caches = [
+        path
+        for path, given in ((pycache, args.pycache_prefix), (tiktoken, args.tiktoken_cache))
+        if not given
+    ]
+    pin_shared_caches(pycache, tiktoken)
+
+    provider: LoopbackProvider | None = None
+    if args.provider == "loopback":
+        provider = LoopbackProvider(
+            model=args.model or "bench-loopback",
+            prefill_ms=args.provider_prefill_ms,
+            reasoning_ms=args.provider_reasoning_ms,
+        )
+        await provider.start()
+        config = ChannelConfig(
+            hosting=args.hosting or "openai-compatible",
+            model=provider.model,
+            provider=provider,
+        )
+    else:
+        config = ChannelConfig(hosting=MOCK_HOSTING, model=MOCK_MODEL, provider=None)
+        notes.append(
+            "provider=test: the built-in mock emits text only, so the reasoning "
+            "columns are unobservable rather than absent"
+        )
+
+    report: dict[str, Any] = {
+        "tree": tree,
+        "host": _host_context(),
+        "provider": {
+            "kind": args.provider,
+            "hosting": config.hosting,
+            "model": config.model,
+            "emulated_prefill_ms": args.provider_prefill_ms,
+            "emulated_reasoning_ms": args.provider_reasoning_ms,
+            "note": (
+                "emulated provider floors; 0 means the numbers are local-operator's "
+                "own overhead, which is the gate configuration"
+            ),
+        },
+        "runs": args.runs,
+        "concurrency": concurrencies,
+        "arms": list(arms),
+        "notes": notes,
+        "cells": [],
+    }
+
+    samples_by_cell: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
+    printed_banner = False
+    try:
+        for channel in channels:
+            for concurrency in concurrencies:
+                for run_index in range(args.runs):
+                    diagnostics: dict[str, Any] = {}
+                    samples = await _one_run(
+                        channel=channel,
+                        arms=arms,
+                        concurrency=concurrency,
+                        config=config,
+                        diagnostics=diagnostics,
+                        root_prefix=args.root_prefix,
+                    )
+                    for sample in samples:
+                        key = (channel, str(sample.get("arm", "")), concurrency)
+                        samples_by_cell.setdefault(key, []).append(sample)
+                    shown = " ".join(
+                        f"{metric.replace('_ms', '')}={_p50(samples, metric):.0f}"
+                        for metric in (M.FIRST_EVENT, M.FIRST_REASONING, M.FIRST_TEXT)
+                    )
+                    print(
+                        f"  {channel} {concurrency}x run {run_index + 1}/{args.runs}: {shown}",
+                        flush=True,
+                    )
+                    if diagnostics and not printed_banner:
+                        print(f"  instrumentation: {json.dumps(diagnostics)[:400]}", flush=True)
+                        printed_banner = True
+                # Persist after every cell, so a run that dies at cell 30 still
+                # hands over the 29 cells it measured (`ALREADY_WARM`-style honesty
+                # about what was and was not taken).
+                report["cells"] = _reduce_cells(samples_by_cell, args.runs)
+                report["finished_cells"] = len(report["cells"])
+                _write_json(args.json, report)
+        report["cells"] = _reduce_cells(samples_by_cell, args.runs)
+        report["load_at_end"] = list(os.getloadavg()) if hasattr(os, "getloadavg") else []
+        if provider is not None:
+            # The provider's request log ships with the report: a mis-paired
+            # provider column is then diagnosable from the artefact instead of
+            # only by re-running the cell.
+            report["provider"]["request_log"] = provider.log[-200:]
+            report["provider"]["requests"] = provider.requests
+        text = render_report(report)
+        print("\n" + text)
+        if args.table:
+            Path(args.table).write_text(text + "\n", encoding="utf-8")
+            print(f"\nwrote {args.table}")
+    finally:
+        if provider is not None:
+            await provider.stop()
+        for created in created_caches:
+            _remove_quietly(created)
+        _write_json(args.json, report)
+
+    failures = [cell for cell in report["cells"] if cell["verdict"]["status"] == "FAIL"]
+    if failures and args.assert_budget:
+        print("\nBUDGET FAILURES:", file=sys.stderr)
+        for cell in failures:
             print(
-                f"  {key:<18} median={stat['median']:>8}  "
-                f"min={stat['min']:>8}  max={stat['max']:>8}"
+                f"  {cell['channel']}/{cell['arm']}@{cell['concurrency']}: "
+                f"{cell['verdict']['reason']}",
+                file=sys.stderr,
             )
-    if args.json:
-        Path(args.json).write_text(json.dumps(report, indent=2), encoding="utf-8")
-        print(f"\nwrote {args.json}")
+        return 2
     return 0
+
+
+def _render_only(paths: list[str], table: str) -> int:
+    """Render one table from already-written report JSONs.
+
+    Exists because the full sweep is a long run on a loaded host and is therefore
+    taken one channel at a time: this folds those artefacts back into the single
+    table a reviewer reads, without re-measuring anything. Percentiles are NOT
+    recomputed — they are carried as they were reduced — so a combined table can
+    never disagree with the run that produced it.
+    """
+    merged: dict[str, Any] = {"cells": [], "notes": []}
+    for path in paths:
+        report = json.loads(Path(path).read_text(encoding="utf-8"))
+        merged["cells"].extend(report.get("cells") or [])
+        for key in ("tree", "host", "provider", "runs", "concurrency", "arms"):
+            merged.setdefault(key, report.get(key))
+        merged["load_at_end"] = report.get("load_at_end", merged.get("load_at_end"))
+        for note in report.get("notes") or []:
+            merged["notes"].append(f"{Path(path).name}: {note}")
+    text = render_report(merged)
+    print(text)
+    if table:
+        Path(table).write_text(text + "\n", encoding="utf-8")
+        print(f"\nwrote {table}")
+    return 0
+
+
+def _p50(samples: list[dict[str, Any]], metric: str) -> float:
+    values = [
+        float(sample[metric])
+        for sample in samples
+        if metric in sample and float(sample[metric]) != M.UNAVAILABLE
+    ]
+    return statistics.median(values) if values else -1.0
+
+
+def _remove_quietly(path: Path, attempts: int = 3) -> None:
+    """Remove a directory, retrying the way a bytecode cache needs.
+
+    ``shutil.rmtree`` walks the tree and fails with "Directory not empty" if a file
+    lands in a directory it already visited — measured on the bytecode cache, where
+    a child that is still finishing its first import writes a ``.pyc`` under a
+    prefix this process is sweeping. Retrying is the whole fix; the alternative
+    (leaving it) is 9 MB per invocation of the largest cache this harness makes.
+    """
+    for attempt in range(attempts):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        time.sleep(0.2 * (attempt + 1))
+
+
+def _write_json(path: str, report: dict[str, Any]) -> None:
+    if not path:
+        return
+    Path(path).write_text(json.dumps(report, indent=2), encoding="utf-8")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--runs", type=int, default=7, help="runs per scenario")
-    parser.add_argument("--scenario", choices=SCENARIOS, default="", help="one scenario only")
-    parser.add_argument("--json", type=str, default="", help="write raw results here")
+    parser.add_argument(
+        "--channels",
+        type=str,
+        default="tui,desktop,exec,mobile,sse-jobs",
+        help=f"comma-separated channels; known: {', '.join(CHANNELS)}",
+    )
+    parser.add_argument(
+        "--arms",
+        type=str,
+        default="cold,warm",
+        help="comma-separated arms (cold, warm); a channel that cannot separate them "
+        "reports what it has",
+    )
+    parser.add_argument("--runs", type=int, default=MIN_RUNS, help="runs per cell")
+    parser.add_argument(
+        "--concurrency",
+        type=str,
+        default="1,4,8",
+        help="comma-separated numbers of concurrent turns",
+    )
+    parser.add_argument("--json", type=str, default="", help="write the raw report here")
+    parser.add_argument(
+        "--root-prefix",
+        type=str,
+        default="lop-ttft-bench-",
+        help="prefix for this run's isolated roots under TMPDIR; distinct from the "
+        "older copies of bench_ttft.py other worktrees run, so a leftover root can "
+        "be attributed",
+    )
+    parser.add_argument(
+        "--render-json",
+        type=str,
+        default="",
+        help="comma-separated report JSONs to fold into ONE table instead of measuring; "
+        "percentiles are carried, never recomputed",
+    )
+    parser.add_argument("--table", type=str, default="", help="write the rendered table here")
+    parser.add_argument(
+        "--measured-tree",
+        type=str,
+        default="",
+        help="the rev whose local_operator/ subtree this run measures; VERIFIED against "
+        "disk (scripts/bench_tree.py), so the artefact can never name a commit the run "
+        "did not measure",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=("loopback", "test"),
+        default="loopback",
+        help="loopback = the harness's own OpenAI-compatible endpoint (can show a "
+        "reasoning phase); test = the built-in mock (text only)",
+    )
+    parser.add_argument(
+        "--provider-prefill-ms",
+        type=float,
+        default=0.0,
+        help="emulated provider time to the first reasoning token (0 = measure local "
+        "overhead only, which is the gate configuration)",
+    )
+    parser.add_argument(
+        "--provider-reasoning-ms",
+        type=float,
+        default=0.0,
+        help="emulated additional provider time to the first TEXT token; a nonzero "
+        "value demonstrates the invisible reasoning phase",
+    )
+    parser.add_argument("--hosting", type=str, default="", help="override the provider id")
+    parser.add_argument("--model", type=str, default="", help="override the model id")
     parser.add_argument(
         "--pycache-prefix",
         type=str,
@@ -531,43 +545,52 @@ def main() -> int:
         help="bytecode cache every process runs under (default: one temp dir per invocation)",
     )
     parser.add_argument(
+        "--tiktoken-cache",
+        type=str,
+        default="",
+        help="tokenizer cache directory (default: one temp dir per invocation); pin it "
+        "per campaign so run 1 does not pay a download",
+    )
+    parser.add_argument(
         "--prime-bytecode",
         action="store_true",
         help="populate that cache once before measuring, as the daemon does",
     )
     parser.add_argument(
+        "--no-assert-budget",
+        dest="assert_budget",
+        action="store_false",
+        help="report only; do not exit non-zero on a budget failure",
+    )
+    parser.add_argument(
         "--child-tui",
         action="store_true",
-        help="(internal) run one TUI measurement in this process and report JSON",
+        help="(internal) run the TUI arm in this process and report JSON",
     )
+    parser.add_argument(
+        "--concurrency-child",
+        type=int,
+        default=1,
+        help="(internal) sessions the TUI child hosts concurrently",
+    )
+    parser.set_defaults(assert_budget=True)
     args = parser.parse_args()
-    global _PYCACHE_PREFIX
-    _PYCACHE_PREFIX = Path(args.pycache_prefix or tempfile.mkdtemp(prefix="lop-ttft-pycache-"))
-    _PYCACHE_PREFIX.mkdir(parents=True, exist_ok=True)
-    global _TIKTOKEN_CACHE_DIR
-    _TIKTOKEN_CACHE_DIR = Path(tempfile.mkdtemp(prefix="lop-ttft-tiktoken-"))
-    # FORCED for the whole invocation, not just the measured runs — and set HERE
-    # rather than in ``_one`` because the priming pass below builds its
-    # environment from ``os.environ``: a prime without the tokenizer's data
-    # directory warms tiktoken into the ambient cache while the measured child
-    # fetches it afresh, which measures the harness's network rather than
-    # local-operator.
-    os.environ["TIKTOKEN_CACHE_DIR"] = str(_TIKTOKEN_CACHE_DIR)
-    os.environ["PYTHONPYCACHEPREFIX"] = str(_PYCACHE_PREFIX)
-    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
-    print(
-        f"bytecode prefix: {_PYCACHE_PREFIX}\n"
-        f"tokenizer cache: {_TIKTOKEN_CACHE_DIR}\n"
-        f"sys.dont_write_bytecode in this process: {sys.dont_write_bytecode} "
-        f"(the arms' CHILDREN always get 1, set in _one)",
-        flush=True,
-    )
+
+    if args.render_json:
+        return _render_only(
+            [path.strip() for path in args.render_json.split(",") if path.strip()], args.table
+        )
     if args.child_tui:
-        config_dir = Path(os.environ["LOCAL_OPERATOR_CONFIG_DIR"])
-        cwd = Path(os.environ["LOP_TTFT_CWD"])
-        marks = asyncio.run(_tui_child(config_dir, cwd))
-        print("TTFT_JSON " + json.dumps(marks))
-        return 0
+        return asyncio.run(
+            tui_child_main(
+                concurrency=args.concurrency_child,
+                arms=tuple(arm.strip() for arm in args.arms.split(",") if arm.strip()),
+                hosting=args.hosting or "openai-compatible",
+                model=args.model or "bench-loopback",
+            )
+        )
+    if args.prime_bytecode:
+        _prime_bytecode_cache()
     return asyncio.run(_amain(args))
 
 
