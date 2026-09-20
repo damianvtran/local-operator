@@ -515,9 +515,9 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
                 if any(opening in text for text in notices):
                     break
                 await asyncio.sleep(0.05)
-            assert any(opening in text for text in notices), (
-                f"the refusal never reached the operator: {notices}"
-            )
+            assert any(
+                opening in text for text in notices
+            ), f"the refusal never reached the operator: {notices}"
         else:
             assert job_status(job_id)["status"] == "succeeded"
         if destination:
