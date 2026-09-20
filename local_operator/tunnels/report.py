@@ -233,9 +233,10 @@ async def local_payload(*, reachable: bool = True) -> dict[str, Any]:
             "login": {"credential_id": None, "state": "unknown"},
             "remedy": None,
         }
+    stored = value.get("record")
     report = payload(
         value,
-        value.get("record") if isinstance(value.get("record"), dict) else {},
+        stored if isinstance(stored, dict) else {},
         source="cached",
         cloud_reason="",
         connector=await connector_state(value, reachable=reachable),
