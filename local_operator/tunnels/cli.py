@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from local_operator import launchd
 from local_operator.tunnels import config, gateway, report, state
 from local_operator.tunnels.api import RadientTunnels, credential_id
 from local_operator.tunnels.service import (
@@ -476,6 +477,14 @@ async def dispatch(args: argparse.Namespace) -> str:
         state.clear()
         try:
             install.action("stop")
+        except launchd.JobNotOurs:
+            # A REFUSAL IS NOT "NO SUPERVISED JOB" (review round 3, QA Q-2). The
+            # branch below is right for the foreground case and was a false
+            # success for this one: the identity guard declined, nothing was
+            # called, and this printed "Stop requested …" with exit 0. Letting it
+            # reach the outer handler prints the refusal's own sentence and exits
+            # non-zero, which is what the operator needs to know.
+            raise
         except ValueError:
             return (
                 "Stop requested; foreground connector checks within 10 seconds. "

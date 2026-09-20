@@ -304,8 +304,14 @@ an EDR reads as "Persistence: launchd job / plist file modification".
 loaded but not running is repaired with `launchctl kickstart -k` rather than by
 rewriting the file, and the reload is also taken when the daemon is not
 answering — `health` for mobile and the bridge, the connector's own
-`/_lop_tunnel/health` on `127.0.0.1:<gateway_port>` for the tunnel — so an
-install that reports success means a daemon that is up.
+`/_lop_tunnel/health` on `127.0.0.1:<gateway_port>` for the tunnel.
+- **Which installers verify, and which report launchd's verdict — not the same
+thing.** Mobile (a 20 s `_serving` loop) and the browser bridge (a health loop)
+re-probe after loading, so their success means a daemon that is answering. The
+tunnel does not re-probe: it reports what `launchctl` said, so a successful
+`lop tunnel install` means the unit is LOADED. The unanswering state is what
+makes it reinstall in the first place, but nothing asks again afterwards, so
+"install succeeded" is not evidence the gateway came back.
 - Before this branch the write and the `bootout` + `bootstrap` were
 unconditional in all three, and a **fresh** install still writes and loads,
 which is the state this section describes for an admin reading a newly
