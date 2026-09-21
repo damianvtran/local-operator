@@ -752,6 +752,17 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # unreachable from the completion path, which is the `/login` line this
         # sits on the other side of.
         "notifications": ArgumentMode.OPTIONAL,
+        # OPTIONAL like `/mcp`, whose shape this family borrows: bare `/network`
+        # opens the panel (this device's networks, peers and relay state) and the
+        # space opens the subcommand vocabulary. NOT REQUIRED — the listing is
+        # the more useful of the two answers, and a gate in front of it would put
+        # it behind a word (`ls`) nobody needs to type.
+        "network": ArgumentMode.OPTIONAL,
+        # NEWLY OPTIONAL, and that is the whole change: the space after `/new`
+        # used to offer nothing. It now offers `remote` and every peer this
+        # device knows, which is the one path to a session on another device —
+        # and bare `/new` still starts a session HERE, unchanged.
+        "new": ArgumentMode.OPTIONAL,
         # OPTIONAL for `/notifications`' reason: bare `/delete` already answers
         # — it is the REHEARSAL, and it is the more useful of the two answers
         # because it reports what would go and any refusal the guards would

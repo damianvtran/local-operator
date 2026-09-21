@@ -269,8 +269,50 @@ async def settle_status_line(pilot: Any, app: Any, *, tries: int = 200) -> None:
     )
 
 
+def refuse_flag_shaped_argument(value: str, *, what: str) -> None:
+    """Refuse a POSITIONAL that is really a mistyped flag, before it is used as a path.
+
+    WHY THIS EXISTS. ``python scripts/network_shot.py --out frames/`` mkdirs
+    ``--out`` — a directory whose name is a flag — inside whatever directory the
+    script was run from, and the same shape in ``sidebar_shot.py`` writes
+    ``--help.svg``. It happened twice in one review round, in a shared checkout,
+    and was cleaned up by hand both times: a scratch by-product of a capturer is
+    exactly the sort of thing that ends up in a commit nobody read. The author's
+    intent is never ambiguous (nobody has a directory called ``--out``), so the
+    loud refusal costs nothing and the silent directory costs a stray file.
+
+    ``what`` names the argument for the message, because "refusing -x" alone
+    does not tell a reader WHICH positional was wrong.
+    """
+    if value.startswith("-"):
+        raise SystemExit(
+            f"refusing {what} {value!r}: it starts with '-', so it is a mistyped flag "
+            "rather than a path (no capture writes into a directory named after a "
+            "flag). Pass the positional this script documents."
+        )
+
+
 def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | None = None) -> str:
-    """Save a native-size SVG and the cell/box measurements needed to audit it."""
+    """Save a native-size SVG and the cell/box measurements needed to audit it.
+
+    THE MEASUREMENTS DESCRIBE THE SCREEN THE SVG SHOWS, and that has to be said
+    because the first version did not do it: the widget walk used ``app.query``,
+    which Textual's ``App._get_dom_base`` resolves to the **default** screen —
+    "when querying from the app, we want to query the default screen" is its own
+    docstring — while ``app.export_screenshot()`` composites the ACTIVE one. For a
+    modal capture the two are different screens, so the SVG showed the panel and
+    the geometry beside it described the transcript underneath, complete with
+    ``screen.size = [98, 28]`` and no modal widget at all. Two of the mesh round's
+    frames shipped that way, byte-identical to each other and to a screen nobody
+    was looking at, which is strictly worse than shipping no geometry: it passes a
+    glance (design round 1, D1).
+
+    The active screen is named in the ``screen`` block, so a reader can tell WHICH
+    screen a file describes without inferring it from the widget list, and the
+    walk now starts from that same screen so the two can never disagree again. For
+    every capture that pushes no modal (the other 67 scripts) ``app.screen`` IS the
+    default screen, so this is a no-op there.
+    """
     if not app.CSS_PATH:
         raise ValueError("visual evidence requires a real app with its production CSS")
     profile = profile or CaptureProfile.from_env()
@@ -279,9 +321,13 @@ def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | No
         raise ValueError("capture destination must end in .svg; rasterize separately")
     path.parent.mkdir(parents=True, exist_ok=True)
     columns, rows = app.size
+    # Read ONCE, before anything is written: the screenshot, the widget walk and
+    # the ``screen`` block must all describe the same screen, and a screen pushed
+    # or popped mid-capture must not be able to split them.
+    screen = app.screen
     path.write_text(terminal_svg(app.export_screenshot(), columns, rows, profile))
     widgets = []
-    for widget in app.query("*"):
+    for widget in screen.query("*"):
         if not widget.display or not widget.region:
             continue
         widgets.append(
@@ -308,12 +354,13 @@ def save_capture(app: Any, filename: str | Path, *, profile: CaptureProfile | No
                     for p in ([app.CSS_PATH] if isinstance(app.CSS_PATH, str) else app.CSS_PATH)
                 ],
                 "screen": {
-                    "size": list(app.screen.size),
-                    "virtual_size": list(app.screen.virtual_size),
-                    "region": list(app.screen.region),
+                    "class": screen.__class__.__name__,
+                    "size": list(screen.size),
+                    "virtual_size": list(screen.virtual_size),
+                    "region": list(screen.region),
                     "scrollbar": [
-                        app.screen.show_horizontal_scrollbar,
-                        app.screen.show_vertical_scrollbar,
+                        screen.show_horizontal_scrollbar,
+                        screen.show_vertical_scrollbar,
                     ],
                 },
                 "widgets": widgets,

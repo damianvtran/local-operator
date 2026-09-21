@@ -61,10 +61,29 @@ def cases() -> list[dict[str, Any]]:
             elif script in {"fallback_shot.py", "nerd_glyph_shot.py"}:
                 args += [variant]
             elif script == "sidebar_shot.py":
-                # Two widths, because the whole point of the sample is the
-                # trade-off between them: "base" is the size at which the list
-                # does not grow at all, "wide" the size at which it does.
-                args += ["160x40" if variant == "wide" else "100x30"]
+                # Three widths/variants, because the sample's whole point is the
+                # trade-off between them: "base" is the size at which the list does
+                # not grow at all, "wide" the size at which it does, and "peers"
+                # adds the remote rows whose `⇄` slot and `⇄ <device>` sections are
+                # the mesh annotation's own frame (`mesh-ui.md` §1.3/§4.1).
+                if variant == "peers-focus":
+                    # TALLER THAN THE OTHER FRAMES ON PURPOSE: this is the settling
+                    # frame for the caret/locality interaction (design round 1,
+                    # D4) AND the only size at which the second peer's section is
+                    # on screen at all — the `(unreachable)` heading and the
+                    # unreachable row were in no artifact of that round because
+                    # the peer tier is three chrome lines per device and the
+                    # 100x30 window stopped before it (review round 4, MINOR 5).
+                    args += ["peers-focus", "100x45"]
+                elif variant == "peers":
+                    args += ["peers", "100x30"]
+                else:
+                    args += ["160x40" if variant == "wide" else "100x30"]
+            elif script == "network_shot.py":
+                # Both of the panel's phases from one boot, so the pair differs by
+                # nothing but the relay's answer. It writes into the case's own
+                # directory and the gallery globs both SVGs.
+                args = ["{directory}", "100x30"]
             elif script == "stop_ladder_shot.py":
                 args += [variant, "100x30"]
             elif script == "org_chart_shot.py":

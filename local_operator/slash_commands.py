@@ -48,6 +48,121 @@ from local_operator.tui.autocomplete import ArgumentMode, ArgumentShape, SlashCo
 PERSIST_HINT = "/model default saves this for new sessions"
 
 
+#: The subcommand vocabulary of ``/network`` — and, because the CLI's verbs and
+#: the TUI's must be ONE list, the words :func:`_network_command` accepts as its
+#: first token.
+#:
+#: A frozen tuple beside the registry rather than a list inside the handler,
+#: because three readers have to agree on it: the handler (which refuses an
+#: unknown word), the picker (which offers the rows) and
+#: :func:`command_argument_words` (which publishes it to the desktop catalogue and
+#: the route). The same rule ``MCP_SUBCOMMANDS`` already follows — drift between
+#: the word a handler accepts and the word the picker offers is a defect class
+#: this repo has paid for.
+#:
+#: ONE TOKEN PER ENTRY, deliberately, even where the picker's row reads as two
+#: words (``member rm``). The vocabulary is what a validator matches ``parts[0]``
+#: against, so a two-word entry would make ``/network member rm …`` fail the very
+#: check it exists to pass; the row's description carries the fuller spelling
+#: instead. ``new`` maps to the CLI's ``init`` (the verb a user reads is not the
+#: verb a shell types) and ``rm``/``rename`` are the operator's own words for the
+#: local forget/relabel pair.
+#:
+#: THE INSTALLATION VERBS ARE ABSENT ON PURPOSE — ``serve``, ``start``, ``stop``,
+#: ``restart`` and ``uninstall [--purge] [--purge-identity]`` install, supervise
+#: and remove a LaunchAgent. A composer row that boots out the operator's relay,
+#: or deletes this device's identity keypair and its networks, is the same class
+#: of one-keystroke mistake the incident verbs take a typed confirmation for
+#: (``mesh-ui.md`` §1.1). Installation stays the CLI's alone.
+#:
+#: ``pool`` is absent too, and that is a fact about the tree rather than a
+#: decision: ``lop network`` has no ``pool`` parser (compute-pool is not
+#: implemented), and a picker row for a verb the CLI lacks is the
+#: offered-but-broken defect ``/mobile``'s entry records. Add it here the day the
+#: parser lands, not before.
+NETWORK_SUBCOMMANDS: tuple[str, ...] = (
+    "disconnect",
+    "doctor",
+    "invite",
+    "join",
+    "log",
+    "ls",
+    "member",
+    "new",
+    "panic",
+    "peers",
+    "rename",
+    "rm",
+    # THE SESSION PLANE, and it is the observer for the one WRITE this family has.
+    # `/new remote <peer>` creates a session on another device, and without this
+    # row the receipt in the transcript is the only place it exists: nothing in
+    # the TUI can list it, warm it or stop it (review round 4, MINOR 3; design
+    # §1.2's deferred producer). The CLI's own verb does all three
+    # (`--peer`/`--all-peers` to list, `--create`, `--engage`, `--stop`), so the
+    # arm passes its tail through rather than growing a second session API here.
+    "sessions",
+    "show",
+    "status",
+    "trust",
+)
+
+#: The picker's one line of help per verb, KEYED BY THE VOCABULARY WORD — so
+#: :func:`network_subcommand_rows` can be total over ``NETWORK_SUBCOMMANDS`` and a
+#: new verb cannot be added without its help line (the test that pins the two
+#: vocabularies equal is what enforces that, not a comment here).
+#:
+#: AND THE VOCABULARY IS APPEARANCE-ONLY BEYOND ITS FIRST TOKEN. The shape the
+#: row declares (``ArgumentShape.SUBCOMMAND``) accepts at most TWO tokens, so
+#: ``/network sessions --peer d_x --engage s_y`` is this command in the terminal
+#: (``_dispatch_network_cli`` reads the raw pieces) while the desktop's admission
+#: rule would plan it as prose. That boundary is accepted and recorded
+#: (``mesh-ui.md`` §2.8.3, review round 4's adjudication) because no desktop
+#: surface queries this family yet — ``desktop_destination`` is deliberately
+#: unset. It becomes a defect the day that tab lands, which is the PR the doc
+#: names for revisiting it.
+#:
+#: The descriptions name the ACT rather than restating the word: a row that read
+#: "status — status" spends a picker line teaching nothing. Where a verb needs a
+#: second token to be useful (``member`` needs ``rm <network> <device>``), the
+#: help says so, because the vocabulary is one token per entry and the row is the
+#: only place the fuller spelling can live.
+NETWORK_SUBCOMMAND_HELP: dict[str, str] = {
+    "disconnect": "Leave; stop trusting; close links",
+    "doctor": "Diagnose a link",
+    "invite": "Mint a single-use invite",
+    # The refusal is the point: pairing needs a human comparing two codes on two
+    # screens, so this terminal's answer is the CLI command to run. That is the
+    # same call the installation verbs get — withheld from a surface that cannot
+    # complete them — and the help line says it before the row is chosen.
+    "join": "Join from an invite (needs a terminal)",
+    "log": "Recent mesh events",
+    "ls": "Networks this device is in",
+    "member": "Member administration: member rm <network> <device>",
+    "new": "Create a network on this device",
+    "panic": "Broadcast revoke and rotate the secret",
+    "peers": "Reachable peers right now",
+    "rename": "Rename a network locally",
+    "rm": "Forget a network locally",
+    "sessions": "Sessions on other devices: list, engage, stop",
+    "show": "Members, roles and endpoints",
+    "status": "Relay health and this device's links",
+    "trust": "Trust an untrusted network again",
+}
+
+
+def network_subcommand_rows() -> tuple[tuple[str, str], ...]:
+    """``(word, help)`` for every ``NETWORK_SUBCOMMANDS`` entry, in that order.
+
+    THE ONE READER the picker builds its rows from, and deliberately not a second
+    list: the words come from the vocabulary the handler accepts and the route
+    validates, so the row a user picks is the word the handler runs. A missing
+    help line raises here rather than shipping a blank row — ``KeyError`` at import
+    of the first caller, which is the loudest available failure for a table that
+    has exactly one reason to be wrong.
+    """
+    return tuple((word, NETWORK_SUBCOMMAND_HELP[word]) for word in NETWORK_SUBCOMMANDS)
+
+
 #: Slash commands handled synchronously before any prompt is sent. One
 #: registry entry per command; aliases live on the entry (TUI-014).
 #:
@@ -143,7 +258,20 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # The word is the new-session picker's SELECTION (`selected=args`), so a
         # whole-draft `/new foo` is that picker's gesture; a sentence after the word
         # is prose.
-        argument_shape=ArgumentShape.WORD,
+        #
+        # ``remote_peer`` rather than ``WORD``, and a SUPERSET of it: the shape
+        # accepts the legacy single word (above) *and* the two-token
+        # ``remote <peer>`` form, which ``WORD`` refuses by construction — so
+        # without a shape of its own, ``/new remote devon`` would be planned as
+        # PROSE and spend a paid model turn on a control the user typed on
+        # purpose (``mesh-ui.md`` §1.4.1 Change B). The peer's name is resolved
+        # against this device's own member lists, never against a dial, because
+        # the picker's list opens on a keystroke and a relay-less device must
+        # still offer its known peers (``/new remote`` is the ONE way to reach a
+        # device whose relay is down, so a vocabulary that needed the network
+        # would withhold the form exactly when it is useful).
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.REMOTE_PEER,
         desktop_destination="sessions.new",
     ),
     # In-process reboot cannot load a replaced wheel; this command exists so
@@ -820,6 +948,33 @@ SLASH_COMMANDS: list[SlashCommand] = [
     # host would have to invent an upstream contract. The terminal command is
     # untouched and still does the whole job.
     SlashCommand("mobile", "Radient phone access: status, enable, stop, billing"),
+    # THE SECOND "this machine's connectivity" command, and the reason it sits
+    # beside `/mobile`. One grouped command with a declared vocabulary rather
+    # than a word per verb: a mesh has several verbs that are variations of one
+    # noun (ls/show/status/peers), and the argument picker enumerates them with a
+    # line of help each, which one truncating `/help` row cannot.
+    #
+    # ``echo=False`` — the listing or the receipt IS the answer, the rule
+    # `/approvals` and `/rename` follow.
+    #
+    # NOT offered on the desktop in this pass, for `/mobile`'s reason and not by
+    # oversight: `desktop_destination` is deliberately unset. The tab that WILL
+    # show networks and devices is the node graph ``docs/design/mesh-ui.md``
+    # §2.8 records, and it is not a renderer over a slash command; advertising a
+    # destination with no adapter behind it is the exact offered-but-dead
+    # failure the `/mobile` entry above documents.
+    #
+    # Every verb runs through the CLI's own authenticated paths (the family the
+    # agent guide drives) rather than a second implementation inside the TUI: the
+    # guards, the epochs and the audit lines live there, and a TUI that re-derived
+    # them would be a second answer to "what does disconnect do".
+    SlashCommand(
+        "network",
+        "Networks, peers, and this device's mesh state",
+        arguments=ArgumentMode.OPTIONAL,
+        argument_shape=ArgumentShape.SUBCOMMAND,
+        subcommands=NETWORK_SUBCOMMANDS,
+    ),
     # The listing (or the masked paste prompt) is the receipt. The argument is
     # a KEY NAME, never the secret, so echoing it would only restate the
     # notice that already names what was stored or forgotten.
@@ -1006,9 +1161,25 @@ def command_argument_words(spec: SlashCommand) -> tuple[str, ...]:
 
         return known_provider_ids()
     if spec.argument_shape is ArgumentShape.SUBCOMMAND:
+        # A row's OWN vocabulary wins when it declares one, and the fallback is
+        # MCP's — resolved lazily at the same place it always was, so `/mcp` is
+        # unchanged by the field's existence. This branch is the ONE place a
+        # declared vocabulary enters the wire: the route validates against it and
+        # the desktop catalogue publishes it, both through this call.
+        if spec.subcommands:
+            return tuple(sorted(spec.subcommands))
         from local_operator.session.frontend_state import MCP_SUBCOMMANDS
 
         return tuple(sorted(MCP_SUBCOMMANDS))
+    if spec.argument_shape is ArgumentShape.REMOTE_PEER:
+        # Published as a vocabulary too, because the picker and the desktop's
+        # argument list both persist it; resolved from the OFFLINE member lists
+        # (``network/peers.py``) rather than from the relay, so an install with
+        # no relay still offers the peers it knows. Empty on a device with no
+        # networks, which is a true statement rather than a failure.
+        from local_operator.network.peers import known_peer_names
+
+        return known_peer_names()
     return ()
 
 
@@ -1023,6 +1194,38 @@ def _is_provider(args: str) -> bool:
     from local_operator.providers.registry import get_provider_definition
 
     return get_provider_definition(args.strip()) is not None
+
+
+def _is_remote_peer(args: str) -> bool:
+    """``remote <peer>`` — or the legacy single word this shape still owns.
+
+    Three accepted forms and one refusal, and the LEGACY half is load-bearing
+    rather than lenient: ``/new <word>`` is the desktop's new-session picker
+    selection (``selected=args``), so a predicate that demanded the two-token
+    form would plan the operator's own ``/new foo`` as PROSE. The superset is
+    written down here rather than left to a reader to infer from ``WORD``.
+
+    * ``<peer>`` — the legacy single token, any non-empty word (``WORD``'s rule:
+      the picker owns the vocabulary, the predicate does not second-guess it).
+    * ``remote <peer>`` — the canonical form, case-folded on the keyword.
+    * ``remote <peer>#<id>`` — the hover-card form: the id is carried after a
+      ``#`` so a name that collides across two networks is still addressable,
+      and the token is ONE word so the shape's token count cannot depend on
+      whether the user disambiguated.
+
+    A THIRD token is prose again (``/new remote devon and then…``), which is the
+    same boundary ``_is_mcp_invocation`` draws and the reason this is a shape
+    rather than ``ANY``. The peer name itself is NOT resolved here: admission
+    answers "is this text this command's argument", and a name this device does
+    not know is the HANDLER's refusal with its own sentence — a predicate that
+    refused it would answer a question it has no sentence for.
+    """
+    parts = args.split()
+    if not parts or len(parts) > 2:
+        return False
+    if len(parts) == 1:
+        return True
+    return parts[0].casefold() == "remote"
 
 
 def _is_mcp_invocation(args: str, words: tuple[str, ...]) -> bool:
@@ -1088,6 +1291,8 @@ def command_argument_is_used(spec: SlashCommand, args: str) -> bool:
         return _is_provider(args)
     if shape is ArgumentShape.SUBCOMMAND:
         return _is_mcp_invocation(args, words)
+    if shape is ArgumentShape.REMOTE_PEER:
+        return _is_remote_peer(args)
     return False
 
 
@@ -1114,7 +1319,19 @@ def command_argument_refusal(spec: SlashCommand, args: str) -> str | None:
     if spec.argument_shape is ArgumentShape.SUBCOMMAND and not _is_mcp_invocation(
         args, command_argument_words(spec)
     ):
+        # The MCP sentence is the family's OWN — it names the form that exists for
+        # it. A row with a DECLARED vocabulary gets a sentence that names its
+        # words instead, because telling a `/network git push` author to use the
+        # MCP setup form is a refusal that names a surface they are not in.
+        if spec.subcommands:
+            return "Use " + ", ".join(command_argument_words(spec))
         return "Use the MCP setup form for configuration and secret references"
+    if spec.argument_shape is ArgumentShape.REMOTE_PEER and not _is_remote_peer(args):
+        # One sentence, and it states the FORM rather than listing peers: the
+        # list is the picker's to paint (it has the row budget), and a refusal
+        # that enumerated a device's peers would be a second rendering of the
+        # catalogue in a 422 body.
+        return "Use /new remote <peer> — or /new for a session on this device"
     return None
 
 

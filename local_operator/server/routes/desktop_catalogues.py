@@ -38,20 +38,29 @@ class CommandMetadata(BaseModel):
     #: command's argument — ``none`` (no source at all: the booleans below are
     #: false and no shape applies), ``word`` (one selector token), ``provider``
     #: (one token naming a provider), ``subcommand`` (``<sub> [name]``, the MCP
-    #: shape) or ``any`` (the command owns its text, whatever it says — a handler
-    #: or form field takes it, or the route REFUSES it because another surface owns
-    #: it, as ``/credential``'s masked-form sentence does). See ``ArgumentShape``.
+    #: shape, or a family's own vocabulary), ``remote_peer`` (``remote <peer>``,
+    #: with the legacy single token still accepted) or ``any`` (the command owns
+    #: its text, whatever it says
+    #: — a handler or form field takes it, or the route REFUSES it because another
+    #: surface owns it, as ``/credential``'s masked-form sentence does). See
+    #: ``ArgumentShape``.
     #:
     #: PRECEDENCE, published so a consumer may read this field alone OR OR it with
     #: the two booleans and be right either way: ``consumes_prompt`` and
     #: ``prefixes_text`` decide FIRST, and a row they carry publishes ``any`` here
     #: rather than ``none`` — so ``none`` always means "no source at all", never
     #: "ask the booleans". Additive with a default like ``prefixes_text``.
-    argument_shape: Literal["none", "word", "provider", "subcommand", "any"] = "none"
+    argument_shape: Literal["none", "word", "provider", "subcommand", "remote_peer", "any"] = "none"
     #: The vocabulary ``argument_shape``'s first token must come from; empty
     #: means any word. Carried so a renderer reproduces the endpoint's answer
     #: (``/login openai`` is a command, ``/login zzz`` is a message) without a
-    #: second copy of the provider or subcommand list.
+    #: second copy of the provider, subcommand or peer list.
+    #:
+    #: A ``remote_peer`` row publishes its DEVICE NAMES here — resolved on the
+    #: serving host, from the member lists it holds, with no dial (see
+    #: ``network/peers.py``: a vocabulary that needed the relay would be empty
+    #: exactly when ``/new remote`` is the only way through). Empty on a host with
+    #: no networks, which is a true statement rather than a failure.
     argument_words: list[str] = Field(default_factory=list)
     destination: str
     execution: Literal["owner", "native"]

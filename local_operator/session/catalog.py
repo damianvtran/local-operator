@@ -761,6 +761,15 @@ def decorate_rows(
                 # from an earlier decoration of the same row would outlive the
                 # failure it described.
                 degraded=degraded,
+                # AND WHERE IT LIVES, which for everything this function can see
+                # is HERE. The local scan reads this machine's own store, so
+                # "local" is a fact the READ proves rather than a default being
+                # restated — and it is stamped at the one join point the design
+                # names (``mesh-ui.md`` §1.3) so a future peer-projection pass
+                # that APPENDS remote rows marks them in the same breath. A row
+                # already carrying a locality is left alone: this decorator reads
+                # one source and must not overwrite what another one established.
+                locality=row.locality or "local",
             )
         )
     return sorted(updated, key=lambda row: 0 if row.pending else 1)

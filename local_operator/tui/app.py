@@ -170,8 +170,10 @@ from local_operator.session.runtime.types import (
     update_phrase,
 )
 from local_operator.slash_commands import (
+    NETWORK_SUBCOMMANDS,
     PERSIST_HINT,
     SLASH_COMMANDS,
+    network_subcommand_rows,
     primary_slash_name,
     slash_command_for,
     unknown_flag_refusal,
@@ -231,6 +233,19 @@ from local_operator.tui.markdown_theme import (
     install_markdown_theme,
 )
 from local_operator.tui.narration import DEFAULT_NARRATION, is_intermediate_narration
+
+# The mesh family's own runner: a subprocess over the CLI, bounded and reaped by
+# its process group. Imported at module scope because it pulls in only the
+# stdlib and ``interpreter.python_argv`` — the mesh package itself (relay, store,
+# identity) stays FUNCTION-LOCAL everywhere below, the rule ``local_operator/
+# cli.py`` states for the 99% of runs that never touch a network.
+from local_operator.tui.network_cli import (
+    LISTING_TIMEOUT_S,
+    PEER_CALL_TIMEOUT_S,
+    QUICK_TIMEOUT_S,
+    NetworkRun,
+    run_network,
+)
 from local_operator.tui.notify import Notifier, notifications_enabled
 from local_operator.tui.session_catalog import CatalogEntry, SidebarSettings
 from local_operator.tui.session_drafts import SessionDraftStore
@@ -304,6 +319,7 @@ from local_operator.tui.widgets.image_block import ImageBlock
 from local_operator.tui.widgets.link_picker import LinkPickerScreen
 from local_operator.tui.widgets.model_picker import ModelRow
 from local_operator.tui.widgets.move_picker import MovePickerScreen
+from local_operator.tui.widgets.network_panel import NetworkCommandRequested
 from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
@@ -8889,6 +8905,7 @@ class OperatorApp(App[None]):
 
         def collect() -> tuple[list[CatalogEntry], list[str], int | None]:
             from local_operator.paths import config_dir
+            from local_operator.session.peer_rows import peer_session_rows
             from local_operator.tui.session_catalog import (
                 load_catalog,
                 subagent_population,
@@ -8902,6 +8919,16 @@ class OperatorApp(App[None]):
                 include_subagents=self._session_sidebar.show_subagents,
                 pinned_hidden_ids=tuple(pins),
             )
+            # THE PEER TIER (``mesh-ui.md`` §1.3, review round 4 MINOR 3): the
+            # sessions other devices hold, appended to this device's own listing,
+            # which is what gives the sidebar's locality mark and its per-device
+            # heading a live producer instead of the fixture the rendering slice
+            # landed against. Bounded and cached inside `peer_session_rows` (one
+            # relay call per TTL, never a dial per row, and NO call at all on a
+            # device with no relay) — this poll runs every two seconds, so an
+            # uncached listing here would be the one thing on the sidebar's
+            # path that talks to the network. A device in no mesh adds no rows.
+            entries = [*entries, *(CatalogEntry(row) for row in peer_session_rows(root))]
             # Read on a SLOW cadence, never per poll: `subagent_population` is
             # a second whole-store scan (+2.36 ms, +21% measured with the layer
             # off) and the count it answers changes when a delegated run
@@ -13958,9 +13985,11 @@ class OperatorApp(App[None]):
         from local_operator.paths import config_dir
         from local_operator.resume import (
             RESUME_LATEST,
+            UNNAMED_DEVICE,
             live_runtime_pid,
             resolve_resume_id,
         )
+        from local_operator.session.peer_rows import peer_session_row
 
         try:
             # Resolve ``@latest`` to a concrete id BEFORE the owner check.
@@ -13970,6 +13999,26 @@ class OperatorApp(App[None]):
         except Exception:
             concrete = resume_id
         if concrete != RESUME_LATEST:
+            # A SESSION ON ANOTHER DEVICE IS NOT RESUMABLE FROM HERE YET (review
+            # round 4 MINOR 3). The producer puts a peer's sessions in this
+            # list, so a row selected from the sidebar now names one — and
+            # without this guard the resume factory would look it up in THIS
+            # machine's store, fail, and report a missing session about a session
+            # that is running perfectly well one device over. CACHE-ONLY:
+            # `peer_session_row` never reads and never dials, so the guard costs
+            # a tuple scan on the path every /resume takes. Opening a remote
+            # session needs `projection.resolve_owner` wired into the factory,
+            # which has no consumer in this tree yet — so the refusal says what
+            # DOES reach it rather than pretending the row was dead.
+            remote = peer_session_row(concrete, config_dir())
+            if remote is not None and remote.owner_device:
+                self._system_notice(
+                    f"{concrete} is running on {remote.owner_label or UNNAMED_DEVICE} — "
+                    f"/network sessions --peer {remote.owner_device} lists it, "
+                    "--engage warms it, --stop ends it",
+                    "warning",
+                )
+                return
             owner = live_runtime_pid(config_dir(), concrete)
             if owner is not None and owner != os.getpid():
                 # Discovery scans the filesystem; run it as a worker so the
@@ -15098,9 +15147,9 @@ class OperatorApp(App[None]):
             self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
         else:
             notice(f"deleted {session_id}", "info")
-        self._cmd_new(notice)
+        self._cmd_new("", notice)
 
-    def _cmd_new(self, notice: NoticeFn) -> None:
+    def _cmd_new(self, arg: str, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
 
         There was no way to do this: ``/clear`` wipes the SCREEN and keeps the
@@ -15110,13 +15159,83 @@ class OperatorApp(App[None]):
         relaunching, which also throws away the terminal state, the MCP
         connections and the warm imports.
 
-        Implemented through the resume factory with ``None`` rather than a
-        second factory: ``create_session`` already branches on
-        ``args.resume is not None``, so this is the same code path a cold
-        launch takes, which is exactly what "new session" should mean. The
-        ledger is rebuilt from the session that boots, as it is on every
-        reload, which for a conversation with no history is an empty screen.
+        ``arg`` IS READ NOW, and reading it is the fix this signature exists
+        for: it used to be dropped, so ``/new remote devon`` started an ordinary
+        local session and said nothing about it — the argument had a meaning (the
+        remote form, ``docs/design/mesh-ui.md`` §1.4) and the surface silently
+        ignored it. The grammar:
+
+        * ``/new`` or ``/new <word>`` — today's behaviour, byte for byte. The
+          single word is the DESKTOP picker's selection (``sessions.new``'s
+          ``selected=args``), which this terminal has never acted on; it is also
+          why the registry's new shape accepts one token as well as the two-token
+          remote form.
+        * ``/new remote <peer> [prompt]`` — create the session ON ``<peer>``,
+          with any trailing text as its first prompt.
         """
+        tail = arg.strip()
+        if tail:
+            pieces = tail.split(maxsplit=1)
+            if pieces[0].casefold() == "remote":
+                self._cmd_new_remote(pieces[1] if len(pieces) > 1 else "", notice)
+                return
+        self._start_new_local_session(notice)
+
+    def _cmd_new_remote(self, tail: str, notice: NoticeFn) -> None:
+        """``/new remote <peer> [prompt]`` — create the session on ANOTHER device.
+
+        THE CLI OWNS THE WHOLE ACT, and this handler does not re-implement a line
+        of it: ``lop network sessions --peer <peer> --create`` is the session
+        plane's own verb (the relay asks the peer, the peer mints the id, spawns
+        and admits), and it is what the agent guide drives. Two reasons it is
+        spelled here rather than called in-process: the spawn takes seconds to
+        tens of seconds (its own budget is 120 s), which is far past a frame, and
+        the refusal vocabulary — an unreachable peer, a refused grant, a peer that
+        never answers — is the CLI's, so the sentence the user reads is the same
+        one the guide's output carries.
+
+        REACHABILITY IS NOT PRE-FLIGHTED. ``/network doctor``'s probing is a
+        person's deliberate act, and a create that dials as a check and then dials
+        again to act would pay the peer-probe budget twice for one keystroke. The
+        create IS the check: an unreachable peer is refused by the relay with the
+        reason it measured, and that reason is printed verbatim.
+
+        The peer is resolved against THIS device's member lists (``network/peers``,
+        a disk read) rather than dialed, so the words the picker offered and the
+        words this accepts are one list even with the relay stopped. A name that
+        is ambiguous across two networks refuses and names the ids instead of
+        guessing which membership the user meant.
+        """
+        from local_operator.network.peers import resolve_peer, split_peer_token
+
+        pieces = tail.split(maxsplit=1)
+        if not pieces:
+            # The bare word deserves a sentence, not a local session: a user who
+            # typed `remote` meant a peer and has not named one.
+            notice("Use /new remote <peer>, or /new for a session on this device.", "error")
+            return
+        token = pieces[0]
+        prompt = pieces[1].strip() if len(pieces) > 1 else ""
+        name, device_hint = split_peer_token(token)
+        matches = resolve_peer(device_hint or name)
+        if device_hint:
+            matches = [peer for peer in matches if peer.device_id == device_hint] or matches
+        if not matches:
+            notice(f"No peer named {token}. /network peers lists them.", "error")
+            return
+        if len({peer.device_id for peer in matches}) > 1:
+            ids = ", ".join(sorted({peer.device_id for peer in matches}))
+            notice(f"{name} is in more than one network — name the peer by id: {ids}", "warning")
+            return
+        peer = matches[0]
+        argv = ["sessions", "--peer", peer.device_id, "--create", "--name", peer.label]
+        if prompt:
+            argv += ["--prompt", prompt]
+        self._run_network_cli(
+            argv, notice, timeout=PEER_CALL_TIMEOUT_S, verb="create a remote session"
+        )
+
+    def _start_new_local_session(self, notice: NoticeFn) -> None:
         if self._resume_factory is None:
             self._system_notice("new session unavailable: no session-capable launcher", "warning")
             return
@@ -29782,6 +29901,19 @@ class OperatorApp(App[None]):
         # pictures. They expand downstream instead, in
         # ``_submit_command_prompt``, after that walk has run — same property,
         # one step later, for a reason the walk itself imposes.
+        #
+        # ``/new`` is the SECOND divergence, and the opposite one: its registry
+        # row keeps ``consumes_prompt`` False (the argument is a peer's name, and
+        # engaging `/new` mid-draft must not reassemble the draft into it — see
+        # `PROMPT_POLICY` in tests/unit/tui/test_slash_echo.py), yet the trailing
+        # text of the ``remote <peer> <text>`` form IS a prompt — the REMOTE
+        # session's first. So the flag cannot be what decides this one, and the
+        # raw ``arg`` reached ``--prompt`` as the literal chip: a 300-line paste
+        # arrived at the peer as ``[Paste #1, 300 lines]`` (review round 4,
+        # MAJOR-1, reproduced against the real editor with a passing `/fork`
+        # control). Dispatching it with ``prompt_arg`` is the fix, exactly as
+        # `/fork` is dispatched; the splice is a no-op for the legacy
+        # single-token form, so ``/new foo`` is untouched.
         prompt_arg = expand_pastes(arg, attachments) if attachments else arg
         notice = self._notice
 
@@ -30057,7 +30189,14 @@ class OperatorApp(App[None]):
         elif command == "/update":
             self._cmd_update(notice)
         elif command == "/new":
-            self._cmd_new(notice)
+            # ``prompt_arg``, NOT ``arg``: the trailing text of the remote form is
+            # the peer's first prompt, so a collapsed ``[Paste #1, 300 lines]``
+            # chip has to become its payload before anything reads it — the same
+            # splice `/fork`, `/goal`, `/loop` and `/btw` take. The registry flag
+            # is False (the argument is a peer's name, not this terminal's
+            # prompt), which is exactly why the splice is spelled here rather
+            # than derived from it (review round 4, MAJOR-1).
+            self._cmd_new(prompt_arg, notice)
         elif command == "/resume":
             self._cmd_resume(arg, notice)
         elif command == "/fork":
@@ -30147,6 +30286,12 @@ class OperatorApp(App[None]):
             self._cmd_login(arg, notice)
         elif command == "/mobile":
             self._cmd_mobile(arg, notice)
+        # Beside `/mobile` and for the same reason: both answer "what is this
+        # machine's connectivity", and both keep every network call off the loop
+        # through a worker. Placed next to it so a reader looking for one finds
+        # the other.
+        elif command == "/network":
+            self._cmd_network(arg, notice)
         elif command == "/logout":
             self._cmd_logout(arg, notice)
         elif command == "/credential":
@@ -32895,7 +33040,7 @@ class OperatorApp(App[None]):
         notice, so the hotkey degrades exactly as the slash command does rather
         than dying differently.
         """
-        self._cmd_new(self._notice)
+        self._cmd_new("", self._notice)
 
     def action_keymap_resume(self) -> None:
         """The remappable "resume" hotkey — ``ctrl+s`` unless remapped.
@@ -36435,6 +36580,66 @@ class OperatorApp(App[None]):
             picker.set_choices(self._analytics_choices())
             picker.set_notice("")
             return
+        if message.command == "network":
+            # THE ROWS COME FROM THE VOCABULARY, not from a second list here: a
+            # word the picker offers that the handler refuses (or the reverse) is
+            # the drift ``NETWORK_SUBCOMMANDS`` exists to prevent, and the test
+            # that pins the two sets equal reads both through this one table.
+            # `detail` stays empty — none of these verbs has live state to show,
+            # and a column that always reads "—" teaches the eye to skip it.
+            picker.set_choices(
+                [
+                    ArgumentChoice(name=word, description=help_text)
+                    for word, help_text in network_subcommand_rows()
+                ]
+            )
+            picker.set_notice("")
+            return
+        if message.command == "new":
+            # ONE LIST, TWO FORMS. The bare `remote` row exists for a peer the user
+            # wants to name by id (a device joined without `--name` has no label to
+            # offer), and each peer row carries the WHOLE argument — `remote
+            # <peer>` — because the picker's completion replaces the argument, and
+            # a row named just `devon-laptop` would leave a buffer the handler
+            # cannot tell from the desktop's `sessions.new` selection.
+            #
+            # The rows come from THIS DEVICE's member lists (a disk read, no dial):
+            # the list opens on the keystroke after a space, and a device whose
+            # relay is down is exactly the device whose `/new remote` matters.
+            # Reachability is not shown as a state here because it is not known
+            # here — the create call answers it with the peer's own reason, and a
+            # fabricated "reachable" column would be the one lie this surface
+            # could tell.
+            choices = [
+                ArgumentChoice(
+                    name="remote",
+                    description="Create it on another device",
+                )
+            ]
+            try:
+                from local_operator.network.peers import known_peers
+
+                peers = known_peers()
+            except Exception:  # noqa: BLE001 — a picker never fails on the mesh being absent
+                peers = []
+            seen: set[str] = set()
+            for peer in peers:
+                token = peer.token
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                choices.append(
+                    ArgumentChoice(
+                        name=f"remote {token}",
+                        description=peer.label,
+                        detail=peer.role,
+                    )
+                )
+            picker.set_choices(choices)
+            picker.set_notice(
+                "" if len(choices) > 1 else "No peers yet. /network invite mints a token."
+            )
+            return
         if message.command == "goal":
             # ONE row, and only while there is a goal to unset. `/goal`'s
             # argument is free text (the objective the model is given), so this
@@ -37170,6 +37375,474 @@ class OperatorApp(App[None]):
         # Do not cancel an in-flight enrollment to start a second one: a thread
         # already talking to the cloud cannot be cancelled with its awaiter.
         self.run_worker(run(), group="mobile-setup")
+
+    # -- /network -----------------------------------------------------------
+
+    def _cmd_network(self, arg: str, notice: NoticeFn) -> None:
+        """``/network [verb …]`` — this device's mesh, through the CLI's own verbs.
+
+        EVERY VERB RUNS THE CLI, and none of them re-derives a guard: the family's
+        epochs, tombstones, audit lines and refusal sentences live in
+        ``network/cli.py`` (the one implementation four front ends share), so this
+        handler is a front end in the same sense `bash` is — it decides which
+        command to spell and reads back what it said.
+
+        THE DESTRUCTIVE VERBS NEED THEIR WORD. ``disconnect``, ``member rm``,
+        ``rm`` and ``panic`` are the four acts whose effect lands on OTHER devices
+        (or deletes this device's membership), and each takes a typed token rather
+        than a keystroke: ``yes`` for the three that can be undone by re-inviting
+        or re-joining, and the NETWORK'S OWN NAME for ``panic``, because a panic
+        rotates the secret and every other device must then be re-admitted —
+        irreversible by the same command, which is what the repo's typed
+        confirmations are for (``mesh-ui.md`` §1.5). A missing or wrong token
+        prints the rehearsal and runs nothing.
+
+        THE INSTALLATION VERBS ARE NOT HERE (``serve``, ``start``, ``stop``,
+        ``restart``, ``uninstall``): they install, supervise or remove a
+        LaunchAgent, and a composer row that boots out the operator's relay — or
+        deletes this device's identity keypair — is the one-keystroke class of
+        mistake the confirmation above exists to prevent. ``NETWORK_SUBCOMMANDS``
+        does not carry them either, so the picker cannot offer one.
+        """
+        pieces = arg.split()
+        verb = pieces[0].casefold() if pieces else "ls"
+        if verb not in NETWORK_SUBCOMMANDS:
+            self._system_notice(
+                f"Use /network <{'|'.join(NETWORK_SUBCOMMANDS)}> — /network alone lists this "
+                "device's networks",
+                "warning",
+            )
+            return
+        rest = pieces[1:]
+        if verb in ("ls", "status"):
+            self._open_network_screen(verb)
+            return
+        if verb == "join":
+            self._network_join_notice(rest)
+            return
+        if verb == "peers":
+            self._dispatch_network_cli(rest, ["peers"], notice, verb="peers")
+            return
+        if verb == "log":
+            argv = ["log", "--limit", "20"] + (["--network", rest[0]] if rest else [])
+            self._dispatch_network_cli(rest[:1], argv, notice, verb="log")
+            return
+        if verb == "doctor":
+            argv = ["doctor"] + (["--peer", rest[0]] if rest else [])
+            self._dispatch_network_cli(rest[:1], argv, notice, verb="doctor")
+            return
+        if verb == "sessions":
+            # The session plane, from the composer: what `/new remote <peer>`
+            # created is otherwise invisible on every surface (review round 4,
+            # MINOR 3, and design D5/§1.2's deferred producer). The verb's own
+            # guards, epochs and audit lines are the CLI's, like every other row
+            # in this family, so this arm decides only the argv and the budget.
+            # The tail is passed through because the same verb lists
+            # (`--peer`/`--all-peers`), creates (`--create`) and acts on
+            # (`--engage`/`--stop`) a session — one implementation, no second
+            # session-plane API in the TUI.
+            mutating = any(token in {"--create", "--engage", "--stop"} for token in rest)
+            self._dispatch_network_cli(
+                rest,
+                ["sessions", *rest],
+                notice,
+                verb="sessions",
+                timeout=PEER_CALL_TIMEOUT_S if mutating else LISTING_TIMEOUT_S,
+            )
+            return
+        if verb == "new":
+            # THE WHOLE TAIL IS THE NAME. `init`'s positional is free text
+            # (`network/cli.py`), and slicing it to the first word silently
+            # created a network called "My" from `/network new My Fancy Net` —
+            # rc 0, a success receipt, no warning (review round 4, MINOR 2).
+            # The picker cannot produce these lines; typing is exactly how a
+            # person names a network.
+            self._dispatch_network_cli(
+                rest, ["init", " ".join(rest)], notice, verb="new", needs=1, tail=True
+            )
+            return
+        if verb == "invite":
+            argv = ["invite", "--role", "drive"] + (["--network", rest[0]] if rest else [])
+            self._dispatch_network_cli(rest[:1], argv, notice, verb="invite")
+            return
+        if verb == "show":
+            self._dispatch_network_cli(rest[:1], ["show", *rest[:1]], notice, verb="show")
+            return
+        if verb == "rename":
+            # The same fix as `new`, one token over: the FIRST token names the
+            # network to relabel and everything after it is the new name, so
+            # `/network rename devmesh My Fancy Name` renames to `My Fancy Name`
+            # rather than to `My` (review round 4, MINOR 2).
+            self._dispatch_network_cli(
+                rest,
+                ["rename", rest[0] if rest else "", " ".join(rest[1:])],
+                notice,
+                verb="rename",
+                needs=2,
+                tail=True,
+            )
+            return
+        if verb == "trust":
+            self._dispatch_network_cli(rest[:1], ["trust", *rest[:1]], notice, verb="trust")
+            return
+        if verb == "rm":
+            self._network_confirm_then(
+                rest,
+                notice,
+                verb="rm",
+                needs=1,
+                token="yes",
+                argv=["rm", rest[0]] if rest else [],
+                rehearsal=(
+                    f"/network rm forgets {rest[0] if rest else 'a network'} ON THIS DEVICE only: "
+                    "the other devices keep the network and this one stops answering it. "
+                    "Run /network disconnect first if the point is to leave."
+                ),
+            )
+            return
+        if verb == "member":
+            self._network_member(rest, notice)
+            return
+        if verb == "disconnect":
+            self._network_disconnect(rest, notice)
+            return
+        if verb == "panic":
+            self._network_panic(rest, notice)
+            return
+
+    def _dispatch_network_cli(
+        self,
+        rest: list[str],
+        argv: list[str],
+        notice: NoticeFn,
+        *,
+        verb: str,
+        needs: int = 0,
+        tail: bool = False,
+        timeout: float = QUICK_TIMEOUT_S,
+        usage: str = "",
+    ) -> None:
+        """Check the token count, then run the argv. One place, so no verb can forget it.
+
+        The arity check is here rather than per verb because a verb that ran with
+        a missing argument would get the CLI's own refusal for a DIFFERENT reason
+        (``_resolve('')`` resolving to the single network, or the parser refusing
+        an absent positional with an argparse traceback in stderr) — neither of
+        which is the sentence a user who typed half a command should read.
+
+        ``tail`` says the tokens PAST ``needs`` are free text belonging to the
+        last argument rather than surplus words to refuse. It exists because two
+        verbs in this family take a human name (``new``, ``rename``) and a
+        name is a sentence, not a token: refusing `/network new My Fancy Net`
+        would be a second way to lose it, and silently taking the first word —
+        what the first cut did — was the worse one (review round 4, MINOR 2).
+        """
+        if len(rest) < needs or (len(rest) > needs > 0 and not tail):
+            self._system_notice(
+                usage or f"That is not a complete /network {verb} command",
+                "warning",
+            )
+            return
+        self._run_network_cli(argv, notice, timeout=timeout)
+
+    def _network_confirm_then(
+        self,
+        rest: list[str],
+        notice: NoticeFn,
+        *,
+        verb: str,
+        needs: int,
+        token: str,
+        argv: list[str],
+        rehearsal: str,
+    ) -> None:
+        """The typed confirmation: rehearse, then run on the exact token.
+
+        ONE implementation for the three word-confirmed verbs, so the rehearsal
+        sentence and the accepted token cannot drift apart. The rehearsal is a
+        WARNING notice — it is the half-typed state of a command, not a refusal of
+        one the user got wrong.
+        """
+        if len(rest) < needs:
+            self._system_notice(f"That is not a complete /network {verb} command", "warning")
+            return
+        if len(rest) == needs:
+            self._system_notice(
+                f"{rehearsal} To confirm, run: /network {verb} "
+                + " ".join(rest[:needs])
+                + f" {token}",
+                "warning",
+            )
+            return
+        if rest[needs].casefold() != token:
+            self._system_notice(f"Type {token} to confirm — nothing was run.", "warning")
+            return
+        self._run_network_cli(argv, notice)
+
+    def _network_member(self, rest: list[str], notice: NoticeFn) -> None:
+        """``/network member rm <network> <device> [yes]`` — revoke, behind a confirmation.
+
+        Revocation is the tab's "remove a device from a network" on the terminal
+        side, and it is the most consequential act in the family: the member is
+        tombstoned, the network SECRET is rotated and the epoch is bumped, so the
+        other devices must be told and the revoked device can never reconnect
+        without a fresh invite (R5). Hence ``yes``.
+        """
+        if len(rest) < 2 or rest[0].casefold() != "rm":
+            self._system_notice(
+                "Use /network member rm <network> <device> — /network show lists the members",
+                "warning",
+            )
+            return
+        target = rest[1:]
+        self._network_confirm_then(
+            target,
+            notice,
+            verb="member rm",
+            needs=2,
+            token="yes",
+            argv=["member", "rm", target[0], target[1]] if len(target) >= 2 else [],
+            rehearsal=(
+                f"Revoking {target[1] if len(target) > 1 else 'a member'} from "
+                f"{target[0] if target else 'a network'} rotates the network secret: every "
+                "remaining device is re-keyed, and the revoked device is refused at its "
+                "next connect until it is invited again."
+            ),
+        )
+
+    def _network_disconnect(self, rest: list[str], notice: NoticeFn) -> None:
+        """``/network disconnect [network] [yes]`` — leave, and stop trusting.
+
+        The bare form resolves to the only network when there is exactly one
+        (§1.5), which is what makes the incident control reachable in one command;
+        with several it lists them instead of guessing which one the user meant.
+        """
+        network_arg = rest[0] if rest else ""
+        if rest and rest[0].casefold() == "yes":
+            network_arg = ""
+            confirm_at = 0
+        else:
+            confirm_at = 1 if rest else 0
+        argv = ["disconnect"] + ([network_arg] if network_arg else [])
+        target = network_arg or self._network_only_name()
+        if target is None:
+            # TWO DIFFERENT SITUATIONS, two different sentences: with several
+            # networks the user must pick one, and with none there is nothing to
+            # leave — telling someone "you are in more than one network" when they
+            # are in none sends them looking for a network that does not exist.
+            if self._network_records():
+                self._system_notice(
+                    "This device is in more than one network — name the one to leave: "
+                    "/network ls lists them",
+                    "warning",
+                )
+            else:
+                self._system_notice(
+                    "This device is in no network — /network new <name> creates one",
+                    "warning",
+                )
+            return
+        if len(rest) <= confirm_at:
+            self._system_notice(
+                f"Leaving {target} stops this device trusting the network, closes its links "
+                "and deletes its local secret; the audit trail is kept. To confirm, run: "
+                f"/network disconnect{' ' + network_arg if network_arg else ''} yes",
+                "warning",
+            )
+            return
+        if rest[confirm_at].casefold() != "yes":
+            self._system_notice("Type yes to confirm — nothing was run.", "warning")
+            return
+        self._run_network_cli(argv, notice)
+
+    def _network_panic(self, rest: list[str], notice: NoticeFn) -> None:
+        """``/network panic <network> <name>`` — typed confirmation of the NAME.
+
+        Not a yes/no, and the difference is the design's: a panic rotates the
+        secret, so every OTHER device must be re-invited before it can come back.
+        That is irreversible by the same command, which is the class of act this
+        repo confirms by TYPING the thing (§1.5, the same shape as
+        ``sessions cleanup --force``). The rehearsal therefore spells the exact
+        line to run, with the network's own name in it.
+        """
+        if not rest:
+            self._system_notice(
+                "Use /network panic <network> — it rotates the secret for every device",
+                "warning",
+            )
+            return
+        network_arg = rest[0]
+        name = self._network_name_for(network_arg)
+        if name is None:
+            self._system_notice(
+                f"No network named {network_arg} on this device — /network ls lists them",
+                "error",
+            )
+            return
+        if len(rest) < 2:
+            self._system_notice(
+                f"Panic on {name} broadcasts a revoke and rotates the secret: every other "
+                "device must be re-admitted with /network invite. To confirm, run: "
+                f"/network panic {network_arg} {name}",
+                "warning",
+            )
+            return
+        if rest[1] != name:
+            self._system_notice(
+                f"Type the network's name ({name}) to confirm — nothing was run.",
+                "warning",
+            )
+            return
+        self._run_network_cli(["panic", network_arg], notice)
+
+    def _network_join_notice(self, rest: list[str]) -> None:
+        """``/network join`` cannot run here, and says so instead of half-running.
+
+        Pairing is a two-screen ceremony with a HUMAN in the middle: this device
+        prints its own derived code, the human reads the code the OTHER device
+        shows, and a mismatch burns the invite rather than warning (R3, and
+        ``network/cli.py::_cmd_join``'s own docstring is the authority). The CLI
+        hosts that on a TTY — ``--sas-stdin`` exists only behind the test-mode
+        environment variable, so there is no non-interactive path for a widget to
+        drive, and a subprocess with no stdin would fail rather than pair.
+
+        So the row stays (the vocabulary is the CLI's) and its answer is the
+        command to run, which is the same call the installation verbs get. The
+        alternative — a composer that appears to start a pairing and cannot finish
+        it — leaves an invite burned and a user with no idea why.
+        """
+        token = rest[0] if rest else "<token>"
+        self._system_notice(
+            "Pairing needs a terminal: this device shows a code for the other device's "
+            f"human to read, and a mismatch burns the invite. Run: lop network join {token}",
+            "warning",
+        )
+
+    def _network_records(self) -> list[Any]:
+        """This device's network records, or ``[]``. Disk only, never a dial."""
+        try:
+            from local_operator.network import store
+
+            return list(store.list_networks())
+        except Exception:  # noqa: BLE001 — a listing never fails on the mesh being absent
+            return []
+
+    def _network_only_name(self) -> str | None:
+        """The single network's ID, or ``None`` when the choice is ambiguous."""
+        records = self._network_records()
+        return records[0].network_id if len(records) == 1 else None
+
+    def _network_name_for(self, target: str) -> str | None:
+        """The NAME a typed confirmation must match, or ``None`` when there is no such network.
+
+        Matched the way the CLI's own ``_resolve`` matches — id first, then name —
+        so the token the rehearsal prints is the token this accepts.
+        """
+        for record in self._network_records():
+            if record.network_id == target:
+                return record.name or record.network_id
+        for record in self._network_records():
+            if record.name == target:
+                return record.name or record.network_id
+        return None
+
+    def _open_network_screen(self, verb: str) -> None:
+        """Push the mesh panel. Push-before-read, like ``/info`` and ``/session``.
+
+        The first frame is disk-only (``capture_local``), so the screen is useful
+        with the relay stopped — the state people open it in — and the worker's
+        dialing fills the verified half afterwards.
+        """
+        from local_operator.tui.widgets.network_panel import (
+            NetworkScreen,
+            capture_local,
+        )
+
+        try:
+            local = capture_local()
+        except Exception:  # noqa: BLE001 — never take the session down for a panel
+            return self._system_notice("the mesh panel could not read this device", "warning")
+        self.push_screen(NetworkScreen(local, scroll_to=verb))
+
+    def on_network_command_requested(self, message: NetworkCommandRequested) -> None:
+        """The panel's ``d``/``shift+P``: put the typed command in the composer.
+
+        UNSUBMITTED, and without its confirmation token: the incident controls are
+        words a human types, so the panel's job is to save the typing of the verb
+        and the network id — never to run the act. The user reads the line, adds
+        whatever the confirmation asks for, and presses Enter themselves.
+        """
+        message.stop()
+        try:
+            editor = self._editor()
+        except Exception:  # noqa: BLE001 — no composer to fill is not a crash
+            return
+        editor.load_text(message.command)
+        editor.focus()
+
+    def _run_network_cli(
+        self,
+        argv: list[str],
+        notice: NoticeFn,
+        *,
+        timeout: float = QUICK_TIMEOUT_S,
+        verb: str = "",
+    ) -> None:
+        """Run one ``lop network`` call off the loop and report what it said.
+
+        NO TWO CALLS AT ONCE: the relay serialises its own control socket, and a
+        second listing queued behind the first would each pay the peer-probe
+        budget for one answer. The flag is a boolean rather than a lock because
+        the second caller's correct answer is a sentence, not a wait.
+        """
+        if getattr(self, "_network_action_busy", False):
+            self._system_notice("a network command is already running.", "warning")
+            return
+        self._network_action_busy = True
+        label = verb or argv[0]
+
+        async def run() -> None:
+            try:
+                result = await asyncio.to_thread(run_network, argv, timeout=timeout)
+            finally:
+                self._network_action_busy = False
+            self._publish_network_run(result, label)
+
+        # `run_worker(..., thread=False)`: the call itself is a blocking subprocess
+        # and it is off the loop by `asyncio.to_thread` INSIDE the coroutine, so
+        # this coroutine yields rather than blocks — the same shape ``_cmd_mobile``
+        # uses for its own service calls.
+        self.run_worker(run(), thread=False, group="network")
+
+    def _publish_network_run(self, result: NetworkRun, label: str) -> None:
+        """The receipt: the CLI's own lines, or its own refusal sentence."""
+        if result.timed_out:
+            self._system_notice(
+                f"/network {label} did not finish in time; the relay may be unresponsive "
+                "— /network doctor diagnoses it",
+                "error",
+            )
+            return
+        lines = result.lines
+        if not lines:
+            # Silent success is still a success: `rename`/`trust` print a receipt,
+            # but an exit-0 call that printed nothing must not be reported as a
+            # failure, and must not be reported as nothing either.
+            self._system_notice(
+                f"/network {label} finished with no output (exit {result.returncode})",
+                "info" if result.ok else "error",
+            )
+            return
+        if result.ok:
+            text = Text()
+            for line in lines:
+                text.append(line + "\n")
+            self._append_block(RichBlock(text))
+            return
+        # A refusal prints its sentence on stderr with the coloured wrapper the
+        # CLI strips for us (``network_cli``); the LAST line is the sentence, and
+        # the earlier ones are argparse's own usage text for a bad flag.
+        self._system_notice(lines[-1], "error")
 
     # -- login / logout -----------------------------------------------------
     def _cmd_login(self, arg: str, notice: NoticeFn) -> None:
@@ -38844,27 +39517,35 @@ class OperatorApp(App[None]):
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
-        The owner-side backend for a follower's ``route_shared_slash``: instead
-        of running the command's UI (which would paint in the OWNER's
-        transcript and leave the invoking terminal with a transport receipt),
-        this produces a :class:`SlashResult`-shaped dict the invoker renders
-        locally. Every product string below is built by the same handler a
-        local session would run, so the follower's receipt is byte-for-byte
-        the standard vocabulary. ``kind`` is ``notice`` for a printed line,
-        ``block`` for a renderable payload, ``noop`` when the follower opens
-        its own picker. Async because the MCP grant path starts a browser
-        round trip, and local model activation refreshes capacity off the UI loop.
+                The owner-side backend for a follower's ``route_shared_slash``: instead
+                of running the command's UI (which would paint in the OWNER's
+                transcript and leave the invoking terminal with a transport receipt),
+                this produces a :class:`SlashResult`-shaped dict the invoker renders
+                locally. Every product string below is built by the same handler a
+                local session would run, so the follower's receipt is byte-for-byte
+                the standard vocabulary. ``kind`` is ``notice`` for a printed line,
+                ``block`` for a renderable payload, ``noop`` when the follower opens
+                its own picker. Async because the MCP grant path starts a browser
+                round trip, and local model activation refreshes capacity off the UI loop.
 
-        ``locality`` is the invoking client's declared position (see
-        ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
-        opened here is in front of a user at THIS machine, which is true of
+                ``locality`` is the invoking client's declared position (see
+                ``ClientLocality``). Only ``/mcp``'s grant verbs read it: a browser
+                opened here is in front of a user at THIS machine, which is true of
         every client today and false for a future relayed remote device.
 
-        Only the commands a follower routes land here; process/terminal
-        commands stay local and never reach this dispatcher.
+        NOT THE SAME FIELD AS ``SessionRow.locality`` (review round 4, NIT 2),
+        and the two are named apart here rather than re-spelled: this one is
+        WHERE THE CALLER IS, and the row's is WHERE THE SESSION LIVES
+        (``"local"``/``"remote"``, ``mesh-ui.md`` §1.3). They mean different
+        things on the same vocabulary, so a future caller passing one for the
+        other is a live hazard — this paragraph is what makes the difference
+        readable at the place a caller would be tempted.
 
-        ``consumers`` is which action-carrying receipts the invoking client
-        renders itself; see :meth:`_complete_unconsumed_action`.
+                Only the commands a follower routes land here; process/terminal
+                commands stay local and never reach this dispatcher.
+
+                ``consumers`` is which action-carrying receipts the invoking client
+                renders itself; see :meth:`_complete_unconsumed_action`.
         """
         result = await self._slash_result(command, args, images, locality, may_loosen)
         result = self._complete_unconsumed_action(result, images, consumers)
@@ -39109,7 +39790,7 @@ class OperatorApp(App[None]):
         if not confirmed:
             # Same single source as the local host above (review round 3, R3-2).
             return SlashResult(kind="notice", text=outcome.rehearsal(), style="warning")
-        self._cmd_new(self._notice)
+        self._cmd_new("", self._notice)
         return SlashResult(
             kind="notice",
             text=f"deleted {session_id}",

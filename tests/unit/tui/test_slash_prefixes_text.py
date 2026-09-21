@@ -130,6 +130,14 @@ PREFIXES_TEXT_POLICY = {
     # A key NAME, with the secret entered in the masked form.
     "credential": False,
     "mobile": False,
+    # FALSE, for the reason `/mobile` and `/notifications` state: the family is a
+    # vocabulary of WORDS (`ls`, `panic`, `member rm …`), so a sentence after the
+    # word must stay a message. The SUBCOMMAND shape below draws that line, and
+    # since this command has no `desktop_destination` in this pass, the field's
+    # only consumer today is the messages endpoint's admission rule — the desktop
+    # never plans it as a command, which is exactly what keeps a mesh verb from
+    # becoming paid chat.
+    "network": False,
     # FALSE, like `/usage` and `/stop`: the argument is a SELECTOR word (`read`)
     # rather than free text, and a sentence after the word must stay a message —
     # `/notifications seems broken` is prose a user is entitled to send, while
@@ -162,7 +170,12 @@ ARGUMENT_SHAPE_POLICY = {
     # ONE selector token, forwarded as the picker's `selected`/`selection`/
     # `filter`. A sentence after the word is prose, which is what keeps
     # `/usage more prose` a message.
-    "new": ArgumentShape.WORD,
+    # REMOTE_PEER, and it is a SUPERSET of the WORD it replaces: one token is
+    # still the desktop's `selected=args` selection, while two tokens with the
+    # first `remote` are the peer form this change adds. WORD alone would plan
+    # `/new remote devon` as PROSE and spend a paid model turn on a control the
+    # user typed on purpose (`docs/design/mesh-ui.md` §1.4.1 Change B).
+    "new": ArgumentShape.REMOTE_PEER,
     "reload": ArgumentShape.WORD,
     "resume": ArgumentShape.WORD,
     # The on/off choice the desktop's picker offers.
@@ -198,6 +211,15 @@ ARGUMENT_SHAPE_POLICY = {
     # MCP_SUBCOMMANDS and SERVER_NAME_RE. At most two tokens, so the operator's
     # own three-line draft stays a message.
     "mcp": ArgumentShape.SUBCOMMAND,
+    # `<subcommand> [name]` over this command's OWN vocabulary
+    # (`NETWORK_SUBCOMMANDS`), which is what `SlashCommand.subcommands` exists
+    # for: without it the route would validate a network verb against MCP's list.
+    # The predicate is MCP's unchanged — at most two tokens, the second
+    # name-shaped — so the prose boundary is the third token; `/network member rm
+    # <net> <device>` is therefore prose to the MESSAGES endpoint, which is stated
+    # in the design (§2.8.3) rather than left for a reader to discover, and is
+    # harmless while no desktop surface queries this family.
+    "network": ArgumentShape.SUBCOMMAND,
     # ANY text: a handler or a form field takes it, so every whole-draft form is
     # the command. `/rename <title>`'s title is arbitrary text, and `/move <path>`
     # executes the path directly, spaces included.
