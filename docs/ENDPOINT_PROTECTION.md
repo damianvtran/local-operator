@@ -48,13 +48,13 @@ Operator`, a binary named `Local Operator` (§2, §3).
 The `<prefix>`/`<install env>` distinction belongs to the **pre-generation
 render**, not to the live plists. `launchd_job` names the branded link
 `<prefix>/bin/Local Operator` where no shim can be planted — `<prefix>` is the
-install prefix of whichever CLI installed the job, `<install env>` the
-environment the installing component ran from (the desktop app's Application
-Support tree, below) — that render's fallback image, not the stable one the
-live layout names — and, with no branded link either, drops `Program`
-entirely and puts the image in `ProgramArguments[0]`. The uv-tool prefix of that
-older shape survives in the dated `…wakes.plist.bak-…` record below, in
-`ProgramArguments[0]`, with no `Program` key.
+install prefix of whichever CLI installed the job, and `<install env>` the
+environment the installing component ran from, whose image is that render's
+fallback — the desktop app's Application Support tree, below — rather than
+the stable one the live layout names. With no branded link either, it drops
+`Program` entirely and puts the image in `ProgramArguments[0]`. The uv-tool
+prefix of that older shape survives in the dated `…wakes.plist.bak-…` record
+below, in `ProgramArguments[0]`, with no `Program` key.
 
 The image/argv split is deliberate, not incidental. The four installers all
 spread `procname.launchd_job(...)` — callers `mobile/install.py`,
@@ -618,10 +618,12 @@ exclusion could be observed firing — see §4.)
 signed does not sign the interpreters it provisions — but it does not leave them
 unsigned either.** The app-provisioned images under Application Support carry
 the app's Developer ID and team (Class 2 above), so a certificate rule *can*
-cover the daemons' program image on a desktop-app install. What a rule written
-for the app bundle does not cover is the **CLI install path**: the uv-tool, pipx
-and plain-pip images are ad-hoc signed with no team at all (Class 1). One
-product, two signing states, and the state depends on how the user installed it.
+cover them, and the daemons' program image on a **pre-generation** desktop-app
+install — the shape §2's Class 2 lead-in bounds, the live layout naming the
+generation tree's image instead (§1). What a rule written for the app bundle
+does not cover is the **CLI install path**: the uv-tool, pipx and plain-pip
+images are ad-hoc signed with no team at all (Class 1). One product, two
+signing states, and the state depends on how the user installed it.
 
 ## 3. The behaviour pattern that trips behavioural engines
 
