@@ -121,6 +121,11 @@ _RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
 #: its accounting turns the MEMBER arm red too, and paying for the difference is
 #: a ceiling decision (which bytes give way), not an elision one. Re-derive both
 #: figures before moving this — the arm's assertion message prints the total.
+#:
+#: "Bounds" here means a ZERO-SLACK EQUALITY on today's numbers, not headroom to
+#: spend (QA round 3, Q7): 1,050,626 − 1,048,576 = 2,050 exactly. One more byte
+#: per roster fails the arm, and raising this constant to clear that red IS the
+#: ceiling decision above, not a way to make the guard pass — report the byte.
 _RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_050
 
 #: No comms node: these released children have no lineage, which is the smaller
@@ -1043,7 +1048,7 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     # accounting turns the MEMBER arm red as well, and paying for the difference
     # means either lowering a shipped cap or re-calibrating a certified
     # instrument — a ceiling decision, not an elision one. It is reported on the
-    # PR; `_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES` bounds the residual so it
+    # PR; `_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES` carries the residual so it
     # cannot grow unnoticed in the meantime.
     #
     # AND THE RESIDUAL IS AN UNDER-CHARGE, not merely a rounding (QA round 2, Q6):
@@ -1053,6 +1058,14 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     # charged: doing so is the ceiling decision described above, and the excess is
     # confirmed pre-existing (released − member-projection = 0 B, so it is not a
     # property of releasing).
+    #
+    # ZERO SLACK, NOT HEADROOM (QA round 3, Q7). "Bounds" above means an exact
+    # EQUALITY on today's numbers, not room to spend: 1,050,626 − 1,048,576 =
+    # 2,050 exactly, so the assertion below has no headroom at all. The next
+    # editor who legitimately changes a field meets a RED GUARD AT +1 B, and
+    # raising this constant to clear that red IS the ceiling decision this block
+    # defers to a human (which bytes give way) — it is not a way to make the
+    # guard pass. Report the extra byte; do not raise the number.
     #
     # The baseline must be read from the FIXTURE'S OWN rows (`settled`), not from
     # `store.state.jobs`: `JobState.from_job` drops a frozen window —

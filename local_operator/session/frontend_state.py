@@ -1595,15 +1595,21 @@ def _elide_row_facts_in_place(job: dict[str, Any]) -> None:
     bytes of slack across a 200-row roster, so SEVEN released rows exhaust it.
     An oversized ``frontend_sync`` is worse than a dropped line here rather than
     merely large: it is the one frame family whose substitute is an ``error``
-    frame FOLLOWED BY A DISCONNECT. ``_readable_frame`` substitutes the
-    ``welcome``/``projection`` families and re-degrades ``event``/
-    ``frontend_update`` (fitted already at ``_enqueue_client_frame``); it closes
-    only on an unsendable ``frontend_sync`` push, because a viewer left on a base
-    that never comes applies no delta and reports the owner as unresponsive.
-    This route has no fit pass either: the :func:`fit_frame_for_wire` chokepoint
-    lives in ``_enqueue_client_frame``, which only the two relay families reach.
-    So the peer is answered with an ``error`` frame and then a disconnect, at
-    ERROR, with no re-send.
+    frame FOLLOWED BY A DISCONNECT. Which arm a frame lands on is NOT a single
+    rule (review round 5, W2), so by arm, in ``session/runtime/server.py``'s
+    ``_readable_frame``: it SUBSTITUTES the welcome (the identity-only projection
+    a connect sends) and the ``result``/any-``req`` replies (an ``error`` frame
+    carrying the request id); it RE-DEGRADES ``event``/``frontend_update``
+    (fitted already at ``_enqueue_client_frame``); and it DROPS, with no
+    substitute and no close, a ``projection`` repaint arriving after connect (the
+    phone-stops-updating-live case whose residual ``_readable_frame`` documents)
+    and any unknown op. It closes ONLY on an unsendable ``frontend_sync`` PUSH
+    (the no-``req`` form, where there is nobody to tell), because a viewer left on
+    a base that never comes applies no delta and reports the owner as
+    unresponsive. That push has no fit pass either: the
+    :func:`fit_frame_for_wire` chokepoint lives in ``_enqueue_client_frame``,
+    which only the two relay families reach. So it is answered with an ``error``
+    frame and then a disconnect, at ERROR, with no re-send.
 
     So the key does not travel ON THE WIRE at all until something reads it there,
     and NOTHING in the tree does: the only writer is :func:`_released_row`, the
