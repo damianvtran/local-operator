@@ -376,3 +376,22 @@ def test_a_plain_id_with_no_curated_name_is_unaffected() -> None:
     falls back to its own selector, never to a title-cased guess."""
     label = model_label("openrouter", "somevendor/unlisted-model")
     assert label.full == "openrouter/somevendor/unlisted-model"
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "anthropic", "deepseek"])
+def test_the_router_name_is_gated_on_the_aggregator_hosting(provider: str) -> None:
+    """``auto`` is a router id ONLY behind an aggregator.
+
+    On a local or direct provider the same word is an ordinary model —
+    ``ollama/auto`` is the case ``discovery.is_meta_route_id`` names — so an
+    id-only lookup would rename a model the user happened to call ``auto``.
+    Measured before this gate: ``ollama/auto`` rendered ``Auto`` where it had
+    rendered ``Ollama``, and ``resolved_a_name`` flipped with it (a decision
+    input to ``attached._restored_model_specs``' display-name adoption). The
+    render must NOT change for these hostings.
+    """
+    label = model_label(provider, "auto")
+    assert label.full != "Auto", f"{provider}/auto must not take the router name"
+    # Whatever these rendered before, they are not the router's NAME: the
+    # fallback is the selector, exactly as an unlisted id.
+    assert label.full == f"{provider}/auto"

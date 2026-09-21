@@ -165,6 +165,16 @@ _ID_MARGIN = 4
 #: rest of the app identifies the model by is unchanged — ``resolved_a_name``
 #: compares against ``provider/model_id``, and this only changes what the human
 #: form prints.
+#:
+#: GATED ON THE PROVIDER, and that is load-bearing rather than defensive. ``auto``
+#: is a router id ONLY behind an aggregator; on ``ollama/auto`` — or any local or
+#: vendor server a user happens to name ``auto`` — the same word is an ordinary
+#: model, and an id-only lookup renamed it (measured: ``ollama/auto`` went from
+#: rendering ``Ollama`` to rendering ``Auto``, and ``resolved_a_name`` flipped
+#: with it, which is a decision input to ``attached._restored_model_specs``'
+#: display-name adoption). This is the same provider gate
+#: ``discovery.is_meta_route_id`` applies, for the same reason, and the two must
+#: agree on what a router is.
 _ROUTER_NAMES: dict[str, str] = dict.fromkeys(AGGREGATOR_ROUTER_MODEL_IDS, "Auto")
 
 
@@ -235,7 +245,13 @@ def _model_label(provider: str, model_id: str, name: str) -> ModelLabel:
     # What the band's ``shorten-model`` rung showed before this module existed,
     # and still the floor it may never do much worse than — see _ID_MARGIN.
     bare_id = ident.rpartition("/")[2] or ident
-    chosen = _ROUTER_NAMES.get(model_id) or _unambiguous_name(provider, model_id, ident, name)
+    # The router name is looked up ONLY on an aggregator hosting (``_resells``).
+    # ``auto`` is a router behind an aggregator and an ordinary model everywhere
+    # else (``ollama/auto``), so the id alone would rename a local model the
+    # user happened to name ``auto`` — the exact hazard ``discovery
+    # .is_meta_route_id`` is provider-scoped to avoid.
+    router_name = _ROUTER_NAMES.get(model_id) if _resells(provider) else None
+    chosen = router_name or _unambiguous_name(provider, model_id, ident, name)
     if not chosen:
         # No name anyone can vouch for: exactly the behaviour this segment had
         # before, selector and all.
