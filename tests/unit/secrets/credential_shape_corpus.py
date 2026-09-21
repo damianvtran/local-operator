@@ -584,6 +584,18 @@ NEGATIVE_CASES: tuple[Case, ...] = (
         "npm_config_manage_package_manager_versions=11.22.0",
         "the same NAME with a version value: the dot lookahead already spares it",
     ),
+    #     The four rows above cover the reported family in HALVES — the underscore
+    #     join with a value, and the dash join without one. The row below is the
+    #     combination, and it is the one #1399 moved: an ordinary env NAME joined by
+    #     dashes CARRYING a value was read as a prefixed issuer token and masked
+    #     (measured against the pre-fix module, where it fired as
+    #     ``vendor-prefixed-token``), so an edit that made the ``=`` arm
+    #     separator-specific would red THIS row rather than nothing at all. It is a
+    #     true negative on this tree, and it carries its reason like every other row.
+    Case(
+        "npm-config-manage-package-manager-versions=false",
+        "the same NAME with the dash join AND a value: the two rows above, combined",
+    ),
     Case(
         "whsec_config_update_notifier",
         "the same NAME under a prefix that carries its own separator",
@@ -793,21 +805,52 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     #     the marker re-fires a fresh incident — "a detector whose output is its own
     #     input cannot settle". Measured false on this table's own tree, and unpinned
     #     by the table until now, which is why the claim travelled as a message
-    #     instead of meeting a row. The marker is ALREADY-CONTAINED material: the
-    #     value it stands in for is gone, so a text carrying it holds no credential
-    #     material for a rule to grade — and the three shapes below are the ones that
-    #     reach this pass from a peer: the marker alone, a handover message, and a
-    #     tool-call argument.
+    #     instead of meeting a row. Each of the three shapes below is byte-identical
+    #     on all seven surfaces, files no hit, takes no label and does not escalate.
     #
-    #     The boundary is measured and stated rather than left to be discovered: the
-    #     ONE spelling where the pass still matches the marker is ``.npmrc``'s
-    #     ``_authToken=`` token, whose value class accepts the marker's own brackets.
-    #     That rule fires and files an ``npmrc-auth-token`` hit, but it rewrites the
-    #     marker back to ITSELF, so the bytes are unchanged on all seven surfaces and
-    #     ``reached_model`` stays false. The class is already driven through the
-    #     shipped path by ``test_a_marker_valued_hit_no_longer_escalates``. It takes no
-    #     row here because neither half can hold it honestly: a POSITIVE row asserts
-    #     its text was rewritten, and this text is byte-stable everywhere.
+    #     THAT IS A PROPERTY OF THESE THREE TEXTS, NOT OF THE MARKER, and the
+    #     difference is the whole of agent review R1-1: the section first stated the
+    #     wider generalisation — that a text carrying the marker "holds no credential
+    #     material for a rule to grade" — and it is measurably FALSE. What decides it
+    #     is a value CLASS wide enough to hold the marker's own brackets. The rule
+    #     matches, files a hit and labels the text, and then rewrites the marker back
+    #     to ITSELF, so the bytes survive and neither half here can hold such a
+    #     spelling: a POSITIVE row asserts its text was rewritten, and a NEGATIVE row
+    #     asserts the pass left it alone in every OBSERVABLE way — the hit list is the
+    #     observable that moves.
+    #
+    #     The corrected boundary, measured 2026-09-21 — every spelling below is
+    #     byte-stable on all seven surfaces with an empty ``reached_model``:
+    #     ``_authToken=[redacted]`` and the registry-path spelling
+    #     ``//registry.npmjs.org/:_authToken=[redacted]`` file ``npmrc-auth-token``;
+    #     ``machine api.example.com login robot password [redacted]`` files
+    #     ``netrc-password``; ``Cookie: [redacted]`` and ``Set-Cookie: [redacted]`` file
+    #     ``cookie-header``; ``mysql -u root -p[redacted]`` and
+    #     ``psql -U postgres -p [redacted]`` file ``client-inline-password``;
+    #     ``docker login -u robot -p [redacted]`` files ``docker-login-password``;
+    #     ``openssl enc -passin [redacted]`` files ``openssl-pass-phrase``; and
+    #     ``curl -u user:[redacted] https://example.invalid`` files
+    #     ``curl-user-credential``. Seven labels over ten spellings: agent review R1-2
+    #     measured four of those labels over six of those spellings, and the
+    #     enumeration is open BY CONSTRUCTION rather than by oversight — a rule added
+    #     tomorrow joins the list without anyone editing this comment. The class is
+    #     already driven through the shipped path by
+    #     ``test_a_marker_valued_hit_no_longer_escalates``.
+    #
+    #     DEFERRED, and PRE-EXISTING rather than introduced here: the marker spelled
+    #     as the VALUE of a lower-case assignment does NOT survive.
+    #     ``password="[redacted]"`` comes back as ``[redacted]"`` — the NAME and its
+    #     separator are DELETED, with 0 hits, 0 labels and no notice, on all seven
+    #     surfaces (``api_key="[redacted]"`` likewise). ``_INCOMPLETE_MASK_LEFT_RE``
+    #     reads the ``name=`` run as the readable HEAD of a credential whose mask
+    #     stopped at a quote — its NAME exclusion is capitals-only, and its run class
+    #     carries ``=`` — and ``_close_partial_masks`` records no hit, so the notice
+    #     path never learns the text was rewritten. A rewrite with no label is exactly
+    #     the "blinding the agent to the text it is reading" case this half exists to
+    #     prevent, which is why it is recorded rather than left implicit; it is NOT
+    #     fixed here because the production diff of this commit against ``origin/main``
+    #     is empty (tests only) and the fix is a production change, so the rows below
+    #     are narrowed to what they measure rather than widened to answer for it.
     Case(
         "[redacted]",
         "the mask marker alone: the pass's own output is not its own input",
