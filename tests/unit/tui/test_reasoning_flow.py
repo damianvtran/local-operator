@@ -250,6 +250,95 @@ async def test_a_finished_phase_leaves_no_row_behind(
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_ends_mid_reasoning_leaves_no_row_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The terminal paths that never reach the answer's delta (review round 1, M1).
+
+    `_finalize_turn` is the ONE exit for every way a turn can finish, and this is
+    the only assertion that the phase is retired THERE: the sibling regression
+    test posts its `TurnEnded` after the answer's delta has already removed the
+    block, so it passes with that call deleted — measured on the mutant, where
+    deleting `_finalize_turn`'s `self._retire_reasoning_block()` left the rest of
+    the file green and this test red (`assert 1 == 0`, the frame still painting
+    `· reasoning`). The paths it covers are the ones with no answer to arrive:
+    an abort, a turn that reasoned and then died, and a worker that returns
+    without a terminal end.
+
+    `TurnEnded(aborted=True)` rather than `TurnAbandoned`: the latter is gated on
+    a matching turn epoch and is posted by the app's own worker, not by a test.
+    """
+    _write_reasoning_flag(tmp_path, monkeypatch, True)
+    try:
+        session = SteerableSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _boot(pilot, app)
+            await _submit(pilot, app, "think about it")
+            app.post_message(TurnStarted())
+            app.post_message(AssistantMessageStart())
+            app.post_message(ReasoningDelta(THOUGHT))
+            await _wait_for_row(pilot, app, THOUGHT)
+            assert len(app.query(ReasoningBlock)) == 1, "the phase must be live first"
+
+            # The turn dies with the phase still on screen: no answer delta.
+            app.post_message(TurnEnded(aborted=True, error=None))
+            for _ in range(4):
+                await pilot.pause()
+
+            assert len(app.query(ReasoningBlock)) == 0
+            assert not any(REASONING_HEADER in row for row in rows(app))
+            assert not any(THOUGHT in row for row in rows(app))
+            assert app._reasoning_block is None
+    finally:
+        settings_reload()
+
+
+@pytest.mark.asyncio
+async def test_a_clear_mid_reasoning_hands_the_live_phase_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/clear drops the phase reference with the rows it points at (round 1, n2).
+
+    `_on_transcript_cleared` drops `_streaming_block`, `_tool_cards` and the
+    working line beside it, and the reasoning block was the one reference left
+    pointing at a widget `clear_blocks` had just removed — the only place
+    `retire()`'s claim that "the OWNER removes the widget" was not literally
+    true. The next fragment still mounts a fresh phase, because the mount is on
+    demand.
+    """
+    _write_reasoning_flag(tmp_path, monkeypatch, True)
+    try:
+        session = SteerableSession()
+        app = OperatorApp(lambda: _factory(session))
+        async with app.run_test(size=(100, 30)) as pilot:
+            await _boot(pilot, app)
+            await _submit(pilot, app, "think about it")
+            app.post_message(TurnStarted())
+            app.post_message(AssistantMessageStart())
+            app.post_message(ReasoningDelta(THOUGHT))
+            await _wait_for_row(pilot, app, THOUGHT)
+            assert len(app.query(ReasoningBlock)) == 1, "the phase must be live first"
+
+            await pilot.press("slash", "c", "l", "e", "a", "r", "enter")
+            for _ in range(2):
+                await pilot.pause()
+
+            assert app._reasoning_block is None
+            assert len(app.query(ReasoningBlock)) == 0
+            assert not any(REASONING_HEADER in row for row in rows(app))
+
+            # A fragment after the clear mounts a fresh phase rather than
+            # writing into the detached one.
+            app.post_message(ReasoningDelta("a fresh thought after the clear"))
+            await _wait_for_row(pilot, app, "a fresh thought after the clear")
+            assert app._reasoning_block is not None
+            assert len(app.query(ReasoningBlock)) == 1
+    finally:
+        settings_reload()
+
+
+@pytest.mark.asyncio
 async def test_a_squeezed_terminal_keeps_the_question_on_screen(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -260,6 +349,15 @@ async def test_a_squeezed_terminal_keeps_the_question_on_screen(
     pushed to y=-3 and a scrollbar appeared, which is the one place this change
     regressed against the base (design round 1, D3). The budget is a property of
     the LIVE block, so this test opts the channel on first.
+
+    WHAT IT DOES NOT CLAIM, measured by QA round 1 and confirmed by design round
+    1's D2 (deferred, not fixed here): below 100x20 the budget still does not
+    count the tail-pinned working line, so the question can be scrolled out of
+    the viewport while the phase streams — identically on `origin/main`, which is
+    why it is not this PR's regression. The assertion below is about the block
+    yielding ROWS rather than expelling the question from the layout (`region.y`
+    can stay non-negative while the question is above the transcript's own clip),
+    and it passed on both trees.
     """
     _write_reasoning_flag(tmp_path, monkeypatch, True)
     try:
