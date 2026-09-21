@@ -259,12 +259,17 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: Local (macOS, py3.12.13) measured `tool_schemas` 49,353 chars / head 30,088;
 #: CI (ubuntu, py3.12) measured 49,420 chars / head **30,113** — 67 more
 #: schema chars, ~25 billed tokens — so a ceiling set 12 above the LOCAL head
-#: failed CI by exactly 13 tokens. The ceiling is therefore set 37 above the
-#: CI reading (and 62 above local), which is inside the 46-51 band this file's
-#: ``secret`` (49), ``web_read`` (71) and ``scratchpad://`` (51) raises hold,
-#: and the tighten band below (1,200) is nowhere near tripped. Earlier raises
-#: in this file found NO local-vs-CI gap; this one does, so it is recorded
-#: rather than carried as the assumption that the two always agree.
+#: failed CI by exactly 13 tokens. The ceiling is therefore set with CI as the
+#: binding reading: 37 above CI's head and 62 above this machine's. Only the
+#: CI figure matters for the gate, so the 37 is the one to read; it sits just
+#: UNDER the 46-51 band this file's ``secret`` (49), ``web_read`` (71) and
+#: ``scratchpad://`` (51) raises chose, and the 62 above local is simply the
+#: same ceiling seen from the smaller reading. The band is descriptive of prior
+#: raises, not a constraint this one satisfies — the local-vs-CI gap, not the
+#: band, decides the number here, and the tighten band below (1,200) is nowhere
+#: near tripped. Earlier raises in this file found NO local-vs-CI gap; this one
+#: does, so it is recorded rather than carried as the assumption that the two
+#: always agree.
 #: RAISED 29,950 -> 30,025 for the scratchpad-salience change, stated here with
 #: the arithmetic because the guard exists to make this an explicit decision.
 #: The base — THIS BRANCH'S base, ``origin/main`` 0bc5fb3a, the tree the PR

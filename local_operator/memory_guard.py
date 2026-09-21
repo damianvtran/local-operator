@@ -660,22 +660,25 @@ class Guard:
         it cannot know. Plain Text because the tool card paints Text — backticks
         would land literally.
 
-        ONE paragraph, no internal newline (design review D3). The tool card
-        claims only the FIRST result line for its wrapping reason block; a second
-        line falls into captured output, where each row is cropped to the measure
-        — so a two-line message had its actionable half (`memory_mb`, the batch
-        advice) cut at canonical widths. As one paragraph the whole message is
-        within the reason block's cell budget and wraps inside it.
+        ONE paragraph, no internal newline (design review D3), and its DEVICE
+        clause is the short `(on a N GB host)` form (design review D6). The tool
+        card claims only the FIRST result line for its wrapping reason block and
+        bounds that block at :data:`REASON_MAX_CELLS` (432) — a whole sentence
+        outside the budget gets its TAIL dropped behind a marker, and the tail is
+        the escape hatch (`memory_mb`/`bash.memory.limit_mb`). The old
+        `(N GB total, M MB available)` clause pushed the message to 433 cells on
+        a 36 GB host and 434 on a 128 GB host — i.e. it cropped at EVERY width,
+        and cropped SOONER the more RAM the host had, which is exactly backwards:
+        the reminder a big host most needs is the one it lost first. The short
+        form measures 405 cells on a 128 GB host, so the whole sentence, escape
+        hatch included, fits inside the reason block at every width.
         """
         peak = sample.bytes_used if sample.bytes_used is not None else self.peak_bytes
         peak_gb = (peak or sample.bytes_hard) / (1024**3)
         hard_gb = sample.bytes_hard / (1024**3)
         device = ""
         if self.budget.total_mb is not None and self.budget.available_mb is not None:
-            device = (
-                f" on this device ({self.budget.total_mb / 1024:.0f} GB total, "
-                f"{self.budget.available_mb / 1024:.1f} GB available)"
-            )
+            device = f" (on a {self.budget.total_mb / 1024:.0f} GB host)"
         return (
             f"MEMORY LIMIT EXCEEDED: this command's process group reached "
             f"{peak_gb:.1f} GB, over the {hard_gb:.1f} GB budget for one command"
