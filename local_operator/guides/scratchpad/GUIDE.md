@@ -103,6 +103,9 @@ an absolute path, so a shell can create directly into it:
 The folder is created for you the first time anything needs it — `write`/`edit`
 make it, and a shell call makes it before the command runs — so a bare redirect
 and a `mktemp` template both work on their first use, with no `mkdir` first.
+Some tool results also carry a one-line `[scratch]` reminder when a command writes
+into a temp root; that line is a display convenience for the card, which clips its
+tail in a narrow window, while the result itself always carries it whole.
 The idiom for a rig that wants a private subdirectory is
 `mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXX"` — the template keeps the
 directory inside the pad, so the files stay readable through the scheme and

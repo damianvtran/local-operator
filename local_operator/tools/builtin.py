@@ -4973,10 +4973,27 @@ def _temp_scratch_line(resolved: Path, why: str, remedy: str, *, is_root: bool =
     ``is_root`` swaps the SUBJECT from a created target to the temp root itself,
     for the bash side's unexpanded targets (``> /tmp/f$i``): the sentence shape,
     the remedy and the reason are unchanged, because the advice is the same and
-    only the thing being NAMED changes.
+    only the thing being NAMED changes. The root arm names the trap in full
+    ("puts scratch in a temp root") rather than referring back to it — there is no
+    antecedent to refer to, since the reader has not been shown the concrete
+    target the other arm talks about, and the clause is visible only when the
+    whole line fits anyway.
+
+    KNOWN LIMIT, recorded here because this is the one builder both advisories
+    share (design review round 1, D1). The line is rendered in a TUI card whose
+    lane body budget is ``width - 8`` cells, and the remedy starts at cell 38 —
+    behind the fixed ``[scratch] `` tag and ``Your own scratch belongs in `` —
+    so the REMEDY is what gets clipped below ~52 columns, and the whole remedy
+    needs ~73. That bound is not this line's: the ``write``/``edit`` line has the
+    same prologue, so the identical edge already applied to it before this
+    change, which is why the wording (approved in #1374, with a cell-pinning
+    test) is not re-opened for it. Two things keep it a display matter only: the
+    MODEL is unaffected — the tool result carries the full line, and the card
+    clips a rendering of it, never the text the model reads — and the fix, if
+    the edge ever matters, is a shorter prologue rather than a shorter remedy.
     """
     subject = (
-        f"a path directly under {resolved} is the same trap"
+        f"writing directly under {resolved} puts scratch in a temp root"
         if is_root
         else f"{resolved} sits directly under a temp root"
     )
