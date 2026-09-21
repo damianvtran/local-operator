@@ -414,16 +414,50 @@ def describe_devices(args: argparse.Namespace) -> int:
         # privileged command, and the route to actually take it. It deliberately does not
         # `return`, so the listing at the end of this verb runs exactly as it does for
         # every other invocation.
+        #
+        # AND IT DESCRIBES THE RUN THIS VERB WILL ACTUALLY PERFORM IN THIS STATE (design
+        # round 13, D1 — MAJOR). The first version promised a statement write and a
+        # privileged step unconditionally, and with a local record but NO USABLE ANCHOR
+        # the real run does neither: it clears the local record, adds nothing to an
+        # anchor it cannot read, and says "run `lop operator install`". A preview that
+        # promises more than the run performs is the class of defect rounds 10–12 were
+        # about, so the branch below is keyed on the same fact the real path keys on.
+        #
+        # WHY DESCRIBE RATHER THAN REFUSE, WHICH IS THE ONE JUDGEMENT CALL HERE. The
+        # sibling `--revoke --print-only` refuses (rc 1) in that state, and consistency
+        # with it was one of the two options. It is the wrong one, because the real runs
+        # of the two verbs differ there for a reason: a revocation that is not in the
+        # anchor is not a revocation (the anchor is the list the runtime reads), while
+        # CLEARING the local record really does lift the refusal — `is_revoked` is the OR
+        # of the two halves, and with no usable anchor the local record is the only holder
+        # left. Refusing here would strand an operator whose phone is refused and who does
+        # not need a privileged install to fix it. What has to agree is the PREVIEW and
+        # ITS OWN REAL RUN; both `--revoke` pairs agree too, in the other direction (its
+        # real run refuses as well). The cell that pins this drives both and compares them.
         from local_operator.operator import staging_path
+        from local_operator.operator.trust import load_anchor
 
         command = devices.AUTHORISE_COMMAND.format(device_id=authorise)
         recorded_here = devices.is_revoked_here(root, authorise)
         recorded_in_anchor = _anchor_revokes(root, authorise)
+        loaded = load_anchor()
+        anchor_usable = bool(loaded.usable and loaded.anchor is not None)
+        staged_path = staging_path(root)
+
         if not recorded_here and not recorded_in_anchor:
             print(
                 f"preview: nothing recorded a revocation of {authorise} on this machine, "
                 f"so `{command}` would have nothing to lift and no privileged step "
                 "would be needed."
+            )
+        elif not anchor_usable:
+            print(
+                f"preview: `{command}` would clear the local revocation record — "
+                f"{authorise} could pair again — and do nothing else: there is no usable "
+                "installed operator anchor on this machine, so no anchor statement would "
+                f"be written and no privileged step would be needed. Run `{command}` "
+                "without --print-only to do exactly that, and run `lop operator install` "
+                "if you expected an anchor here."
             )
         else:
             halves = " and ".join(
@@ -436,25 +470,34 @@ def describe_devices(args: argparse.Namespace) -> int:
             )
             print(
                 f"preview: `{command}` would clear {halves}, write the anchor statement "
-                f"without the entry to {staging_path(root)}, and need ONE privileged "
-                "step to install it."
+                f"without the entry to {staged_path}, and need ONE privileged step to "
+                "install it."
             )
-            if install_anchor(root, print_only=True) == 0:
-                # THE COMMAND IS THE ONE THE REAL RUN WOULD OFFER, NOT ONE THAT WORKS YET:
-                # the statement it installs is only written by that run, so saying "run
-                # this" without saying that would install the UNCHANGED anchor — the same
-                # class of misdirection as claiming a lift that had not happened.
+            if staged_path.exists():
+                # THE CAVEAT TRAVELS WITH THE COMMAND (design round 13, D2): it used to sit
+                # fifteen rows below it in a 44-column block, so a reader could copy the
+                # command without ever meeting the correction.
                 print(
-                    "NOTHING has been changed by this run: the statement named above is "
-                    "not on disk yet, so that command would install the anchor unchanged. "
+                    "NOTHING has been changed by this run: the statement is not on disk "
+                    "yet, so the command below would install the anchor unchanged."
+                )
+                install_anchor(root, print_only=True)
+                print(
                     f"Next step: run `{command}` without --print-only — it writes the "
                     "statement and takes that step itself — then pair the phone again with "
                     "`lop pair`."
                 )
             else:
-                # `install_anchor`'s own message names what to run instead; the preview
-                # does not fail because the host has nothing staged.
-                print("nothing is staged to install yet")
+                # A REMEDY ON THE SAME STREAM, AND NO INTERLEAVING (design round 13, D5).
+                # Calling `install_anchor` here would print its own "nothing staged; run
+                # `lop operator init`" to STDERR, which in a piped run arrives BEFORE this
+                # stdout block — and the old stdout line then repeated the fact with no
+                # remedy at all. Says the remedy once, in the right order.
+                print(
+                    "There is no staged anchor statement to install, so that privileged "
+                    "step cannot be offered yet: run `lop operator init` on this machine "
+                    "to write one, then run this command again."
+                )
 
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))

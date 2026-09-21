@@ -843,3 +843,137 @@ def test_a_record_that_did_not_apply_is_not_reported_as_never_recorded(
     assert "did not apply under the installed anchor" in said, said
     assert "nothing recorded a revocation" not in said, said
     assert devices.revoked_path(root).exists() is False
+
+
+def test_the_authorise_preview_promises_exactly_what_its_own_run_does(
+    paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design round 13, D1 (MAJOR): the promise must equal the action, in every state.
+
+    Measured on the previous head, with a local record but no USABLE anchor: the preview
+    promised a statement write and "ONE privileged step", printed the `sudo install` line
+    and sent the reader to re-run without `--print-only` — while the real run in that same
+    state wrote nothing, took no step and said "run `lop operator install`". The promise
+    outran the run, which is the class of defect rounds 10-12 were about, and it survived
+    because each side was pinned by its own wording rather than against the other.
+
+    Pinned as a PROPERTY now, in every state this verb models: the two things the preview
+    claims — whether it would clear the local record, and whether a privileged step exists
+    — are compared with what the real run actually does. Wording changes cannot make the
+    two sides agree falsely, because the comparison is between the command the PRODUCT
+    prints and the install the stub was actually asked to perform.
+    """
+    import dataclasses
+    import json
+
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import handlers, trust
+    from local_operator.operator.pair_handlers import (
+        _stage_anchor_revocation,
+        describe_devices,
+    )
+
+    root = _config()
+    _, point = _phone_point()
+    device_id = devices.new_device_id(point)
+    installed_path = root / "installed-anchor.json"
+    calls: list[str] = []
+
+    # The INSTALLED statement is its own file, so a preview that writes nothing cannot
+    # move it: the state the run acts on is separated from the state it would write.
+    installed_path.write_bytes(
+        trust.anchor_bytes(
+            dataclasses.replace(
+                paired_machine, devices=({"device_id": device_id, "revoked": True},)
+            )
+        )
+    )
+
+    def seam(uid: Any = None) -> Any:
+        body = json.loads(installed_path.read_text())
+        return trust.AnchorLoad(
+            anchor=trust.OperatorAnchor.from_json(body),
+            path=trust.anchor_path(uid),
+            root_owned=True,
+            reason="ok",
+            exists=True,
+        )
+
+    absent = lambda uid=None: trust.AnchorLoad(  # noqa: E731 — a seam, not a style
+        anchor=None,
+        path=trust.anchor_path(uid),
+        root_owned=False,
+        reason="pinned absent by the test",
+        exists=False,
+    )
+    real_install = handlers.install_anchor
+
+    def fake_install(config_root: Path, *, print_only: bool = False) -> int:
+        if print_only:
+            return real_install(config_root, print_only=True)
+        calls.append("installed")
+        installed_path.write_bytes(trust.staging_path(config_root).read_bytes())
+        return 0
+
+    monkeypatch.setattr(handlers, "install_anchor", fake_install)
+
+    def observe(*, preview: bool, anchor_usable: bool, staged: bool = True) -> dict[str, Any]:
+        """One fresh fixture, one invocation, and what it claimed or did."""
+        staged_path = trust.staging_path(root)
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        if staged:
+            staged_path.write_bytes(trust.anchor_bytes(paired_machine))
+        else:
+            staged_path.unlink(missing_ok=True)
+        devices.record_revocation(root, device_id)
+        usable = seam if anchor_usable else absent
+        monkeypatch.setattr(trust, "load_anchor", usable)
+        monkeypatch.setattr(operator_pkg, "load_anchor", usable)
+        calls.clear()
+        before = staged_path.read_bytes() if staged else None
+        capsys.readouterr()
+        assert describe_devices(_args(authorise=device_id, print_only=preview)) == 0
+        out = capsys.readouterr().out
+        return {
+            "claims_local_clear": ("would clear the local revocation record" in out)
+            or ("only the local record was cleared" in out),
+            "claims_privileged_step": "sudo install" in out,
+            "record_gone": not devices.revoked_path(root).exists(),
+            "staged_changed": (staged_path.read_bytes() if staged else None) != before,
+            "stepped": bool(calls),
+            "out": out,
+        }
+
+    # (a) the state D1 measured: a local record, and no usable anchor.
+    preview = observe(preview=True, anchor_usable=False)
+    assert preview["record_gone"] is False and preview["staged_changed"] is False
+    assert preview["stepped"] is False, "the preview took the privileged step"
+    assert preview["claims_privileged_step"] is False, preview["out"]
+    assert "no usable" in preview["out"] and "lop operator install" in preview["out"]
+    real = observe(preview=False, anchor_usable=False)
+    assert preview["claims_local_clear"] == real["record_gone"] is True
+    assert preview["claims_privileged_step"] == real["stepped"], (
+        "the preview's promise and the real run's action disagree: "
+        f"{preview['claims_privileged_step']} vs {real['stepped']}"
+    )
+    assert real["stepped"] is False and real["record_gone"] is True
+
+    # (b) the ordinary state: both halves revoked, anchor usable.
+    preview = observe(preview=True, anchor_usable=True)
+    assert preview["record_gone"] is False and preview["staged_changed"] is False
+    real = observe(preview=False, anchor_usable=True)
+    assert preview["claims_local_clear"] == real["record_gone"] is True
+    assert preview["claims_privileged_step"] == real["stepped"] is True
+
+    # (c) and nothing staged: the privileged step cannot be offered, and the remedy rides
+    # the same stream in the right order (design round 13, D5) instead of arriving on
+    # stderr before this block in a piped run.
+    preview = observe(preview=True, anchor_usable=True, staged=False)
+    assert preview["claims_privileged_step"] is False, preview["out"]
+    assert "lop operator init" in preview["out"], preview["out"]
+    assert "nothing is staged to install yet" not in preview["out"], preview["out"]
+
+    # (d) the caveat travels with the command (design round 13, D2): it used to sit
+    # fifteen rows below it at 44 columns.
+    ordered = observe(preview=True, anchor_usable=True)["out"]
+    assert ordered.index("NOTHING has been changed by this run") < ordered.index("sudo install")
