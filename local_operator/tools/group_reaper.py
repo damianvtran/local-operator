@@ -78,13 +78,13 @@ import contextlib
 import json
 import logging
 import os
-import subprocess
 import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from local_operator.procstate import birth_token
 from local_operator.session.retention import _process_alive
 
 logger = logging.getLogger(__name__)
@@ -205,42 +205,30 @@ class ReaperSweepResult:
 def _owner_start_token(pid: int) -> str | None:
     """The opaque process-start token for ``pid``, or ``None`` if unreadable.
 
-    ``ps -o lstart=`` prints a process's start time in a fixed, locale-stable
-    form under ``LC_ALL=C`` (verified identical on macOS and Linux, e.g.
-    ``Wed Aug 26 11:38:17 2026``). It needs no ``/proc`` (macOS has none) and no
-    psutil (not installed), which is why it is used here instead of a
-    platform-specific probe.
+    **The probe is :func:`local_operator.procstate.birth_token`, not a second
+    copy of it.** This module used to spell its own ``ps -o lstart=`` invocation
+    under ``LC_ALL=C`` — the same measurement, with the same "never parse it,
+    compare the raw bytes" rule — and the lease needed that measurement too
+    (2026-09-21, a recycled pid that impersonated a dead session's claim, see
+    ``procstate``'s birth-token section). Two spellings of one probe is the drift
+    class this tree names repeatedly, so the leaf module owns it now and this
+    delegates: same ``ps`` keyword, same pinning, and ``None`` for "gone or
+    unreadable", which every caller here already treats as "cannot establish
+    identity, refuse to reap".
 
-    The token is treated as **opaque**: stored and compared as a raw string,
-    NEVER parsed into a datetime. That is a safety property, not laziness — a
-    locale quirk or a ``ps`` format surprise can then only make two tokens
-    *differ* (which errs toward NOT reaping, the safe direction), never make two
+    The token is still treated as **opaque**: stored and compared as a raw
+    string, NEVER parsed into a datetime. That is a safety property, not
+    laziness — a format surprise can then only make two tokens *differ* (which
+    errs toward NOT reaping, the safe direction), never make two
     genuinely-different processes' tokens falsely *match* (which could reap a
-    live victim).
-
-    Returns ``None`` when the pid is gone or ``ps`` fails for any reason; every
-    caller treats ``None`` as "cannot establish identity" and refuses to reap.
+    live victim). The shared probe pins ``LC_ALL=C`` (so the month and day names
+    are byte-stable across machines and users) and ``TZ=UTC`` (so the rendering
+    does not follow the caller's time zone): a token rendered differently for the
+    same process would read as a mismatch, which here means refusing to reap —
+    safe, but it would also mean that a group registered before this change is
+    not reaped until it is registered again.
     """
-    if pid <= 0:
-        return None
-    try:
-        # LC_ALL=C pins the month/day names so the token is byte-stable across
-        # machines and users; text mode + explicit decode keeps it a str.
-        completed = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "LC_ALL": "C"},
-            check=False,
-        )
-    except (OSError, ValueError) as exc:  # ps missing, or bad argv
-        logger.debug("group reaper: ps lstart failed for pid %s: %s", pid, exc)
-        return None
-    if completed.returncode != 0:
-        # Non-zero almost always means "no such process" — the pid is gone.
-        return None
-    token = completed.stdout.strip()
-    return token or None
+    return birth_token(pid)
 
 
 #: Memoized start token for THIS process. The owner's own start token is

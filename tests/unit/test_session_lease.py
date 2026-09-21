@@ -13,6 +13,7 @@ import pytest
 from local_operator import session_lease as lease_mod
 from local_operator.session_lease import (
     LEASE_NAME,
+    Claim,
     SessionLease,
     SessionLeaseHeldError,
     acquire_session_lease,
@@ -85,10 +86,13 @@ def test_two_stale_recoverers_cannot_replace_a_fresh_successor(tmp_path: Path, m
     inspected: set[int] = set()
     inspected_lock = threading.Lock()
 
-    def synchronized_read(path: Path) -> tuple[str | None, int | None]:
+    def synchronized_read(path: Path) -> Claim:
+        # Reads through the shared parser and compares the two fields this gate
+        # inspects; the claim now also records its writer's birth fields, which
+        # a token-less claim leaves absent (see ``_write_stale_claim``).
         claim = original_read(path)
         ident = threading.get_ident()
-        if claim == ("stale", 2_147_483_646):
+        if (claim.generation, claim.pid) == ("stale", 2_147_483_646):
             with inspected_lock:
                 first_inspection = ident not in inspected
                 inspected.add(ident)
