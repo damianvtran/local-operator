@@ -626,10 +626,16 @@ class Handshake:
                 "`lop network trust` before it accepts links",
             )
         if self.mode == "join":
-            # THE CALLER HAS ALREADY CLAIMED THE INVITE before this frame is built:
-            # validating here as well would be a second implementation of the same
-            # decision (and a second place for the two to disagree), so the only
-            # check left is that the credential it derived actually arrived.
+            # THE CALLER HAS ALREADY VALIDATED THE INVITE before this frame is
+            # built, and the challenge is the FIRST frame an attacker learns
+            # anything from, so nothing about the token may be decided after it.
+            # Note what the caller has NOT done: written `redeemed`. That happens
+            # once the auth frame proves the peer holds the invite material (see
+            # ``RelayServer._run_inbound_handshake``), because a peer that sends a
+            # hello and vanishes has proved nothing. Validating here as well would
+            # be a second implementation of the same decision (and a second place
+            # for the two to disagree), so the only check left is that the
+            # credential it derived actually arrived.
             if self.credential is None:
                 raise HandshakeRefusal(
                     REASON_INVITE,

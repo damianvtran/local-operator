@@ -330,6 +330,31 @@ InviteState = Literal["minted", "redeemed", "consumed"]
 LinkPhase = Literal["member", "reconcile", "pair"]
 Outcome = Literal["ok", "refused", "failed", "partial", "admitted", "aborted"]
 
+#: The three trust states as a runtime set, mirrored by the reader below — which
+#: is the ONE place a string becomes a :data:`TrustState`, whether it arrived in
+#: another device's frame or on an operator's command line. The set is exported so
+#: a future caller can ask "is this one of them" without restating the list.
+TRUST_STATES: frozenset[str] = frozenset({"active", "untrusted", "disconnected"})
+
+
+def trust_state(value: object) -> TrustState:
+    """``value`` as a :data:`TrustState`, or :class:`MeshRefusal` naming it.
+
+    One reader means one refusal code and one sentence instead of one per caller,
+    and it is deliberately EXACT rather than coercing: a trust value that cannot
+    be read must never be quietly promoted to ``"active"``, which is the one
+    direction where mis-reading it would matter. The refusal is ``bad_trust``,
+    the code every caller that used to validate this by hand already raised, so
+    moving the check here changes no contract — it removes the copies.
+    """
+    if value == "active":
+        return "active"
+    if value == "untrusted":
+        return "untrusted"
+    if value == "disconnected":
+        return "disconnected"
+    raise MeshRefusal("bad_trust", f"unknown trust state {value!r}")
+
 
 @dataclass
 class MemberRecord:

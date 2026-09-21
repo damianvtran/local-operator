@@ -284,7 +284,8 @@ def dial_owner(
     if welcome is None:
         dial.close()
         raise OwnerUnreachable("that session's runtime is not answering its socket")
-    data = welcome.get("data") if isinstance(welcome.get("data"), dict) else {}
+    raw_data = welcome.get("data")
+    data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
     served = str(data.get("session_id") or "")
     if served and served != session_id:
         dial.close()

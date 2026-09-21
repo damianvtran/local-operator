@@ -4013,7 +4013,10 @@ class AttachedSession:
         # not adopted yet.
         built: list[AttachClient] = []
 
-        def live(handler: Any) -> Any:
+        # NOT named ``live``: this function's own body reads the desktop lease
+        # into a ``live`` bool further down, and one name for a callback and a
+        # boolean is a shadowing that nothing but a type checker notices.
+        def once_adopted(handler: Any) -> Any:
             def wrapped(data: Any) -> Any:
                 if built and self._client is built[0]:
                     return handler(data)
@@ -4025,7 +4028,7 @@ class AttachedSession:
             lambda _projection: None,
             on_disconnected,
             events=True,
-            on_event=live(self._on_wire_event),
+            on_event=once_adopted(self._on_wire_event),
             frontend_state=True,
             display_window=self._display_window_requested,
             surface=self._surface,
@@ -4038,9 +4041,9 @@ class AttachedSession:
             # THE declaration, read from the one constant both sides use — see
             # ``ATTACHED_SLASH_CONSUMERS`` for why it is not inlined here.
             slash_consumers=list(ATTACHED_SLASH_CONSUMERS),
-            on_frontend_sync=live(self._on_frontend_sync),
-            on_frontend_update=live(self._on_frontend_update),
-            on_retiring=live(self._on_retiring_frame),
+            on_frontend_sync=once_adopted(self._on_frontend_sync),
+            on_frontend_update=once_adopted(self._on_frontend_update),
+            on_retiring=once_adopted(self._on_retiring_frame),
         )
         built.append(client)
         try:

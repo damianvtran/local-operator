@@ -540,10 +540,7 @@ async def execute_network(
         # tells an agent neither what happened nor what to do (QA round 1, F-6).
         reason = str(scrubbed.get("code") or "")
         message = str(
-            scrubbed.get("message")
-            or scrubbed.get("error")
-            or _clean(stderr)
-            or f"exited {code}"
+            scrubbed.get("message") or scrubbed.get("error") or _clean(stderr) or f"exited {code}"
         )
         hint = _hint(params.action)
         return _error(

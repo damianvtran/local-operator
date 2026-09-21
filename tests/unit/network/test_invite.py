@@ -192,14 +192,42 @@ def test_an_epoch_rotation_invalidates_the_invite() -> None:
 
 def test_a_device_bound_invite_refuses_any_other_device() -> None:
     """The optional binding: a token stolen in transit is worthless to a different
-    device when the invite names one."""
+    device when the invite names one — and the attempt is TERMINAL.
+
+    ``claim`` alone refuses and leaves the invite standing (that is what lets an
+    ordinary failure be retried); the inviter's path goes through
+    :func:`claim_or_consume`, which is where design §5.1/§5.4's rule lives: a bound
+    invite presented by another device IS the leak the binding exists to contain,
+    so it is consumed rather than left redeemable.
+    """
+    record, _invite = _with_invite(device_id="d_" + "c" * 32)
+    invite_id = record.invites[0].invite_id
+    with pytest.raises(types.PairingRefusal) as excinfo:
+        invite_mod.claim_or_consume(
+            record, invite_id, device_id="d_" + "b" * 32, epoch=3, now=110.0
+        )
+    assert excinfo.value.code == invite_mod.REASON_DEVICE
+    assert record.invites[0].state == "consumed"
+    # The named device is now too late as well: consuming is terminal, which is
+    # the price the design accepts for a binding that actually contains a leak.
+    with pytest.raises(types.PairingRefusal) as excinfo:
+        invite_mod.claim(record, invite_id, device_id="d_" + "c" * 32, epoch=3, now=110.0)
+    assert excinfo.value.code == invite_mod.REASON_USED
+
+
+def test_claim_alone_leaves_the_invite_standing() -> None:
+    """``claim`` is the VALIDATOR, and a refused attempt does not burn the invite.
+
+    That property is what makes an honest retry work after an ordinary failure, and
+    it is deliberately unchanged: the one TERMINAL refusal in this family lives in
+    ``claim_or_consume``.
+    """
     record, _invite = _with_invite(device_id="d_" + "c" * 32)
     invite_id = record.invites[0].invite_id
     with pytest.raises(types.PairingRefusal) as excinfo:
         invite_mod.claim(record, invite_id, device_id="d_" + "b" * 32, epoch=3, now=110.0)
     assert excinfo.value.code == invite_mod.REASON_DEVICE
-    # The named device is admitted.
-    assert invite_mod.claim(record, invite_id, device_id="d_" + "c" * 32, epoch=3, now=110.0)
+    assert record.invites[0].state == "minted"
 
 
 def test_the_binding_travels_in_the_envelope() -> None:

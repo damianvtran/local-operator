@@ -165,7 +165,13 @@ class PeerRow:
     kind: str = "daemon"
     state: str = ""
     busy: bool = False
-    pending: bool = False
+    #: WHAT a person is being waited on (``"approval"``/``"ask"``), the same
+    #: ``str | None`` the LOCAL row publishes (``SessionRecord.pending``, carried
+    #: through ``info/collect``): the federated row may not change a field's TYPE,
+    #: because one client reads the local and the remote rows together and a bool
+    #: beside a string is a second vocabulary for one fact. An absent or empty
+    #: value is no claim, never ``False``.
+    pending: str | None = None
     detached: bool = False
     capabilities: tuple[str, ...] = ()
     started: float = 0.0
@@ -227,7 +233,7 @@ class PeerRow:
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
             busy=_bool("busy"),
-            pending=_bool("pending"),
+            pending=str(data.get("pending") or "") or None,
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
             started=float(data.get("started") or 0.0),
@@ -314,7 +320,8 @@ class RelayPeerCatalog:
         detail = self._call(OP_PEER_ROWS)
         if not detail:
             return []
-        peers = detail.get("peers") if isinstance(detail.get("peers"), dict) else {}
+        raw_peers = detail.get("peers")
+        peers: dict[str, Any] = raw_peers if isinstance(raw_peers, dict) else {}
         return [
             PeerFacts(
                 device_id=str(device_id),
@@ -349,7 +356,8 @@ class RelayPeerCatalog:
         for item in detail.get("sessions") or ():
             if not isinstance(item, dict):
                 continue
-            peer = item.get("peer") if isinstance(item.get("peer"), dict) else {}
+            raw_peer = item.get("peer")
+            peer: dict[str, Any] = raw_peer if isinstance(raw_peer, dict) else {}
             rows.append(
                 PeerRow.from_json(
                     item,
@@ -385,7 +393,8 @@ def read_tombstones(config_dir: Path | None = None) -> dict[str, dict[str, Any]]
         return {}
     if not isinstance(data, dict):
         return {}
-    entries = data.get("sessions") if isinstance(data.get("sessions"), dict) else data
+    raw_entries = data.get("sessions")
+    entries: dict[str, Any] = raw_entries if isinstance(raw_entries, dict) else data
     return {str(key): value for key, value in entries.items() if isinstance(value, dict)}
 
 
@@ -1010,7 +1019,8 @@ class RemoteSessionClient(AttachClient):
             raise ConnectionError(
                 str((opening or {}).get("message") or "the relay refused to open that stream")
             )
-        detail = opening.get("detail") if isinstance(opening.get("detail"), dict) else {}
+        raw_detail = opening.get("detail")
+        detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
         self._stream_id = str(detail.get("stream") or "")
         # From here the socket IS the session pipe: the next frame the owner
         # sends is its welcome projection, exactly as it is for a local attach.

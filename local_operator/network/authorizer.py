@@ -61,9 +61,11 @@ class NetworkState(Protocol):
 
     def network(self, network_id: str) -> NetworkRecord | None:
         """The record, or ``None`` when this device is not in that network."""
+        ...
 
     def local_session_ids(self) -> set[str]:
         """Sessions that live on THIS device (the relay's read-through cache)."""
+        ...
 
 
 class Authorizer:

@@ -377,7 +377,10 @@ machine; and the operator's own mistakes (pairing with the wrong device).
    that never comes back ages out and must reconcile-and-rotate, which is the
    half of R5 that rotation-at-removal-time alone does not cover
    (`mesh-transport-identity.md` §8.1, §8.3, §8.4; prior art in
-   `mesh-prior-art.md` §2).
+   `mesh-prior-art.md` §2). **This clause is DECIDED BUT NOT IMPLEMENTED in this
+   build, and that is recorded rather than implied** — see the status note under
+   the invariant in `mesh-transport-identity.md` §8.4, which names the piece it
+   is waiting on (the reconcile client).
 7. **Fails closed.** Any error in authentication, authorisation, or epoch
    verification refuses the request. There is no degraded-trust mode, and no
    "localhost so it must be fine" shortcut for a peer link.
@@ -615,7 +618,7 @@ here for the rule itself.
 | Decision | Reason | Detail lives in |
 |---|---|---|
 | `lop network uninstall --purge` is scoped to the **network records, invites and outbox** of the networks being uninstalled. Deleting the **device identity keypair** needs its own flag, `--purge-identity`, **plus an interactive TTY confirmation naming every network still known to that identity**; without a TTY it is refused outright, with a message naming the flag that does work | The keypair is unrecoverable and is what every *other* network addresses this device by, so one flag covering both would let a single-network action destroy identity that networks the operator was not thinking about still depend on. One flag, one blast radius; the wider one needs a human — the rule `lop network trust` already applies to its own irreversible act | §6 (the row); `mesh-transport-identity.md` §2.2, §16 Q1, invariant `purge_identity_needs_a_named_tty_confirmation` |
-| `network.epoch_max_age_s` ships at **30 days**, configurable | It is a **policy statement** about the operator's device-loss window, not a derived number: above any plausible offline window (a sleeping laptop is never forced to re-pair), below the 180-day prior-art ceiling for node credentials. When it fires, the network reconciles and the lowest-`device_id` active admin rotates — a session in flight is not disrupted, because a session is a separate runtime that does not hold the link, and a viewer only sees its existing reconnect path | `mesh-transport-identity.md` §4.3, §8.4, §11; prior art in `mesh-prior-art.md` §2 |
+| `network.epoch_max_age_s` is decided at **30 days**, configurable — **and it is NOT IMPLEMENTED in this build** (see the status note under the invariant in `mesh-transport-identity.md` §8.4, which names the reconcile client it waits on) | It is a **policy statement** about the operator's device-loss window, not a derived number: above any plausible offline window (a sleeping laptop is never forced to re-pair), below the 180-day prior-art ceiling for node credentials. When it fires, the network reconciles and the lowest-`device_id` active admin rotates — a session in flight is not disrupted, because a session is a separate runtime that does not hold the link, and a viewer only sees its existing reconnect path | `mesh-transport-identity.md` §4.3, §8.4, §11; prior art in `mesh-prior-art.md` §2 |
 | **R6 is owned by `mesh-ui.md`**; `mesh-session-mobility.md` implements the federation the surface renders | R6 is a statement about what a front end shows — one list, a local/remote annotation, inside the desktop's budget — and §8 already pointed at `mesh-ui.md` for its detail. Mobility supplies the data path, not the surface, and now says so as "implements on the way" rather than claiming the requirement | §2.1 (R6), §8; `mesh-ui.md` §1.3, §2; `mesh-session-mobility.md` header and §3 |
 
 **One consequence worth stating:** decisions taken here bind the *shape* of what

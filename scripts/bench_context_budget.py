@@ -240,7 +240,44 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the ``secret`` (49), ``web_read`` (71) and ``scratchpad://`` (51) raises, so
 #: the ratchet stays tight; the tighten band below (1,200) is nowhere near
 #: tripped and the next context reduction tightens it.
-BUDGET_BILLED_TOKENS = 29_950
+#:
+#: RAISED 29,950 -> 30,700 for the ``network`` tool (the mesh's agent surface,
+#: ``mesh-transport-identity.md`` §12.5 / ``mesh-ui.md`` §3.2), stated with the
+#: same arithmetic and for the same reason as the raise above. BOTH sides were
+#: measured by running THIS script, each in its own tree, rather than derived
+#: from one another:
+#:
+#:   base, ``origin/main`` 87a0cf70           83,185 chars = ~29,923 billed
+#:                                            (27 tools, 27 under the old
+#:                                             ceiling)
+#:   + the tool's schema           50,827 chars of tool_schemas vs
+#:                                  48,920 = +1,907 chars = +686
+#:   + its one inventory line      +10 chars = +4
+#:   + instructions                       33,919 vs 33,919  = 0
+#:   = measured on this head                  85,102 chars = ~30,612 billed
+#:                                            (28 tools)
+#:
+#: So the whole delta is one tool, and it is the ladder's tax paid as its rung 5
+#: describes: a new core tool ships its schema on every request, in every
+#: session, whether or not it is called. It is UNGATED on purpose and the design
+#: records why (§12.5: an agent must be able to create the FIRST network, so a
+#: gate on "a relay exists" would strip the tool from exactly the session that
+#: has to run ``lop network init``), which means there is no host on which this
+#: raise is not paid. Two things make that the right trade anyway, and both are
+#: stated rather than implied: the tool is the only way the operator's R19 brief
+#: ("an agent can set a network up from a verbal request") is satisfiable on a
+#: fresh machine, and its schema is already the trimmed one — a twelve-value
+#: ``action`` enum with one field per flag the CLI takes, which is one schema
+#: where twelve tools would be twelve.
+#:
+#: A reader comparing this number to a real session's start context should know
+#: the one place the mesh's "nothing changes on a device with no network" claim
+#: is not literally true: that session does gain this tool. It is the claim
+#: ``mesh-ui.md`` §3.2 makes about every OTHER surface (no relay, no daemon, no
+#: listener, no state), and the tool's own ``description`` is what keeps the
+#: schema from being paid for nothing — it names the capability and says what
+#: this build cannot do.
+BUDGET_BILLED_TOKENS = 30_700
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

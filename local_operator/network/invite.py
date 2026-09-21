@@ -516,6 +516,38 @@ def consume(
     return invite
 
 
+def claim_or_consume(
+    record: NetworkRecord,
+    invite_id: str,
+    *,
+    device_id: str,
+    epoch: int,
+    now: float | None = None,
+) -> Redemption:
+    """``claim``, with design §5.1/§5.4's one TERMINAL refusal applied.
+
+    Every other refusal in ``claim`` is about THIS attempt — a stale epoch, an
+    expired or unknown invite, another redemption already in flight — and leaving
+    the invite standing is what lets the operator fix the cause and retry. A
+    ``bound_device`` mismatch is not: ``--device`` exists so that a token which
+    leaked to a second device is worthless to it, and a bound invite presented by
+    another device is therefore the leak itself, which the design consumes rather
+    than leaves standing for a second try. The cost is one more
+    ``lop network invite``, and it is the whole point of the binding.
+
+    The state change happens HERE rather than at the call site because the rule is
+    a property of the state machine, not of one caller: the caller's only extra
+    duty is to persist ``record`` (the same duty it has after
+    :func:`mark_redeemed`).
+    """
+    try:
+        return claim(record, invite_id, device_id=device_id, epoch=epoch, now=now)
+    except PairingRefusal as refusal:
+        if refusal.code == REASON_DEVICE:
+            consume(record, invite_id, outcome="wrong_device", now=now)
+        raise
+
+
 # ---------------------------------------------------------------------------
 # The human step's words
 # ---------------------------------------------------------------------------

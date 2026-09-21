@@ -175,9 +175,7 @@ def _mint_invite(server: relay.RelayServer, record: types.NetworkRecord) -> tupl
 
 
 def _type_the_code(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        net_cli, "_read_code", lambda args, derived, fingerprint: derived
-    )
+    monkeypatch.setattr(net_cli, "_read_code", lambda args, derived, fingerprint: derived)
 
 
 def _answer_confirmation(
@@ -229,9 +227,7 @@ def _join(
     being asked, so a host that starves this process cannot turn it into the window's
     expiry instead of the reason.
     """
-    record = store.load(
-        store.list_networks(inviter.root)[0].network_id, inviter.root
-    )
+    record = store.load(store.list_networks(inviter.root)[0].network_id, inviter.root)
     token, envelope = _mint_invite(inviter.server, record)
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(device.root))
     _type_the_code(monkeypatch)
@@ -371,9 +367,12 @@ def test_membership_converges_over_links_that_were_already_up(
     while time.time() < deadline and d.device_id not in _members(a):
         time.sleep(0.1)
 
-    assert _members(a) == {a.device_id, b.device_id, c.device_id, d.device_id}, (
-        "the late member never became visible over a link that was already up"
-    )
+    assert _members(a) == {
+        a.device_id,
+        b.device_id,
+        c.device_id,
+        d.device_id,
+    }, "the late member never became visible over a link that was already up"
     assert _members(c) == {a.device_id, b.device_id, c.device_id, d.device_id}
     # NOTHING WAS DIALED TO MAKE THIS HAPPEN — the refresh runs on the links that
     # exist, which is the property that makes it independent of a mesh's shape.
@@ -679,9 +678,9 @@ def test_a_frame_queued_immediately_before_a_close_reaches_the_peer(
     while time.time() < deadline and not seen:
         time.sleep(0.05)
 
-    assert seen, (
-        "the frame queued immediately before the close never arrived: close beat the writer"
-    )
+    assert (
+        seen
+    ), "the frame queued immediately before the close never arrived: close beat the writer"
 
 
 # ---------------------------------------------------------------------------
