@@ -144,6 +144,40 @@ def test_every_guide_cross_reference_resolves() -> None:
     assert not self_refs, f"a guide must not tell the model to read itself: {self_refs}"
 
 
+def test_every_guide_reference_in_the_code_resolves() -> None:
+    """The other half of the dead end, one directory over (review round 1, R1-8).
+
+    The corpus walk above cannot see the references the HARNESS itself prints:
+    the missing-tool advisory names `guide://system-tools` from `builtin.py`, and
+    a rename of that guide would leave the harness pointing at a name the
+    resolver reports as unknown — with nothing but the model's own recovery to
+    notice. The test that guards guide-to-guide links should guard
+    code-to-guide links with it, because the same rename breaks both and only
+    one of them was checked.
+
+    Scoped to the packaged `local_operator/` tree: that is the code that ships
+    beside the guides and therefore the only code whose references this catalog
+    can promise. A reference in a user's own script is theirs to get right.
+    """
+    root = Path(discover_guides()[0].file_path).resolve().parents[2]
+    assert (root / "guides").is_dir(), f"unexpected package layout at {root}"
+    names = {guide.name for guide in discover_guides()}
+
+    # `guide://<name>` placeholders are excluded by the pattern itself (the
+    # character class stops at `<`), which is why the protocol's own prose in
+    # `skills/index.py` and the prompts does not trip this.
+    dangling: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        for lineno, line in enumerate(
+            path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+        ):
+            for target in set(re.findall(r"guide://([a-zA-Z0-9_-]+)", line)):
+                if target not in names:
+                    dangling.append(f"{path.relative_to(root)}:{lineno} -> guide://{target}")
+
+    assert not dangling, f"code references a guide that does not exist: {dangling}"
+
+
 def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
     """The one rule two guides state, so the two texts cannot drift apart.
 

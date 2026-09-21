@@ -130,8 +130,16 @@ Two console facts that decide how you drive it:
 ```sh
 # macOS, once: does the tool respond through the shell's own PATH now?
 zsh -lc 'ffmpeg -version' || echo 'PATH fix needed in this surface'
-eval "$(brew shellenv)"        # for the rest of THIS surface
+command -v brew || echo 'brew is not on THIS PATH either — use the absolute path'
+eval "$(/opt/homebrew/bin/brew shellenv)"      # for the rest of THIS surface, if brew was missing
 ```
+
+The last line uses the **absolute path to `brew`**, and that is not decoration: in
+the surface this guide measured, `brew` itself does not resolve, so
+`eval "$(brew shellenv)"` substitutes an EMPTY string — `eval ""` exits 0 and
+changes nothing, which is the worst kind of fix. Check `command -v brew` first,
+as above, and use the absolute path when it is absent. On Intel Macs the prefix
+is `/usr/local` rather than `/opt/homebrew`.
 
 That last line is what to run in a console surface after a Homebrew install; it
 is a session-local fix. Making it permanent means a line in the user's own
@@ -161,14 +169,14 @@ after the initial setup**, it is the same tool the user will use themselves, and
 After installing, `command -v` in the SAME surface may still say nothing — see
 step 1. `brew install` symlinks into `/opt/homebrew/bin` (or `/usr/local/bin`)
 and tells the user their shell config needs the prefix on `PATH`; the tool works
-from that prefix immediately, and the surface needs `eval "$(brew shellenv)"`
-to see it. Verify against the absolute path or after that line, and never treat
-the unchanged `command -v` as a failed install.
+from that prefix immediately, and the surface needs the shellenv line to see it.
+Verify against the absolute path or after that line, and never treat the
+unchanged `command -v` as a failed install.
 
 ```sh
 brew install ffmpeg
-/opt/homebrew/bin/ffmpeg -version | head -1   # works immediately
-eval "$(brew shellenv)" && ffmpeg -version | head -1   # works through PATH too
+/opt/homebrew/bin/ffmpeg -version | head -1        # works immediately
+command -v brew && eval "$(brew shellenv)" && ffmpeg -version | head -1
 ```
 
 ### When `brew` is not installed at all
@@ -203,12 +211,14 @@ config exports the prefix. The installer prints the exact line for the user's
 shell; it is the same one Homebrew's own installation page documents:
 
 ```sh
-eval "$(/opt/homebrew/bin/brew shellenv)"
+command -v brew || eval "$(/opt/homebrew/bin/brew shellenv)"   # /usr/local on Intel Macs
 ```
 
-For the rest of that surface, prefix it once and keep working; for the user's own
-terminals, the line belongs in their `~/.zprofile`, which is a change to their
-shell config — tell them rather than doing it silently.
+That line is for the rest of THIS surface, and it uses the absolute path for the
+reason step 5 gives: after a fresh bootstrap `brew` itself may not resolve yet, so
+`brew shellenv` would substitute nothing and `eval` would succeed silently. For
+the user's own terminals the line belongs in their `~/.zprofile`, which is a
+change to their shell config — tell them rather than doing it silently.
 
 ## Linux
 
@@ -322,24 +332,37 @@ guide — so the table is by tool, not by task.
 |---|---|---|---|---|---|---|---|
 | ffmpeg | convert, cut, encode, mux video and audio; thumbnails | `brew install ffmpeg` | `sudo apt install ffmpeg` | `sudo dnf install ffmpeg` | `sudo pacman -S ffmpeg` | `winget install --id Gyan.FFmpeg -e` | `ffmpeg -version \| head -1` |
 | ffprobe | inspect a file without converting it — codecs, duration, streams | ships with ffmpeg | `sudo apt install ffmpeg` | ships with ffmpeg | ships with ffmpeg | ships with ffmpeg | `ffprobe -version \| head -1` |
-| ImageMagick | convert, resize, crop, compose images; PDF-to-image (needs ghostscript) | `brew install imagemagick` | `sudo apt install imagemagick` | `sudo dnf install ImageMagick` | `sudo pacman -S imagemagick` | `winget install --id ImageMagick.ImageMagick -e` | `magick -version \| head -1` |
+| ImageMagick | convert, resize, crop, compose images; PDF-to-image (needs ghostscript) | `brew install imagemagick` | `sudo apt install imagemagick` | `sudo dnf install ImageMagick` | `sudo pacman -S imagemagick` | `winget install --id ImageMagick.ImageMagick -e` | `magick -version \| head -1` **or** `convert -version \| head -1` (see note) |
 | poppler | text and images out of PDFs (`pdftotext`, `pdftoppm`, `pdfinfo`) | `brew install poppler` | `sudo apt install poppler-utils` | `sudo dnf install poppler-utils` | `sudo pacman -S poppler` | `winget install --id oschwartz10612.Poppler -e` | `pdftotext -v` (see note) |
 | ghostscript | the PostScript/PDF engine ImageMagick and `mutool` lean on | `brew install ghostscript` | `sudo apt install ghostscript` | `sudo dnf install ghostscript` | `sudo pacman -S ghostscript` | **no winget package** — `choco install ghostscript`, or the Artifex installer | `gs --version` |
 | pandoc | document format conversion (`docx` ↔ `md`, `html`, `epub`) | `brew install pandoc` | `sudo apt install pandoc` | `sudo dnf install pandoc` | `sudo pacman -S pandoc` | `winget install --id JohnMacFarlane.Pandoc -e` | `pandoc --version \| head -1` |
-| tesseract | OCR: text out of a scanned image or PDF page | `brew install tesseract` | `sudo apt install tesseract-ocr` | `sudo dnf install tesseract` | `sudo pacman -S tesseract` | `winget install --id UB-Mannheim.TesseractOCR -e` | `tesseract --version \| head -1` (see note) |
+| tesseract | OCR: text out of a scanned image or PDF page | `brew install tesseract` | `sudo apt install tesseract-ocr` | `sudo dnf install tesseract` | `sudo pacman -S tesseract` | `winget install --id UB-Mannheim.TesseractOCR -e` | `tesseract --version \| head -1` |
 | yt-dlp | download media a site publishes | `brew install yt-dlp` | `sudo apt install yt-dlp` | `sudo dnf install yt-dlp` | `sudo pacman -S yt-dlp` | `winget install --id yt-dlp.yt-dlp -e` | `yt-dlp --version` |
 
-Three caveats in that table are load-bearing:
+The caveats in that table are load-bearing:
 
+- **ImageMagick's command depends on the VERSION, and half of Linux ships 6.**
+  ImageMagick 7's command is `magick`; ImageMagick 6's is `convert`. Debian 12
+  "bookworm" and both current Ubuntu LTS releases install **IM6**, where `magick`
+  does not exist at all — so `magick -version | head -1` reports failure on a
+  perfectly good install there, which is the exact confusing text this guide's
+  opening calls the most common failure mode. Check either spelling, IM7 first:
+  `magick -version || convert -version`. (Debian 13 "trixie" is IM7, which is
+  why a check run only there looks right; it is not the distribution most users
+  have.)
 - **`convert` is not ImageMagick on Windows** — `convert.exe` is a filesystem
-  tool. ImageMagick 7's command is `magick`, which is what the row checks.
-- **`pdftotext -v` and `tesseract --version` are special.** `pdftotext` has no
-  `--version`; `-v` prints a banner to stderr and it treats an unknown option as
-  a filename. `tesseract --version` prints a usage block first. Verify these two
-  with the real task instead: `pdftotext file.pdf -` and
-  `tesseract image.png -` are the honest tests.
+  tool, so on Windows the command is `magick` and nothing else.
+- **`pdftotext` has no `--version`.** `-v` prints a banner to stderr and the
+  tool treats an unknown option as a filename, so it answers with a file error.
+  Verify it with the real task instead: `pdftotext file.pdf -`.
 - **`ghostscript` has no winget package.** Its `ArtifexSoftware` manifest is
   `mutool`, not Ghostscript; on Windows it is the Artifex installer or Chocolatey.
+
+(`tesseract --version` is NOT special: the shipped Homebrew build answers
+`tesseract 5.5.2` on the first line with no usage text. The usage block comes
+from running `tesseract` with no arguments. An earlier revision of this guide
+said otherwise and its evidence recorded that bare command's output — the row is
+correct as written.)
 
 Package names in the Linux columns are apt/dnf/pacman names, not upstream names:
 `imagemagick` is lowercase, the RPM world calls it `ImageMagick`, and tesseract's
@@ -356,10 +379,18 @@ the machine already has something that does it:
 - **Resize, convert or crop one image on macOS**: `sips` is built in —
   `sips -Z 1200 input.png --out output.png`. No install, no approval.
 - **One image conversion anywhere else**: most tasks that reach for ImageMagick
-  are a pure-Python package away (`Pillow`), which installs into the session's own
-  environment rather than the user's machine.
-- **Reading one PDF's text**: `pdftotext` may already be present; if not, `pypdf`
-  or `pdfminer.six` reads most PDFs without a system package.
+  are a few lines of `Pillow`, which is **already a declared dependency of this
+  product and importable in its environment** — `from PIL import Image` needs no
+  install and no approval. Do not generalise from that to pypdf or pdfminer:
+  neither is installed, so reaching for one is a `pip install` into the product's
+  own uv-managed environment, which is a change to the user's machine like any
+  other (ask first), and one that can collide with `lop-update`'s dependency
+  set. A throwaway venv under the session's scratch area is the cleaner route
+  when you need a library this product does not ship.
+- **Reading one PDF's text**: `pdftotext` may already be present — check with
+  `command -v pdftotext` before assuming anything is missing. If it is absent,
+  a pure-Python PDF reader is an install into the product environment (above),
+  not a free alternative.
 
 What those do **not** cover is video and audio. There is no built-in media
 conversion in this product and no Python package that substitutes for FFmpeg's
