@@ -83,9 +83,22 @@ training corpus. A credential that reaches `bash` (its `argv`, a child's
 environment), that lives in this process's memory, or that is written to disk in
 plaintext is NOT compromised: each of those is a containment, and the only thing it
 owes anyone is cleanup. That is why :attr:`ShapeHit.exposed` exists and why it is
-the sole input to the escalated notice: a hit that was masked whole is reported as
-an event with NO exposure, and only a fragment that survived into the text the model
-reads escalates. This paragraph is about SEVERITY; it changes nothing about
+the sole input to the escalated notice: only a fragment that survived into the text the
+model reads escalates, and a hit that was masked whole is CONTAINED.
+
+**CONTAINED IS SILENT, and the cleanup obligation went with it.** The operator's
+instruction is that the contained case files nothing — "as long as something wasn't
+actually leaked to the transcript we shouldn't get a session incident indicated
+anywhere" — and one consequence belongs here rather than in a diff comment: the
+contained wording carried the only cleanup obligation this system ever stated,
+*delete any plaintext copy a tool call may have written*, and with contained hits
+filed nowhere in-tree there is now no surface that tells an operator a plaintext
+copy may be sitting on disk. That is a deliberate trade, not an oversight; the
+wording is kept in :func:`~local_operator.incidents.format_shape_incident_message`
+for a caller that deliberately has something to say about a contained hit, and
+today nothing in-tree does.
+
+This paragraph is about SEVERITY; it changes nothing about
 coverage, where under-masking is still a leak and over-masking is still a defect.
 """
 
@@ -257,7 +270,7 @@ _ASSIGNED_VALUE_GROUP = (
 #: credential containing a quote (the case the negative corpus already carries as
 #: `DB_PASSWORD=abc"defghij"`).
 _QUOTED_ASSIGNED_VALUE_GROUP = (
-    r"((?:(?!\3(?=[\s,;)\]}\"']|$))[^\s]){7,}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
+    r"((?:(?!(?P=quote)(?=[\s,;)\]}\"']|$))[^\s]){7,}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
 )
 
 #: A guard for the two rules that consume a WHOLE value: skip when that value
@@ -457,6 +470,26 @@ _RUN_TOGETHER_NAMES = frozenset(
 #: Prefixes that mark a name as a COUNT or a cache/handle rather than a
 #: credential (``max_tokens``, ``context_tokens``, ``cache_key``). Named
 #: explicitly because the distinction cannot be inferred from the tail word.
+#: The tail nouns that make a count word in a NON-first segment decisive.
+#:
+#: Not "any credential word the name could end in" — that is the leak this set
+#: exists to prevent — and not ``token``, which is a credential word that
+#: happens to be spelled like one of these (``FACEBOOK_PAGE_ACCESS_TOKEN``).
+#: A tail here is a QUANTITY by itself, so no qualifier can make it a secret.
+#:
+#: **What that trades away, stated rather than left to a differential** (QA round 2,
+#: Q2-1). A name of the form ``PREFIX_<count word>_TOKENS`` — ``REDIS_CACHE_TOKENS``
+#: and its relatives, 300 spellings in QA's sweep — was masked at ``origin/main``
+#: (its first segment is not a count word, and the first-segment arm was all there
+#: was) and is released here, because this arm reads the TAIL as a quantity. The
+#: reading is deliberate: a qualified ``TOKENS``/``COUNT`` tail is a count whatever
+#: precedes it, which is the same judgement that keeps the Anthropic counters
+#: unmasked, and QA's round-2 pass read them the same way. It is pinned in the
+#: NEGATIVE half of the corpus (``COUNT_TAIL_RELEASED_NAMES``) rather than left to
+#: agree with a differential, and what would change it is a real credential
+#: spelling in that family — a corpus case, not a hunch.
+_COUNT_TAIL_NOUNS = frozenset({"tokens", "count", "counts"})
+
 _COUNT_WORDS = frozenset(
     {
         "max",
@@ -526,25 +559,48 @@ def is_count_shaped(name: str) -> bool:
     (``cache_key``) end in a credential word and carry no secret. Masking them
     would hide numbers the agent needs while protecting nothing.
 
-    **Every segment is consulted, not just the first.** The first-segment-only
+    **The first segment decides, and then the TAIL decides.** The first-segment
     form is right for the vocabulary above and wrong for the Anthropic usage
     counters the Bedrock cost-tracking work is full of:
     ``ephemeral_5m_input_tokens`` and ``ephemeral_1h_input_tokens`` are counts,
     but their first segment is a MODE, so the tail ``tokens`` won the judgement,
     the counter was masked, and the grader then found a fragment inside the
-    swallowed next field and filed a rotation demand for a number (the operator's
-    ``write`` of ``idv-bedrock-ca-pin/EVIDENCE.md``, 2026-09-20). The count word
-    is the QUALIFIER, and the qualifier is not always first.
+    swallowed next field and filed a rotation demand for a NUMBER (the operator's
+    ``write`` of ``idv-bedrock-ca-pin/EVIDENCE.md``, 2026-09-20).
 
-    The tail is swept along with the rest rather than excluded: no
-    ``_COUNT_WORDS`` member is also a credential word, so the sweep is the same
-    judgement as "any qualifier segment", and it stays correct for a caller that
-    has not checked the name's shape first. Measured over the whole corpus when
-    this widened — every identifier it carries, both halves — with zero positive
-    cases losing a mask and zero negatives gaining one.
+    The obvious widening — a count word anywhere in the name — is a LEAK, and it
+    was measured on the shipped store path before it shipped.
+    :func:`is_credential_name` asks only that the TAIL be a credential word, so a
+    qualifier that merely CONTAINS a quantity word released real credential names
+    that ``origin/main`` masks: ``REDIS_CACHE_PASSWORD`` (``cache``),
+    ``KAFKA_OUTPUT_SECRET`` (``output``), ``OPENAI_PROMPT_KEY`` (``prompt``),
+    ``MY_PAGE_ACCESS_TOKEN`` (``page``) and their relatives — left fully
+    readable, with no mask, no label and nothing registered for containment
+    (agent review R1-1, QA round 1 Q-1).
+
+    So the sweep is scoped by the TAIL, which is the segment that says what a name
+    IS. A tail that is itself a quantity (``tokens``, ``count``) makes the name a
+    count whatever qualifies it; ``…_ACCESS_TOKEN`` and ``…_CACHE_PASSWORD`` are
+    credentials whatever qualifies them. The first-segment arm is kept exactly as
+    ``origin/main`` had it, because it carries the vocabulary the tail cannot: a
+    cache HANDLE keys a count, and a model parameter is named for what it limits.
+
+    One residual is knowingly left, and it is pre-existing rather than this rule's:
+    a name whose FIRST segment is a count word and whose tail is a credential word
+    — the shape where a quantity word opens the name and a credential word closes
+    it — is released here, and was released at ``origin/main`` too, because
+    ``segments[0]`` is what that arm reads. Closing it means re-deciding the first
+    arm (which would re-mask ``cache_key``, the case that arm exists for), not
+    widening this sweep, so it is recorded rather than fixed here.
     """
     segments = _name_segments(name)
-    return len(segments) > 1 and any(seg in _COUNT_WORDS for seg in segments)
+    if len(segments) < 2:
+        return False
+    if segments[0] in _COUNT_WORDS:
+        return True
+    return segments[-1] in _COUNT_TAIL_NOUNS and any(
+        segment in _COUNT_WORDS for segment in segments[1:-1]
+    )
 
 
 #: Issuer prefixes whose separator is one of ``-``/``_`` (so the gate needs both
@@ -1093,8 +1149,9 @@ def _assignment_guard(match: Match[str]) -> bool:
     fragment of the swallowed text as exposed and filed a rotation demand for a
     credential that had been covered whole.
 
-    A quoted value therefore belongs to ``credential-assignment-quoted``, which
-    is the only rule of the two that can find where a quoted value ENDS. The
+    A quoted value therefore belongs to the QUOTED spelling of this same rule
+    (the second ``credential-assignment`` entry in the table), which is the only
+    one of the two that can find where a quoted value ENDS. The
     unquoted spelling keeps this grammar unchanged: a value with no delimiter to
     stop at must keep the length bound and the terminating-delimiter rule, and
     narrowing it would publish the tail of a credential containing a quote — the
@@ -1473,8 +1530,8 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # whole shape on the most common surface there is.
             # Group 3 is the opening quote when the value is quoted, and this rule
             # must not match such a value at all: the guard below refuses it and
-            # hands it to ``credential-assignment-quoted``, which is the only rule
-            # that can find where a quoted value ENDS (see
+            # hands it to the QUOTED spelling below, which is the only rule that
+            # can find where a quoted value ENDS (see
             # :data:`_QUOTED_ASSIGNED_VALUE_GROUP` for the over-masking that cost
             # the operator a neighbouring KEY). The refusal is in the guard rather
             # than in this pattern because that is where every other rule in this
@@ -1500,12 +1557,23 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
     # produced on compact JSON, and `_assignment_guard` for the delegation that
     # keeps the two from fighting (a quoted match is this rule's, never the
     # unquoted rule's).
+    # ONE LABEL for both spellings, deliberately (agent review R1, finding 5): a
+    # shape label is operator-facing text — it is rendered into the notice's
+    # ``(shapes)`` list and into the journal row — and the two rules are one
+    # shape to whoever reads that line. The rules stay separate because the
+    # VALUE's bound differs, which is an implementation fact, not something an
+    # operator triaging a notice can act on differently.
     Shape(
-        "credential-assignment-quoted",
+        "credential-assignment",
         re.compile(
             r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{2,48})"
             r"([\"']?\s*[:=]\s*)"
-            r"([\"'])"
+            # NAMED, not positional. The value group below stops at the delimiter
+            # this group captures, and a positional backreference would silently
+            # start bounding against a different group the day a group is added or
+            # reordered above it — an over-reaching mask again, with nothing
+            # failing (agent review R1, finding 6). A group NAME cannot drift.
+            r"(?P<quote>[\"'])"
             rf"{_QUOTED_ASSIGNED_VALUE_GROUP}"
         ),
         None,
@@ -2753,6 +2821,14 @@ class DumpShape:
 #: and that is the trade for turning a quadratic scan linear — a deep path is
 #: rare, a 140 KB line cost 142 s. The residual is named here rather than left to
 #: be discovered.
+#: One more measurement, from QA round 1 (Q-3), sizes the population that sits
+#: outside those edges: taking EVERY harvested line that carries both a read verb
+#: and a credential filename — firing or not — the gap reaches 664 characters at
+#: its extreme and 48 at its median. Those extremes are prose that happens to hold
+#: a verb and a filename rather than read commands, which is why the bound still
+#: clears the real work (largest gap a firing command needed: 71); they are named
+#: here because the exemption they describe is exactly what the cut gives up, and
+#: raising it is one constant if a real spelling beyond it turns up.
 _FILE_GAP_CHARS = 96
 _FILE_PATH_CHARS = 128
 

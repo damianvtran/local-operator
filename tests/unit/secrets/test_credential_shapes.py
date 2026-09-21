@@ -68,7 +68,12 @@ from local_operator.session.transcript import Transcript
 from local_operator.tools import builtin
 from local_operator.variables import VariableStore
 from tests.unit.secrets.credential_shape_corpus import (
+    COMPACT_TOKEN_PAIR,
+    COUNT_QUALIFIER_NAMES,
+    COUNT_TAIL_RELEASED_NAMES,
+    COUNTER_USAGE_LINE,
     DUMP_COMMAND_CASES,
+    FIXTURE_VALUE,
     NEGATIVE_CASES,
     POSITIVE_CASES,
     Case,
@@ -364,7 +369,6 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
     guarded = [shape for shape in CREDENTIAL_SHAPES if shape.guard is not None]
     assert {shape.label for shape in guarded} == {
         "credential-assignment",
-        "credential-assignment-quoted",
         "credential-url-value",
         "cli-credential-flag",
         "vendor-prefixed-token",
@@ -2234,20 +2238,19 @@ def _corpus_grading() -> str:
 #: hit and every grading. Regenerate by printing ``_corpus_grading()`` — and only in
 #: the commit that argues why the behaviour moved.
 #:
-#: Moved on 2026-09-21 by the false-positive fix, and here is the argument, case by
-#: case. **No masked text moved anywhere in the corpus.** Nine cases moved only their
-#: hit LABEL, because a quoted value is now matched by ``credential-assignment-quoted``
-#: rather than ``credential-assignment``: the JSON comma value, the quoted password
-#: values (single and double), ``export`` with quotes, the tab-indented refresh token,
-#: the terraform output, the AWS secret payload, the compact ``client_secret`` and the
-#: single-quoted dict secret. Measured by diffing the whole corpus against the module
-#: at the branch head: 9 of 308 cases differ, every difference is ``credential-
-#: assignment`` -> ``credential-assignment-quoted`` with an identical mask, and the
-#: remaining 299 are byte-identical (values and gradings included). The corpus also
-#: GREW in this commit — 5 compact-JSON cases and 4 counter cases — which moves the
-#: digest for a second, independent reason: those cases are the specification for the
-#: fix, not a re-baselining of the old behaviour.
-_CORPUS_GRADING_DIGEST = "dfc997df9f1f1b0c69a980b73c7f248e8d4b0299e3a00fdb1fdbe52d794065bb"
+#: Moved on 2026-09-21 by the false-positive fix, and the argument is short because
+#: the measurement is: **no pre-existing case moved at all.** The corpus as it stood
+#: at ``origin/main`` (308 cases) produces byte-identical masked text, labels, values,
+#: windows, ``complete`` and ``exposed`` under this module — measured case by case
+#: against ``git show origin/main:local_operator/redaction_shapes.py`` loaded beside
+#: it. The digest moves for one reason only: the corpus GREW, to 335 cases, and the
+#: added cases are the specification for the fix — 5 compact-JSON positives, 4 counter
+#: negatives, one positive per name in ``COUNT_QUALIFIER_NAMES`` (the credential names
+#: an any-segment count sweep released in the first version of this change: agent
+#: review R1-1, QA round 1 Q-1), and one negative per name in
+#: ``COUNT_TAIL_RELEASED_NAMES`` (the boundary the tail arm draws, pinned in the half
+#: it releases: QA round 2, Q2-1).
+_CORPUS_GRADING_DIGEST = "9f962ae4a02809e713b2493a142c4371d1b9ede141c189af7dd7ee03f0e9575b"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -2293,27 +2296,6 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
     assert checked > 150, f"the corpus graded only {checked} hits: it is not evidence"
 
 
-def _compact_pair() -> str:
-    """The corpus's compact token pair, found by reason.
-
-    Derived rather than written out, like ``_exposed_text``: this file spells no
-    credential-shaped literal of its own, and the day the corpus changes its mind
-    the tests follow it instead of disagreeing with it.
-    """
-    return next(
-        case.text for case in POSITIVE_CASES if case.reason.startswith("a compact JSON token pair")
-    )
-
-
-def _counter_line() -> str:
-    """The corpus's Bedrock evidence line, found by reason (see ``_compact_pair``)."""
-    return next(
-        case.text
-        for case in NEGATIVE_CASES
-        if case.reason.startswith("the evidence file's own line")
-    )
-
-
 def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
     """The name half of the assignment rule, at the segment level.
 
@@ -2324,10 +2306,14 @@ def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
     inside the match — the grader then found a fragment of the swallowed text in
     the unmasked first key and demanded a rotation for a NUMBER.
 
-    Both halves: the counters must be counts, and a real credential name must not
-    become one. The credential names asserted here are the ones whose SECOND
-    segment is a credential word, which is what a rule reading the wrong segment
-    would have decided.
+    Both halves, and the second half is asserted over NAMES rather than over
+    spellings: an any-segment sweep released the ``COUNT_QUALIFIER_NAMES`` family
+    — ``REDIS_CACHE_PASSWORD``, ``FACEBOOK_PAGE_ACCESS_TOKEN`` — which share the
+    counters' segment-level shape and are credentials, not counts (agent review
+    R1-1, QA round 1 Q-1). The first version of this test asserted four one- and
+    two-segment names with no count word in them, which is exactly why it could
+    report "nothing loses a mask" while a real name did: a name has to be driven
+    through BOTH the judgement and the pass, so that is what happens here.
     """
     for counter in (
         "ephemeral_5m_input_tokens",
@@ -2341,6 +2327,21 @@ def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
     for credential in ("access_token", "refresh_token", "client_secret", "api_key"):
         assert redaction_shapes.is_credential_name(credential), credential
         assert not redaction_shapes.is_count_shaped(credential), credential
+    for name in COUNT_TAIL_RELEASED_NAMES:
+        # The boundary the tail arm draws, asserted in the OTHER direction: a
+        # qualified quantity tail is a count, so these stay readable — and the
+        # corpus carries the case for each, so neither direction can drift alone
+        # (QA round 2, Q2-1).
+        assert redaction_shapes.is_credential_name(name), name
+        assert redaction_shapes.is_count_shaped(name), name
+    for name in COUNT_QUALIFIER_NAMES:
+        # Both readings, because either one alone can pass for the wrong reason:
+        # the judgement must call it a credential, and the pass must mask it.
+        assert redaction_shapes.is_credential_name(name), name
+        assert not redaction_shapes.is_count_shaped(name), name
+        masked = scrub_shapes(f"{name}={FIXTURE_VALUE}")
+        assert REDACTION_MARKER in masked, f"{name} left its value readable"
+        assert FIXTURE_VALUE not in masked, name
 
 
 def test_a_compact_json_pair_keeps_its_neighbouring_key_and_files_nothing() -> None:
@@ -2353,7 +2354,7 @@ def test_a_compact_json_pair_keeps_its_neighbouring_key_and_files_nothing() -> N
     covered whole. So this asserts the shape of the right answer, not a count:
     both keys stay readable, both values go, and nothing escalates.
     """
-    text = _compact_pair()
+    text = COMPACT_TOKEN_PAIR
     masked, hits = scrub_shapes_with_hits(text)
     assert "access_token" in masked, "the credential's own key was masked away"
     assert "refresh_token" in masked, "the neighbouring KEY was masked away"
@@ -2379,9 +2380,9 @@ def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> Non
     (``_ESCALATING_POSITIVE_CASES``); this is the test that pins the direction
     without widening that set.
     """
-    obj = json.loads(_compact_pair())
+    obj = json.loads(COMPACT_TOKEN_PAIR)
     value = obj["access_token"]
-    text = _compact_pair()[:-1] + f',"echo":"{value}"' + "}"
+    text = COMPACT_TOKEN_PAIR[:-1] + f',"echo":"{value}"' + "}"
     masked, hits = scrub_shapes_with_hits(text)
     assert masked.count(REDACTION_MARKER) == 2, masked
     assert f'"echo":"{value}"' in masked, "the readable copy is the exposure"
@@ -2398,7 +2399,7 @@ def test_the_measured_counter_line_is_not_an_incident() -> None:
     exposed — so a future widening that re-classifies a counter reds here even if
     the corpus row is edited away.
     """
-    text = _counter_line()
+    text = COUNTER_USAGE_LINE
     masked, hits = scrub_shapes_with_hits(text)
     assert masked == text, masked
     assert hits == [], hits

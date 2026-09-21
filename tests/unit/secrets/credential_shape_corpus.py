@@ -48,10 +48,93 @@ def _compact(*fields: tuple[str, str], quote: str = '"') -> str:
     delimiter would stop it crossed the field boundary — see the compact cases in
     the POSITIVE block, and the counters in the NEGATIVE block for what that
     judgement was catching instead.
+
+    ONE LIMIT, which is not visible from the signature: a value CONTAINING the
+    quoting character cannot be expressed through this helper, so a fixture whose
+    value holds a quote is written out in full instead of built here. The compact
+    fixtures below are also NAMED, and the regression tests read those names rather
+    than searching the table for a reason string: a test whose fixture is found by
+    prose is one edit away from testing nothing (agent review R1, finding 7).
     """
     q = quote
     return "{" + ",".join(f"{q}{name}{q}:{q}{value}{q}" for name, value in fields) + "}"
 
+
+#: The exact wire texts the compact cases carry, spelled once and NAMED.
+#:
+#: Readability is why: they are what a reviewer checks the quoted rule against, and
+#: they are what the regression tests read — ``COMPACT_TOKEN_PAIR`` rather than a
+#: search for a reason string, which is the coupling that made an edit to prose an
+#: edit to a test (agent review R1, finding 7).
+#: renders: {"access_token":"abc123def456","refresh_token":"zzz999yyy888"}
+COMPACT_TOKEN_PAIR = _compact(("access_token", "abc123def456"), ("refresh_token", "zzz999yyy888"))
+COMPACT_CLIENT_CREDENTIALS = _compact(
+    ("client_secret", "s3cr3t-value-here"), ("client_id", "public-identifier-x")
+)
+COMPACT_CLIENT_CREDENTIALS_REPR = _compact(
+    ("client_secret", "s3cr3t-value-here"), ("scope", "read"), quote="'"
+)
+COMPACT_API_KEY = _compact(("api_key", "realAccessKeyId1234"), ("region", "ca-central-1"))
+COMPACT_PASSWORD_PAIR = _compact(("password", "hunter2hunter2"), ("user", "svc"))
+
+#: The Bedrock evidence file's own line, as the operator's ``write`` carried it: a
+#: counter under a qualified name, with the whitespace that kept THIS spelling quiet
+#: while the compact one fired.
+COUNTER_USAGE_LINE = (
+    'usage: {"input_tokens": 16, "cache_creation_input_tokens": 0, '
+    '"cache_creation": {"ephemeral_5m_input_tokens": 3536}}'
+)
+
+#: The credential NAMES the TAIL arm RELEASES, pinned so the boundary is a decision
+#: rather than a differential artefact (QA round 2, Q2-1): a qualified quantity tail.
+#:
+#: They were masked at ``origin/main`` — the first-segment arm does not see them —
+#: and this change reads them as COUNTS, which is the reading QA's sweep agreed with
+#: and the same judgement that keeps the Anthropic counters unmasked. The cases live
+#: in the NEGATIVE half and carry a value that WOULD be masked if the tail arm were
+#: reverted, so they discriminate in the direction that matters.
+COUNT_TAIL_RELEASED_NAMES: tuple[str, ...] = (
+    "REDIS_CACHE_TOKENS",
+    "DB_CACHE_TOKENS",
+    "SENTRY_CACHE_TOKENS",
+    "MINIO_CACHE_TOKENS",
+)
+
+#: A synthetic value for the generated cases: opaque, credential-free spelling, and
+#: deliberately not built from a name so it cannot be mistaken for a real one. It is
+#: long enough to clear the assignment rule's seven-character floor.
+FIXTURE_VALUE = "QA-fixture-9c1f4a"
+
+#: Credential NAMES whose qualifier carries a word that also names a QUANTITY.
+#:
+#: The other direction of the count judgement, and the one that leaks when the
+#: sweep is widened carelessly. ``is_credential_name`` only asks that the TAIL be a
+#: credential word, so ``REDIS_CACHE_PASSWORD`` has the same segment-level shape as
+#: ``ephemeral_5m_input_tokens`` — ``…_<count word>_…_<credential tail>`` — and must
+#: still be masked. Every name here IS masked at ``origin/main``; every one was
+#: released by an any-segment sweep (agent review R1-1, QA round 1 Q-1), with no
+#: mask, no label and nothing registered for containment. They live in a table
+#: because two readers need the same list: the POSITIVE block generates a case per
+#: name, and the count-judgement test iterates it rather than restating the names as
+#: prose (which is what let the class through the first time).
+COUNT_QUALIFIER_NAMES: tuple[str, ...] = (
+    # `cache` in a non-first segment, under a password/secret/token tail.
+    "REDIS_CACHE_PASSWORD",
+    "REDIS_CACHE_TOKEN",
+    "DB_CACHE_PASSWORD",
+    "SENTRY_CACHE_PASSWORD",
+    "ELASTICACHE_CACHE_PASSWORD",
+    "MY_CACHE_PASSWORD",
+    "SESSION_CACHE_SECRET",
+    "MINIO_CACHE_SECRET_KEY",
+    # Other quantity words in a qualifier: `output`, `prompt`, `page`.
+    "KAFKA_OUTPUT_SECRET",
+    "OPENAI_PROMPT_KEY",
+    "FACEBOOK_PAGE_ACCESS_TOKEN",
+    "META_PAGE_ACCESS_TOKEN",
+    "IG_PAGE_ACCESS_TOKEN",
+    "MY_PAGE_ACCESS_TOKEN",
+)
 
 #: A credential spelled the way something spells one. Every one of these must
 #: come back with at least one shape masked.
@@ -397,27 +480,38 @@ POSITIVE_CASES: tuple[Case, ...] = (
     # OVER-REACH direction: a real key id in the same compact shape, which the
     # narrowed value grammar may not release.
     Case(
-        _compact(("access_token", "abc123def456"), ("refresh_token", "zzz999yyy888")),
+        COMPACT_TOKEN_PAIR,
         "a compact JSON token pair: the mask may not cross the field boundary",
     ),
     Case(
-        _compact(
-            ("client_secret", "s3cr3t-value-here"),
-            ("client_id", "public-identifier-x"),
-        ),
+        COMPACT_CLIENT_CREDENTIALS,
         "a compact client-credentials response, the neighbour a public id",
     ),
     Case(
-        _compact(("client_secret", "s3cr3t-value-here"), ("scope", "read"), quote="'"),
+        COMPACT_CLIENT_CREDENTIALS_REPR,
         "the Python repr spelling of the same, single-quoted and compact",
     ),
     Case(
-        _compact(("api_key", "realAccessKeyId1234"), ("region", "ca-central-1")),
+        COMPACT_API_KEY,
         "a real key id in compact JSON: the over-reach direction",
     ),
     Case(
-        _compact(("password", "hunter2hunter2"), ("user", "svc")),
+        COMPACT_PASSWORD_PAIR,
         "a compact password whose neighbouring field must survive",
+    ),
+    # --- a count word in a QUALIFIER, under a credential TAIL ------------------
+    # One case per name in ``COUNT_QUALIFIER_NAMES``. These are the names an
+    # any-segment count sweep releases: the qualifier says "cache" or "page" and
+    # the tail says "password" or "access_token", and the TAIL is what the name
+    # IS. They are in this half because they must be masked — and they were, at
+    # ``origin/main``, which is what makes releasing them a regression rather than
+    # a trade. The name is in the reason so each case has its own test id.
+    *(
+        Case(
+            f"{name}={FIXTURE_VALUE}",
+            f"a count word in a qualifier segment under a credential tail: {name}",
+        )
+        for name in COUNT_QUALIFIER_NAMES
     ),
 )
 
@@ -629,13 +723,25 @@ NEGATIVE_CASES: tuple[Case, ...] = (
         "the same pair at the top level of a usage object",
     ),
     Case(
-        'usage: {"input_tokens": 16, "cache_creation_input_tokens": 0, '
-        '"cache_creation": {"ephemeral_5m_input_tokens": 3536}}',
+        COUNTER_USAGE_LINE,
         "the evidence file's own line: a counter under a qualified name",
     ),
     Case(
         '{"cache_read_input_tokens":10,"cache_creation_input_tokens":20}',
         "the ordinary usage companions of the counter",
+    ),
+    # --- the tail arm's BOUNDARY, one case per name (QA round 2, Q2-1) ---------
+    # The direction the tail arm RELEASES: a qualified plural-quantity tail. Names
+    # of this form were masked before this change, and the reading kept here is that
+    # the tail says what the name IS — the qualifier cannot turn a quantity into a
+    # secret. Pinned as cases so a future widening that masks them again has to
+    # argue with the table; the name is in the reason so each has its own test id.
+    *(
+        Case(
+            f"{name}={FIXTURE_VALUE}",
+            f"a qualified quantity tail the tail arm releases: {name} is a count",
+        )
+        for name in COUNT_TAIL_RELEASED_NAMES
     ),
 )
 
@@ -746,7 +852,11 @@ DUMP_COMMAND_CASES: tuple[DumpCase, ...] = (
     # simple command, in a comment, or in a heredoc body than the reading verb —
     # ordinary work nagged for a token it merely MENTIONED (the operator's words:
     # "remove the redaction warning just from credentials being used in bash").
-    # The five below are those firings, masked where a path was private.
+    # The five below are those firings, masked where a path was private. The third
+    # had its credential FILENAME masked along with the path, which made it fire on
+    # neither ref — a case that passes vacuously while its reason claims a firing —
+    # so the token is restored to the harvest's other spelling and the reason now
+    # names what it pins: base fires, head does not (agent review R1, finding 3).
     DumpCase(
         "head -30; echo ---; ls -la .env",
         False,

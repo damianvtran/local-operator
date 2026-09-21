@@ -9573,12 +9573,13 @@ class Session:
         # emit: the row reached the model, persisted, and painted on no operator
         # surface at all, live or on replay.
         #
-        # `warning` ink for BOTH classifications, deliberately: the event is one
-        # the operator asked to be shown either way (a credential touched a tool,
-        # and a plaintext copy may be sitting on disk to clean up), and the
-        # severity difference is carried by the text rather than by the ink. A
-        # quieter ink for the contained case is a DESIGN decision on the notice
-        # row, not something this change should make by the back door.
+        # `warning` ink for whichever classification reaches this method, and
+        # in-tree today that is only the escalated one: the contained hit is
+        # dropped at `_queue_shape_incident`, the single gate, so this comment is
+        # about the INK of a severity this path still carries by text. The
+        # severity difference lives in the wording rather than in the ink, because
+        # a quieter ink for the contained case is a DESIGN decision on the notice
+        # row rather than something this change should make by the back door.
         try:
             await self._emit(NoticeEvent(text=text, kind="warning", headline="credential masked"))
         except Exception:  # noqa: BLE001 — a paint failure is not a turn failure
