@@ -141,6 +141,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelChangeEvent,
     ModelSpec,
+    ReasoningDeltaEvent,
     SubagentEndEvent,
     SubagentProgressEvent,
     SubagentStartEvent,
@@ -1254,7 +1255,20 @@ def _make_relay(
 
     async def relay(event: AgentEvent) -> None:
         nonlocal relayed, streaming
-        if job is not None and job.trajectory is not None:
+        # The model's private reasoning is display-only and has NO row on the
+        # subagent page, so it must not consume a slot in this bounded window:
+        # reasoning is one event per reasoning token, and 250 of them per model
+        # call silently evicted the tool calls and messages the page exists to
+        # show (review round 1, MAJOR-1 — measured: three tool rows became one
+        # with 250 fragments per call, all three stayed with none). Coalescing
+        # would still spend a slot per model call on a row nothing can paint,
+        # so the family is dropped here and the parent's own stream keeps
+        # receiving it untouched.
+        if (
+            job is not None
+            and job.trajectory is not None
+            and not isinstance(event, ReasoningDeltaEvent)
+        ):
             record = event.model_dump(mode="json")
             # Stamped BEFORE the append and never revised, because this is the
             # identity the subagent page keys its rows by and the eviction two

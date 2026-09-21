@@ -19,6 +19,7 @@ from local_operator.tui.widgets.editor import (
     InterruptRequested,
     ShellModeChanged,
 )
+from local_operator.tui.widgets.reasoning import ReasoningBlock
 from local_operator.tui.widgets.status_line import StatusLine
 from local_operator.tui.widgets.toast import Toast
 from local_operator.tui.widgets.tool_card import ToolCard
@@ -31,6 +32,7 @@ from local_operator.tui.widgets.transcript import (
 
 __all__ = [
     "AssistantBlock",
+    "ReasoningBlock",
     "CommandPicker",
     "Editor",
     "EditorQuit",

@@ -104,6 +104,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
@@ -281,8 +282,10 @@ def _child_env(config_dir: Path, home: Path) -> dict[str, str]:
             "LINES": str(SCREEN[1]),
             # The same two side channels the headless stage pins: a notice or a
             # terminal-title write from a test is attention stolen from a
-            # machine running dozens of concurrent sessions.
-            "LOCAL_OPERATOR_NO_NOTIFICATIONS": "1",
+            # machine running dozens of concurrent sessions. Both live on the
+            # shared harness constant so this file and the other child builders
+            # cannot disagree about which switches they are.
+            **NO_NOTIFY_ENV,
             "LOCAL_OPERATOR_NO_TERMINAL_TITLE": "1",
         }
     )

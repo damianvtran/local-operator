@@ -52,6 +52,7 @@ import functools
 import json
 import logging
 import math
+import os
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -646,6 +647,16 @@ REJECTION_VALUE_SEP = " — "
 ADVICE_NOT_FOUND = "does not exist; clicks open a terminal. Clear this to discover the app."
 ADVICE_NOT_EXECUTABLE = "not executable; clicks open a terminal. Clear this to discover the app."
 ADVICE_NOT_ON_PATH = "not on PATH; clicks open a terminal. Clear this to discover the app."
+
+#: Whether this process is on Windows, read ONCE as a module constant.
+#:
+#: Both places below ask a Windows question — which shell the bash row promises
+#: and what "executable" means for a click launcher — and neither can be asked
+#: with an inline ``os.name`` read a test can flip: patching ``os.name``
+#: process-wide makes ``pathlib`` build a ``WindowsPath`` and refuse on the host
+#: running the test (see :mod:`local_operator.procstate`, which holds its
+#: platform the same way). One name, read once, patched in tests.
+_IS_WINDOWS = os.name == "nt"
 _VALUE_REJECTION_ADVICE: tuple[str, ...] = (
     ADVICE_NOT_FOUND,
     ADVICE_NOT_EXECUTABLE,
@@ -819,11 +830,48 @@ def _validate_desktop_launch_command(value: Any) -> None:
     if os.sep in executable or (os.altsep and os.altsep in executable):
         if not os.path.exists(executable):
             raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_FOUND}")
-        if not os.access(executable, os.X_OK):
+        # TWO QUESTIONS, ONE PER PLATFORM, and the POSIX one is unchanged: on
+        # Windows "is it executable" has no mode-bit answer at all
+        # (:func:`_windows_command_is_runnable`), and the vacuous `X_OK` that
+        # used to stand in for it let any existing file through.
+        runnable = (
+            _windows_command_is_runnable(executable)
+            if _IS_WINDOWS
+            else os.access(executable, os.X_OK)
+        )
+        if not runnable:
             raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_EXECUTABLE}")
         return
     if shutil.which(executable) is None and not _resolvable_for_the_user(executable):
         raise ValueError(f"{executable}{REJECTION_VALUE_SEP}{ADVICE_NOT_ON_PATH}")
+
+
+def _windows_command_is_runnable(executable: str) -> bool:
+    """Whether WINDOWS would actually run ``executable``.
+
+    ``os.access(path, os.X_OK)`` cannot answer this (audit D23). It is a POSIX
+    question — "does this file carry the execute bit?" — and on Windows there is
+    no such bit: the call is satisfied for any existing file, so the check this
+    replaces accepted a ``.txt`` or a ``.ps1`` as a click launcher and the
+    failure surfaced later as an unexplained refusal to launch.
+
+    The platform's own answer is the one ``cmd`` uses: a file is runnable when
+    its extension is in ``PATHEXT`` (``.COM;.EXE;.BAT;.CMD;…``). A path with NO
+    extension is also runnable, because ``CreateProcess`` appends ``.exe`` to a
+    name that carries none — so ``C:\\tools\\notepad`` runs ``notepad.exe``.
+    PATHEXT is read from the environment rather than hardcoded: it is the user's
+    own list, and a host that has added an extension to it means it.
+    """
+    suffix = os.path.splitext(executable)[1]
+    if not suffix:
+        return os.path.isfile(executable + ".exe")
+    # Split on ";" and not on ``os.pathsep``: the list's separator is a WINDOWS
+    # fact (there it happens to equal ``os.pathsep``, which is why the two look
+    # interchangeable) and reading it as the host's would make this function
+    # answer differently on a machine that is not Windows — including in a test,
+    # which is where the difference would otherwise hide.
+    extensions = (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";")
+    return suffix.upper() in {ext.strip().upper() for ext in extensions if ext.strip()}
 
 
 def _bool_choices(on: str, off: str) -> tuple[Choice, ...]:
@@ -922,6 +970,49 @@ def _effort_choices() -> tuple[Choice, ...]:
         Choice("", "auto", "the model's own default"),
         *(Choice(level, level, _EFFORT_LEVEL_HELP.get(level, "")) for level in EFFORT_ORDER),
     )
+
+
+def _bash_shell_help(windows: bool) -> str:
+    """The ``bash.shell`` row's help for a platform, and why it is platform-shaped.
+
+    The sentence NAMES A PATH — "empty uses bash on PATH, else /bin/sh" — so it
+    has to name the one this OS falls back to (audit B26). The resolver is
+    ``tools.builtin.resolve_bash_shell``: the configured value, else ``bash`` on
+    PATH, else that module's last resort. On Windows the last resort is NOT
+    ``/bin/sh`` — there is no such file there — it is the ``bash.exe`` of a Git
+    for Windows install, and when even that is absent the tool REFUSES the call
+    with an install hint (``WINDOWS_NO_BASH_MESSAGE``) rather than executing
+    every command in a dialect it does not advertise. Promising ``/bin/sh`` on
+    that row would describe an interpreter that cannot exist on the machine the
+    operator is reading it on.
+
+    A FUNCTION RATHER THAN ONE INLINE CONDITIONAL, so both spellings are
+    reachable by a test on either host: the row itself is built at import, and
+    the only other way to exercise the Windows string from macOS would be to
+    patch ``os.name`` process-wide. The text is spelled here rather than imported
+    from ``tools.builtin`` for the reason the row's ``path`` is pinned by test
+    instead of imported: this module must stay cheap for the CLI, and
+    ``tools.builtin`` is not (see the module docstring on Textual).
+
+    THE WINDOWS SPELLING IS 72 CELLS, and that is a constraint rather than a
+    coincidence (design round 1, D1). This field does not wrap, its shed ladder
+    has no rung below "help alone", and the floor cuts the sentence mid-clause
+    with a visible ``…`` — so the 163-cell spelling this replaces was clipped at
+    `else the bash.exe` at 80 columns AND at `with neit` at 120, i.e. unreadable
+    on the platform it was written for at every width the page supports. The
+    clause it drops is not information lost: "with neither, the tool refuses and
+    says how to install one" is the first line of that module's own refusal
+    (``tools.builtin.WINDOWS_NO_BASH_MESSAGE``), which the tool card renders with
+    room around it. `Git for Windows` also had to go — the cells are the budget
+    here, and the refusal's install hint is where a user reads the product name.
+    """
+    if windows:
+        return "Interpreter for the bash tool. Empty: bash on PATH, else Git's bash.exe."
+    return "Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh."
+
+
+#: This host's spelling, baked into the row below at import.
+_BASH_SHELL_HELP = _bash_shell_help(_IS_WINDOWS)
 
 
 SETTINGS: tuple[Setting, ...] = (
@@ -1486,6 +1577,20 @@ SETTINGS: tuple[Setting, ...] = (
         default=True,
         help="Keep the agent's mid-turn narration in the transcript after its tool calls run.",
         choices=_bool_choices("keep narration", "hide narration once tools run"),
+    ),
+    Setting(
+        key="display.reasoning",
+        path=("display.reasoning",),
+        section="appearance",
+        label="Live model reasoning",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Show the model's private thinking while it thinks. It collapses to "
+            "one row when the answer starts, and never joins the transcript, "
+            "so it is absent after /resume either way."
+        ),
+        choices=_bool_choices("show live reasoning", "hide reasoning"),
     ),
     Setting(
         key="display.rail",
@@ -2585,7 +2690,7 @@ SETTINGS: tuple[Setting, ...] = (
         label="Bash interpreter",
         kind=Kind.TEXT,
         default="",
-        help="Interpreter for the bash tool. Empty uses bash on PATH, else /bin/sh.",
+        help=_BASH_SHELL_HELP,
         empty_unsets=True,
     ),
     # -- shell_environment ----------------------------------------------

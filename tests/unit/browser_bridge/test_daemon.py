@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -9,12 +11,62 @@ from typing import Any
 import pytest
 from starlette.testclient import TestClient
 
+from local_operator.browser_bridge import daemon as daemon_module
 from local_operator.browser_bridge import state as state_store
 from local_operator.browser_bridge.daemon import create_app, pairing_status
 from local_operator.browser_bridge.protocol import PROTO_VERSION, Response
 
 EXTENSION_ID = "a" * 32
 ORIGIN = f"chrome-extension://{EXTENSION_ID}"
+
+
+def test_the_pairing_write_says_when_the_mode_restricts_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``os.chmod`` is inert on Windows, and the file holds a token (audit C8).
+
+    Skipping the two calls is the easy half. The half that matters is that the
+    ABSENCE IS VISIBLE: an operator reading this daemon's log — which is what
+    ``lop browser logs`` shows — is told the mode bought nothing and what does
+    protect the file instead, rather than being left to infer it from a source
+    comment. Said once per process, because the sentence is about the platform.
+    """
+    chmods: list[int] = []
+    monkeypatch.setattr(daemon_module, "_MODE_BITS_ARE_CONFIDENTIALITY", False)
+    monkeypatch.setattr(daemon_module, "_mode_notice_logged", False)
+    monkeypatch.setattr(daemon_module.os, "chmod", lambda path, mode: chmods.append(mode))
+
+    with caplog.at_level("WARNING", logger=daemon_module.logger.name):
+        daemon_module._private_write(tmp_path / "browser" / "pairing.json", {"a": 1})
+        daemon_module._private_write(tmp_path / "run" / "pairing-pending.json", {"a": 2})
+
+    assert chmods == [], "an inert call is skipped rather than made for the look of it"
+    notes = [record.getMessage() for record in caplog.records if "inert" in record.getMessage()]
+    assert len(notes) == 1, "the note is about the platform, so it is logged once"
+    assert "access control list" in notes[0]
+
+
+def test_the_pairing_write_still_tightens_the_modes_on_posix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The POSIX path is unchanged: directory first, then the file itself."""
+    if sys.platform == "win32":  # pragma: no cover - the POSIX half
+        pytest.skip("mode bits are a POSIX claim")
+    chmods: list[int] = []
+    real_chmod = os.chmod
+    monkeypatch.setattr(daemon_module, "_mode_notice_logged", False)
+    monkeypatch.setattr(
+        daemon_module.os,
+        "chmod",
+        lambda path, mode: (chmods.append(mode), real_chmod(path, mode))[0],
+    )
+
+    target = tmp_path / "browser" / "pairing.json"
+    daemon_module._private_write(target, {"a": 1})
+
+    assert chmods == [0o700, 0o600], "the directory first, then the file itself"
+    assert target.stat().st_mode & 0o777 == 0o600
+    assert target.parent.stat().st_mode & 0o777 == 0o700
 
 
 def test_rpc_auth_invalid_and_disconnected(tmp_path: Path) -> None:

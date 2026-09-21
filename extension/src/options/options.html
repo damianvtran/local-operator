@@ -66,6 +66,67 @@
         </p>
       </section>
 
+      <!-- The file-transfer consent. Both capabilities are OFF until a human
+           turns them on HERE: the worker only ever READS these flags, and no
+           daemon frame, tool call or page can write one (consent.ts rule 1 — the
+           switch is the consent boundary, and the copy the user reads here is the
+           same string a refusal carries). Turning `Allow downloads` on also
+           requests the optional `downloads` permission from this page, on that
+           click: it is deliberately NOT declared at install time, so installing
+           or updating the extension never widens what it may do. -->
+      <section class="card">
+        <h2>File transfer</h2>
+        <label class="switch" for="allow-downloads">
+          <input id="allow-downloads" type="checkbox" role="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-text">Allow downloads</span>
+        </label>
+        <p class="hint">
+          Lets the agent save a file a page offers into this session's private folder. Chrome
+          asks for permission to manage downloads the first time you turn this on. The file
+          appears briefly in your normal Downloads folder before Local Operator moves it, so
+          expect to see it there and then not.
+        </p>
+
+        <label class="switch switch--stacked" for="allow-uploads">
+          <input id="allow-uploads" type="checkbox" role="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+          <span class="switch-text">Allow uploads</span>
+        </label>
+        <p class="hint">
+          Lets the agent attach local files to a page's file input. Files that look like
+          credentials (SSH keys, <code>.env</code> files) and Local Operator's own configuration
+          are refused whatever this switch says. Uploads need no extra Chrome permission: the
+          extension already has the access they use.
+        </p>
+
+        <!-- The state line and BOTH notices sit below the two rows, and the order is
+             a fix rather than a style: a notice between the switches pushed the
+             uploads row 45.5 px down when downloads was toggled (round-1 D4), and
+             a note about one capability is not a reason for the other row to move.
+             The state line is what says, in words, which way the switches point
+             (round-1 D3) — the off state used to be carried by the knob alone.
+
+             WHY THEY ARE STILL READABLE AT SHORT VIEWPORT HEIGHTS (round-2 U1).
+             Measured before the fix: at 760x520 the sentence sat at viewport
+             y=530-587 in a 520 px viewport and at 420x700 at y=592-688 — below the
+             fold entirely — so a user who had scrolled far enough to press the
+             switch saw the knob flick back off with nothing readable saying why.
+             The shipped mechanism is a REVEAL, not a pinned block: `notice()` in
+             `options.ts` scrolls this box into view (see `revealNotice`, which also
+             keeps the pressed row on screen and re-applies the scroll once the
+             page's own flash banner has settled). A `position: sticky` block was
+             tried first and rejected on measurement — it pinned at 900x620 and
+             420x700 but left the notice at y=530 in a 520 px viewport, which is the
+             case that matters, and it would not recover from a resize or a focus
+             change either. Nothing here is sticky. -->
+        <p class="consent-state" id="consent-state"></p>
+        <div class="consent-notices">
+          <p class="consent-note hidden" id="downloads-notice" role="status" aria-live="polite"></p>
+          <p class="consent-note hidden" id="uploads-notice" role="status" aria-live="polite"></p>
+        </div>
+      </section>
+
       <section class="card">
         <h2>Allowed sites</h2>
         <p class="hint">

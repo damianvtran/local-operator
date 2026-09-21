@@ -49,6 +49,7 @@ from local_operator.evaluation.evidence.models import (
     VerificationIssueCode,
     VerificationReport,
 )
+from local_operator.procstate import O_BINARY
 
 _ALLOWED_ROOT = {
     ".lock",
@@ -66,11 +67,19 @@ MAX_EVENTS = 100_000
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 MAX_PARSED_MEDIA_BYTES = 32 * 1024 * 1024
 _READ_CHUNK = 1024 * 1024
+# `| O_BINARY` is the READ half of the write-side fix, and it was
+# found by review rather than by the reading that produced the write
+# half: text mode rewrites on the way IN too, so an artifact whose
+# bytes contain `0x0D 0x0A` was hashed as something other than what
+# is on disk. `verify.py` compares that digest to the file NAME, so
+# on Windows such an artifact failed its own verification. Same flag,
+# same reason, opposite direction.
 _READ_FLAGS = (
     os.O_RDONLY
     | getattr(os, "O_CLOEXEC", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_NONBLOCK", 0)
+    | O_BINARY
 )
 _DIR_FLAGS = _READ_FLAGS | getattr(os, "O_DIRECTORY", 0)
 

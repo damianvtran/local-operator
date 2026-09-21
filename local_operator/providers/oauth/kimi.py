@@ -26,6 +26,7 @@ import httpx
 
 from local_operator.harness.types import AbortSignal
 from local_operator.paths import config_dir as _app_config_dir
+from local_operator.procstate import O_BINARY
 from local_operator.providers.oauth.callback_server import (
     LoginCallbacks,
     LoginError,
@@ -81,7 +82,7 @@ def get_or_create_device_id(config_dir: Path | None = None) -> str:
                 return stored
         device_id = str(uuid.uuid4())
         directory.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | O_BINARY, 0o600)
         try:
             os.write(fd, (device_id + "\n").encode())
         finally:

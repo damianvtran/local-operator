@@ -49,6 +49,7 @@ import pytest
 from local_operator.incidents import render_cut_off_reason
 from local_operator.session.runtime import process as child_mod
 from local_operator.session.runtime import registry
+from tests.e2e.harness import NO_NOTIFY_ENV
 from tests.e2e.watchdog import bounded
 
 pytestmark = pytest.mark.e2e
@@ -306,6 +307,7 @@ def _child_env(config_dir: Path, prefix: Path, session_id: str, **extra: str) ->
         for k, v in os.environ.items()
         if not k.startswith(("CMUX_", "LOP_RUNTIME_", "LOP_MOBILE_CHILD_"))
     }
+    env.update(NO_NOTIFY_ENV)
     env.update(
         {
             "LOCAL_OPERATOR_CONFIG_DIR": str(config_dir),

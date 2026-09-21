@@ -1349,7 +1349,7 @@ class ViewerSessionProtocol(SessionProtocol, Protocol):
         """Called when the runtime retired itself for a newer build."""
         ...
 
-    def set_drain_callback(self, callback: Callable[[str], Any] | None) -> None:
+    def set_drain_callback(self, callback: Callable[..., Any] | None) -> None:
         """Called the moment the runtime announces a departure that REFUSES work.
 
         The sibling of :meth:`set_refresh_callback` one event earlier: that one

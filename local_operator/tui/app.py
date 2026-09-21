@@ -165,7 +165,9 @@ from local_operator.session.runtime.types import (
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
+    UPDATING,
     bound_text,
+    update_phrase,
 )
 from local_operator.slash_commands import (
     PERSIST_HINT,
@@ -200,6 +202,8 @@ from local_operator.tui.events import (
     HistoryRowsSettled,
     NoticePosted,
     PeerMessageDelivered,
+    ReasoningDelta,
+    ReasoningEnd,
     RetryEnded,
     RetryStarted,
     SessionEvent,
@@ -304,6 +308,7 @@ from local_operator.tui.widgets.org_chart_view import (
     OrgChartView,
     OrgChartViewDismissed,
 )
+from local_operator.tui.widgets.reasoning import DEFAULT_REASONING, ReasoningBlock
 from local_operator.tui.widgets.session_picker import (
     RESUME_EMPTY_NOTICE,
     SessionPickerScreen,
@@ -325,6 +330,7 @@ from local_operator.tui.widgets.settings_view import (
     SettingsViewDismissed,
 )
 from local_operator.tui.widgets.status_line import (
+    ICON_APPROVALS,
     ICON_MCP,
     McpStatus,
     StatusLine,
@@ -782,6 +788,26 @@ QUEUED_PROMPT_DECLINE_NOTICE = "queued message kept — clear the composer, esc 
 #: disagree about what has been said here (UX round 1, U2).
 QUEUED_ELSEWHERE_NOTICE = "a message is queued for the next runtime — it runs when the session does"
 
+#: THE UPDATE WINDOW'S SENTENCE IS NOT COMPOSED HERE, and that is a correction rather
+#: than a relocation (design review round 1, D5). This module used to hold its own
+#: copy — "updating to the newer build; your message is queued … " — while
+#: ``types.update_phrase`` composed a different one, so the sentence the operator read
+#: was not the sentence under test, and the notice was the one surface that could have
+#: named WHICH build was arriving while ``lop sessions`` and the phone already did.
+#: The vocabulary lives in ``types`` and the frame's own pair is passed through, so
+#: the notice, the fleet cell and the incident row are one sentence with three
+#: renderings (the phase tables the pin walks, ``_UPDATING_SHORT`` and
+#: ``update_short``, all read the same three tokens).
+#:
+#: THE OTHER TWO PHASES ARE NOT PAINTED HERE, and the pin asserts reachability rather
+#: than the presence of table entries it walks (agent review round 1, MINOR 3): only
+#: ``UPDATING`` ever arrives on a frame — an applied update is announced one method
+#: over by :meth:`OperatorApp._announce_refresh_completed`, and a failed one leaves the
+#: runtime SERVING, so there is no frame to carry it and the record plus the incident
+#: row are where it is read (design review round 1, D1 fixed that on the fleet and
+#: info surfaces). A table of sentences nothing can reach is what the reviewer
+#: measured; a call site that renders the phase it is given is what replaced it.
+
 #: Which sentence a draining frame earns, keyed by the TRIGGER'S OWN WORDS — the
 #: ``leaving`` phrase the runtime publishes on its record and now sends in the
 #: frame, so the app and the fleet surfaces quote one vocabulary instead of two
@@ -858,6 +884,34 @@ def _announceable_kind(entry: CatalogEntry) -> str:
     from local_operator.tui.notify import CONTEXTS
 
     return entry.completion_kind if entry.completion_kind in CONTEXTS else "complete"
+
+
+def _is_test_hosted(directory: Path, entry: CatalogEntry) -> bool:
+    """Whether this row's conversation is on the TEST hosting (the mock wire).
+
+    LAYER 3'S OWN HALF of the rule, and the one the operator actually meets:
+    the process switch silences the process that RAN the mock, while THIS
+    surface is the TUI they keep a dozen of, reading a store every rig on the
+    machine writes into. Without the per-row read, a ``test/test-model`` session
+    left in that store is bannered here with the mock's own sentence exactly as
+    a real session's "finished" would be (review round 1, R1-1, reproduced with
+    a real app and a real store).
+
+    IT RUNS IN THE SCAN'S WORKER THREAD, never on the event loop: the scan is
+    dispatched as ``asyncio.to_thread(collect)``, and this is a journal walk —
+    0.6 ms when the newest v2 row is at the tail and up to ~745 ms on a large
+    journal that has none (see ``session_uses_test_hosting``'s docstring for the
+    measurements). That function memoises on the journal's
+    ``(mtime_ns, size)``, so a steady tick costs a ``stat`` per row.
+
+    A SKIPPED ROW CONSUMES NO CLAIM, deliberately: this is asked in the row
+    FILTER, above the per-tick cap and above ``claim_delivery``, so the
+    completion stays unseen and claimable by whatever surface may legitimately
+    announce it.
+    """
+    from local_operator.session.model_selection import session_uses_test_hosting
+
+    return session_uses_test_hosting(directory / "sessions" / entry.id)
 
 
 def _desktop_owns_completion(directory: Path, entry: CatalogEntry) -> bool:
@@ -1146,6 +1200,95 @@ def _retiring_notice_text(error: BaseException) -> str:
 #: dozen rows is the cheaper of those two costs. The band is only repainted
 #: when the count actually CHANGES.
 JOB_POLL_INTERVAL_S = 1.0
+
+#: How often the terminal asks whether this machine's connector parked itself.
+#:
+#: A small local file, not HTTP and not a poll of a gateway that is not running
+#: (`tunnels/state.py` — the park is exactly the state where nothing is
+#: listening). The condition changes when the operator signs in, which is a
+#: human timescale, so the interval is set by how long a stale notice may linger
+#: on screen rather than by how fast the read is: five seconds is short enough
+#: that a sign-in completed in another window withdraws the card while the user
+#: is still looking at the app.
+TUNNEL_PARK_POLL_S = 5.0
+
+#: Owner tag for the parked-connector notice.
+#:
+#: The toast slot is shared, and `Toast.withdraw` retires by OWNER, so this is
+#: what keeps the mention of remote access from pulling an MCP failure out from
+#: under the user (see the rationale on `Toast.withdraw`).
+TUNNEL_PARK_NOTICE = object()
+
+#: The in-app spelling of the remedies the park file carries, as a shell command
+#: would be un-runnable here.
+#:
+#: ONE table, and the only place the mapping exists, because this is exactly the
+#: defect review round 1 opened with (D1/M2): the park's sentence used to name
+#: `/login radient` — a slash command — and that sentence is ALSO written into
+#: `state.json` and forwarded to the desktop as `connector.detail`. A surface
+#: cannot name a command the others cannot run, so the sentence now names none
+#: (`gateway.TERMINAL_DETAIL`) and every surface appends the one it can: the CLI
+#: prints `TERMINAL_REMEDY` verbatim, and this card maps it through here.
+#: Anything not in the table is shown as it stands — a shell command in a
+#: terminal the user is already sitting in front of is runnable — so a new park
+#: reason needs no entry to be told to the user honestly.
+TUNNEL_CARD_COMMANDS = {"lop login radient": "/login radient"}
+
+#: What the card calls each parked reason, as the TAIL of the line.
+#:
+#: The card leads with the COMMAND and puts the reason after it, which is the
+#: repo's own failure-line rule (`toast._FAILURE_REASON_SEP`): the card is
+#: clamped to the terminal, so whatever is lost to a clamp has to be the
+#: explanation, never the instruction — a half-printed `/logi…` is an instruction
+#: the user cannot follow (review round 1, D3).
+#:
+#: Two of the three tails are D3's own words and replace a reason LABEL that was
+#: the wrong reading out of context ("needs re-enrolment" says nothing about what
+#: the user just lost); `login_required` takes the house vocabulary this product
+#: already uses for an expired sign-in (`usage_panel`: `sign-in expired — /login
+#: {provider}`), which is D6's ask. A reason with no entry falls back to its
+#: `REASON_LABEL`, so a code from a newer connector still reads as something.
+TUNNEL_CARD_REASONS = {
+    "login_required": "Radient sign-in expired",
+    "reenrolment_required": "remote access is off",
+    "local_prerequisite": "a prerequisite is missing",
+}
+
+
+def tunnel_park_card(reason: str, command: str) -> str:
+    """The one line the parked-connector card shows: ``<command> — <reason>``.
+
+    Every branch is under 50 cells with the glyph, which is the width the toast
+    can hold on a narrow terminal without clamping (58 cells of content at the
+    ordinary cap, less as the terminal narrows) — measured in the tests against
+    `cell_len`, not eyeballed. "Run" is not spelled: the command is what the
+    clause leads with, and the verb was 4 cells of the 66- and 68-cell lines that
+    wrapped mid-command before (D3), with D6 dropping the same redundancy from
+    the card's other wording.
+
+    The GLYPH leads it (D9): every other actionable card in this app does
+    (`f"{ICON_MCP} MCP {message}"`), and the splash's warning rows lead with the
+    same mark, which is what makes the card findable at a glance rather than only
+    readable once it has been found.
+    """
+    mapped = TUNNEL_CARD_COMMANDS.get(command, command)
+    tail = TUNNEL_CARD_REASONS.get(reason) or _park_reason_label(reason)
+    if not mapped:
+        return f"{ICON_APPROVALS} {tail}"
+    return f"{ICON_APPROVALS} {mapped} — {tail}"
+
+
+def _park_reason_label(reason: str) -> str:
+    """`gateway.reason_label` for a code this app has no card wording for.
+
+    A lazy import for the reason the poll's own import is lazy: `tunnels.gateway`
+    drags httpx and starlette, and this module is on the boot path of every
+    session — including the ones that will never see a park.
+    """
+    from local_operator.tunnels import gateway
+
+    return gateway.reason_label(reason)
+
 
 #: Bucket the dock's expiry clock to this many seconds. Rows whose settle
 #: stamps fall in the same bucket therefore cross the window on the SAME
@@ -3613,6 +3756,15 @@ class OperatorApp(App[None]):
         self._session: SessionProtocol | None = None
         self._controller: EventController | None = None
         self._status: StatusLine | None = None
+        #: The park reason this app has already announced, so a 5-second poll
+        #: raises one card per episode rather than holding the toast slot
+        #: forever (see `_poll_tunnel_park`).
+        self._tunnel_park_notice: str | None = None
+        #: Whether the band is carrying the parked-connector rung. Tracked beside
+        #: the episode above because the two answer different questions — the
+        #: card's is "has this park been announced?", the rung's is "is remote
+        #: access off right now?" — and only the second must survive a dismissal.
+        self._tunnel_parked = False
         #: Unsubscribes this app from the process config watcher (see
         #: :meth:`_watch_config`). ``None`` until the first session is adopted.
         self._unsubscribe_config_watch: Callable[[], None] | None = None
@@ -3742,6 +3894,11 @@ class OperatorApp(App[None]):
         #: site that resets ``_turn_open`` resets this too.
         self._turn_notified = False
         self._streaming_block: AssistantBlock | None = None
+        #: The live reasoning phase's block, mounted on the first reasoning
+        #: fragment and retired when the answer starts (see
+        #: ``widgets/reasoning.py``). One per model call: a tool-loop turn can
+        #: reason before each of its calls, and each phase is its own block.
+        self._reasoning_block: ReasoningBlock | None = None
         self._tool_cards: dict[str, ToolCard] = {}
         # Rows for calls the model is still dictating. Separate from
         # `_tool_cards`, which holds calls that are RUNNING: a composing row has
@@ -9128,6 +9285,12 @@ class OperatorApp(App[None]):
         # Keep the active provider's quota warm in the shared cache so `/usage`
         # answers from disk (see USAGE_WARM_INTERVAL_S).
         self.set_interval(USAGE_WARM_INTERVAL_S, self._warm_usage_background)
+        # Remote access is off for a reason only a FILE on this machine knows
+        # (see TUNNEL_PARK_POLL_S). Registered with the other always-on polls
+        # rather than on a panel's timer: nothing else in the app is watching
+        # for this, and the notice and the band rung are the only places the
+        # terminal admits it.
+        self.set_interval(TUNNEL_PARK_POLL_S, self._poll_tunnel_park)
         # ALWAYS ON, deliberately not on `_sidebar_timer`. That timer is
         # registered with `pause=True` and is paused whenever the sidebar is
         # closed, so hanging the reap off it would mean a user who closes the
@@ -18135,8 +18298,16 @@ class OperatorApp(App[None]):
         self._warm_engage_started = False
         self._start_runtime_engage(reason="refresh")
 
-    def _on_runtime_draining(self, leaving: str = "") -> None:
+    def _on_runtime_draining(self, leaving: str = "", updating: str = "") -> None:
         """A runtime has committed to leaving while it still has work: say so.
+
+        TWO DEPARTURES REACH THIS, AND THEY NEED OPPOSITE SENTENCES. ``leaving`` is
+        the drain's phrase, whose promise is that a new message will NOT start a
+        turn; ``updating`` is an update window, whose promise is that the message is
+        ALREADY queued and runs when the successor boots. Painting the drain's
+        sentence over a window sends the operator to re-send a message that is held
+        — which is why the window has its own table, its own frame key and this
+        argument, rather than a fourth value of ``leaving`` (``types.UPDATING``).
 
         Fired from the ``retiring`` FRAME (``AttachedSession.set_drain_callback``),
         which the runtime sends immediately before it latches — so this lands
@@ -18165,7 +18336,14 @@ class OperatorApp(App[None]):
         """
         if self._interaction is None:
             return
-        notice = _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        # THE WINDOW FIRST, and the ordering is the contract: a runtime that opened a
+        # window and then latched a drain sends both, and only the window's sentence
+        # is true of the message the operator just sent (it is queued, not refused).
+        notice = (
+            update_phrase(UPDATING, updating)
+            if updating
+            else _DRAIN_NOTICES.get(leaving, DRAIN_NOTICE_OTHER)
+        )
         self._notice_for(self._interaction, notice, "note")
         self._announce_queued_elsewhere(self._interaction)
 
@@ -23118,6 +23296,7 @@ class OperatorApp(App[None]):
                     or entry.row.pending
                     or entry.id == current
                     or entry.row.live_state not in _BACKGROUND_NOTIFY_ANNOUNCEABLE_STATES
+                    or _is_test_hosted(directory, entry)
                     or _desktop_owns_completion(directory, entry)
                 ):
                     # A pending row is a GATE, not a finished turn: the runtime
@@ -23133,6 +23312,13 @@ class OperatorApp(App[None]):
                     # narrowed by kind — the feed carries completions only, so
                     # an `interrupted` row, which the desktop never banners,
                     # must still be announced here.
+                    #
+                    # `_is_test_hosted` is the same rule on the STORE side (R1-1):
+                    # a session whose journal records the mock hosting must not be
+                    # bannered by any surface, and this one reads a store every
+                    # rig writes into. It is asked in the filter rather than at the
+                    # spawn so a skipped row never consumes a claim — see the
+                    # helper for the measured cost and why it is off the loop.
                     #
                     # The `live_state` test is the SAME rule as the
                     # `entry.id == current` skip beside it, applied to a window
@@ -26285,6 +26471,83 @@ class OperatorApp(App[None]):
         # free — and never raises, since a status surface may not take the app
         # down (see the panels' own docstrings).
         self._refresh_band()
+
+    def _poll_tunnel_park(self) -> None:
+        """Tell the user once when this machine's remote access needs a person.
+
+        The connector cannot report it itself: parking means it exited
+        SUCCESSFULLY (the only exit a supervisor reads as "do not retry me"),
+        so no process is left to say anything, and the state file is the only
+        thing that knows. Read from disk, never over the network — when the
+        login is dead the tunnel is the last route that could carry an answer,
+        and a probe of the gateway would report "nothing is listening" for a
+        cause it cannot name.
+
+        One card per EPISODE, not per tick: ``show`` re-arms its dismissal timer
+        on every call, so re-raising on a five-second tick would hold a
+        ten-second card on screen forever — a worse nag than the one it
+        replaced. A user who dismisses it is not chased again until the
+        condition clears and comes back, and `lop tunnel status` remains the
+        place that answers the question on demand.
+
+        The BAND is told the same fact in the same read, because a card cannot
+        outlive its ten seconds and a park outlives the session that found it: on
+        the next start the card is re-raised and the band rung is already there,
+        and in between the band is the only thing still saying remote access is
+        off (review round 1, D4). This is the MCP alarm's own treatment — a toast
+        AND a standing segment — rather than a second mechanism. It is a separate
+        gate from the card's `_tunnel_park_notice`, which tracks the EPISODE;
+        this one tracks the FACT, so a re-raise after a dismissal re-asserts a
+        rung that never went away.
+
+        Never fires for a machine with no tunnel, or one the operator stopped:
+        `state.nag` owns that gate, because it is a fact about the state file
+        rather than about this widget.
+        """
+        from local_operator.tunnels import state
+
+        notice = state.nag()
+        reason = str(notice.get("reason") or "") if notice else ""
+        self._assert_tunnel_band(bool(reason))
+        if not reason:
+            if self._tunnel_park_notice is not None:
+                # WITHDRAWN, not merely left to stop re-showing: a card still on
+                # screen after the condition cleared would contradict the
+                # recovery the user just performed. `withdraw` refuses any card
+                # that is not this owner's, so an unrelated notice in the shared
+                # slot is safe.
+                self.query_one(Toast).withdraw(TUNNEL_PARK_NOTICE)
+                self._tunnel_park_notice = None
+            return
+        if reason == self._tunnel_park_notice:
+            return
+        self._tunnel_park_notice = reason
+        remedy = notice.get("remedy") if notice else None
+        command = str(remedy.get("command") or "") if isinstance(remedy, dict) else ""
+        # A FAILURE-length card (`TOAST_FAILURE_MS`), which is this app's one
+        # marker for "the user has to act on this": it claims the shared slot
+        # against courtesy receipts instead of being evicted by one.
+        self.query_one(Toast).show(
+            tunnel_park_card(reason, command),
+            duration_ms=TOAST_FAILURE_MS,
+            owner=TUNNEL_PARK_NOTICE,
+        )
+
+    def _assert_tunnel_band(self, parked: bool) -> None:
+        """Keep the band's parked rung in step with the park file.
+
+        Repainted only on a CHANGE: this runs every `TUNNEL_PARK_POLL_S` and the
+        band shares the dock with the transcript the user is reading, so a
+        needless repaint per tick is a cost with no reader. `update` leaves a
+        segment alone for a caller that passes `None`, so `False` here is a real
+        assertion — the rung is withdrawn, not merely untouched.
+        """
+        if parked == self._tunnel_parked:
+            return
+        self._tunnel_parked = parked
+        status = self._status
+        if status is not None:
+            status.update(tunnel_parked=parked)
 
     def _sync_band_inset(self) -> None:
         """Give the band its top inset only while it actually holds a slot.
@@ -41142,14 +41405,79 @@ class OperatorApp(App[None]):
             self._refresh_working_activity()
         return block
 
+    def _ensure_reasoning_block(self) -> ReasoningBlock:
+        """The block for the reasoning being streamed, mounted on first use.
+
+        Mounted on the FIRST fragment rather than at ``message_start``, and for
+        the reason :meth:`on_assistant_message_start` records: a call that never
+        reasons must not open a row it will never fill. Most turns do reason
+        (86.5% of deepseek-flash turns in the operator's ledger), so this is the
+        common path rather than the exception -- the deferral costs nothing and
+        the alternative spends a header row on every non-reasoning model.
+        """
+        block = self._reasoning_block
+        if block is None:
+            block = ReasoningBlock()
+            self._reasoning_block = block
+            self._append_block(block)
+            self._refresh_working_activity()
+        return block
+
+    def _retire_reasoning_block(self) -> None:
+        """Close the live reasoning phase, if any, and let go of it.
+
+        Called when the answer starts and on every terminal path. The block is
+        COLLAPSED rather than removed or left expanded: removing it would delete
+        rows from under the reader's cursor, and leaving it was one ~7-row block
+        per model call with no way to dismiss them (UX review round 1, U1). It
+        keeps its header row, which says this call reasoned. Letting go of the
+        reference is what lets the NEXT model call of the same turn open a fresh
+        phase -- ``SPACING_TRANSIENT`` means the retired one takes no gap.
+        """
+        block = self._reasoning_block
+        if block is None:
+            return
+        self._reasoning_block = None
+        block.retire()
+        self._refresh_working_activity()
+
+    def on_reasoning_delta(self, message: ReasoningDelta) -> None:
+        """The model's private reasoning, streamed dim above the answer it will write."""
+        # Whitespace-only text is not reasoning either: mounting on it paints a
+        # labelled header with nothing under it, which design round 1 caught as
+        # a frame (D5). `on_assistant_delta`'s guard is the same shape.
+        if not message.text.strip():
+            return
+        # `display.reasoning` is this channel's escape hatch (UX review round 1,
+        # U1). Read at MOUNT, not cached on the app, so a write from `/settings`
+        # applies to the next phase; a mid-session flip is forward-only, like
+        # `display.narration`, because re-projecting mounted blocks in one
+        # synchronous pass is what paints a blank frame.
+        if not settings_get("display.reasoning", DEFAULT_REASONING):
+            return
+        self._ensure_reasoning_block().update_text(message.text)
+
+    def on_reasoning_end(self, message: ReasoningEnd) -> None:
+        """The phase is over -- the model stopped thinking for this call."""
+        self._retire_reasoning_block()
+
     def on_assistant_delta(self, message: AssistantDelta) -> None:
         # Empty deltas are not text: flushing one would mount a block that then
         # sits blank until real content lands, which is the hole this avoids.
         if not message.text:
             return
+        # The answer has started, so the thinking is over: retire the reasoning
+        # phase before the assistant block mounts, so the two rows are ordered
+        # thinking-then-answer in the transcript even when both updates land in
+        # the same frame.
+        self._retire_reasoning_block()
         self._ensure_streaming_block().update_text(message.text)
 
     def on_assistant_message_end(self, message: AssistantMessageEnd) -> None:
+        # A tool-only call ends its message with no prose at all, so this is the
+        # path that retires a reasoning phase for a turn that reasoned and then
+        # called a tool. Idempotent: a `reasoning_end` already retired it.
+        self._retire_reasoning_block()
         # An empty authoritative text is not an instruction to erase what
         # streamed. Adopting it unconditionally destroyed the prose the deltas
         # had already painted and left an empty block mounted in its place; the

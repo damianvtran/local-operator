@@ -640,7 +640,7 @@ class AuthStore:
                     (credential_type, data_json, now, row[0]),
                 )
                 self._conn.commit()
-                return self._reread_after_write(row[0])
+                return self._after_credential_write(provider, row[0])
 
         cursor = self._conn.execute(
             "INSERT INTO auth_credentials "
@@ -649,7 +649,104 @@ class AuthStore:
             (provider, credential_type, data_json, identity, now, now),
         )
         self._conn.commit()
-        return self._reread_after_write(cursor.lastrowid)
+        return self._after_credential_write(provider, cursor.lastrowid)
+
+    def _after_credential_write(self, provider: str, credential_id: int | None) -> StoredCredential:
+        """Read the row back, then run what a completed write implies.
+
+        One exit for both the update and the insert path, so a later caller
+        cannot land in a branch that skips the re-arm.
+        """
+        stored = self._reread_after_write(credential_id)
+        self._rearm_parked_tunnel_login(provider, stored)
+        return stored
+
+    def _rearm_parked_tunnel_login(self, provider: str, stored: StoredCredential) -> None:
+        """Let a login that fixed a dead grant bring the tunnel connector back.
+
+        The connector cannot notice by itself: parking exits SUCCESSFULLY
+        (that is what stops its supervisor retrying it, see
+        ``tunnels/service.py``), so the operator's login is the only event that
+        can end the park. Called from here because this one write path is shared
+        by the TUI's `/login`, `lop login`, and the desktop login route, and
+        because the fix has to be durable first — this runs after the commit,
+        never before it.
+
+        Unconditional and cheap on purpose: `tunnels.install.rearm_if_parked`
+        decides whether the write concerns the tunnel at all, and its first
+        guard is the park file, which does not exist in the ordinary case. The
+        import is lazy because `tunnels.install` reaches `launchd`, `paths` and
+        the tunnels package, none of which belong on the import path of a
+        credential write — and because this module is imported BY that package.
+
+        OFF THE EVENT LOOP where there is one (review round 1, m3). The guard
+        chain ends in a real `launchctl kickstart` / `systemctl --user start`
+        with a 20-second timeout, and this write path is reached from the desktop
+        login route and from `/login` in the TUI — both on the loop that also
+        serves every other request, so a hung service manager stalled the whole
+        server for up to 20 seconds. There is nothing to return here, so the
+        cheapest correct thing is to hand the call to a worker thread and let the
+        caller proceed: the operator is told the sign-in succeeded, and the
+        connector's own state file says the rest.
+        """
+        try:
+            from local_operator.tunnels import install
+        except Exception:  # noqa: BLE001 — a login must not fail over a service restart
+            logger.warning(
+                "could not re-arm a parked tunnel connector for %s after a login",
+                provider,
+            )
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No loop on this thread. Deliberately the same call rather than a
+            # skipped one: a script driving a login still wants its connector
+            # back, and there is no loop here to stall.
+            self._rearm_off_thread(install, provider, stored.id)
+            return
+        try:
+            loop.run_in_executor(None, self._rearm_off_thread, install, provider, stored.id)
+        except RuntimeError:
+            # A running loop whose default executor is ALREADY SHUT DOWN — and
+            # this is the one line in the guard chain that can fail there, so it
+            # carries the guard (review round 2, M3). Measured: with
+            # `loop.shutdown_default_executor()` done and the loop still ticking,
+            # `run_in_executor` raises `RuntimeError: Executor shutdown has been
+            # called`, which propagated out of here through
+            # `_after_credential_write` and out of `upsert_credential` — i.e. out
+            # of a credential write that had already COMMITTED, reporting a
+            # successful sign-in to the operator as a failure (the house pattern
+            # for a fire-and-forget dispatch under someone else's verdict is
+            # `session/attached.py`'s guarded one).
+            #
+            # Inline rather than dropped, which is the no-loop branch's own trade
+            # and the reason it makes it: the caller is a login, and the point of
+            # this hook is that the connector comes back without a second
+            # command. Reachability is the teardown window this signature
+            # describes — a loop on its way out is not serving anyone, so the
+            # blocking call it can no longer hand to a thread costs no request,
+            # and `_rearm_off_thread` never raises.
+            self._rearm_off_thread(install, provider, stored.id)
+
+    @staticmethod
+    def _rearm_off_thread(install: Any, provider: str, credential_id: int) -> None:
+        """The re-arm itself, where a blocking call costs nobody a turn.
+
+        Never raises: a re-arm that fails must not fail the login that triggered
+        it — and on the executor path an exception would surface only as an
+        unretrieved future exception, which is neither a log line nor a shrug.
+        """
+        try:
+            note = install.rearm_if_parked(provider=provider, credential_id=credential_id)
+        except Exception:  # noqa: BLE001 — a login must not fail over a service restart
+            logger.warning(
+                "could not re-arm a parked tunnel connector for %s after a login",
+                provider,
+            )
+            return
+        if note:
+            logger.info("%s (provider=%s)", note, provider)
 
     def _reread_after_write(self, credential_id: int | None) -> StoredCredential:
         """Re-read a row this connection just wrote.

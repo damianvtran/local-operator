@@ -12,7 +12,8 @@
     "gen-themes": "node scripts/generate-theme-css.mjs",
     "check-themes": "node scripts/generate-theme-css.mjs --check",
     "inline-mark": "node scripts/inline-mark.mjs",
-    "prebuild": "node scripts/generate-theme-css.mjs && node scripts/inline-mark.mjs"
+    "prebuild": "node scripts/generate-theme-css.mjs && node scripts/inline-mark.mjs",
+    "postbuild": "node scripts/check-bundle.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",

@@ -1,4 +1,5 @@
 import { BridgeCommandError, cdp, requireSurface } from "../cdp";
+import { requireConsent } from "../consent";
 import { credentialRefusal, safeName } from "../driver/file-transfer-policy";
 import { nodeIdFor } from "./input";
 
@@ -10,6 +11,12 @@ import { nodeIdFor } from "./input";
  * new permission, no store re-review). The browser process reads the bytes off
  * disk; this worker never sees them, which is also why it can check a NAME but
  * never a CONTENT (see driver/file-transfer-policy.ts).
+ *
+ * THE OPERATOR'S SWITCH GATES IT, and it is the only control this direction has:
+ * no new permission is involved, so `allowUploads` in the extension's options is
+ * what decides whether a local file may leave this machine at all. It is OFF by
+ * default, and `requireConsent` is checked here and not only in the
+ * advertisement — see consent.ts.
  *
  * TWO RULES ARE STRUCTURAL, not stylistic:
  *
@@ -112,6 +119,12 @@ async function readInputFiles(tabId: number, nodeId: number): Promise<FileReadba
 }
 
 export async function upload(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  // The operator's switch, before the page is touched at all (consent.ts). The
+  // refusal names the switch rather than the build, because the capability is
+  // present and only its consent is missing — and this is the LAST gate, after
+  // the advertisement, so a page's file input is never reached on a switched-off
+  // capability even if an old daemon sent the command anyway.
+  await requireConsent("upload");
   const surface = await requireSurface(params.tab);
   const selector = params.selector ?? params.ref;
   const raw = Array.isArray(params.paths) ? params.paths : [];

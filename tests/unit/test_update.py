@@ -19,10 +19,12 @@ import pytest
 from local_operator import procname
 from local_operator import update as update_mod
 from local_operator.interpreter import SAFE_PATH_FLAG
+from local_operator.mobile import install as install_mod
 from local_operator.update import (
     TTL_S,
     InstallKind,
     MobileRefresh,
+    SnapshotSource,
     UpdateError,
     check_latest,
     install_kind,
@@ -481,6 +483,117 @@ def test_installer_invocation_leaves_third_party_binaries_named() -> None:
         ["pipx", "upgrade", "local-operator"],
         None,
     )
+
+
+def test_an_in_place_install_attests_before_it_rewrites_the_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I3: pip and pipx have no generation to install into, so they rewrite in place.
+
+    This is the one install path that still takes runtimes with it (see
+    ``perform_upgrade``'s own docstring), and the reason the attestation lives in it:
+    the site-packages tree under a running fleet is rewritten where it stands, the
+    runtimes importing from it die mid-turn and cannot record anything themselves —
+    and a measured install did exactly that to every session on this machine on
+    2026-09-15, with the unwatched half staying down until they were resumed by hand.
+
+    The ORDER is the assertion that matters: the marker must be on disk BEFORE the
+    installer runs, because afterwards the party that could say what happened is the
+    party that was killed. The marker itself must name the mechanism and the front end
+    that asked for it.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord, session_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".local-operator"
+    record = SessionRecord(
+        pid=4246,
+        kind="daemon",
+        session_id="pipsession",
+        conversation_name="pipsession",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+        install_root=sys.prefix,
+    )
+    registry.publish(record, root)
+    session_dir(root, record.session_id).mkdir(parents=True)
+
+    order: list[str] = []
+    real_attest = update_mod.note_doomed_runtimes
+
+    def observing_attest(tree: Path, **kwargs: object) -> object:
+        order.append("attest")
+        return real_attest(tree, **kwargs)  # type: ignore[arg-type]
+
+    def observing_installer(argv: list[str], *, executable: str | None = None) -> int:
+        order.append("install")
+        return 0
+
+    monkeypatch.setattr(update_mod, "note_doomed_runtimes", observing_attest)
+    monkeypatch.setattr(update_mod, "_run_installer", observing_installer)
+
+    perform_upgrade(
+        target="0.28.0",
+        kind=InstallKind.PIP,
+        prefix=sys.prefix,
+        executable=sys.executable,
+    )
+
+    assert order == ["attest", "install"], order
+    marker = registry.read_stop_marker(session_dir(root, record.session_id))
+    assert marker is not None, "the install must attest for the runtimes it displaces"
+    assert marker["deliberate"] is False
+    assert marker["mechanism"] == "in-place-install"
+    assert marker["actor"] == "lop update"
+    assert marker["session_id"] == "pipsession"
+    assert marker["pid"] == 4246
+
+
+def test_a_failed_in_place_install_withdraws_the_attestation_it_staged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR 2 on the install path: a failed install leaves no verdict behind.
+
+    The marker is staged before the installer runs, and a non-zero exit means the
+    upgrade did NOT happen — the caller raises ``UpdateError``, so the operator is
+    told it failed. The marker would say the opposite, for the whole RUN it is keyed
+    to: an unrelated crash an hour later would render as "its install was being
+    replaced in place". The report wins, and the artifact has to agree with it.
+    """
+    from local_operator.session.runtime import registry
+    from local_operator.session.runtime.types import SessionRecord, session_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".local-operator"
+    record = SessionRecord(
+        pid=4247,
+        kind="daemon",
+        session_id="pipfailed",
+        conversation_name="pipfailed",
+        cwd="/tmp",
+        model_label="m",
+        control_port=0,
+        control_key="k",
+        install_root=sys.prefix,
+    )
+    registry.publish(record, root)
+    session_dir(root, record.session_id).mkdir(parents=True)
+    monkeypatch.setattr(update_mod, "_run_installer", lambda *a, **k: 1)
+
+    with pytest.raises(UpdateError):
+        perform_upgrade(
+            target="0.28.0",
+            kind=InstallKind.PIP,
+            prefix=sys.prefix,
+            executable=sys.executable,
+        )
+
+    assert (
+        registry.read_stop_marker(session_dir(root, record.session_id)) is None
+    ), "an install that failed must not leave a verdict saying it took the tree"
 
 
 def test_perform_upgrade_refuses_editable_and_unknown() -> None:
@@ -1125,7 +1238,16 @@ class TestServiceDaemonRefresh:
     what the summary says it did.
     """
 
-    def test_nothing_installed_means_no_child_at_all(self) -> None:
+    def test_nothing_installed_means_no_child_at_all(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An empty scan on a host the scan CAN address is silence.
+
+        The platform is pinned to the launchd shape deliberately: since audit A24
+        an empty scan on a host whose daemons are systemd units or scheduled
+        tasks announces that it did not refresh them, which is the neighbouring
+        case and has its own test. Without the pin this test would be asserting
+        the macOS answer on a Linux runner, where the answer differs by design.
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
         with (
             patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
             patch("subprocess.run") as run,
@@ -1134,6 +1256,60 @@ class TestServiceDaemonRefresh:
         assert refresh == update_mod.DaemonRefresh("service daemons")
         assert refresh.lines == () and refresh.warnings == ()
         run.assert_not_called()
+
+    def test_a_platform_without_launchd_says_so_instead_of_saying_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Silence reads as success, so a platform the scan cannot address speaks.
+
+        The scan is ``~/Library/LaunchAgents``, so on Linux and Windows it finds
+        nothing and the empty ``DaemonRefresh`` printed nothing at all — in the
+        upgrade summary that is indistinguishable from "there was nothing to
+        do", while a systemd unit or a scheduled task is still running the
+        previous interpreter. Re-registering those units is a follow-up; what is
+        pinned here is that the step reports what it did NOT do (audit A24).
+
+        The scan is still CONSULTED (``return_value=[]`` is the real host's
+        answer, not a bypass), because that is the function's own contract and
+        the sibling macOS tests below patch the same seam to prove the child
+        runs; what changes on this host is only the conclusion.
+        """
+        monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False)
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[]),
+            patch("subprocess.run") as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_not_called()
+        assert refresh.warnings == ()
+        assert len(refresh.lines) == 1
+        assert "not refreshed" in refresh.lines[0]
+        assert sys.platform in refresh.lines[0], "the line names this host's platform"
+        assert "installer" in refresh.lines[0], "and the way to fix it"
+        # The upgrade summary is read by tests that keep each step's own lines
+        # apart (``test_update_command_upgrades`` pins that a skipped mobile
+        # refresh prints nothing), so this sentence must not name a daemon.
+        assert "mobile" not in refresh.lines[0]
+
+    def test_an_installed_agent_is_repaired_whatever_the_platform_says(self, branded_image) -> None:
+        """The platform branch decides the empty-scan answer, not whether to work.
+
+        Gating the scan on macOS made the function's contract untestable off it:
+        a host that HAS an agent to repair must reach the child, and that is what
+        the four tests below assert. This one pins the boundary between them.
+        """
+        plist = Path("/tmp/Library/LaunchAgents/com.local-operator.tunnel.plist")
+        completed = subprocess.CompletedProcess([], 0, stdout="tunnel daemon: refreshed\n")
+        with (
+            patch.object(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", False),
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[plist]),
+            patch("subprocess.run", return_value=completed) as run,
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+
+        run.assert_called_once()
+        assert refresh.lines, "the repaired agent is reported"
 
     def test_the_child_is_the_new_wheel_and_is_named(self, branded_image) -> None:
         plist = Path("/tmp/Library/LaunchAgents/com.local-operator.tunnel.plist")
@@ -1178,12 +1354,160 @@ class TestServiceDaemonRefresh:
         assert refresh.lines == ()
 
     def test_a_timeout_is_a_warning(self) -> None:
+        """A kill with NOTHING announced still says a daemon may be STOPPED.
+
+        The child can die before it announces anything (a wedge inside its first
+        repair, or a build whose announcements predate these lines), and this is the
+        sentence that has to stand on its own then. It may not name a daemon it does
+        not know, and it may not lose the recovery 0.61.4's reload failure preserved.
+        """
         with (
             patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
             patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)),
         ):
             refresh = update_mod.refresh_service_daemons_after_upgrade()
-        assert refresh.warnings == ("warning: daemon refresh timed out",)
+        assert len(refresh.warnings) == 1
+        warning = refresh.warnings[0]
+        assert warning.startswith("warning: the daemon refresh did not finish within")
+        assert "was stopped" in warning
+        assert "may now be STOPPED" in warning
+        assert "`lop tunnel install`" in warning, "the recovery is still named"
+
+    def test_the_bound_names_the_daemon_the_child_was_repairing(self) -> None:
+        """The killed child's own announcement is what makes the line actionable.
+
+        REPRODUCED against a real launchd job before this fix (macOS 27.0.0,
+        ``gui/501``, scratch label, a stale plist): the bound killed the child with
+        the ``bootout`` already issued, the job left the domain, the plist was
+        rewritten, and the upgrade's only line was *"warning: daemon refresh timed
+        out"* — no daemon, no state, no recovery. The child is the only side that
+        knows where it was, so its announcement comes back out of the output
+        ``subprocess.run`` captured before the kill. It arrives as BYTES even under
+        ``text=True`` (measured), which is why the fixture below is bytes.
+        """
+        stdout = (
+            "refreshing: mobile :: lop mobile install\n"
+            "refreshing: tunnel :: lop tunnel install\n"
+        )
+        expired = subprocess.TimeoutExpired(cmd="x", timeout=1, output=stdout.encode())
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", side_effect=expired),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        warning = refresh.warnings[0]
+        assert "while the tunnel daemon was being repaired" in warning
+        assert "run `lop tunnel install` to bring it back" in warning
+        assert "mobile" not in warning, "the LAST announcement is the one in flight"
+
+    def test_a_half_written_announcement_names_no_daemon(self) -> None:
+        """A marker the child was killed mid-write must not become a daemon's name.
+
+        The daemon would be invented and the recovery command absent, which is a
+        worse sentence than the one that admits it does not know.
+        """
+        expired = subprocess.TimeoutExpired(cmd="x", timeout=1, output=b"refreshing: tun")
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", side_effect=expired),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert "may now be STOPPED" in refresh.warnings[0]
+        assert "while the" not in refresh.warnings[0]
+
+    def test_a_healthy_run_does_not_print_the_announcements(self) -> None:
+        """They are for a KILLED child, not for every upgrade.
+
+        Both streams are filtered: the child writes the marker to stdout, and a
+        summary that printed progress on every upgrade would be a new line of noise
+        on a step that is deliberately silent when nothing changed.
+        """
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="refreshing: tunnel :: lop tunnel install\ntunnel daemon: refreshed\n",
+            stderr="refreshing: tunnel :: lop tunnel install\nwarning: other\n",
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", return_value=completed),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh.lines == ("tunnel daemon: refreshed",)
+        assert refresh.warnings == ("warning: other",)
+
+    def test_a_dead_child_cannot_report_an_announcement_as_its_failure(self) -> None:
+        """A non-zero exit whose last output is the marker reports the exit, not it.
+
+        The annotations are this side's progress, never the child's answer — the
+        failure detail is a sentence for the operator and an announcement is not one.
+        """
+        completed = subprocess.CompletedProcess(
+            [], 3, stdout="refreshing: tunnel :: lop tunnel install\n", stderr=""
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", return_value=completed),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh.warnings == ("warning: could not refresh installed daemons: exit 3",)
+
+    def test_the_child_announces_each_daemon_before_it_repairs_it(self, monkeypatch) -> None:
+        """The announcement is written BEFORE the repair, and flushed.
+
+        This is the whole mechanism: a kill can land at any point in a repair, so the
+        line has to be out of the child's buffer before the first `launchctl` call of
+        that daemon's reload — an announcement printed afterwards would never be read
+        for the daemon that was actually down. Checked by snapshotting what the child
+        had WRITTEN at the moment each repair ran, which is what the parent sees when
+        it kills the pipe.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        from local_operator import launchd
+        from local_operator.browser_bridge import install as browser_install
+        from local_operator.mobile import install as mobile_install
+        from local_operator.tunnels import install as tunnel_install
+        from local_operator.wakes import install as wakes_install
+
+        written: list[str] = []
+        buffer = io.StringIO()
+
+        def repair_for(name: str):
+            def repair() -> launchd.PlistRefresh:
+                written.append(buffer.getvalue())
+                return launchd.PlistRefresh(name=name, kind="current")
+
+            return repair
+
+        monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+        for module, name in (
+            (mobile_install, "mobile"),
+            (browser_install, "browser bridge"),
+            (tunnel_install, "tunnel"),
+            (wakes_install, "wakes supervisor"),
+        ):
+            monkeypatch.setattr(module, "refresh_plist_if_stale", repair_for(name))
+
+        with redirect_stdout(buffer):
+            assert update_mod.daemons_refresh_command() == 0
+
+        steps = update_mod._refresh_steps()
+        names = tuple(name for name, _recovery, _repair in steps)
+        assert names == ("mobile", "browser bridge", "tunnel", "wakes supervisor")
+        assert len(written) == len(names), "every daemon was repaired once"
+        announcements = [
+            update_mod._refresh_announcement(name, recovery) for name, recovery, _repair in steps
+        ]
+        for index, announcement in enumerate(announcements):
+            # Already written when THIS repair runs, and no later daemon announced
+            # yet: the marker is a position, and a position read out of order would
+            # name the wrong daemon in the killed child's report.
+            assert f"{announcement}\n" in written[index]
+            for later in announcements[index + 1 :]:
+                assert later not in written[index]
+        assert buffer.getvalue().splitlines() == announcements
 
     def test_the_services_run_before_the_mobile_bounce(self) -> None:
         """The order the plist repair makes load-bearing.
@@ -1326,11 +1650,25 @@ class TestServiceDaemonRefresh:
                 )
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        # NOTHING was repaired, so the child's only output is its per-daemon
+        # announcements — the progress lines the upgrade summary strips. The
+        # contract this test has always asserted (no repair, no line about one)
+        # is unchanged; what the run says out loud is now pinned exactly.
+        assert captured.out.splitlines() == [
+            update_mod._refresh_announcement(name, recovery)
+            for name, recovery, _repair in update_mod._refresh_steps()
+        ]
         assert captured.err == ""
 
     def test_the_child_repairs_every_daemon_and_reports_each(self, capsys) -> None:
-        """One line per daemon that CHANGED; silence for one already current."""
+        """One line per daemon that CHANGED; silence for one already current.
+
+        Each daemon is ANNOUNCED before it is repaired (the line the parent reads
+        back out of a killed child — see ``update._PROGRESS_PREFIX``), so the pinned
+        output below is announcement, report, announcement, … The summary's lines
+        are still only the daemons that CHANGED: the browser bridge and the tunnel
+        were current and failed respectively, and neither gets one.
+        """
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
         from local_operator.mobile import install as mobile_install
@@ -1354,15 +1692,28 @@ class TestServiceDaemonRefresh:
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
         assert captured.out.splitlines() == [
+            update_mod._refresh_announcement("mobile", "lop mobile install"),
             "mobile daemon: refreshed a stale LaunchAgent and restarted it",
+            update_mod._refresh_announcement("browser bridge", "lop browser install"),
+            update_mod._refresh_announcement("tunnel", "lop tunnel install"),
+            update_mod._refresh_announcement("wakes supervisor", "lop wake install"),
             "wakes supervisor daemon: refreshed a stale LaunchAgent and restarted it",
         ]
         assert captured.err.splitlines() == ["warning: tunnel daemon was not refreshed: boom"]
 
 
 def test_update_command_no_plist_prints_only_install_lines(
-    capsys: pytest.CaptureFixture[str],
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The step under test is the MOBILE one, so the daemons step is pinned quiet.
+
+    Since audit A24 a host whose supervised daemons are not launchd agents adds
+    its own "not refreshed" line to the same summary, which would make this
+    assertion about an unrelated step. Pinning the daemons branch keeps the exit
+    code, the child invocation and the exact output all decided by the mobile
+    refresh, which is what the test is named for.
+    """
+    monkeypatch.setattr(update_mod, "_DAEMONS_ARE_LAUNCHD_AGENTS", True)
     with (
         _upgrade_cmd(),
         patch.object(update_mod, "_mobile_plist_path", return_value=_FakePlist(False)),
@@ -2077,4 +2428,77 @@ def test_cli_version_flag_reports_the_running_build(tmp_path: Path) -> None:
         f"got {printed!r}, expected 'v{marker}'. A raw "
         "importlib.metadata.version() call reports the installed metadata and "
         "cannot see the running checkout's version."
+    )
+
+
+def test_from_snapshot_builds_the_mobile_bundle_before_installing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The two installers used to disagree about whether a snapshot has a UI.
+
+    `~/.local/bin/lop-update` builds the bundle into the tree it prepares; the
+    in-package `--from-snapshot` path did not, so the generation it installed
+    carried the web SOURCES and no `dist/` — the phone answered 503 "bundle not
+    built" until someone ran `lop mobile install` on that machine (2026-09-19).
+    """
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    order: list[str] = []
+
+    def build(web_dir: Path, runner: list[str] | None = None) -> str | None:
+        order.append(f"build{tuple(runner or ())}")
+        (web_dir / "dist").mkdir()
+        (web_dir / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+        return None
+
+    def install(path: Path, **kwargs: Any) -> None:
+        order.append("installed")
+        # Before uv copies the tree, not after: a bundle built afterwards never
+        # reaches the generation.
+        assert (path / web.relative_to(snapshot) / "dist" / "index.html").is_file()
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(install_mod, "_package_runner", return_value=(["pnpm"], None)),
+        patch.object(install_mod, "_build_bundle", side_effect=build),
+        patch.object(update_mod, "install_into_generation", side_effect=install),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0
+
+    assert order == ["build('pnpm',)", "installed"]
+    assert "lop-update: mobile web bundle: built" in capsys.readouterr().out
+
+
+def test_from_snapshot_without_node_still_installs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No Node is a documented skip, never a failed update: the daemon heals
+    itself at `lop mobile install` on a host that has one."""
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(install_mod.shutil, "which", return_value=None),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 0
+
+    assert installed == [snapshot]
+    assert (
+        "lop-update: mobile web bundle: skipped (node not installed; build at `lop mobile install`)"
+        in capsys.readouterr().out
     )

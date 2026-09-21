@@ -59,6 +59,11 @@ TOOL_BUILDERS: dict[str, Callable[[ToolContext], AgentTool | None]] = {
     "list_variables": lambda _context: builtin.build_list_variables_tool(),
     "read_variable": lambda _context: builtin.build_read_variable_tool(),
     "browser": lambda _context: builtin.build_browser_tool(_context),
+    # createIf: returns None unless the desktop app publishes a console-capable
+    # host. One row, one predicate, and NO settings row for availability — the
+    # tool is absent, not hidden, where the app cannot serve it (design
+    # ui-console-tab §14.1/§14.2).
+    "console": lambda _context: builtin.build_console_tool(_context),
     "agent": lambda context: build_agent_tool(context),
     "team": lambda context: build_team_tool(context),
     "team_delete": lambda context: build_team_delete_tool(context),
@@ -98,6 +103,7 @@ DEFAULT_TOOL_NAMES: list[str] = [
     "list_variables",
     "read_variable",
     "browser",
+    "console",
     "agent",
     "team",
     "team_delete",

@@ -31,6 +31,7 @@ import dataclasses
 import inspect
 import json
 import logging
+import re
 import secrets
 import shutil
 import subprocess
@@ -277,6 +278,97 @@ TERMINAL_GRANT_ERRORS = frozenset(
     }
 )
 
+#: An ``error`` field that is prose rather than a code, and what it must say.
+#:
+#: Some identity providers answer a refused refresh with a sentence instead of
+#: an RFC 6749 code. Measured against Radient's own endpoint:
+#:
+#:     401 {"error": "Token refresh failed: refresh token is expired or revoked"}
+#:
+#: The field parsed fine, but ``token refresh failed: refresh token is expired or
+#: revoked`` is in no error-code set, so the verdict fell through as retryable --
+#: and a dead grant classified retryable is what turned one refused refresh into
+#: a crash loop (870 restarts in `tunnels/service.py`, each writing the same line
+#: to the service log).
+#:
+#: The rule lives HERE, in the one shared classifier, not in each vendor's
+#: refresh: a per-vendor check is how one cause ends up classified two ways, and
+#: the same body would then mean "dead" for Radient and "retry" for anyone else
+#: whose provider worded it the same way.
+#:
+#: It is deliberately narrow, because a FALSE permanent verdict is expensive:
+#: `CredentialInvalidError` deprioritises a LIVE account in `/usage`, the routing
+#: cascade and `model/configure.py` until the operator re-logs-in. So the body
+#: must name a REFRESH TOKEN and call it dead, and it is consulted only when the
+#: `error` field is free text -- a body that names a machine-readable code keeps
+#: that code's meaning exactly (see the exclusions above), which is what stops a
+#: ``{"error":"invalid_request","error_description":"...invalid_grant..."}``
+#: from being read as a verdict about the grant.
+#:
+#: DIRECTION, SEPARATORS AND NEGATION, all three of which the first version got
+#: wrong in a way its own probe list showed (review round 1, m1):
+#:
+#: * The verdict reads in BOTH orders. Radient states it token-first ("refresh
+#:   token is expired or revoked"); the ordinary English paraphrase everyone
+#:   reaches for first is adjective-first ("Invalid refresh token"), and that one
+#:   was still classified retryable -- which is the incident's own failure mode
+#:   one wording away.
+#: * Separators are `[-_ ]?`, not `[_ ]?` ("refresh-token-expired"), and the match
+#:   is case-insensitive, because a provider's field can carry any of them.
+#:   BOUNDARY, recorded rather than discovered: a JOINED camel spelling inside the
+#:   `error` FIELD still does not reach this rule. The field parser lowercases
+#:   what it returns (RFC 6749 codes are lowercase), and a lowercased
+#:   `refreshtokenexpired` is shape-identical to a machine code — which the rule
+#:   above keeps retryable, deliberately, because a code we do not know is one we
+#:   cannot judge. The joined form IS matched on the fallback path, where there is
+#:   no parseable field and the raw body text is scanned.
+#: * The gap between the two halves EXCLUDES a negation -- see
+#:   :data:`_NEGATION_FREE_GAP`, where the spelling and the reason it cannot use
+#:   `\bn't\b` both live.
+#:
+#: The gap a verdict word may sit away from the phrase it judges, with the
+#: NEGATION GUARD the first version lacked.
+#:
+#: Python's `re` has no variable-width lookbehind, so "not" cannot be asserted
+#: BEFORE the verdict word; instead it is excluded from the consumed span, which is
+#: this tempered class: "one character that is not a full stop and does not start a
+#: negation", repeatable. Two spellings of the negation are needed and neither is
+#: `\bn't\b` -- there is no word boundary inside `isn't` (the `n` follows the word
+#: character `s`), so the contraction is keyed on its apostrophe, ASCII or
+#: typographic, and the guard is what keeps "... refresh token is not expired
+#: yet", a working grant being DESCRIBED, out of this set.
+_NEGATION_FREE_GAP = r"(?:(?!\bnot\b|n['\u2019]t\b)[^.])"
+
+_DEAD_REFRESH_TOKEN = re.compile(
+    # "refresh token is expired", "RefreshTokenExpired", "refresh-token-invalid",
+    # "refresh_token no longer valid". No `\b` after `token` HERE: the joined
+    # camel form has no boundary there, and the verdict word has to follow either
+    # way.
+    r"refresh[-_ ]?token"
+    + _NEGATION_FREE_GAP
+    + r"{0,48}?(?:expired|revoked|invalid|no longer valid)"
+    # ...or the verdict first: "Invalid refresh token", "expired refresh_token".
+    # `\b` after `token` on THIS alternative, unlike the one above: here both
+    # halves are matched as WORDS, so nothing stops the phrase matching part of a
+    # longer one, and a plural is the expensive direction — measured on the
+    # round-2 head, prose DESCRIBING a working grant was read as a dead one
+    # (`{"error": "the session expired; refresh tokens are rotated per use"}` →
+    # True), which is the false permanent verdict the docstring above prices as
+    # the costly one. The joined spellings are unaffected: they come through the
+    # first alternative, which is where the boundary cannot be asserted.
+    + r"|\b(?:invalid|expired|revoked)\b" + _NEGATION_FREE_GAP + r"{0,24}?refresh[-_ ]?token\b",
+    re.IGNORECASE,
+)
+
+#: The shape of an RFC 6749 ``error`` code: one short lowercase token, no spaces.
+#: Anything else in the field is prose, and prose is the only place
+#: :data:`_DEAD_REFRESH_TOKEN` is allowed to speak.
+_OAUTH_ERROR_CODE = re.compile(r"[a-z][a-z0-9_]{2,39}\Z")
+
+
+def _names_a_dead_refresh_token(text: str) -> bool:
+    return _DEAD_REFRESH_TOKEN.search(text) is not None
+
 
 def _oauth_error_code(body: str) -> str | None:
     """The value of the OAuth2 ``error`` FIELD, or None if the body has none.
@@ -349,11 +441,19 @@ def is_terminal_grant_response(status_code: int, body: str) -> bool:
         return False
     code = _oauth_error_code(body)
     if code is not None:
-        # The body named its verdict: honour it exactly, including when the
-        # verdict is an excluded code that merely MENTIONS a terminal one.
-        return code in TERMINAL_GRANT_ERRORS
+        if code in TERMINAL_GRANT_ERRORS:
+            return True
+        # The field carried something that is not a known code. A CODE we do
+        # not recognise stays retryable, exactly as before; a sentence does not
+        # get that benefit of the doubt, because a sentence is the shape some
+        # providers use to state the verdict (see _DEAD_REFRESH_TOKEN).
+        return _OAUTH_ERROR_CODE.fullmatch(code) is None and _names_a_dead_refresh_token(code)
     lowered = body.lower()
-    return any(candidate in lowered for candidate in TERMINAL_GRANT_ERRORS)
+    return any(candidate in lowered for candidate in TERMINAL_GRANT_ERRORS) or (
+        # An unparseable body is free text by definition (an HTML gateway page,
+        # a form-encoded error), so the same prose rule applies to it.
+        _names_a_dead_refresh_token(lowered)
+    )
 
 
 def raise_for_refresh_failure(

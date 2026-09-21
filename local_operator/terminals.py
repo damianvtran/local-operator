@@ -84,6 +84,16 @@ HERDR_SOCKET_ENV = "HERDR_SOCKET_PATH"
 HERDR_TAB_ENV = "HERDR_TAB_ID"
 HERDR_WORKSPACE_ENV = "HERDR_WORKSPACE_ID"
 
+#: The Local Operator desktop app's console sets both, per surface. This is a
+#: marker the APP injects into the pty it forks (design ui-console-tab §6.5), not
+#: an emulator's: there is no emulator to detect here, because the app IS one.
+#: BOTH are recorded because a program generally wants the session (to correlate
+#: with what the agent sees) as much as the surface; only the surface gates
+#: :func:`is_local_operator_console`, since the surface is the handle the agent
+#: and the human both name.
+CONSOLE_SURFACE_ENV = "LOCAL_OPERATOR_CONSOLE_SURFACE"
+CONSOLE_SESSION_ENV = "LOCAL_OPERATOR_CONSOLE_SESSION"
+
 #: Set by sshd in a remote session. Used to say "no window server here" in a
 #: fork's fallback receipt, which reads as competent rather than broken.
 SSH_CONNECTION_ENV = "SSH_CONNECTION"
@@ -179,6 +189,32 @@ def is_herdr(env: EnvMap | None = None) -> bool:
     """
     source = _source(env)
     return source.get(HERDR_ENV) == "1" and bool(source.get(HERDR_PANE_ENV))
+
+
+def is_local_operator_console(env: EnvMap | None = None) -> bool:
+    """True when this process is running inside a Local Operator console surface.
+
+    The counterpart to the emulator predicates above and NOT one of them: there is
+    no emulator to recognise, because the app is the emulator, and the marker it
+    sets names a SURFACE rather than a program. It is read by
+    :func:`local_operator.tui.glyphs._nerd_capable_terminal`, whose own rule is
+    "a positive emulator marker wins" — the app bundles a Nerd-patched face
+    (Geist Mono) and renders the private use area, so a ``lop`` TUI running inside
+    one of its surfaces may draw Nerd glyphs where the same TUI in an unpatched
+    terminal would tofu.
+
+    Deliberately NOT satisfied by any emulator variable: impersonating ghostty (by
+    exporting ``GHOSTTY_RESOURCES_DIR``) would be a lie about what is running AND
+    would flip ``notify.detect_protocol`` to ghostty's notification protocol for
+    every process in the surface — a second, unrelated behaviour bought with the
+    same forgery (design §6.6). A marker of our own is honest and has one effect.
+
+    The usual caveat about inherited markers applies and is not solved here: this
+    answers "was this process tree started by a console surface", which is the
+    right question for a glyph decision (harmless if wrong in either direction — a
+    glyph table swap) and not sufficient for anything that shells out.
+    """
+    return bool(_source(env).get(CONSOLE_SURFACE_ENV))
 
 
 def is_ssh(env: EnvMap | None = None) -> bool:

@@ -2,7 +2,7 @@
 // Vendored copy for local-operator-ui: driver/file-transfer-policy.ts (host-free shared policy (chrome.*-free by construction)).
 // Source of truth: local-operator local_operator/browser_bridge/protocol.py + gen_ts.py + extension/src/driver/*.ts (10 modules: access-flow.ts, access-queue.ts, ax-compact.ts, deadline.ts, errors.ts, file-transfer-policy.ts, file-transfer.tables.gen.ts, origin-policy.ts, psl.gen.ts, scroll-expressions.ts)
 // PROTO_VERSION: 1
-// Inputs sha256: e2bfac4b5d4acfd222480cb67fbdd7a9c5393f1a8fbb4e902e0ea35f3339294e
+// Inputs sha256: 89992d160871b2315f2dd4bf322b3fa70878aa273ef7ccb3981cb39a45af654c
 // An INPUT hash, never a git SHA: a stamp over commits would go red on every
 // commit that touched nothing this generator reads, and a gate that cries wolf
 // gets deleted. Regenerate with `python -m local_operator.browser_bridge.gen_ts`;
@@ -160,10 +160,10 @@ export function extensionOf(raw: string): string {
  * It is a NAME check and never a verdict: a `.txt` whose bytes are a PE is
  * Python's to catch (content wins), and a `.exe` over PDF bytes is allowed as a
  * PDF. The desktop app's download path uses this to refuse an obviously-unwanted
- * file BEFORE it lands, where the platform lets it; the extension cannot serve
- * downloads at all (see `EXTENSION_CANNOT_SERVE` in
- * `local_operator/browser_bridge/protocol.py`), so this function's caller lives
- * in the other host.
+ * file BEFORE it lands, where the platform lets it; the extension's download path
+ * cannot (Chrome reports a download only once the transfer exists, and a name
+ * alone must never be a verdict — a `.exe` over PDF bytes is allowed as a PDF),
+ * so this function's callers live in the other host and in Python.
  */
 export function executableName(raw: string): boolean {
   const ext = extensionOf(raw);

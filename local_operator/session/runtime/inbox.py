@@ -37,10 +37,13 @@ import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from local_operator.procstate import O_BINARY
 
 logger = logging.getLogger(__name__)
 
@@ -243,8 +246,12 @@ class _NonBlockingLock:
     def __enter__(self) -> "_NonBlockingLock":
         if os.name == "nt":
             # No fcntl on Windows, and msvcrt.locking's non-blocking mode
-            # raises rather than waiting. The atomic O_APPEND write stands on
-            # its own there.
+            # raises rather than waiting. The lock is skipped rather than
+            # emulated, and BOTH users are written to be correct without it:
+            # the writer relies on the atomic O_APPEND write, and
+            # `drain_inbox` falls through to the staged-remainder rewrite
+            # whenever the lock was not acquired — on this platform as much as
+            # on a contended POSIX one.
             return self
         import fcntl
 
@@ -282,7 +289,7 @@ def append_inbox(session_dir: Path, line: InboxLine) -> bool:
     path = inbox_path(session_dir)
     payload = json.dumps(line.to_json(), separators=(",", ":")).encode() + b"\n"
     try:
-        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND | O_BINARY, 0o600)
     except OSError:
         logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
         return False
@@ -445,7 +452,7 @@ def withdraw_inbox(session_dir: Path, command_id: str) -> bool:
         return False
     path = inbox_path(session_dir)
     try:
-        fd = os.open(path, os.O_RDWR | os.O_APPEND)
+        fd = os.open(path, os.O_RDWR | os.O_APPEND | O_BINARY)
     except FileNotFoundError:
         return False
     except OSError:
@@ -530,6 +537,7 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
     except OSError:
         logger.warning("could not open inbox for %s", session_dir.name, exc_info=True)
         return []
+    closed = False
     try:
         with _NonBlockingLock(fd) as lock:
             raw = _read_all(fd)
@@ -554,7 +562,7 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
             # goes, and a recall has done its job once the batch it applied to is
             # gone.
             deliverable = _deliverable(lines)
-            if lock.acquired or os.name == "nt":
+            if lock.acquired:
                 os.ftruncate(fd, 0)
             else:
                 # Unlocked, a truncate could discard a row an appender wrote
@@ -563,6 +571,22 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
                 # appender's row lands in a file we just replaced, which the
                 # NEXT open drains.
                 #
+                # **Windows takes THIS branch too, and must close first.** The
+                # ``or os.name == "nt"`` this replaces sent the platform with
+                # no locking (see _NonBlockingLock) straight to the one
+                # operation the sentence above identifies as able to discard a
+                # row. Nothing about the remainder path is POSIX-specific, but
+                # it DOES need the handle gone before it runs: on Windows
+                # ``os.replace`` is ``MoveFileExW(MOVEFILE_REPLACE_EXISTING)``,
+                # and an existing open of the DESTINATION path makes that call
+                # fail — CPython's own issue 46003 records that delete sharing
+                # does not save it, and our fd shares neither delete nor
+                # anything else the CRT offers. Left open, every unlocked drain
+                # would fail the rename, warn, and redeliver the whole spool.
+                # Closing first is a no-op on POSIX, where a rename over an
+                # open descriptor is ordinary.
+                os.close(fd)
+                closed = True
                 # ``latest``, not ``raw``: rows that arrived between the two
                 # reads are part of this batch, so they must not survive as a
                 # remainder to be delivered twice.
@@ -572,7 +596,8 @@ def drain_inbox(session_dir: Path) -> list[InboxLine]:
         logger.warning("inbox drain failed for %s", session_dir.name, exc_info=True)
         return []
     finally:
-        os.close(fd)
+        if not closed:
+            os.close(fd)
 
 
 def _read_all(fd: int) -> bytes:
@@ -584,3 +609,126 @@ def _read_all(fd: int) -> bytes:
             break
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+# -- the update window's handover marker ---------------------------------------
+#
+# The inbox file above carries the MESSAGES a leaving runtime spooled. This
+# carries the FACT that a handover was in flight, and the two are separate files
+# because they have different lifetimes and different readers:
+#
+#   * the spool is read by the successor's own delivery path and is EMPTY until
+#     somebody sends something;
+#   * the marker is written by the window's OPEN and read (once) by the
+#     successor's BOOT, whether or not a single message was queued.
+#
+# WHY A FILE AND NOT A FIELD. The pair has to cross a process boundary in the
+# one direction the record cannot serve: the predecessor's record is gone by the
+# time the successor imports, and the successor's own record is written before
+# any of this could be consulted (``_bind_boot_instrumentation`` runs before the
+# inbox drain). The session directory is the only durable handover surface both
+# ends already share, and the predecessor ALREADY owns it.
+#
+# IT SURVIVES A FAILED WINDOW ON PURPOSE, in one direction only: the runtime that
+# opens a window clears this marker when it aborts (``end_update``), so a marker
+# that outlives its writer is evidence of a process that died mid-move. The
+# successor still reports the update as applied, which is the honest reading —
+# it IS running the newer build — and is exactly the case the operator could
+# never see before this existed.
+UPDATE_WINDOW_NAME = "update-window.json"
+
+
+def update_window_path(session_dir: Path) -> Path:
+    return session_dir / UPDATE_WINDOW_NAME
+
+
+def write_update_window(session_dir: Path, pair: str) -> bool:
+    """Record that an update window is moving to ``pair``. ``False`` on failure.
+
+    Written through a temporary in the same directory and renamed into place, so
+    a reader can never observe a half-written marker (the window opens
+    synchronously inside the idle decision, where there is no second rung to
+    retry from). Failure is NOT fatal to the window: the messages still spool and
+    the successor still runs them — what is lost is only the "updated" fact, which
+    is the cheaper half.
+
+    THE TEMPORARY NAME IS UNIQUE PER WRITER, and that is a fix rather than
+    tidiness (agent review round 1, MINOR 4). ``path.with_suffix('.tmp')`` — the
+    obvious spelling, and the hazard ``model/catalogue.py`` documents for the same
+    construct — is ONE name for every writer of one session directory, and two
+    runtimes can serve one directory: that is exactly the shape a blocked loop
+    provokes, where the supervisor spawns a replacement while the predecessor is
+    still in its exit leg. Measured against that shape (2 writers x 3000 writes):
+    **59** reads of an absent-or-corrupt marker, and **2374** writes reporting
+    failure (``FileNotFoundError: update-window.tmp -> update-window.json`` — the
+    other writer had already renamed it away). The two failure modes are both
+    silent in the direction that matters: a writer whose ``os.replace`` installs
+    the other's truncated file returns ``True``, and the successor then publishes
+    no ``updated`` fact at all.
+
+    ``mkstemp`` also gives O_EXCL, so two writers cannot open the same temporary
+    in the first place. The temporary is removed on every failure path: a leaked
+    ``.tmp`` inside a session directory is a file nothing else knows about.
+    """
+    path = update_window_path(session_dir)
+    fd = -1
+    tmp = ""
+    try:
+        # ``dir=`` puts the temporary on the same filesystem, which is what makes
+        # the ``os.replace`` below atomic.
+        fd, tmp = tempfile.mkstemp(dir=session_dir, prefix=UPDATE_WINDOW_NAME + ".", suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            # ``os.fdopen`` takes ownership of ``fd``; ``stream`` marks that here so
+            # the ``finally`` below does not close a descriptor the file object
+            # already closed.
+            fd = -1
+            json.dump({"pair": pair, "pid": os.getpid()}, handle)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        logger.warning(
+            "could not write the update-window marker for %s", session_dir.name, exc_info=True
+        )
+        return False
+    finally:
+        if fd >= 0:  # pragma: no cover - only the failed-fdopen path reaches this
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass  # the rename moved it, which is the success path
+            except OSError:  # pragma: no cover - a leaked temp is not worth a raise
+                logger.debug("could not remove the marker temporary %s", tmp, exc_info=True)
+
+
+def read_update_window(session_dir: Path) -> str:
+    """The pair a handover was moving to, or ``""`` when no marker is present.
+
+    An unreadable or malformed marker reads as absent rather than raising: a boot
+    must not fail because a sidecar from an older or killed build is malformed,
+    and the cost of missing one is a fact that is merely nice to have.
+    """
+    try:
+        raw = json.loads(update_window_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    pair = raw.get("pair") if isinstance(raw, dict) else ""
+    return pair if isinstance(pair, str) else ""
+
+
+def clear_update_window(session_dir: Path) -> bool:
+    """Remove the marker, whether or not one is there. ``True`` if it was."""
+    try:
+        update_window_path(session_dir).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        logger.warning(
+            "could not clear the update-window marker for %s", session_dir.name, exc_info=True
+        )
+        return False

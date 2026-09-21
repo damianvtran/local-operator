@@ -37,6 +37,8 @@ import os
 import sys
 from pathlib import Path
 
+from local_operator import procstate
+
 logger = logging.getLogger(__name__)
 
 #: Directory under the config dir holding ephemeral per-run transcripts.
@@ -188,20 +190,16 @@ def _process_alive(pid: int) -> bool:
     has since been recycled reads as alive. That over-protects a directory
     until the unrelated process exits; it never under-protects one, which is
     the direction every caller of this probe errs in.
+
+    The probe itself is ``procstate.pid_liveness`` rather than a local
+    ``os.kill(pid, 0)``: on Windows that call TERMINATES the process it is
+    probing, and the shared tri-state is where that distinction is owned. Its
+    ``None`` — "could not prove either answer" — counts as alive here, again
+    for the safe direction.
     """
     if pid <= 0:
         return False
-    if _PLATFORM == "win32":  # pragma: no cover - probe is POSIX-only
-        return True
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
-    return True
+    return procstate.pid_liveness(pid) is not False
 
 
 def _is_session_store_dir(directory: Path) -> bool:

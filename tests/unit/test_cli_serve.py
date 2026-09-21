@@ -226,3 +226,74 @@ def test_a_reload_probe_that_cannot_bind_is_refused_like_the_listener(
 
     mock_run.assert_not_called()
     assert "cannot bind http://10.1.2.3:0" in capsys.readouterr().err
+
+
+def _recorded_bind_options(monkeypatch: pytest.MonkeyPatch) -> list[tuple[object, ...]]:
+    """The ``setsockopt`` calls ``_bind_serve_socket`` makes, on a fake socket.
+
+    Recorded rather than merely tolerated because the option under test is not
+    observable any other way: it is set on a socket that is then handed to
+    uvicorn, and on this host the two candidate options are one ``hasattr``
+    apart.
+    """
+    calls: list[tuple[object, ...]] = []
+
+    class FakeSocket:
+        def setsockopt(self, level: int, option: int, value: int) -> None:
+            calls.append(("setsockopt", level, option, value))
+
+        def bind(self, address: tuple[str, int]) -> None:
+            calls.append(("bind", address))
+
+        def close(self) -> None:  # pragma: no cover — only a failed bind closes
+            calls.append(("close",))
+
+    monkeypatch.setattr(socket, "socket", lambda *args, **kwargs: FakeSocket())
+    _bind_serve_socket("127.0.0.1", 0)
+    return calls
+
+
+def test_windows_binds_with_so_exclusiveaddrinstead_of_so_reuseaddr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows the two options are ALTERNATIVES, and the choice is a defect fix.
+
+    ``SO_REUSEADDR`` is kept on POSIX because it is what lets a daemon restart
+    the instant after a crash (the measurement is in the function's docstring).
+    On Windows the same option lets a second socket bind an address a first,
+    LISTENING socket already holds — Microsoft's "Using SO_REUSEADDR and
+    SO_EXCLUSIVEADDRUSE" calls it a hijack vector and says every server should
+    set the exclusive option — so the friendly "cannot bind … a daemon is already
+    on 1111" refusal above would never fire, and two `lop serve` processes would
+    split the port in silence while each one's rendezvous record claimed the
+    address.
+
+    ``SO_EXCLUSIVEADDRUSE`` does not exist in ``socket`` off Windows, so the
+    constant is PLANTED here: no macOS or Linux host can exercise this branch
+    otherwise, and the branch is the whole fix.
+    """
+    planted = 0x41
+    monkeypatch.setattr(socket, "SO_EXCLUSIVEADDRUSE", planted, raising=False)
+    calls = _recorded_bind_options(monkeypatch)
+
+    assert ("setsockopt", socket.SOL_SOCKET, planted, 1) in calls
+    assert (
+        "setsockopt",
+        socket.SOL_SOCKET,
+        socket.SO_REUSEADDR,
+        1,
+    ) not in calls, "the two options are mutually exclusive: setting both is not what Windows means"
+
+
+def test_posix_binds_with_so_reuseaddr_as_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The macOS/Linux half, pinned: nothing about this host's bind changed.
+
+    This is the regression that would matter most (macOS behaviour must be
+    identical), so it asserts the option this host really has rather than a
+    branch: where ``SO_EXCLUSIVEADDRUSE`` exists, the other test covers the
+    choice.
+    """
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):  # pragma: no cover — Windows only
+        pytest.skip("this host is Windows, where the exclusive option is the correct one")
+    calls = _recorded_bind_options(monkeypatch)
+    assert ("setsockopt", socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in calls

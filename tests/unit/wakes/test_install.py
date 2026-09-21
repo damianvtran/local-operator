@@ -28,12 +28,27 @@ import pytest
 
 from local_operator.wakes.install import (
     LABEL,
+    SELF_HEAL_INTERVAL_S,
     UNSUPPORTED_REASON,
     ensure_supervisor_installed,
-    is_supported,
     plist_path,
     render_plist,
 )
+
+
+def _supervisor_kind() -> str | None:
+    """Which supervisor THIS machine would be addressed on.
+
+    The launchd-shaped tests below used to gate on ``is_supported()``, which
+    was true on darwin only — so on a Linux runner they fell into the
+    "unsupported" branch and asserted nothing. Now that ``is_supported()`` is
+    true on all three platforms, the honest gate is the supervisor's IDENTITY:
+    these tests fake ``launchctl``, so they are only meaningful where launchctl
+    is what the installer would call.
+    """
+    from local_operator import supervisors
+
+    return supervisors.supervisor()
 
 
 @pytest.fixture
@@ -61,23 +76,65 @@ def test_the_installer_never_touches_the_real_launch_agents_directory(
 def test_install_writes_a_plist_but_declines_to_load_it(
     redirected_home: Path, tmp_path: Path
 ) -> None:
-    outcome = ensure_supervisor_installed(tmp_path / "config")
+    """The file half runs; the half that reaches a live supervisor refuses.
 
-    if not is_supported():
+    On macOS that means a plist and a launchd call that declines because the
+    path is not the one the real passwd home owns. On Linux the same two halves
+    are a systemd unit and a ``systemctl`` call that declines for the same
+    reason, and the unit file it wrote is the real thing a user would get — so
+    this asserts the CONTENT per supervisor rather than assuming a plist.
+    """
+    outcome = ensure_supervisor_installed(tmp_path / "config")
+    kind = _supervisor_kind()
+
+    if kind == "launchctl":
+        # The file half runs in full: this is what launchd WOULD be handed.
+        assert plist_path().exists()
+        written = plistlib.loads(plist_path().read_bytes())
+        assert written == render_plist(tmp_path / "config")
+    elif kind == "systemctl":
+        # The unit, not a plist: same guard, same refusal, different file.
+        from local_operator.wakes.install import SYSTEMD_TIMER, SYSTEMD_UNIT
+
+        unit = plist_path()
+        assert unit.name == SYSTEMD_UNIT
+        text = unit.read_text(encoding="utf-8")
+        assert "ExecStart=" in text and "local_operator.wakes.supervisor" in text
+        # The store travels in the unit, or a second profile would be supervised
+        # by a unit watching the default one.
+        assert f"LOCAL_OPERATOR_CONFIG_DIR={tmp_path / 'config'}" in text
+        # Restart=on-failure and NOT Restart=always: the supervisor exits 0 when
+        # the index empties and that exit has to stick.
+        assert "Restart=on-failure" in text
+        timer = unit.with_name(SYSTEMD_TIMER)
+        assert timer.exists()
+        assert f"OnUnitInactiveSec={SELF_HEAL_INTERVAL_S}s" in timer.read_text(encoding="utf-8")
+    else:
         assert outcome.installed is False
         assert outcome.reason == UNSUPPORTED_REASON
         return
 
-    # The file half runs in full: this is what launchd WOULD be handed.
-    assert plist_path().exists()
-    written = plistlib.loads(plist_path().read_bytes())
-    assert written == render_plist(tmp_path / "config")
-    # The process half refuses under a redirected home.
+    # The process half refuses under a redirected home on every platform.
     assert outcome.installed is False
-    assert "not addressable" in outcome.reason
+    assert "not addressable" in outcome.reason or "not the one the real home owns" in outcome.reason
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="LaunchAgent plist is macOS-only")
+def test_the_unsupported_reason_names_a_supervisor_and_a_remedy() -> None:
+    """D6: the text said "no supervisor installer for this platform".
+
+    That was the pre-PR fact. After this branch all three platforms HAVE an
+    installer, so what is missing on such a host is a SUPERVISOR — and the three
+    sibling daemons already say it that way
+    (``supervisors.no_supervisor_error``), so a user reading four refusals must
+    not get two different stories. Asserted on the copy itself: a test that only
+    compares the outcome to the constant passes whatever the constant says.
+    """
+    assert "no supervisor installer" not in UNSUPPORTED_REASON
+    for named in ("launchctl", "systemctl --user", "schtasks"):
+        assert named in UNSUPPORTED_REASON, UNSUPPORTED_REASON
+
+
 def test_the_plist_lets_a_finished_supervisor_stay_down(tmp_path: Path) -> None:
     """``KeepAlive: {SuccessfulExit: False}`` is load-bearing, not decoration.
 
@@ -178,9 +235,9 @@ def test_the_guard_accepts_only_the_genuine_home(monkeypatch: pytest.MonkeyPatch
     """
     import pwd
 
-    from local_operator.wakes.install import _launchd_is_addressable, is_supported
+    from local_operator.wakes.install import _launchd_is_addressable
 
-    if not is_supported():
+    if _supervisor_kind() != "launchctl":
         pytest.skip("launchd guard is only meaningful on darwin with launchctl")
 
     real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
@@ -288,7 +345,7 @@ def test_a_loaded_but_exited_job_is_not_running(monkeypatch: pytest.MonkeyPatch)
     """
     from local_operator.wakes import install as mod
 
-    if not is_supported():
+    if _supervisor_kind() != "launchctl":
         pytest.skip("launchd probe is only meaningful on darwin with launchctl")
 
     fake = _FakeLaunchctl({"print": (0, _PRINT_EXITED)})
@@ -315,7 +372,7 @@ def test_a_running_job_is_reported_with_its_pid(monkeypatch: pytest.MonkeyPatch)
     """
     from local_operator.wakes import install as mod
 
-    if not is_supported():
+    if _supervisor_kind() != "launchctl":
         pytest.skip("launchd probe is only meaningful on darwin with launchctl")
 
     monkeypatch.setattr(mod, "_launchctl", _FakeLaunchctl({"print": (0, _PRINT_RUNNING)}))
@@ -329,7 +386,7 @@ def test_a_running_job_is_reported_with_its_pid(monkeypatch: pytest.MonkeyPatch)
 def test_an_absent_job_is_neither_loaded_nor_running(monkeypatch: pytest.MonkeyPatch) -> None:
     from local_operator.wakes import install as mod
 
-    if not is_supported():
+    if _supervisor_kind() != "launchctl":
         pytest.skip("launchd probe is only meaningful on darwin with launchctl")
 
     monkeypatch.setattr(mod, "_launchctl", _FakeLaunchctl({"print": (1, "")}))
@@ -364,7 +421,7 @@ def test_a_stopped_supervisor_is_kickstarted_rather_than_called_installed(
     """
     from local_operator.wakes import install as mod
 
-    if not is_supported():
+    if _supervisor_kind() != "launchctl":
         pytest.skip("launchd repair is only meaningful on darwin with launchctl")
 
     config = tmp_path / "config"
@@ -398,7 +455,7 @@ def test_a_running_supervisor_is_left_alone(
     """
     from local_operator.wakes import install as mod
 
-    if not is_supported():
+    if _supervisor_kind() != "launchctl":
         pytest.skip("launchd repair is only meaningful on darwin with launchctl")
 
     config = tmp_path / "config"
@@ -461,7 +518,7 @@ def test_a_store_launchd_cannot_supervise_is_reported_as_unverifiable(
     """
     from local_operator.wakes import install as mod
 
-    if not is_supported():
+    if _supervisor_kind() != "launchctl":
         pytest.skip("launchd scoping is only meaningful on darwin with launchctl")
 
     fake = _FakeLaunchctl({"print": (0, _PRINT_RUNNING)})
@@ -493,11 +550,522 @@ def test_a_repeat_install_in_a_foreign_store_does_not_claim_to_be_installed(
     first = ensure_supervisor_installed(config)
     second = ensure_supervisor_installed(config)  # same store, plist now matches
 
-    if not is_supported():
+    if _supervisor_kind() is None:
+        # Neither macOS nor Linux-with-systemctl: the only honest answer left.
+        assert second.installed is False
         assert second.reason == UNSUPPORTED_REASON
         return
 
-    assert second.installed is False, "a store launchd cannot reach reported as installed"
+    # The gate is the supervisor's IDENTITY, not "is it launchctl". Before the
+    # Linux arm existed this branch was ``!= "launchctl"`` and asserted the
+    # unsupported reason, which was true then because nothing else was ever
+    # installed. Now a Linux host with a user manager takes the SAME shape as
+    # macOS — a unit is written, the manager refuses to be addressed from a
+    # foreign home — so the assertion that matters ("a store nothing supervises
+    # must not report as installed, and must say which manager cannot reach
+    # it") is asserted for both, instead of one arm asserting nothing.
+    assert second.installed is False, "a store the supervisor cannot reach reported as installed"
     assert "not addressable" in second.reason, second.reason
     # Both calls answer in the same vocabulary; only the tense differs.
     assert "not addressable" in first.reason, first.reason
+
+
+# ---------------------------------------------------------------------------
+# The Linux and Windows arms (A9/A1/A8)
+#
+# The defect these exist for is not a crash but a SILENCE: on Linux and Windows
+# `ensure_supervisor_installed` returned
+# ``installed=False, "no supervisor installer for this platform"``, the wake
+# persisted, and it then fired only when a human next opened that session — the
+# exact case `lop wake` exists for. macOS was unaffected, so nothing caught it.
+#
+# The fakes below stand in for `systemctl --user` and `schtasks`. Whether a REAL
+# systemd accepts these units was settled separately, on systemd 255 in an
+# Ubuntu 24.04 container: the unit is written, `systemctl --user enable --now`
+# starts it, and the timer re-runs it (see the PR's evidence section).
+# ---------------------------------------------------------------------------
+
+
+class _FakeSystemctl:
+    """Records every ``systemctl --user`` argv and replays canned results."""
+
+    def __init__(self, results: dict[str, tuple[int, str]] | None = None) -> None:
+        self._results = results or {}
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, *args: str, **kwargs: object):  # noqa: ANN204
+        import subprocess
+
+        self.calls.append(args)
+        code, stdout = self._results.get(args[0], (0, ""))
+        return subprocess.CompletedProcess(list(args), code, stdout, "")
+
+    @property
+    def verbs(self) -> list[str]:
+        return [call[0] for call in self.calls]
+
+
+def _systemd(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    unit_addressable: bool = True,
+    store_in_real_home: bool = True,
+) -> _FakeSystemctl:
+    """Point the installer at Linux/systemd with fakes for every process reach.
+
+    ``unit_addressable`` (does a ``systemctl --user`` call here address the REAL
+    user manager?) and ``store_in_real_home`` (does the supervised store outlive
+    this process?) are the two INDEPENDENT inputs the write guard decides on,
+    and they are separate parameters because the defect they guard against lives
+    in the mixed corner: a real HOME with a store outside it. This fixture used
+    to set both from ONE ``addressable`` argument, so only ``True/True`` and
+    ``False/False`` could be expressed and the mixed case — the one that
+    overwrote an operator's live systemd unit — was untestable by construction.
+    """
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    fake = _FakeSystemctl()
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "systemctl")
+    monkeypatch.setattr(supervisors, "systemctl_user", fake)
+    monkeypatch.setattr(supervisors, "enable_linger", lambda: True)
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda _unit: unit_addressable)
+    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _config: store_in_real_home)
+    monkeypatch.setattr(supervisors, "systemd_version", lambda: 255)
+    return fake
+
+
+def test_the_linux_arm_installs_a_unit_a_timer_and_enables_the_timer(
+    redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The deliverable: a wake armed on Linux is supervised when no TUI is open."""
+    from local_operator.wakes import install as mod
+
+    fake = _systemd(monkeypatch)
+    store = tmp_path / "config"
+
+    outcome = mod.ensure_supervisor_installed(store)
+
+    assert outcome.installed is True, outcome.reason
+    unit = mod.plist_path()
+    assert unit.name == mod.SYSTEMD_UNIT
+    text = unit.read_text(encoding="utf-8")
+    assert "ExecStart=" in text and "local_operator.wakes.supervisor" in text
+    assert f"LOCAL_OPERATOR_CONFIG_DIR={store}" in text
+    assert "Restart=on-failure" in text
+    # The log the other two platforms' supervisors create, which systemd only
+    # creates when it is new enough to understand `append:`.
+    assert "StandardOutput=append:" in text
+    timer = unit.with_name(mod.SYSTEMD_TIMER)
+    assert timer.exists()
+    assert f"OnUnitInactiveSec={mod.SELF_HEAL_INTERVAL_S}s" in timer.read_text(encoding="utf-8")
+    # The TIMER is enabled so the supervisor re-runs itself, and the SERVICE is
+    # enabled for start-at-login — enabling a timer does not enable the unit it
+    # activates, so both are needed for the launchd pair being reproduced
+    # (`RunAtLoad` + `StartInterval`).
+    assert ("enable", "--now", mod.SYSTEMD_TIMER) in fake.calls
+    assert ("enable", mod.SYSTEMD_UNIT) in fake.calls
+    # And started NOW: the wake that triggered this install is already due.
+    assert ("start", mod.SYSTEMD_UNIT) in fake.calls
+    assert ("daemon-reload",) in fake.calls
+
+
+def test_the_linux_arm_refuses_to_load_a_unit_from_a_redirected_home(
+    redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The file half runs; the half that reaches a LIVE user manager refuses.
+
+    ``systemctl --user`` addresses the calling user's instance whatever ``$HOME``
+    says, so without this an isolated run would enable a real unit pointed at a
+    store that is deleted when the test ends.
+    """
+    from local_operator.wakes import install as mod
+
+    fake = _systemd(monkeypatch, unit_addressable=False, store_in_real_home=False)
+
+    outcome = mod.ensure_supervisor_installed(tmp_path / "config")
+
+    assert outcome.installed is False
+    assert "not addressable" in outcome.reason
+    assert mod.plist_path().exists(), "the unit file half must still be testable"
+    assert fake.calls == [], "the user manager was addressed from a redirected home"
+
+
+def test_the_linux_arm_refuses_a_real_unit_path_with_a_store_outside_the_home(
+    redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The mix the old fixture could not express: real manager, sandbox store.
+
+    ``_systemd``'s two flags are independent on purpose, and this is the corner
+    they were collapsed over: ``unit_addressable`` True (the unit path is the
+    real ``~/.config/systemd/user``) with ``store_in_real_home`` False. The
+    write guard used to fold the store test into ``addressable``, which made its
+    own refusal — ``addressable and not _config_lives_in_real_home`` —
+    unsatisfiable, so this exact input overwrote an operator's live unit with
+    one pointed at a store that dies with the sandbox (reviewer A A1).
+
+    Asserted on the outcome and on the file NOT being written, which is the
+    damage; the predicate alone would pass either way.
+    """
+    from local_operator.wakes import install as mod
+
+    fake = _systemd(monkeypatch, unit_addressable=True, store_in_real_home=False)
+
+    outcome = mod.ensure_supervisor_installed(tmp_path / "sandbox-store")
+
+    assert outcome.installed is False
+    assert "outside the real home" in outcome.reason
+    unit = mod.plist_path()
+    assert not unit.exists(), "a sandbox store was written into the real systemd user dir"
+    assert not unit.with_name(mod.SYSTEMD_TIMER).exists()
+    assert fake.calls == [], "the real user manager was addressed for a sandbox store"
+
+
+def test_a_repeat_install_is_idempotent_by_content(
+    redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A second write of the same unit must not bounce a healthy supervisor."""
+    from local_operator.wakes import install as mod
+
+    store = tmp_path / "config"
+    fake = _systemd(monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "_systemd_supervisor_state",
+        lambda _config: mod.SupervisorState(loaded=True, running=True, pid=4321, detail="active"),
+    )
+
+    mod.ensure_supervisor_installed(store)
+    fake.calls.clear()
+    second = mod.ensure_supervisor_installed(store)
+
+    assert second.installed is True
+    assert second.reason == "already installed"
+    assert fake.calls == [], "an unchanged, running unit was restarted"
+
+
+def test_a_loaded_but_dead_supervisor_is_started_again(
+    redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The self-retirement shape: unit correct, systemd knows it, nothing runs.
+
+    This is the Linux half of the permanent-miss bug — the supervisor exits 0 on
+    an empty index, so "already installed" on a dead unit is exactly the state
+    that let armed wakes sit unfired.
+    """
+    from local_operator.wakes import install as mod
+
+    store = tmp_path / "config"
+    fake = _systemd(monkeypatch)
+    monkeypatch.setattr(
+        mod,
+        "_systemd_supervisor_state",
+        lambda _config: mod.SupervisorState(loaded=True, running=False, detail="inactive/dead"),
+    )
+
+    mod.ensure_supervisor_installed(store)
+    fake.calls.clear()
+    outcome = mod.ensure_supervisor_installed(store)
+
+    assert outcome.installed is True
+    assert outcome.reason == "restarted a stopped supervisor"
+    assert ("start", mod.SYSTEMD_UNIT) in fake.calls
+
+
+def test_systemctl_refusing_to_enable_is_reported_with_its_own_words(
+    redirected_home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Not a traceback, and not a claimed success either."""
+    from local_operator.wakes import install as mod
+
+    fake = _systemd(monkeypatch)
+
+    def failing(*args: str, **kwargs: object):  # noqa: ANN202
+        if args[0] == "enable":
+            import subprocess
+
+            return subprocess.CompletedProcess(
+                list(args), 1, "", "Failed to connect to bus: No medium found"
+            )
+        return fake(*args, **kwargs)  # type: ignore[arg-type]
+
+    from local_operator import supervisors
+
+    monkeypatch.setattr(supervisors, "systemctl_user", failing)
+
+    outcome = mod.ensure_supervisor_installed(tmp_path / "config")
+
+    assert outcome.installed is False
+    assert "loginctl enable-linger" in outcome.reason, "the remedy must be named"
+
+
+def test_uninstall_disables_the_timer_before_the_service(
+    redirected_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disabling the service alone leaves a timer that starts it again."""
+    from local_operator.wakes import install as mod
+
+    fake = _systemd(monkeypatch)
+
+    mod.uninstall()
+
+    assert fake.calls.index(("disable", "--now", mod.SYSTEMD_TIMER)) < fake.calls.index(
+        ("disable", "--now", mod.SYSTEMD_UNIT)
+    )
+
+
+def test_the_windows_uninstall_ends_the_task_before_deleting_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A2: the delete deregisters without stopping the supervisor.
+
+    ``lop wake uninstall`` on Windows used to leave a supervisor still firing
+    wakes from a store the caller believed it had removed — the other two
+    platforms stop the job as part of the uninstall (``bootout``,
+    ``disable --now``) and Windows needs its own ``/End``.
+    """
+    import subprocess
+
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
+    monkeypatch.setattr(mod, "ambient_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        supervisors,
+        "schtasks",
+        lambda *args, **kw: calls.append(args)
+        or subprocess.CompletedProcess(list(args), 0, "", ""),
+    )
+    monkeypatch.setattr(
+        supervisors,
+        "delete_task",
+        lambda name: calls.append(("/Delete", "/TN", name)) or (True, "deleted"),
+    )
+    record = mod.task_record_path(tmp_path)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text("<Task/>", encoding="utf-8")
+
+    outcome = mod.uninstall()
+
+    assert outcome.installed is False and outcome.reason == "uninstalled", outcome
+    assert [call[0] for call in calls] == ["/End", "/Delete"], calls
+    assert calls[0] == tuple(supervisors.task_end_args(mod.TASK_NAME))
+    assert not record.exists()
+
+
+def test_a_refused_windows_uninstall_is_not_reported_as_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A refusal must not read as removed: the supervisor is still registered."""
+    import subprocess
+
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
+    monkeypatch.setattr(mod, "ambient_config_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        supervisors,
+        "schtasks",
+        lambda *args, **kw: subprocess.CompletedProcess(list(args), 0, "", ""),
+    )
+    monkeypatch.setattr(
+        supervisors, "delete_task", lambda _name: (False, "ERROR: Access is denied.")
+    )
+
+    outcome = mod.uninstall()
+
+    assert outcome.installed is False
+    assert "Access is denied." in outcome.reason
+
+
+def test_the_linux_unit_quotes_paths_systemd_would_otherwise_split(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A5, measured on systemd 255: unquoted values are silently truncated.
+
+    ``Environment=LOCAL_OPERATOR_CONFIG_DIR=/home/a b/store`` made systemd log
+    ``Invalid environment assignment, ignoring: b/store`` and keep the variable
+    at its first word — so the supervisor supervised a DIFFERENT store than the
+    one the wake was armed in, with nothing on screen saying so. A space in the
+    interpreter path was worse: ``Command /home/a is not executable``, a unit
+    that can never start.
+    """
+    from local_operator.wakes import install as mod
+
+    monkeypatch.setattr(mod.sys, "executable", "/home/a b/python3")
+    monkeypatch.setattr(mod.procname, "supervised_image", lambda: None)
+    store = tmp_path / "a b" / "100%" / "store"
+
+    text = mod.render_systemd(store)
+
+    # ``%`` is doubled because systemd expands unit specifiers even inside a
+    # quoted string; ``%%`` is the escape, and a single ``%`` here would be the
+    # silent-mangling half of the same defect.
+    assert f'Environment="LOCAL_OPERATOR_CONFIG_DIR={store}"'.replace("100%", "100%%") in text
+    assert 'ExecStart="/home/a b/python3" -m local_operator.wakes.supervisor' in text
+
+
+def test_the_systemd_probe_reads_state_rather_than_an_exit_code() -> None:
+    """Pure parse, against recorded ``systemctl show`` output."""
+    from local_operator.wakes.install import _parse_systemd_state
+
+    exited = _parse_systemd_state(
+        "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0"
+    )
+    assert exited.loaded is True and exited.running is False and exited.pid is None
+
+    live = _parse_systemd_state(
+        "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=8123"
+    )
+    assert live.running is True and live.pid == 8123
+
+    absent = _parse_systemd_state(
+        "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0"
+    )
+    assert absent.loaded is False and absent.running is False
+    assert "not loaded" in absent.detail
+
+
+def test_an_auto_restarting_unit_is_not_a_running_supervisor() -> None:
+    """A crash loop must not read as "running" on the status surface.
+
+    MEASURED on real systemd 255 (Ubuntu 24.04 container): a unit whose process
+    keeps exiting reports ``activating/auto-restart``. systemd is retrying, so
+    nothing is serving the wakes — and a `start` on it is a no-op, which is why
+    classifying it as stopped is safe as well as honest.
+    """
+    from local_operator.wakes.install import _parse_systemd_state
+
+    crashing = _parse_systemd_state(
+        "LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nMainPID=162"
+    )
+
+    assert crashing.loaded is True
+    assert crashing.running is False
+    assert "auto-restart" in crashing.detail
+
+
+def test_the_systemd_probe_fails_safe_on_vocabulary_it_does_not_know() -> None:
+    """Unknown vocabulary is NOT read as stopped.
+
+    Reading an unknown word as stopped would restart a healthy supervisor on
+    every wake write; reading it as running only skips a repair the timer would
+    have made anyway, so the asymmetry is deliberate.
+    """
+    from local_operator.wakes.install import _parse_systemd_state
+
+    unknown = _parse_systemd_state(
+        "LoadState=loaded\nActiveState=reloading\nSubState=reload\nMainPID=9"
+    )
+    assert unknown.running is True
+
+
+def test_an_unreachable_user_manager_is_not_verifiable_rather_than_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ "Cannot ask" and "nothing installed" are different answers to the user."""
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda _unit: True)
+    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _config: True)
+
+    def no_bus(*args: str, **kwargs: object):  # noqa: ANN202
+        import subprocess
+
+        return subprocess.CompletedProcess(
+            list(args), 1, "", "Failed to connect to bus: No medium found"
+        )
+
+    monkeypatch.setattr(supervisors, "systemctl_user", no_bus)
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "systemctl")
+
+    state = mod.supervisor_state(tmp_path / "config")
+
+    assert state.verifiable is False
+    assert "loginctl enable-linger" in state.detail
+    # And the isolated-store answer is unchanged: not verifiable, no pid.
+    monkeypatch.setattr(supervisors, "systemd_unit_is_addressable", lambda _unit: False)
+    assert mod.supervisor_state(tmp_path / "config").verifiable is False
+
+
+def test_the_windows_arm_registers_and_starts_a_task(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A8: nothing in this repo attempted Windows task scheduling before this."""
+    import subprocess
+
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    created: list[tuple[str, str]] = []
+    runs: list[tuple[str, ...]] = []
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
+    monkeypatch.setattr(supervisors, "task_scheduler_is_addressable", lambda _c: True)
+    monkeypatch.setattr(supervisors, "task_state", lambda _name: (False, False, "not registered"))
+    monkeypatch.setattr(mod, "_config_lives_in_real_home", lambda _c: True)
+
+    def fake_create(name: str, xml: str) -> tuple[bool, str]:
+        created.append((name, xml))
+        return True, "registered"
+
+    monkeypatch.setattr(supervisors, "create_task", fake_create)
+    monkeypatch.setattr(
+        supervisors,
+        "schtasks",
+        lambda *args, **kwargs: runs.append(args)
+        or subprocess.CompletedProcess(list(args), 0, "", ""),
+    )
+
+    store = tmp_path / "config"
+    outcome = mod.ensure_supervisor_installed(store)
+
+    assert outcome.installed is True, outcome.reason
+    name, xml = created[0]
+    assert name == mod.TASK_NAME
+    assert "local_operator.wakes.supervisor" in xml
+    assert "PT15M" in xml, "the self-heal interval is what makes an unattended wake fire"
+    assert str(store) in xml, "the supervised store is part of the contract"
+    assert ("/Run", "/TN", mod.TASK_NAME) in runs
+    assert mod.task_record_path(store).exists()
+
+
+def test_the_windows_arm_reports_schtasks_refusal_verbatim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No Windows host here, so a wrong guess must fail LOUDLY with its own words."""
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
+    monkeypatch.setattr(supervisors, "task_scheduler_is_addressable", lambda _c: True)
+    monkeypatch.setattr(
+        supervisors, "create_task", lambda _n, _x: (False, "ERROR: Access is denied.")
+    )
+
+    outcome = mod.ensure_supervisor_installed(tmp_path / "config")
+
+    assert outcome.installed is False
+    assert "Access is denied." in outcome.reason
+
+
+def test_the_windows_arm_refuses_a_store_outside_the_real_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_operator import supervisors
+    from local_operator.wakes import install as mod
+
+    monkeypatch.setattr(supervisors, "supervisor", lambda: "schtasks")
+    monkeypatch.setattr(supervisors, "task_scheduler_is_addressable", lambda _c: False)
+    called: list[str] = []
+    monkeypatch.setattr(supervisors, "create_task", lambda n, x: called.append(n) or (True, ""))
+
+    outcome = mod.ensure_supervisor_installed(tmp_path / "config")
+
+    assert outcome.installed is False
+    assert "outside the real profile" in outcome.reason
+    assert called == [], "a task was registered for a sandbox store"

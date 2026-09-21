@@ -48,6 +48,7 @@ import asyncio
 import sqlite3
 import threading
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -59,6 +60,24 @@ from local_operator.server.utils.desktop_feed import (
     _fingerprint,
 )
 from local_operator.session.attention import AttentionStore, provisional_anchor
+from tests.notification_opt_in import notification_path_opt_in
+
+
+@pytest.fixture(autouse=True)
+def notification_path_on() -> Iterator[None]:
+    """This suite's subject IS the ``notification`` frame, so it opts in.
+
+    Both process-wide gates suppress it otherwise: the kill switch armed by
+    ``tests/conftest.py`` (no frame is composed at all) and, for the legs whose
+    sessions carry a journal, the test-hosting rule. These tests fabricate
+    session ids with no journal, so only the first applies here — the shared
+    helper clears both, because a module that later seeds a real selection must
+    not have to remember a second variable. See ``tests/notification_opt_in``
+    for why this is a module-level fixture and what the escape can and cannot
+    do.
+    """
+    with notification_path_opt_in():
+        yield
 
 
 def publish(

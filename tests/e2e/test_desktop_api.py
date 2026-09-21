@@ -6,6 +6,7 @@ through its normal lifecycle; it never replaces a developer's running service.
 """
 
 import asyncio
+import json
 import secrets
 import socket
 from pathlib import Path
@@ -82,6 +83,62 @@ async def test_desktop_controls_over_real_http(tmp_path: Path, monkeypatch: pyte
             print("GET /v1/auth/status", accounts.status_code, accounts.json())
             assert secret not in accounts.text
             assert accounts.headers["cache-control"] == "no-store"
+            # The tunnel verdict rides the same response, decided on this device:
+            # no tunnel is enrolled in this fixture, so there is nothing to sign
+            # in for and no remedy to offer.
+            assert accounts.json()["result"]["radient_login"]["state"] == "unknown"
+            assert accounts.json()["result"]["tunnel_remedy"] is None
+
+            # The desktop's read-only view of remote access, over the assembled
+            # app: this is what pins that the route is REGISTERED and gated (a
+            # router added to `app.py` but collided away by a sibling answers
+            # 404 here) and that it describes a machine with no tunnel honestly.
+            tunnel = await client.get("/v1/desktop/tunnel")
+            print("GET /v1/desktop/tunnel", tunnel.status_code, tunnel.json()["result"])
+            assert tunnel.status_code == 200
+            unconfigured = tunnel.json()["result"]
+            assert unconfigured["configured"] is False
+            assert unconfigured["connector"]["state"] == "not configured"
+            assert unconfigured["remedy"] is None
+
+            # A parked connector changes the answer, and the park wins over any
+            # probe: state.json is what the connector left behind, and the
+            # desktop must be able to see the condition without shelling out.
+            directory = root / "tunnel"
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "config.json").write_text(
+                json.dumps(
+                    {
+                        "tunnel_id": "tunnel-1",
+                        "credential_id": 1,
+                        "gateway_port": 4711,
+                        "record": {"id": "tunnel-1", "status": "active"},
+                    }
+                )
+            )
+            (directory / "state.json").write_text(
+                json.dumps(
+                    {
+                        "state": "parked",
+                        "reason": "login_required",
+                        "detail": "The connector's Radient login is no longer valid.",
+                        "remedy": {
+                            "command": "lop login radient",
+                            "url": "https://console.radienthq.com/dashboard/tunnels",
+                        },
+                        "credential_id": 1,
+                        "at": 1_800_000_000,
+                        "first_at": 1_800_000_000,
+                        "attempts": 1,
+                    }
+                )
+            )
+            parked = await client.get("/v1/desktop/tunnel")
+            print("GET /v1/desktop/tunnel (parked)", parked.status_code, parked.json()["result"])
+            assert parked.status_code == 200
+            assert parked.json()["result"]["connector"]["state"] == "parked"
+            assert parked.json()["result"]["remedy"]["command"] == "lop login radient"
+            assert parked.headers["cache-control"] == "no-store"
             assert not (tmp_path / "desktop-home" / ".local-operator" / "config.yml").exists()
     finally:
         server.should_exit = True

@@ -54,6 +54,7 @@ _AGENT_EVENT_NAMES: Dict[str, str] = {
     "turn_start": EventName.TURN_START,
     "turn_end": EventName.TURN_END,
     "message_update": EventName.MESSAGE_DELTA,
+    "reasoning_delta": EventName.REASONING_DELTA,
     "tool_execution_start": EventName.TOOL_START,
     "tool_execution_update": EventName.TOOL_DELTA,
     "tool_execution_end": EventName.TOOL_END,
@@ -173,7 +174,16 @@ def publish_agent_event(
         if job_id:
             body["job_id"] = job_id
         channels = [job_channel(job_id)] if job_id else []
-        message_id = _record_id_for(payload)
+        # A display-only family must not ride the RECORD channel. That channel is
+        # the compatibility surface an installed client follows one record's
+        # ``message.delta``/``record.update`` frames on, and a reducer that
+        # appends ``data.delta`` from every frame on it -- the shape this
+        # transport was built to preserve -- would splice the model's private
+        # thinking into the answer being painted (review round 1, MINOR-3). The
+        # job channel still carries the event, which is where a client that
+        # knows the name reads it, and the phone's projection is fed from the
+        # runtime's own stream rather than from here.
+        message_id = None if raw_type == "reasoning_delta" else _record_id_for(payload)
         if message_id:
             channels.append(message_channel(str(message_id)))
         for channel in channels:

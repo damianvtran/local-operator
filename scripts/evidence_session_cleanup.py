@@ -164,6 +164,13 @@ def main() -> int:
     parsed = parser.parse_args()
     config_dir = _refuse_real_home()
 
+    # This driver builds REAL sessions on the ``test``/mock hosting against the
+    # scratch store it was pointed at, and a mock completion's banner body is
+    # the mock's own reply. Gated once, before any session exists.
+    from local_operator.tui.notify import suppress_notifications_for_process
+
+    suppress_notifications_for_process("session-cleanup driver")
+
     import logging
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
