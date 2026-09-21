@@ -788,6 +788,38 @@ NEGATIVE_CASES: tuple[Case, ...] = (
         )
         for name in COUNT_TAIL_RELEASED_NAMES
     ),
+    # --- 2026-09-21: the MASK MARKER itself, which a peer session reported three
+    #     times in one hour. The third report was this claim: a message CONTAINING
+    #     the marker re-fires a fresh incident — "a detector whose output is its own
+    #     input cannot settle". Measured false on this table's own tree, and unpinned
+    #     by the table until now, which is why the claim travelled as a message
+    #     instead of meeting a row. The marker is ALREADY-CONTAINED material: the
+    #     value it stands in for is gone, so a text carrying it holds no credential
+    #     material for a rule to grade — and the three shapes below are the ones that
+    #     reach this pass from a peer: the marker alone, a handover message, and a
+    #     tool-call argument.
+    #
+    #     The boundary is measured and stated rather than left to be discovered: the
+    #     ONE spelling where the pass still matches the marker is ``.npmrc``'s
+    #     ``_authToken=`` token, whose value class accepts the marker's own brackets.
+    #     That rule fires and files an ``npmrc-auth-token`` hit, but it rewrites the
+    #     marker back to ITSELF, so the bytes are unchanged on all seven surfaces and
+    #     ``reached_model`` stays false. The class is already driven through the
+    #     shipped path by ``test_a_marker_valued_hit_no_longer_escalates``. It takes no
+    #     row here because neither half can hold it honestly: a POSITIVE row asserts
+    #     its text was rewritten, and this text is byte-stable everywhere.
+    Case(
+        "[redacted]",
+        "the mask marker alone: the pass's own output is not its own input",
+    ),
+    Case(
+        "The alert quoted MONGO_DSN=mongodb+srv://svc:[redacted]@db.invalid/x as " "its evidence.",
+        "the marker inside prose, in a credential position: a peer's evidence",
+    ),
+    Case(
+        '{"command": "grep -rn \'MONGO_DSN=[redacted]\' notes/"}',
+        "the marker inside a JSON tool argument: the shape a bash call journals",
+    ),
 )
 
 

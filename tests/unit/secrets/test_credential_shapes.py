@@ -221,6 +221,51 @@ def test_ordinary_text_is_left_byte_identical_on_every_surface(
     assert SURFACES[surface](case.text) == case.text, f"{surface} rewrote {case.reason}"
 
 
+#: The corpus rows that make the MASK MARKER their own subject, named by REASON so
+#: that a rename or a removal fails loudly instead of quietly checking nothing.
+MASK_MARKER_NEGATIVE_REASONS: tuple[str, ...] = (
+    "the mask marker alone: the pass's own output is not its own input",
+    "the marker inside prose, in a credential position: a peer's evidence",
+    "the marker inside a JSON tool argument: the shape a bash call journals",
+)
+
+
+def test_the_mask_marker_neither_masks_nor_labels_nor_escalates() -> None:
+    """A message carrying the marker files no incident — the peer's report, pinned.
+
+    The third of three "credential reached X" reports was this claim: a message that
+    CONTAINS the mask marker re-fires a fresh incident, so "a detector whose output
+    is its own input cannot settle". It is measured false, and the corpus could not
+    settle it because the marker appeared in no row on either half; a claim that
+    travels as prose is a claim the next session re-litigates, so it takes rows.
+
+    What this test adds over the rows is the rest of the claim. The parametrised
+    negative test asserts the BYTE half — the marker survives every surface — and
+    the corpus digest pins the label and severity of what the table MATCHES, which
+    for these rows is nothing. The three assertions below are stated together
+    because they are one finding: no mask, no label, no escalation. ``reached_model``
+    is derived from the hit list (:func:`shape_report`), so the empty hit list is
+    what keeps the escalation half from being vacuously true — a rule that matched
+    would file a hit, and the ``.npmrc`` ``_authToken=`` spelling is this table's own
+    measured example of a hit that files, labels, and still does not escalate.
+    """
+    cases = [case for case in NEGATIVE_CASES if case.reason in MASK_MARKER_NEGATIVE_REASONS]
+    missing = set(MASK_MARKER_NEGATIVE_REASONS) - {case.reason for case in cases}
+    assert not missing, f"the marker rows were renamed or removed: {sorted(missing)}"
+
+    for case in cases:
+        # Anti-vacuity first: a row that no longer carries the marker would satisfy
+        # every assertion below while pinning nothing at all.
+        assert REDACTION_MARKER in case.text, f"{case.reason} no longer carries the marker"
+        changed = [name for name, surface in SURFACES.items() if surface(case.text) != case.text]
+        assert not changed, f"{case.reason} was rewritten on {changed}"
+        assert match_shape_names(case.text) == [], f"{case.reason} was labelled"
+        _, hits = scrub_shapes_with_hits(case.text)
+        assert not hits, f"{case.reason} filed a hit"
+        report = redaction_shapes.shape_report(hits)
+        assert report.reached_model is False, f"{case.reason} escalated"
+
+
 def test_the_corpus_is_big_enough_to_be_evidence() -> None:
     """A guard on the corpus itself, so it cannot be quietly trimmed.
 
@@ -2417,7 +2462,18 @@ def _corpus_grading() -> str:
 #: (``<prefix>_<name>=<value>``, the dash-joined form, and a fixed-prefix name), and
 #: one positive for the npm token's own hex-and-dash spelling, which pins the
 #: boundary the new tail predicate must leave alone.
-_CORPUS_GRADING_DIGEST = "42390096fa184cd71c8ff6a3627739bccc13d30406f965ffef343a8f29d57c48"
+#:
+#: Moved on 2026-09-21 a fourth time, by the commit that pinned the MASK MARKER as
+#: corpus negatives, and the argument is once again a measurement: this commit's diff
+#: to ``redaction_shapes.py`` is EMPTY (tests only), so nothing could move — and the
+#: digest delta is exactly the three added rows, measured the same way as the round
+#: before it: recomputing ``_corpus_grading()`` over the 342 rows the constant above
+#: covered, i.e. this corpus minus the three marker rows, produces that constant
+#: byte for byte, and 345 produce the value below. What the three rows change is
+#: coverage rather than behaviour: the marker appeared in no row on either half, and
+#: its claim — that a message CONTAINING the detector's own output re-fires an
+#: incident — now fails against a table instead of against a paragraph.
+_CORPUS_GRADING_DIGEST = "893465306dd7e53362da5c289a0192fe856bb5830ea8dc5499891d798b8fd4b1"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
