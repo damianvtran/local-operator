@@ -1663,45 +1663,39 @@ def _credential_file_names(provider: str) -> list[str]:
 
 
 def _catalogue_api_key(provider: str) -> str:
-    """An explicit API key for ``provider`` from env or the credential file, else "".
+    """An explicit API key for ``provider`` from the provider store, env, or the
+    legacy credential file, else "".
 
     Reading ONLY ``os.environ`` was a real defect rather than a shortcut: both
     sanctioned credential flows bypass the environment. ``local-operator
-    credential update OPENROUTER_API_KEY`` writes the ``CredentialManager`` file,
-    and the TUI's ``/login`` writes the ``AuthStore``. So the users who configured
-    credentials the app's own way were exactly the ones this enrichment silently
-    skipped — their sessions streamed fine (the stream-time cascade reads those
-    stores) while their band showed a 128k window and no cost, forever, with the
-    failure recorded only at debug level. Every other key reader in the repo goes
-    through ``CredentialManager``; this one was the outlier.
+    credential update OPENROUTER_API_KEY`` now writes a provider-class store row
+    (and, mid-transition, the legacy ``CredentialManager`` file), and the TUI's
+    ``/login`` writes the ``AuthStore``. So the users who configured credentials
+    the app's own way were exactly the ones this enrichment silently skipped —
+    their sessions streamed fine (the stream-time cascade reads those stores)
+    while their band showed a 128k window and no cost, forever, with the failure
+    recorded only at debug level. Every other key reader in the repo now goes
+    through the shared store-first reader; this one was the outlier.
 
-    The env leg goes through ``resolve_env_key`` rather than reading the
-    definition's ``env_keys`` directly, because that field has TWO forms —
-    ``str | Callable[[], str | None]`` — and an ``isinstance(..., str)`` test
-    silently drops the callable one. Anthropic is the only provider using it, so
-    the reader that skipped it skipped precisely the provider whose listing needs
-    a credential most: its catalogue 401s unauthenticated, so enrichment never ran
-    and every unshipped Claude id kept the 128k unknown default.
+    The env leg goes through ``registry.provider_env_key``, which reads the
+    provider-class STORE row first, then the environment, then the legacy file,
+    and does so for BOTH forms of ``env_keys`` — ``str | Callable[[], str |
+    None]`` — where an ``isinstance(..., str)`` test silently drops the callable
+    one. Anthropic is the only provider using it, so the reader that skipped it
+    skipped precisely the provider whose listing needs a credential most: its
+    catalogue 401s unauthenticated, so enrichment never ran and every unshipped
+    Claude id kept the 128k unknown default.
 
     The OAuth store is NOT read here — see :func:`_catalogue_credential`, which
     layers it underneath this and reports which kind of secret it found.
     """
-    from local_operator.providers.registry import resolve_env_key
-
-    canonical = "test" if provider == "noop" else provider
-    from_env = resolve_env_key(canonical)
-    if from_env:
-        return from_env
-
     try:
-        from local_operator.credentials import CredentialManager
+        from local_operator.providers.registry import provider_env_key
 
-        manager = CredentialManager(config_dir())
-        for name in _credential_file_names(canonical):
-            secret = manager.get_credential(name)
-            if secret is not None and secret.get_secret_value():
-                return secret.get_secret_value()
-    except Exception as exc:  # noqa: BLE001 - an unreadable store is not fatal
+        value = provider_env_key(canonical)
+        if value:
+            return value
+    except Exception as exc:  # noqa: BLE001 - a store failure is not fatal here
         logger.debug("could not read %s key for the catalogue: %s", provider, exc)
     return ""
 
@@ -2720,16 +2714,19 @@ def configure_model(
     if not model_name:
         model_name = DEFAULT_MODEL_NAMES.get(canonical, "")
 
-    # Best-effort static key for legacy consumers; the cascade at stream time
-    # re-resolves (OAuth refresh, env, stored keys) — see AuthStore.
+    # Best-effort static key for legacy consumers; the store-first reader tries
+    # the provider-class row, then env, then the legacy file. The cascade at
+    # stream time re-resolves (OAuth refresh, env, stored keys) — see AuthStore.
     api_key: Optional[SecretStr] = None
-    if credential_manager is not None and isinstance(definition.env_keys, str):
+    if credential_manager is not None:
         try:
-            secret = credential_manager.get_credential(definition.env_keys)
-        except Exception:
-            secret = None
-        if secret is not None and secret.get_secret_value():
-            api_key = secret
+            from local_operator.providers.registry import provider_env_key
+
+            static_key = provider_env_key(canonical)
+        except Exception:  # noqa: BLE001 - a store failure must not block config
+            static_key = None
+        if static_key:
+            api_key = SecretStr(static_key)
 
     model_info: ModelInfo
     if model_info_client is not None:
