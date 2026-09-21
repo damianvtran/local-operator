@@ -5296,3 +5296,177 @@ async def test_edit_suppression_tail_uses_the_headers_word_for_a_mixed_batch(
     suppressed = 9 - builtin._EDIT_MAX_DETAILED_HUNKS - builtin._EDIT_MAX_COMPACT_HUNKS
     assert str(suppressed) in tail, tail
     assert "refused" in tail, tail
+
+
+# ---------------------------------------------------------------------------
+# the missing-tool advisory
+# ---------------------------------------------------------------------------
+#
+# A `command not found` result is the one moment the model is certain a tool is
+# missing, and it used to be the moment the harness said nothing: the model
+# either guessed a package name for a machine it cannot see or abandoned the
+# task. The advisory points at `guide://system-tools` and carries the rule that
+# the user is asked before anything privileged runs. Its NEGATIVE cases are the
+# interesting ones — a present-but-failing tool must never trigger it.
+
+
+@pytest.mark.asyncio
+async def test_a_missing_command_result_carries_the_install_pointer(tmp_path, monkeypatch) -> None:
+    """The real tool result, which is what the model reads."""
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-missing",
+        {"command": "lop-no-such-tool-xyz --version"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    # ``is_error`` stays False for a non-zero exit — the tool RAN and reported;
+    # only a spawn failure is an error result. The exit code is what discriminates.
+    assert result.is_error is False
+    assert "exit code: 127" in result.text
+    assert "missing tool" in result.text
+    assert "guide://system-tools" in result.text
+    # The name the SHELL printed, not the whole command line.
+    assert "lop-no-such-tool-xyz" in result.text
+    # It rides the result NEXT TO the exit code, not after the output: the tool
+    # card keeps the head of a long result, so an advisory at the end is the
+    # first thing dropped. One line, and it carries the user-consent half too.
+    assert result.text.splitlines()[1] == (
+        "missing tool: `lop-no-such-tool-xyz` is not installed — read " "`guide://system-tools`"
+    ), result.text
+    # The user-consent half of the rule is NOT a suffix of this notice: the
+    # console guide owns that wording, and what this test pins is that the
+    # pointer is reachable and one line, in the head window the tool card keeps.
+    # ``test_system_tools_guide_agrees_with_the_console_guide_on_approval``
+    # pins the consent rule where it lives, in the guide this notice names.
+    assert "ask the user" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_present_tool_that_failed_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The worst false positive this notice could have.
+
+    `ffmpeg missing-input.mp4` is a working ffmpeg asked for a file that is not
+    there — the most common failed command in any media task. The shell's "no
+    such command" line is the only evidence that counts, so a `No such file or
+    directory` from the program must stay silent.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-no-file", {"command": "ls definitely-not-here.txt"}, AbortSignal(), None, context
+    )
+
+    # A working tool asked for a file that is not there: non-zero exit, no
+    # "no such command" line, and therefore no advisory.
+    assert result.is_error is False
+    assert "exit code: 1" in result.text
+    assert "missing tool" not in result.text, result.text
+
+
+@pytest.mark.asyncio
+async def test_a_host_without_a_console_gets_no_install_nudge(tmp_path, monkeypatch) -> None:
+    """Gating mirrors the console tool's own `createIf` predicate.
+
+    The install the guide describes needs a pty, so pointing a session at a
+    procedure it cannot perform would send it into the dead end `system.md`
+    already forbids it to paper over. Absent means absent.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: False)
+    context = ToolContext(cwd=str(tmp_path), session_id="missing-tool")
+
+    result = await builtin.execute_bash(
+        "bash-no-console",
+        {"command": "lop-no-such-tool-xyz --version"},
+        AbortSignal(),
+        None,
+        context,
+    )
+
+    assert "missing tool" not in result.text, result.text
+    assert "guide://system-tools" not in result.text
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("bash: ffmpeg: command not found\n", "ffmpeg"),
+        ("zsh: command not found: magick\n", "magick"),
+        ("bash: line 1: tesseract: command not found\n", "tesseract"),
+        ("tesseract: command not found\n", "tesseract"),
+        # The shell's FILE form is NOT a missing command: `cd` exists and the
+        # directory does not. Matching it reported `cd` as a tool to install.
+        ("bash: cd: /nope: No such file or directory\n", ""),
+        ("bash: /opt/homebrew/bin/ffplay: No such file or directory\n", ""),
+        (
+            "'winget' is not recognized as an internal or external command,\r\n",
+            "winget",
+        ),
+        (
+            "C:\\Tools\\ffmpeg is not recognized as an internal or external command\r\n",
+            "ffmpeg",
+        ),
+        (
+            "'C:\\Tools\\ffmpeg' is not recognized as an internal or external command,\r\n",
+            "ffmpeg",
+        ),
+        (
+            "The term 'scoop' is not recognized as the name of a cmdlet, function,",
+            "scoop",
+        ),
+        # A WORKING tool whose operand is missing: the positive case this notice
+        # must never claim, on both platforms.
+        ("ffmpeg: No such file or directory\n", ""),
+        (
+            "The system cannot find the file specified.\r\n",
+            "",
+        ),
+        ("", ""),
+    ],
+)
+def test_the_signature_matches_the_shells_own_wording(
+    stderr: str, expected: str, monkeypatch
+) -> None:
+    """One row per real spelling, plus the two `not found` lines that belong to
+    the PROGRAM rather than to a shell — those must stay silent."""
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=".", session_id="sig")
+
+    notice = builtin._missing_tool_notice(stderr, context)
+
+    if expected:
+        assert expected in notice, (stderr, notice)
+        assert "guide://system-tools" in notice
+    else:
+        assert notice == "", (stderr, notice)
+
+
+def test_the_signature_is_linear_in_the_size_of_the_stderr(monkeypatch) -> None:
+    """A structural bound rather than a laptop-calibrated ceiling.
+
+    The pattern is alternation over bounded character classes with no nested
+    quantifier, so the risk it guards is a catastrophic-backtracking rewrite
+    rather than a slow machine. A quadratic blow-up on 200 KB of shell noise
+    took minutes to hit in practice; the bound here is generous enough not to
+    flake under fleet load and tight enough to fail loudly if it appears.
+    """
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
+    context = ToolContext(cwd=".", session_id="perf")
+    noise = ("progress: wrote 4096 bytes to out.bin\n" * 6000) + "bash: ffmpeg: command not found\n"
+
+    start = time.perf_counter()
+    notice = builtin._missing_tool_notice(noise, context)
+    elapsed = time.perf_counter() - start
+
+    assert "ffmpeg" in notice
+    assert elapsed < 1.0, f"signature scan took {elapsed:.3f}s on {len(noise)} chars"
+
+
+def test_the_signature_scan_returns_nothing_without_a_context() -> None:
+    """It rides a tool result; without a session there is nobody to advise."""
+    assert builtin._missing_tool_notice("bash: ffmpeg: command not found\n", None) == ""

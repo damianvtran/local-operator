@@ -3568,6 +3568,15 @@ async def execute_bash(
     scratch = _bash_scratch_hint(params.command, context)
     if scratch:
         parts.insert(2 if notice else 1, scratch)
+    # The missing-tool advisory rides the same head window and RANKS BELOW the two
+    # above by inclusion only, not by importance: a secret already in the
+    # transcript outranks it, the scratch nudge is a destination for a file that
+    # was just written, and this one is a next-step. It cannot fire on a
+    # successful command, and it needs the shell's own "no such command" line,
+    # so on the ordinary command it costs one empty-string check.
+    missing = _missing_tool_notice(stderr, context)
+    if missing:
+        parts.insert(1 + (1 if notice else 0) + (1 if scratch else 0), missing)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
@@ -5240,6 +5249,164 @@ _PREFIX_OPERAND = re.compile(r"\d+(?:\.\d+)?[smhd]?$")
 #: substitution. Its presence is what separates a target that NAMES a path from a
 #: target that will name one at run time (see :func:`_temp_scratch_line`).
 _UNEXPANDED_SHELL = re.compile(r"[$`]")
+
+#: The shells' own "there is no such command" lines, which are the only honest
+#: evidence that something is missing rather than merely failed.
+#:
+#: Deliberately NOT matched: a bare `not found`. The prose belongs to the shell,
+#: and "No such file or directory" / "file not found" come from the PROGRAM — a
+#: present, working `ffmpeg` asked for a file that is not there is the most
+#: common failed command in any media task, and nudging an install at it would
+#: be the worst possible false positive in this notice.
+#:
+#: The interjection the shells use is the whole detector, and that
+#: narrowness is deliberate:
+#:
+#: * `command not found` and `is not recognized as …` are two-word phrases no
+#:   other diagnostic uses, so they cannot be produced by a command that merely
+#:   failed.
+#: * `No such file or directory` is NOT one of them, in either of its forms.
+#:   `ffmpeg -i missing.mp4` is a working tool asked for a missing file — the
+#:   most common failed command in any media task — and a notice that fired
+#:   there would tell the model to install what it is already using. cmd.exe's
+#:   `The system cannot find the file specified` is the same ambiguity on
+#:   Windows, where it is as common for a missing operand as for a missing
+#:   command. An earlier revision matched both; it reported `definitely-not-
+#:   here.txt` as the missing tool on `ls definitely-not-here.txt`.
+#: * A command's own stderr is therefore safe to scan: only a shell writes
+#:   these lines, and the shells write them on stdout of their own diagnostic
+#:   stream rather than as program output.
+#:
+#: Localization is a stated limit rather than a silent one: a non-English
+#: Windows renders "is not recognized as an internal or external command"
+#: translated, and these patterns then miss it. The exit code is not a substitute
+#: — 127 is `command not found` on a POSIX shell and means nothing of the sort on
+#: Windows — so the honest position is that this notice fires where the shell's
+#: message is the English one, and the guide (which the model reaches by other
+#: routes) is not weakened when it does not fire.
+_MISSING_TOOL_SIGNATURE = re.compile(
+    # zsh puts the SHELL and the interjection FIRST and the name LAST.
+    r"(?P<zsh_name>(?:bash|zsh|sh|dash|ksh): command not found: (?P<zsh_cmd>[^\s]{1,64}))"
+    # bash prefixes the failing line when the failure comes from a sourced line
+    # or a function, `bash: line 1: cmd: command not found`. Matched before the
+    # plain form, which would otherwise anchor on `line 1`.
+    r"|(?P<lineno_name>line \d{1,6}: (?P<lineno_cmd>[^:\n]{1,64}): command not found)"
+    # LINE-ANCHORED, and that anchor is what stops this arm from swallowing the
+    # Windows diagnostics: `<anything>: command not found` matched mid-line, so
+    # `'winget' is not recognized as an internal or external command` was read as
+    # a hit on the phrase `command` and the notice named the wrong tool. The
+    # optional first token is the shell's own name (`/bin/bash: ffmpeg: …`),
+    # which this arm must not report as the command — the grammar is the same
+    # shape as bash's sourced-line prefix.
+    r"|(?P<name>^(?:[^\s:]{1,64}: )?[^\s:]{1,64}: command not found)"
+    # cmd.exe has no colon to anchor on and no quoting rule either: the name is
+    # at the head of the line, bare or quoted, sometimes with a leading space,
+    # and the group is a LINE rather than a name (see the trailing-arm table).
+    r"|(?P<cmd_name>[^\n]{1,120}?)(?= is not recognized as an internal or external command)"
+    # PowerShell restates the whole thing and names the exception: `Get-Command`
+    # not finding a command raises CommandNotFoundException. The leading space
+    # inside the quotes is what this arm strips, and `[^']` bounds the capture
+    # so an unterminated quote cannot run to the end of the transcript.
+    r"|(?P<ps_name>The term '\s*(?P<ps_cmd>[^']{1,64})' is not recognized as the name of a cmdlet)",
+    re.MULTILINE,
+)
+
+#: One line, and the remedy leads it. The same measured constraint the sibling
+#: advisories carry: the tool card keeps the HEAD of a result and cuts a long
+#: result TAIL-FIRST, so a sentence whose point is at the end is the first thing
+#: destroyed. It names no path and no value from the command beyond the command's
+#: own name, and it teaches the rule in the same breath as the pointer — an
+#: install is a change to the user's machine, so the user is asked first.
+_MISSING_TOOL_ADVICE = (
+    "missing tool: install it \u2014 read `guide://system-tools` (ask the user before"
+    " anything privileged runs)."
+)
+
+
+#: The grammar arms, in the order they are tried, each carrying the COMMAND and
+#: nothing else. The order is load-bearing: the two POSIX grammars put the name in
+#: different places — bash writes `<name>: command not found` (name FIRST) and zsh
+#: writes `command not found: <name>` (name LAST) — so a post-match split on `:`
+#: reported the word ``command`` as the missing tool on whichever grammar it
+#: guessed wrong. Parse the order once, in the pattern, and name what it produced.
+_MISSING_TOOL_ARMS = ("zsh_cmd", "lineno_cmd", "name", "ps_cmd", "cmd_name")
+
+#: The one arm whose capture is a LINE rather than a name: cmd.exe's diagnostic
+#: has no separator between the command and the message, so the arm looks ahead
+#: for the message and the command is its LAST whitespace-delimited token.
+#: `'C:\Tools\ffmpeg'` and the bare `C:\Tools\ffmpeg` both reduce to `ffmpeg`
+#: that way — taking the FIRST token would name the drive or a directory for the
+#: unquoted form, and the quoted form puts the command second whenever the path
+#: contains a space.
+_MISSING_TOOL_TRAILING_ARMS = ("cmd_name",)
+
+
+def _missing_tool_name(match: re.Match[str]) -> str:
+    """The command name a shell signature names, or ``""``.
+
+    The arms are tried in :data:`_MISSING_TOOL_ARMS` order and the first
+    non-empty one wins, so the answer does not depend on which alternative
+    ``re`` happened to prefer. Two shapes need opposite reductions, which is why
+    they are branches rather than one chain: every arm except ``name`` carries
+    the command ALONE (so the reduction is basename-and-quotes), while ``name``
+    may carry the shell's own prefix — and a split on the last colon there
+    reports the word ``command``, a split on the first reports the shell.
+    """
+    for arm in _MISSING_TOOL_ARMS:
+        captured = match.group(arm)
+        if not captured:
+            continue
+        if arm == "name":
+            # `bash: ffmpeg: command not found` has no other field between the
+            # name and the interjection, so the token immediately before the
+            # interjection is the command. The optional shell prefix carries
+            # spaces AFTER its colon (`bash: line 1: …` is a separate arm), so
+            # the name is always the last whitespace-delimited token here.
+            captured = captured.removesuffix(": command not found").split()[-1]
+        elif arm in _MISSING_TOOL_TRAILING_ARMS:
+            captured = captured.split()[-1] if captured.split() else ""
+        return captured.strip().strip("'\"").rsplit("/", 1)[-1].rsplit("\\", 1)[-1].strip("'\"")
+    return ""
+
+
+def _missing_tool_notice(stderr: str, context: ToolContext | None) -> str:
+    """One advisory line when the shell said a command does not exist, else ``""``.
+
+    Why this notice exists at all: a `command not found` result is the one moment
+    the model is certain the tool is missing, and it is precisely the moment the
+    harness used to say nothing — the model either guessed a package name for the
+    user's machine or gave up, and the first run of any media task hits it. The
+    remedy is a guide rather than a recipe because the recipe is platform-shaped
+    (Homebrew, apt/dnf/pacman/zypper, winget/choco/scoop) and the guide is where
+    the platform branches live.
+
+    Three conditions, all load-bearing:
+
+    * The signature is the SHELL's message, never a non-zero exit code alone.
+    * ``context`` must exist — this rides a tool result, and without a context
+      there is no session to advise.
+    * The desktop app's console must be advertised on this host. The install the
+      guide describes needs a pty (installers prompt, and `sudo` prompts in
+      particular), so pointing a session at it on a host that cannot open one
+      would send the model into the dead end ``system.md`` already forbids it to
+      paper over. Gate on the SAME file-only predicate the `console` tool's
+      ``createIf`` uses, so the advice and the capability cannot disagree.
+
+    Not covered, deliberately: a missing command discovered inside a script, or on
+    the detached/job path (``_detach_to_job`` assembles its own result and never
+    reaches the insert below). Both are misses, not false positives.
+    """
+    if context is None or not stderr:
+        return ""
+    match = _MISSING_TOOL_SIGNATURE.search(stderr)
+    if match is None:
+        return ""
+    if not ui_console_advertisable():
+        return ""
+    name = _missing_tool_name(match)
+    if not name:
+        return _MISSING_TOOL_ADVICE
+    return f"missing tool: `{name}` is not installed \u2014 read `guide://system-tools`"
 
 
 def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:

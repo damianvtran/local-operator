@@ -39,6 +39,7 @@ def test_packaged_catalog_is_small_and_descriptions_are_prompt_sized() -> None:
         "peer-messaging",
         "qwencloud",
         "scratchpad",
+        "system-tools",
         "teams",
         "tunnel",
     ]
@@ -87,6 +88,14 @@ def test_guide_listing_never_contains_guide_body() -> None:
             "turn on the smart agent hints and check which vendor served the call",
             "classification",
         ),
+        # The lexical router is deliberately crude (a hashed n-gram embedder,
+        # not a model), so this row is the SHAPE it can actually see: the
+        # missing-command signal and the package-manager vocabulary. A task that
+        # merely needs a conversion ("convert this video to mp4") is NOT matched
+        # by this router and is not asserted here — the classification layer's
+        # LLM roster is the path that carries those, and overstating the router
+        # in a test would pin a claim it cannot keep.
+        ("ffmpeg: command not found, I need to install it", "system-tools"),
     ],
 )
 async def test_each_guide_routes_from_representative_task(
@@ -101,6 +110,60 @@ async def test_each_guide_routes_from_representative_task(
     selected = await index.select(query)
 
     assert expected in {guide.name for guide in selected}
+
+
+def test_every_guide_cross_reference_resolves() -> None:
+    """A `guide://<name>` that names no discovered guide is a silent dead end.
+
+    The corpus tells a model to go read another guide at the exact moment it is
+    stuck (a missing tool, a refused call), and nothing verified the name it is
+    sent to. Nothing in the read path can catch it either: ``read`` on an
+    unknown guide returns the available names as CONTENT, which is a recovery
+    for the model and invisible to a reviewer, so a one-word typo in a
+    cross-reference ships as a working-looking sentence.
+
+    Scoped to the packaged corpus, which is the only place a guide may be
+    referenced from — a guide in a user's own skill tree is not this catalog's
+    business, and the catalogue is what ships.
+    """
+    guides = discover_guides()
+    names = {guide.name for guide in guides}
+    assert names, "the packaged catalog discovered nothing to check"
+
+    unreachable: list[str] = []
+    self_refs: list[str] = []
+    for guide in guides:
+        body = guide.file_path.read_text(encoding="utf-8", errors="replace")
+        for target in set(re.findall(r"guide://([a-zA-Z0-9_-]+)", body)):
+            if target not in names:
+                unreachable.append(f"{guide.name} -> guide://{target}")
+            if target == guide.name:
+                self_refs.append(f"{guide.name} -> guide://{target}")
+
+    assert not unreachable, f"cross-reference names no discovered guide: {unreachable}"
+    assert not self_refs, f"a guide must not tell the model to read itself: {self_refs}"
+
+
+def test_system_tools_guide_agrees_with_the_console_guide_on_approval() -> None:
+    """The one rule two guides state, so the two texts cannot drift apart.
+
+    The console guide owns the rule that the harness gate authorises the CALL
+    while ``ask`` authorises the CHANGE to the user's machine. The install guide
+    is the situation where a model is most likely to compress the two into one,
+    so it has to send the model to that rule rather than paraphrase it into a
+    subtly weaker one of its own.
+    """
+    body = make_guide_resolver({guide.name: guide for guide in discover_guides()})(
+        "guide://system-tools"
+    )
+
+    assert body is not None
+    assert "console guide already carries that rule" in body
+    assert "Never install anything silently" in body
+    # The Windows elevation limit is the finding this guide exists to state
+    # rather than paper over: the surface cannot answer a UAC dialog.
+    assert "surface cannot" in body and "answer it" in body
+    assert "UAC" in body
 
 
 @pytest.mark.asyncio
