@@ -100,6 +100,9 @@ names and carries the resolved folder in its header.
 `eval` kernel are each given this session's pad as `$LOCAL_OPERATOR_SCRATCHPAD`,
 an absolute path, so a shell can create directly into it:
 `mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/logs"`, `> "$LOCAL_OPERATOR_SCRATCHPAD/x.log"`.
+The folder is created for you the first time anything needs it — `write`/`edit`
+make it, and a shell call makes it before the command runs — so a bare redirect
+and a `mktemp` template both work on their first use, with no `mkdir` first.
 The idiom for a rig that wants a private subdirectory is
 `mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXX"` — the template keeps the
 directory inside the pad, so the files stay readable through the scheme and

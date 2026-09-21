@@ -143,6 +143,7 @@ from local_operator.scratchpad import (
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadPathError,
+    ensure_scratchpad_dir,
     parse_scratchpad_url,
     scratchpad_dir_of,
     scratchpad_env_injection,
@@ -2767,7 +2768,11 @@ async def execute_bash(
     # none (so a nested session never writes into its parent's scratchpad), and
     # not written at all otherwise. The scheme cannot cross this boundary — a
     # shell cannot resolve one — which is the whole reason the path is exported.
-    injections.update(scratchpad_env_injection(scratchpad_dir_of(context)))
+    #
+    # ``ensure_scratchpad_dir`` runs HERE because this is where the path is handed
+    # over: a shell cannot create a missing parent the way ``write``/``edit`` do,
+    # so the advertised path has to exist by the time the child starts.
+    injections.update(scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir_of(context))))
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
 
@@ -4954,7 +4959,7 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
     return ""
 
 
-def _temp_scratch_line(resolved: Path, why: str, remedy: str) -> str:
+def _temp_scratch_line(resolved: Path, why: str, remedy: str, *, is_root: bool = False) -> str:
     """The one advisory line BOTH temp-root nudges emit, verbatim in one place.
 
     ``remedy`` is what the two channels can actually act on and it is the only
@@ -4964,11 +4969,18 @@ def _temp_scratch_line(resolved: Path, why: str, remedy: str) -> str:
     order are shared, because the word order is the load-bearing part (see
     :func:`_temp_scratch_hint`) and a second hand-written copy is how it would
     quietly stop being true of one of the two lines.
+
+    ``is_root`` swaps the SUBJECT from a created target to the temp root itself,
+    for the bash side's unexpanded targets (``> /tmp/f$i``): the sentence shape,
+    the remedy and the reason are unchanged, because the advice is the same and
+    only the thing being NAMED changes.
     """
-    return (
-        f"[scratch] Your own scratch belongs in {remedy} — {resolved} "
-        f"sits directly under a temp root: {why}."
+    subject = (
+        f"a path directly under {resolved} is the same trap"
+        if is_root
+        else f"{resolved} sits directly under a temp root"
     )
+    return f"[scratch] Your own scratch belongs in {remedy} — {subject}: {why}."
 
 
 # ---------------------------------------------------------------------------
@@ -5002,16 +5014,66 @@ _CREATING_COMMANDS: dict[str, str] = {
     "mktemp": "template",
 }
 
-#: Words that precede a command without BEING one, so the word after them is
-#: still in command position. Without this, the commonest way this fleet runs a
-#: creating command — ``sudo mkdir /tmp/x``, ``env FOO=1 cp a /tmp/b`` — would
-#: read its command name as an ordinary argument and never nudge.
-_COMMAND_PREFIXES = frozenset(
-    {"sudo", "command", "nohup", "env", "time", "exec", "do", "then", "else"}
-)
+#: Prefix commands that stand in FRONT of the real command rather than being one —
+#: ``sudo mkdir /tmp/x``, ``env FOO=1 cp a /tmp/b``, ``timeout 60 mkdir /tmp/x`` do
+#: not nudge unless the walk steps over the prefix to the word that IS the command.
+#:
+#: Each maps to the two facts stepping over it needs: the flags that take a
+#: SEPARATE value, and whether a leading bare operand belongs to the PREFIX rather
+#: than to the command. Without the first, the flag's VALUE sits in command
+#: position and reads as the command name (``sudo -u root mkdir``); without the
+#: second, the prefix's own operand does the same (``timeout 60 mkdir``). Either
+#: way the creation behind it is never seen.
+#:
+#: Both are MISSES, which is the safe direction — but the docstring below names
+#: ``sudo mkdir`` as a shape this list exists for, so leaving it inexact would be a
+#: coverage claim rather than an intended limit. Kept to the prefixes worth naming
+#: plus the shell words that share their position (``do``/``then``/``else``, where
+#: the next word is still a command); anything else is a miss on purpose.
+_COMMAND_PREFIXES: dict[str, tuple[frozenset[str], bool]] = {
+    "sudo": (
+        frozenset(
+            {
+                "-u",
+                "-g",
+                "-p",
+                "-C",
+                "-h",
+                "-r",
+                "-t",
+                "--user",
+                "--group",
+                "--prompt",
+                "--chdir",
+                "--host",
+                "--role",
+                "--type",
+            }
+        ),
+        False,
+    ),
+    "timeout": (frozenset({"-s", "-k", "--signal", "--kill-after"}), True),
+    "nice": (frozenset({"-n", "--adjustment"}), True),
+    "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}), False),
+    "command": (frozenset(), False),
+    "nohup": (frozenset(), False),
+    "exec": (frozenset(), False),
+    "do": (frozenset(), False),
+    "then": (frozenset(), False),
+    "else": (frozenset(), False),
+}
 
 #: ``NAME=value`` ahead of a command word.
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+#: A bare operand that is a PREFIX's own rather than the command's: ``timeout 60``,
+#: ``nice 10``, and their suffixed spellings (``timeout 1m``).
+_PREFIX_OPERAND = re.compile(r"\d+(?:\.\d+)?[smhd]?$")
+
+#: A shell construct the scanner cannot expand: a variable or a command
+#: substitution. Its presence is what separates a target that NAMES a path from a
+#: target that will name one at run time (see :func:`_temp_scratch_line`).
+_UNEXPANDED_SHELL = re.compile(r"[$`]")
 
 
 def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
@@ -5057,8 +5119,19 @@ def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
         return ""
     for candidate in _bash_created_paths(command):
         resolved = _temp_root_target(candidate, roots)
-        if resolved is not None:
-            return _temp_scratch_line(resolved, roots[resolved.parent], f"${SCRATCHPAD_PATH_ENV}")
+        if resolved is None:
+            continue
+        # A target the shell has yet to expand does not NAME a path, and printing
+        # its resolved form would invent one (``> /tmp/f$i`` is not
+        # ``/private/tmp/f$i``). The temp root is the honest subject there, and it
+        # is a directory that really exists.
+        unexpanded = _UNEXPANDED_SHELL.search(_expand_tmpdir_spellings(candidate)) is not None
+        return _temp_scratch_line(
+            resolved.parent if unexpanded else resolved,
+            roots[resolved.parent],
+            f"${SCRATCHPAD_PATH_ENV}",
+            is_root=unexpanded,
+        )
     return ""
 
 
@@ -5087,7 +5160,15 @@ def _bash_created_paths(command: str) -> Iterator[str]:
             continue
         if not at_command:
             continue
-        if text.startswith("-") or _ASSIGNMENT.match(text) or text in _COMMAND_PREFIXES:
+        if _ASSIGNMENT.match(text):
+            continue
+        prefix = _COMMAND_PREFIXES.get(text)
+        if prefix is not None:
+            index = _skip_prefix_operands(tokens, index, *prefix)
+            continue
+        if text.startswith("-"):
+            # A stray flag in command position names no command, so nothing behind
+            # it is a creation this walk can attribute.
             continue
         mode = _CREATING_COMMANDS.get(text.rsplit("/", 1)[-1])
         if mode is None:
@@ -5106,6 +5187,47 @@ def _bash_created_paths(command: str) -> Iterator[str]:
         at_command = False
 
 
+def _skip_prefix_operands(
+    tokens: list[tuple[str, str]], index: int, taking_value: frozenset[str], takes_operand: bool
+) -> int:
+    """Step past a prefix command's own flags and operands, to its real command.
+
+    Returns the index of the first token that is neither, so the caller resumes at
+    a genuine command position. The two skip rules are the table's: a flag listed
+    as taking a value consumes the token after it (``-u root``), and a prefix that
+    consumes a leading bare operand stops doing so after one (``timeout 60``) —
+    after that, a bare word IS the command.
+    """
+    while index < len(tokens) and tokens[index][0] == "word":
+        word = tokens[index][1]
+        if word in taking_value:
+            index += 2
+            continue
+        if word.startswith("-"):
+            index += 1
+            continue
+        if takes_operand and _PREFIX_OPERAND.match(word):
+            takes_operand = False
+            index += 1
+            continue
+        break
+    return index
+
+
+def _expand_tmpdir_spellings(candidate: str) -> str:
+    """``candidate`` with the shell's ``$TMPDIR`` spellings expanded.
+
+    ``${TMPDIR}`` FIRST: the longer spelling contains no ``$TMPDIR`` substring, but
+    replacing in the other order would leave ``${}`` behind and rewrite a literal
+    that was never a variable. Shared with the unexpanded-target check next door so
+    the two cannot disagree about what counts as spelled out: ``$TMPDIR/x`` IS a
+    path once expanded, while ``/tmp/f$i`` still is not.
+    """
+    for spelling in ("${TMPDIR}", "$TMPDIR"):
+        candidate = candidate.replace(spelling, tempfile.gettempdir())
+    return candidate
+
+
 def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     """``candidate`` resolved, when it sits DIRECTLY under one of ``roots``.
 
@@ -5116,14 +5238,9 @@ def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
     path, a ``~`` path and anything carrying a scheme are not temp-root targets
     and must not be guessed at.
     """
-    text = candidate.strip()
+    text = _expand_tmpdir_spellings(candidate.strip())
     if not text or "://" in text:
         return None
-    # ``${TMPDIR}`` FIRST: the longer spelling contains no ``$TMPDIR`` substring,
-    # but replacing in the other order would leave ``${}`` behind and rewrite a
-    # literal that was never a variable.
-    for spelling in ("${TMPDIR}", "$TMPDIR"):
-        text = text.replace(spelling, tempfile.gettempdir())
     if not text.startswith("/"):
         return None
     try:

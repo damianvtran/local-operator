@@ -2568,6 +2568,63 @@ async def test_a_heredoc_body_is_not_read_as_a_second_creation(tmp_path, monkeyp
     assert _bash_nudge_line(temp_root / "notes.md") in text
 
 
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
+        # The prefix's OWN operand sits in command position, so a walk that does not
+        # step over it reads that operand as the command name and never sees the
+        # creation: `sudo -u <user> mkdir` (the value of `-u`), `timeout 60 mkdir`
+        # (the duration), `nice -n 10 cp` (the value of `-n`), `nice 10 cp` (the
+        # legacy bare increment). All four are MISSES without the table, which the
+        # table's own comment calls the safe direction but not the documented one —
+        # `_COMMAND_PREFIXES` exists for `sudo mkdir`, and `_bash_scratch_hint`'s
+        # docstring names that shape as covered.
+        ("sudo -u root mkdir {root}/sudoed", "sudoed"),
+        ("timeout 60 mkdir {root}/timed", "timed"),
+        ("nice -n 10 cp report.md {root}/nixed", "nixed"),
+        ("nice 10 touch {root}/niced", "niced"),
+    ],
+)
+def test_a_prefix_commands_own_operand_does_not_hide_the_command(
+    tmp_path, monkeypatch, command, created
+) -> None:
+    """Scanner-level rather than executed: `timeout` is GNU coreutils and is absent
+    from a stock macOS, and `sudo -u` asks for a password — neither is a reason for
+    the CONTRACT (which words the scan treats as a creating position) to go
+    untested."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    line = builtin._bash_scratch_hint(command.format(root=temp_root), context)
+
+    assert line == _bash_nudge_line(temp_root / created), line
+
+
+def test_an_unexpanded_target_names_the_temp_root_not_a_fabricated_path(
+    tmp_path, monkeypatch
+) -> None:
+    """`for i in 1 2 3; do echo x > /tmp/f$i; done` produces a target the scan
+    cannot resolve, and printing its "resolved" form invents a path that will never
+    exist: `/private/tmp/f$i`. The advice and the reason do not change — only the
+    subject, which becomes the temp root: a directory that really does exist, and
+    the thing the reader has to recognize."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    line = builtin._bash_scratch_hint(
+        "for i in 1 2 3; do echo x > {root}/f$i; done".format(root=temp_root), context
+    )
+
+    assert line, "the loop still creates files under the temp root"
+    assert "$i" not in line
+    assert f"a path directly under {temp_root.resolve()} is the same trap" in line
+    assert f"${SCRATCHPAD_PATH_ENV}" in line
+
+
 @pytest.mark.asyncio
 async def test_the_tmpdir_spelling_is_recognised(tmp_path, monkeypatch) -> None:
     """The shells on this fleet rarely write ``/var/folders/…/T`` literally, they
