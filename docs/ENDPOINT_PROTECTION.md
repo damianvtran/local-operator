@@ -32,6 +32,10 @@ not a path. The remaining argv elements are the module and its arguments.
 | `com.local-operator.tunnel` | `<lop root>/bin/python3` | `Local Operator [tunnel]` | `-m local_operator.tunnels.service` | `~/.local-operator/tunnel/service.log` |
 | `com.local-operator.wakes` | `<lop root>/bin/python3` | `Local Operator [wakes]` | `-m local_operator.wakes.supervisor` | `~/.local-operator/logs/wake-supervisor.log` |
 
+`<lop root>` is the stable install root, `~/.local/share/lop` (`stable_root()`
+in `local_operator/update.py`), whose `current` entry names the generation in
+use.
+
 The `Program` column is the **shim** `~/.local/share/lop/bin/python3` on every
 job, and that is the live value rather than a placeholder: measured here on
 2026-09-21, all four `com.local-operator.*` plists carry
@@ -58,8 +62,9 @@ that renderer sets `Program` to the image it will name and `ProgramArguments[0]`
 to the role label precisely so that launchd can execute a file named `Local
 Operator` while passing the array as argv. It names the shim where the
 generation layout is present (`supervised_image()`), and the branded link
-otherwise. This snippet is that branch — the shape a machine with no generation
-layout renders:
+otherwise. This snippet is that branch: the shape a machine with no generation
+layout renders **when a branded link can be planted** — with none it renders the
+argv-only fallback above instead:
 
 ```python
 return {
@@ -97,7 +102,8 @@ and the value dict in `local_operator/tunnels/install.py`):
   `StartInterval: 900` on wakes (a bounded self-heal re-check every 15
   minutes).
 - `EnvironmentVariables: {LOCAL_OPERATOR_CONFIG_DIR: <config dir>}` on the
-  tunnel and wakes jobs, so those two are pinned to a specific store.
+  mobile, tunnel and wakes jobs, so those three are pinned to a specific store
+  (the browser bridge's plist carries no such key).
 
 Labels are not always literally the four above: the browser bridge derives its
 label from the config root (`label()` in
@@ -287,12 +293,15 @@ environment instead of relying on a global `lop`:
   have.
 
 The products in those environments are also named `Local Operator` (same
-hardlink mechanism), and the app's backend and helper processes are launched
-**from inside `~/Library/Application Support/Local Operator`** — for example
-`.../managed-python/packaged/environments/<id>/bin/python -c "from
-local_operator.cli import main; main()" serve --port 1111`, and the Electron
-helpers with `--user-data-dir=/Users/…/Library/Application Support/Local
-Operator`. Executing helper processes out of Application Support is a normal
+hardlink mechanism), and the Electron helpers run with
+`--user-data-dir=/Users/…/Library/Application Support/Local Operator`. The app's
+*backend* is a separate question, and on this machine it is not the Application
+Support interpreter: measured on 2026-09-21 with the app bundle running, the live
+backend is the app's own child running the **generation** tree's interpreter,
+`<generation>/tools/local-operator/bin/python -c "from local_operator.cli import
+main; main()" serve --port 1111`, while the environment above is present and
+selected (`managed-python/packaged/selected-environment.json`) with no process
+observed running it. Running a backend out of Application Support is a normal
 Electron/Mac pattern, but it is one of the signals §3 is about.
 
 This is the artefact class whose *signature* differs from the CLI's, which
@@ -542,9 +551,16 @@ signature, and indeed this environment's image differs in signature byte count
 and signing timestamp from the seed now inside the app bundle, which is what
 that design predicts.
 
-Every `codesign` block in this document is printed complete — nothing trimmed —
-so a reader can diff the document against their own machine line for line. The
-app-bundle block below follows the same rule.
+Every `codesign` block in this document is reproduced as captured, with no line
+trimmed from what the command printed on the macOS the capture was taken on
+(25.6), so a reader can diff it field by field against their own machine. A
+newer macOS adds trailing fields these captures predate — on 27.0 both
+Developer-ID blocks also print `Total signatures=1` and `Chosen signature=1`,
+which the ad-hoc Class 1 image does not — and an app bundle that has been
+replaced since the capture moves its `Timestamp` and `Sealed Resources … files=`
+count (this machine's bundle now reads `Sep 20, 2026 at 10:14:27 PM` and
+`files=1562`, where the block below records the earlier build). The app-bundle
+block follows the same rule.
 
 ### The desktop app bundle
 
@@ -629,21 +645,29 @@ install:
    `~/Library/Application Support/Local Operator/`. (The desktop app is a
    separate bundle maintained in the `local-operator-ui` repository; the
    script-writing path is `src/main/backend/backend-installer.ts` there.)
-3. **Execution from inside Application Support.** On a desktop-app install,
-   the app's backend runs an interpreter living under
-   `~/Library/Application Support/Local Operator/…`, not from a normal
-   toolchain location. What it *supervises* points elsewhere: measured on this
-   machine, the live `wakes` plist names the generation shim and the running
-   supervisor is the generation's image, not an Application Support one. An
-   installer run writes and re-registers the job only when the render differs
-   from the file on disk (§1), and this machine shows what that does to the
-   supervised path: the stale `…wakes.plist.bak-…` (a leftover §1 flags as
-   unknown provenance, but on this machine it is the old path) names the
-   uv-tool prefix, while the live plist names the generation **shim**
-   `~/.local/share/lop/bin/python3`, so a tool that watches the plist sees a
-   supervised program being repointed out of the toolchain and into the
-   product's own install root — a directory that is itself the kind of place
-   persistence hides.
+3. **A managed-Python environment under Application Support.** The app
+   *provisions* one, and a backend launched from it is running out of a location
+   that is not a normal toolchain path. On this machine it is not what runs:
+   measured on 2026-09-21 with the app bundle running, the live backend is the
+   app's own child running the **generation** tree's interpreter,
+   `<generation>/tools/local-operator/bin/python … serve --port 1111`, with the
+   Application Support environment present and selected
+   (`selected-environment.json`) and no process observed running it. What the app
+   *supervises* points elsewhere too: the live `wakes` plist names the generation
+   shim and the running supervisor is the generation's image, not an Application
+   Support one. An installer run compares before it writes —
+   `launchd.rewrite_if_stale` rewrites the plist only where the render differs
+   from the file on disk, so a re-install that would change nothing changes no
+   bytes — but the **reload is not gated on that write**: a file that is already
+   current is still reloaded where the daemon is not answering (`kickstart`, and
+   the bootstrap reload past it) (§1, "Installs compare before they rewrite").
+   This machine shows what those states do to the supervised path: the stale
+   `…wakes.plist.bak-…` (a leftover §1 flags as unknown provenance, but on this
+   machine it is the old path) names the uv-tool prefix, while the live plist
+   names the generation **shim** `~/.local/share/lop/bin/python3`, so a tool that
+   watches the plist sees a supervised program being repointed out of the
+   toolchain and into the product's own install root — a directory that is itself
+   the kind of place persistence hides.
 4. **A binary that is not what it is called.** The program the EDR sees is
    named `Local Operator` while its code signature's identity is CPython's,
    because it is a hardlink (§2). This is a genuine **name/identity
