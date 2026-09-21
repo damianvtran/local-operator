@@ -334,6 +334,15 @@ class SessionTable:
         #: disagree: it is set exactly on the failed path and cleared on the
         #: next successful one.
         self._durable_listing_degraded = False
+        #: Whether the most recent ATTENTION read (the decoration behind these
+        #: rows) FAILED. A separate flag from the one above because the two
+        #: reads fail independently -- the durable half is the filesystem, this
+        #: one is ``attention.db`` -- and a lock on the store must not be
+        #: published as a failure of the listing the rows came from. Set exactly
+        #: on the failed read and cleared on the next successful one, published
+        #: beside the rows (see ``listing_degraded``) so the marker and the marks
+        #: on the rows cannot disagree.
+        self._attention_listing_degraded = False
         self._summaries_cache: list[dict[str, Any]] | None = None
         self._summaries_at = 0.0
         self._summaries_task: asyncio.Task[list[dict[str, Any]]] | None = None
@@ -455,12 +464,29 @@ class SessionTable:
         """What could not be read for the listing being published.
 
         Always a list, so a client reads it without a presence check, and empty
-        when the durable half was read on the most recent attempt. The values
-        are the phone's own (see ``DEGRADED_DURABLE_LISTING``) rather than the
-        desktop's decoration names, because this reports the read the ROWS came
-        from while those report decorations on rows that were read.
+        when BOTH reads behind the listing were read on the most recent attempt.
+        The values are the phone's own ``DEGRADED_DURABLE_LISTING`` word for the
+        read the ROWS came from, and ``session.catalog.DECORATION_ATTENTION`` for
+        the attention decoration read behind them -- because that failure IS the
+        one the catalogue and the desktop listing already name with that word:
+        the rows stand and a MARK on them is lost. A client keying on a
+        vocabulary may not have to learn a second word for one thing, and the
+        two read failures are independent, so both can be present at once.
+
+        The decoration name is looked up from ``session.catalog`` AT THE FAILURE
+        rather than re-spelled here, and only in the degraded branch: importing
+        the catalogue costs ~26 ms (measured), which a healthy phone listing must
+        not pay on every repaint, and ``mobile/daemon.py`` imports its session
+        modules lazily throughout for the same reason.
         """
-        return [DEGRADED_DURABLE_LISTING] if self._durable_listing_degraded else []
+        reasons: list[str] = []
+        if self._durable_listing_degraded:
+            reasons.append(DEGRADED_DURABLE_LISTING)
+        if self._attention_listing_degraded:
+            from local_operator.session.catalog import DECORATION_ATTENTION
+
+            reasons.append(DECORATION_ATTENTION)
+        return reasons
 
     async def summaries(self) -> list[dict[str, Any]]:
         """Reconcile live generations with durable conversations by session id.
@@ -499,9 +525,44 @@ class SessionTable:
             identities.update(
                 f"session/{entry.record.session_id}" for entry in self.entries.values()
             )
-            self._attention_states = await asyncio.to_thread(
-                AttentionStore().state_many, identities
-            )
+            # THE LAST READ ON THIS ROUTE WITHOUT AN ARM, and the one the
+            # incident's own traceback chain ends in (round-2 review MINOR-A,
+            # round-2 QA Q-1). ``state_many`` rides out a contended lock for
+            # ~10.8 s and then raises ``AttentionReadDeferred``; every ladder in
+            # the tree classifies that verdict as 503-busy, but nothing here
+            # caught it, so a lock that outlasted the store's retry budget left
+            # ``_list_frame`` as an unhandled 500 on the phone's list route --
+            # the only listing call site in the tree that behaved that way,
+            # while its neighbours (``server/utils/desktop_sessions.py``,
+            # ``session/catalog.py``, ``info/collect.py``) all degrade.
+            #
+            # The contract is the durable half's, one read further out: keep
+            # what was last READ -- the previous states, or the store's own
+            # DEFAULTS when nothing was ever read -- name the failure in
+            # ``listing_degraded``, and let the next build heal it. THAT IS
+            # RECENCY, NOT CURRENT TRUTH (round-3 review MINOR-2, round-3 QA
+            # Q-1): a completion that lands or is acknowledged during the outage
+            # is invisible to these marks until the next successful read, and
+            # the direction that can be silently wrong is the dangerous one -- a
+            # genuinely UNREAD completion served as ``unseen: false`` re-states
+            # the confident negative this store exists to stop. Nothing in the
+            # row discloses that, because no client can see it: ``degraded``
+            # carrying ``["attention"]`` is the ONLY thing that says these marks
+            # are stale rather than fresh.
+            #
+            # ``(sqlite3.Error, OSError)`` is the exact pair the two sibling
+            # readers catch: the deferred verdict is a ``sqlite3.Error`` (it
+            # subclasses ``OperationalError`` so the store's code rides
+            # through), and a store that cannot be OPENED is an ``OSError``.
+            try:
+                self._attention_states = await asyncio.to_thread(
+                    AttentionStore().state_many, identities
+                )
+            except (sqlite3.Error, OSError):
+                logger.warning("phone listing could not read attention state", exc_info=True)
+                self._attention_listing_degraded = True
+            else:
+                self._attention_listing_degraded = False
             return self._merge_summaries(rows)
 
         task = asyncio.ensure_future(_build())

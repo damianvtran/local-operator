@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import uuid
 from typing import Any
 
 import pytest
@@ -1739,6 +1740,110 @@ def test_the_listing_route_publishes_the_marker_beside_the_rows(tmp_path, monkey
 
     assert {row["session_id"] for row in broken["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
     assert broken["degraded"] == ["sessions"]
+
+
+@pytest.mark.asyncio
+async def test_a_deferred_attention_read_degrades_the_listing_instead_of_raising(
+    tmp_path, monkeypatch
+) -> None:
+    """The read the incident's own chain ends in, at the call site that had no arm.
+
+    ``SessionTable._build`` reads the attention store AFTER the durable scan, and
+    that read was the one listing read in the tree without an ``except`` (round-2
+    review MINOR-A / round-2 QA Q-1): a lock that outlasted the store's retry
+    budget raised ``AttentionReadDeferred`` straight out of ``summaries``, so the
+    phone's ``GET /api/sessions`` answered 500 while its neighbours degraded. The
+    arms asserted here are what make it answer: the rows are kept, their last
+    truly READ marks are kept -- recency, not current truth, so a completion that
+    lands or is acknowledged during the outage stays invisible to the marks until
+    the next successful read, which ``degraded: ["attention"]`` is the only thing
+    to disclose -- and the failure is named in the list the marker already
+    travels in.
+
+    Injected at the CLASS, which pins THIS call site rather than the store: an
+    edit that removes the ``except`` re-raises out of ``summaries`` and fails
+    here. The store's own retry and its typed verdict are pinned separately in
+    ``tests/unit/session/test_attention_lock_contention.py``.
+    """
+    from local_operator.session.attention import AttentionReadDeferred, AttentionStore
+
+    cfg = tmp_path / "config"
+    _listing_rows(cfg, "aaaaaaaaaaaa")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    # A REAL unread completion, so "the marks were kept" below is about a mark
+    # that existed rather than about a default that happens to match one.
+    AttentionStore().publish("session/aaaaaaaaaaaa", str(uuid.uuid4()), "answer", "complete")
+
+    table = SessionTable()
+    healthy = await table.summaries()
+    assert [row["unseen"] for row in healthy] == [True], healthy
+    assert table.listing_degraded() == []
+
+    real_state_many = AttentionStore.state_many
+
+    def defers(_store, _conversations):
+        raise AttentionReadDeferred("attention store stayed busy through 2 attempts")
+
+    monkeypatch.setattr(AttentionStore, "state_many", defers)
+    table.invalidate_summaries_cache()
+    degraded = await table.summaries()
+
+    assert [row["session_id"] for row in degraded] == ["aaaaaaaaaaaa"]
+    assert [row["unseen"] for row in degraded] == [True], (
+        "a deferred read must keep the marks of the last read that SUCCEEDED: "
+        "this completion was unread then, and re-deriving from defaults is the "
+        "``unseen: false`` the store exists to stop. The guarantee is recency, "
+        "NOT current truth -- a completion landing or acked while the read is "
+        "deferred stays invisible here until the next successful read, and "
+        "``degraded: ['attention']`` is what discloses it"
+    )
+    assert table.listing_degraded() == ["attention"]
+
+    # And the marker does not latch — the next successful read clears it, which
+    # is what lets a client's "couldn't refresh" go away on its own. The seam is
+    # healed by hand rather than with ``monkeypatch.undo()``, which would drop
+    # the config-dir isolation patch too and walk the operator's real store.
+    monkeypatch.setattr(AttentionStore, "state_many", real_state_many)
+    table.invalidate_summaries_cache()
+    healed = await table.summaries()
+    assert [row["unseen"] for row in healed] == [True]
+    assert table.listing_degraded() == []
+
+
+def test_the_listing_route_serves_a_deferred_attention_read(tmp_path, monkeypatch) -> None:
+    """The wire half: past the budget the list route degrades instead of 500ing.
+
+    ``GET /api/sessions`` answered 500 @10.8 s on the previous head once a lock
+    outlasted the store's retry budget, because ``_list_frame`` -> ``summaries``
+    let ``AttentionReadDeferred`` escape to uvicorn. A route may not lose the
+    rows it DID read to a read behind them: it answers 200 with those rows and
+    names the decoration, the shape the durable half already uses on this frame.
+    """
+    from local_operator.session.attention import AttentionReadDeferred, AttentionStore
+
+    cfg = tmp_path / "config"
+    _listing_rows(cfg, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: cfg)
+
+    daemon = MobileDaemon(port=0, password="pw123")
+    client = TestClient(build_app(daemon), follow_redirects=False)
+    client.post("/login", data={"password": "pw123"})
+
+    healthy = client.get("/api/sessions").json()
+    assert healthy["degraded"] == []
+
+    def defers(_store, _conversations):
+        raise AttentionReadDeferred("attention store stayed busy through 2 attempts")
+
+    monkeypatch.setattr(AttentionStore, "state_many", defers)
+    daemon.table.invalidate_summaries_cache()
+    response = client.get("/api/sessions")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {row["session_id"] for row in body["sessions"]} == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert body["degraded"] == ["attention"]
 
 
 def test_the_history_route_names_the_store_it_could_not_read(tmp_path, monkeypatch) -> None:
