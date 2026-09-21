@@ -1824,7 +1824,39 @@ to be inspected as a rendered frame before it is claimed to work. The recipe
 below is the one used for the usage-card spacing and the `/resume` picker; it
 takes about a minute.
 
+**When the app is available, the console is the first instrument, not the
+emulator.** If the Local Operator desktop app is running and its console host
+advertises, the `console` tool is present — `guide://console` is its playbook, and
+`docs/CONSOLE.md` is the operator's view of the same thing — and the frame should
+come from a console surface before the Textual compositor below is reached for.
+Textual emulation has small visual and spacing differences from what people
+actually see, and those differences are the size of the defects a still is taken
+to catch: a reconstructed frame can be exactly right about a layout that looks
+wrong on the user's screen. The console reads and photographs the **real** pty in
+the app's own terminal — its font, its theme, its own grid — and it reports which
+of the two it gave you: `rendered: "displayed"` is the app photographing its own
+window cropped to the pane, while `"offscreen"` is a replay reconstruction from
+the surface's record, faithful to that record but not a photograph of a live
+screen. The tool's `keys` method sends named keys into the live program, so a
+state that only exists under interaction is driven rather than simulated.
+
+Sections 1-5 are **not replaced** by that. They remain the fallback when no app
+is running — the tool is offered only while the app's discovery record advertises
+a console, so a session built without the app has no tool at all, one that
+outlives the app is told its surfaces ended rather than being handed a frame, and
+a build that is neither displaying the surface nor carrying an offscreen capture
+view refuses the screenshot with `capture_unavailable` instead of returning a
+frame it does not have — and the instrument of record for what the console cannot
+reach: a widget state you construct by hand, a CSS-less unit-test host. What a
+frame can prove does not change either: a `read` is text and a `screenshot` is
+pixels, neither is a design judgement, and sections 3-5 apply to a console
+capture exactly as they do to an SVG.
+
 ### 1. Render the screen to an SVG still
+
+**This is the fallback path.** If the app is running with its console host
+advertised, take the frame from a console surface instead (see above); the
+helper below stays the instrument of record for what the console cannot reach.
 
 **Use the faithful developer capture helper**, not a default Rich presentation
 as a terminal-size measurement. All current shot scripts use
