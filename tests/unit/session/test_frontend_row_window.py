@@ -1509,12 +1509,17 @@ def test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it() ->
     the durable row really does carry the flag, and a restored store RE-DERIVES it
     rather than trusting the durable copy.
 
-    Re-derivation is the load-bearing half. ``JobState.from_job`` never sets the
-    field, so a restore that merely inherited the durable value would hold a
-    ``True`` released by a PREVIOUS process; the first ``refresh_jobs`` rebuilds
-    every row through ``from_job``/``_released_row`` and so overwrites it. Nothing
-    in the tree reads the flag off the checkpoint (or off any wire frame), which is
-    why carrying it costs bytes and no correctness.
+    Re-derivation is the load-bearing half, and it is OBSERVABLE here only because
+    the test makes the durable copy STALE first (review round 5, W1): it writes a
+    ``True`` onto a LIVE child's durable row before restoring. ``JobState.from_job``
+    never sets the field, so a restore that merely inherited the durable value
+    would hold a ``True`` released by a PREVIOUS process; the first
+    ``refresh_jobs`` rebuilds every row through ``from_job``/``_released_row`` and
+    so overwrites it. The stale ``True`` is what the terminal assertion catches,
+    and without that seed the assertion is satisfied by the map the restore
+    already holds — so it would pass even against a refresh that does nothing.
+    Nothing in the tree reads the flag off the checkpoint (or off any wire frame),
+    which is why carrying it costs bytes and no correctness.
     """
     live, done = _job("child-live"), _settled(_job("child-done"))
     session = _released_session([live, done])
@@ -1535,17 +1540,27 @@ def test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it() ->
     )
     assert durable["child-live"]["roster_released"] is False
 
+    # Make the durable copy STALE before the restore, which is the only thing that
+    # makes the re-derivation observable (review round 5, W1). `child-live` is a
+    # MEMBER of the live roster, so a durable `True` on it can only be a flag
+    # released by a PREVIOUS process — precisely the hazard the docstrings name.
+    # `durable` holds the very dicts the transcript reports from `latest_custom`,
+    # so this seeds what the restore will read. Without it the post-refresh
+    # assertion below asserts the map the restore already holds, and passes even
+    # when the refresh is a no-op.
+    durable["child-live"]["roster_released"] = True
+
     restored = FrontendStateStore.from_checkpoint(
         SimpleNamespace(session_id="frame-cost", _transcript=transcript)
     )
     assert {row.id: row.roster_released for row in restored.state.jobs} == {
-        "child-live": False,
+        "child-live": True,
         "child-done": True,
-    }, "a same-session restore did not adopt the durable flags"
+    }, "a same-session restore did not adopt the durable flags (stale seed included)"
 
-    # The first refresh RE-DERIVES rather than trusting the durable copy, and the
-    # premise is asserted first: if ``from_job`` ever started setting the field,
-    # the refresh below would be a no-op test that the durable value survived.
+    # The premise, asserted before the refresh so a future `from_job` that set the
+    # field is caught here rather than silently turning the refresh into a no-op
+    # check that the durable value survived.
     released_row = next(row for row in restored.state.jobs if row.id == "child-done")
     assert JobState.from_job(released_row).roster_released is False, (
         "`from_job` now sets the flag, so a refresh no longer re-derives it and this "
@@ -1555,7 +1570,11 @@ def test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it() ->
     assert {row.id: row.roster_released for row in restored.state.jobs} == {
         "child-live": False,
         "child-done": True,
-    }, "the refresh after a restore did not re-derive the released flags"
+    }, (
+        "the refresh after a restore did not re-derive the released flags: the stale "
+        "durable `True` on a live child survived it, so the restore inherited a flag "
+        "released by a previous process instead of rebuilding the row"
+    )
 
 
 def test_a_released_row_holds_only_frozen_containers() -> None:
