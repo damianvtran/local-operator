@@ -24,14 +24,21 @@ token (a pnpm stand-in does the forking) and asserts on what is ALIVE afterwards
 — the same instrument the field observation used (``pgrep -f``).
 
 WHAT FAILS ON THE PRE-FIX TREE, stated precisely because the distinction matters
-when grading the evidence: **three** tests fail there BEHAVIOURALLY — the
-self-exiting step leaves its descendants alive, the mismatch runs
-``pnpm install`` instead of refusing, and there is no probe outside the pinned
-tree. The **two bound-branch** tests fail there at the monkeypatched
-``_BUILD_STEP_TIMEOUT`` / ``_BUILD_KILL_GRACE``, which exist only on the fixed
-tree, so the bound-branch before/after is carried by the PR's process listings
-rather than by a test. Everything else fails on base because the function under
-test does not exist there at all.
+when grading the evidence — and, for the bound branch, because the COUNT MOVES
+with the revision the question is asked of, so both revisions were measured.
+"The pre-fix tree" is the BRANCH BASE, ``fcf56b68``: there **three** tests fail
+BEHAVIOURALLY — the self-exiting step leaves its descendants alive, the mismatch
+runs ``pnpm install`` instead of refusing, and there is no probe outside the
+pinned tree — and the **two bound-branch** tests fail at the monkeypatched
+``_BUILD_STEP_TIMEOUT`` / ``_BUILD_KILL_GRACE``, neither of which the base's
+``install.py`` has: they raise ``AttributeError`` in 0.5 s, having started no
+process, which is why the bound-branch before/after is carried by the PR's
+process listings rather than by a test. On the branch's own ``8b39b4bb`` — where
+both rules DO exist — that second count is **one**: four of the five tests that
+assert on the step's process group pass, and the single behavioural failure left
+is the external-stop one (``a descendant ([pid]) outlived an external SIGTERM``),
+which is what the branch's last commit ``92f0d928`` closes. Everything else
+fails on base because the function under test does not exist there at all.
 """
 
 from __future__ import annotations
@@ -278,9 +285,14 @@ def test_the_bound_reaps_the_group_not_just_the_leader(
 ) -> None:
     """The field defect: the bound fires, the leader dies, the work does not.
 
-    On the pre-fix tree this test fails with the planted grandchild STILL ALIVE
-    after ``_build_bundle`` returned — ``subprocess.run(timeout=...)`` kills the
-    direct child only, and nothing else was watching the group.
+    WHAT THIS FAILS WITH ON THE BASE depends on which base, so name it: against
+    the branch base ``fcf56b68`` it cannot run at all — the two constants patched
+    below do not exist there, so it raises ``AttributeError`` in 0.5 s — and the
+    behaviour it asserts is absent there anyway, because
+    ``subprocess.run(timeout=...)`` kills the direct child only and nothing else
+    was watching the group. From ``94f2ecde`` on, where both the constants and
+    the group bound exist, it passes; the base's behaviour is carried by the PR's
+    process listings rather than by this test.
     """
     token = _token()
     reap_markers.append(token)
@@ -468,11 +480,70 @@ def test_a_pnpm_that_is_not_the_pinned_one_is_refused_before_anything_runs(
     assert "10.30.3" in error, f"the refusal must name the version on PATH: {error}"
     assert "11.22.0" in error, f"the refusal must name the pinned version: {error}"
     assert "npm install -g pnpm@11.22.0" in error
-    assert "corepack enable" in error
+    # Corepack is offered only where a corepack shim actually resolves — Corepack
+    # stopped shipping with Node at v25 (this host's Node v26.5.0 has none), so
+    # naming it unconditionally sent a reader on Current into "command not found"
+    # and a second refusal (design round 3, D14, still open in this arm). The
+    # invariant holds on either host shape; the two tests below pin BOTH shapes,
+    # because a copy assertion that only passes where corepack happens to exist is
+    # how the defect came back the first time.
+    assert ("corepack enable" in error) == (install._shim_argv("corepack") is not None)
     assert "fans out" in error, "the why has to be in the sentence, not only in the code"
     assert fake.argv_seen() == [
         ["--version"]
     ], f"only the version probe may run: {fake.argv_seen()}"
+
+
+def test_the_refusal_drops_the_corepack_route_where_no_corepack_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A remedy the reader cannot run is a second refusal, not a remedy.
+
+    ``npm install -g pnpm@11.22.0`` is the route that works wherever pnpm itself
+    was installed from, so it is the one that leads; the Corepack clause is added
+    only when a corepack launcher resolves, which is the shape asserted here by
+    emptying ``PATH`` around the call.
+    """
+    fake = StandIn(tmp_path / "bin", version="10.30.3")
+    web = _web(tmp_path, pin="pnpm@11.22.0")
+    no_tools = tmp_path / "no-tools"
+    no_tools.mkdir()
+    monkeypatch.setenv("PATH", str(no_tools))
+
+    error = install._build_bundle(web, fake.runner)
+
+    assert error is not None
+    assert "11.22.0" in error
+    assert error.index("`npm install -g pnpm@11.22.0`") < error.index("`lop mobile install`")
+    assert "corepack" not in error, f"this route does not exist on this host: {error}"
+
+
+def test_the_refusal_keeps_the_corepack_route_where_one_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: where Corepack IS installed, that route stays in the copy.
+
+    Both shapes have to be pinned, not just the one this host happens to be in —
+    the clause is a fact about the machine, so a test that only checks its absence
+    would go green by deleting it everywhere.
+    """
+    fake = StandIn(tmp_path / "bin", version="10.30.3")
+    web = _web(tmp_path, pin="pnpm@11.22.0")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    # The launcher spelling each platform's `shutil.which` looks for, so this
+    # asserts the guard on Windows too rather than only where the shim is a
+    # bare name.
+    shim = tools / ("corepack.cmd" if os.name == "nt" else "corepack")
+    shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools))
+
+    error = install._build_bundle(web, fake.runner)
+
+    assert error is not None
+    assert "corepack enable" in error
+    assert "npm install -g pnpm@11.22.0" in error
 
 
 def test_the_version_probe_runs_outside_the_pinned_tree(tmp_path: Path) -> None:
@@ -619,9 +690,11 @@ def test_a_dev_engines_value_equality_cannot_judge_is_not_a_pin(
 ) -> None:
     """A RANGE (and anything not naming pnpm) is deliberately not enforced.
 
-    ``^11.5.1`` is not a version, and refusing on it would refuse builds whose
-    range the host's pnpm satisfies; judging one needs a semver implementation,
-    which is not this fix. Stated here so the omission is a decision, not a gap.
+    ``^11.5.1`` is not a version, so equality cannot judge it and this guard
+    protects NOTHING for a range: the host's pnpm is used as-is, matching or not
+    (measured — a host pnpm 10.30.3 does not satisfy ``^11.5.1`` and the build
+    proceeds). Judging one needs a semver implementation, which is not this fix.
+    Stated here so the omission is a decision, not a gap.
     """
     web = _web(tmp_path, pin=None, dev_engines=dev_engines)
 

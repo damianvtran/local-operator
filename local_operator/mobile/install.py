@@ -557,11 +557,15 @@ def _dev_engines_pin(manifest: dict[str, Any]) -> str | None:
     a mismatch through the same managed-version path the guard exists to refuse —
     hence it is read rather than ignored.
 
-    A RANGE is deliberately not a pin here: ``^11.5.1`` is not a version, and
-    refusing on it would refuse builds whose range the host's pnpm satisfies
-    perfectly well. Judging a range needs a semver implementation, which is not
-    what this fix is; the exact-version case is what these trees carry and what
-    is decidable here.
+    A RANGE is deliberately not a pin here, and the cost of that is real rather
+    than hypothetical: a range gets NO protection from this guard. ``^11.5.1`` is
+    not a version, so equality cannot judge it, and whatever pnpm the host has is
+    used as-is — measured on this host, a pnpm 10.30.3 that does not satisfy
+    ``^11.5.1`` passes straight through and the build proceeds. Judging a range
+    needs a semver implementation, which is not what this fix is, so an
+    unjudgeable range stays unenforced rather than being refused wholesale;
+    ``packageManager``'s exact pins are what these trees carry and what is
+    decidable here.
     """
     dev = manifest.get("devEngines")
     entry = dev.get("packageManager") if isinstance(dev, dict) else None
@@ -638,11 +642,11 @@ def _corepack_shaped(runner: Sequence[str]) -> bool:
     Two shapes reach here: the argv :func:`_package_runner`'s Corepack arm
     returns (``corepack pnpm``), and a ``pnpm`` that Corepack itself installed as
     a shim on PATH — a script that re-executes Corepack. Both RESOLVE the pin,
-    which is the whole point of Corepack and the route the refusal below
-    recommends, so comparing their reported version against the pin would refuse
-    a build that was about to be handled correctly. Checked by reading the shim,
-    and only ever to AVOID refusing: a wrong answer here costs one unguarded
-    build, never a refused good one.
+    which is the whole point of Corepack and a route :func:`_pin_mismatch` offers
+    wherever a corepack launcher resolves, so comparing their reported version
+    against the pin would refuse a build that was about to be handled correctly.
+    Checked by reading the shim, and only ever to AVOID refusing: a wrong answer
+    here costs one unguarded build, never a refused good one.
     """
     if not runner:
         return False
@@ -685,13 +689,25 @@ def _pin_mismatch(runner: Sequence[str], web_dir: Path) -> str | None:
     reported = _runner_reports(runner)
     if reported is None or reported == pinned:
         return None
+    # The route this copy names must WORK ON THE MACHINE PRINTING IT, which is
+    # the defect D8/D14 fixed in the no-pnpm arm above and this arm kept: it
+    # offered `corepack enable` unconditionally, and Corepack stopped shipping
+    # with Node at v25 — this host runs Node v26.5.0, whose install has no
+    # corepack file and no `corepack` on PATH, so a reader here would run the
+    # remedy, get "command not found", and read a second refusal back. `npm
+    # install -g` is the route that exists wherever pnpm itself was installed
+    # from, so it leads; the Corepack clause is added only when a corepack shim
+    # actually resolves, through the ONE place that owns each launcher's argv
+    # (see :func:`_shim_argv`).
+    corepack_route = ""
+    if _shim_argv("corepack") is not None:
+        corepack_route = ", or use Corepack (`corepack enable`, which makes `pnpm` resolve the pin)"
     return (
         f"the pnpm on PATH is {reported} but {web_dir / 'package.json'} pins "
-        f"pnpm@{pinned}: install the pinned version (`npm install -g pnpm@{pinned}`) "
-        "or use Corepack (`corepack enable`, which makes `pnpm` resolve the pin), "
-        "then re-run `lop mobile install`. A pnpm that does not match its own pin "
-        "resolves it by installing pnpm WITH pnpm, which fans out until the "
-        "machine dies"
+        f"pnpm@{pinned}: install the pinned version "
+        f"(`npm install -g pnpm@{pinned}`){corepack_route}, then re-run "
+        "`lop mobile install`. A pnpm that does not match its own pin resolves it "
+        "by installing pnpm WITH pnpm, which fans out until the machine dies"
     )
 
 
