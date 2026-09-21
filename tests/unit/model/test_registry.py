@@ -939,3 +939,50 @@ def test_aggregator_router_rows_advertise_prompt_caching(provider: str) -> None:
 
     spec = build_model_spec(provider, "auto", info)
     assert spec.supports_prompt_cache is True, "the spec the request builder reads must carry it"
+
+
+@pytest.mark.parametrize(
+    "provider, model_id",
+    [("radient", "auto"), ("openrouter", "auto"), ("openrouter", "openrouter/auto")],
+)
+def test_an_aggregator_router_route_gets_an_effort_ladder_defaulting_to_high(
+    provider: str, model_id: str
+) -> None:
+    """The router is a ROUTE, and the operator's decision is that the harness
+    EMITS an effort level on it rather than leaving the dial invisible.
+
+    Before this the router carried an empty ladder, so ``_reasoning_effort``
+    returned None and no ``reasoning_effort`` key ever reached the wire — the
+    status band showed nothing and ``/effort`` reported "not adjustable" on the
+    route the harness selects by default on ``radient``. The ladder is the
+    aggregator's own vocabulary (low/medium/high: what Radient's request schema
+    documents for the field and what OpenRouter normalises), and `high` is the
+    level the route's own current model documents as its default, so the body
+    states the depth already in force rather than switching reasoning on.
+
+    ``openrouter/auto`` is included because ``AGGREGATOR_ROUTER_MODEL_IDS``
+    names both spellings: the id-keyed rule is the router, whichever aggregator
+    fronts it.
+    """
+    spec = build_model_spec(provider, model_id, get_model_info(provider, model_id))
+
+    assert spec.reasoning_efforts == ("low", "medium", "high")
+    assert spec.reasoning_default_effort == "high"
+    assert spec.reasoning_effort == "high", "the band must show a level from boot"
+    assert spec.reasoning is True
+
+
+def test_the_router_ladder_does_not_leak_onto_a_non_aggregator_auto() -> None:
+    """``auto`` is a router id on an aggregator and a LOCAL model elsewhere.
+
+    ``ollama/auto`` reaches the router by the same id through a different
+    hosting, so an id-only rule would hand a local model a ladder and a seeded
+    ``high`` the route cannot honour — the exact false-capability failure the
+    three-state scheme exists to prevent. Keyed on route AND id, so this stays
+    empty.
+    """
+    spec = build_model_spec("ollama", "auto")
+
+    assert spec.reasoning_efforts == ()
+    assert spec.reasoning_effort is None
+    assert spec.reasoning_default_effort is None
