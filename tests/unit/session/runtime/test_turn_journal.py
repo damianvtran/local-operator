@@ -671,7 +671,7 @@ def _write_stall_dump(
         f"means this process made no progress for {seconds:g}s.\n"
     )
     if fired:
-        body += f"{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n  File \"x.py\", line 1\n"
+        body += f'{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n  File "x.py", line 1\n'
     dump = directory / f"runtime-stall-{pid}.log"
     dump.write_text(body, encoding="utf-8")
     monkeypatch.setattr(stall_watchdog, "dump_path", lambda pid=None, directory=None: dump)

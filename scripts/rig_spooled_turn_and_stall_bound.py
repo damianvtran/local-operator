@@ -181,7 +181,6 @@ def _phase_b(root: Path) -> int:  # noqa: C901 — see above
     from local_operator.config import ConfigManager
     from local_operator.harness.types import Message
     from local_operator.paths import config_dir
-    from local_operator.resume import TRANSCRIPT_NAME
     from local_operator.session.runtime.inbox import InboxLine, append_inbox, peek_inbox
     from local_operator.session.transcript import Transcript
     from local_operator.wakes import spooled

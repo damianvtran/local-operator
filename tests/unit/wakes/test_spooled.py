@@ -26,12 +26,12 @@ from pathlib import Path
 import pytest
 
 from local_operator.wakes import spooled
+from local_operator.wakes.store import write_entry
 from local_operator.wakes.supervisor import (
     _due_sessions,
     _has_fireable_wakes,
     _reconcile_spooled,
 )
-from local_operator.wakes.store import write_entry
 
 NOW_MS = int(time.time() * 1000)
 
@@ -158,9 +158,12 @@ def test_only_a_turn_asking_row_owes_a_turn(tmp_path: Path) -> None:
         )
         is False
     )
-    assert spooled.spool_owes_turn(
-        _session(config_dir, "m", rows=[_note_row(), {"text": "ask", "wake": True}])
-    ) is True, "one turn-asking row among notes is enough"
+    assert (
+        spooled.spool_owes_turn(
+            _session(config_dir, "m", rows=[_note_row(), {"text": "ask", "wake": True}])
+        )
+        is True
+    ), "one turn-asking row among notes is enough"
     assert spooled.spool_owes_turn(_session(config_dir, "empty", rows=[])) is False
     assert spooled.spool_owes_turn(config_dir / "sessions" / "missing") is False
 
@@ -168,9 +171,7 @@ def test_only_a_turn_asking_row_owes_a_turn(tmp_path: Path) -> None:
 def test_a_malformed_spool_row_is_skipped_rather_than_fatal(tmp_path: Path) -> None:
     config_dir = tmp_path / "store"
     directory = _session(config_dir, "junk")
-    (directory / spooled.INBOX_NAME).write_text(
-        'not json\n{"wake": true}\n', encoding="utf-8"
-    )
+    (directory / spooled.INBOX_NAME).write_text('not json\n{"wake": true}\n', encoding="utf-8")
     assert spooled.spool_owes_turn(directory) is True
 
 
@@ -185,7 +186,8 @@ def test_a_spooled_turn_is_due_the_moment_it_is_recorded(tmp_path: Path) -> None
 
     due = _due_sessions({}, NOW_MS, spooled=spooled.read_spooled(config_dir))
 
-    assert due == [("sess-d", "/tmp/here", spooled.read_spooled(config_dir)["sess-d"]["noted_at_ms"])]
+    recorded = spooled.read_spooled(config_dir)
+    assert due == [("sess-d", "/tmp/here", recorded["sess-d"]["noted_at_ms"])]
     assert _has_fireable_wakes({}, spooled=spooled.read_spooled(config_dir)) is True
 
 
@@ -204,9 +206,9 @@ def test_a_dormant_session_is_not_raised_for_a_spooled_turn(tmp_path: Path) -> N
 
     from local_operator.wakes.store import read_index
 
-    assert (
-        _due_sessions(read_index(config_dir), NOW_MS, spooled=spooled.read_spooled(config_dir)) == []
-    )
+    due = _due_sessions(read_index(config_dir), NOW_MS, spooled=spooled.read_spooled(config_dir))
+
+    assert due == []
 
 
 def test_a_session_due_both_ways_is_engaged_once(tmp_path: Path) -> None:
@@ -281,9 +283,9 @@ def test_the_drain_that_empties_the_spool_retires_the_record(
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
 
     inbox.settle_owed_turn(directory)
-    assert spooled.read_spooled_turn(config_dir, "sess-j") is not None, (
-        "a spool that still holds a turn-asking row keeps the record"
-    )
+    assert (
+        spooled.read_spooled_turn(config_dir, "sess-j") is not None
+    ), "a spool that still holds a turn-asking row keeps the record"
 
     (directory / spooled.INBOX_NAME).write_text("", encoding="utf-8")
     inbox.settle_owed_turn(directory)

@@ -543,9 +543,7 @@ def _session_exists(config_dir: Path, session_id: str) -> bool:
 
 def _load_and_reconcile_state(
     config_dir: Path,
-) -> tuple[
-    dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]
-]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """Read the index and the ledger in ONE thread hop, RECONCILED here.
 
     ONE hop, not two. This runs once per slice pass, in a process whose whole
@@ -1311,7 +1309,9 @@ def _note_spooled_attempt(config_dir: Path, session_id: str, *, error: str = "")
             return
         note_attempt(config_dir, session_id, error=error)
     except Exception:  # noqa: BLE001 — bookkeeping must never stop an engagement
-        logger.warning("could not record the spooled-turn attempt for %s", session_id, exc_info=True)
+        logger.warning(
+            "could not record the spooled-turn attempt for %s", session_id, exc_info=True
+        )
 
 
 def _retirement_reason(config_dir: Path) -> str:
@@ -1415,7 +1415,9 @@ async def serve(config_dir: Path, *, once: bool = False) -> int:
     residency = _ResidencySweep(config_dir)
     try:
         while True:
-            index, deliveries, spooled = await asyncio.to_thread(_load_and_reconcile_state, config_dir)
+            index, deliveries, spooled = await asyncio.to_thread(
+                _load_and_reconcile_state, config_dir
+            )
             if not _has_fireable_wakes(
                 index, config_dir=config_dir, deliveries=deliveries, spooled=spooled
             ):
