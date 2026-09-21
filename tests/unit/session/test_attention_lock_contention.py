@@ -22,8 +22,10 @@ retries a contended write on a bounded budget, and a caller that treats a store
 failure as fatal now degrades, observably.
 
 THE READ CLASS GETS THE SAME TREATMENT, and had tests of its own added later
-because it did not: 36 of the 60 `database is locked` lines in that log are the
-DAEMON'S SCAN, a read, against 12 on the publish path. A wider window left those
+because it did not: 36 RECORDS of the incident's log are the DAEMON'S SCAN, a
+read, against 12 records on the publish path, over 60 `database is locked` text
+occurrences -- records and occurrences are different units, because a publish
+record carries the phrase twice. A wider window left those
 36 exactly as they were -- a read that raised at 2 s raised at 5 s instead. So
 the reads are retried too (:meth:`AttentionStore._retry_read`), they get their
 own typed verdict (:class:`AttentionReadDeferred`), and the retry set is asserted
@@ -425,7 +427,8 @@ def test_a_third_attempt_is_a_retry_not_an_index_error(
 
 
 # ---------------------------------------------------------------------------
-# The read class: 36 of the 60 lock lines in the incident's log.
+# The read class: 36 scan RECORDS (60 `database is locked` occurrences) in the
+# incident's log.
 # ---------------------------------------------------------------------------
 
 

@@ -1657,9 +1657,12 @@ class AttentionStore:
 
         WHY THE READ CLASS NEEDED THIS TOO. Reads contend for the same lock as
         writes in this store's default rollback journal, and they are the
-        MAJORITY of the incident: 36 of the 60 `database is locked` lines in the
-        operator's log are the daemon's own scan dying inside
-        `revision -> _uninitialized`, against 12 on the publish path. Closing
+        MAJORITY of the incident: 36 RECORDS of the daemon's own scan dying
+        inside `revision -> _uninitialized`, against 12 records on the publish
+        path, over the 60 `database is locked` text OCCURRENCES in the
+        operator's log -- two units, not one, because a record such as the
+        publish one carries the phrase twice (36/12/1 records, 38/21/1
+        occurrences). Closing
         the exposed window to 5 s (what this PR did first) left those 36 exactly
         as they were -- they were merely given a larger window before failing,
         with the phone's read routes still answering 500 on a lock the window
@@ -1848,8 +1851,9 @@ class AttentionStore:
         a separate, unchanged wire contract (``AttentionState.revision``, mirrored
         by the mobile client) and deliberately does not grow a third element.
 
-        THIS IS THE READ THE INCIDENT'S LOG SHOWS DYING (36 of its 60 lock lines,
-        out of ``_uninitialized``), so it runs under the bounded read retry
+        THIS IS THE READ THE INCIDENT'S LOG SHOWS DYING (36 records of it, over
+        the 60 `database is locked` text occurrences, out of ``_uninitialized``),
+        so it runs under the bounded read retry
         (:meth:`_retry_read`) and gives a classified :class:`AttentionReadDeferred`
         rather than a bare ``OperationalError`` if every attempt meets the lock.
         """
