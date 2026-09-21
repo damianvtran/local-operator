@@ -1832,13 +1832,25 @@ come from a console surface before the Textual compositor below is reached for.
 Textual emulation has small visual and spacing differences from what people
 actually see, and those differences are the size of the defects a still is taken
 to catch: a reconstructed frame can be exactly right about a layout that looks
-wrong on the user's screen. The console reads and photographs the **real** pty in
-the app's own terminal — its font, its theme, its own grid — and it reports which
+wrong on the user's screen. When the pane is displayed, the console photographs
+the **real** pty in the app's own terminal — its font, its theme, its own grid —
+and it always reports which
 of the two it gave you: `rendered: "displayed"` is the app photographing its own
 window cropped to the pane, while `"offscreen"` is a replay reconstruction from
 the surface's record, faithful to that record but not a photograph of a live
 screen. The tool's `keys` method sends named keys into the live program, so a
 state that only exists under interaction is driven rather than simulated.
+
+**Two of section 1's requirements move with the instrument, so carry them over.**
+Isolate `HOME` and the config root before the app imports — section 1's isolation
+step exists because a machine set to auto-capture otherwise yields a frame with
+no prompt at all, and a console surface runs under whatever `HOME` it is given,
+so that same silent emptiness would simply move onto the preferred path. And
+check the size the frame came back at rather than the size you asked for: a
+displayed surface is re-gridded from the pane's own rect (design §8.2) while an
+offscreen one keeps its create-time grid (§8.4), and the screenshot result names
+neither `cols` nor `rows`, so a published frame can be at neither the size you
+requested nor one the result reports.
 
 Sections 1-5 are **not replaced** by that. They remain the fallback when no app
 is running — the tool is offered only while the app's discovery record advertises
@@ -1849,8 +1861,9 @@ view refuses the screenshot with `capture_unavailable` instead of returning a
 frame it does not have — and the instrument of record for what the console cannot
 reach: a widget state you construct by hand, a CSS-less unit-test host. What a
 frame can prove does not change either: a `read` is text and a `screenshot` is
-pixels, neither is a design judgement, and sections 3-5 apply to a console
-capture exactly as they do to an SVG.
+pixels, neither is a design judgement, and the principles of sections 3-5 apply
+to a console capture exactly as they do to an SVG — the procedures in them are
+written for the compositor, which the console does not drive.
 
 ### 1. Render the screen to an SVG still
 
