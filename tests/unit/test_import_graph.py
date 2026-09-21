@@ -291,6 +291,38 @@ def test_wake_store_import_is_stdlib_only(wake_store_modules: set[str]) -> None:
     assert ours == ["local_operator", "local_operator.wakes", "local_operator.wakes.store"], ours
 
 
+@pytest.fixture(scope="module")
+def spooled_store_modules() -> set[str]:
+    """Modules loaded by importing the spooled-turn store."""
+    return _imported_modules("local_operator.wakes.spooled")
+
+
+def test_spooled_turn_store_import_is_stdlib_only(spooled_store_modules: set[str]) -> None:
+    """The third member of the wake store family, on the same resident set.
+
+    ``local_operator.wakes.spooled`` is read by the wake supervisor on the same
+    serve loop as the index and the ledger, so it carries the same contract: no
+    asyncio, no pydantic, nothing under ``session``/``harness``/``mobile``/``tui``.
+    Pinned in its OWN cell rather than folded into theirs because the failure
+    mode differs — this module is the one a future edit is most likely to reach
+    into ``session.runtime.inbox`` from, since the two describe the same spool
+    from different sides, and that import would drag the harness onto the
+    supervisor's resident set.
+    """
+    _assert_absent(spooled_store_modules, "asyncio", "the supervisor is a plain loop")
+    _assert_absent(spooled_store_modules, "pydantic", "the record is a plain dict")
+    _assert_absent(
+        spooled_store_modules, "local_operator.session", "the store never opens a session"
+    )
+    _assert_absent(spooled_store_modules, "local_operator.harness", "no harness types")
+    _assert_absent(spooled_store_modules, "local_operator.mobile", "no runtime, no daemon")
+    _assert_absent(spooled_store_modules, "local_operator.tui", "no front end")
+    _assert_absent(spooled_store_modules, "textual", "no front end")
+    _assert_absent(spooled_store_modules, "httpx", "no provider layer")
+    ours = sorted(m for m in spooled_store_modules if m.startswith("local_operator"))
+    assert ours == ["local_operator", "local_operator.wakes", "local_operator.wakes.spooled"], ours
+
+
 def test_wake_delivery_ledger_import_is_stdlib_only() -> None:
     """The same contract as the index, for the same processes.
 

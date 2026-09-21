@@ -90,14 +90,25 @@ RETRY_FACTOR = 2.0
 #: (a credential, a lock) that a later pass will not see.
 RETRY_CAP_S = 3600.0
 
-#: How many attempts the supervisor makes before it stops raising this session.
-#: Bounded on purpose: the alternative to a cap is a session whose delivery can
-#: never succeed being raised on every pass forever, which is a process churn
-#: the machine pays for and nobody reads. Past the cap the obligation KEEPS its
-#: record and stays visible (so the state is legible rather than silently
-#: dropped); the spool row itself is untouched, so an ordinary engage — the
-#: owner opening the conversation, a peer's ``send`` — still delivers it.
-MAX_ATTEMPTS = 6
+#: Where the attempt walk stops getting faster, and the only bound on it. There
+#: is deliberately NO attempt cap: a capped walk gave up permanently, which in
+#: review round 1 (R1-1, R1-2) turned out to be defect (B) returning through the
+#: bookkeeping — a handover whose owner outlived the cap (a slow clean exit, or
+#: the wedged owner this whole change is about) or a row spooled after the walk
+#: ended was left with no successor at all, forever. The walk therefore keeps
+#: going at this ceiling, and the properties that were doing the cap's real work
+#: are the ones that remain:
+#:
+#: * CHURN IS BOUNDED BY THE BACKOFF: attempts are 15 s, 30 s, 60 s, …, 1 h apart,
+#:   and an attempt is only COUNTED when a raise was actually tried (a failed
+#:   engage, or a wedged owner that holds the lease without answering) — see
+#:   ``supervisor._SPOOLED_ATTEMPT_REASONS``. A session whose own runtime is
+#:   still alive is not an attempt: nothing was tried, and the handover has not
+#:   even begun.
+#: * IMMORTALITY IS THE PRICE, and it is the honest one: a session that still
+#:   owes a turn is still work, so the resident supervisor stays up to do it (one
+#:   boot per hour past the ceiling, not a loop). What stops it is the spool
+#:   emptying — the authority — not a counter.
 
 
 def spooled_dir(config_dir: Path) -> Path:
@@ -168,11 +179,17 @@ def note_spooled_turn(
     that ASKS for a turn has been appended — a peer's ``send --wake`` or the
     owner's own prompt — and it is the whole of the promise the receipt makes.
 
-    RE-NOTING IS NOT A NEW OBLIGATION. A second row spooled while the first is
-    still owed must not restart the attempt walk (that is how a busy session
-    would never reach its cap) and must not lose the count of what is waiting, so
-    an existing record keeps its ``attempts``/``next_attempt_ms`` and its own
-    ``noted_at_ms``, and only its row count grows.
+    RE-NOTING IS NOT A NEW OBLIGATION, and ROUND 1 CHANGED WHAT THAT MEANS. A
+    second row spooled while the first is still owed must not lose the count of
+    what is waiting, so an existing record keeps its own ``noted_at_ms`` and its
+    ``attempts`` — but it must not simply inherit the previous walk's wait
+    either: a row that arrives while the record is an hour into a backed-off walk
+    is FRESH WORK, and the receipt its sender is about to be handed promises a
+    runtime ("held for the next runtime — it runs it"). So a re-note keeps the
+    recorded attempts and pulls the next attempt no later than
+    :data:`RETRY_BASE_S` from now (:func:`next_attempt_at_ms`), which is the
+    ordering that makes the promise true without letting a stream of notes
+    restart an already-short wait.
     """
     moment = _now_ms() if now_ms is None else now_ms
     if not str(session_id or ""):
@@ -190,16 +207,24 @@ def note_spooled_turn(
         "noted_at_ms": existing.get("noted_at_ms") or moment,
         "updated_at_ms": moment,
         "rows": int(existing.get("rows") or 0) + max(1, int(rows)),
-        "attempts": int(existing.get("attempts") or 0),
+        "attempts": _attempts_of(existing),
     }
-    if existing.get("next_attempt_ms"):
-        record["next_attempt_ms"] = existing["next_attempt_ms"]
+    # ONLY A RE-NOTE CARRIES A WAIT. A brand-new obligation has no
+    # ``next_attempt_ms`` at all, which reads as "due now" (see
+    # :func:`next_attempt_at_ms`) — the wait being shortened here belongs to the
+    # walk a PREVIOUS row started, and inventing one for the first row would
+    # delay the raise it is asking for by :data:`RETRY_BASE_S` for no reason.
+    recorded_next = existing.get("next_attempt_ms")
+    if isinstance(recorded_next, int) and not isinstance(recorded_next, bool):
+        record["next_attempt_ms"] = min(recorded_next, moment + int(RETRY_BASE_S * 1000))
     if existing.get("last_error"):
         record["last_error"] = existing["last_error"]
     return _write(config_dir, session_id, record)
 
 
-def clear_spooled_turn(config_dir: Path, session_id: str) -> bool:
+def clear_spooled_turn(
+    config_dir: Path, session_id: str, *, expected_updated_at_ms: int | None = None
+) -> bool:
     """Drop the obligation. Returns whether a record was removed.
 
     Called by whoever DISCHARGES it: the successor's own spool drain (the rows
@@ -207,7 +232,26 @@ def clear_spooled_turn(config_dir: Path, session_id: str) -> bool:
     spool no longer holds a row that asks for a turn). Best-effort, and never a
     reason to fail a delivery — a stale record costs one wasted engage, and the
     reconciliation on the next pass removes it.
+
+    ``expected_updated_at_ms`` IS THE COMPARE-AND-DELETE GUARD (review round 1,
+    R1-4). Both callers judge the record stale from a read that happened
+    elsewhere — one in another PROCESS (the writer is the draining runtime, the
+    clearer is its successor) — so an unconditional unlink can delete a record
+    that a row landing in that window has just re-armed, which is defect (B)
+    returning silently. A caller that holds the value it judged passes it, and a
+    record whose ``updated_at_ms`` has moved since (a re-note, a failed attempt)
+    is left alone. The window between this read and the unlink is a few
+    microseconds rather than the caller's own read-to-unlink gap; the residual is
+    stated in :func:`local_operator.wakes.supervisor._reconcile_spooled`, and it
+    fails towards keeping a record that a later pass will drop rather than
+    dropping one that is still owed.
     """
+    if expected_updated_at_ms is not None:
+        current = read_spooled_turn(config_dir, session_id)
+        if current is None:
+            return False
+        if current.get("updated_at_ms") != expected_updated_at_ms:
+            return False
     try:
         spooled_path(config_dir, session_id).unlink()
         return True
@@ -228,13 +272,21 @@ def note_attempt(config_dir: Path, session_id: str, *, error: str = "") -> None:
     record = read_spooled_turn(config_dir, session_id)
     if record is None:
         return
-    attempts = int(record.get("attempts") or 0) + 1
+    attempts = _attempts_of(record) + 1
     record["attempts"] = attempts
     record["last_attempt_ms"] = _now_ms()
     record["next_attempt_ms"] = _now_ms() + int(backoff_s(attempts) * 1000)
     if error:
         record["last_error"] = str(error)[:400]
     _write(config_dir, session_id, record)
+
+
+def _attempts_of(record: Mapping[str, Any]) -> int:
+    """``attempts`` as an int, or ``0`` for anything a foreign writer left there."""
+    raw = record.get("attempts")
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+        return raw
+    return 0
 
 
 def backoff_s(attempts: int) -> float:
@@ -247,16 +299,20 @@ def backoff_s(attempts: int) -> float:
     return min(RETRY_CAP_S, RETRY_BASE_S * (RETRY_FACTOR**exponent))
 
 
-def next_fireable_ms(record: Mapping[str, Any]) -> int | None:
-    """When this obligation may be acted on again, or ``None`` if never.
+def next_attempt_at_ms(record: Mapping[str, Any]) -> int:
+    """When this obligation may be acted on again. Never raises, never "never".
 
-    ``None`` is the retirement/backoff answer in both directions the caller needs
-    it: past :data:`MAX_ATTEMPTS` this process stops raising the session (the
-    walk is over — see the constant), and before ``next_attempt_ms`` it is simply
-    not this pass's turn.
+    DEFENSIVE ON PURPOSE, AND NOT FOR DECORATION. The record is written by several
+    processes and read on the supervisor's hot path (``_due_sessions``,
+    ``_has_fireable_wakes``, both of which run inside ``sweep``/``serve``), so a
+    hand-edited, truncated or future-schema field must cost ONE session's turn
+    rather than raise ``ValueError`` out of the whole pass — the contract
+    ``_due_sessions`` states for the index and its sibling readers already honour
+    (review round 1, R1-5, which caught this one raising).
+
+    An unreadable schedule reads as DUE NOW, which is the direction that cannot
+    lose work: the walk's own backoff bounds what that costs.
     """
-    if int(record.get("attempts") or 0) >= MAX_ATTEMPTS:
-        return None
     recorded = record.get("next_attempt_ms")
     if isinstance(recorded, int) and not isinstance(recorded, bool):
         return recorded

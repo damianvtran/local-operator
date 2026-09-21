@@ -125,6 +125,22 @@ def _phase_a(root: Path) -> int:  # noqa: C901 — a script, and the print IS th
     print(f"dump: {dump}")
     print(f"dump carries the fired marker: {fired}")
 
+    # THE ROW IS STAMPED WITH THE INSTALL THAT IS REAL HERE, not a fabricated
+    # one (review round 1, R1-9). With a made-up stamp the tear rung
+    # (``install-mid-update``) answers for the dump-less case instead of the
+    # unattributed one, and the control then shows "the artifact mattered"
+    # rather than the state the real successors were actually told — which is
+    # ``runtime-killed`` with ``(unattributed, ...)``.
+    from local_operator import buildwatch
+    from local_operator.update import installed_build
+
+    try:
+        stamp = installed_build(buildwatch.build_prefix())
+        build_fields = {"version": stamp.version, "source_ref": stamp.source_ref}
+    except Exception:  # noqa: BLE001 — an unstamped tree is itself a real shape
+        build_fields = {}
+    print(f"row build stamp: {build_fields or '(none — an unstamped tree)'}")
+
     session = "rig-stall"
     directory = cfg / "sessions" / session
     directory.mkdir(parents=True, exist_ok=True)
@@ -144,7 +160,7 @@ def _phase_a(root: Path) -> int:  # noqa: C901 — a script, and the print IS th
             "exit_cause": "",
             "still_open_at_exit": False,
             "last_boundary": "bash",
-            "build": {"version": "0.61.18", "source_ref": "2a9a737a185e592e2fb4aa404369e023d4ba7f"},
+            "build": build_fields,
             "install_root": "/tmp/rig-install",
             "updated_at": now - 1,
         },
@@ -156,17 +172,18 @@ def _phase_a(root: Path) -> int:  # noqa: C901 — a script, and the print IS th
     print(f"reason: {reason}")
 
     # The counterfactual, taken away and re-asked: with no artifact the verdict
-    # falls to the rungs that existed before this change, which is what the real
-    # successors were told.
+    # falls to the rungs that existed before this change — and for a row whose
+    # install has not moved, that is exactly what the real successors were told:
+    # ``runtime-killed`` carrying ``(unattributed, ...)``.
     dump.unlink()
-    _kind, without, _reason = journal.death_verdict(row)
-    print(f"without the dump: {without}")
+    _kind, without, without_reason = journal.death_verdict(row)
+    print(f"without the dump: {without} | {without_reason}")
 
     if cause != "runtime-stalled":
         print("FAIL A: the fired bound did not name the death")
         return 1
-    if without == "runtime-stalled":
-        print("FAIL A: the verdict did not depend on the artifact")
+    if without != "runtime-killed" or "unattributed" not in without_reason:
+        print("FAIL A: the dump-less verdict is not the measured pre-change state")
         return 1
     print("RESULT A: NAMED")
     return 0

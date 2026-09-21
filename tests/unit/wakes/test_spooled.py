@@ -26,10 +26,11 @@ from pathlib import Path
 import pytest
 
 from local_operator.wakes import spooled
-from local_operator.wakes.store import write_entry
+from local_operator.wakes.store import read_index, write_entry
 from local_operator.wakes.supervisor import (
     _due_sessions,
     _has_fireable_wakes,
+    _note_spooled_attempt,
     _reconcile_spooled,
 )
 
@@ -77,57 +78,66 @@ def test_a_spooled_turn_round_trips(tmp_path: Path) -> None:
     assert spooled.read_spooled(config_dir) == {}
 
 
-def test_a_second_row_does_not_restart_the_attempt_walk(tmp_path: Path) -> None:
-    """Re-noting is not a new obligation: the cap has to stay reachable.
+def test_a_second_row_pulls_the_wait_back_without_resetting_the_walk(tmp_path: Path) -> None:
+    """A fresh row is fresh work: it must not wait behind an hour-old backoff.
 
-    A session that spools a second message while the first is still owed must not
-    reset ``attempts`` — otherwise a busy session never reaches
-    :data:`spooled.MAX_ATTEMPTS` and the supervisor raises it forever, which is
-    the churn the cap exists to bound.
+    ROUND 1 CHANGED THIS RULE (R1-2). The record keeps its ``attempts`` — a busy
+    session must not get a new walk per message — but the ``next_attempt_ms`` it
+    inherits belongs to the walk that previous rows started, and the receipt the
+    new sender is about to be handed says a runtime will run their message. So the
+    wait is pulled back to at most :data:`spooled.RETRY_BASE_S`, never pushed out,
+    and never *restarted* outright: the attempts Figure stays where the walk had
+    got to, which is what keeps the churn bounded when a session keeps failing.
     """
     config_dir = tmp_path / "store"
     spooled.note_spooled_turn(config_dir, "sess-b")
-    spooled.note_attempt(config_dir, "sess-b", error="engage failed")
+    for _ in range(4):
+        spooled.note_attempt(config_dir, "sess-b", error="engage failed")
     first = spooled.read_spooled_turn(config_dir, "sess-b")
-    assert first is not None and first["attempts"] == 1
-    assert first["next_attempt_ms"] > NOW_MS - 1000
+    assert first is not None and first["attempts"] == 4
+    assert first["next_attempt_ms"] > NOW_MS + 100_000, "four failures walk to a long wait"
 
     spooled.note_spooled_turn(config_dir, "sess-b")
 
     second = spooled.read_spooled_turn(config_dir, "sess-b")
     assert second is not None
-    assert second["attempts"] == 1, "a second row must not reset the walk"
-    assert second["next_attempt_ms"] == first["next_attempt_ms"]
+    assert second["attempts"] == 4, "the walk is not restarted by a later row"
     assert second["rows"] == 2, "the count of what is waiting still grows"
-    assert second["noted_at_ms"] == first["noted_at_ms"]
+    assert second["noted_at_ms"] == first["noted_at_ms"], "the oldest row still leads the queue"
+    ceiling = int(time.time() * 1000) + spooled.RETRY_BASE_S * 1000 + 2_000
+    assert (
+        second["next_attempt_ms"] <= ceiling
+    ), "the new row's runtime is owed promptly, not after the old walk's hour"
 
 
-def test_a_nameless_obligation_is_refused(tmp_path: Path) -> None:
-    """An id-less record would be invisible to the reconciler and stay forever."""
-    config_dir = tmp_path / "store"
-    assert spooled.note_spooled_turn(config_dir, "") is False
-    assert spooled.read_spooled(config_dir) == {}
+def test_the_walk_never_ends(tmp_path: Path) -> None:
+    """THERE IS NO ATTEMPT CAP, and that is round 1's finding (R1-1, R1-2).
 
-
-def test_the_walk_stops_at_the_attempt_cap(tmp_path: Path) -> None:
-    """``next_fireable_ms`` is the one place the cap and the backoff are read."""
+    A capped walk gave up permanently. Two shapes then had no successor at all:
+    a handover whose owner outlived the cap (a slow clean exit, or the wedged
+    owner this change is about) and a row spooled after the walk ended. The walk
+    therefore keeps going at the backoff ceiling — what bounds it is the spool
+    emptying, the authority, not a counter.
+    """
     config_dir = tmp_path / "store"
     spooled.note_spooled_turn(config_dir, "sess-c")
     record = spooled.read_spooled_turn(config_dir, "sess-c")
     assert record is not None
-    assert spooled.next_fireable_ms(record) == 0, "a fresh obligation is due now"
+    assert spooled.next_attempt_at_ms(record) == 0, "a fresh obligation is due now"
 
-    for _ in range(spooled.MAX_ATTEMPTS):
+    for _ in range(50):
         spooled.note_attempt(config_dir, "sess-c")
-    exhausted = spooled.read_spooled_turn(config_dir, "sess-c")
-    assert exhausted is not None
-    assert exhausted["attempts"] == spooled.MAX_ATTEMPTS
-    assert spooled.next_fireable_ms(exhausted) is None, "the walk is over, not merely delayed"
 
-    # The record is KEPT when the walk gives up: the state stays legible rather
-    # than being silently dropped, and the spool row is untouched, so an ordinary
-    # engage still delivers it.
-    assert spooled.read_spooled_turn(config_dir, "sess-c") is not None
+    walked = spooled.read_spooled_turn(config_dir, "sess-c")
+    assert walked is not None
+    assert walked["attempts"] == 50
+    now = int(time.time() * 1000)
+    later = spooled.next_attempt_at_ms(walked)
+    assert later > now, "the walk is throttled to its ceiling, not stopped"
+    assert later <= now + spooled.RETRY_CAP_S * 1000 + 2_000, "…and the ceiling holds"
+    assert (
+        _due_sessions({}, later + 1, spooled={"sess-c": walked}) != []
+    ), "an hour later it is tried again rather than abandoned"
 
 
 def test_the_backoff_is_bounded_between_attempts(tmp_path: Path) -> None:
@@ -254,18 +264,91 @@ def test_reconciliation_drops_an_obligation_whose_spool_is_empty(tmp_path: Path)
     assert spooled.read_spooled_turn(config_dir, "sess-h") is None, "the file goes too"
 
 
-def test_an_exhausted_walk_is_not_fireable(tmp_path: Path) -> None:
-    """A delivery that can never succeed must not make the supervisor immortal."""
+def test_a_backed_off_walk_is_still_fireable_work(tmp_path: Path) -> None:
+    """An owed turn is work, so the resident supervisor stays up to do it.
+
+    That is the deliberate price of dropping the cap (see :mod:`spooled`): one
+    boot an hour past the ceiling, not a loop, and the process stops once the
+    spool stops owing.
+    """
     config_dir = tmp_path / "store"
     _session(config_dir, "sess-i", rows=[_wake_row()])
     spooled.note_spooled_turn(config_dir, "sess-i")
-    for _ in range(spooled.MAX_ATTEMPTS):
+    for _ in range(6):
         spooled.note_attempt(config_dir, "sess-i")
 
     records = spooled.read_spooled(config_dir)
 
-    assert _due_sessions({}, NOW_MS, spooled=records) == []
-    assert _has_fireable_wakes({}, spooled=records) is False
+    assert _has_fireable_wakes({}, spooled=records) is True
+
+
+def test_a_dormant_session_is_not_fireable_even_with_a_spooled_turn(tmp_path: Path) -> None:
+    """R1-6: the kill switch has to reach BOTH doors into ``_has_fireable_wakes``.
+
+    ``_due_sessions`` already refuses to fire a stopped session's spooled turn;
+    if the retirement predicate disagreed, a stopped session with an owed turn
+    would keep the supervisor resident forever, waiting to fire something it will
+    never fire — the leak that function's own docstring says it was written to
+    close for dormant index entries.
+    """
+    config_dir = tmp_path / "store"
+    _session(config_dir, "sess-z", rows=[_wake_row()])
+    spooled.note_spooled_turn(config_dir, "sess-z")
+    write_entry(
+        config_dir,
+        "sess-z",
+        cwd="/tmp",
+        schedules=[{"id": "w", "message": "m", "next_due_at": NOW_MS + 60_000}],
+        preserve={"stopped_at": NOW_MS},
+    )
+    index = read_index(config_dir)
+
+    assert _due_sessions(index, NOW_MS, spooled=spooled.read_spooled(config_dir)) == []
+    assert (
+        _has_fireable_wakes(index, config_dir=config_dir, spooled=spooled.read_spooled(config_dir))
+        is False
+    )
+
+
+def test_a_corrupt_record_cannot_raise_out_of_the_sweep(tmp_path: Path) -> None:
+    """R1-5: the store is written by other processes and read on the hot path.
+
+    ``_due_sessions``' own contract for the index ("a hand-edited or half-written
+    entry must cost one session's wake, never the whole sweep") applies to this
+    store for the same reason, so a non-numeric field reads as DUE rather than
+    raising ``ValueError`` out of ``sweep``/``serve``.
+    """
+    junk = {"schema": 1, "session_id": "sess-junk", "attempts": "many", "next_attempt_ms": "soon"}
+
+    assert spooled.next_attempt_at_ms(junk) == 0
+    assert _due_sessions({}, NOW_MS, spooled={"sess-junk": junk}) != []
+    assert _has_fireable_wakes({}, spooled={"sess-junk": junk}) is True
+
+
+def test_only_a_tried_raise_moves_the_walk(tmp_path: Path) -> None:
+    """R1-1, at the ledger: a SERVED session is not a failed attempt.
+
+    ``live`` means the handover has not begun — nothing was tried — and counting
+    those refused passes ended the walk ≈7.75 min after the record was written,
+    which is defect (B) returning through the bookkeeping. ``wedged`` and
+    ``failed`` are the shapes where a raise really did not happen and repeating it
+    immediately is pointless.
+    """
+    config_dir = tmp_path / "store"
+    _session(config_dir, "sess-live", rows=[_wake_row()])
+    spooled.note_spooled_turn(config_dir, "sess-live")
+
+    _note_spooled_attempt(config_dir, "sess-live", reason="live")
+    _note_spooled_attempt(config_dir, "sess-live", reason="started")
+    _note_spooled_attempt(config_dir, "sess-live", reason="ghost")
+    untouched = spooled.read_spooled_turn(config_dir, "sess-live")
+    assert untouched is not None and untouched["attempts"] == 0
+    assert spooled.next_attempt_at_ms(untouched) == 0, "a first row is due immediately"
+
+    _note_spooled_attempt(config_dir, "sess-live", reason="wedged")
+    counted = spooled.read_spooled_turn(config_dir, "sess-live")
+    assert counted is not None and counted["attempts"] == 1
+    assert counted["last_error"] == "wedged"
 
 
 # -- discharge ------------------------------------------------------------------
