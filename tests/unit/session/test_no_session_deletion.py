@@ -292,6 +292,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # -- the archive index: the pins store's row, for the pins store's reasons --
+    # One file at the config root with a FIXED basename (`archived-sessions.json`
+    # plus a pid-named sibling while it is written). No session id, no caller
+    # input and no directory ever reaches either path: the ids the file CONTAINS
+    # are guarded by `session_directory_name` on the way in, and the ids it is
+    # pruned against are only ever joined onto `config_dir()/sessions` to be
+    # stat-ed.
+    (
+        "local_operator/session/archived.py::_write_archived",
+        "os.replace",
+        "Atomic replacement of the single archived-sessions.json file in the config "
+        "dir, never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/session/archived.py::_write_archived",
+        "<path>.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
+    ),
     # -- the one legitimate remover -----------------------------------------
     (
         "local_operator/session/cleanup.py::remove_session_dir",
@@ -1617,6 +1635,7 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
+        "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE

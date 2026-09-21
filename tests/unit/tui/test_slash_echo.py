@@ -64,6 +64,21 @@ ECHO_POLICY = {
     # without the echo the only record of what the branch was asked to do is in
     # another window entirely.
     "fork": True,
+    # Hides the conversation from every list. Nothing here reaches the model, and
+    # the receipt names the state that ended up in force AND the way back
+    # (`/unarchive`, or `/resume <id>`) — strictly more than the typed word, on
+    # `/rename`'s rule.
+    "archive": False,
+    # The same rule in the other direction: the receipt names the id and says it
+    # is listed again.
+    "unarchive": False,
+    # The most consequential command in the registry, and the echo is still
+    # False for the plainest reason: the receipt says what was REMOVED and what
+    # survived, and nothing here is words the model is told. Its confirmation is
+    # a typed `yes` rather than a ledger row, so a UserBlock above it would be a
+    # keystroke record of a command whose receipt is the whole account (see the
+    # entry's own comment in `SLASH_COMMANDS`).
+    "delete": False,
     # A setting (WHERE the session works), not words the model is told. The
     # receipt names the directory that ended up in force, which is strictly
     # more than the typed words: `~/x`, a relative path, or nothing typed at
@@ -208,6 +223,14 @@ PROMPT_POLICY = {
     # like `/usage` rather than reassembling to the front and handing the model
     # the rest of the draft.
     "notifications": False,
+    # FALSE, all three, for `/notifications`' reason and one more of their own:
+    # the trailing text these own is a WORD the handler reads (`yes`), never free
+    # text a model is given. `/delete yes` is a confirmation, and a confirmation
+    # that reached the model as prose would be a paid turn that ALSO did not
+    # delete anything.
+    "archive": False,
+    "unarchive": False,
+    "delete": False,
 }
 
 

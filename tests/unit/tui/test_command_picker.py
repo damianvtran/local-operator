@@ -835,7 +835,10 @@ async def test_click_on_the_overflow_row_does_nothing() -> None:
 @pytest.mark.parametrize(
     "query,expected",
     [
-        ("u", ["update", "usage"]),
+        # `unarchive` joins the two as a flat prefix match, and registry order is
+        # the tiebreak for those: it sits in the session-transition family, which
+        # is registered after `/usage`, so it lands third rather than second.
+        ("u", ["update", "unarchive", "usage"]),
         ("g", ["goal"]),
         # `settings` and its `config` alias join these two prefixes; both are
         # ranked ahead of their neighbours because a prefix match on a longer
