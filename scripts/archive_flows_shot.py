@@ -36,8 +36,10 @@ a capture of the product's own sentence rather than a hand-built notice.
   into every list.
 * ``delete-value-list`` — ``/delete`` with its value list OPEN: the row that says
   what ``yes`` will do, captured where it used to be cut mid-word (D6).
-* ``guard-unreadable`` — ``/delete yes`` where a guard cannot be READ at all: the
-  fail-closed fallback sentence, which no other frame shows (D11).
+* ``guard-unreadable`` — ``/delete yes`` where a guard RAISES: the fail-closed
+  fallback sentence, which no other frame shows (D11). Reachable only by patching
+  the guard, and the mode says so: an unreadable wake entry is handled and fails
+  closed into the armed-wake sentence instead.
 * ``no-session-saved`` — ``/delete`` on a conversation that has never been
   written: the empty state a first-run user reaches (D11).
 * ``not-on-disk`` — ``/delete`` naming an id that is on disk but is not a
@@ -141,9 +143,14 @@ def _seed(root: Path, mode: str) -> None:
             json.dumps(
                 {
                     "version": 1,
-                    "generation": 1,
+                    "generation": 2,
                     "jobs": [],
-                    "records": {f"s{index:012x}": f"{index:012x}" for index in range(2)},
+                    # A LIST, which is the shape the runtime writes and the shape
+                    # ``_subagent_child_count`` counts (``len(records)`` for a
+                    # list); a dict of ids reads as zero children and the frame
+                    # would have shown the plain rehearsal under a label claiming
+                    # the clause was in it.
+                    "records": [{"session_id": f"{index:012x}"} for index in range(2)],
                 }
             ),
             encoding="utf-8",
@@ -190,10 +197,18 @@ async def main() -> None:
     _seed(root, mode)
 
     if mode == "guard-unreadable":
-        # A wake path that cannot be READ (a directory where the entry should be):
-        # the guard fails closed, and this is the sentence a user sees when it
-        # cannot be evaluated at all — the fallback, not the armed-wake copy.
-        (root / "wakes" / f"{SESSION}.json").mkdir(parents=True, exist_ok=True)
+        # THE FALLBACK SENTENCE, and the patch is how a frame reaches it: it is
+        # what the user reads when a guard RAISES something the guard does not
+        # expect, which no store fixture can produce (an unreadable wake entry is
+        # already handled — it fails closed into the armed-wake sentence, which is
+        # a different frame). Patching the guard is honest about that: the frame is
+        # the sentence for the state, and the state is "a guard raised".
+        from local_operator.session import cleanup as cleanup_mod
+
+        def boom(*_args: object, **_kwargs: object) -> bool:
+            raise RuntimeError("probe exploded")
+
+        cleanup_mod._claimed = boom
     if mode == "refusal-live":
         # A live claim, written the way a runtime writes one: the guard reads the
         # pid and asks whether the process is alive, and this process is.
