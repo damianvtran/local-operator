@@ -22323,6 +22323,12 @@ class OperatorApp(App[None]):
         self._stop_all_listing = None
         self._stop_all_armed_at = None
         self._streaming_block = None
+        # The reasoning phase goes with the streaming block and for the same
+        # reason: `clear_blocks` has just removed the widget, so keeping the
+        # reference would leave `retire()`'s claim that "the OWNER removes the
+        # widget" untrue for this path, and the next fragment mounts a fresh
+        # phase anyway (mount-on-demand, exactly like `_streaming_block`).
+        self._reasoning_block = None
         self._tool_cards = {}
         self._composing_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
@@ -41113,6 +41119,14 @@ class OperatorApp(App[None]):
         # "Still owes an outcome" covers both, where either flag alone does not.
         owes_outcome = was_open or not self._turn_notified
         self._dismiss_working_block()
+        # The thinking goes with the working line. This is the ONE exit for
+        # every way a turn can finish (completed, failed, aborted), so retiring
+        # here is what covers the terminal paths the answer's own delta never
+        # reaches: an abort mid-reasoning, a turn that reasoned and then died,
+        # and the ``TurnAbandoned`` fallback posted when the worker returns
+        # without a terminal end. A phase left mounted through any of them is
+        # the leftover row the operator reported, one per model call.
+        self._retire_reasoning_block()
         if self._status is not None:
             # ONE `update` carrying BOTH facts, which is what makes the ordering
             # STRUCTURAL rather than race-won. An earlier revision called
@@ -42092,21 +42106,36 @@ class OperatorApp(App[None]):
         return block
 
     def _retire_reasoning_block(self) -> None:
-        """Close the live reasoning phase, if any, and let go of it.
+        """Close the live reasoning phase, if any, and REMOVE it from the transcript.
 
         Called when the answer starts and on every terminal path. The block is
-        COLLAPSED rather than removed or left expanded: removing it would delete
-        rows from under the reader's cursor, and leaving it was one ~7-row block
-        per model call with no way to dismiss them (UX review round 1, U1). It
-        keeps its header row, which says this call reasoned. Letting go of the
-        reference is what lets the NEXT model call of the same turn open a fresh
-        phase -- ``SPACING_TRANSIENT`` means the retired one takes no gap.
+        closed and then removed WHOLE, following ``display.narration``'s
+        precedent in :meth:`on_assistant_message_end`.
+
+        Removal rather than the collapsed header row an earlier revision kept
+        (UX review round 1, U1): a turn makes several model calls, so one row
+        per call accumulated for the life of the session, and the operator
+        reported the residue as pollution. The block is removed AFTER its own
+        ``retire()`` freezes it — the same order and the same reason as the
+        narration removal, and removing a block whole does not violate the
+        FINALIZED-BLOCK protocol, which governs mutation of a block's committed
+        rows, not its existence. ``ReasoningBlock.SPACING_TRANSIENT`` is what
+        lets ``remove_block`` re-decide the gap on whatever fell into its place
+        without leaving one behind.
+
+        Letting go of the reference is what lets the NEXT model call of the same
+        turn open a fresh phase. ``ReasoningBlock.retire`` records the measured
+        scroll cost of the removal (a reader above the block sees nothing move;
+        a reader at the tail has the window slide back by the rows removed) —
+        the argument the collapsed header row was defended with is answered
+        there, not here.
         """
         block = self._reasoning_block
         if block is None:
             return
         self._reasoning_block = None
         block.retire()
+        self._transcript_view().remove_block(block)
         self._refresh_working_activity()
 
     def on_reasoning_delta(self, message: ReasoningDelta) -> None:
@@ -42116,11 +42145,14 @@ class OperatorApp(App[None]):
         # a frame (D5). `on_assistant_delta`'s guard is the same shape.
         if not message.text.strip():
             return
-        # `display.reasoning` is this channel's escape hatch (UX review round 1,
-        # U1). Read at MOUNT, not cached on the app, so a write from `/settings`
-        # applies to the next phase; a mid-session flip is forward-only, like
-        # `display.narration`, because re-projecting mounted blocks in one
-        # synchronous pass is what paints a blank frame.
+        # `display.reasoning` gates this channel, read at MOUNT rather than
+        # cached on the app so a write from `/settings` applies to the next
+        # phase. It ships OFF: ON is the opt-in for a reader who wants to watch
+        # the model think, not an escape hatch from a default that shows it
+        # (the polarity flipped with the default — see `DEFAULT_REASONING`).
+        # A mid-session flip is forward-only, like `display.narration`, because
+        # re-projecting mounted blocks in one synchronous pass is what paints a
+        # blank frame.
         if not settings_get("display.reasoning", DEFAULT_REASONING):
             return
         self._ensure_reasoning_block().update_text(message.text)
@@ -42267,6 +42299,11 @@ class OperatorApp(App[None]):
             self._composing_cards = {}
             self._streaming_block = None
             self._working_block = None
+            # The reasoning block is cleared here for the reason
+            # `_on_transcript_cleared` records: `clear_blocks` has removed the
+            # widget, and a reference to it would be a phase the app no longer
+            # owns.
+            self._reasoning_block = None
             self._shell_card = None
             self._project_settled_rows(message.messages, bound=RESUME_RENDER_MESSAGES)
             view.follow_tail()
