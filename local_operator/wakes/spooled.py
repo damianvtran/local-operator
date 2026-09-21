@@ -319,6 +319,37 @@ def next_attempt_at_ms(record: Mapping[str, Any]) -> int:
     return 0
 
 
+def spool_has_owner_row(session_dir: Path) -> bool:
+    """Whether this session's spool holds the OWNER's own words, which always run.
+
+    The narrower question ``drop_owed_turn`` needs (see its docstring): a
+    ``SOURCE_USER`` row is dischargeable by a raise — the successor's boot drain
+    runs it — so a record that arrived for one must never be dropped on the
+    grounds that the PEER rows beside it cannot be delivered yet.
+
+    Same read and same never-raises contract as :func:`spool_owes_turn`, which it
+    deliberately duplicates in one direction rather than parameterising: a
+    predicate that answers two questions through a flag is one refactor away from
+    answering the wrong one at one of its two call sites.
+    """
+    path = Path(session_dir) / INBOX_NAME
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and str(row.get(SOURCE_FIELD) or "") == SOURCE_USER:
+            return True
+    return False
+
+
 def spool_owes_turn(session_dir: Path) -> bool:
     """Whether this session's spool still holds a row that asks for a turn.
 

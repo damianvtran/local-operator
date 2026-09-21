@@ -374,3 +374,119 @@ def test_the_drain_that_empties_the_spool_retires_the_record(
     inbox.settle_owed_turn(directory)
 
     assert spooled.read_spooled_turn(config_dir, "sess-j") is None
+
+
+# -- the wire: the walk is only as good as the call site -------------------------
+#
+# ROUND 2'S MAJOR (R2-1) LIVED HERE AND NOWHERE ELSE. `_engage_one` grew an
+# `on_outcome` callback in round 1 and the one caller that needs it never passed
+# it, so every outcome word was dropped, `note_attempt` was never called, and a
+# session the supervisor could not raise was re-engaged on every slice. No cell
+# could see it: the walk's own cells call `_note_spooled_attempt` directly. These
+# two drive `_Sweeper.engage` itself, which is the seam that was broken.
+
+
+@pytest.mark.asyncio
+async def test_the_sweeper_hands_every_outcome_to_the_walk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real engagement outcome reaches the store, THROUGH the sweeper."""
+    from local_operator.wakes import supervisor
+
+    config_dir = tmp_path / "store"
+    _session(config_dir, "sess-wired", rows=[_wake_row()])
+    spooled.note_spooled_turn(config_dir, "sess-wired")
+    assert spooled.read_spooled_turn(config_dir, "sess-wired")["attempts"] == 0
+
+    seen: dict[str, object] = {}
+
+    async def _fake_engage_one(
+        cfg: Path,
+        session_id: str,
+        cwd: str,
+        due_ms: int,
+        moment: int,
+        semaphore: object,
+        *,
+        on_outcome=None,
+    ) -> bool:
+        seen["on_outcome"] = on_outcome
+        assert on_outcome is not None, "the sweeper must pass the walk's callback"
+        on_outcome("wedged")  # what a wedged owner produces
+        return False
+
+    monkeypatch.setattr(supervisor, "_engage_one", _fake_engage_one)
+
+    sweeper = supervisor._Sweeper()
+    sweeper.engage(config_dir, "sess-wired", "/tmp", 0, NOW_MS)
+    for task in list(sweeper._in_flight.values()):
+        await task
+
+    assert seen["on_outcome"] is not None
+    counted = spooled.read_spooled_turn(config_dir, "sess-wired")
+    assert counted is not None and counted["attempts"] == 1, (
+        "an outcome the sweeper was handed must move the walk, or the churn bound "
+        "the store documents does not exist at its call site"
+    )
+    assert counted["last_error"] == "wedged"
+
+
+@pytest.mark.asyncio
+async def test_an_unanticipated_raise_from_the_engage_is_still_an_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The belt is where a raise that never reported lands, so it must count."""
+    from local_operator.wakes import supervisor
+
+    config_dir = tmp_path / "store"
+    _session(config_dir, "sess-belt", rows=[_wake_row()])
+    spooled.note_spooled_turn(config_dir, "sess-belt")
+
+    async def _boom(*_args: object, **_kwargs: object) -> bool:
+        raise RuntimeError("engage exploded before it could report")
+
+    monkeypatch.setattr(supervisor, "_engage_one", _boom)
+
+    sweeper = supervisor._Sweeper()
+    sweeper.engage(config_dir, "sess-belt", "/tmp", 0, NOW_MS)
+    for task in list(sweeper._in_flight.values()):
+        await task
+
+    counted = spooled.read_spooled_turn(config_dir, "sess-belt")
+    assert counted is not None and counted["attempts"] == 1
+    assert counted["last_error"] == "failed"
+
+
+def test_dropping_a_deferral_still_judges_the_record_it_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R2-Q2: the third unlink passes the same compare-and-delete as its siblings.
+
+    Checked at the call rather than through a race the isolated rig cannot build
+    (the deferral runs pre-socket): the drop reads the record, then asks for the
+    value it read to still be there.
+    """
+    from local_operator.session.runtime import inbox
+    from local_operator.wakes import spooled as store
+
+    config_dir = tmp_path / "store"
+    directory = _session(config_dir, "sess-cas", rows=[_wake_row()])
+    store.note_spooled_turn(config_dir, "sess-cas")
+    judged = store.read_spooled_turn(config_dir, "sess-cas")
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
+
+    seen: dict[str, object] = {}
+    real_clear = store.clear_spooled_turn
+
+    def _spy(root: Path, session_id: str, **kwargs: object) -> bool:
+        seen.update(kwargs)
+        return real_clear(root, session_id, **kwargs)
+
+    # ``drop_owed_turn`` imports the name function-locally, so patching the module
+    # attribute is what the production call resolves.
+    monkeypatch.setattr(store, "clear_spooled_turn", _spy)
+    inbox.drop_owed_turn(directory)
+
+    assert (
+        seen.get("expected_updated_at_ms") == judged["updated_at_ms"]
+    ), "the drop must not unlink a record on a judgement it cannot still see"

@@ -1123,9 +1123,35 @@ class _Sweeper:
             return False
 
         async def _run() -> bool:
+            def _outcome(reason: str) -> None:
+                """Report one engagement's outcome to the spooled-turn walk.
+
+                ROUND 2 (R2-1) IS WHY THIS EXISTS AND WHY IT IS A NAMED LOCAL.
+                The callback was added to ``_engage_one``'s signature in round 1
+                and then never passed at the one call site that matters, so the
+                walk was inert: no outcome word arrived, ``note_attempt`` was
+                never called, ``next_attempt_ms`` stayed unset, and a session the
+                supervisor could not raise was re-engaged on every 10 s slice
+                (``_MAX_CONCURRENT_ENGAGES`` = 2 slots, each wedged probe a full
+                ``registry.scan``) instead of walking 15 s/30 s/…/1 h apart. The
+                store's whole churn argument lived at a call site that was not
+                wired.
+
+                A local rather than an inline lambda so the belt below can use
+                it too: an unanticipated raise out of ``_engage_one`` is a raise
+                that did not happen, which is exactly what ``failed`` means.
+                """
+                _note_spooled_attempt(config_dir, session_id, reason=reason)
+
             try:
                 started = await _engage_one(
-                    config_dir, session_id, cwd, due_ms, moment, self._semaphore
+                    config_dir,
+                    session_id,
+                    cwd,
+                    due_ms,
+                    moment,
+                    self._semaphore,
+                    on_outcome=_outcome,
                 )
             except asyncio.CancelledError:
                 # Shutdown, not a failure: `shutdown()` cancels in-flight work
@@ -1149,6 +1175,11 @@ class _Sweeper:
                         exc,
                         exc_info=True,
                     )
+                # AND IT IS AN ATTEMPT (round 2, R2-1): this is a raise that did
+                # not happen. Without it the walk would be silent on exactly the
+                # shape that repeats most cheaply — an exception thrown before
+                # `_engage_one` could report anything of its own.
+                _outcome("failed")
                 return False
             finally:
                 # Popped in the task itself rather than in a done-callback so
