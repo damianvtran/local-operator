@@ -35,9 +35,9 @@ on never comes (twice), the probe runs inside the tree that carries the manifest
 and the invocation list shows no probe at all. The **two bound-branch** tests fail
 a step earlier, at the monkeypatched ``_BUILD_STEP_TIMEOUT`` /
 ``_BUILD_KILL_GRACE``, neither of which the base's ``install.py`` has: they raise
-``AttributeError`` in 0.5 s, having started no process — which is why the
-bound-branch before/after is carried by the PR's process listings rather than by
-a test. The abort and external-stop tests fail before their own subject as well,
+``AttributeError`` at the patch — before ``_build_bundle`` is called at all, so no
+process starts — which is why the bound-branch before/after is carried by the
+PR's process listings rather than by a test. The abort and external-stop tests fail before their own subject as well,
 and not for the defect's sake: the driver they drive calls ``_run_build_step``,
 absent on the base, so the step never plants the descendant they wait for.
 Everything else raises ``AttributeError`` on ``_pinned_pnpm`` / ``_pin_mismatch``
