@@ -273,12 +273,24 @@ def test_the_exit_block_is_gated_on_the_reapers_own_return() -> None:
     read credited the skip to a reaper that had disposed nothing and the whole
     exit block below it was skipped — the defect this PR fixes.
 
-    WHY A SOURCE ASSERTION. Nothing cheap executes that branch: CI's ``tui-e2e``
-    job is the only one that runs ``tests/e2e`` and it is skipped on a diff that
-    reaches no e2e file, and the one cell that does reach the branch fails only
-    ~6% of runs on the parent — so a revert to ``reaper.exception() is None``
-    would pass that cell ~94% of the time and every behavioural test in this
-    file. The other tests here pin the pieces (``_reaper``'s return value, and
+    WHY A SOURCE ASSERTION. Nothing that runs here can discriminate: the one cell
+    that reaches this branch is the ``tui-e2e`` journal cell
+    (``tests/e2e/test_session_survival_journal_e2e.py``), and it fails only ~6%
+    of runs on the parent — so a revert to ``reaper.exception() is None`` would
+    pass it ~94% of the time, and a green run proves nothing.
+
+    AT THE ROUND-1 REVIEW THAT LEG DID NOT RUN AT ALL, and naming the real
+    reason is deliberate so that nobody reads it as a rule about diffs:
+    ``tui-e2e`` is ``needs: [changes, lint, type-check]`` and gates on
+    ``needs.lint.result == 'success'``, so the unrelated ``lint`` red inherited
+    from the tree (an ``isort`` failure in ``test_session_delete.py``, since
+    fixed by #1371) skipped all six shards — while the ``changes`` classifier
+    itself printed ``tui = true`` / ``tui-e2e: run``. ``tui`` is ``unit``'s
+    predicate, not "this diff reaches an e2e file" (see ``FLAG_REASONS`` in
+    ``scripts/ci_scope.py``), and this PR's e2e legs ran on every head whose
+    ``lint`` was green.
+
+    The other tests here pin the pieces (``_reaper``'s return value, and
     ``_clean_ordering_already_ran``'s contract against stand-in futures); this
     pins the call site that joins them, which is the line whose absence caused
     the defect.
@@ -286,6 +298,16 @@ def test_the_exit_block_is_gated_on_the_reapers_own_return() -> None:
     PARSED, NOT SUBSTRING-MATCHED, for the reason ``test_inbox`` spells out: a
     substring match can be satisfied by prose, and this module's own comments
     necessarily name ``reaper.exception()`` while explaining why it is gone.
+
+    WHAT IT PINS, SO A CORRECT CHANGE UPDATES THIS TEST RATHER THAN BEING
+    REWORKED AROUND IT. Two narrownesses are deliberate, and both are about the
+    answer coming from the reaper's RETURN VALUE at this call site. The verdict
+    must be the ``if``'s test DIRECTLY: hoisting it into a local
+    (``verdict = _clean_ordering_already_ran(reaper)``, then ``elif verdict:``)
+    is correct code this assertion rejects. And ``offenders`` forbids ANY read
+    of ``<reaper>.exception()`` in ``amain``'s own body, a logging-only one
+    included. A change that keeps the property but moves those shapes is a
+    change to this pin, not a reason to rework the change.
     """
     source = textwrap.dedent(inspect.getsource(child_mod.amain))
     tree = ast.parse(source)
