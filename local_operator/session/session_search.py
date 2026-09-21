@@ -360,6 +360,7 @@ def search_store(
     soft: SoftSearchIndex | None = None,
     limit: int | None = None,
     strict: bool = False,
+    include_archived: bool = False,
 ) -> list[SessionMatch]:
     """One-shot store search: scan the rows, build the index, answer ``query``.
 
@@ -394,9 +395,21 @@ def search_store(
     a store that is simply NOT THERE is still an empty answer and only an
     unreadable one raises
     :class:`~local_operator.session.errors.SessionStoreUnavailable`.
+
+    ``include_archived=False`` (the default) is the search's own archive
+    predicate, and it needs no change to the index to be honest: the digest
+    index is built from ``[row.id for row in rows]`` below, so an ARCHIVED ID IS
+    NEVER HANDED TO IT while the flag is off and cannot be returned as a hit.
+    Stale entries left in the cache by an earlier, wider build are inert
+    because :func:`~local_operator.session.search_index._load` is
+    version-gated and bounded to the ids it is given. ``include_archived=True``
+    is for a surface that has already revealed them (the picker's toggle) and
+    leaves the same body search available over that population.
     """
     if rows is None:
-        rows = recent_session_rows(config_dir, limit=None, strict=strict)
+        rows = recent_session_rows(
+            config_dir, limit=None, strict=strict, include_archived=include_archived
+        )
     rows = list(rows)
     middle = query.strip()
     if not middle:

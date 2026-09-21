@@ -123,6 +123,35 @@ def native_action(spec: SlashCommand, session_id: str, args: str) -> dict[str, A
             adopt_path=endpoint + "/asides/{aside_id}/adopt",
             off_record=True,
         )
+    elif spec.name in {"archive", "unarchive"}:
+        # NOT ``source``-only, and that is the difference from a listing
+        # command: these two WRITE, so the payload carries the endpoint the
+        # renderer submits to and the state it must send. ``archived`` is the
+        # literal the request body needs rather than a verb the renderer would
+        # have to derive from the command word — the wire takes a DESIRED STATE
+        # (see the route), and a renderer that had to decide which of two
+        # spellings meant ``true`` would be re-deriving a contract it was handed.
+        data.update(
+            submit={"method": "POST", "path": endpoint + "/archive"},
+            archived=spec.name == "archive",
+            source="/v1/desktop/sessions",
+        )
+    elif spec.name == "delete":
+        # ``/stop``'s danger shape exactly — a required boolean named
+        # ``confirmed`` and a submit the renderer must build from it — because
+        # this is the same kind of act: irreversible, and refused without the
+        # confirmation. The method is DELETE and the body is not a parameter set
+        # but the confirmation itself, so it is published here rather than left
+        # for the renderer to infer from the route's name.
+        fields.append({"name": "confirmed", "kind": "boolean", "required": True})
+        data.update(
+            submit={"method": "DELETE", "path": endpoint, "body": {"confirmed": True}},
+            source="/v1/desktop/sessions",
+            # The word the terminal asks for, published so a desktop confirm
+            # control can say what it is standing in for when it offers a button
+            # instead of a typed word (``OperatorApp._cmd_delete``).
+            confirm_word="yes",
+        )
     elif spec.name == "stop":
         fields.extend(
             [
