@@ -280,6 +280,17 @@ rather than routed to the session's runtime owner — `/stop`'s classification, 
   accept is not a conversation the store can hide.
 * **No undo for delete.** It is a removal; the guards and the confirmation are the
   whole of the protection, and nothing is kept on the side.
+* **No `/wake cancel`.** An armed wake refuses the delete and the sentence names
+  the two doors that exist — ask the conversation, or delete the resolved index
+  file — because a wake is real pending work and the refusal is what keeps it from
+  being destroyed by an irreversible act. A cancel COMMAND would be the better
+  first door and is deliberately not in this change: it is a new command (registry
+  entry, both dispatch hosts, the echo table, `docs/design/keymap.md`, a desktop
+  destination and its own tests), which is its own ask rather than a remediation
+  inside an archive/delete PR. Ruled out for this PR on 2026-09-20; if it is added
+  later, the half to revisit is the guard — an armed wake refuses today, and a
+  cancel surface is what would make the refusal cheap to clear from the terminal
+  that printed it.
 * **The picker's OPENING TRANSIENT is a pre-existing defect and is NOT fixed
   here.** The list pane is composed once, against the box it has at that moment,
   and only a keystroke recomposes it (`_repaint` is the only caller of
