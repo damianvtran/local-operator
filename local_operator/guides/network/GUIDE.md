@@ -109,7 +109,7 @@ mesh. From a shell:
 | `lop network sessions --peer <id> --create --name <n> [--prompt <p>]` | create the session ON the peer, which mints its id |
 | `lop network sessions --peer <id> --engage <session>` | warm a stored session on the peer |
 | `lop network sessions --peer <id> --stop <session>` | stop it where it lives |
-| `lop network sessions --peer <id> --stop <session> --force` | the same stop on a target whose turn is in flight, or that will not answer its socket |
+| `lop network sessions --peer <id> --stop <session> --force` | the same stop on a target whose turn is in flight, or that will not answer its socket — it WAITS for the owner's ladder to resolve, which can be minutes (see below) |
 
 EVERY REFUSAL NAMES THE COMPONENT THAT CAUSED IT, so read the `code` before
 acting on one (QA round 5, Q-R5-1):
@@ -143,6 +143,19 @@ sentence naming both ways forward, and the target LEFT UNTOUCHED — stop it aga
 once the turn ends, or add `--force`. The same rule covers `refused`, where the
 owner could not prove the process it would signal was the one it recorded. The
 `outcome` word is what says which happened; rc alone does not.
+
+A FORCED STOP CAN TAKE MINUTES, and the wait is the owner's own ladder, not a
+hang. `--force` against a target that will not answer its socket signals it and
+then waits out the owner's SIGTERM grace: the rung cannot tell "draining
+politely" from "wedged" while the socket is silent, so it is deliberately as
+long as the `lop stop --force` you would run on the owner's own machine (about
+two to three minutes). THIS SIDE WAITS IT OUT, because the alternative is what a
+previous round shipped and QA measured: the signal landing while the caller was
+told `peer_unreachable` with no outcome, no rung and no pid. So read the answer
+that arrives — it names the rung that actually acted (`sigterm` or `sigkill`) and
+`ok: true` with rc 0 — rather than interrupting the command and assuming it
+failed. `--force` on a target whose socket does answer is unaffected and returns
+in about a second.
 
 WHAT IS **NOT** IN THIS BUILD, although the design names it: `lop exec --peer`,
 `lop send --peer`, `lop sessions move <id> --to <peer>|local`, and the TUI's

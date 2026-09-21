@@ -59,6 +59,7 @@ from local_operator.mobile.attach_client import (
     AttachClient,
     _projection_from_json,
 )
+from local_operator.network.types import normalise_pending
 from local_operator.session.owner import SessionSeed
 from local_operator.session.placement import (
     SessionPlacement,
@@ -233,7 +234,7 @@ class PeerRow:
             kind=str(data.get("kind") or "daemon"),
             state=str(data.get("state") or ""),
             busy=_bool("busy"),
-            pending=str(data.get("pending") or "") or None,
+            pending=normalise_pending(data.get("pending")),
             detached=_bool("detached"),
             capabilities=tuple(str(item) for item in (data.get("capabilities") or ())),
             started=float(data.get("started") or 0.0),

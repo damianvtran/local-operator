@@ -83,6 +83,7 @@ from local_operator.network.handshake import (
 from local_operator.network.identity import (
     DeviceIdentity,
     IdentityUseTracker,
+    load,
     load_or_mint,
     mint_instance_id,
     rotation_statement,
@@ -98,6 +99,7 @@ from local_operator.network.invite import (
 )
 from local_operator.network.invite import mint as mint_invite
 from local_operator.network.types import (
+    NEEDS_ASK,
     LinkContext,
     LinkPhase,
     MemberRecord,
@@ -1535,6 +1537,42 @@ class StoreView(NetworkState):
 #: and shorter than any front end's patience with a "starting" row.
 ENGAGE_DEADLINE_S = 60.0
 
+#: Margin over the ladder's own rungs when this side budgets a FORCED stop.
+#:
+#: The two waits below are the bound; this covers what sits around them on the
+#: OWNER's side — the silent-socket probe, the identity proofs (one of which
+#: forks ``ps`` and ``lsof``), the stop marker and the record recovery.
+_FORCED_STOP_MARGIN_S = 20.0
+
+
+def forced_stop_deadline_s() -> float:
+    """How long a requester must wait for a PEER'S own forced stop to resolve.
+
+    A PEER STOP'S ANSWER IS THE OWNER'S RECEIPT, OR IT IS NOTHING (QA round 7,
+    Q-R7-2). The owner runs its OWN kill-switch ladder and answers with the rung
+    that acted; that ladder's one long silence is the SIGTERM rung's grace, which
+    is derived from the receiver's drain bound and is MINUTES by construction.
+    Budgeting the hop below it does not shorten the owner's work — it only
+    throws the receipt away: measured on a busy, socket-silent target, the marker
+    the relay itself wrote named rung ``sigterm`` while the caller was told
+    ``rc 1 peer_unreachable`` with no outcome, no rung and no pid, because the hop
+    waited 60 s (``max(op_wait_s, ENGAGE_DEADLINE_S)``) and the ladder needed
+    ~150 s.
+
+    Only the FORCED path can reach that wait: a plain stop refuses or skips a
+    target whose socket is silent, and the busy skip sits before the identity
+    gate (see ``control.stop_session``), so every other mode of this verb keeps
+    the default hop budget.
+
+    DERIVED from the ladder's own constants rather than re-typed: a second number
+    here would go stale the moment either rung moves, and both move for reasons
+    (``SIGNAL_DRAIN_S``) that have nothing to do with this hop.
+    """
+    from local_operator.session.runtime import control
+
+    return control.SIGTERM_GRACE_S + control.SIGKILL_CONFIRM_S + _FORCED_STOP_MARGIN_S
+
+
 #: ``control.StopOutcome.method`` (socket | sigterm | sigkill | gone | refused |
 #: busy | draining) → the coarse word a viewer's receipt uses. The RUNG is reported
 #: verbatim beside it; this map only answers "did it end?", and it lives here rather
@@ -2184,7 +2222,10 @@ class RelayServer:
         self._handshake_slots = threading.BoundedSemaphore(max(1, self.settings.max_handshakes))
         #: When the pre-auth bound last reported itself (``_note_handshake_cap``).
         #: Written and read by the accept loop alone, which is one thread, so it needs
-        #: no lock; the audit writer is the relay's own and is already thread-safe.
+        #: no lock here. The audit call it guards does lock — ``AuditLog`` is flushed
+        #: from every thread the relay runs, ``_write_lock`` is what keeps one record
+        #: from being published twice (see that module's docstring; assuming it was
+        #: "the relay's own and already thread-safe" is exactly how the duplicate hid).
         self._cap_notice_at = 0.0
         self._reconcile_grants: dict[tuple[str, str], list[float]] = {}
         self._handlers: dict[str, Callable[[PeerLink, dict[str, Any]], dict[str, Any] | None]] = {
@@ -2798,7 +2839,26 @@ class RelayServer:
                 # HELLO alone burned a perfectly good invite when a connection
                 # dropped before its auth frame, and the honest device's retry was
                 # then refused `invite_in_use` — an unauthenticated peer has proved
-                # nothing at this point.
+                # nothing at this point. (The ONE durable write this block can still
+                # make is a different rule of the state machine, and it is reasoned
+                # about below.)
+                #
+                # THE ONE WRITE THIS BLOCK CAN STILL MAKE IS DELIBERATE (review round
+                # 2, MINOR 1), and it is the reason this is ``claim_or_consume`` and
+                # not ``claim``. Design §5.2/§5.4: a BOUND invite presented by
+                # another device is CONSUMED, because a token that reached a second
+                # device is the leak ``--device`` exists to contain. That decision is
+                # taken from the hello's own ``device_id`` — an unauthenticated field
+                # — and moving it after the auth frame would not authenticate it but
+                # DISABLE it: ``verify_auth`` requires the auth frame to name the same
+                # device the hello did and re-derives that id from the key that signs
+                # it, so a device presenting a bound invite it does not own can never
+                # reach the post-auth block at all. What the write can do is bounded
+                # by the same fact: it authorises nothing, deletes nothing, and tells
+                # no peer anything (every failure on this path is a silent close), and
+                # it can only be reached by a peer able to NAME the invite id — which
+                # lives in the token and in this device's own record and in no audit
+                # record — i.e. by the leak this rule is for.
                 with self._invite_lock:
                     joined = store.load(network_id, self.root)
                     invite_id = str(handshake.join_block.get("invite_id") or "")
@@ -3330,7 +3390,18 @@ class RelayServer:
                     "cwd": "",
                     "model_label": "",
                     "busy": False,
-                    "pending": bool(entry.unseen),
+                    # THE FIELD'S CONTRACT IS A STRING (Q-R7-1). This used to
+                    # publish ``bool(entry.unseen)``, which crashed the ONE
+                    # human reader of the field — `lop sessions --all-peers`
+                    # and `--peer <dev>` render `pending` through
+                    # ``rich.cells.cell_len`` — while the live half of the same
+                    # catalogue published ``SessionRecord.pending``, a string.
+                    # "An unread completion is waiting" is a NEEDS claim, so it
+                    # says so in the record's own vocabulary rather than
+                    # answering a what-is-needed question with a yes/no
+                    # (``types.NEEDS_ASK``, beside the normaliser that reads the
+                    # same field off the wire).
+                    "pending": NEEDS_ASK if entry.unseen else None,
                     "detached": True,
                     "started": float(getattr(entry.row, "mtime", 0.0) or 0.0),
                     "pid": 0,
@@ -5540,7 +5611,9 @@ class RelayServer:
     # replicating (mobility §8.1) is that the guards, the ladder and the sentences
     # stay on the device that owns the disk.
 
-    def _local_peer_call(self, op: str, peer: str, **fields: Any) -> dict[str, Any]:
+    def _local_peer_call(
+        self, op: str, peer: str, *, timeout: float | None = None, **fields: Any
+    ) -> dict[str, Any]:
         """Run one peer op on ``peer`` and return its detail.
 
         A refusal from the peer is turned into a MeshRefusal carrying the PEER'S
@@ -5548,6 +5621,13 @@ class RelayServer:
         party that can see which guard or which ladder rung fired, and a second
         sentence table on this side is exactly how two devices come to disagree
         about the remedy (§8.2).
+
+        ``timeout`` is per-op and defaults to ``max(op_wait_s, ENGAGE_DEADLINE_S)``
+        — a spawn's budget. The one op that must outlast its own act on the far
+        side passes its own (``_ctl_peer_stop``'s forced mode: see
+        :func:`forced_stop_deadline_s`), because a hop that gives up first does not
+        report a slow stop, it reports NOTHING — and the guide reads that answer as
+        "the stop did not act".
         """
         link = self._ensure_link(self._resolve_peer(peer))
         if link is None:
@@ -5557,7 +5637,9 @@ class RelayServer:
             )
         reply = link.request(
             {"op": op, "req": self._next_relay_req(), "locality": "remote", **fields},
-            timeout=max(self.settings.op_wait_s, ENGAGE_DEADLINE_S),
+            timeout=(
+                max(self.settings.op_wait_s, ENGAGE_DEADLINE_S) if timeout is None else timeout
+            ),
         )
         if reply is None:
             raise MeshRefusal(
@@ -5594,11 +5676,20 @@ class RelayServer:
         )
 
     def _ctl_peer_stop(self, frame: dict[str, Any]) -> dict[str, Any]:
+        mode = str(frame.get("mode") or "graceful")
         return self._local_peer_call(
             "net_session_stop",
             str(frame.get("peer") or ""),
             session_id=str(frame.get("session_id") or ""),
-            mode=str(frame.get("mode") or "graceful"),
+            mode=mode,
+            # A FORCED STOP IS THE ONE HOP WHOSE ANSWER IS WORTH MINUTES (Q-R7-2).
+            # ``immediate`` is the ladder's own opt-in, and the only shape that
+            # takes it to the SIGTERM rung is a target whose socket is silent — the
+            # exact case the flag exists for — so this is the hop that must outlast
+            # the rung instead of reporting a refusal while the owner is still
+            # working. Every other mode answers quickly (skip/refuse) and keeps the
+            # default budget.
+            timeout=forced_stop_deadline_s() if mode == "immediate" else None,
         )
 
     def _ctl_peer_facts(self, frame: dict[str, Any]) -> dict[str, Any]:
@@ -6497,6 +6588,21 @@ def uninstall(
     steps: list[str] = []
     known = store.list_networks(root)
     targets = [record.network_id for record in known] if networks is None else list(networks)
+    # A TARGET THAT MATCHES NOTHING IS A REFUSAL, NOT A NO-OP (round 1's MINOR 8,
+    # review round 2's MINOR 4). ``--network n_mistyped`` used to select nothing,
+    # delete nothing and answer ``ok: true`` with an empty ``deleted`` block, so an
+    # operator scoping a purge by hand got a receipt that read as success for a
+    # network that was never touched. Naming the ids that matched nothing is the
+    # whole remedy, and they are the operator's own input.
+    known_ids = {record.network_id for record in known}
+    unmatched = [target for target in targets if target not in known_ids]
+    if unmatched:
+        raise MeshRefusal(
+            "unknown_network",
+            "no network here matches "
+            + ", ".join(repr(target) for target in unmatched)
+            + "; nothing was deleted. `lop network ls` lists the networks this device knows.",
+        )
     selected = [record for record in known if record.network_id in set(targets)]
 
     if purge_identity and not (_has_terminal() if assume_tty is None else assume_tty):
@@ -6596,8 +6702,22 @@ def _purge_identity_step(
     what the human is being asked to destroy the key for: a device whose keypair
     goes away stops being addressable by every one of them, and the operator cannot
     weigh that if the command only says "delete the identity?".
+
+    LOAD, NEVER ``load_or_mint`` (round 1's MINOR 8, review round 2's MINOR 4). This
+    used to MINT a keypair on a device that had none, ask the human to confirm
+    deleting it, and leave that freshly minted key on disk the moment the typed id
+    did not match — a command whose whole job is to destroy an identity must not be
+    the thing that creates one. A device with no identity answers by name instead:
+    there is nothing here to delete.
     """
-    identity = load_or_mint(root)
+    identity = load(root)
+    if identity is None:
+        raise MeshRefusal(
+            "no_identity",
+            "this device has no identity keypair, so there is nothing to delete and "
+            "nothing was created: `lop network init` mints one, and `--purge` removes "
+            "the network records without touching it.",
+        )
     listing = (
         ", ".join(f"{record.name} ({record.network_id})" for record in networks)
         or "no networks (this identity is not in any)"

@@ -10,6 +10,7 @@ refusal with a code and a sentence.
 from __future__ import annotations
 
 import json
+import uuid
 from argparse import Namespace
 from pathlib import Path
 
@@ -876,6 +877,94 @@ def test_with_the_relay_up_a_member_that_does_not_answer_is_blamed_on_that_membe
         captured = capsys.readouterr()
         assert json.loads(captured.out) == []
         assert "lop-mesh-peer-b: unreachable" in captured.err
+    finally:
+        server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Q-R7-1 — the NEEDS column's one shape, in the HUMAN spelling
+# ---------------------------------------------------------------------------
+
+
+#: The id of the stored row these tests render. It has to be a name the catalogue
+#: ACCEPTS, not one it parses: what is under test is the row the producer derives
+#: from the directory, not the directory's own spelling.
+_UNSEEN_ROW = "qr7-1-stored-unseen"
+
+
+def _a_stored_session_with_an_unread_completion(root: Path) -> None:
+    """One stored session, plus an unread completion for it.
+
+    Written through the REAL stores — the directory the catalogue walks and the
+    attention store the sidebar reads — because the row under test is the one the
+    relay derives from exactly those two.
+    """
+    from local_operator.session.attention import AttentionStore
+
+    directory = root / "sessions" / _UNSEEN_ROW
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "transcript.jsonl").write_text("", encoding="utf-8")
+    AttentionStore().publish(
+        f"session/{_UNSEEN_ROW}",
+        token=str(uuid.uuid4()),
+        anchor="qr7-1-anchor",
+        kind="complete",
+        baseline_seen=False,
+    )
+
+
+def _rendered_row(table: str, session_id: str) -> str:
+    """The rendered line for one row, or a failure naming what WAS rendered."""
+    for line in table.splitlines():
+        if session_id in line:
+            return line
+    raise AssertionError(f"no row for {session_id} in the listing:\n{table}")
+
+
+def test_the_human_listing_renders_a_row_whose_unseen_is_true(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Q-R7-1: the NEEDS column survives a row carrying an unread completion.
+
+    ``pending`` is rendered through ``rich.cells.cell_len``, so the one shape that
+    killed the whole command was a truthy NON-string: the peer half of a catalogue
+    published ``bool(entry.unseen)`` while the local half published
+    ``SessionRecord.pending``, and `lop sessions --all-peers` died with
+    ``TypeError: object of type 'bool' has no len()`` on any reachable peer holding
+    a stored session with ``unseen=True``.
+
+    THE HUMAN SPELLING IS THE POINT. Rounds 5 and 6 both drove ``--json`` — where a
+    bool is a value that crosses the wire perfectly well, so the crash could not be
+    seen from there — and this test renders the TABLE, for both spellings an
+    operator has: ``--all-peers`` (real relay, real producer, real renderer) and
+    ``--peer <dev>`` (the same producer's row with the hop stubbed, because the row
+    is what crashed, not the hop).
+    """
+    from local_operator import cli as main_cli
+
+    server = _live_relay(root, monkeypatch)
+    try:
+        _a_stored_session_with_an_unread_completion(root)
+
+        assert main_cli.sessions_command(_ordinary_sessions_args(all_peers=True, json=False)) == 0
+        merged = capsys.readouterr()
+        assert "ask" in _rendered_row(merged.out, _UNSEEN_ROW), merged.out
+
+        produced = [
+            {**main_cli._REMOTE_ROW_FILL, **row, "locality": "remote"}
+            for row in server.local_session_rows()
+        ]
+        monkeypatch.setattr(
+            main_cli, "_remote_listing", lambda **_: main_cli._RemoteListing(produced, [])
+        )
+        assert (
+            main_cli.sessions_command(
+                _ordinary_sessions_args(peer=server.identity.device_id, json=False)
+            )
+            == 0
+        )
+        named = capsys.readouterr()
+        assert "ask" in _rendered_row(named.out, _UNSEEN_ROW), named.out
     finally:
         server.stop()
 

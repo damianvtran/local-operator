@@ -63,7 +63,7 @@ PEERS_RUN_DIRNAME = "run/peers"
 # Capabilities and roles
 # ---------------------------------------------------------------------------
 
-#: The ONE capability vocabulary (convergence round, authoritative): nine
+#: The ONE capability vocabulary (convergence round, authoritative): ten
 #: names, no synonyms. ``broker:request``, ``broker:grant`` and ``member:admin``
 #: were draft names and are not implemented.
 CAPABILITIES: frozenset[str] = frozenset(
@@ -110,6 +110,48 @@ def capabilities_for_role(role: str) -> frozenset[str]:
     if role not in ROLE_CAPABILITIES:
         raise KeyError(f"unknown role {role!r}; known roles are {', '.join(ROLES)}")
     return ROLE_CAPABILITIES[role]
+
+
+# ---------------------------------------------------------------------------
+# The session row's ``pending`` vocabulary
+# ---------------------------------------------------------------------------
+
+#: WHAT A PERSON IS BEING WAITED ON, and the ONE spelling of it.
+#:
+#: ``SessionRecord.pending`` owns this vocabulary (``approval`` / ``ask`` /
+#: ``None``; see ``session/runtime/types.py``): ``lop sessions`` prints the value
+#: raw in its NEEDS column and the sidebar maps it to "Approval needed"/"Answer
+#: needed", so a second spelling for one fact shows up as a column nobody can
+#: read. The federated row carries the SAME strings (§9.2), and the stored half
+#: of a catalogue derives its claim from the attention store's ``unseen`` flag —
+#: an unread completion IS the operator being awaited, and it is not an
+#: approval, so that half publishes :data:`NEEDS_ASK`.
+NEEDS_APPROVAL = "approval"
+NEEDS_ASK = "ask"
+
+
+def normalise_pending(value: object) -> str | None:
+    """The ONE reader of a ``pending`` value, whichever producer wrote it.
+
+    A STRING IS THE CONTRACT and ``None`` is "no claim", never ``False``: the
+    field is read by the federated listing, the sidebar and the picker, and a
+    truthy NON-string reaching any of them is how ``lop sessions --all-peers``
+    died with ``TypeError: object of type 'bool' has no len()`` (QA round 7,
+    Q-R7-1) — the crashing row carried ``True``, because a producer had answered
+    "is there an unread completion" in the field that asks "what is needed".
+
+    A BOOLEAN is therefore TRANSLATED rather than echoed: the only build that
+    ever wrote one wrote it from that same ``unseen`` flag, so ``True`` reads as
+    :data:`NEEDS_ASK` — the claim it meant — while ``"True"`` (the
+    stringification a reviewer flagged) can no longer be produced. ``False``,
+    ``None``, an empty string and anything that is neither a string nor a bool
+    are all "no claim".
+    """
+    if isinstance(value, bool):
+        return NEEDS_ASK if value else None
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
 
 # ---------------------------------------------------------------------------
