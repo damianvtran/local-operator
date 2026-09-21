@@ -40873,6 +40873,14 @@ class OperatorApp(App[None]):
         # "Still owes an outcome" covers both, where either flag alone does not.
         owes_outcome = was_open or not self._turn_notified
         self._dismiss_working_block()
+        # The thinking goes with the working line. This is the ONE exit for
+        # every way a turn can finish (completed, failed, aborted), so retiring
+        # here is what covers the terminal paths the answer's own delta never
+        # reaches: an abort mid-reasoning, a turn that reasoned and then died,
+        # and the ``TurnAbandoned`` fallback posted when the worker returns
+        # without a terminal end. A phase left mounted through any of them is
+        # the leftover row the operator reported, one per model call.
+        self._retire_reasoning_block()
         if self._status is not None:
             # ONE `update` carrying BOTH facts, which is what makes the ordering
             # STRUCTURAL rather than race-won. An earlier revision called
@@ -41852,21 +41860,32 @@ class OperatorApp(App[None]):
         return block
 
     def _retire_reasoning_block(self) -> None:
-        """Close the live reasoning phase, if any, and let go of it.
+        """Close the live reasoning phase, if any, and REMOVE it from the transcript.
 
         Called when the answer starts and on every terminal path. The block is
-        COLLAPSED rather than removed or left expanded: removing it would delete
-        rows from under the reader's cursor, and leaving it was one ~7-row block
-        per model call with no way to dismiss them (UX review round 1, U1). It
-        keeps its header row, which says this call reasoned. Letting go of the
-        reference is what lets the NEXT model call of the same turn open a fresh
-        phase -- ``SPACING_TRANSIENT`` means the retired one takes no gap.
+        closed and then removed WHOLE, following ``display.narration``'s
+        precedent in :meth:`on_assistant_message_end`.
+
+        Removal rather than the collapsed header row an earlier revision kept
+        (UX review round 1, U1): a turn makes several model calls, so one row
+        per call accumulated for the life of the session, and the operator
+        reported the residue as pollution. The block is removed AFTER its own
+        ``retire()`` freezes it — the same order and the same reason as the
+        narration removal, and removing a block whole does not violate the
+        FINALIZED-BLOCK protocol, which governs mutation of a block's committed
+        rows, not its existence. ``ReasoningBlock.SPACING_TRANSIENT`` is what
+        lets ``remove_block`` re-decide the gap on whatever fell into its place
+        without leaving one behind.
+
+        Letting go of the reference is what lets the NEXT model call of the same
+        turn open a fresh phase.
         """
         block = self._reasoning_block
         if block is None:
             return
         self._reasoning_block = None
         block.retire()
+        self._transcript_view().remove_block(block)
         self._refresh_working_activity()
 
     def on_reasoning_delta(self, message: ReasoningDelta) -> None:

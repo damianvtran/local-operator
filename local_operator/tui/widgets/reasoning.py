@@ -26,17 +26,20 @@ Three properties are deliberate:
   think" means, and the bound makes each flush O(``REASONING_TAIL_CHARS``)
   regardless of how long the model has been thinking.
 
-* **It is TRANSIENT, and it COLLAPSES when the phase ends.**
-  ``SPACING_TRANSIENT`` is exactly this case (a block that appears and vanishes
-  within a turn, taking no gap and anchoring none), and the app retires it when
-  the answer starts. Retiring collapses it to its header row rather than leaving
-  its rows in place: one ~7-row block per model call, dozens per session, with
-  nothing to compare them against after a resume, was the review's U1. The
-  reasoning of a finished turn is not re-shown on resume — it is not in the
-  transcript, and pretending otherwise would be a second, divergent source for a
-  phase the ledger now times (``first_reasoning_ms``). ``display.reasoning =
-  false`` suppresses the block entirely, which is the one setting under which the
-  live transcript and the resumed one agree exactly.
+* **It is TRANSIENT, and it VANISHES when the phase ends.** ``SPACING_TRANSIENT``
+  is exactly this case (a block that appears and vanishes within a turn, taking
+  no gap and anchoring none), and the app removes it WHOLE when the answer
+  starts. Collapsing it to a header row instead was measured wrong in use: a
+  turn makes several model calls, so the rows accumulated one per call for the
+  life of the session, and the operator reported them as pollution — a row that
+  says nothing a reader can act on, since the reasoning it stood for is gone
+  either way (:meth:`ReasoningBlock.retire` keeps the argument). The settled
+  transcript therefore reads ``user -> tools -> answer``, and nothing has to be
+  reconciled against a resume: the reasoning of a finished turn is not in the
+  transcript either way — it is not durable, and re-showing a phase would be a
+  second, divergent source for the phase the ledger already times
+  (``first_reasoning_ms``). ``display.reasoning = false`` is the DEFAULT;
+  ``true`` opts into watching the model think.
 
 * **It yields to a squeezed viewport.** ``REASONING_VISIBLE_ROWS`` is a ceiling
   the block budgets against the transcript's own height, not a constant: six rows
@@ -103,11 +106,20 @@ REASONING_TAIL_MARKER = "… "
 REASONING_LABEL = "reasoning"
 
 #: Default for ``display.reasoning`` (the ``/settings`` key), kept beside the
-#: code that reads it: ON, because the phase this block shows is the thing the
-#: operator could not see at all before, and a display flag whose default hides
-#: the feature is one nobody discovers. It is an escape hatch, not a preference
-#: to opt into.
-DEFAULT_REASONING = True
+#: code that reads it: OFF. The block is a live view of the model thinking, and
+#: a live view that is on by default spends rows on every model call of every
+#: turn for a reader who never asked to watch — the operator reported the
+#: accumulated frames as pollution. ON is the opt-in, and the key is
+#: discoverable where a default belongs: ``/settings`` and ``lop config`` list
+#: it.
+#:
+#: The pairs with this flag are worth stating because they constrain it. OFF
+#: is not a mute button on something already on screen: nothing mounts, so
+#: there is nothing to unwind when the value flips, and the settled transcript
+#: is byte-identical to the resumed one (reasoning is never durable). A flip
+#: MID-SESSION is forward-only, for the reason ``display.narration``'s is:
+#: re-projecting mounted blocks in one synchronous pass paints a blank frame.
+DEFAULT_REASONING = False
 
 #: The header's glyph, drawn in the same field the notice family uses
 #: (``SPINE_INDENT`` + glyph + space). Deliberately from the plain repertoire
@@ -192,31 +204,37 @@ class ReasoningBlock(TranscriptBlock):
         self.set_content(self._build(lane), layout=len(rows) != self._pinned_rows)
 
     def retire(self) -> None:
-        """Close the phase: stop accepting text and COLLAPSE to the header row.
+        """Close the phase: stop accepting text, ready for the container to drop it.
 
+        The terminal state of a reasoning phase is VANISHING, not collapsing.
         Called when the answer's own block mounts (the model has stopped
-        thinking) and on every terminal path (message/turn/agent end, abort).
+        thinking) and on every terminal path (message/turn/agent end, abort);
+        the OWNER removes the widget in the same breath
+        (``app._retire_reasoning_block``), exactly as ``display.narration``'s
+        removal at finalize does.
 
-        Removing the block would delete rows from under the reader's cursor, and
-        keeping its rows was the other extreme: one ~7-row block per model call,
-        dozens per session, with no way to dismiss them and nothing to compare
-        them against after a resume (UX review round 1, U1). Collapsing is the
-        middle the tool cards already use — the phase keeps ONE row saying this
-        call reasoned, and the transcript stays readable. It is display-only
-        either way: the reasoning is never durable, so the collapsed row is a
-        marker of the phase, not a handle on content that survives a resume, and
-        ``display.reasoning = false`` is the escape hatch for a reader who wants
-        none of it at all.
+        WHY NOT A COLLAPSED HEADER ROW, which an earlier revision did keep. Its
+        argument was that removing rows deletes them from under the reader's
+        cursor; its cost is what settled the question the other way. A turn
+        makes several model calls, so the rows accumulate one per call for the
+        life of the session — dozens of ``· reasoning`` lines a reader can
+        neither dismiss nor act on, because the reasoning itself is gone either
+        way: not copyable, not persisted, not re-shown after a resume. A
+        settled transcript reading ``user -> tools -> answer`` is the honest
+        one, and it is what the operator asked for in reporting the rows as
+        pollution.
+
+        Two halves of one guard, and they are not redundant: ``_collapsed``
+        refuses later TEXT (see :meth:`update_text` — the controller's final
+        flush can land after the phase is closed), and ``finalize`` refuses
+        later ROWS, so a delta that arrives between the close and the detach
+        cannot repaint a block the reader has watched settle.
         """
         if self._collapsed:
             return
+        # Set BEFORE the finalize, so the block is never in a state where one
+        # half of the guard has taken and the other has not.
         self._collapsed = True
-        was_finalized = self._finalized
-        self._finalized = False
-        try:
-            self.set_content(self._build(), layout=True)
-        finally:
-            self._finalized = was_finalized
         self.finalize()
 
     def text(self) -> str:
@@ -278,6 +296,13 @@ class ReasoningBlock(TranscriptBlock):
         block authors its own rows: a row folded at paint time would wrap at the
         terminal's left edge and break the single text column every other block
         in the transcript keeps.
+
+        A CLOSED phase paints no rows at all. ``retire`` removes the block from
+        the tree, so this is the guard for the window between the close and the
+        detach, and for anything that reaches a retired instance afterwards (a
+        late delta, a resize): the phase is over, and re-authoring rows here is
+        how a retired block would come back onto a frame the reader has already
+        watched settle.
         """
         if self._collapsed:
             return []

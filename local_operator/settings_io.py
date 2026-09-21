@@ -1573,11 +1573,11 @@ SETTINGS: tuple[Setting, ...] = (
         section="appearance",
         label="Live model reasoning",
         kind=Kind.BOOL,
-        default=True,
+        default=False,
         help=(
-            "Show the model's private thinking while it thinks. It collapses to "
-            "one row when the answer starts, and never joins the transcript, "
-            "so it is absent after /resume either way."
+            "Show the model's private thinking while it streams. The phase "
+            "vanishes when the answer starts, so nothing is left in the "
+            "transcript and there is nothing to re-show after /resume."
         ),
         choices=_bool_choices("show live reasoning", "hide reasoning"),
     ),
