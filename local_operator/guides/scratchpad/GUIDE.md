@@ -51,9 +51,20 @@ cannot tell apart from output.
   directory, so deleting the session takes the whole folder, and the automatic
   cleanup pass does too when its policy is switched on). An output that has to
   survive belongs in the working directory, or wherever the user wants it.
-- Binary files (an image, an archive, a model file) → not here: this store is
-  text (markdown, JSON, CSV/TSV, TXT, YAML, logs, script sources), and a binary
-  file put here cannot be read back — the reader refuses it.
+- **Binary scratch** (an image, an archive, a model file) → not here: this
+  store is text (markdown, JSON, CSV/TSV, TXT, YAML, logs, script sources), and
+  a binary file put here cannot be read back — the reader refuses it. It gets a
+  real temp dir instead: `bash mktemp -d` with NO template, which lands in
+  `$TMPDIR`, the per-user temp directory. Do NOT pass a template that carries
+  the `/tmp` directory in its path — that is what puts you back in the one
+  directory macOS reaps. `/tmp` belongs to the system cleaner:
+  `/usr/libexec/tmp_cleaner` (launchd `com.apple.tmp_cleaner`, run daily)
+  prunes entries under `/tmp` older than three days, and `$TMPDIR` is not on
+  that list — so scratch there can be deleted out from under a session that is
+  still running, while `$TMPDIR` survives it. Then write that absolute path into
+  the scratchpad itself (`scratchpad://dirs.txt`): the path is what `bash` and
+  `read` need to reach the files, and a path that lives only in an old
+  transcript is a path already lost.
 
 ## The protocol
 
@@ -104,7 +115,8 @@ gets no tile and no viewer. One file per subject; subdirectories are free
 ## When it is unavailable
 
 Some hosts have no session folder (a `--train` agent directory, a bare tool
-context). The tool says so. Use a real temporary directory (`bash mktemp -d`)
-and keep the path in your working notes — do not put scratch in the user's
+context). The tool says so. Use a real temporary directory — `bash mktemp -d`
+with NO template, so it lands in `$TMPDIR` and not in `/tmp` (see above) — and
+keep the absolute path in your working notes; do not put scratch in the user's
 working directory to work around it, which is the litter this protocol exists to
 prevent.

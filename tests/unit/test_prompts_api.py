@@ -250,6 +250,41 @@ def test_system_md_points_scratch_work_at_the_scratchpad() -> None:
     assert text.count("scratchpad://") <= 6
 
 
+def test_system_md_names_the_places_scratch_must_not_land_in() -> None:
+    """The pointer said where scratch BELONGS and never named the two places a
+    session actually drops it instead: the user's working directory, and ``/tmp``.
+
+    The second is the measured one — a session wrote its generator to
+    ``/tmp/lopost.py`` and its render passes under ``mktemp -d
+    /tmp/lopost-XXXXXX`` — and the reason is a fact about the host rather than a
+    preference: macOS's ``com.apple.tmp_cleaner`` prunes ``/tmp`` after three
+    days, so a session can outlive its own scratch there.
+
+    Contract, not wording: both traps named, the pruning reason stated, the
+    paragraph scoped to TEXT scratch — the store refuses a binary, so an
+    unqualified "scratch" promises a home it cannot keep — and the pointer to
+    the guide kept, because the guide is where a binary's own home is answered.
+
+    The text scope is asserted as the SCOPE it is (the paragraph says which kind
+    of scratch it is talking about, and where the rest is answered) and not by
+    the absence of the word "binary": a paragraph can stay silent on binaries
+    and still promise them a home, so an absence assertion is one no regression
+    can fail.
+    """
+    # Normalized: the source is hard-wrapped, so an asserted phrase may
+    # straddle a line break.
+    text = " ".join(render_template("system.md", {}).split())
+    paragraph = text[text.index("Text scratch of your own") : text.index("Keep the todo list")]
+    assert "not the working directory" in paragraph
+    assert "`/tmp`" in paragraph
+    assert "three days" in paragraph
+    # TEXT scratch, said so: the store is text, and the guide's bullet is the
+    # only place a binary's home is answered — so this paragraph must keep
+    # pointing there rather than leave the reader to assume the store holds it.
+    assert paragraph.startswith("Text scratch of your own")
+    assert "guide://scratchpad" in paragraph
+
+
 def test_system_md_frames_the_web_as_a_verification_surface() -> None:
     """Verification must not be defined as a closed set of LOCAL actions.
 
