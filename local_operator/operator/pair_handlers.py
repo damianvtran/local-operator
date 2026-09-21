@@ -330,14 +330,47 @@ def describe_devices(args: argparse.Namespace) -> int:
         # `--authorise` twice would otherwise report the same lift twice. Local record
         # first, then the anchor's entry through the same privileged install step
         # `--revoke` uses (host-side only, like every other half of this).
+        print_only = bool(getattr(args, "print_only", False))
         recorded_here = devices.is_revoked_here(root, authorise)
         recorded_in_anchor = _anchor_revokes(root, authorise)
+        command = devices.AUTHORISE_COMMAND.format(device_id=authorise)
+
+        if print_only:
+            # A PREVIEW ACTS ON NOTHING (UX round 11, U5). Measured defect: the local
+            # clear sat ABOVE the old `print_only` branch, so `--authorise --print-only`
+            # removed the record for real — and in the state `--revoke --print-only`
+            # itself creates (the local record is the only holder of the revocation) the
+            # "preview" had already lifted it, while its own sentence said the anchor
+            # still refused the device. A preview that acts is not a preview, and this
+            # one contradicted itself about the state it left. Nothing below this return
+            # runs: no clear, no staging, no privileged command.
+            if not recorded_here and not recorded_in_anchor:
+                print(
+                    f"preview: nothing recorded a revocation of {authorise} on this machine, "
+                    f"so `{command}` would have nothing to lift."
+                )
+            else:
+                halves = " and ".join(
+                    part
+                    for part, present in (
+                        ("the local revocation record", recorded_here),
+                        ("the anchor's revocation entry", recorded_in_anchor),
+                    )
+                    if present
+                )
+                print(
+                    f"preview: `{command}` would clear {halves}, stage an anchor without "
+                    "the entry, and print the one privileged command that installs it. "
+                    f"NOTHING has been changed by this run: {authorise} is still refused "
+                    "until that command is run and completes."
+                )
+            return 0
+
         cleared = devices.forget_revocation(root, authorise)
-        print_only = bool(getattr(args, "print_only", False))
         if recorded_here and not cleared:
             # The record named this device and its entry is still there: say the clear
-            # did not happen instead of printing the receipt for one that did not
-            # (agent review round 10, NIT-1).
+            # did not happen (agent review round 10, NIT-1) — and do not let the receipt
+            # below claim the lift anyway (round 11, U6/Q11-1/R11-1).
             print(
                 f"the local revocation record still names {authorise} — it could not be "
                 "rewritten. Check the permissions on the operator directory under your "
@@ -358,24 +391,24 @@ def describe_devices(args: argparse.Namespace) -> int:
             else:
                 print(f"nothing recorded a revocation of {authorise} on this machine.")
         elif staged:
-            code = install_anchor(root, print_only=print_only)
+            code = install_anchor(root, print_only=False)
             if code != 0:
                 return code
             from local_operator.operator.trust import ANCHOR_REFRESH_S
 
-            if print_only:
-                # THE DRY RUN HAS NOT LIFTED ANYTHING (UX round 10, U2). Measured:
-                # immediately after `--authorise --print-only`, `is_revoked` was still
-                # True — the anchor is the list the runtime reads and the install step
-                # that carries the change had only been printed. `--revoke --print-only`
-                # carried this caveat; this sentence claimed the opposite of the state
-                # and sent the operator to `lop pair` to be refused again, which is the
-                # loop this verb exists to end.
+            if recorded_here and not cleared:
+                # THE HALF THAT DID NOT HAPPEN (round 11, U6 = Q11-1, R11-1). The success
+                # sentence was printed unconditionally, so with the operator root
+                # unwritable the same run said "a new pairing request is accepted at once"
+                # two lines above a row listing the device as revoked — and the phone was
+                # still refused (403 on a fresh code, measured by QA and the reviewer).
+                # `is_revoked` is the OR of the two halves, so the local record alone
+                # still refuses this device; the sentence says that instead.
                 print(
-                    f"the lift for {authorise} is prepared and NOT in force: the install "
-                    "step printed above has not run, so the anchor still refuses this "
-                    "device. Run this again without --print-only (one privileged step), "
-                    "then pair the phone again with `lop pair`."
+                    f"the anchor no longer revokes {authorise}, but the local record still "
+                    "does — so this device is STILL refused. Fix the permissions on the "
+                    "operator directory under your config root, then run this again to "
+                    "finish it."
                 )
             else:
                 print(
@@ -384,12 +417,21 @@ def describe_devices(args: argparse.Namespace) -> int:
                     "Pair the phone again with `lop pair`."
                 )
         else:
-            print(
-                "no installed operator anchor to lift a revocation from, so only the "
-                "local record was cleared — run `lop operator install` on this machine "
-                "if you expected an anchor here",
-                file=sys.stderr,
-            )
+            if recorded_here and not cleared:
+                print(
+                    "no installed operator anchor to lift a revocation from, and the local "
+                    "record could not be cleared either, so this device is STILL refused — "
+                    "run `lop operator install` on this machine and fix the permissions on "
+                    "the operator directory, then run this again",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "no installed operator anchor to lift a revocation from, so only the "
+                    "local record was cleared — run `lop operator install` on this machine "
+                    "if you expected an anchor here",
+                    file=sys.stderr,
+                )
 
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))
