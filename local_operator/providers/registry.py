@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import os
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from local_operator.env import DEFAULT_RADIENT_API_BASE_URL
@@ -862,13 +863,32 @@ def provider_env_key(provider_id: str) -> str | None:
     if definition is None or definition.env_keys is None:
         return None
     names = env_key_names(provider_id) or credential_file_names(provider_id)
+    return first_provider_key(names, resolve_env_key(provider_id))
+
+
+def first_provider_key(names: Iterable[str], env_value: str | None = None) -> str | None:
+    """First configured value across the store, ``env_value``, then the file.
+
+    The rung ORDER every store-first reader shares, split out from
+    :func:`provider_env_key` for the callers that carry their OWN key names and
+    have already resolved their env value: the classification vendors walk a
+    per-leg ``env_key_names`` tuple through ``CredentialManager.get_credential``
+    and, like the provider reader, must prefer a store row to the environment to
+    the plaintext file. Two spellings of that order is how one surface ends up
+    reading a different credential than the one a login wrote.
+
+    ``names`` are ENV VAR NAMES; each is looked up as a ``LOP_PROVIDER_<name>``
+    store row. ``env_value`` is the caller's already-resolved environment value,
+    if it has one, and is consulted between the store and the file.
+    """
     for name in names:
         stored = provider_secret_value(name)
         if stored:
             return stored
-    value = resolve_env_key(provider_id)
-    if value:
-        return value
+    if env_value:
+        return env_value
+    if not names:
+        return None
     # Transition leg: the plaintext file, read WITHOUT creating it. Goes away in
     # PR2 once every writer writes store rows.
     from local_operator.credentials import CredentialManager

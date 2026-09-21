@@ -189,7 +189,13 @@ def _static_credential_present(manager: "CredentialManager", name: str) -> bool:
         "typesafe": ("TYPESAFE_API_KEY", "JEV_API_KEY"),
         "openrouter": ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY_DEV"),
     }[name]
-    return any(bool(manager.get_credential(key)) for key in keys)
+    # Store-first, matching the vendor legs' own resolution: a provider-class
+    # store row counts as a populated static tier, then get_credential (which
+    # reads the environment tier too, without writing it back to disk), then the
+    # legacy file inside get_credential.
+    from local_operator.providers.registry import provider_secret_value
+
+    return any(provider_secret_value(key) or bool(manager.get_credential(key)) for key in keys)
 
 
 __all__ = [
