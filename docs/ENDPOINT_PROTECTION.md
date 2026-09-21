@@ -27,23 +27,44 @@ not a path. The remaining argv elements are the module and its arguments.
 
 | Label | `Program` — the image | `ProgramArguments[0]` — role label | Rest of argv | Log |
 | --- | --- | --- | --- | --- |
-| `com.local-operator.mobile` | `<prefix>/bin/Local Operator` | `Local Operator [mobile daemon] port=4098` | `-m local_operator.mobile.service --port 4098` | `~/Library/Logs/local-operator/mobile.log` |
-| `com.local-operator.browser` | `<prefix>/bin/Local Operator` | `Local Operator [browser bridge] port=4099` | `-m local_operator.browser_bridge.daemon --port 4099` | `~/Library/Logs/local-operator/browser-bridge.log` |
-| `com.local-operator.tunnel` | `<prefix>/bin/Local Operator` | `Local Operator [tunnel]` | `-m local_operator.tunnels.service` | `~/.local-operator/tunnel/service.log` |
-| `com.local-operator.wakes` | `<install env>/bin/Local Operator` | `Local Operator [wakes]` | `-m local_operator.wakes.supervisor` | `~/.local-operator/logs/wake-supervisor.log` |
+| `com.local-operator.mobile` | `<lop root>/bin/python3` | `Local Operator [mobile daemon] port=4098` | `-m local_operator.mobile.service --port 4098` | `~/Library/Logs/local-operator/mobile.log` |
+| `com.local-operator.browser` | `<lop root>/bin/python3` | `Local Operator [browser bridge] port=4099` | `-m local_operator.browser_bridge.daemon --port 4099` | `~/Library/Logs/local-operator/browser-bridge.log` |
+| `com.local-operator.tunnel` | `<lop root>/bin/python3` | `Local Operator [tunnel]` | `-m local_operator.tunnels.service` | `~/.local-operator/tunnel/service.log` |
+| `com.local-operator.wakes` | `<lop root>/bin/python3` | `Local Operator [wakes]` | `-m local_operator.wakes.supervisor` | `~/.local-operator/logs/wake-supervisor.log` |
 
-`<prefix>` is the install prefix of whichever CLI installed the job; `<install
-env>` is the environment the installing component runs from. On the machine
-measured here that distinction is visible in the live plists: the three
-CLI-installed jobs name the uv-tool prefix, while the app-installed `wakes` job
-names the desktop app's managed-python environment (see below).
+`<lop root>` is the stable install root, `~/.local/share/lop` (`stable_root()`
+in `local_operator/update.py`), whose `current` entry names the generation in
+use.
+
+The `Program` column is the **shim** `~/.local/share/lop/bin/python3` on every
+job, and that is the live value rather than a placeholder: measured here on
+2026-09-21, all four `com.local-operator.*` plists carry
+`Program = /Users/damian/.local/share/lop/bin/python3` — what
+`daemon_image_path()` returns, i.e. `<lop root>/bin/python3`, a POSIX shell
+script with no signature of its own. The image an EDR sees is what the shim
+execs: the current generation's `<generation>/tools/local-operator/bin/Local
+Operator`, a binary named `Local Operator` (§2, §3).
+
+The `<prefix>`/`<install env>` distinction belongs to the **pre-generation
+render**, not to the live plists. `launchd_job` names the branded link
+`<prefix>/bin/Local Operator` where no shim can be planted — `<prefix>` is the
+install prefix of whichever CLI installed the job, `<install env>` the
+environment the installing component runs from (the desktop app's Application
+Support tree, below) — and, with no branded link either, drops `Program`
+entirely and puts the image in `ProgramArguments[0]`. The uv-tool prefix of that
+older shape survives in the dated `…wakes.plist.bak-…` record below, in
+`ProgramArguments[0]`, with no `Program` key.
 
 The image/argv split is deliberate, not incidental. The four installers all
 spread `procname.launchd_job(...)` — callers `mobile/install.py`,
 `browser_bridge/install.py`, `tunnels/install.py`, `wakes/install.py` — and
-that renderer sets `Program` to the branded link and `ProgramArguments[0]` to
-the role label precisely so that launchd can execute a file named `Local
-Operator` while passing the array as argv:
+that renderer sets `Program` to the image it will name and `ProgramArguments[0]`
+to the role label precisely so that launchd can execute a file named `Local
+Operator` while passing the array as argv. It names the shim where the
+generation layout is present (`supervised_image()`), and the branded link
+otherwise. This snippet is that branch: the shape a machine with no generation
+layout renders **when a branded link can be planted** — with none it renders the
+argv-only fallback above instead:
 
 ```python
 return {
@@ -81,7 +102,8 @@ and the value dict in `local_operator/tunnels/install.py`):
   `StartInterval: 900` on wakes (a bounded self-heal re-check every 15
   minutes).
 - `EnvironmentVariables: {LOCAL_OPERATOR_CONFIG_DIR: <config dir>}` on the
-  tunnel and wakes jobs, so those two are pinned to a specific store.
+  mobile, tunnel and wakes jobs, so those three are pinned to a specific store
+  (the browser bridge's plist carries no such key).
 
 Labels are not always literally the four above: the browser bridge derives its
 label from the config root (`label()` in
@@ -109,14 +131,36 @@ Verified on this machine rather than assumed: reading
 (`com.local-operator.ShipIt`, `application.com.local-operator.*`), which belong
 to the app bundle and its updater rather than to the CLI installer.
 
-### Where the program image lives (the install prefix)
+### Where the program image lives: the shim, and the prefixes behind it
 
-`Program` is an absolute path to a binary named `Local Operator`. It lives in
-the install prefix, which depends on how the CLI was installed (`install_kind()`
-in `local_operator/update.py` distinguishes them):
+`Program` is an absolute path to the program image. On a machine with the
+generation layout it is the **shim**, `<lop root>/bin/python3`, the same path for
+all four jobs — what an EDR sees as the process image is what that shim execs,
+the current generation's `<generation>/tools/local-operator/bin/Local
+Operator` (§2, §3). The shim is a machine-level artefact, so it does not depend
+on how the CLI was installed.
 
-- **uv tool** (the documented end-user path): `~/.local/share/uv/tools/local-operator/`,
-  with console scripts in that tree's `bin/`.
+The **install prefix** decides what the pre-generation render names, and it is
+what `sys.prefix`, `.lop-source` and the update machinery key on
+(`install_kind()` in `local_operator/update.py` sorts uv-tool, pipx and
+plain-pip installs; a generation install reports `UV_TOOL`, because its prefix
+carries its own `uv-receipt.toml` — which is why the layout has to be named
+here):
+
+- **a generation install (what `lop-update` and `lop update` both produce)**:
+  `~/.local/bin/lop` is a symlink to `~/.local/share/lop/current/bin/lop`, and
+  `current` names one generation root,
+  `~/.local/share/lop/generations/<stamp>-<sha-or-version>/`.
+  The install prefix (`sys.prefix`) is that root's `tools/local-operator/`, so the
+  branded image is `<generation>/tools/local-operator/bin/Local Operator`. Resolve
+  the pointer (`readlink ~/.local/share/lop/current`) rather than quoting a
+  generation name, which changes at every update; `.lop-source` in that same tree
+  records which build it is (`<sha> <ref>` for a git build, `pypi <version>` for a
+  wheel).
+- **uv tool**: `~/.local/share/uv/tools/local-operator/`, with console scripts in
+  that tree's `bin/` — the pre-generation layout, which `uv tool install --force`
+  writes in place; a machine that only ever installed through the generation
+  layout has no such tree at all.
 - **pipx**: `~/.local/pipx/venvs/local-operator/`.
 - **plain pip**: the venv prefix or the base interpreter that received the
   package, wherever the user's toolchain put it.
@@ -249,12 +293,15 @@ environment instead of relying on a global `lop`:
   have.
 
 The products in those environments are also named `Local Operator` (same
-hardlink mechanism), and the app's backend and helper processes are launched
-**from inside `~/Library/Application Support/Local Operator`** — for example
-`.../managed-python/packaged/environments/<id>/bin/python -c "from
-local_operator.cli import main; main()" serve --port 1111`, and the Electron
-helpers with `--user-data-dir=/Users/…/Library/Application Support/Local
-Operator`. Executing helper processes out of Application Support is a normal
+hardlink mechanism), and the Electron helpers run with
+`--user-data-dir=/Users/…/Library/Application Support/Local Operator`. The app's
+*backend* is a separate question, and on this machine it is not the Application
+Support interpreter: measured on 2026-09-21 with the app bundle running, the live
+backend is the app's own child running the **generation** tree's interpreter,
+`<generation>/tools/local-operator/bin/python -c "from local_operator.cli import
+main; main()" serve --port 1111`, while the environment above is present and
+selected (`managed-python/packaged/selected-environment.json`) with no process
+observed running it. Running a backend out of Application Support is a normal
 Electron/Mac pattern, but it is one of the signals §3 is about.
 
 This is the artefact class whose *signature* differs from the CLI's, which
@@ -330,9 +377,9 @@ machine has both `~/Library/LaunchAgents/com.local-operator.wakes.plist` and a
 `…wakes.plist.bak-…` copy beside it. The backup names
 `~/.local/share/uv/tools/local-operator/bin/Local Operator` in
 `ProgramArguments[0]` and has no `Program` key; the live plist names the
-desktop app's managed-python image in `Program`. Same label, rewritten program
-path — which is exactly what an upgrade looks like to an EDR watching that
-file.
+generation **shim**, `~/.local/share/lop/bin/python3`, in `Program` (§1). Same
+label, rewritten program path — which is exactly what an upgrade looks like to
+an EDR watching that file.
 
 The qualification: **that backup is an observation on the author's machine, not
 a documented upgrade mechanic.** Nothing at this revision writes a `.bak-…`
@@ -342,7 +389,7 @@ provenance. Its value here is narrower and still real: it is a genuine example
 of the pre-branding plist shape (the `ProgramArguments[0]`-is-the-image form
 described above), which is otherwise only reachable in the fallback branch.
 
-## 2. How the shipped code is signed today
+## 2. How the shipped code is signed today (two captures predate the generation layout)
 
 Measured on this machine, not assumed. There are **two artefact classes**, and
 they are signed differently. The distinction is load-bearing rather than
@@ -359,7 +406,15 @@ which class it names, and §3 and §5 both rest on it.
 ### Two artefacts sit on the `lop` command path, and only one is signed
 
 An admin who starts from the command they type (`lop …`) and runs `codesign` on
-it gets a different answer than the one below, so name both artefacts:
+it gets a different answer than the one below, so name both artefacts.
+
+Both this block and Class 1's below are the **pre-generation capture**, kept
+verbatim as the record: the uv-tool tree they name no longer exists on this
+machine (verified 2026-09-21), so re-running them fails — the `head -1` exits 1
+with `No such file or directory`, and the `ls -l` resolves to
+`~/.local/share/lop/current/bin/lop` instead. Substitute
+`$(readlink ~/.local/share/lop/current)/tools/local-operator` for that tree; the
+signing answers do not depend on the path.
 
 ```console
 $ ls -l "$HOME/.local/bin/lop"
@@ -383,6 +438,9 @@ the `lop` path itself "ad-hoc signed" describes a file that has no signature at
 all.
 
 ### Class 1: the CLI interpreter (the daemon artefact)
+
+Pre-generation capture as above — this tree is gone too; re-measured unchanged
+against the current generation's image on 2026-09-21.
 
 ```console
 $ codesign -dv --verbose=2 "$HOME/.local/share/uv/tools/local-operator/bin/Local Operator"
@@ -424,8 +482,10 @@ the name says, the signature is CPython's.
 
 ### Class 2: the app-provisioned interpreters (Application Support)
 
-The images the desktop app installs are **not** in Class 1. Measured against
-the program path the live `wakes` plist names:
+The images the desktop app installs are **not** in Class 1 — and on this machine
+they are not what any plist names either (§1: all four `com.local-operator.*`
+plists name the generation shim, whose exec target is the CLI tree). Measured
+against the app's own environment image:
 
 ```console
 $ codesign -dv --verbose=2 "$HOME/Library/Application Support/Local Operator/managed-python/packaged/environments/<id>/bin/Local Operator"
@@ -491,9 +551,16 @@ signature, and indeed this environment's image differs in signature byte count
 and signing timestamp from the seed now inside the app bundle, which is what
 that design predicts.
 
-Every `codesign` block in this document is printed complete — nothing trimmed —
-so a reader can diff the document against their own machine line for line. The
-app-bundle block below follows the same rule.
+Every `codesign` block in this document is reproduced as captured, with no line
+trimmed from what the command printed on the macOS the capture was taken on
+(25.6), so a reader can diff it field by field against their own machine. A
+newer macOS adds trailing fields these captures predate — on 27.0 both
+Developer-ID blocks also print `Total signatures=1` and `Chosen signature=1`,
+which the ad-hoc Class 1 image does not — and an app bundle that has been
+replaced since the capture moves its `Timestamp` and `Sealed Resources … files=`
+count (this machine's bundle now reads `Sep 20, 2026 at 10:14:27 PM` and
+`files=1562`, where the block below records the earlier build). The app-bundle
+block follows the same rule.
 
 ### The desktop app bundle
 
@@ -578,32 +645,48 @@ install:
    `~/Library/Application Support/Local Operator/`. (The desktop app is a
    separate bundle maintained in the `local-operator-ui` repository; the
    script-writing path is `src/main/backend/backend-installer.ts` there.)
-3. **Execution from inside Application Support.** On a desktop-app install,
-   the app's backend and the wakes supervisor both run interpreters living
-   under `~/Library/Application Support/Local Operator/…`, not from a normal
-   toolchain location. Every installer run rewrites its own plist and
-   re-registers the job (§1), and this machine shows what that does to the
-   supervised path: the stale `…wakes.plist.bak-…` (a leftover §1 flags as
-   unknown provenance, but on this machine it is the old path) names the
-   uv-tool prefix while the live plist names the Application Support image, so
-   a tool that watches the plist sees a supervised program being repointed at a
-   directory that is itself the kind of place persistence hides.
+3. **A managed-Python environment under Application Support.** The app
+   *provisions* one, and a backend launched from it is running out of a location
+   that is not a normal toolchain path. On this machine it is not what runs:
+   measured on 2026-09-21 with the app bundle running, the live backend is the
+   app's own child running the **generation** tree's interpreter,
+   `<generation>/tools/local-operator/bin/python … serve --port 1111`, with the
+   Application Support environment present and selected
+   (`selected-environment.json`) and no process observed running it. What the app
+   *supervises* points elsewhere too: the live `wakes` plist names the generation
+   shim and the running supervisor is the generation's image, not an Application
+   Support one. An installer run compares before it writes —
+   `launchd.rewrite_if_stale` rewrites the plist only where the render differs
+   from the file on disk, so a re-install that would change nothing changes no
+   bytes — but the **reload is not gated on that write**: a file that is already
+   current is still reloaded where the daemon is not answering (`kickstart`, and
+   the bootstrap reload past it) (§1, "Installs compare before they rewrite").
+   This machine shows what those states do to the supervised path: the stale
+   `…wakes.plist.bak-…` (a leftover §1 flags as unknown provenance, but on this
+   machine it is the old path) names the uv-tool prefix, while the live plist
+   names the generation **shim** `~/.local/share/lop/bin/python3`, so a tool that
+   watches the plist sees a supervised program being repointed out of the
+   toolchain and into the product's own install root — a directory that is itself
+   the kind of place persistence hides.
 4. **A binary that is not what it is called.** The program the EDR sees is
    named `Local Operator` while its code signature's identity is CPython's,
    because it is a hardlink (§2). This is a genuine **name/identity
    disagreement by construction**, and it holds in both signing classes: the
    identifier is CPython's either way (`Identifier=python3` on an
    app-provisioned image, `Identifier=-` on a CLI one). What differs by class is
-   how strong a signal it looks like. On this machine the three CLI-installed
-   jobs' `Program` is `…/bin/Local Operator`, whose `codesign -dv` prints
-   `flags=…(adhoc,linker-signed)` with `TeamIdentifier=not set` — a binary named
-   one thing, signed by nobody. The app-installed `wakes` job's `Program` is the
-   Application Support image, which prints `TeamIdentifier=SHA2U6KT7V` and
-   passes `codesign --verify`, so the engine's report there is a mismatch
-   between the file name and the signing identifier, not an unidentified
-   binary. The naming is not concealment (it was adopted so Activity Monitor and
-   the login-items list say something meaningful instead of `python3`), but an
-   engine cannot tell the two motivations apart from the artefact alone.
+   how strong a signal it looks like. On this machine all four
+   `com.local-operator.*` plists name the shim, and all four daemons resolve
+   through it to the current generation's `…/bin/Local Operator`, whose
+   `codesign -dv` prints `flags=…(adhoc,linker-signed)` with
+   `TeamIdentifier=not set` — the supervised program here is a binary named one
+   thing, signed by nobody. The app-provisioned image under Application Support
+   prints `TeamIdentifier=SHA2U6KT7V` and passes `codesign --verify`, so an
+   engine that reports *that* image has a mismatch between the file name and the
+   signing identifier rather than an unidentified binary — it is the class-2
+   artefact (§2), not what a plist on this machine names today. The naming is not
+   concealment (it was adopted so Activity Monitor and the login-items list say
+   something meaningful instead of `python3`), but an engine cannot tell the two
+   motivations apart from the artefact alone.
    Note also what the naming does *not* fix: a name/identifier disagreement we
    control is still a disagreement an engine has to resolve on its own.
 
@@ -629,9 +712,11 @@ stop.
 
 Scope the exclusion to:
 
-- the install prefix — `~/.local/share/uv/tools/local-operator/**` for a uv
-  tool install, `~/.local/pipx/venvs/local-operator/**` for pipx, or the
-  equivalent venv prefix for a plain pip install;
+- the install prefix — `~/.local/share/lop/**` for the generation layout (the
+  `current` pointer and every generation root the launcher resolves through),
+  `~/.local/share/uv/tools/local-operator/**` for a pre-generation uv tool
+  install, `~/.local/pipx/venvs/local-operator/**` for pipx, or the equivalent
+  venv prefix for a plain pip install;
 - **the branded image name, and the shared interpreter it is a hardlink of** —
   `*/bin/Local Operator` (which the plant creates in every tree the product runs
   from, including each `lop` generation) **and** the interpreter paths the same
@@ -705,7 +790,7 @@ it more bluntly — Interoperability *"reduces the monitoring level on the
 excluded processes, in addition to suppressing alerts"* and Performance Focus
 *"disables monitoring of the excluded processes"*. Following this section while
 selecting one of those trades a false positive for blindness to
-`~/.local/share/uv/tools/local-operator/**`, the app bundle and the managed
+`~/.local/share/lop/**`, the app bundle and the managed
 Python environment — the opposite of what SECURITY.md promises.
 - On **macOS agents 4.6+** the vendor support matrix lists `Interoperability` as
 **No** and `Performance Focus` as **Yes**, so on a current agent the only
@@ -785,6 +870,12 @@ apply the exclusion first — these exclusions are path-scoped and do not requir
 the file to exist — and then reinstall.
 
 1. **Reinstall**, so there is something to allow:
+   - the `lop` CLI: `lop-update` installs a committed revision into a new
+     generation. It takes its ref from its argument and defaults to the **local**
+     `main`, and it performs **no** remote comparison, so a checkout whose local
+     `main` is stale builds an old commit and installs it: `git fetch origin
+     main` and confirm `git rev-parse --short main` equals `git rev-parse --short
+     origin/main` first, or name the ref explicitly — `lop-update <sha>`.
    - uv tool: `uv tool install --force local-operator`
    - pipx: `pipx install --force local-operator`
    - desktop app: reinstall the app bundle.

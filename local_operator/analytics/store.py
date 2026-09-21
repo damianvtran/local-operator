@@ -1663,8 +1663,23 @@ class AnalyticsStore:
 
     def upsert_session_name(
         self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
-    ) -> None:
+    ) -> bool:
         """Record (or update) a session's human name for the per-session table.
+
+        Returns True when the statement ran and committed, False when the write
+        was DROPPED: no connection, an empty id or name, or SQLite refusing the
+        statement past its ``busy_timeout``. True does NOT mean the row now
+        holds ``name`` — the rank gate below may legitimately keep a better
+        incumbent, and that is a SUCCESS, not a drop.
+
+        Why a return value and not a raise: this call never raises by design (a
+        lost name costs a slightly-wrong ledger, while a raise here would be a
+        broken turn — see the guards at the bottom), so without a signal a
+        caller cannot tell a name the database committed from one it never saw.
+        ``record_batch``/``record_tool_calls`` answer the same question by
+        returning the number of rows they wrote; this returns a flag because a
+        rank-gated no-op writes zero rows while being a success, which a count
+        could not distinguish.
 
         RANK-GATED, which is the whole reason this is not a plain upsert. The
         ledger is now mirrored from several sources that do not arrive in
@@ -1691,10 +1706,10 @@ class AnalyticsStore:
         surface, so the guard belongs here too.
         """
         if not session_id or not name:
-            return
+            return False
         conn = self._connect()
         if conn is None:
-            return
+            return False
         try:
             conn.execute(
                 "INSERT INTO session_names (session_id, name, updated_at_ms, rank) "
@@ -1707,6 +1722,8 @@ class AnalyticsStore:
             conn.commit()
         except Exception:  # noqa: BLE001
             logger.debug("analytics: session name upsert failed", exc_info=True)
+            return False
+        return True
 
     def session_names_present(self) -> set[str]:
         """Every session id that already carries a ledger name.

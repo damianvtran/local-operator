@@ -111,6 +111,28 @@ EXCLUSIVE_MOVE_CAPABILITY = "exclusive-move-v1"
 #: client gates the send on this string being present in the record).
 EVENT_MUTE_CAPABILITY = "event-mute-v1"
 
+#: Additive attach capability: this owner accepts the ``operator_challenge`` op
+#: and will admit an authority-increasing frame that carries a valid
+#: ``operator_sig`` (with ``operator_key_id``, and ``operator_cert`` for a
+#: device) against the operator anchor it has pinned.
+#:
+#: WHY A CAPABILITY AND NOT A PROTOCOL BUMP (revision 2, §2.3). The whole change
+#: is ADDITIVE: a new ordinary op that grants nothing, and three optional fields
+#: on frames that already exist. An older owner answers the new op with its
+#: generic unknown-op error frame, which the client reads as "this runtime
+#: predates the feature" and handles by... not being able to loosen, which is
+#: exactly what that runtime could do before. Bumping ``PROTOCOL_VERSION`` would
+#: instead refuse the CONNECTION, breaking ordinary control (a phone could not
+#: even read a session) for a capability it can live without — the OPPOSITE of
+#: what this revision is for.
+#:
+#: Advertised by every runtime that can verify a signature, which is every
+#: runtime of this build: verification needs only the anchor's public half, so an
+#: owner with no anchor installed is still a correct answer to "can you check
+#: one" (it checks and refuses). See the record's capability list for why it is
+#: not conditioned on the anchor's presence.
+OPERATOR_SIGNATURE_CAPABILITY = "operator-signature-v1"
+
 #: Event types a MUTED attach connection stops receiving: the wire half of
 #: ``EVENT_MUTE_CAPABILITY``, and deliberately THE SAME SET the parked
 #: ``EventController`` discards app-side (``tui/events.py`` assigns its
@@ -906,10 +928,19 @@ class SessionRecord:
     pid is the natural uniqueness token and ``kill -9`` leaves exactly one
     stale file to reap.
 
-    ``control_key`` is the whole authorization story of the control socket:
-    the record is mode 0600 under a 0700 directory, so anything that can read
-    the key is already the owning account. The daemon never transmits it
-    further — the phone never learns it.
+    ``control_key`` is the whole authorization story of the control socket for
+    ORDINARY operations: the record is mode 0600 under a 0700 directory, so
+    anything that can read the key is already the owning account. The daemon
+    never transmits it further — the phone never learns it.
+
+    It is deliberately NOT the whole story for the operations that INCREASE
+    authority (issue #1310). ``/approvals auto`` and an approved card remove the
+    gate that constrains the caller, and a model-authored tool call runs as this
+    same uid — so it can read this very file. Those two classes therefore also
+    demand the per-session operator capability, which is held only in the memory
+    of the process that started the session (``harness/approval.py``). Nothing
+    about it belongs in this record: a field here is readable under the same uid
+    and would reinstate the defect. See ``docs/design/approval-authority.md``.
     """
 
     pid: int
@@ -1026,6 +1057,37 @@ class SessionRecord:
     #: the phone's projection, the desktop feed).
     updated: str = ""
     update_failed: str = ""
+
+    # -- what the last beat measured ---------------------------------------
+    # Same additive contract as the blocks above, and PROTOCOL_VERSION again
+    # deliberately does not move: nothing is required to read these, and a
+    # reader that ignores them loses a distinction rather than a fact.
+    #
+    # WHY THEY EXIST. ``heartbeat_age_s`` says only HOW LONG the owner has been
+    # quiet, and that one number cannot tell three different situations apart:
+    # a runtime wedged in its own work, a runtime the host stopped scheduling,
+    # and a runtime that is simply gone. All three read as ``wedged`` at 45 s,
+    # and on 2026-09-20 five sessions sat in that single ambiguous word for
+    # 1.5-7.2 h before being reaped by hand. These two fields are in-process
+    # readings taken by the owner itself, so they cost no fork and remain true
+    # of the PROCESS rather than of the machine's average: a large lag with CPU
+    # that advanced says the runtime burned its own core (the measured shape —
+    # ~0.9 core against a stale beat), while a large lag with CPU that did NOT
+    # advance says it was descheduled (the host). ``None`` means this build does
+    # not report, never zero — a pre-field runtime has not told us either way.
+    #
+    #: Seconds since the PREVIOUS beat, measured by the beating loop. The gap is
+    #: what a stalled loop leaves behind: a healthy runtime owns up to
+    #: ``HEARTBEAT_INTERVAL_S`` (15 s) here, and this host has produced 105.8 s
+    #: and 205.8 s on sessions whose CPU was advancing. Note that a turn-boundary
+    #: republish rewrites ``heartbeat_at`` without re-measuring, so this can
+    #: exceed the age the record appears to have by up to one interval.
+    beat_lag_s: float | None = None
+    #: How much CPU time this PROCESS spent since the previous beat — all
+    #: threads, ``time.process_time()``, read in-process. Paired with the lag
+    #: above it separates "starved by its own work" (this advanced) from
+    #: "starved by the host" (this did not), which no other field can.
+    cpu_since_beat_s: float | None = None
 
     # -- build stamp --------------------------------------------------------
     # Same additive contract as the live-state block above, and for the same

@@ -55,7 +55,12 @@ The bearer has **two sources**, and they exist for two different daemons:
    environment. Such a daemon mints `claim_key = secrets.token_urlsafe(32)` at
    startup and publishes it in its **discovery record** at
    `<config>/run/serve/<pid>.json`, `0600` inside a `0700` directory — the same
-   boundary that already protects a session's `control_key`. Main reads the
+   boundary that already protects a session's `control_key`. That boundary is the
+   whole story for a session's ORDINARY operations; the operations that increase
+   a running gate's authority are additionally gated on a per-session operator
+   capability that is never written to any record (issue #1310, see
+   `docs/design/approval-authority.md`), which is why this section governs the
+   daemon and not the approval gate. Main reads the
    record, finds the daemon, confirms `instance_id`, and presents the key once
    to `POST /v1/desktop/claim` as `Authorization: Bearer <claim_key>`. The key
    is never returned by a route, never logged, and never written anywhere but

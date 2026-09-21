@@ -12,9 +12,12 @@ The child builds a session with the CLI's composition root, wraps it in the
 owned-session handle (approval/ask gates resolved from the phone), registers
 it through the normal record + control socket path, and idles until a signal
 arrives or the residency predicate (:func:`_should_exit`) holds for one
-sustained drain. Environment variables are the
-spawn contract (``LOP_MOBILE_CHILD_CWD``, ``_PROVIDER``, ``_MODEL``) — argv
-would be ps-readable.
+sustained drain. Environment variables are the spawn contract
+(``LOP_MOBILE_CHILD_CWD``, ``_PROVIDER``, ``_MODEL``) — argv would be
+ps-readable. The ONE thing that rides in argv is ``--operator-fd <n>``, the
+NUMBER of the descriptor the operator capability arrives on: a descriptor
+number is not a secret and is useless without the 32 bytes written through it
+(issue #1310, see ``harness/approval.py``).
 
 **Residency (design §6.1).** The runtime is a unit of WORK, not of state; it
 runs its trajectory to completion and exits when idle, so a closed terminal
@@ -68,9 +71,11 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 from local_operator import buildwatch as _buildwatch
 from local_operator import procstate
 from local_operator.procstate import install_loop_signal_handlers
+from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_OVERDUE_CAUSE,
     BUILD_DRAIN_PROGRESS_S,
+    HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
@@ -1010,7 +1015,7 @@ def _idle_exit_reason() -> str:
     )
 
 
-async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
+async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
     """Exit the disposable session runtime after one uninterrupted idle drain.
 
     The drain is re-checked every ``REAP_CHECK_S`` against the full predicate,
@@ -1027,6 +1032,18 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
     replaced build past the bound — or has lost the tree it loaded — it stops
     admitting work and leaves at the first instant its OWN work is done, viewer
     or no viewer. Nothing in flight is ever aborted by either path.
+
+    IT RETURNS WHETHER IT RAN THE CLEAN ORDERING, and that is not decoration:
+    there are TWO normal returns and they mean opposite things to ``amain``.
+    ``True`` is the exit leg — ``_clean_exit`` has run (deny → dispose →
+    aclose) and the caller owes nothing. ``False`` is the empty-hands return,
+    taken when ``stop`` was set by a task OTHER than this one: the signal
+    drain's bound expiry or its no-latch fallback (``_drain_for_signal``),
+    ``_on_signal``'s nothing-in-flight rung, the socket ``stop`` op
+    (``_on_socket_stop``), or a drain another task ran to its own end. Nothing
+    was disposed HERE, so the caller still owes the whole ordering. A caller
+    that cannot tell the two apart skips an exit it owes — see
+    :func:`_clean_ordering_already_ran` and issue #1250.
     """
     grace_s = _grace_seconds()
     boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
@@ -1072,7 +1089,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         if stop.is_set():
             continue
         if await refresh_check():
-            return
+            return True
         if stop.is_set():
             continue
         if drain is not None:
@@ -1083,7 +1100,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
             # window is for a runtime that might still be wanted — this one has
             # already stopped taking work.
             if await _drain_for(drain, handle, runtime, stop):
-                return
+                return True
             continue
         if not _should_exit(handle, runtime):
             continue
@@ -1092,7 +1109,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if await refresh_check():
-                return
+                return True
             if stop.is_set() or not _should_exit(handle, runtime):
                 break  # a predicate term flipped back (or shutdown began)
         else:
@@ -1141,7 +1158,64 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         )
         await _clean_exit(handle, runtime, reason=reason)
         stop.set()  # amain's wait() returns; exit code stays 0
-        return
+        return True
+
+    # THE EMPTY-HANDS RETURN. ``stop`` was set by another task while this loop
+    # was parked — the signal drain's bound expiry (``_drain_for_signal``), that
+    # drain's no-latch fallback for a reduced handle, ``_on_signal``'s
+    # nothing-in-flight rung, the socket ``stop`` op (``_on_socket_stop``), or a
+    # drain another task ran to its own end — so an exit is under way and this
+    # loop is not the one running it. ``False`` is what tells ``amain`` that it
+    # still owes the deny → dispose → aclose ordering, and the ordering is
+    # exactly what a bare ``exception() is None`` at that call site used to
+    # lose: both returns look identical to it, so a 0.25 s tick landing in the
+    # same loop iteration as a drain bound skipped the whole exit block (#1250).
+    #
+    # NB a build rung the REAPER runs is NOT among those producers, and the
+    # distinction is worth keeping straight: ``_refresh_for``, ``_drain_for`` and
+    # ``_leave_overdue`` each run ``_clean_exit`` in the task that calls them and
+    # then return ``True``, so that rung is the exit leg, not this return.
+    return False
+
+
+def _clean_ordering_already_ran(reaper: "asyncio.Task[bool]") -> bool:
+    """Did a FINISHED reaper run the clean exit ordering itself?
+
+    The one question ``amain`` has to answer after ``await stop.wait()``:
+    whether the exit block below it — the ``exiting`` line, the turn journal's
+    exit note, ``_deny_pending_gates`` and ``dispose`` — is owed or already
+    done. It reads the reaper's own return value, because that is the only
+    thing that separates the two normal returns: a reaper that woke to an
+    already-set ``stop`` also finishes with no exception, and reading that as a
+    completed exit is how the block got skipped.
+
+    What the skip cost, measured on ``macos-latest`` and reproduced on this
+    host: no exit note reached the turn journal, so its row kept
+    ``exit_cause=''`` and the cell asserting
+    ``signal_exit_token(row.exit_cause) == "SIGTERM"`` failed with
+    ``'' == 'SIGTERM'`` (issue #1250: reported 10 occurrences over four days, all
+    on ``macos-latest``) — the row was then closed by the teardown's own dispose
+    instead, recording an aborted
+    turn as ``completed``. The gate deny and the dispose were skipped with it;
+    only ``aclose_remote`` still ran, which is why the process exited 0 and the
+    boot record was withdrawn while none of the ordering had happened.
+
+    ``cancelled()`` is tested BEFORE ``exception()`` deliberately:
+    ``exception()`` RAISES ``CancelledError`` on a cancelled task rather than
+    answering ``None``, so a reaper that is FINISHED *and* cancelled would make
+    this function raise instead of answering. Nothing in the tree cancels the
+    reaper but ``amain``'s own ``reaper.cancel()`` branch, and that branch never
+    reaches this read — so the ordering is defence against a future caller, not
+    a closed live escape. It is what makes the answer TOTAL, and that is the
+    reason it cannot be simplified away: the moment something else cancels a
+    finished reaper, the three-way answer below is the only one that still
+    holds.
+    """
+    if not reaper.done() or reaper.cancelled():
+        return False
+    if reaper.exception() is not None:
+        return False
+    return reaper.result() is True
 
 
 async def _refresh_for(
@@ -2919,7 +2993,66 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
         logger.warning("could not install the SIGHUP ignore", exc_info=True)
 
 
-async def amain() -> int:
+#: The switch that turns the SIGUSR1 task-stack dump off. ON BY DEFAULT since
+#: 2026-09-20; ``0``/``off``/``no``/``false`` restores the previous disposition.
+DEBUG_STACKS_ENV = "LOP_RUNTIME_DEBUG_STACKS"
+
+#: The spellings that mean "off". A harness that needs SIGUSR1's default (fatal)
+#: disposition back, or an operator debugging the dump itself, has one.
+DEBUG_STACKS_OFF = ("0", "no", "false", "off")
+
+
+def debug_stacks_enabled() -> bool:
+    """Whether the SIGUSR1 task-stack dump is installed in this runtime.
+
+    A function rather than an inline ``os.environ`` test so the default and its
+    opt-out are testable without booting a runtime — the decision is the whole
+    behaviour, and pinning it through a spawned child would make a one-line rule
+    cost a process. The capability probe stays at the CALL SITE
+    (``getattr(signal, "SIGUSR1", None)``), where the platform question belongs.
+    """
+    return os.environ.get(DEBUG_STACKS_ENV, "1").strip().lower() not in DEBUG_STACKS_OFF
+
+
+async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
+    """Report the WORKLOAD loop's progress to the process's stall bound.
+
+    The WORKLOAD plane's tick, and one of the two the bound tracks; the other is
+    the serving plane's heartbeat (``RuntimeServer._heartbeat_loop``). They are
+    tracked SEPARATELY (``stall_watchdog`` keeps a stamp per plane and arms for the
+    earliest deadline), because the measured failure is exactly this plane going
+    silent while the serving plane stays healthy — and a bound the healthy plane
+    could keep re-arming would never fire on it.
+
+    A plain sleep loop rather than a hook on the turn itself, and that is the
+    property the bound needs: a turn that WAITS (on a model, a tool, a
+    subprocess) yields and keeps this ticking, so what the bound measures is no
+    sign of life anywhere — never a slow step or a long turn.
+
+    Boot is not covered here: this starts with the reaper, after the runtime is
+    published. The entry point's own arming covers that window, with the whole
+    bound, which is longer than the engage deadline (180 s) the spawner sizes.
+    """
+    while not stop.is_set():
+        # The SAME cadence the serving plane's heartbeat keeps, and the same
+        # constant rather than a second copy of the number: the two ticks are
+        # interchangeable as "this plane is alive" signals, so a drift between
+        # them would be a drift in what the bound means.
+        await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+        stall_watchdog.beat(stall_watchdog.WORKLOAD)
+
+
+async def amain(operator_cap: bytes | None = None) -> int:
+    """Run the owned session to completion.
+
+    ``operator_cap`` is the capability handed over by the spawner on an
+    inherited descriptor (see ``harness/approval.py``). It is threaded to the
+    ``RuntimeServer`` rather than stashed on the handle, because the runtime is
+    the seam that demands it and the handle is an injected collaborator that
+    every test double also implements. ``None`` — a hand-run module, an older
+    spawner — is the fail-closed state: ordinary operations keep working and
+    nothing may loosen the gate.
+    """
     # SIGHUP FIRST, before the deferred imports below, the lease arbitration,
     # session construction, MCP bring-up and ``RuntimeServer.start``: the guarantee
     # is "no interface can end this session's work", and a HUP during boot has
@@ -3056,7 +3189,7 @@ async def amain() -> int:
         except Exception:  # noqa: BLE001 — an unarmable scheduler is not a dead runtime
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
-    runtime = RuntimeServer(handle, kind="daemon")
+    runtime = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
     # EVERY WAY THIS RUNTIME CAN BE ASKED TO LEAVE IS ARMED HERE, BEFORE THE
     # SERVING PLANE CAN MAKE IT ADDRESSABLE. That order is the fix for a
     # measured race, not tidiness.
@@ -3220,17 +3353,36 @@ async def amain() -> int:
     # block is safe to reach on any platform rather than merely skipped because
     # the constant happens to be missing.
     debug_stacks = getattr(signal, "SIGUSR1", None)
-    if (
-        not procstate.is_windows()
-        and os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1"
-        and debug_stacks is not None
-    ):
-        # SIGUSR1 prints every asyncio task's stack to the child log. The
-        # child has no terminal and no attached debugger, and a wedged turn
-        # (round 2, U6) is exactly the state whose cause is "which await is
-        # the turn parked in" — invisible to py-spy without root and to the
-        # main-thread faulthandler dump, which shows the loop idling under a
-        # parked task. Opt-in so a normal runtime pays nothing.
+    # ON BY DEFAULT, and that is the change the 2026-09-20 freeze forced. This
+    # was opt-in (``LOP_RUNTIME_DEBUG_STACKS=1``), and on every one of the five
+    # runtime processes found wedged that day — 1.5 to 7.2 h each, all of them
+    # parked in a C-level regex call with the transcript taking zero writes —
+    # the variable was NOT set on the launcher, so the ONE instrument that could
+    # have named the parked await was unavailable and the question "which line?"
+    # stayed unanswerable for hours. A diagnostic that must be predicted before
+    # the freeze it explains is a diagnostic nobody has when they need it.
+    #
+    # WHAT IT COSTS: one `add_signal_handler` under a capability probe, off the
+    # hot path — nothing here is read per turn. WHAT IT CHANGES beyond the dump:
+    # SIGUSR1's default disposition is fatal, so the signal used to kill a
+    # runtime outright; it now prints this process's task stacks to the child log
+    # instead, which is strictly more than the old behaviour offered and is the
+    # convention a debugger and an operator both expect. The opt-out survives
+    # (``=0``) for a harness that needs the default disposition back.
+    #
+    # It is NOT the whole answer to the freeze: this handler is an asyncio signal
+    # handler, so like every other Python-level instrument it needs the loop, and
+    # a loop parked in a C call never runs it. That class is what
+    # ``stall_watchdog``'s C-thread dump covers; this one is for the state the
+    # C-thread dump cannot show — a loop that is RUNNING but has its turn parked
+    # on an await (round 2, U6).
+    if not procstate.is_windows() and debug_stacks_enabled() and debug_stacks is not None:
+
+        # SIGUSR1 prints every asyncio task's stack to the child log. The child
+        # has no terminal and no attached debugger, and a wedged turn is exactly
+        # the state whose cause is "which await is the turn parked in" —
+        # invisible to py-spy without root and to the main-thread C dump, which
+        # shows the loop idling under a parked task.
         def _dump_task_stacks() -> None:
             session = getattr(handle, "_session", None)
             try:
@@ -3279,6 +3431,11 @@ async def amain() -> int:
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.
     reaper = asyncio.ensure_future(_reaper(handle, runtime, stop))
+    # The workload half of the stall bound, beside the reaper because it shares
+    # its lifetime exactly: both run for the whole session and both stop with
+    # it. Nothing is armed for an in-process host that never went through this
+    # module's entry point, where ``beat`` is a no-op.
+    stall_beats = asyncio.ensure_future(_beat_stall_watchdog(stop))
     reaper_ran_clean_exit = False
     await stop.wait()
     if draining is not None and not draining.done():
@@ -3288,11 +3445,14 @@ async def amain() -> int:
         # which has now happened, so it is cancelled rather than left to wake
         # against a session that is already disposing.
         draining.cancel()
+    if not stall_beats.done():
+        stall_beats.cancel()
     if not reaper.done():
         reaper.cancel()
-    elif reaper.exception() is None:
-        # The reaper completed (not was cancelled): it already ran the clean
-        # ordering. A signal-initiated stop still owes it.
+    elif _clean_ordering_already_ran(reaper):
+        # The reaper completed AND ran the clean ordering, so this path owes it
+        # nothing. A reaper that merely woke to find ``stop`` already set gets
+        # no such credit — see :func:`_clean_ordering_already_ran`.
         reaper_ran_clean_exit = True
     if not reaper_ran_clean_exit:
         # The reaper logs its own line from ``_clean_exit``; these are the
@@ -3393,14 +3553,41 @@ def main() -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     if configure_file_logging(path=target, level=logging.INFO) is None:
         logger.warning("session runtime could not open a log file; records stay on stderr")
+    # THE OPERATOR CAPABILITY IS READ HERE, and it is read from a DESCRIPTOR
+    # rather than from argv/env/a file: a model-run ``bash`` tool can read any of
+    # those (the record is 0600 under this same uid, which is the defect), and
+    # the 32 bytes travel on an inherited fd the spawner closes as soon as it has
+    # written them. Read above the lease and the session construction, and closed
+    # inside the reader — by the time this process serves anything the descriptor
+    # is gone from its table, so no tool subprocess can inherit it. ``None``
+    # means no capability was handed over: ordinary operations keep working and
+    # every authority-increasing request is refused. AFTER the logging setup, so
+    # a malformed handoff's warning actually lands in ``runtime.log``.
+    from local_operator.harness.approval import read_operator_cap_from_argv
+
+    operator_cap = read_operator_cap_from_argv(sys.argv[1:])
+    # The stall bound was armed in the entry point, before this file existed, so
+    # its dump path is named here — next to the log a person reads after a
+    # freeze, which is where they need it. A no-op when nothing is armed, i.e.
+    # for every in-process caller of this function.
+    stall_watchdog.announce()
     # One record per runtime, naming its own process: this file is shared by every
     # runtime child, so a reader has to be able to attribute a line to the
     # process that wrote it.
     logger.info("session runtime started: pid %d", os.getpid())
     try:
-        return asyncio.run(amain())
+        return asyncio.run(amain(operator_cap=operator_cap))
     except KeyboardInterrupt:
         return 0
+    finally:
+        # A clean exit cancels the bound and writes its own outcome over the
+        # header — the file STAYS, because the evidence is its content (the
+        # fired marker), never its existence: a SIGKILL leaves the same file an
+        # armed runtime has. See ``stall_watchdog``'s docstring for why nothing
+        # here deletes anything. Reached on every graceful leave — the drain's,
+        # the reaper's and a plain stop's — and never on the paths that exit
+        # from the C thread (that is the point of the file).
+        stall_watchdog.disarm()
 
 
 if __name__ == "__main__":
@@ -3412,4 +3599,16 @@ if __name__ == "__main__":
     from local_operator import procname
 
     procname.brand_this_process()
+    # THE STALL BOUND IS ARMED HERE, AND ONLY HERE, for the same reason the comm
+    # branding is: this branch is reachable by ``python -m`` alone, i.e. by a
+    # real runtime child (``launch._spawn_runtime``, ``mobile/daemon.py``), while
+    # ``main()`` and every constructor are reachable in-process. The C timer is
+    # process-global and shared with the two pytest-side watchdogs
+    # (``tests/e2e/watchdog.py``, ``tests/shard_stall_watchdog.py``), so arming
+    # it from a library path would let an in-process boot silence a CI stage's
+    # only bound; see ``stall_watchdog``'s docstring and
+    # ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``, which pins
+    # both halves of that. Arming before ``main()`` also means a stall during
+    # boot — the window nothing else can report — is bounded and named.
+    stall_watchdog.arm()
     sys.exit(main())

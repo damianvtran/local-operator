@@ -81,7 +81,11 @@ from local_operator.server.utils.store_failures import (
 )
 from local_operator.session.attention import SupersededCompletionToken
 from local_operator.session.cold_model import synthesise_cold_state
-from local_operator.session.errors import MoveIndeterminate, SessionStoreUnavailable
+from local_operator.session.errors import (
+    MoveIndeterminate,
+    OperatorAuthorityRequired,
+    SessionStoreUnavailable,
+)
 from local_operator.session.frontend_state import (
     FrontendSync,
     SlashResult,
@@ -1229,6 +1233,19 @@ async def errors(request: Request, copy: StoreRefusalCopy | None = None) -> Asyn
         # through the record (design §7) — a message and a code it can key on,
         # never a traceback.
         raise HTTPException(503, {"code": error.code, "message": str(error)}) from None
+    except OperatorAuthorityRequired as error:
+        # THE REFUSAL IS THE ANSWER (agent review round 1 R1-2 = design D1 = UX
+        # U4 = QA Q1). This one arrived as a bare ``RuntimeError`` and fell
+        # through to the 503 below, so the desktop client was told the runtime
+        # was UNREACHABLE and asked to reconcile — a different problem, with a
+        # remedy that cannot work — while every other route (the phone relay's
+        # 422) carried the copy that names the real remedies. 422, not 503: the
+        # runtime answered, promptly and deliberately, and the request is the
+        # thing that has to change.
+        #
+        # ``code`` rides along so a client can key on the category rather than
+        # on the sentence, exactly as the ladder's other arms do.
+        raise HTTPException(422, {"code": error.code, "message": str(error)}) from None
     except SubagentChildUnavailable as error:
         # The child read route's containment refusal (design § 9.1). Not folded
         # into the generic 404 below because the code is part of the contract:
@@ -2268,6 +2285,19 @@ async def answer(session_id: str, body: Answer, request: Request):
                 approved=body.approved,
                 question_index=body.question_index,
             )
+        except OperatorAuthorityRequired as error:
+            # BEFORE the ``RuntimeError`` arm below, which would otherwise
+            # swallow this as "no longer pending" — the opposite of the truth:
+            # the card is STILL PARKED, waiting for a console that may approve
+            # it, and this caller is not one (agent review round 1 R1-2, QA Q1:
+            # the route answered 409 "no longer pending" while the card was
+            # still on screen, so the operator's next move was to stop looking
+            # for it). ``still_pending`` says so in a field rather than only in
+            # prose, and the copy names the remedies.
+            raise HTTPException(
+                422,
+                {"code": error.code, "message": str(error), "still_pending": True},
+            ) from None
         except RuntimeError:
             raise HTTPException(409, "This question or approval is no longer pending") from None
         return reply({"detail": detail})

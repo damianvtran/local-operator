@@ -83,7 +83,12 @@ async def _pump(pilot, predicate) -> None:
 @pytest.mark.parametrize("approval", [False, True])
 @pytest.mark.parametrize("size", [(100, 30), (60, 24)])
 async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
-    headless_tui_env: Path, workspace: Path, monkeypatch, approval: bool, size: tuple[int, int]
+    headless_tui_env: Path,
+    workspace: Path,
+    monkeypatch,
+    approval: bool,
+    size: tuple[int, int],
+    operator_cap: bytes,
 ) -> None:
     from local_operator.spawn import registry
 
@@ -178,8 +183,12 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
     job = owner.jobs.get(child_job)
     assert job is not None
     owner.subscribe(lambda event: finished.set() if event.type == "agent_end" else None)
+    # ``operator_cap`` (issue #1310): this test builds the registrant IN THIS
+    # PROCESS, so it is that runtime's console. The assembled TUI below is a
+    # follower, and answering a card is an authority-increasing request — wire the
+    # capability the way a real console would, or the card can never be settled.
     handle = ServingSessionHandle(owner, asyncio.get_running_loop(), cwd=str(workspace))
-    server = RuntimeServer(handle, kind="daemon")
+    server = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
     await server.start_in_process()
     runtimes = {owner.session_id: (owner, handle, server)}
     branch_stream = ScriptedStream([text_turn("fork opened exactly once")])
@@ -191,7 +200,10 @@ async def test_fork_keeps_original_tool_and_gate_then_returns_without_restart(
             branch_handle = ServingSessionHandle(
                 branch, asyncio.get_running_loop(), cwd=str(workspace)
             )
-            branch_server = RuntimeServer(branch_handle, kind="daemon")
+            # The forked branch is a SECOND registrant built by this same
+            # process, so it is this process's console too (same reasoning as
+            # above): the fork's own card is answered through it.
+            branch_server = RuntimeServer(branch_handle, kind="daemon", operator_cap=operator_cap)
             await branch_server.start_in_process()
             runtimes[sid] = branch, branch_handle, branch_server
         current, _, runtime = runtimes[sid]

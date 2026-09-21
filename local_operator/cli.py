@@ -537,6 +537,22 @@ def build_cli_parser() -> argparse.ArgumentParser:
 
     add_network_parser(subparsers, parent_parser)
 
+    # Operator authority (issue #1310, revision 2). Registration is stdlib-only
+    # for the same reason `secret`'s is: `lop --version` must not load
+    # Security.framework, the CNG stack or `cryptography`, and the verbs that do
+    # live in `operator/handlers.py`, imported only when a verb is dispatched.
+    from local_operator.operator.cli import add_parser as add_operator_parser
+
+    add_operator_parser(subparsers)
+
+    # Device pairing (stage D of the same design). Registered beside
+    # `operator` because it is the same trust root seen from the other end — the
+    # operator signs the certificate, the phone holds the key — and stdlib-only
+    # for the identical reason: `lop --version` must not load the keychain.
+    from local_operator.operator.pair import add_parser as add_pair_parser
+
+    add_pair_parser(subparsers)
+
     # QwenCloud console session cookie: the credential the personal Token Plan
     # usage window needs and no login flow can mint (a browser session cookie
     # cannot be refreshed headlessly). stdlib-only registration, same rule.
@@ -1305,6 +1321,18 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "Route approvals and questions to an attached supervisor (may wait). "
             "Without this flag non-TTY approvals deny; discovery and live attachment "
             "are available either way. --yolo remains an explicit approval override."
+        ),
+    )
+    exec_parser.add_argument(
+        "--supervisor-fd",
+        type=int,
+        dest="supervisor_fd",
+        default=None,
+        help=(
+            "Write this run's operator capability to this inherited descriptor so the "
+            "supervisor holding the other end can APPROVE the cards this run parks "
+            "(stage E). Requires --control; refused with --background. Descriptor "
+            "numbers only — the value never touches argv, the environment or a file."
         ),
     )
 
@@ -8684,6 +8712,14 @@ def main() -> int:
             from local_operator.network.cli import main as network_main
 
             return network_main(args)
+        elif args.subcommand == "operator":
+            from local_operator.operator.cli import main as operator_main
+
+            return operator_main(args)
+        elif args.subcommand == "pair":
+            from local_operator.operator.pair import main as pair_main
+
+            return pair_main(args)
         elif args.subcommand == "qwencloud-ticket":
             return qwencloud_ticket_command(args)
         elif args.subcommand == "browser":
@@ -8903,6 +8939,17 @@ def main() -> int:
                 # missing attribute must read as "off", never raise.
                 control=bool(getattr(args, "control", False)),
                 tools=getattr(args, "tools", None),
+                # THE SUPERVISOR'S DESCRIPTOR, forwarded here or nowhere (stage E).
+                # Its absence was a real gap rather than a tidy-up: `run_session`
+                # reads the field off this ExecArgs object — not off the argparse
+                # Namespace — so omitting it here made `--supervisor-fd` a flag that
+                # parsed, validated, and then silently did nothing: the run minted no
+                # capability and wrote nothing upward, and a supervisor waited out
+                # its whole timeout. Found by the e2e cell that drives a real
+                # supervised run (`test_a_supervised_run_is_approved_through_the_
+                # handoff`), which is why that cell exists rather than an in-process
+                # probe (agent review round 6, R6-5).
+                supervisor_fd=getattr(args, "supervisor_fd", None),
             )
             # Startup preflight (CL-06) for the FOREGROUND path: hosting/
             # model (agent > flag > config) + API-key resolution fail fast

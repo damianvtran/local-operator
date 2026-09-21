@@ -58,6 +58,7 @@ from local_operator.harness.approval import (
 from local_operator.harness.approval import (
     loosening_is_authorised as _loosening_is_authorised,
 )
+from local_operator.harness.approval import transition_authority
 from local_operator.harness.jobs import TRAJECTORY_SEQ_KEY
 from local_operator.harness.types import AgentEvent, ModelChangeEvent
 from local_operator.harness.wire import bound_agent_end_for_wire
@@ -4416,6 +4417,14 @@ class ServingSessionHandle(SessionHandle):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
+        #: ``None`` = "this caller has not said", which the sentence builders
+        #: read CONSERVATIVELY. The default is deliberately not permissive: every
+        #: production caller passes the connection's own answer explicitly
+        #: (``RuntimeServer`` for a runtime, ``OperatorApp._may_loosen_gate_here``
+        #: for the pane that owns its gate), and a future caller that forgets must
+        #: fail closed rather than be told a route it cannot walk (agent review
+        #: round 4, R4-3).
+        may_loosen: bool | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command against the session and answer as data.
 
@@ -4450,7 +4459,7 @@ class ServingSessionHandle(SessionHandle):
         """
         from local_operator.session.frontend_state import SlashResult
 
-        result = await self._slash_result(command, args, SlashResult, locality)
+        result = await self._slash_result(command, args, SlashResult, locality, may_loosen)
         result = await self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -4614,7 +4623,12 @@ class ServingSessionHandle(SessionHandle):
         task.add_done_callback(_log_detached_admission)
 
     async def _slash_result(
-        self, command: str, args: str, SlashResult: Any, locality: str = "local"
+        self,
+        command: str,
+        args: str,
+        SlashResult: Any,
+        locality: str = "local",
+        may_loosen: bool | None = None,
     ) -> Any:
         """Dispatch one routed slash command. Mirrors ``OperatorApp._slash_result``.
 
@@ -4693,7 +4707,23 @@ class ServingSessionHandle(SessionHandle):
         if command == "fast":
             return self._fast_slash(session, args, SlashResult)
         if command == "approvals":
-            return self._approvals_slash(session, args, SlashResult)
+            # ``may_loosen`` (issue #1310; design round 2 D10, UX round 2 U9):
+            # whether THIS connection could carry `/approvals auto`, as the seam
+            # itself judges it. The reports below name remedies, and a report that
+            # offers a command the same connection is refused is the defect this
+            # round is fixing — so the report is TOLD rather than guessing, and a
+            # handle that serves every connection alike cannot guess.
+            #
+            # AND THIS ``may_loosen`` LINE IS THE ONE THAT STAYS (review MINOR-1 =
+            # QA Q15-1, round 15). The fold onto ``main`` left the plain
+            # ``self._approvals_slash(session, args, SlashResult)`` form unreachable
+            # directly below it; dropping that dead line must not tempt anyone into
+            # dropping this one, because the plain form would then BECOME live — a
+            # plausible-looking "cleanup" that silently un-fixes #1310 for every
+            # connection that CAN loosen, and no gate can see it: pyright sets no
+            # ``reportUnreachable`` and flake8 has no unreachable check, so CI stays
+            # green either way. The dead line is gone; this argument is not.
+            return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
         if command == "archive":
             return self._archive_slash(session, True, SlashResult)
         if command == "unarchive":
@@ -5862,7 +5892,58 @@ class ServingSessionHandle(SessionHandle):
         )
         return SlashResult(kind="notice", text=text, style="info")
 
-    def _approvals_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
+    @staticmethod
+    def _adopt_remedy(saved: str, *, may_loosen: bool | None = None) -> str:
+        """The command that matches ``config.yml``, and where it has to be typed.
+
+        The same sentence the TUI's report builds (``OperatorApp._adopt_remedy``)
+        for the same reason: a remedy printed where it cannot be used is the
+        defect (design round 1 D3, UX round 1 U1/U2). This handle does not know
+        which connection asked, so it always names the place — which is accurate
+        for the window that owns the gate and load-bearing for the one that does
+        not.
+        """
+        from local_operator.harness.approval import transition_authority
+
+        remedy = f"/approvals {saved} adopts it in this session"
+        if transition_authority("approvals", saved) == "authority-increasing" and not may_loosen:
+            # THE SPAWNER CLAUSE IS GONE (revision 2 §5; agent review round 6 R6-3
+            # = design round 6 D1 = UX round 6 U4). It read "typed in the terminal
+            # or app window that started this session", which was true under
+            # spawner authority and is not any more: §3 gives a pane attached to a
+            # runtime another process started, the desktop app for any session, and
+            # the phone the same one-presence-gesture loosening. So the report
+            # withheld capability that now exists, from the surface whose whole job
+            # is to say what is in effect and why.
+            return (
+                f"/approvals {saved} adopts it with the operator's own consent — authorise it "
+                "from this machine (Touch ID) or from a paired phone"
+            )
+        return remedy
+
+    @staticmethod
+    def _uninstalled_anchor_clause() -> str:
+        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+
+        THIS REPLACES THE DELETED "retire and reopen the session here" clause, and
+        it replaces it with the one thing that clause was standing in for: a
+        sentence naming the route that actually works from where the reader is.
+        On a host with no usable anchor the two levers the report names cannot run
+        yet, so the report has to say so and name the command that fixes it
+        (UX round 6, U1/U2 — the same gap the refusal copy had).
+        """
+        from local_operator.operator import operator_authority_unusable
+
+        if not operator_authority_unusable():
+            return ""
+        return (
+            "; but operator authority is not installed on this machine yet: neither can run "
+            "until `lop operator install` has run there (one privileged step)"
+        )
+
+    def _approvals_slash(
+        self, session: Any, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
+    ) -> Any:
         """Report or switch the gate the RUNTIME's tools actually consult.
 
         `self._auto_approve` is the real gate here (see `_install_gates`), so
@@ -5886,10 +5967,23 @@ class ServingSessionHandle(SessionHandle):
                 style="warning" if argument else "info",
             )
         if argument == "default" or argument.startswith("default "):
+            # TWO TRUTHS, ONE SENTENCE (design round 2, D10 = UX round 2, U7).
+            # This half persists to the local machine's config file and is
+            # refused from ANY control connection — a runtime cannot edit the
+            # machine that launched it — so "run it on a terminal" was advice for
+            # someone who is not at one, and the second half promised `auto`
+            # "now" on a connection that may not loosen this session at all. The
+            # wording is now SHARED with the app's routed half, and it names the
+            # machine the SESSION runs on rather than "this machine", which reads
+            # as the reader's own filesystem from a phone (design round 3, D16).
+            from local_operator.harness.approval import approvals_default_notice
+            from local_operator.operator import operator_authority_unusable
+
             return SlashResult(
                 kind="notice",
-                text="/approvals default persists to the local machine's config — run it "
-                "on a terminal; /approvals ask|auto switches this session now",
+                text=approvals_default_notice(
+                    may_loosen=may_loosen, anchor_unusable=operator_authority_unusable()
+                ),
                 style="warning",
             )
         if not argument:
@@ -5914,12 +6008,48 @@ class ServingSessionHandle(SessionHandle):
                 # both directions — `/approvals auto` for the divergence this
                 # change makes common (a live `ask` over a file that says
                 # `auto`), and `/approvals ask` for the mirror case.
+                # The remedy names WHERE it works. This handle cannot see the
+                # connection that asked, so the sentence is written to be true
+                # from either side: a tightening word takes effect anywhere, and
+                # a loosening word needs the operator (issue #1310; design round 1
+                # D3, UX round 1 U1/U2 — the old wording sent a follower pane to
+                # `/approvals auto` and the same pane answered with a refusal).
+                #
+                # THAT LAST CLAUSE READ "only in the terminal or app window that
+                # started this session" UNTIL ROUND 7 (QA Q7-2): the report code
+                # four lines below had already been rewritten for revision 2, so
+                # the comment described spawner authority as current while
+                # `_adopt_remedy` named the levers that work. An attached pane, the
+                # desktop app and a paired phone all loosen; the spawner gets no
+                # prompt of its own and, now, no sentence naming it either.
+                remedy = self._adopt_remedy(on_disk, may_loosen=may_loosen)
+                if (
+                    transition_authority("approvals", on_disk) == "authority-increasing"
+                    and not may_loosen
+                ):
+                    # THE ROUTE THAT WORKS IS NAMED HERE TOO (UX round 2, U9): the
+                    # refusal copy carries it, but the REPORT is the sentence an
+                    # operator reads *before* acting, and a report that only says
+                    # "type it in the window that started this session" left them to
+                    # discover the real route by being refused first — on the
+                    # background-started case where no such window exists at all.
+                    #
+                    # WHAT IT NAMES CHANGED WITH THE MODEL (revision 2 §5; agent
+                    # review round 6 R6-3 = design round 6 D1 = UX round 6 U4): the
+                    # clause that stood here was "let this session's runtime retire
+                    # and reopen the session here — the window that opens a runtime
+                    # owns its gate", which is verbatim the remedy this redesign
+                    # deletes, shipped on the one surface a reader consults BEFORE
+                    # being refused. Beyond the deleted remedy it withheld the
+                    # capability that now exists (a pane attached to another
+                    # process's runtime can loosen), so a reader with a working lever
+                    # was told to retire a runtime instead of using it.
+                    remedy += self._uninstalled_anchor_clause()
                 return SlashResult(
                     kind="notice",
                     text=(
                         f"tool approvals: {live} (this session) — {effect}; "
-                        f"config.yml says {on_disk} — /approvals {on_disk} adopts it in "
-                        "this session"
+                        f"config.yml says {on_disk} — {remedy}"
                     ),
                     style="warning" if self._auto_approve else "info",
                 )
