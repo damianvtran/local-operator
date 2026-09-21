@@ -30,7 +30,7 @@ import os
 import shutil
 import subprocess
 import textwrap
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -828,17 +828,55 @@ def test_run_jobs_with_no_jobs_says_nothing_was_selected(tmp_path, capsys):
     assert "nothing to run" not in out
 
 
-def test_an_empty_diff_is_reported_as_empty_not_as_uncollected(tmp_path, capsys):
+def test_an_empty_diff_is_reported_as_empty_not_as_uncollected(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A clean tree used to be told BOTH that whole-tree commands would run and
     that nothing would: an empty diff and an uncollectable one shared a branch.
 
     The distinction is observable behaviour — the two cases print different
     things, and only the failure case promises a whole-tree run — so it is
     asserted against a real (empty) repository rather than a mock.
+
+    THE EVENT IS PINNED, and that pin is a repair rather than a precaution. CI
+    always sets ``GITHUB_EVENT_NAME`` (``push`` on ``main``), and ``main``
+    short-circuits ANY non-``pull_request`` event to "every job runs" (D5) BEFORE
+    it classifies a diff. Unpinned, this cell therefore tested the empty-diff
+    branch on a workstation and the D5 short-circuit on a runner, where it went
+    red with ``assert 1 == 0`` on four runs across both Python versions: it read
+    the short-circuit's "no diff is available to scope by" report, selected all
+    seven jobs and EXECUTED them against the empty fixture repo (``uvx --from
+    black==26.1.0 black --check .`` downloaded a wheel on its way to rc=127).
+
+    The pin is the ABSENT variable rather than ``--event``, because ``--event``
+    cannot express "no event": any value it accepts is a CI event and takes the
+    D5 branch — and this cell is about a LOCAL run, ``make check-changed``'s
+    shape, which is the only shape whose report the assertions below describe.
     """
     if shutil.which("git") is None:  # pragma: no cover - every gate host has git
         pytest.skip("git is not on PATH")
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
     root = _git_repo(tmp_path)
+
+    # NOTHING MAY EXECUTE, guarded at the boundary the decision reaches rather
+    # than trusted to it. `--run` is the point of the cell — and it is also what
+    # the unpinned version reached with seven whole-tree commands behind it, in
+    # a fixture repo with no `.venv/bin/python` to run them. A future change
+    # that selects a job now fails HERE, before any command can run.
+    real_run_jobs = ci_scope.run_jobs
+
+    def _guard_empty_selection(
+        jobs: Sequence[str], root: Path, commands: Mapping[str, Sequence[str]] | None = None
+    ) -> int:
+        assert list(jobs) == [], (
+            f"this diff selected {list(jobs)!r}: a cell exercising the empty-diff report "
+            "must never be able to execute a real job command"
+        )
+        return real_run_jobs(jobs, root, commands)
+
+    monkeypatch.setattr(ci_scope, "run_jobs", _guard_empty_selection)
 
     assert ci_scope.main(["--root", str(root), "--since", "HEAD", "--run"]) == 0
 
@@ -847,6 +885,14 @@ def test_an_empty_diff_is_reported_as_empty_not_as_uncollected(tmp_path, capsys)
     assert "the diff is empty" in scope
     assert "whole-tree command" not in scope.split("skipped locally")[0]
     assert "no job was selected for this diff, so nothing ran" in out
+    # THE POSITIVE HALF, which the unpinned cell never asserted: both facts are
+    # printed by ``summary_lines``, and their absence is what let a run of the
+    # D5 short-circuit read as a pass on the two properties above.
+    assert "- diff base: `HEAD`" in out
+    assert "- event: `local`" in out
+    # A job that DID run is announced as `=== <job>: <command>`, so the output
+    # carries that evidence even if the guard above is ever removed.
+    assert "=== " not in out
 
 
 def _git_repo(root: Path) -> Path:
