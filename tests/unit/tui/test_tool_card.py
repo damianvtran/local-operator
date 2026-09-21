@@ -57,6 +57,7 @@ from local_operator.tui.widgets.tool_card import (
     ICON_ERROR,
     ICON_INTERRUPTED,
     ICON_SUCCESS,
+    LIVE_ADVISORY_GLYPH,
     LIVE_HEADER_PENDING,
     LIVE_HEADER_RUNNING,
     LIVE_MAX_LINES,
@@ -3204,6 +3205,57 @@ def test_a_payload_past_the_ingest_slice_refuses_to_quote_a_line_count() -> None
     body = card._build_content(80).plain
     assert "… earlier output not shown" in body
     assert "earlier lines" not in body  # no invented number
+
+
+def test_the_live_advisory_is_a_persistent_state_line_not_output() -> None:
+    """The soft memory advisory survives a chatty command (design review D1).
+
+    Prepended to the output it rode the HEAD of a block that keeps the TAIL, so
+    on a command printing more than :data:`LIVE_MAX_LINES` — precisely the
+    memory-pressure case it exists for — it scrolled off. As a state line under
+    the header it is present no matter how much the command prints.
+    """
+    card = ToolCard("t", "bash", {"command": "seq 100000"})
+    card._expanded = True
+    card.set_live_advisory("memory 2.7/3.2 GB — approaching the command budget")
+    # A chatty payload that would evict any prepended line.
+    card.set_partial_detail("\n".join(str(n) for n in range(1, 101)))
+
+    body = card._build_content(80).plain
+    assert f"{LIVE_ADVISORY_GLYPH} memory 2.7/3.2 GB" in body
+    # It sits with the HEADER (the state block), ABOVE the drop marker and the
+    # bounded output tail — not inside output, where it would scroll off.
+    header_row = body.index(LIVE_HEADER_RUNNING)
+    advisory_row = body.index("approaching the command budget")
+    assert advisory_row > header_row
+    assert advisory_row < body.index("… ")
+
+
+def test_the_live_advisory_is_cleared_on_settle_and_on_an_explicit_clear() -> None:
+    """The state line does not outlive the condition."""
+    card = ToolCard("t", "bash", {"command": "echo hi"})
+    card._expanded = True
+    card.set_live_advisory("memory 2.7/3.2 GB — approaching the command budget")
+    assert "approaching the command budget" in card._build_content(80).plain
+    card.set_live_advisory(None)
+    assert "approaching the command budget" not in card._build_content(80).plain
+    card.set_live_advisory("memory 2.7/3.2 GB — approaching the command budget")
+    card._settle_live()
+    assert card._live_advisory is None
+
+
+def test_the_live_advisory_uses_its_own_binding_not_the_output_ink() -> None:
+    """D2: the advisory is the HARNESS speaking, in a colour distinct from the
+    command's own stdout on the same card."""
+    advisory_style = bindings.style("tool.live.advisory")
+    output_style = bindings.style("tool.live.dim")
+    assert advisory_style != output_style
+    # The binding resolves to the theme's amber (warning), not `dim`.
+    assert advisory_style.color is not None
+    assert (
+        advisory_style.color.get_truecolor().hex.lower()
+        == theme_mod.semantic_color("warning").lower()
+    )
 
 
 def test_an_arriving_update_does_not_repaint_and_the_tick_does() -> None:

@@ -108,12 +108,13 @@ def test_the_darwin_available_arm_counts_free_speculative_and_file_backed(
     """The macOS parsing itself: ``free + speculative + file-backed``, and NOT
     ``inactive``.
 
-    ``sys.platform`` is pinned to darwin so this exercises the vm_stat parse on
-    any host. Counting ``inactive`` reported 8,137 MB of headroom at a moment the
-    host had 452 MB genuinely free, so a probe answer carrying a huge inactive
-    line must NOT raise the number.
+    ``_platform`` is pinned to darwin so this exercises the vm_stat parse on
+    any host without mutating the shared ``sys`` module (review round 1, n2).
+    Counting ``inactive`` reported 8,137 MB of headroom at a moment the host had
+    452 MB genuinely free, so a probe answer carrying a huge inactive line must
+    NOT raise the number.
     """
-    monkeypatch.setattr(mg.sys, "platform", "darwin")
+    monkeypatch.setattr(mg, "_platform", lambda: "darwin")
     vm_inactive = "\n".join(
         [
             "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
@@ -134,8 +135,10 @@ def test_the_darwin_available_arm_reads_the_header_page_size(
     """The page size comes from ``vm_stat``'s header, never a hardcoded 4096.
 
     This host uses 16 KiB pages, so a fixed 4096 would under-report by 4x.
+    ``_platform`` is pinned so the parse runs on any host without touching the
+    shared ``sys`` module (review round 1, n2).
     """
-    monkeypatch.setattr(mg.sys, "platform", "darwin")
+    monkeypatch.setattr(mg, "_platform", lambda: "darwin")
     vm_4k = "\n".join(
         [
             "Mach Virtual Memory Statistics: (page size of 4096 bytes)",
@@ -191,9 +194,42 @@ def test_per_call_zero_disables_for_that_command_only() -> None:
     assert budget.ceiling_mb == 0
 
 
+def test_the_override_and_manual_arms_spend_no_host_probe() -> None:
+    """An explicit ceiling must not fork ``vm_stat``/read ``/proc`` (m4).
+
+    The arms that already know the number do not need the host's memory, so a
+    probe that RAISES proves the arms never reach it.
+    """
+
+    def exploding_runner(argv: list[str]) -> tuple[int, str]:
+        raise AssertionError(f"host probe must not run for an explicit ceiling: {argv}")
+
+    override = mg.compute_budget(override_mb=512, runner=exploding_runner)
+    assert override.source == "override" and override.ceiling_mb == 512
+    assert override.available_mb is None  # cosmetic field honestly unset
+    manual = mg.compute_budget(mode="manual", limit_mb=256, runner=exploding_runner)
+    assert manual.source == "manual" and manual.ceiling_mb == 256
+    assert manual.available_mb is None
+
+
 def test_enabled_false_disables_the_guard() -> None:
     budget = mg.compute_budget(enabled=False, runner=_fake_runner())
     assert budget.source == "disabled"
+
+
+def test_the_off_switch_beats_a_positive_per_call_override() -> None:
+    """``enabled=False`` + a positive ``memory_mb`` is DISABLED (QA round 1, Q1).
+
+    ``enabled`` is the machine-wide MASTER SWITCH (contract §6/§7), checked
+    before a positive override, so a per-call ceiling cannot overrule it. This
+    pins the precedence the docstring now states, so the two cannot drift back
+    apart.
+    """
+    budget = mg.compute_budget(enabled=False, override_mb=64, runner=_fake_runner())
+    assert budget.source == "disabled"
+    assert budget.ceiling_mb == 0
+    # `memory_mb=0` against a positive config is the OTHER direction and is
+    # covered above; here the config switch wins over the per-call number.
 
 
 def test_manual_mode_uses_limit_mb() -> None:
@@ -352,6 +388,11 @@ def test_over_budget_message_is_plain_text_and_names_the_numbers() -> None:
     assert "was killed; the session is fine" in message
     assert "memory_mb" in message  # names the escape hatch
     assert "bash.memory.limit_mb" in message
+    # ONE paragraph, no internal newline (design review D3): the card claims only
+    # the first result line for its wrapping reason block, so a second line fell
+    # into captured output and was cropped at canonical widths, cutting the
+    # remedy and the escape hatch.
+    assert "\n" not in message
 
 
 # ---------------------------------------------------------------------------

@@ -37,12 +37,26 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Callable
 
 from local_operator.mobile.resources import session_resource_usage
+
+
+def _platform() -> str:
+    """The host platform string, behind a seam so tests need not fake ``sys``.
+
+    The probes branch on the platform, and a test that wants to exercise the
+    macOS parse on a Linux host must be able to say so WITHOUT mutating the
+    shared ``sys`` module attribute process-wide for the duration of the test
+    (review round 1, n2). This indirection is what `monkeypatch.setattr(mg,
+    "_platform", ...)` targets; production never overrides it.
+    """
+    return sys.platform
+
 
 # ---------------------------------------------------------------------------
 # Constants, next to the code that reads them (the `_consumer_defaults()` rule).
@@ -77,17 +91,19 @@ _SOFT_FRACTION = 0.8
 _SWAP_FLOOR_MB = 256
 
 #: Small-device floor. The reserve arithmetic above can drive the ceiling to zero
-#: on a tight host (an 8 GB device at 1.5 GB available resolves to 0 MB), which
-#: would kill every command the instant it started — a guard that is worse than no
-#: guard. Measured on this host: the smallest command that actually runs
-#: (`bash -c 'sleep & sleep'`) peaks at ~4 MB, a plain `git status` ~3 MB, and a
-#: trivial `python3 -c` at ~15 MB of interpreter; the realistic smallest
+#: on a tight host (~1 GB available on an 8 GB device: `min(512, 1024 - 1024)` =
+#: 0 MB), which would kill every command the instant it started — a guard that is
+#: worse than no guard. Measured on this host: the smallest command that actually
+#: runs (`bash -c 'sleep & sleep'`) peaks at ~4 MB, a plain `git status` ~3 MB, and
+#: a trivial `python3 -c` at ~15 MB of interpreter; the realistic smallest
 #: "ordinary" command this fleet runs is a Python interpreter, so the floor is set
 #: above that. It is a JUDGEMENT, not a calibrated number (no 8 GB device was
 #: available to measure against), and it is deliberately low: its job is to keep
 #: ordinary commands (a `git status`, a shell pipeline, a `python -c`) alive on a
 #: pressured small host, not to hand a big job a licence to run. A command that
 #: genuinely needs more than this asks for it — `memory_mb=`, or `mode=manual`.
+#: (At 1.5 GB available the arithmetic gives 512 MB, above this floor — the floor
+#: binds at ~1 GB, the case named here and in the contract's §11.)
 _MIN_CEILING_MB = 64
 
 #: Where the config keys live under `values`, spelled ONCE and shared with the
@@ -166,11 +182,10 @@ def _available_memory_mb(runner: Runner) -> int | None:
     and never ratchets back down). ``File-backed pages`` is the subset ``vm_stat``
     itself identifies as clean and droppable, so it needs no invented discount.
     """
-    if sys.platform == "darwin":
+    if _platform() == "darwin":
         code, out = runner(["vm_stat"])
         if code != 0:
             return None
-        import re
 
         header = re.search(r"page size of (\d+) bytes", out)
         if header is None:
@@ -189,7 +204,7 @@ def _available_memory_mb(runner: Runner) -> int | None:
         per_mb = page_size / (1024 * 1024)
         return max(0, int(sum(counts.values()) * per_mb))
 
-    if sys.platform.startswith("linux"):
+    if _platform().startswith("linux"):
         try:
             # MemAvailable is the kernel's own estimate of what can be handed out
             # without swapping — strictly better than MemFree, which ignores
@@ -213,11 +228,10 @@ def _free_swap_mb(runner: Runner) -> int | None:
     since boot" rather than "this host is swapping now"; only ``free`` recovers,
     so only ``free`` is a pressure signal.
     """
-    if sys.platform == "darwin":
+    if _platform() == "darwin":
         code, out = runner(["sysctl", "-n", "vm.swapusage"])
         if code != 0:
             return None
-        import re
 
         # `total = 5120.00M  used = 4011.25M  free = 1108.75M`
         match = re.search(r"free\s*=\s*([\d.]+)([MGT])", out)
@@ -228,7 +242,7 @@ def _free_swap_mb(runner: Runner) -> int | None:
         scale = {"M": 1, "G": 1024, "T": 1024 * 1024}[unit]
         return int(value * scale)
 
-    if sys.platform.startswith("linux"):
+    if _platform().startswith("linux"):
         try:
             with open("/proc/meminfo", encoding="utf-8") as handle:
                 for line in handle:
@@ -283,10 +297,22 @@ def compute_budget(
     Never raises; an unmeasurable host degrades to ``source="disabled"`` rather
     than to a guess, which is the pre-guard behaviour (no kill, no exception).
 
-    Resolution order, first match wins: a per-call ``override_mb`` (``0`` =
-    explicitly disabled for this call, ``> 0`` = explicit ceiling), then
-    ``enabled=False``, then ``mode="manual"`` with a positive ``limit_mb``, else
-    the auto ceiling.
+    Resolution order, first match wins:
+
+    * ``override_mb == 0`` — disabled for this call, whatever the config says.
+    * ``enabled=False`` — the machine-wide MASTER SWITCH (contract §6/§7). It is
+      checked BEFORE a positive override, so ``enabled=False, override_mb=64``
+      returns ``source="disabled"``: the off switch wins. A positive override
+      only *chooses a ceiling*; it does not overrule the switch that says there
+      is to be no ceiling.
+    * a positive ``override_mb`` — the per-call ceiling.
+    * ``mode="manual"`` with a positive ``limit_mb``.
+    * else the auto ceiling.
+
+    The override and manual arms do NOT probe host memory: an explicit ceiling
+    needs no measurement (the caller, or the config, already said what the
+    number is), so their ``available_mb`` is honestly ``None`` rather than a
+    ``vm_stat`` subprocess spent only to populate a cosmetic field.
     """
     base = runner or _default_runner
 
@@ -317,6 +343,10 @@ def compute_budget(
         return disabled("disabled in settings (bash.memory.enabled=false)")
 
     total_mb = _total_memory_mb()
+    # Assigned by the AUTO arm only; the override/manual arms leave it None
+    # rather than spending a `vm_stat` probe on a cosmetic field (m4). Named
+    # here so the closure below reads it without a NameError on those arms.
+    available_mb: int | None = None
 
     def soft_of(ceiling: int) -> int:
         return int(max(0, ceiling) * max(0.0, min(1.0, soft_fraction)))
@@ -335,9 +365,9 @@ def compute_budget(
 
     override_ceiling = _positive_override()
     if override_ceiling is not None:
-        # An explicit ceiling does not need the host's memory to be readable: the
-        # caller has already said what the number is.
-        available_mb = _available_memory_mb(base)
+        # No host probe: the caller already said what the ceiling is, so this arm
+        # needs no measurement (see the docstring). `available_mb` is left None
+        # rather than spending a `vm_stat` subprocess on a cosmetic field.
         return with_ceilings(
             override_ceiling,
             "override",
@@ -346,7 +376,7 @@ def compute_budget(
         )
 
     if mode == "manual" and limit_mb and limit_mb > 0:
-        available_mb = _available_memory_mb(base)
+        # Same reasoning as the override arm: the config named the ceiling.
         return with_ceilings(
             limit_mb,
             "manual",
@@ -442,6 +472,21 @@ def group_rss_bytes(pgid: int, *, runner: Runner | None = None) -> int | None:
     e-group/session selector, not ``pgid`` — so the pgid filter is done in Python
     over the portable full-table read.
     """
+    members = _read_group_members(pgid, runner=runner)
+    if not members:
+        return None
+    return sum(members.values())
+
+
+def _read_group_members(pgid: int, *, runner: Runner | None = None) -> dict[int, int] | None:
+    """One ``ps`` pass -> ``{pid: rss_bytes}`` for ``pgid``, or ``None``.
+
+    The shared spine of :func:`group_rss_bytes` and the guard's fidelity arm:
+    returning the membership (not just the sum) lets a refined tick reuse the
+    pids this read already resolved instead of forking a second full-table
+    ``ps`` to re-derive them (review round 1, n3). ``None`` on any failure,
+    same as a vanished group.
+    """
     run = runner or _default_runner
     try:
         code, out = run(["ps", "-axo", "pid=,pgid=,rss="])
@@ -449,12 +494,8 @@ def group_rss_bytes(pgid: int, *, runner: Runner | None = None) -> int | None:
         return None
     if code != 0:
         return None
-    by_pid = _parse_group_rss(out, pgid)
-    if not by_pid:
-        # A vanished group is GONE, not huge: the process already exited and the
-        # normal reap path owns it.
-        return None
-    return sum(by_pid.values())
+    members = _parse_group_rss(out, pgid)
+    return members or None
 
 
 @dataclass
@@ -525,7 +566,8 @@ class Guard:
     def _sample_sync(self) -> Sample:
         soft = self.soft_bytes
         hard = self.hard_bytes
-        used = group_rss_bytes(self.pgid, runner=self.runner)
+        members = _read_group_members(self.pgid, runner=self.runner)
+        used = sum(members.values()) if members else None
         refined = False
 
         # Fidelity arm, near the decision only: `ri_phys_footprint`/Pss is the
@@ -533,10 +575,14 @@ class Guard:
         # whose fallback (`top` dump) can cost seconds. Spend it only when the
         # cheap sum is inside the watch band just below the soft line, where the
         # under-read could change the verdict.
+        #
+        # The pids come from the SAME `ps` read the cheap sum used (n3): the
+        # fidelity arm re-uses this membership rather than forking a second
+        # full-table `ps` to re-derive it.
         if used is not None and soft > 0:
             watch_band = max(0, soft - max(used // 8, hard // 20))
             if used >= watch_band:
-                honest = self._footprint_total()
+                honest = self._footprint_total(sorted(members) if members else [])
                 if honest is not None and honest > used:
                     used = honest
                 refined = True
@@ -554,22 +600,15 @@ class Guard:
             refined=refined,
         )
 
-    def _footprint_total(self) -> int | None:
-        """Honest footprint sum for the group, or ``None`` when unmeasurable.
+    def _footprint_total(self, pids: list[int]) -> int | None:
+        """Honest footprint sum for ``pids``, or ``None`` when unmeasurable.
 
         Reuses ``mobile.resources.session_resource_usage`` with OUR runner so a
-        guard tick never pays the ``top`` fallback's unbounded cost. Pids come
-        from the same ``ps`` table membership the fast arm used; a vanished group
-        yields ``None`` and the caller keeps the cheap sum.
+        guard tick never pays the ``top`` fallback's unbounded cost. ``pids``
+        are the membership the tick's OWN ``ps`` read already parsed (n3) — this
+        arm never forks its own table read; an empty list yields ``None`` and the
+        caller keeps the cheap sum.
         """
-        run = self.runner or _default_runner
-        try:
-            code, out = run(["ps", "-axo", "pid=,pgid=,rss="])
-        except Exception:  # noqa: BLE001 — any probe failure is just "no data"
-            return None
-        if code != 0:
-            return None
-        pids = sorted(_group_pids(out, self.pgid))
         if not pids:
             return None
         try:
@@ -599,6 +638,12 @@ class Guard:
         Latched: returns a string once per guard instance, then ``None``, so a
         group sitting over the soft line does not spam the stream. ADVISORY ONLY —
         see the module docstring: userspace cannot throttle an allocation.
+
+        "One-shot" is about not RE-FIRING, not about how long it stays visible:
+        the caller carries this as a field on every subsequent live update (the
+        card paints it as a state line beside the running header), so it remains
+        on screen until the command ends even though this method returns it only
+        once.
         """
         if self._advised or not sample.over_soft:
             return None
@@ -614,6 +659,13 @@ class Guard:
         what lets the model size the retry, and it must not name a "safe" number
         it cannot know. Plain Text because the tool card paints Text — backticks
         would land literally.
+
+        ONE paragraph, no internal newline (design review D3). The tool card
+        claims only the FIRST result line for its wrapping reason block; a second
+        line falls into captured output, where each row is cropped to the measure
+        — so a two-line message had its actionable half (`memory_mb`, the batch
+        advice) cut at canonical widths. As one paragraph the whole message is
+        within the reason block's cell budget and wraps inside it.
         """
         peak = sample.bytes_used if sample.bytes_used is not None else self.peak_bytes
         peak_gb = (peak or sample.bytes_hard) / (1024**3)
@@ -627,12 +679,11 @@ class Guard:
         return (
             f"MEMORY LIMIT EXCEEDED: this command's process group reached "
             f"{peak_gb:.1f} GB, over the {hard_gb:.1f} GB budget for one command"
-            f"{device}."
-            f"\nThe command was killed; the session is fine. Reduce peak memory and "
-            f"retry: stream instead of loading all rows, lower the batch size, or "
-            f"process the input in chunks. To allow a deliberately large command, "
-            f"pass memory_mb on the bash call or raise bash.memory.limit_mb in "
-            f"settings."
+            f"{device}. The command was killed; the session is fine. Reduce peak "
+            f"memory and retry: stream instead of loading all rows, lower the batch "
+            f"size, or process the input in chunks. To allow a deliberately large "
+            f"command, pass memory_mb on the bash call or raise bash.memory.limit_mb "
+            f"in settings."
         )
 
 
