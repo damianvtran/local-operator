@@ -250,6 +250,32 @@ def test_system_md_points_scratch_work_at_the_scratchpad() -> None:
     assert text.count("scratchpad://") <= 6
 
 
+def test_system_md_names_the_places_scratch_must_not_land_in() -> None:
+    """The pointer said where scratch BELONGS and never named the two places a
+    session actually drops it instead: the user's working directory, and ``/tmp``.
+
+    The second is the measured one — a session wrote its generator to
+    ``/tmp/lopost.py`` and its render passes under ``mktemp -d
+    /tmp/lopost-XXXXXX`` — and the reason is a fact about the host rather than a
+    preference: macOS's ``com.apple.tmp_cleaner`` prunes ``/tmp`` after three
+    days, so a session can outlive its own scratch there.
+
+    Contract, not wording: both traps named, the pruning reason stated, and no
+    promise that the store holds what the guide refuses (it is text, and the
+    guide's binary bullet is where a binary's home is answered).
+    """
+    # Normalized: the source is hard-wrapped, so an asserted phrase may
+    # straddle a line break.
+    text = " ".join(render_template("system.md", {}).split())
+    paragraph = text[text.index("Scratch of your own") : text.index("Keep the todo list")]
+    assert "not the working directory" in paragraph
+    assert "`/tmp`" in paragraph
+    assert "three days" in paragraph
+    # It must not promise the store what the guide refuses (the store is text);
+    # where a binary goes is the guide's answer, not this paragraph's.
+    assert "binary" not in paragraph.lower()
+
+
 def test_system_md_frames_the_web_as_a_verification_surface() -> None:
     """Verification must not be defined as a closed set of LOCAL actions.
 

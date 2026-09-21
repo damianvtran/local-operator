@@ -52,6 +52,7 @@ import mimetypes
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import traceback
@@ -4732,6 +4733,87 @@ def _scratchpad_root(context: ToolContext | None) -> Path | None:
     return Path(raw)
 
 
+def _temp_scratch_roots() -> tuple[tuple[Path, str], ...]:
+    """``(resolved root, why it is a trap)`` for the temp dirs ``write``/``edit`` watch.
+
+    A FUNCTION rather than a module constant so a test can monkeypatch the roots
+    it compares against instead of creating files in the machine's real temp
+    dirs. Roots are RESOLVED because macOS makes ``/tmp`` a symlink to
+    ``/private/tmp``, and a miss here is SILENT: ``execute_write`` and
+    ``execute_edit`` resolve the caller's path (``_resolve_workspace_path``), so
+    the parent handed to the comparison is always the resolved one and the
+    unresolved spelling of a root could never match it.
+
+    Two roots, with distinct reasons, because they are cleared by different
+    things: macOS ships ``/usr/libexec/tmp_cleaner`` (launchd
+    ``com.apple.tmp_cleaner``, daily) with ``daily_clean_tmps_dirs="/tmp"`` and
+    ``daily_clean_tmps_days="3"``, while ``$TMPDIR`` (``/var/folders/…``) is not
+    on that list. The reason is stated to the agent because the two differ in
+    kind: one prunes the file out from under a long session, the other is simply
+    not the session's own area. Duplicate resolved roots collapse, so on Linux —
+    where ``gettempdir()`` IS ``/tmp`` — the hint carries one reason, not two.
+    """
+    candidates = (
+        (tempfile.gettempdir(), "it is not the session's own area, and not kept with it"),
+        ("/tmp", "macOS prunes it after three days, so a session can outlive its scratch"),
+    )
+    roots: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+    for raw, why in candidates:
+        try:
+            resolved = Path(raw).resolve()
+        except OSError:  # pragma: no cover - a temp root that cannot be resolved
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        roots.append((resolved, why))
+    return tuple(roots)
+
+
+def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad: bool) -> str:
+    """One advisory line when ``write``/``edit`` lands a file DIRECTLY under a temp
+    root, else ``""``.
+
+    Why a hint and not a refusal: a session doing image or tooling work outside a
+    repo can legitimately need a real temp path, and the rule this nudges is
+    stated in ``system.md`` — which never fires at the moment of the write. The
+    measured incident: a session wrote its generator to ``/tmp/lopost.py`` and
+    its render passes under ``mktemp -d /tmp/lopost-XXXXXX``, and nothing said
+    so. The nudge is one line on an EXISTING tool result, so it costs zero
+    standing context (the tool-schema footprint ladder's rung 1).
+
+    Contract, deliberately narrow in four ways:
+
+    * Only ``write``/``edit`` call it, from their own RESOLVED target path —
+      never from ``bash`` and never from ``read``, so a script or a test that
+      deliberately writes under ``/tmp`` through the shell is unaffected.
+    * Depth-1 only: the parent must BE a temp root. Several of this fleet's real
+      agent worktrees live at ``/private/tmp/<name>``, so anything nested deeper
+      is a plausible deliverable and a nudge there would be a false positive on
+      real work — the cost of that is a miss on ``<tmp>/<dir>/x.py``, which the
+      guide covers instead.
+    * No scratchpad on this host (the ``SCRATCHPAD_UNAVAILABLE`` contract) means
+      no nudge — there is nowhere better to point the session.
+    * Never for a ``scratchpad://`` target: the session's own store is the
+      destination, not the trap.
+    """
+    if is_scratchpad:
+        return ""
+    root = _scratchpad_root(context)
+    if root is None:
+        return ""
+    resolved = path.resolve()
+    for temp_root, why in _temp_scratch_roots():
+        if resolved.parent == temp_root:
+            return (
+                f"[scratch] {resolved} sits directly under a temp root — {why}. "
+                f"Your own scratch belongs in {SCRATCHPAD_SCHEME} ({root.resolve()}), e.g. "
+                f'write(path="{SCRATCHPAD_SCHEME}name.py", content="…").'
+            )
+    return ""
+
+
 def _scratchpad_address(result: ToolResult, url: str, path: Path) -> ToolResult:
     """Put the RESOLVED ABSOLUTE PATH into the result TEXT.
 
@@ -5114,7 +5196,8 @@ def build_read_tool() -> AgentTool:
         name="read",
         label="Read",
         description=(
-            "Read a file, line range, or internal URL (skill://, guide://, mcp://). "
+            "Read a file, line range, or internal URL (skill://, guide://, mcp://, "
+            "scratchpad://). "
             "PNG/JPEG/GIF/WebP/HEIC files come back as a viewable image. "
             "Python files read whole return a structural summary; use a "
             "range or raw=true for exact text."
@@ -6209,11 +6292,14 @@ async def execute_edit(
     # The URL is echoed for a scratchpad file so the result text reads as the
     # address the agent used, followed by where it landed
     # (see ``_scratchpad_address``).
-    where = f"{url} -> {path}" if _has_scratchpad_scheme(url) else str(path)
+    is_scratchpad = _has_scratchpad_scheme(url)
+    where = f"{url} -> {path}" if is_scratchpad else str(path)
+    text = f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied."
+    hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
         "edit",
-        f"Edited {where}: {len(hunks)} hunk(s), {total_replacements} replacement(s) applied.",
+        f"{text}\n{hint}" if hint else text,
         details=details,
     )
 
@@ -6419,7 +6505,8 @@ def build_edit_tool() -> AgentTool:
             "several changes in one call; exact match first, then "
             "whitespace-tolerant; anchor_line disambiguates repeats). A hunk "
             "that does not match writes nothing and the error names the "
-            "closest file lines — re-read those before retrying."
+            "closest file lines — re-read those before retrying. Your own "
+            "scratch files belong in scratchpad://<name>."
         ),
         parameters=EditParams.model_json_schema(),
         approval_tier="write",
@@ -6562,10 +6649,14 @@ async def execute_write(
     # in this session, so the create receipt already covers all of them, and an
     # overwrite receipt would restate the same fact on every edit (UX round 1, U1).
     lifetime = " — deleted with the session" if is_scratchpad and not existed else ""
+    text = f"{verb} {where} ({len(params.content)} chars){lifetime}."
+    # Appended, never substituted: the nudge rides the receipt the caller already
+    # reads, and the file itself is written either way (see ``_temp_scratch_hint``).
+    hint = _temp_scratch_hint(path, context, is_scratchpad=is_scratchpad)
     return _text(
         tool_call_id,
         "write",
-        f"{verb} {where} ({len(params.content)} chars){lifetime}.",
+        f"{text}\n{hint}" if hint else text,
         details=details,
     )
 
@@ -6602,7 +6693,10 @@ def build_write_tool() -> AgentTool:
         name="write",
         label="Write",
         describe_approval=_describe_path_approval("write"),
-        description="Create or overwrite a file (parents are created automatically).",
+        description=(
+            "Create or overwrite a file (parents are created automatically). "
+            "Your own scratch files belong in scratchpad://<name>."
+        ),
         parameters=WriteParams.model_json_schema(),
         approval_tier="write",
         # write model: concurrent writes to the same file race silently;
