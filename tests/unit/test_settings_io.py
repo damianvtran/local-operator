@@ -44,6 +44,12 @@ def _consumer_defaults() -> dict[str, object]:
     from local_operator.compaction.thresholds import CompactionSettings
     from local_operator.harness.jobs import DEFAULT_MAX_RUNNING_JOBS
     from local_operator.harness.subagent import DEFAULT_MODEL_CHOICE
+    from local_operator.memory_guard import (
+        BASH_MEMORY_ENABLED_DEFAULT,
+        BASH_MEMORY_LIMIT_MB_DEFAULT,
+        BASH_MEMORY_MODE_DEFAULT,
+        BASH_MEMORY_SOFT_FRACTION_DEFAULT,
+    )
     from local_operator.model.configure import (
         ANTHROPIC_CACHE_TTL_1H_MIN_CONTEXT_TOKENS,
         OPENAI_USE_MAX_CONTEXT_WINDOW,
@@ -105,6 +111,13 @@ def _consumer_defaults() -> dict[str, object]:
         # Empty means "auto-resolve" (bash on PATH, else /bin/sh) rather than
         # an interpreter, so the consumer's constant is the empty string too.
         "bash.shell": BASH_SHELL_DEFAULT,
+        # The four memory_guard keys. The consumer constants live next to the
+        # reader in memory_guard.py, so this mapping is what stops the registry
+        # default and the code default drifting.
+        "bash.memory.enabled": BASH_MEMORY_ENABLED_DEFAULT,
+        "bash.memory.mode": BASH_MEMORY_MODE_DEFAULT,
+        "bash.memory.limit_mb": BASH_MEMORY_LIMIT_MB_DEFAULT,
+        "bash.memory.soft_fraction": BASH_MEMORY_SOFT_FRACTION_DEFAULT,
         "runtime.background_on_resume": DEFAULT_BACKGROUND_ON_RESUME,
         # The registry restates this empty string rather than importing the
         # reader (an import edge from the CLI's settings layer into the TUI for
@@ -578,6 +591,44 @@ def test_bash_shell_row_shares_the_consumer_path(manager: ConfigManager) -> None
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
         assert _configured_bash_shell() == "/opt/x/bash"
+
+
+def test_memory_guard_rows_share_the_consumer_paths(manager: ConfigManager) -> None:
+    """The four ``memory_guard`` rows write exactly where ``memory_guard.py``
+    reads, and a stored ``limit_mb`` round-trips through the real reader.
+
+    Pinned by test rather than import for the same reason the rows above are:
+    ``settings_io`` must stay cheap for the CLI while the reader lives in
+    ``memory_guard``. A registry writing ``bash.memory.*`` while the reader
+    looked elsewhere would leave the guard silently unbounded — the failure this
+    key exists to close — so the paths and the mode default are asserted against
+    the consumer's own constants.
+    """
+    from local_operator import memory_guard
+
+    assert settings_io.BY_KEY["bash.memory.enabled"].path == memory_guard.BASH_MEMORY_ENABLED_PATH
+    assert settings_io.BY_KEY["bash.memory.mode"].path == memory_guard.BASH_MEMORY_MODE_PATH
+    assert settings_io.BY_KEY["bash.memory.limit_mb"].path == memory_guard.BASH_MEMORY_LIMIT_MB_PATH
+    assert (
+        settings_io.BY_KEY["bash.memory.soft_fraction"].path
+        == memory_guard.BASH_MEMORY_SOFT_FRACTION_PATH
+    )
+    assert settings_io.BY_KEY["bash.memory.mode"].default == memory_guard.BASH_MEMORY_MODE_DEFAULT
+
+    settings_io.write_setting(manager, settings_io.BY_KEY["bash.memory.mode"], "manual")
+    settings_io.write_setting(manager, settings_io.BY_KEY["bash.memory.limit_mb"], 1024)
+    stored = yaml.safe_load((manager.config_dir / "config.yml").read_text())["values"]
+    assert stored["bash"]["memory"] == {"mode": "manual", "limit_mb": 1024}
+    assert "bash.memory.mode" not in stored
+
+    # Round-trip through the REAL reader: a stored manual ceiling must resolve to
+    # that ceiling, so the registry and the guard cannot disagree about a number
+    # the user set. `compute_budget` takes no host probes on the manual arm.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(manager.config_dir))
+        budget = memory_guard.compute_budget(mode="manual", limit_mb=1024)
+        assert budget.source == "manual"
+        assert budget.ceiling_mb == 1024
 
 
 def test_shell_environment_rows_share_the_reader_paths(manager: ConfigManager) -> None:
