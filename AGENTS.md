@@ -1882,9 +1882,9 @@ For anything else, Textual can export exactly what it painted. Drive the app
 with `run_test`, put it in the state you care about, and save a frame:
 
 ```python
-# $LOCAL_OPERATOR_SCRATCHPAD/shot.py — `guide://scratchpad` explains the variable;
-#   env -u NO_COLOR TERM=xterm-256color .venv/bin/python "$LOCAL_OPERATOR_SCRATCHPAD/shot.py" \
-#     "$LOCAL_OPERATOR_SCRATCHPAD/out.svg"
+# ${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py — `guide://scratchpad` explains the variable;
+#   env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+#     "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/out.svg"
 import asyncio
 import sys
 
