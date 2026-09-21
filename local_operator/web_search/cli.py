@@ -127,13 +127,20 @@ def format_search_status(manager: ConfigManager, credentials: CredentialManager)
 
 
 def _store_api_key(provider_id: SearchProviderId, credentials: CredentialManager) -> None:
+    """Save a search provider's API key as a provider-class store row.
+
+    Writes ``LOP_PROVIDER_<KEY>`` with ``role="provider"`` — the consolidated
+    home for provider keys — so ``_credential`` finds it on the store-first leg.
+    """
+    from local_operator.providers.registry import store_provider_key
+
     key_name = _API_KEY_NAMES.get(provider_id)
     if key_name is None:
         raise ValueError(f"{provider_id} does not use an API key")
     value = getpass.getpass(f"{key_name}: ").strip()
     if not value:
         raise ValueError("API key was empty; nothing changed")
-    credentials.set_credential(key_name, value)
+    store_provider_key(key_name, value, description=f"Web search API key for {provider_id}")
 
 
 def _setup_tavily_oauth() -> int:

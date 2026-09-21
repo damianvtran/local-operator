@@ -54,7 +54,19 @@ class ProviderDefinition:
 
 
 def _credential(manager: CredentialManager, *keys: str) -> str:
-    """Resolve the first non-empty stored/environment credential without logging it."""
+    """First configured value across the provider store, then the legacy tier.
+
+    Store-first: a ``LOP_PROVIDER_<key>`` row the operator saved (via ``lop
+    search setup`` or ``lop credential update``) outranks an ambient export,
+    which is the order every other provider-key reader in the repo uses. The
+    value is never logged.
+    """
+    from local_operator.providers.registry import provider_secret_value
+
+    for key in keys:
+        stored = provider_secret_value(key)
+        if stored:
+            return stored
     for key in keys:
         value = manager.get_credential(key).get_secret_value().strip()
         if value:

@@ -907,6 +907,63 @@ def first_provider_key(names: Iterable[str], env_value: str | None = None) -> st
     return None
 
 
+def store_provider_key(env_key: str, value: str, *, description: str = "") -> None:
+    """Write a provider-class store row for ``env_key`` (set or update).
+
+    The ONE writer for the provider namespace, so every surface that saves a
+    key — ``lop credential update``, ``lop search setup``, the credentials
+    route's PATCH — files it under the same name with the same ``role``. Raises
+    :class:`~local_operator.secrets.errors.SecretStoreError` for the caller to
+    report; unlike the READERS this does not swallow failures, because a write
+    the operator asked for and did not get must not look like success.
+
+    ``update`` is tried first and ``set`` second: ``set`` refuses an existing
+    name by design (a mistyped name must not clobber a live credential), so a
+    re-run that changed a key would otherwise fail with ``SecretExists``.
+    """
+    from local_operator.secrets.access import open_store, session_id
+    from local_operator.secrets.errors import SecretExists, SecretNotFound
+    from local_operator.secrets.store import provider_secret_name
+
+    name = provider_secret_name(env_key)
+    payload = value.encode("utf-8")
+    store = open_store(create=True)
+    try:
+        store.update(name, payload, role="provider", session_id=session_id())
+        return
+    except SecretNotFound:
+        pass
+    try:
+        store.set(
+            name,
+            payload,
+            description=description or f"Provider API key {env_key}",
+            role="provider",
+            session_id=session_id(),
+        )
+    except SecretExists:
+        # Another writer created the row between the update and the set; the
+        # caller's intent is still "this name holds this value".
+        store.update(name, payload, role="provider", session_id=session_id())
+
+
+def remove_provider_key(env_key: str) -> bool:
+    """Delete the provider-class row for ``env_key``; ``True`` if one was removed.
+
+    Best-effort on an absent store (returns ``False``): a delete of something
+    that is not there is the desired end state, not an error.
+    """
+    from local_operator.secrets.access import open_store, session_id
+    from local_operator.secrets.errors import SecretNotFound, SecretStoreError
+    from local_operator.secrets.store import provider_secret_name
+
+    try:
+        open_store().delete(provider_secret_name(env_key), session_id=session_id())
+        return True
+    except (SecretNotFound, SecretStoreError, OSError):
+        return False
+
+
 def stored_provider_env_keys() -> set[str]:
     """ENV KEY names that have a provider-class row in the store.
 
