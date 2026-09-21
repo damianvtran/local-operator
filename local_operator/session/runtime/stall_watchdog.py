@@ -6,10 +6,11 @@ had to be reaped by hand with ``lop stop --force``. ``sample <pid> 3`` on every
 one of them put 100% of the event-loop main thread inside
 ``_sre_SRE_Pattern_search`` -> ``sre_search`` -> ``sre_ucs1_match`` — a bare
 ``.search()`` — while CPU kept advancing at ~0.9 core and the transcript took
-zero writes. The linear cost model does not explain a freeze of hours: the
-repo's own ``scrub_secrets`` runs over those very transcripts in 1.75-2.07 s.
-The scan simply was not converging, and **nothing in the process could say which
-line it was stuck on**, because the one instrument that would have
+zero writes. A freeze of hours is not a linear cost: the repo's own
+``scrub_secrets`` walks those same transcripts in 1.75-2.07 s, so the scan in
+flight was not converging on its input — and **the caller was never identified,
+because nothing in the process could say which line it was stuck on**. The one
+instrument that would have
 (``LOP_RUNTIME_DEBUG_STACKS``' SIGUSR1 asyncio dump, ``process.amain``) was not
 switched on. There is no automatic recovery path either: ``lop sessions
 reclaim`` refused all five (``record-present``) and ``session.cleanup.enabled``
@@ -42,15 +43,30 @@ since the last sign of life *inside this process* — the same signal the record
 heartbeat publishes. A turn that awaits for ten minutes keeps beating; a loop
 parked in one C call does not.
 
-TWO LOOPS BEAT, DELIBERATELY. A ``daemon``/``exec`` runtime runs its workload
-and its serving plane on separate threads (``RuntimeServer.start``), and only
-the process as a whole is what an operator experiences as frozen. The timer is
-process-global — there is exactly one — so the honest reset for it is progress
-from ANY of the process's own loops: ``RuntimeServer._heartbeat_loop`` beats,
-and so does the workload half (``process._beat_stall_watchdog``). A stall
-confined to one plane therefore does NOT trip this bound (that shape shows up as
-a ``busy``/lane reading instead), which is the residual this design accepts
-rather than killing a runtime that is demonstrably still working.
+EVERY PLANE'S PROGRESS IS TRACKED SEPARATELY, AND EITHER ONE GOING SILENT TRIPS
+IT. A ``daemon``/``exec`` runtime runs its workload and its serving plane on
+separate threads (``RuntimeServer.start``), so "this process is alive" is NOT the
+question — the measured failure was the WORKLOAD loop parked in a synchronous
+scan for hours while everything else about the process was fine, and a bound
+that a healthy serving plane can keep re-arming is worse than no bound at all:
+it makes the fleet look protected. Each plane therefore carries its own
+last-seen stamp (:data:`WORKLOAD`, ticked by ``process._beat_stall_watchdog``;
+:data:`SERVING`, ticked by ``RuntimeServer._heartbeat_loop`` — both on a
+15 s cadence, see ``types.HEARTBEAT_INTERVAL_S``), and whichever tick runs next
+re-arms the single process-wide C timer for the EARLIEST remaining deadline:
+``min(stamp + bound) - now``. A healthy plane therefore cannot mask a silent
+one — its own tick shortens the timer to the other plane's deadline rather than
+pushing it out — and with BOTH planes silent no tick runs at all, so the timer
+simply fires at the deadline the last tick set.
+
+WHAT THIS BOUND MEANS, STATED PLAINLY, BECAUSE IT IS STRICTER THAN "WEDGED":
+a synchronous step is indistinguishable from a wedge from outside the process,
+so the bound is also a CEILING ON ONE SILENT SYNCHRONOUS STEP: a step that takes
+tens of seconds passes, one that never returns is cut. What the bound
+measures is the LOOPS RUNNING, never the work advancing: a plane that keeps
+ticking while its work stands still is outside this design (nothing here can
+see that, and inventing a second, footprint-based clock is what
+``process._work_motion`` already does for the drain).
 
 WHY THE EXIT IS THE BLUNT ONE, AND WHAT IT COSTS
 ------------------------------------------------
@@ -74,17 +90,46 @@ one asymmetry worth stating in the PR: until this ships, the automatic paths
 refuse a loop-blocked runtime (``record-present``) and the only working recovery
 is a hand-run ``lop stop --pid <pid> --force``.
 
+A HARD EXIT ALSO SKIPS THE IN-PROCESS KILL OF THIS TURN'S TOOL PROCESS GROUPS,
+and that is covered rather than merely accepted: ``_exit`` from the C thread runs
+no Python, so ``execute_bash``'s ``_kill`` chain cannot fire — which is exactly
+the "hard death of the owning ``lop`` process" class
+``local_operator/tools/group_reaper.py`` exists for. Each group is registered
+with a liveness marker at spawn and :func:`sweep_orphan_groups` reaps the ones
+whose owner is provably dead, at the NEXT ``lop`` startup. So a child orphaned
+here is bounded by the next session start rather than by this process's death,
+which is the same guarantee today's only recovery (SIGKILL) already relies on —
+and a stray group is visible in the meantime exactly as it would be after any
+hard death.
+
 THE FILE IS THE EVIDENCE, AND ITS ABSENCE MEANS NOTHING FIRED
 ------------------------------------------------------------
 The dump is written to ``<log dir>/runtime-stall-<pid>.log`` — beside
 ``runtime.log``, in the directory ``paths.log_dir`` already resolves and
-``lop mobile logs`` already points a reader at. Its EXISTENCE is the signal: a
-clean exit (``disarm``) cancels the timer and removes the file, so a header-only
-file that survives means the process died without disarming (a SIGKILL), and a
-file carrying :data:`FIRED_MARKER` means this bound actually fired. That is the
-same shape ``tests/e2e/watchdog.py`` uses, and for the same reason: faulthandler
-writes with a raw descriptor from a C thread, so the header cannot be deferred
-to the moment it fires.
+``lop mobile logs`` already points a reader at. Its EXISTENCE carries one signal:
+a clean exit (``disarm``) cancels the timer and REMOVES the file, so a header-only
+file that survives means the process died without disarming (a SIGKILL, an OOM
+kill, or this module's ``exit=True`` firing), and a file carrying
+:data:`FIRED_MARKER` means this bound actually fired. That is the shape
+``tests/e2e/watchdog.py`` uses, and for the same reason: ``faulthandler`` writes
+with a raw descriptor from a C thread, so the header cannot be deferred to the
+moment it fires.
+
+WHY AN ``unlink`` HERE IS ALLOWED, AND WHERE THE ARGUMENT LIVES.
+``tests/unit/session/test_no_session_deletion.py`` fails the build on any
+``<path>.unlink`` under ``local_operator/`` outside ``session/cleanup.py``, because
+twice a "safe" reaper deleted a real session's files. Its docstring states the
+route for a call site that must exist: *"Adding a call site therefore means adding
+a row HERE with a reason a reviewer can check — the point is not that the list is
+short, it is that every entry was argued for."* That is what this module does,
+twice (``arm``'s tidy-up of a header it just failed to arm, and ``disarm``'s
+removal of a clean runtime's file), and the reason in each row is the checkable
+part: :func:`dump_path` composes the path from ``paths.log_dir()`` and an int pid
+ALONE — never from a session id, a session directory, or any other caller input —
+so no call here can name a session file. Leaving the file behind instead (its
+content, not its existence, carrying the outcome) was implemented first and
+rejected on review: it accumulates one file per runtime process with nothing to
+prune them, and the existence signal is worth keeping.
 
 NO CREDENTIAL CAN LAND IN IT. ``faulthandler`` prints frames — file, line and
 function name — and never local variables, which is the property this file
@@ -178,31 +223,77 @@ DUMP_PREFIX = "runtime-stall"
 FIRED_MARKER = "Timeout ("
 
 #: The header written when the timer is ARMED. It reads like a claim but is not
-#: one; :func:`fired_dumps` is what distinguishes the two.
+#: one; :func:`fired_pids` is what distinguishes the two.
 ARM_MARKER = "[stall watchdog] "
 
-#: The re-arm cadence the CALLERS are expected to keep, for the benefit of a
-#: reader of this module only — nothing here enforces it. It is the serving
-#: plane's ``HEARTBEAT_INTERVAL_S`` (15 s) and the workload loop's matching
-#: tick, both of which sit an order of magnitude inside the bound.
-BEAT_INTERVAL_HINT_S = 15.0
+#: The planes whose progress this bound tracks. Named rather than spelled at
+#: each tick site: the two names are the whole vocabulary, and an unknown one is
+#: a programmer error rather than a third plane (see :func:`beat`).
+WORKLOAD = "workload"
+SERVING = "serving"
+PLANES = (WORKLOAD, SERVING)
+
+#: The floor on the OPERATOR-facing bound, in seconds. A bound tighter than three
+#: heartbeat intervals can fire on a HEALTHY runtime: both planes tick every
+#: ``HEARTBEAT_INTERVAL_S`` (15 s), so a bound of one tick leaves no room for a
+#: single late tick on a loaded host, and the first revision shipped without this
+#: guard — review measured ``LOP_RUNTIME_STALL_SECONDS=4`` dumping and killing a
+#: healthy runtime at 4.1 s. Three ticks is the smallest multiple that absorbs one
+#: late tick, and it lands exactly on ``types.HEARTBEAT_TIMEOUT_S`` (45 s), the
+#: threshold this fleet already uses to call a heartbeat STALE — so the floor is
+#: the fleet's own existing answer rather than a new number to argue about.
+#:
+#: It applies to the ENVIRONMENT and not to :func:`arm`, deliberately: ``arm`` is
+#: called by the entry point with whatever the environment produced, and by tests
+#: with a one-second bound (see ``SHORT_BOUND_S`` there) where waiting out the
+#: floor would be 45x slower for no extra coverage. The operator-facing knob is
+#: the one that must not accept a value that kills healthy runtimes.
+MIN_BOUND_FLOOR_TICKS = 3
+
+
+def min_bound_seconds() -> float:
+    """The floor above, resolved lazily so this module stays import-light."""
+    from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S
+
+    return MIN_BOUND_FLOOR_TICKS * HEARTBEAT_INTERVAL_S
+
+
+#: The shortest re-arm, so an already-overdue deadline is not passed to
+#: ``faulthandler`` as zero or a negative number. A fiftieth of a second is
+#: short enough that "overdue" and "fires now" are the same thing to a reader.
+MIN_REARM_S = 0.05
 
 
 class _Armed:
-    """One process's armed timer: the open file and the bound it was armed for.
+    """One process's armed timer: its file, its bound, and each plane's stamp.
 
     The handle is held OPEN for the process's life, and that is a requirement
     rather than tidiness: ``faulthandler`` writes with the bare descriptor, so
     closing the object would leave the timer firing at a closed fd.
     """
 
-    __slots__ = ("path", "handle", "seconds", "pid")
+    __slots__ = ("path", "handle", "seconds", "pid", "last_beat")
 
     def __init__(self, path: Path, handle: IO[str], seconds: float, pid: int) -> None:
         self.path = path
         self.handle = handle
         self.seconds = seconds
         self.pid = pid
+        #: Each plane's last sign of life, in ``time.monotonic`` seconds. Seeded to
+        #: the ARM time rather than left empty, so a plane that has simply not
+        #: ticked yet (the 15 s between boot and its first tick) is measured from
+        #: the arm rather than treated as infinitely silent — which would fire the
+        #: bound on every healthy boot.
+        self.last_beat: dict[str, float] = {plane: time.monotonic() for plane in PLANES}
+
+    def deadline(self) -> float:
+        """The earliest moment any plane's silence reaches the bound.
+
+        THE EARLIEST, not the latest, and that is the whole of A2's fix: a healthy
+        plane's tick must shorten the timer toward a silent plane's deadline, never
+        push it out. See the module docstring.
+        """
+        return min(stamp for stamp in self.last_beat.values()) + self.seconds
 
 
 #: The process's armed timer, or ``None``. Module state rather than an object a
@@ -212,12 +303,11 @@ class _Armed:
 #: :func:`is_armed` is what pins that no library path armed anything.
 _ARMED: _Armed | None = None
 
-#: Serializes arm/beat/disarm. ``beat`` is called from two threads, and while
-#: ``faulthandler`` tolerates a re-arm over a live timer (measured: no
-#: exception, the new bound replaces the old), a ``cancel`` from one thread
-#: interleaved with an ``arm`` from the other could leave the timer disarmed —
-#: i.e. silently remove this runtime's own bound. The lock is held for two C
-#: calls, once per beat.
+#: Serializes arm/beat/disarm. ``beat`` is called from two threads — the serving
+#: plane's heartbeat and the workload's tick — and each beat both stamps its own
+#: plane and re-arms the ONE process-global C timer from the earliest deadline, so
+#: the read-modify-write has to be atomic: two ticks interleaved could otherwise
+#: leave the timer armed for the longer of the two.
 _LOCK = threading.Lock()
 
 
@@ -225,7 +315,8 @@ def bound_seconds() -> float | None:
     """The configured bound, or ``None`` when the watchdog is switched off.
 
     Unreadable, non-numeric and out-of-range values fall back to
-    :data:`DEFAULT_STALL_S` rather than raising: this runs in the runtime's
+    :data:`DEFAULT_STALL_S` rather than raising, and a value below
+    :func:`min_bound_seconds` is raised TO that floor (see the constant): this runs in the runtime's
     entry point, where an exception would take the session down over a
     diagnostic, and the honest failure of a typo is the default bound rather
     than no bound at all. An explicit ``0``/``off`` is the one spelling that
@@ -255,6 +346,23 @@ def bound_seconds() -> float | None:
             "%s=%r is beyond the C timer's range; using %.0fs", ENV_SECONDS, raw, DEFAULT_STALL_S
         )
         return DEFAULT_STALL_S
+    floor = min_bound_seconds()
+    if seconds < floor:
+        # THE FLOOR, and clamping rather than honouring it: a bound under three
+        # heartbeat intervals fires on runtimes that are not stalled at all —
+        # review measured this knob at 4 s killing a HEALTHY runtime at 4.1 s —
+        # so a value below it is a misconfiguration to correct, not a preference
+        # to respect. Said out loud rather than silently, because an operator who
+        # set 4 s and got 45 s needs to know which one they are running.
+        logger.warning(
+            "%s=%.3fs is below the %.0fs floor (%d heartbeat intervals); using %.0fs",
+            ENV_SECONDS,
+            seconds,
+            floor,
+            MIN_BOUND_FLOOR_TICKS,
+            floor,
+        )
+        return floor
     return seconds
 
 
@@ -317,6 +425,9 @@ def arm(
             faulthandler.dump_traceback_later(bound, file=handle, exit=True)
         except (OSError, ValueError, OverflowError, RuntimeError):
             logger.warning("stall watchdog could not arm; no dump will be written", exc_info=True)
+            # The header this call just wrote would otherwise read as evidence of
+            # an armed runtime, so it goes — and only ever this call's own file.
+            # Allow-listed for the reason spelled out in the module docstring.
             try:
                 handle.close()
                 target.unlink()
@@ -327,37 +438,54 @@ def arm(
         return True
 
 
-def beat(*args: object, **kwargs: object) -> None:
-    """Report progress: restart the bound.
+def beat(plane: str) -> None:
+    """Report ONE plane's progress, and re-arm for the earliest deadline.
 
-    Called by the runtime's own loops as they run — the serving plane's
-    heartbeat and the workload loop's matching tick. A no-op when nothing is
-    armed, which is what keeps this safe to call from an in-process host (a TUI
-    or a test) that never armed the process timer.
+    ``plane`` is :data:`WORKLOAD` or :data:`SERVING` — the two loops whose
+    progress this bound tracks. A stamp here means THAT LOOP RAN, and nothing
+    about the work it was running: see the module docstring for what the bound
+    does and does not measure.
 
-    The signature takes and ignores arguments so a caller can pass whatever it
-    has to hand (a loop, a handle) without this module learning about it.
+    NO ``cancel`` BEFORE THE RE-ARM, deliberately. ``faulthandler`` replaces a live
+    timer when ``dump_traceback_later`` is called again (measured: no exception,
+    the new bound wins), so the cancel was two extra C calls that also opened a
+    window in which the process had NO bound — a failed re-arm after a successful
+    cancel would leave a runtime unbounded while the old comment claimed the
+    worst case was only an early expiry. One call, one atomic replace.
+
+    A no-op when nothing is armed, which is what keeps this safe to call from an
+    in-process host (a TUI or a test) that never armed the process timer.
     """
+    if plane not in PLANES:
+        # A typo must not conjure a third plane that no one ever stamps: that
+        # plane would look permanently silent and fire the bound on a healthy
+        # runtime. Logged and ignored instead.
+        logger.warning("stall watchdog: unknown plane %r; progress not recorded", plane)
+        return
     with _LOCK:
         armed = _ARMED
         if armed is None:
             return
+        now = time.monotonic()
+        armed.last_beat[plane] = now
         try:
-            faulthandler.cancel_dump_traceback_later()
-            faulthandler.dump_traceback_later(armed.seconds, file=armed.handle, exit=True)
+            faulthandler.dump_traceback_later(
+                max(MIN_REARM_S, armed.deadline() - now), file=armed.handle, exit=True
+            )
         except (OSError, ValueError, RuntimeError):
             # A beat that cannot re-arm must not take the loop down with it: the
-            # timer is still armed from the previous beat, so the worst case is
-            # a bound that expires sooner than intended.
+            # timer is still armed — from the previous beat, or from ``arm`` — so
+            # the worst case is a bound that expires sooner than intended.
             logger.warning("stall watchdog could not re-arm its timer", exc_info=True)
 
 
 def disarm() -> None:
     """Cancel the bound and remove the file: this process left on its own terms.
 
-    Removing the file is what makes its existence mean something — see the
-    module docstring. Unconditionally safe to call, and called on every clean
-    exit path.
+    Removing the file is what makes its existence mean something — see "THE FILE
+    IS THE EVIDENCE" in the module docstring, including why this ``unlink`` is
+    allow-listed rather than replaced by an in-place rewrite. Unconditionally safe
+    to call, and called on every clean exit path.
     """
     global _ARMED
     with _LOCK:
@@ -406,26 +534,41 @@ def announce() -> None:
         )
 
 
-def fired_dumps(directory: Path | None = None) -> list[Path]:
-    """Every dump this store holds that a bound actually fired into.
+def fired_pids(directory: Path | None = None) -> set[int]:
+    """The pids in this store whose bound actually FIRED.
+
+    The reader for the evidence this module writes, and it has a real consumer
+    rather than being a helper kept warm by its own tests: ``lop sessions --json``
+    carries the path per row (``info.collect.session_rows``), which is the surface
+    an operator or an agent lists a fleet on after something died. The path itself
+    is :func:`dump_path`, so a reader holding a pid needs nothing else.
 
     ``FIRED_MARKER`` at the start of a line is the test, exactly as
-    ``tests/e2e/watchdog.py`` defines it: a file whose header exists but whose
-    timer never fired is a SIGKILL's leavings, not a freeze report.
+    ``tests/e2e/watchdog.py`` defines it, because surviving the clean exit is not
+    enough to call a file a freeze report: a runtime killed without disarming
+    leaves a header-only file, and that is a hard death rather than this bound
+    (see "THE FILE IS THE EVIDENCE" in the module docstring).
+
+    ONE scan for a whole listing: the marker has to be read out of each candidate,
+    so a per-row call would re-glob and re-read the same directory once per
+    session on a surface that renders every row.
     """
     from local_operator.paths import log_dir
 
     base = directory if directory is not None else log_dir()
-    found: list[Path] = []
+    fired: set[int] = set()
     try:
         candidates = sorted(base.glob(f"{DUMP_PREFIX}-*.log"))
     except OSError:
-        return found
+        return fired
     for path in candidates:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if any(line.startswith(FIRED_MARKER) for line in text.splitlines()):
-            found.append(path)
-    return found
+        if not any(line.startswith(FIRED_MARKER) for line in text.splitlines()):
+            continue
+        suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
+        if suffix.isdigit():
+            fired.add(int(suffix))
+    return fired

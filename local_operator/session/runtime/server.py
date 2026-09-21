@@ -2786,13 +2786,16 @@ class RuntimeServer:
             lag_s, cpu_since_beat_s = moment[0] - previous_wall, moment[1] - previous_cpu
             previous = moment
             # PROGRESS, REPORTED TO THE STALL BOUND. This loop is the serving
-            # plane's own sign of life, and it is one of the two beats that
-            # reset the process-wide C timer (the other is the workload's own
-            # tick, ``process._beat_stall_watchdog``). Deliberately before the
-            # record write below rather than after it: the bound must be reset
-            # by THIS LOOP HAVING RUN, not by the write having succeeded — a
-            # failed write is self-healing and must not look like a stall.
-            stall_watchdog.beat()
+            # plane's own sign of life, and it carries ONE stamp — the workload's
+            # is its own (``process._beat_stall_watchdog``). The timer is
+            # re-armed for the earliest of the two deadlines, so a tick here
+            # cannot mask a parked workload loop; that is the whole point of
+            # tracking them apart (see ``stall_watchdog``). Deliberately before
+            # the record write below rather than after it: the bound must be
+            # restarted by THIS LOOP HAVING RUN, not by the write having
+            # succeeded — a failed write is self-healing and must not look like a
+            # stall.
+            stall_watchdog.beat(stall_watchdog.SERVING)
             try:
                 # The FLOOR for the record's ``busy`` bit, not its fix: the
                 # handle republishes at every turn boundary (the session's

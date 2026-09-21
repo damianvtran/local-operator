@@ -10,26 +10,20 @@ asyncio timer needs the loop), and nothing named the line. So the mechanism
 under test is ``faulthandler.dump_traceback_later`` — armed in a C thread — and
 a green test that never occupies the loop would prove nothing about it.
 
-THE REPRODUCTION IS THE MEASURED TRIGGER, not an invented one.
-``test_a_resume_sized_replay_scan_is_dumped_and_the_process_leaves`` builds a
-fixture session store (a manager's child transcripts, synthesized at realistic
-sizes in ``tmp_path`` — never the operator's live files, which are 32.6 MB across
-22 children for the session that froze twice) and drives the replay that
-``hub resume`` performs: the real reader a resumed child is built on
-(``Transcript.__init__`` — ``harness/subagent.py`` says that reader IS the whole
-resume mechanism) and then the credential-shape pass over its bytes, which the
-ops session measured at 49.66 s of CPU over those 22 children. It asserts WHAT
-WAS WRITTEN (the file, the innermost frame naming the scan) and WHERE THE
-PROCESS WENT (rc 1, and a sentinel the finished replay would have written that
-must NOT exist) — never how many milliseconds anything took.
-
-A SECOND, CHEAPER INSTRUMENT STAYS, and it is a different assertion rather than
-a duplicate: ``test_a_stalled_loop_is_dumped_and_the_process_leaves`` parks the
-loop in a deliberate GIL-holding C call (``ctypes.PyDLL`` does not release the
-GIL; ``CDLL`` does), which is the *mechanism* of the freeze — every Python thread
-of the process stops — at a fraction of the bytes. The replay test can only fail
-if the scan is slow; that one fails if the C timer stops surviving a starved
-interpreter, which is the property the whole design rests on.
+THE REPRODUCTION PARKS THE LOOP ON PURPOSE, and it claims NOTHING about why a
+real runtime parks. An earlier revision shipped a fixture that replayed a
+manager's child transcripts through the credential-shape pass, on the theory that
+``hub resume`` scrubs them on the way back in; review measured that a resume over
+a 20 MB credential-shaped store costs 1.27 s of boot against 0.97 s for a 1-row
+store, i.e. **resume does not scrub**, and six real runtime passes that burned up
+to 60.4 s of turn CPU while ``beat_lag_s`` stayed at 15.00 s never came near the
+bound. So the fixture is gone rather than dressed up: what the five frozen
+sessions proved is that a loop was parked in a C scan for hours, and what this
+file tests is the instrument and the policy for that — a deliberately parked loop
+(a GIL-holding C call, and separately the reviewer's busy-but-yielding
+``re.search`` loop with a HEALTHY serving plane) — with the trigger left to the
+measurement that will name it. No claim in this file, or in the PR, depends on a
+caller being identified.
 
 AND A SPY on the C timer (``_FakeFaulthandler``) covers the structure a real
 fired timer cannot be asked about in-process: that every beat RE-ARMS the bound,
@@ -55,7 +49,7 @@ REAL spawned runtime (which arms, and which disarms on a clean stop) — see
 from __future__ import annotations
 
 import ast
-import json
+import inspect
 import os
 import subprocess
 import sys
@@ -81,6 +75,14 @@ LOCAL_SENTINEL = "sentinel-that-must-never-appear-in-a-dump"
 #: the C timer's own setup cannot race it on a loaded host, short enough that a
 #: fired bound is a test that finishes in seconds.
 CHILD_BOUND_S = 2
+
+#: The bound the single-stall children run under: one second, which is far below
+#: anything an operator may set (the environment floors at ``MIN_BOUND_S``, three
+#: heartbeat intervals) and is exactly why these children pass the bound on
+#: ``argv`` and arm with ``arm(seconds=...)`` instead of the environment: the
+#: mechanism is bound-agnostic, and making every run wait 45 s for the floor would
+#: buy no coverage at all.
+SHORT_BOUND_S = 1
 
 
 @pytest.fixture(autouse=True)
@@ -183,7 +185,7 @@ from local_operator.session.runtime import stall_watchdog
 # prints frames and never variables, so this must not reach the file.
 secret = "{LOCAL_SENTINEL}"
 resumed = pathlib.Path(sys.argv[1])
-assert stall_watchdog.arm(), "the child could not arm the bound"
+assert stall_watchdog.arm(seconds=float(sys.argv[2])), "the child could not arm the bound"
 print(f"armed:{{os.getpid()}}", flush=True)
 
 
@@ -219,8 +221,7 @@ def test_a_stalled_loop_is_dumped_and_the_process_leaves(tmp_path: Path) -> None
     result = _run_script(
         _PARKED_CHILD,
         tmp_path,
-        args=(str(resumed),),
-        env_extra={stall_watchdog.ENV_SECONDS: str(CHILD_BOUND_S)},
+        args=(str(resumed), str(CHILD_BOUND_S)),
     )
 
     assert result.returncode == 1, f"the bound did not fire: {result.stdout!r} {result.stderr!r}"
@@ -249,159 +250,275 @@ from local_operator.session.runtime import stall_watchdog
 # A file the reader can look for: nothing here counts beats, because the fact
 # under test is the bound NOT firing, not how many beats landed.
 beats = pathlib.Path(sys.argv[1])
-assert stall_watchdog.arm(), "the child could not arm the bound"
+assert stall_watchdog.arm(seconds=float(sys.argv[2])), "the child could not arm the bound"
 for index in range(30):
-    stall_watchdog.beat()
+    # BOTH planes, because each is tracked separately now: one silent plane is
+    # what the bound exists to catch, so a healthy runtime reports on both.
+    stall_watchdog.beat(stall_watchdog.WORKLOAD)
+    stall_watchdog.beat(stall_watchdog.SERVING)
     beats.write_text(str(index), encoding="utf-8")
     time.sleep(0.2)
 print("survived", flush=True)
 stall_watchdog.disarm()
 """
 
-#: Bytes per synthesized child transcript. The real children of the session that
-#: froze twice are 0.6-4.5 MB each (32,621,531 bytes across 22 of them), so these
-#: are the SMALL end of the real range and a test-sized slice of the real cost.
-REPLAY_CHILD_BYTES = 500_000
-
-#: How many children the fixture store carries. Three keeps the scan's total cost
-#: several times the bound below on this host while the fixture stays under 2 MB.
-REPLAY_CHILDREN = 3
-
-#: The bound the replay child runs under. One second against a scan the fixture
-#: costs ~3.5 s of CPU (measured on this host: 2.30 us/byte with 6270 hits in a
-#: 0.86 MB child, i.e. the per-hit full-text scan of that child alone is ~5.4 G
-#: byte-scans). The margin is what makes this an assertion about the BOUND rather
-#: than a stopwatch: a scan of this size cannot outrun it, however fast the box.
-REPLAY_BOUND_S = 1
-
-#: A row body carrying a credential SHAPE, because the shape pass early-returns on
-#: text with no anchor (``redaction_shapes.has_shape_anchor``) and a fixture of
-#: plain prose would cost nothing to scan — i.e. it would prove nothing. The
-#: non-ASCII rune is there because the ops session's own samples landed in the
-#: matcher's UCS-2 path (``sre_ucs2_*``), which is chosen by the string being
-#: searched, and a fixture that cannot reach it is a fixture that tests less.
-_REPLAY_CHUNK = (
-    "ran the deploy against the staging cluster\n"
-    "MONGO_DSN=mongodb+srv://agent_runtime_model_worker:[redacted]@db.example/app\n"
-    "AWS_SECRET_ACCESS_KEY=[redacted]    Authorization: Bearer [redacted]\n"
-    "a line with non-ascii \u2603 so the scanner has a wide string to walk\n"
-)
-
-
-def _write_child_transcripts(root: Path) -> int:
-    """A manager's child transcripts, at realistic sizes, inside ``tmp_path``.
-
-    Written by the TEST rather than the child so the fixture is inspectable when
-    a run fails, and so the child's own timeline is arming -> replay -> (never)
-    finished. Nothing here reads the operator's live store: the measured run was
-    against 32.6 MB of real transcripts, and reading those at test time is how an
-    agent ends up holding a 32 MB string it did not ask for.
-    """
-    total = 0
-    for index in range(REPLAY_CHILDREN):
-        directory = root / f"child-{index:02d}"
-        directory.mkdir(parents=True, exist_ok=True)
-        rows: list[str] = []
-        written = 0
-        while written < REPLAY_CHILD_BYTES:
-            body = _REPLAY_CHUNK * 2
-            rows.append(
-                json.dumps(
-                    {
-                        "id": f"e{len(rows)}",
-                        "ts": 1,
-                        "type": "message",
-                        "payload": {
-                            "kind": "message",
-                            "role": "tool",
-                            "content": [{"type": "text", "text": body}],
-                        },
-                    }
-                )
-            )
-            written += len(body)
-        (directory / "transcript.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
-        total += written
-    return total
-
-
-_REPLAY_CHILD = r"""
+_TWO_PLANE_CHILD = r"""
 import os
 import pathlib
+import re
 import sys
+import threading
+import time
 
-from local_operator.redaction_shapes import scrub_shapes
 from local_operator.session.runtime import stall_watchdog
-from local_operator.session.transcript import Transcript
 
-store = pathlib.Path(sys.argv[1])
-finished = pathlib.Path(sys.argv[2])
-assert stall_watchdog.arm(), "the child could not arm the bound"
+finished = pathlib.Path(sys.argv[1])
+assert stall_watchdog.arm(seconds=float(sys.argv[2])), "the child could not arm the bound"
 print(f"armed:{os.getpid()}", flush=True)
 
-# THE REPLAY ``hub resume`` PERFORMS: the stopped child's own directory read back
-# by the real reader (``harness/subagent.py``: a resumed child is built on the
-# stopped child's directory, and that reader is the whole of the mechanism), then
-# the credential-shape pass over those bytes.
-for child in sorted(store.glob("child-*")):
-    replay = Transcript(child)
-    scrub_shapes("\n".join(entry.to_json() for entry in replay.entries()))
 
-finished.write_text("the replay finished", encoding="utf-8")
+def serving_plane() -> None:
+    # Healthy, and it SAYS so: the test asserts these stamps landed, so a green
+    # run cannot be explained away by the serving plane having been stuck too.
+    count = 0
+    while True:
+        stall_watchdog.beat(stall_watchdog.SERVING)
+        count += 1
+        if count % 5 == 0:
+            print(f"serving-stamp:{count}", flush=True)
+        time.sleep(0.2)
+
+
+threading.Thread(target=serving_plane, daemon=True).start()
+
+# The workload plane: busy in the matcher, and it never reports its progress.
+subject = "credential-shaped text \u2603 x" * 20000
+pattern = re.compile(r"(SECRET|DSN|Bearer)\s*=\s*\S+")
+while True:
+    pattern.search(subject)
+
+finished.write_text("the busy plane returned", encoding="utf-8")
 """
 
 
-def test_a_resume_sized_replay_scan_is_dumped_and_the_process_leaves(tmp_path: Path) -> None:
-    """THE MEASURED TRIGGER: a resume-sized replay scan, named and bounded.
+def test_a_parked_workload_plane_trips_the_bound_while_the_serving_plane_is_healthy(
+    tmp_path: Path,
+) -> None:
+    """THE PRODUCT CASE, and the one the pre-fix design could not fire on.
 
-    Session ``e837562a4c28`` froze twice on 2026-09-20, both times ~30 s after
-    start and both times immediately after ``hub resume`` of a subagent, at ~0.9
-    core with samples inside the shape pass's matcher and the transcript taking
-    zero writes. Nothing could say WHERE: the process had no instrument that
-    survives a starved interpreter, and the one that would have
-    (``LOP_RUNTIME_DEBUG_STACKS``) was not set on the launcher.
+    A ``daemon``/``exec`` runtime serves on its own thread, so the plane that
+    stalls is usually NOT the whole process: on 2026-09-20 every sample sat in the
+    workload loop's scan while the serving plane's heartbeat had its own thread to
+    run on. A bound that any healthy plane's tick can re-arm therefore never fires
+    on the measured failure — and is worse than no bound, because it makes the
+    fleet look protected.
 
-    This is that reproduction at test size, and what it asserts is the point of
-    the PR: the dump NAMES THE LINE the loop was parked on — the credential-shape
-    scan, reached through the real reader a resumed child is built on — and the
-    process LEAVES instead of sitting there for hours.
+    RED BEFORE THE FIX, measured on the committed head (``15ec2c63``) with this
+    exact rig at ``LOP_RUNTIME_STALL_SECONDS=1``: the process ran 8 s (8x the
+    bound) and was killed by an external timeout, with ZERO fired markers and a
+    header-only dump. Green after: the timer is re-armed by whichever plane ticks
+    next, for the EARLIEST deadline, so the serving plane's own beats shorten it
+    toward the silent plane's deadline instead of pushing it out.
 
-    The innermost frame is a Python caller of a C scan, and that is not a
-    shortcoming: ``faulthandler`` prints Python frames, so a C-level ``in`` /
-    ``search`` appears as the line that called it — which is still the answer to
-    "which line?". The frame this names (``_credential_fragments_survive``'s
-    ``if value in text``) is a FULL-TEXT scan per hit, which is why 0.86 MB of
-    replayed text with 6270 hits costs ~2 s rather than microseconds; that cost
-    model, and its bound, are the next PR's subject rather than this one's.
+    The serving plane's own stamps are asserted, so this cannot pass by having
+    both planes frozen — which the single-threaded tests above already cover and
+    which would prove nothing about masking.
     """
-    store = tmp_path / "store"
-    written = _write_child_transcripts(store)
-    assert written >= 1_000_000, f"the fixture shrank to {written} bytes; it would prove nothing"
     finished = tmp_path / "finished.txt"
-
     result = _run_script(
-        _REPLAY_CHILD,
+        _TWO_PLANE_CHILD,
         tmp_path,
-        args=(str(store), str(finished)),
-        env_extra={stall_watchdog.ENV_SECONDS: str(REPLAY_BOUND_S)},
+        args=(str(finished), str(SHORT_BOUND_S)),
     )
 
-    assert (
-        result.returncode == 1
-    ), f"the replay scan finished inside the bound: {result.stdout!r} {result.stderr!r}"
-    assert (
-        "armed:" in result.stdout
-    ), f"the child never armed: stdout={result.stdout!r} stderr={result.stderr!r}"
-    assert not finished.exists(), "the replay completed, so the bound fired too late to matter"
+    assert result.returncode == 1, (
+        f"the workload plane parked and the bound never fired: {result.stdout!r} "
+        f"{result.stderr!r}"
+    )
+    assert not finished.exists(), "the busy workload plane returned; the bound fired too late"
+    assert "serving-stamp:" in result.stdout, (
+        "the serving plane never reported, so this run says nothing about a healthy "
+        f"plane masking a silent one: {result.stdout!r} {result.stderr!r}"
+    )
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     dump = _dump_for(tmp_path, pid)
     assert dump.is_file(), f"no dump was written; logs: {sorted((tmp_path / 'logs').glob('*'))}"
     text = dump.read_text(encoding="utf-8")
-
     assert stall_watchdog.FIRED_MARKER in text, text
-    assert "redaction_shapes.py" in text, f"the dump does not name the scan: {text}"
-    assert "scrub_shapes" in text, f"the dump does not name the pass: {text}"
-    assert text.index(stall_watchdog.ARM_MARKER) < text.index(stall_watchdog.FIRED_MARKER)
+    assert "parked_child.py" in text, f"the dump does not name the parked plane: {text}"
+
+
+# -- the debug dump's default -------------------------------------------------
+
+
+def test_the_debug_dump_is_on_by_default_and_can_be_turned_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The DEFAULT is the behaviour, so it is pinned directly (A7).
+
+    This dump was opt-in until 2026-09-20, and that is why it changed: on every
+    one of the five runtimes found frozen that day the variable was NOT set, so
+    the one instrument that could have named the parked await was unavailable —
+    a diagnostic that must be predicted before the freeze it explains is one
+    nobody has when they need it. The opt-out survives for a harness that needs
+    SIGUSR1's default (fatal) disposition back, and it is pinned as a decision
+    rather than through a spawned child because the decision is one line and the
+    boot is not what is under test.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.delenv(process.DEBUG_STACKS_ENV, raising=False)
+    assert process.debug_stacks_enabled() is True
+
+    for spelling in ("0", "no", "false", "off", "FALSE", " off "):
+        monkeypatch.setenv(process.DEBUG_STACKS_ENV, spelling)
+        assert process.debug_stacks_enabled() is False, spelling
+
+    for other in ("1", "yes", "on", "true", ""):
+        monkeypatch.setenv(process.DEBUG_STACKS_ENV, other)
+        assert process.debug_stacks_enabled() is True, other
+
+
+def test_the_debug_dump_decision_is_wired_into_the_handler_installation() -> None:
+    """A decision nothing consults is not a default, it is a comment.
+
+    Asserted against ``amain``'s own source, and it also pins the shape the
+    cross-platform probe reads: the capability probe
+    (``debug_stacks is not None`` — SIGUSR1 is POSIX-only) must stay at the call
+    site, because the scanner that made the battery's two probe legs fail finds
+    its guard by NAME. Moving that probe into the helper would leave an
+    unguarded POSIX ``add_signal_handler`` in the tree with a green test here.
+    """
+    from local_operator.session.runtime import process
+
+    source = inspect.getsource(process.amain)
+    assert "debug_stacks_enabled()" in source, "the default is not consulted"
+    assert (
+        "debug_stacks is not None" in source
+    ), "the POSIX capability probe left the call site; the xplat scan reads it there"
+    assert "not procstate.is_windows()" in source
+
+
+#: THE PRODUCT'S TWO PLANES, not a model of them: the real ``RuntimeServer``
+#: (``start()`` gives the serving plane its own thread and loop, and its heartbeat
+#: loop is what stamps :data:`stall_watchdog.SERVING`) plus the real workload tick
+#: (``process._beat_stall_watchdog``, stamping ``WORKLOAD``), with the workload loop
+#: then parked in a chain of SHORT C calls — the measured shape, in which the GIL is
+#: released every switch interval so the serving plane's thread keeps running.
+#:
+#: The two cadences are patched to a fraction of a second so the run is seconds
+#: rather than minutes. That is a knob, not the rule under test: what is under test
+#: is that ONE silent plane trips the bound while the other reports normally, and
+#: the cadence only decides how long a test has to wait to see it.
+_REAL_TWO_PLANE_CHILD = r"""
+import asyncio
+import os
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, sys.argv[3])  # the checkout root, for the session factory
+
+from local_operator.harness.types import StreamEndEvent
+from local_operator.session.runtime import process, server, stall_watchdog
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import make_session
+
+
+def _stream(request, signal):
+    async def gen():
+        yield StreamEndEvent(stop_reason="stop")
+
+    return gen()
+
+
+async def main() -> None:
+    root = pathlib.Path(sys.argv[2])
+    process.HEARTBEAT_INTERVAL_S = 0.3
+    server.HEARTBEAT_INTERVAL_S = 0.3
+
+    session = make_session(root, _stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    assert await runtime.wait_until_published(), "the boot prologue never published"
+    assert stall_watchdog.arm(seconds=float(sys.argv[1])), "the child could not arm the bound"
+    print(f"armed:{os.getpid()}", flush=True)
+    print(f"record:{root}/run/mobile/{os.getpid()}.json", flush=True)
+
+    stop = asyncio.Event()
+    asyncio.create_task(process._beat_stall_watchdog(stop))
+    # Both planes now run on their own loops: the serving plane on the runtime's
+    # thread, this ticker on the workload loop.
+    await asyncio.sleep(2.0)
+    print("both-planes-ran", flush=True)
+
+    subject = "credential-shaped text \u2603 x" * 20000
+    pattern = re.compile(r"(SECRET|DSN|Bearer)\s*=\s*\S+")
+    while True:
+        pattern.search(subject)
+
+
+asyncio.run(main())
+"""
+
+
+def test_the_bound_fires_on_the_real_runtime_while_its_serving_plane_stays_healthy(
+    tmp_path: Path,
+) -> None:
+    """Q2(c): the product's own two planes, one parked, and the bound fires.
+
+    This is the case the first revision of this change could not fire on, and it
+    is the reason that revision was wrong: a ``daemon``/``exec`` runtime serves on
+    its own thread, so the plane that stalls is usually NOT the whole process. A
+    bound any healthy plane can re-arm therefore never fires on the failure this
+    PR exists for — worse than no bound, because it makes the fleet look
+    protected. Review measured exactly that on the committed head (8x the bound,
+    zero fired markers), and this asserts the fix on the REAL plumbing rather than
+    on a rig: the serving plane is ``RuntimeServer.start()``'s own thread and loop,
+    and the silent one is ``process._beat_stall_watchdog`` — the runtime's own
+    ticker — after it has demonstrably run (``workload-tick-ran``) and then been
+    parked by a synchronous scan.
+
+    RED BEFORE THE FIX, structurally: with one shared last-beat the serving plane's
+    heartbeat re-armed the full bound every 15 s, so this child never left and the
+    run had to be killed externally.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    result = _run_script(
+        _REAL_TWO_PLANE_CHILD,
+        config_dir,
+        args=(
+            str(CHILD_BOUND_S),
+            str(config_dir),
+            str(Path(__file__).resolve().parents[4]),
+        ),
+        timeout=120.0,
+    )
+
+    assert result.returncode == 1, (
+        f"the parked workload plane did not trip the bound while the serving plane "
+        f"was healthy: {result.stdout!r} {result.stderr!r}"
+    )
+    assert "both-planes-ran" in result.stdout, (
+        f"the workload ticker never ran, so this says nothing about a HEALTHY plane "
+        f"going silent: {result.stdout!r} {result.stderr!r}"
+    )
+    # THE SERVING PLANE REALLY WAS THERE: it published a record, and that record is
+    # the heartbeat this runtime's own surfaces read.
+    records = sorted((config_dir / "run" / "mobile").glob("*.json"))
+    assert records, f"the serving plane never published a record: {sorted(config_dir.rglob('*'))}"
+
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    dump = _dump_for(config_dir, pid)
+    text = dump.read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in text, text
+    assert "parked_child.py" in text, f"the dump does not name the parked workload loop: {text}"
+    # TWO PLANES IN THE DUMP: faulthandler writes every thread, so a run with the
+    # serving plane alive shows its thread as well as the parked one.
+    assert text.count("Thread 0x") >= 2, f"only one thread was live at the trip: {text}"
 
 
 def test_progress_defers_the_bound_in_a_real_process(tmp_path: Path) -> None:
@@ -416,23 +533,28 @@ def test_progress_defers_the_bound_in_a_real_process(tmp_path: Path) -> None:
     result = _run_script(
         script,
         tmp_path,
-        args=(str(tmp_path / "beats.txt"),),
-        env_extra={stall_watchdog.ENV_SECONDS: str(CHILD_BOUND_S)},
+        args=(str(tmp_path / "beats.txt"), str(CHILD_BOUND_S)),
     )
 
     assert result.returncode == 0, f"the bound fired through the beats: {result.stdout!r}"
     assert "survived" in result.stdout, result.stdout
+    # A CLEAN EXIT REMOVES ITS FILE, which is what makes a file left behind mean
+    # the process died without disarming (see "THE FILE IS THE EVIDENCE" in the
+    # module docstring, and the allow-list rows that argue the ``unlink``).
     assert not list(
         (tmp_path / "logs").glob(f"{stall_watchdog.DUMP_PREFIX}-*.log")
-    ), "a clean exit left its dump behind, so a file's existence no longer means the bound fired"
+    ), "a clean exit left its dump behind, so a file's existence stopped meaning anything"
+    assert stall_watchdog.fired_pids(tmp_path / "logs") == set()
 
 
 _LEAVING_CHILD = """
 import os
+import sys
 
 from local_operator.session.runtime import stall_watchdog
 
-assert stall_watchdog.arm(), "the child could not arm the bound"
+# argv[1] is the bound: this child writes no sentinel, so it is the first argument.
+assert stall_watchdog.arm(seconds=float(sys.argv[1])), "the child could not arm the bound"
 print(f"armed:{os.getpid()}", flush=True)
 # An exit that never runs the disarm: exactly what a SIGKILL or a crash leaves.
 os._exit(0)
@@ -449,21 +571,25 @@ def test_a_file_left_by_a_kill_is_not_reported_as_a_fired_bound(tmp_path: Path) 
     ``tests/e2e/watchdog.py`` names, and the reason this module defines its
     evidence as a marker rather than as a file.
     """
-    result = _run_script(_LEAVING_CHILD, tmp_path)
+    result = _run_script(_LEAVING_CHILD, tmp_path, args=(str(SHORT_BOUND_S),))
     assert result.returncode == 0, result.stderr
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     leftover = _dump_for(tmp_path, pid)
     assert leftover.is_file(), "the header-only file this test is about was never written"
     assert stall_watchdog.FIRED_MARKER not in leftover.read_text(encoding="utf-8")
     assert (
-        stall_watchdog.fired_dumps(tmp_path / "logs") == []
+        stall_watchdog.fired_pids(tmp_path / "logs") == set()
     ), "a header-only file was reported as a fired bound"
 
     fired = tmp_path / "logs" / f"{stall_watchdog.DUMP_PREFIX}-4242.log"
     fired.write_text(
         f"header\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n", encoding="utf-8"
     )
-    assert stall_watchdog.fired_dumps(tmp_path / "logs") == [fired]
+    assert stall_watchdog.fired_pids(tmp_path / "logs") == {4242}
+    # ...and the pid is read from the FILE NAME, so a reader holding a record's
+    # pid can ask directly instead of globbing for a path: that is the contract
+    # ``lop sessions --json``'s ``stall_dump`` relies on.
+    assert stall_watchdog.dump_path(4242, tmp_path / "logs") == fired
 
 
 # -- the bound's own arithmetic ---------------------------------------------
@@ -482,8 +608,19 @@ def test_the_bound_is_the_default_unless_the_environment_says_otherwise(
     monkeypatch.delenv(stall_watchdog.ENV_SECONDS, raising=False)
     assert stall_watchdog.bound_seconds() == stall_watchdog.DEFAULT_STALL_S
 
-    monkeypatch.setenv(stall_watchdog.ENV_SECONDS, "12.5")
-    assert stall_watchdog.bound_seconds() == 12.5
+    monkeypatch.setenv(stall_watchdog.ENV_SECONDS, "92.5")
+    assert stall_watchdog.bound_seconds() == 92.5
+
+    # THE FLOOR. A bound tighter than a few heartbeat intervals fires on runtimes
+    # that are not stalled at all: review measured this knob at 4 s dumping and
+    # killing a HEALTHY runtime at 4.1 s. Anything below three intervals is
+    # raised to the floor (and logged) rather than honoured, and the floor is the
+    # same 45 s this fleet already uses to call a heartbeat stale.
+    floor = stall_watchdog.min_bound_seconds()
+    assert floor == 45.0, f"the floor moved to {floor}s; the docstring argues 3 intervals"
+    for too_tight in ("4", "12.5", str(floor - 0.001)):
+        monkeypatch.setenv(stall_watchdog.ENV_SECONDS, too_tight)
+        assert stall_watchdog.bound_seconds() == floor, too_tight
 
     for spelling in ("0", "off", "no", "false", ""):
         monkeypatch.setenv(stall_watchdog.ENV_SECONDS, spelling)
@@ -544,38 +681,59 @@ def test_the_header_is_written_before_the_timer_is_armed(
     assert fake.armed[0][2].read_text(encoding="utf-8") == fake.text_at_arm
 
 
-def test_every_beat_re_arms_the_one_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The bound measures NO PROGRESS, so each beat restarts it.
+def test_each_plane_is_tracked_apart_and_a_silent_one_shrinks_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A healthy plane must NOT be able to keep a parked one alive.
 
-    Also pins the two properties a later edit is most likely to lose: arming is
-    idempotent (a second call does not leak a second handle or displace the
-    file), and a beat with nothing armed — the in-process host, a TUI, a test —
-    touches the C timer not at all.
+    This is A2's fix as a property of the timer arithmetic, and it is the
+    assertion the pre-fix design fails: with one shared "last beat", every tick
+    from any plane re-armed the full bound, so a serving plane that kept reporting
+    masked a workload plane that had stopped — which is precisely the measured
+    failure (the serving plane's heartbeat is on its own thread and stays healthy
+    while the workload loop is parked in a scan). Here only SERVING beats after
+    the arm, and every one of its ticks must SHORTEN the timer toward the silent
+    plane's deadline rather than push it out.
+
+    Also pins the two properties a later edit is most likely to lose: a beat never
+    cancels a live timer (the re-arm replaces it, and a cancel-then-fail leaves the
+    process with NO bound while the comment claims otherwise — A3), and arming is
+    idempotent so a second call cannot leak a handle or displace the file.
     """
     fake = _FakeFaulthandler()
     monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
 
-    stall_watchdog.beat()
+    stall_watchdog.beat(stall_watchdog.WORKLOAD)
     assert fake.cancels == 0 and fake.armed == [], "a beat armed a timer no one asked for"
 
-    assert stall_watchdog.arm(seconds=5.0, directory=tmp_path) is True
-    assert stall_watchdog.arm(seconds=9.0, directory=tmp_path) is True
-    assert len(fake.armed) == 1, "a second arm displaced the first instead of being a no-op"
+    assert stall_watchdog.arm(seconds=10.0, directory=tmp_path) is True
+    assert stall_watchdog.arm(seconds=99.0, directory=tmp_path) is True
+    assert [(seconds, exit_) for seconds, exit_, _ in fake.armed] == [
+        (10.0, True)
+    ], "a second arm displaced the first instead of being a no-op"
 
-    stall_watchdog.beat()
-    stall_watchdog.beat()
-    assert fake.cancels == 2
-    assert [seconds for seconds, _, _ in fake.armed] == [
-        5.0,
-        5.0,
-        5.0,
-    ], "a beat re-armed with a different bound than the one that was armed"
+    stall_watchdog.beat(stall_watchdog.SERVING)
+    stall_watchdog.beat(stall_watchdog.SERVING)
+    assert fake.cancels == 0, "a beat cancelled a live timer; the re-arm replaces it"
+    armed_for = [seconds for seconds, _, _ in fake.armed]
+    assert len(armed_for) == 3, armed_for
+    assert (
+        armed_for[1] < armed_for[0] and armed_for[2] < armed_for[0]
+    ), f"the healthy plane re-armed for the FULL bound, so it can mask a silent one: {armed_for}"
+    assert all(exit_ for _, exit_, _ in fake.armed), "the timer is not armed to exit"
+
+    # A typo is not a third plane: it is logged and ignored rather than creating a
+    # stamp that nothing would ever refresh (which would fire on a healthy runtime).
+    stall_watchdog.beat("servring")
+    assert [seconds for seconds, _, _ in fake.armed] == armed_for
     assert stall_watchdog.is_armed() is True
 
+    # A clean disarm removes the file: see the module docstring on why this
+    # ``unlink`` is allow-listed, and on what a surviving file then means.
     file = fake.armed[0][2]
     stall_watchdog.disarm()
     assert stall_watchdog.is_armed() is False
-    assert fake.cancels == 3
+    assert fake.cancels == 1, "disarm must cancel the bound it is giving up"
     assert not file.exists(), "a clean disarm left the dump behind, so it no longer means 'fired'"
 
 
@@ -661,7 +819,12 @@ def test_the_only_arm_site_is_the_runtime_entry_point() -> None:
         and isinstance(node.value, ast.Name)
         and node.value.id == "stall_watchdog"
     }
-    assert touched == {"beat"}, f"the serving plane reaches the watchdog for {touched}"
+    # The serving plane reports progress and NOTHING ELSE: no ``arm``, no
+    # ``disarm``. Its plane name travels with the beat, which is why the set is
+    # more than one symbol — the point of the pin is that the serving plane cannot
+    # create, move or cancel the process-global timer.
+    assert "beat" in touched, f"the serving plane never reports progress: {touched}"
+    assert touched <= {"beat", "SERVING"}, f"the serving plane reaches the watchdog for {touched}"
 
 
 @pytest.mark.slow
@@ -713,6 +876,20 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
     _seed(config_dir)
     _isolate(monkeypatch, config_dir)
 
+    # THE CHILD MUST BE THE CODE UNDER TEST, and leaving that to the spawn would
+    # not give it: `launch._spawn_interpreter()` deliberately returns the CURRENT
+    # INSTALL GENERATION's interpreter so a mixed-generation fleet converges, and
+    # on a machine with a global `lop` install that is a DIFFERENT BUILD with no
+    # `stall_watchdog` in it at all. Measured here: the operator's environment
+    # resolves to `~/.local/share/lop/generations/<stamp>/…/bin/python3`, while an
+    # isolated HOME (which is what the suite gives every test) falls through to
+    # `sys.executable`. A test that let that pointer choose would be asserting
+    # about whatever build the host happens to have installed — and could pass
+    # while exercising none of this diff. Pinned to this process's interpreter,
+    # and the assertion it exists for (the armed dump file) is what proves the
+    # child really ran this tree.
+    monkeypatch.setattr(launch_module, "_spawn_interpreter", lambda: sys.executable)
+
     previous_usr1 = signal_module.signal(signal_module.SIGUSR1, signal_module.SIG_IGN)
     child = None
     try:
@@ -741,7 +918,7 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         assert stall_watchdog.FIRED_MARKER not in dump.read_text(
             encoding="utf-8"
         ), "a healthy runtime reported a fired bound"
-        assert stall_watchdog.fired_dumps(config_dir / "logs") == []
+        assert stall_watchdog.fired_pids(config_dir / "logs") == set()
 
         # HANDLER READINESS, by the child's own hand: the SIGUSR1 task dump is
         # armed in the block directly after the SIGTERM handler, so seeing it is
@@ -759,9 +936,10 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
             os.kill(pid, signal_module.SIGUSR1)
             time.sleep(0.2)
 
-        # A CLEAN STOP LEAVES NO DUMP. Nothing is in flight, so the runtime leaves
-        # at once and ``main``'s finally disarms; a file that survived here would
-        # make existence stop meaning "the bound fired".
+        # A CLEAN STOP RECORDS ITSELF AND LEAVES THE FILE. Nothing is in flight,
+        # so the runtime leaves at once and ``main``'s finally disarm writes the
+        # clean-exit line over the header — the file stays, because existence was
+        # never what made it evidence.
         child.terminate()
         deadline = time.monotonic() + 60.0
         while child.poll() is None and time.monotonic() < deadline:
@@ -777,6 +955,7 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         assert (
             not dump.exists()
         ), "a clean exit left the dump behind, so a file no longer means the bound fired"
+        assert stall_watchdog.fired_pids(config_dir / "logs") == set()
     finally:
         signal_module.signal(signal_module.SIGUSR1, previous_usr1)
         if child is not None:

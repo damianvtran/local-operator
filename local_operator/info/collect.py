@@ -633,6 +633,13 @@ def session_rows(
     this order, so the expectation is updated in the same change.
     """
     info = collect_sessions(root, include_stored=include_stored, stored_limit=stored_limit)
+    # THE FLEET'S OWN STALL BOUND, and what it left behind. ONE scan of the log
+    # directory for the whole listing rather than one per row: the marker has to
+    # be read out of each candidate file, so a per-row call would re-glob and
+    # re-read the same directory once per session.
+    from local_operator.session.runtime import stall_watchdog
+
+    fired = stall_watchdog.fired_pids()
     return [
         {
             "state": line.state,
@@ -716,6 +723,14 @@ def session_rows(
             # not report them, exactly as ``subagents_queued``'s ``None`` does.
             "beat_lag_s": line.beat_lag_s,
             "cpu_since_beat_s": line.cpu_since_beat_s,
+            # WHERE THIS SESSION'S OWN STALL DUMP IS, when its bound fired: the
+            # path, or ``None`` for every row whose runtime never tripped it.
+            # Appended at the END for the same append-only reason as the keys
+            # above. It rides here because the dump is the ONE artifact a reader
+            # needs after a freeze and the runtime that wrote it is gone by
+            # definition — a listing is where they arrive (``stall_watchdog``
+            # owns the naming, so the path is never composed twice).
+            "stall_dump": str(stall_watchdog.dump_path(line.pid)) if line.pid in fired else None,
         }
         for line in info.lines
     ]

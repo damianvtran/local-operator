@@ -75,6 +75,7 @@ from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_OVERDUE_CAUSE,
     BUILD_DRAIN_PROGRESS_S,
+    HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
@@ -2992,18 +2993,36 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
         logger.warning("could not install the SIGHUP ignore", exc_info=True)
 
 
+#: The switch that turns the SIGUSR1 task-stack dump off. ON BY DEFAULT since
+#: 2026-09-20; ``0``/``off``/``no``/``false`` restores the previous disposition.
+DEBUG_STACKS_ENV = "LOP_RUNTIME_DEBUG_STACKS"
+
+#: The spellings that mean "off". A harness that needs SIGUSR1's default (fatal)
+#: disposition back, or an operator debugging the dump itself, has one.
+DEBUG_STACKS_OFF = ("0", "no", "false", "off")
+
+
+def debug_stacks_enabled() -> bool:
+    """Whether the SIGUSR1 task-stack dump is installed in this runtime.
+
+    A function rather than an inline ``os.environ`` test so the default and its
+    opt-out are testable without booting a runtime — the decision is the whole
+    behaviour, and pinning it through a spawned child would make a one-line rule
+    cost a process. The capability probe stays at the CALL SITE
+    (``getattr(signal, "SIGUSR1", None)``), where the platform question belongs.
+    """
+    return os.environ.get(DEBUG_STACKS_ENV, "1").strip().lower() not in DEBUG_STACKS_OFF
+
+
 async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
     """Report the WORKLOAD loop's progress to the process's stall bound.
 
-    One of the two beats that reset ``stall_watchdog``'s timer; the other is
-    the serving plane's heartbeat (``RuntimeServer._heartbeat_loop``). Both are
-    needed and neither implies the other: since ``RuntimeServer.start`` the
-    workload and the serving plane run on separate threads, so a beat from one
-    says nothing about the other. The C timer is process-global — there is
-    exactly one — so its honest reset is progress from ANY of the process's own
-    loops, and a workload loop parked in a synchronous C call while the serving
-    plane keeps reporting is a reading the record already carries (``busy``)
-    rather than a reason for this process to exit.
+    The WORKLOAD plane's tick, and one of the two the bound tracks; the other is
+    the serving plane's heartbeat (``RuntimeServer._heartbeat_loop``). They are
+    tracked SEPARATELY (``stall_watchdog`` keeps a stamp per plane and arms for the
+    earliest deadline), because the measured failure is exactly this plane going
+    silent while the serving plane stays healthy — and a bound the healthy plane
+    could keep re-arming would never fire on it.
 
     A plain sleep loop rather than a hook on the turn itself, and that is the
     property the bound needs: a turn that WAITS (on a model, a tool, a
@@ -3015,8 +3034,12 @@ async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
     bound, which is longer than the engage deadline (180 s) the spawner sizes.
     """
     while not stop.is_set():
-        await asyncio.sleep(stall_watchdog.BEAT_INTERVAL_HINT_S)
-        stall_watchdog.beat()
+        # The SAME cadence the serving plane's heartbeat keeps, and the same
+        # constant rather than a second copy of the number: the two ticks are
+        # interchangeable as "this plane is alive" signals, so a drift between
+        # them would be a drift in what the bound means.
+        await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+        stall_watchdog.beat(stall_watchdog.WORKLOAD)
 
 
 async def amain(operator_cap: bytes | None = None) -> int:
@@ -3353,13 +3376,7 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # ``stall_watchdog``'s C-thread dump covers; this one is for the state the
     # C-thread dump cannot show — a loop that is RUNNING but has its turn parked
     # on an await (round 2, U6).
-    debug_stacks_off = os.environ.get("LOP_RUNTIME_DEBUG_STACKS", "1").strip().lower() in (
-        "0",
-        "no",
-        "false",
-        "off",
-    )
-    if not procstate.is_windows() and not debug_stacks_off and debug_stacks is not None:
+    if not procstate.is_windows() and debug_stacks_enabled() and debug_stacks is not None:
 
         # SIGUSR1 prints every asyncio task's stack to the child log. The child
         # has no terminal and no attached debugger, and a wedged turn is exactly
@@ -3563,11 +3580,13 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     finally:
-        # A clean exit cancels the bound and REMOVES the dump file, which is what
-        # makes a file left behind mean "the bound fired" rather than "a runtime
-        # ran here once". Reached on every graceful leave — the drain's, the
-        # reaper's and a plain stop's — and never on the paths that exit from
-        # the C thread (that is the point of the file).
+        # A clean exit cancels the bound and writes its own outcome over the
+        # header — the file STAYS, because the evidence is its content (the
+        # fired marker), never its existence: a SIGKILL leaves the same file an
+        # armed runtime has. See ``stall_watchdog``'s docstring for why nothing
+        # here deletes anything. Reached on every graceful leave — the drain's,
+        # the reaper's and a plain stop's — and never on the paths that exit
+        # from the C thread (that is the point of the file).
         stall_watchdog.disarm()
 
 

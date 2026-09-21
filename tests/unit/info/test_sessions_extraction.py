@@ -195,6 +195,12 @@ EXPECTED = [
         # which is what a runtime predating the fields looks like.
         "beat_lag_s": None,
         "cpu_since_beat_s": None,
+        # WHERE THIS SESSION'S STALL DUMP IS when its own bound fired, appended
+        # after the pair above for the same append-only reason: ``None`` here
+        # because no runtime in this fixture tripped it (the path is
+        # ``stall_watchdog``'s to compose, and it is the one artifact a reader
+        # needs after a freeze — see that module).
+        "stall_dump": None,
     },
     {
         "state": "live",
@@ -235,6 +241,12 @@ EXPECTED = [
         # which is what a runtime predating the fields looks like.
         "beat_lag_s": None,
         "cpu_since_beat_s": None,
+        # WHERE THIS SESSION'S STALL DUMP IS when its own bound fired, appended
+        # after the pair above for the same append-only reason: ``None`` here
+        # because no runtime in this fixture tripped it (the path is
+        # ``stall_watchdog``'s to compose, and it is the one artifact a reader
+        # needs after a freeze — see that module).
+        "stall_dump": None,
     },
     {
         "state": "stale",
@@ -280,6 +292,12 @@ EXPECTED = [
         # which is what a runtime predating the fields looks like.
         "beat_lag_s": None,
         "cpu_since_beat_s": None,
+        # WHERE THIS SESSION'S STALL DUMP IS when its own bound fired, appended
+        # after the pair above for the same append-only reason: ``None`` here
+        # because no runtime in this fixture tripped it (the path is
+        # ``stall_watchdog``'s to compose, and it is the one artifact a reader
+        # needs after a freeze — see that module).
+        "stall_dump": None,
     },
 ]
 
@@ -528,7 +546,8 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     assert list(rows[0]).index("updating") < list(rows[0]).index("update_failed")
     assert list(rows[0]).index("update_failed") < list(rows[0]).index("beat_lag_s")
     assert list(rows[0]).index("beat_lag_s") < list(rows[0]).index("cpu_since_beat_s")
-    assert list(rows[0])[-1] == "cpu_since_beat_s"
+    assert list(rows[0]).index("cpu_since_beat_s") < list(rows[0]).index("stall_dump")
+    assert list(rows[0])[-1] == "stall_dump"
 
     assert (
         cli.sessions_command(
