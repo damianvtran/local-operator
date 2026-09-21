@@ -26,19 +26,32 @@ token (a pnpm stand-in does the forking) and asserts on what is ALIVE afterwards
 WHAT FAILS ON THE PRE-FIX TREE, stated precisely because the distinction matters
 when grading the evidence — and, for the bound branch, because the COUNT MOVES
 with the revision the question is asked of, so both revisions were measured.
-"The pre-fix tree" is the BRANCH BASE, ``fcf56b68``: there **three** tests fail
-BEHAVIOURALLY — the self-exiting step leaves its descendants alive, the mismatch
-runs ``pnpm install`` instead of refusing, and there is no probe outside the
-pinned tree — and the **two bound-branch** tests fail at the monkeypatched
-``_BUILD_STEP_TIMEOUT`` / ``_BUILD_KILL_GRACE``, neither of which the base's
-``install.py`` has: they raise ``AttributeError`` in 0.5 s, having started no
-process, which is why the bound-branch before/after is carried by the PR's
-process listings rather than by a test. On the branch's own ``8b39b4bb`` — where
-both rules DO exist — that second count is **one**: four of the five tests that
-assert on the step's process group pass, and the single behavioural failure left
-is the external-stop one (``a descendant ([pid]) outlived an external SIGTERM``),
-which is what the branch's last commit ``92f0d928`` closes. Everything else
-fails on base because the function under test does not exist there at all.
+"The pre-fix tree" is the BRANCH BASE, ``fcf56b68``, and the file measured is the
+one carrying this docstring: it collects **25** tests there and **23 fail, 2
+pass**. SIX of the failures are assertions on the pre-fix BEHAVIOUR — the
+self-exiting step leaves its descendants alive, the mismatch runs
+``pnpm install`` instead of refusing, the refusal that the two route tests assert
+on never comes (twice), the probe runs inside the tree that carries the manifest,
+and the invocation list shows no probe at all. The **two bound-branch** tests fail
+a step earlier, at the monkeypatched ``_BUILD_STEP_TIMEOUT`` /
+``_BUILD_KILL_GRACE``, neither of which the base's ``install.py`` has: they raise
+``AttributeError`` in 0.5 s, having started no process — which is why the
+bound-branch before/after is carried by the PR's process listings rather than by
+a test. The abort and external-stop tests fail before their own subject as well,
+and not for the defect's sake: the driver they drive calls ``_run_build_step``,
+absent on the base, so the step never plants the descendant they wait for.
+Everything else raises ``AttributeError`` on ``_pinned_pnpm`` / ``_pin_mismatch``
+— the function under test does not exist there at all. (The two that pass are
+``test_an_unreadable_runner_is_not_refused`` — on the base there is no refusal to
+be wrong about — and this file's own sweep test, which touches no module state.)
+On the branch's own ``8b39b4bb`` — where both rules DO exist — the same file
+collects 25 and **5 fail, 20 pass**: of the five tests that assert on the step's
+process group, exactly one fails, and it is the external-stop one (``a descendant
+([pid]) outlived an external SIGTERM``), which is what the branch's last commit
+``92f0d928`` closes. The other four are the three refusal tests, whose assertions
+describe the copy this PR ships (one pre-existing and strengthened here, two
+added), and ``test_a_dev_engines_pin_is_read_too``, a spelling that arrives with
+``92f0d928``.
 """
 
 from __future__ import annotations
@@ -51,7 +64,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 
 import pytest
 
@@ -88,24 +101,57 @@ def _wait_until_gone(token: str, timeout: float = 15.0) -> list[int]:
     return remaining
 
 
+def _sweep(patterns: Iterable[str]) -> list[int]:
+    """SIGKILL every pid matching each pattern, and return the ones still alive.
+
+    Killed by exact PID and never by a program name: this host runs two dozen
+    sessions, and a name-scoped ``pgrep`` here is how another session's process
+    tree gets killed. Survivors are RETURNED rather than swallowed, because a
+    sweep is only as good as its patterns and a sweep that misses the leader is
+    the leak this file has already had once (see the fixture).
+
+    One owner for the sweep, so the fixture's teardown and the test that pins it
+    cannot drift apart.
+    """
+    for pattern in patterns:
+        for pid in _pids_carrying(pattern):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    survivors: list[int] = []
+    for pattern in patterns:
+        survivors.extend(_wait_until_gone(pattern, timeout=5.0))
+    return survivors
+
+
 @pytest.fixture
-def reap_markers() -> Iterator[list[str]]:
+def reap_markers(tmp_path: Path) -> Iterator[list[str]]:
     """Kill anything a failing test leaves behind, by exact pid, and say so.
 
     A test for a leak must not become one: this host runs two dozen sessions, and
-    an orphaned sleeper from a red test would outlive it. Killed by PID, and only
-    for the token this test planted — never by a program name.
+    an orphaned sleeper from a red test would outlive it. Killed by PID, and never
+    by a program name.
+
+    TWO patterns, because a token-only sweep misses the LEADER. The planted token
+    lives in the GRANDCHILD's argv; the ``stand-in-pnpm`` leader's argv carries the
+    script's PATH and no token at all, so a test that failed between the fork and
+    the reap left the leader re-parented (``ppid=1``) to its 600 s linger —
+    observed in 1 of 3 full-file runs at load ~105, where it had to be killed by
+    hand. ``tmp_path`` is unique per test (pytest names the directory after the
+    test), so sweeping it can only reach this test's own stand-ins and driver,
+    never a sibling test's or another session's.
+
+    The sweep's survivors are ASSERTED on, so a pattern that stops matching fails
+    the test that leaked instead of leaking quietly.
     """
     tokens: list[str] = []
     try:
         yield tokens
     finally:
-        for token in tokens:
-            for pid in _pids_carrying(token):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+        patterns = [*tokens, str(tmp_path)]
+        survivors = _sweep(patterns)
+        assert survivors == [], f"the sweep left {survivors} alive for {patterns}"
 
 
 #: A pnpm stand-in: it records what it was asked to do, answers ``--version``
@@ -278,6 +324,40 @@ def _web(tmp_path: Path, *, pin: str | None, dev_engines: dict[str, object] | No
         manifest["devEngines"] = dev_engines
     (web / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
     return web
+
+
+def test_the_sweep_matches_the_leader_and_not_only_the_planted_token(tmp_path: Path) -> None:
+    """The sweep's PATTERNS, pinned where the leak actually was.
+
+    The planted token is in the grandchild's argv; the leader's carries the
+    stand-in's script path instead, so a token-only sweep — what this file had
+    until an abort test left a re-parented leader behind in 1 of 3 full-file runs
+    — matches the descendant and misses the process that owns the group. Asserted
+    on the sweep itself rather than through a failing test, because the sweep is
+    what has to hold whatever fails; the fixture's teardown drives the same
+    function with the same two patterns.
+    """
+    token = _token()
+    fake = StandIn(tmp_path / "bin", version="11.22.0", fork=True, token=token, linger=600)
+    leader = subprocess.Popen(
+        [*fake.runner, "install", "--frozen-lockfile"],
+        cwd=tmp_path,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert _wait_for_pid_carrying(token), "the stand-in never planted its grandchild"
+        # The leak, asserted rather than hoped for: the token does NOT name the
+        # leader, which is why the tree's path has to be a pattern of its own.
+        assert leader.pid not in _pids_carrying(token)
+
+        survivors = _sweep([token, str(tmp_path)])
+
+        assert survivors == [], f"the sweep left {survivors} alive"
+        assert leader.poll() is not None, "the leader outlived the sweep"
+        assert _pids_carrying(str(tmp_path)) == []
+    finally:
+        _kill_if_alive(leader)
 
 
 def test_the_bound_reaps_the_group_not_just_the_leader(
@@ -479,14 +559,15 @@ def test_a_pnpm_that_is_not_the_pinned_one_is_refused_before_anything_runs(
     assert error is not None
     assert "10.30.3" in error, f"the refusal must name the version on PATH: {error}"
     assert "11.22.0" in error, f"the refusal must name the pinned version: {error}"
-    assert "npm install -g pnpm@11.22.0" in error
-    # Corepack is offered only where a corepack shim actually resolves — Corepack
-    # stopped shipping with Node at v25 (this host's Node v26.5.0 has none), so
-    # naming it unconditionally sent a reader on Current into "command not found"
-    # and a second refusal (design round 3, D14, still open in this arm). The
-    # invariant holds on either host shape; the two tests below pin BOTH shapes,
-    # because a copy assertion that only passes where corepack happens to exist is
-    # how the defect came back the first time.
+    # The CONDITION is what holds on every host; the routes below it are a list of
+    # what this host actually has, because no single route is universal (R1-1:
+    # `npm install -g` cannot land where another manager owns the `pnpm` on PATH,
+    # and Corepack is absent from Node >= 25). Both host shapes are pinned by the
+    # two tests below, so a copy assertion that only passes where a given launcher
+    # happens to exist cannot come back.
+    assert "has to report 11.22.0" in error
+    assert "whatever manager installed the pnpm already on PATH" in error
+    assert ("npm install -g pnpm@11.22.0" in error) == (install._shim_argv("npm") is not None)
     assert ("corepack enable" in error) == (install._shim_argv("corepack") is not None)
     assert "fans out" in error, "the why has to be in the sentence, not only in the code"
     assert fake.argv_seen() == [
@@ -494,15 +575,16 @@ def test_a_pnpm_that_is_not_the_pinned_one_is_refused_before_anything_runs(
     ], f"only the version probe may run: {fake.argv_seen()}"
 
 
-def test_the_refusal_drops_the_corepack_route_where_no_corepack_resolves(
+def test_the_refusal_drops_every_tool_route_that_does_not_resolve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A remedy the reader cannot run is a second refusal, not a remedy.
 
-    ``npm install -g pnpm@11.22.0`` is the route that works wherever pnpm itself
-    was installed from, so it is the one that leads; the Corepack clause is added
-    only when a corepack launcher resolves, which is the shape asserted here by
-    emptying ``PATH`` around the call.
+    With nothing on ``PATH`` neither the npm route nor the Corepack one exists on
+    this (simulated) host, so neither may be named — while the condition that has
+    to hold and the route that is always available (whatever installed the pnpm
+    already on PATH) stay in the sentence. That is the shape R1-1 asked for: state
+    the requirement, and offer only routes the machine can run.
     """
     fake = StandIn(tmp_path / "bin", version="10.30.3")
     web = _web(tmp_path, pin="pnpm@11.22.0")
@@ -514,8 +596,10 @@ def test_the_refusal_drops_the_corepack_route_where_no_corepack_resolves(
 
     assert error is not None
     assert "11.22.0" in error
-    assert error.index("`npm install -g pnpm@11.22.0`") < error.index("`lop mobile install`")
+    assert error.index("has to report 11.22.0") < error.index("`lop mobile install`")
+    assert "npm install -g" not in error, f"this route does not exist on this host: {error}"
     assert "corepack" not in error, f"this route does not exist on this host: {error}"
+    assert "whatever manager installed the pnpm already on PATH" in error
 
 
 def test_the_refusal_keeps_the_corepack_route_where_one_resolves(
@@ -524,8 +608,10 @@ def test_the_refusal_keeps_the_corepack_route_where_one_resolves(
     """The other half: where Corepack IS installed, that route stays in the copy.
 
     Both shapes have to be pinned, not just the one this host happens to be in —
-    the clause is a fact about the machine, so a test that only checks its absence
-    would go green by deleting it everywhere.
+    the routes are a fact about the machine, so a test that only checks their
+    absence would go green by deleting them everywhere. The npm route is asserted
+    ABSENT here as well, so the two are shown to be independent rather than two
+    spellings of one conditional.
     """
     fake = StandIn(tmp_path / "bin", version="10.30.3")
     web = _web(tmp_path, pin="pnpm@11.22.0")
@@ -543,7 +629,7 @@ def test_the_refusal_keeps_the_corepack_route_where_one_resolves(
 
     assert error is not None
     assert "corepack enable" in error
-    assert "npm install -g pnpm@11.22.0" in error
+    assert "npm install -g" not in error, f"npm does not resolve on this PATH: {error}"
 
 
 def test_the_version_probe_runs_outside_the_pinned_tree(tmp_path: Path) -> None:
@@ -692,8 +778,9 @@ def test_a_dev_engines_value_equality_cannot_judge_is_not_a_pin(
 
     ``^11.5.1`` is not a version, so equality cannot judge it and this guard
     protects NOTHING for a range: the host's pnpm is used as-is, matching or not
-    (measured — a host pnpm 10.30.3 does not satisfy ``^11.5.1`` and the build
-    proceeds). Judging one needs a semver implementation, which is not this fix.
+    (measured — a host pnpm 10.30.3 does not satisfy ``^11.5.1`` and is let
+    through; what pnpm then does with the mismatch is pnpm's behaviour, not this
+    guard's). Judging one needs a semver implementation, which is not this fix.
     Stated here so the omission is a decision, not a gap.
     """
     web = _web(tmp_path, pin=None, dev_engines=dev_engines)
