@@ -351,8 +351,12 @@ async def list_models(
                         )
                     )
             elif provider_detail.id == "openrouter":
-                # Then try to get OpenRouter models if API key is configured
-                api_key = credential_manager.get_credential("OPENROUTER_API_KEY")
+                # Then try to get OpenRouter models if API key is configured.
+                # provider_env_key is store-first, so a LOP_PROVIDER_OPENROUTER_API_KEY
+                # row saved by `lop credential update` wins over an ambient export.
+                from local_operator.providers.registry import provider_env_key
+
+                api_key = provider_env_key("openrouter")
                 if api_key:
                     try:
                         # Create the OpenRouter client
