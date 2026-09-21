@@ -587,24 +587,22 @@ def test_a_revoked_device_keeps_a_row_and_the_command_that_brings_it_back(
     assert "revoked" in listing, listing
 
 
-def test_authorise_print_only_reports_the_state_it_left_not_the_one_it_aimed_at(
+def test_authorise_print_only_is_a_preview_that_changes_nothing(
     paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """UX round 10, U2, pinned as a PROPERTY rather than as wording.
+    """UX round 11, U5: a dry run that acts is not a dry run.
 
-    Measured on the round-10 head: `--authorise --print-only` printed the unconditional
-    success sentence ("a new pairing request is accepted at once") and left
-    `is_revoked` **True**, because the anchor is the list the runtime reads and the
-    install step that carries the change had only been printed. The operator followed
-    the receipt to `lop pair` and was refused again — the loop this verb exists to end,
-    on the one path the new help text advertises for it.
+    TWO ROUNDS OF THIS VERB'S HISTORY ARE IN THIS CELL. Round 10's U2 was that the dry
+    run printed the success sentence while `is_revoked` was still True; the fix added the
+    caveat — but left the local clear ABOVE the `print_only` branch, so the preview
+    really did lift that half. In the state `--revoke --print-only` itself creates (the
+    local record is the only holder) the "preview" had therefore already un-revoked the
+    device while its own sentence said the device was still refused: a receipt
+    contradicting the state it left, one layer down.
 
-    THE RIG HAS TO SEPARATE STAGED FROM INSTALLED, which the neighbouring cells do not
-    need to: they read the staged file as the anchor, so a staged lift looks applied.
-    Here the installed statement is its own file, and only the (stubbed) privileged step
-    moves one to the other — which is what makes the dry run measurably a dry run. The
-    assertion is the STATE after it, not the sentence, because the sentence is what the
-    last round pinned while the defect shipped.
+    The rig separates STAGED from INSTALLED, which the neighbouring cells do not need to:
+    they read the staged file as the anchor, so a staged change looks applied and the
+    mutation this cell exists for would be invisible.
     """
     import json
 
@@ -632,14 +630,10 @@ def test_authorise_print_only_reports_the_state_it_left_not_the_one_it_aimed_at(
 
     def fake_install(config_root: Path, *, print_only: bool = False) -> int:
         """Models the ONE privileged step: the staged statement lands, or it does not."""
-        if print_only:
-            print("sudo install … (the privileged command, printed rather than run)")
-        else:
+        if not print_only:
             installed_path.write_bytes(trust.staging_path(config_root).read_bytes())
         return 0
 
-    # The fixture's own anchor becomes the INSTALLED one, before the seam is wired:
-    # nothing else here has to invent a statement.
     installed_path.write_bytes(trust.staging_path(root).read_bytes())
     monkeypatch.setattr(trust, "load_anchor", installed)
     monkeypatch.setattr(operator_pkg, "load_anchor", installed)
@@ -650,18 +644,137 @@ def test_authorise_print_only_reports_the_state_it_left_not_the_one_it_aimed_at(
     devices.record_revocation(root, device_id)
     assert devices.is_revoked(root, device_id) is True
 
-    # (a) the dry run: the installed anchor still refuses the device, and the receipt
-    # says exactly that rather than sending the operator to `lop pair` to be refused.
+    # THE WHOLE STATE, byte for byte, around the preview.
+    before = {
+        "record": devices.revoked_path(root).read_bytes(),
+        "staged": trust.staging_path(root).read_bytes(),
+        "is_revoked": devices.is_revoked(root, device_id),
+        "here": devices.is_revoked_here(root, device_id),
+    }
     assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
-    dry_run = capsys.readouterr().out
-    assert devices.is_revoked(root, device_id) is True, "the dry run lifted something"
-    assert "NOT in force" in dry_run, dry_run
-    assert "accepted at once" not in dry_run, dry_run
+    preview = capsys.readouterr().out
+    after = {
+        "record": devices.revoked_path(root).read_bytes(),
+        "staged": trust.staging_path(root).read_bytes(),
+        "is_revoked": devices.is_revoked(root, device_id),
+        "here": devices.is_revoked_here(root, device_id),
+    }
+    assert before == after, f"the preview changed the state: {before} -> {after}"
+    assert "preview:" in preview and "NOTHING has been changed" in preview, preview
+    assert "accepted at once" not in preview, preview
+    assert devices.AUTHORISE_COMMAND.format(device_id=device_id) in preview, preview
 
-    # (b) and the real run does lift it, so the caveat is a caveat and not a shrug.
+    # ...and the real run does lift both halves, so the preview is a preview and not a
+    # verb that cannot act.
     assert describe_devices(_args(authorise=device_id, print_only=False)) == 0
     capsys.readouterr()
     assert devices.is_revoked(root, device_id) is False
+    assert devices.revoked_path(root).exists() is False
+
+
+def test_authorise_does_not_claim_the_lift_when_the_local_record_survives(
+    paired_machine: OperatorAnchor, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """UX round 11 U6 = QA Q11-1 = reviewer R11-1: the stdout half of a failed clear.
+
+    With the operator root unwritable, the run warned on stderr and then printed
+    "authorised … a new pairing request is accepted at once" on stdout, two lines above
+    a listing row calling the device revoked — and the phone was still refused (403 on a
+    fresh code, measured by both rounds). `is_revoked` is the OR of the two halves, so
+    the local record alone still refuses the device and the receipt has to say so.
+    Checked in BOTH branches, because the reviewer measured both: with an installed
+    anchor, and on the no-anchor arm whose sentence claimed "only the local record was
+    cleared".
+    """
+    import json
+    import os as _os
+
+    import local_operator.operator as operator_pkg
+    from local_operator.operator import handlers, trust
+    from local_operator.operator.pair_handlers import (
+        _stage_anchor_revocation,
+        describe_devices,
+    )
+
+    root = _config()
+    _, point = _phone_point()
+    device_id = devices.new_device_id(point)
+    installed_path = root / "installed-anchor.json"
+
+    def installed(uid: Any = None) -> Any:
+        body = json.loads(installed_path.read_text())
+        return trust.AnchorLoad(
+            anchor=trust.OperatorAnchor.from_json(body),
+            path=trust.anchor_path(uid),
+            root_owned=True,
+            reason="ok",
+            exists=True,
+        )
+
+    def fake_install(config_root: Path, *, print_only: bool = False) -> int:
+        if not print_only:
+            installed_path.write_bytes(trust.staging_path(config_root).read_bytes())
+        return 0
+
+    installed_path.write_bytes(trust.staging_path(root).read_bytes())
+    monkeypatch.setattr(trust, "load_anchor", installed)
+    monkeypatch.setattr(operator_pkg, "load_anchor", installed)
+    monkeypatch.setattr(handlers, "install_anchor", fake_install)
+    assert _stage_anchor_revocation(root, device_id, revoked=True) is True
+    installed_path.write_bytes(trust.staging_path(root).read_bytes())
+    devices.record_revocation(root, device_id)
+
+    operator_dir = devices.operator_root(root)
+    try:
+        # (a) installed anchor: the anchor half IS lifted, the local half is not. The
+        # directory is re-tightened before each run because `stage_anchor` chmods its
+        # own parent back to 0700 as it writes (pre-existing behaviour), so one chmod
+        # would only make the FIRST run unwritable.
+        _os.chmod(operator_dir, 0o500)
+        assert describe_devices(_args(authorise=device_id)) == 0
+        captured = capsys.readouterr()
+        assert "still names" in captured.err, captured.err
+        assert "accepted at once" not in captured.out, captured.out
+        assert "STILL refused" in captured.out, captured.out
+        assert devices.is_revoked(root, device_id) is True, "the guard was released anyway"
+        assert devices.revoked_path(root).exists() is True
+
+        # (b) the no-anchor arm, whose sentence claimed a clear that did not happen.
+        monkeypatch.setattr(
+            trust,
+            "load_anchor",
+            lambda uid=None: trust.AnchorLoad(
+                anchor=None,
+                path=trust.anchor_path(uid),
+                root_owned=False,
+                reason="pinned absent by the test",
+                exists=False,
+            ),
+        )
+        monkeypatch.setattr(
+            operator_pkg,
+            "load_anchor",
+            lambda uid=None: trust.AnchorLoad(
+                anchor=None,
+                path=trust.anchor_path(uid),
+                root_owned=False,
+                reason="pinned absent by the test",
+                exists=False,
+            ),
+        )
+        # An UNSTAMPED record, so it still applies with no anchor installed (the stamp
+        # is compared against the installed key id, and "no anchor" answers `""`); this
+        # is the half the reviewer measured, where the arm's sentence claimed the local
+        # record had been cleared.
+        devices.revoked_path(root).write_text(json.dumps({"v": 1, "devices": [device_id]}))
+        _os.chmod(operator_dir, 0o500)
+        assert describe_devices(_args(authorise=device_id)) == 0
+        captured = capsys.readouterr()
+        assert "no installed operator anchor" in captured.err, captured.err
+        assert "only the local record was cleared" not in captured.err, captured.err
+        assert "STILL refused" in captured.err, captured.err
+    finally:
+        _os.chmod(operator_dir, 0o700)
 
 
 def test_a_record_that_did_not_apply_is_not_reported_as_never_recorded(
@@ -694,7 +807,10 @@ def test_a_record_that_did_not_apply_is_not_reported_as_never_recorded(
     )
     assert devices.is_revoked(root, device_id) is False, "the fixture's record does apply"
 
-    assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
+    # The REAL run, not a preview: since round 11 a `--print-only` run changes nothing,
+    # so it is the real one that clears this record (and this state's branch never
+    # reaches the install step, so no privileged command is offered or run).
+    assert describe_devices(_args(authorise=device_id, print_only=False)) == 0
     said = capsys.readouterr().out
     assert "did not apply under the installed anchor" in said, said
     assert "nothing recorded a revocation" not in said, said
