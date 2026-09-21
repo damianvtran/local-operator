@@ -306,6 +306,29 @@ def test_scratchpad_guide_prints_no_absolute_path_shaped_example() -> None:
     )
 
 
+def test_scratchpad_guide_says_where_binary_scratch_goes() -> None:
+    """The guide refuses binaries and used to stop there, so a session with an
+    image to write had nowhere the two documents agreed on. Its binary bullet now
+    names the home (a real temp dir in the per-user temp directory, NOT the one
+    macOS reaps) and where to record the path it made — so the omission
+    ``system.md`` leaves is answered where the reader lands, instead of being a
+    gap to fall into.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+    section = body[body.index("## Use something else for") : body.index("## The protocol")]
+    assert "**Binary scratch**" in section
+    assert "mktemp" in section
+    assert "$TMPDIR" in section
+    # The verified mechanism, named rather than gestured at, and the window it
+    # prunes on — the reason the guide gives for avoiding that one directory.
+    assert "com.apple.tmp_cleaner" in section
+    assert "three days" in section
+    # Where the made temp dir's path is recorded, so a later turn finds the files.
+    assert "scratchpad://" in section
+
+
 def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:
     guides = {guide.name: guide for guide in discover_guides()}
     resolver = make_guide_resolver(guides)
