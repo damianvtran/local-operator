@@ -1557,38 +1557,63 @@ def _elide_derivable_launch_id_in_place(job: dict[str, Any]) -> None:
         del job["launch_message_id"]
 
 
-def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
-    """Omit the per-row keys that are EMPTY from a row that has neither fact.
+def _elide_row_facts_in_place(job: dict[str, Any]) -> None:
+    """Drop the per-row keys that must not ride the wire.
 
-    An absent fact must not buy wire bytes. These two keys are empty on every
-    bash job and on every child that was never resumed, and at roster scale the
-    empty values alone were measured at ~9 KB of the 1 MiB line budget — enough
-    to push the ``ran all year`` class guard over the limit on their own, with
-    no information in them at all.
-
-    Omission is exactly equivalent to sending the empty values: ``JobState``
-    defaults both, a delta rebuilds each row by revalidating the raw dict rather
-    than merging it onto the prior row (``apply_update``), and a follower
-    reading neither key takes the same degrade path as one attached to a runtime
-    that predates the fields. So this is a pure byte saving, not a semantic one.
-
-    ``cut_off_cause`` joins them for the same reason, measured the same way:
-    it is empty on every row that was not restored from a roster record, and one
-    key's worth of JSON on each of 200 rows was enough to push the same class
-    guard 4 KB over the line on its own. Its non-empty value is a single token
-    from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at rest and
-    tens of bytes on the handful of rows that carry it.
-
-    ``roster_released`` is the same shape of saving and was measured the same
-    way: ``"roster_released": false`` is ~25 bytes on every row that is still a
-    current roster member, and on the ``ran all year`` guard's 200 rows that
-    alone put the frame 4 KB over the line. Only ``true`` carries information —
-    a row without the key reads as a current member, which is what a follower
-    predating the field already assumes.
-
-    Applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
+    Two KINDS of drop live here, and they are different arguments that happen to
+    share a boundary. One is a byte saving on values that are EMPTY; the other is
+    a key the session keeps INTERNALLY and deliberately never publishes. Both are
+    applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
     attach snapshot in :func:`sync_wire_payload` — because the two serialize job
     rows by different routes and a saving in one does not reach the other.
+
+    EMPTY-VALUED, because an absent fact must not buy wire bytes.
+    ``launch_message_id`` and ``launch_prompts`` are empty on every bash job and
+    on every child that was never resumed, and at roster scale the empty values
+    alone were measured at ~9 KB of the 1 MiB line budget — enough to push the
+    ``ran all year`` class guard over the limit on their own, with no information
+    in them at all. ``cut_off_cause`` joins them for the same reason, measured
+    the same way: it is empty on every row that was not restored from a roster
+    record, and one key's worth of JSON on each of 200 rows was enough to push
+    the same class guard 4 KB over the line on its own. Its non-empty value is a
+    single token from ``incidents.CUT_OFF_CAUSES``, so the field costs nothing at
+    rest and tens of bytes on the handful of rows that carry it.
+
+    Omission is exactly equivalent to sending those empty values: ``JobState``
+    defaults all three, a delta rebuilds each row by revalidating the raw dict
+    rather than merging it onto the prior row (``apply_update``), and a follower
+    reading none of them takes the same degrade path as one attached to a runtime
+    that predates the fields. So that half is a pure byte saving, not a semantic
+    one.
+
+    ``roster_released`` is NOT that shape, and this paragraph is the one to read
+    before touching it (QA round 1, Q1). Eliding only its ``false`` value was the
+    first idea and it does not fit: the key is 25 bytes on every row that
+    actually carries it (``"roster_released":true,`` plus its separator, measured
+    against the ``ran all year`` guard), and the certified worst case has 168
+    bytes of slack across a 200-row roster, so SEVEN released rows exhaust it.
+    An oversized ``frontend_sync`` is worse than a dropped line here rather than
+    merely large: it is the one frame family that bypasses both
+    :func:`fit_frame_for_wire` and :func:`relay_frame_or_degraded` —
+    ``_enqueue_client_frame`` routes only ``frontend_update``/``event`` through
+    that chokepoint — so the peer is answered with an ``error`` frame and then a
+    disconnect, at ERROR, with no re-send.
+
+    So the key does not travel at all until something reads it, and NOTHING in
+    the tree does: the only writer is :func:`_released_row`, the only reader is
+    ``_ReleasedRows.adopt_from``'s in-process gate, and outside those two the
+    name appears in this module and two test modules. The perf win is entirely
+    owner-side, no part of the memoisation consults the wire, and a per-row key
+    with no consumer is a per-row cost with nothing to pay for.
+
+    WHEN A CONSUMER LANDS, the wire form is a STATE-LEVEL enumeration rather
+    than this per-row key, and the measured options are recorded here so nobody
+    re-derives them. At the guard's 200 released rows: a ``"1"``-per-row bit
+    string costs 221 B, the same string hex-packed 71 B, an id list 1,912 B
+    (9.6 B/ROW — a per-row cost wearing a state-level name, and a FAIL), and the
+    whole budget for any new cost is 1,208 B (the 168 bytes free plus four
+    catalogue rows of the residual bound's travel to
+    :data:`MODEL_CATALOGUE_FLOOR_ROWS`). The wire form returns with its reader.
     """
     if not job.get("launch_message_id"):
         job.pop("launch_message_id", None)
@@ -1596,8 +1621,11 @@ def _drop_absent_row_facts_in_place(job: dict[str, Any]) -> None:
         job.pop("launch_prompts", None)
     if not job.get("cut_off_cause"):
         job.pop("cut_off_cause", None)
-    if not job.get("roster_released"):
-        job.pop("roster_released", None)
+    # Unconditional, unlike the three above: an ABSENT fact is dropped to save
+    # bytes, this one is dropped because no reader exists for it. ``true`` is the
+    # informative value and it is exactly the value that costs 25 B/row, so
+    # keeping it and eliding only ``false`` buys nothing. See the docstring.
+    job.pop("roster_released", None)
 
 
 def _clear_node_status_failure() -> None:
@@ -1636,11 +1664,13 @@ def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
     quantised. The observable consequence is bounded and one-directional: the
     dock keeps a row for up to one bucket (15 s at the default window) after
     this flag turns true, never the other way, so no consumer is shown a row
-    the dock has already dropped. A follower that FILTERS on
-    ``roster_released`` therefore hides such a row up to one bucket before the
-    owner's own dock does; that is the price of the publisher staying on the
+    the dock has already dropped. A consumer that FILTERED on
+    ``roster_released`` would therefore hide such a row up to one bucket before
+    the owner's own dock does; that is the price of the publisher staying on the
     exact clock, and adopting the reader's rounded one here would move the
-    canonical roster OFF the ledger's clock to fix a cosmetic disagreement.
+    canonical roster OFF the ledger's clock to fix a cosmetic disagreement. No
+    consumer filters on it today, and none can until a wire form exists: the
+    flag is in-process only (see :func:`_elide_row_facts_in_place`).
     """
     retention_ms = getattr(manager, "retention_ms", None)
     if isinstance(retention_ms, bool) or not isinstance(retention_ms, (int, float)):
@@ -1699,8 +1729,9 @@ def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
 #: and say how it ended.
 #:
 #: WHAT IS SHED, and each for its own reason (review round 1, S4 — the drop is
-#: named here rather than left implicit, because ``JobState.roster_released``
-#: promises a viewer loses nothing it could see before):
+#: named here rather than left implicit, because :attr:`JobState.roster_released`
+#: promises a viewer of THIS process's roster — the dock and the TUI read the
+#: store directly, not the socket — that it loses nothing it could see before):
 #:
 #: * ``trajectory`` — a released child is settled and its rows are on disk in
 #:   its own transcript, which is what the subagent page reads. The in-memory
@@ -2236,9 +2267,18 @@ class JobState(BaseModel):
     #: mirrored here).
     #:
     #: So the row keeps travelling and says what it is instead. A consumer that
-    #: needs MEMBERSHIP ("what is on the roster right now") filters on this
-    #: flag; a consumer that needs IDENTITY ("resolve this child's page")
-    #: ignores it and still finds the row.
+    #: needs MEMBERSHIP ("what is on the roster right now") reads this flag; a
+    #: consumer that needs IDENTITY ("resolve this child's page") ignores it and
+    #: still finds the row.
+    #:
+    #: IN-PROCESS ONLY: this flag is never serialized (QA round 1, Q1 — see
+    #: :func:`_elide_row_facts_in_place` for the measurement that decided it, and
+    #: for the state-level shapes to use when a wire consumer finally needs it).
+    #: The two readers that exist are both owner-side: :func:`_released_row` sets
+    #: it, ``_ReleasedRows.adopt_from``'s reuse gate consults it. The perf win
+    #: this flag was added for is entirely owner-side too — nothing in the
+    #: memoisation consults the wire — so a per-row wire key has nothing to pay
+    #: for and 25 bytes of a certified ceiling to pay with.
     #:
     #: WHAT A VIEWER LOSES, exhaustively, because "nothing is hidden" would be
     #: the easier sentence and it is not true (review round 1, S4). Identity,
@@ -2256,8 +2296,10 @@ class JobState(BaseModel):
     #: 42-hour session accumulated 48 rows whose retained windows were re-frozen
     #: on a 50 ms coalescer until the loop could not keep up.
     #:
-    #: Absent on a runtime that predates it (``extra='allow'``): an older
-    #: follower sees today's behaviour, every row unflagged, never a crash.
+    #: The flag is absent off this process entirely — no runtime serializes it —
+    #: so a reader looking for it takes the ``False`` default: the same path a
+    #: follower of a runtime that predates it took (``extra='allow'``). Nothing
+    #: reads it, so nothing degrades.
     roster_released: bool = False
     # Canonical lineage (U5): the runtime's subagent-comms tree is not itself
     # serializable, but its one fact — who launched whom — is. Stamping the
@@ -3118,7 +3160,7 @@ def sync_wire_payload(sync: FrontendSync) -> dict[str, Any]:
             _bound_launch_ids_across_jobs(jobs)
             for job in jobs:
                 if isinstance(job, dict):
-                    _drop_absent_row_facts_in_place(job)
+                    _elide_row_facts_in_place(job)
         # LAST, after every other field has been bounded: this budget is what
         # the socket line has LEFT, so it can only be measured once nothing
         # else will shrink. See MODEL_CATALOGUE_FLOOR_ROWS for why the
@@ -5033,7 +5075,7 @@ class FrontendStateStore:
                 _elide_derivable_launch_id_in_place(summary)
             _bound_launch_ids_across_jobs(summaries)
             for summary in summaries:
-                _drop_absent_row_facts_in_place(summary)
+                _elide_row_facts_in_place(summary)
             wire_changes["jobs"] = summaries
         if not normalized:
             return None
@@ -6156,6 +6198,8 @@ class FrontendStateStore:
         a long session's tick cost stops growing with the children it has
         already finished. They keep travelling — see
         :attr:`JobState.roster_released` for why dropping them is not an option.
+        The stamp stays in this process: it is elided at every wire boundary
+        (:func:`_elide_row_facts_in_place`).
         """
         manager = getattr(session, "jobs", None)
         try:

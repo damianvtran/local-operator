@@ -1419,19 +1419,36 @@ def test_an_unresolved_failure_is_not_released_on_the_quiet_clock() -> None:
     assert store.state.jobs[0].roster_released is False, "a FAILED child was released"
 
 
-def test_the_released_flag_does_not_ride_the_wire_when_it_is_false() -> None:
-    """One key per row at roster scale is what the attach frame guard measures."""
+def test_the_released_flag_never_rides_the_wire() -> None:
+    """The flag is in-process only: `_released_row` sets it, no reader is on the socket.
+
+    QA ROUND 1 (Q1). It used to be sent whenever it was true — "the informative
+    value" — and that cost 25 bytes on EVERY released row against an attach
+    ceiling with 168 bytes of slack across a 200-row roster. Nothing in the tree
+    consumes it off the wire, so it is elided at both boundaries until a reader
+    exists (``frontend_state._elide_row_facts_in_place`` records the measurement
+    and the state-level shapes to use when one lands).
+    """
     live, done = _job("child-live"), _settled(_job("child-done"))
     session = _released_session([live, done])
     store = _store([live, done])
     store.refresh_jobs(session)
 
+    # The PREMISE, and asserted on the canonical state rather than on the wire:
+    # the released child really was released, so the absence assertions below are
+    # about the elision and not about a row that never carried the flag at all.
+    canonical = {row.id: row for row in store._state.jobs}
+    assert canonical["child-done"].roster_released is True, "the premise is unmet"
+
     payload = sync_wire_payload(
         FrontendSync(epoch=store.state.epoch, sequence=store.state.sequence, snapshot=store.state)
     )
     rows = {row["id"]: row for row in payload["snapshot"]["jobs"]}
-    assert "roster_released" not in rows["child-live"], "the default bought wire bytes"
-    assert rows["child-done"]["roster_released"] is True, "the informative value was dropped"
+    assert "roster_released" not in rows["child-live"], "a member row carried the flag"
+    assert "roster_released" not in rows["child-done"], (
+        "a released row carried the flag; nothing reads it off the wire and 25 B/row "
+        "does not fit the attach ceiling (QA round 1, Q1)"
+    )
 
 
 def test_a_released_row_holds_only_frozen_containers() -> None:

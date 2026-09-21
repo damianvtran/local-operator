@@ -9,8 +9,14 @@ session simply could not be attached to: 12 of 17 sessions on the reference
 machine failed exactly this way.
 
 These are hard size assertions rather than "it worked" assertions, because the
-failure they guard is silent — an oversized frame is a dropped line, not an
-error anybody reports.
+failure they guard is silent. For a ``frontend_update`` a dropped line leaves
+that reader short one delta and nothing says so. For the canonical
+``frontend_sync`` it is not a dropped line at all: that family bypasses the
+relay fit pass (``server._enqueue_client_frame`` routes only
+``frontend_update``/``event`` through it), so an oversized one is answered with
+an ``error`` frame and then a disconnect at ERROR, with no re-send — and the
+connect-time PUSH form leaves the client refusing every delta as a sequence gap
+and going cold. Either way nobody gets a usable terminal.
 """
 
 from __future__ import annotations
@@ -94,13 +100,33 @@ from local_operator.session.runtime.server import _MAX_LINE_BYTES, RuntimeServer
 from local_operator.tui.costs import job_cost
 from tests.unit.session.runtime.test_server import FakeHandle
 
-#: Wire budget for the `roster_released` key on ONE released row, in bytes.
-#: Measured at 25 (`"roster_released":true,` and its separator) against a
-#: certified ceiling with 168 bytes of slack across a 200-row roster, so this
-#: bound is deliberately tight rather than generous: a change to the key's
-#: encoding has to trip `test_the_released_flag_costs_a_bounded_number_of_bytes_per_row`
-#: and be re-derived against the ceiling (QA round 1, Q1).
-_RELEASED_FLAG_WIRE_BUDGET_BYTES = 32
+#: The settled stamp the released arm builds its rows with. Any value in the
+#: past works (`_released_predicate` is never consulted on this path — the arm
+#: projects the rows directly); it is a named constant only so the arm reads as
+#: "a settled child" rather than as a magic float.
+_RELEASED_ARM_SETTLED_AT = 1_700_000_000.0
+
+#: The excess over the socket line the released arm already carries at the
+#: guard's own 200-row worst case, which is a PRE-EXISTING property of that
+#: fixture and not of the release path. Measured on this head: the released
+#: projection and the same roster projected by the production builder
+#: (`JobState.from_job` + `_with_lineage`) both serialize to 1,050,626 B, so
+#: releasedness adds NOTHING; the excess is that `_jobs` hand-builds its rows
+#: with `direct_cost`/`direct_cost_knowledge` unset while every row the
+#: production builder emits carries a float and a token (~17 B/row = 3,400 B
+#: across the roster), against 1,208 B of residual catalogue travel. Charging
+#: ONLY those two fields on the fixture's own rows measures 1,050,600 B.
+#:
+#: It bounds the arm rather than blessing the state: making the fixture charge
+#: its accounting turns the MEMBER arm red too, and paying for the difference is
+#: a ceiling decision (which bytes give way), not an elision one. Re-derive both
+#: figures before moving this — the arm's assertion message prints the total.
+_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES = 2_050
+
+#: No comms node: these released children have no lineage, which is the smaller
+#: of the two shapes `_with_lineage` can produce and the only one this arm needs
+#: — only the released projection's byte cost is under test here.
+_NO_LINEAGE = SimpleNamespace(node=lambda _job_id: None)
 
 #: A tool result big enough to be realistic. The point of the cap is that ONE
 #: event carries an unbounded payload, so a small filler would test the row
@@ -606,30 +632,42 @@ def test_shareable_state_fields_are_real_and_immutable() -> None:
     )
 
 
-def test_the_released_flag_costs_a_bounded_number_of_bytes_per_row() -> None:
-    """`roster_released` is a per-row cost against a ceiling with ~168 B of slack.
+def test_the_released_flag_never_reaches_the_wire() -> None:
+    """`roster_released` is in-process only, and this is what says so.
 
-    QA ROUND 1 (Q1). Setting `roster_released` on the calibrated
-    ``ran_all_year`` fixture's 200 rows takes the attach frame from 1,048,408
-    to 1,054,200 bytes -- over the 1 MiB line -- so about six rows of that shape
-    are the whole margin. That fixture cannot express the shape itself: its rows
-    are ``status="running"``, and `retention_expired` refuses a running row
-    before it looks at the clock, so the roster window can never release one.
+    QA ROUND 1 (Q1), closed by eliding the key at BOTH wire boundaries rather
+    than by lowering a cap or re-tuning the instrument. Setting it on the
+    calibrated ``ran_all_year`` fixture's 200 rows took the attach frame from
+    1,048,408 to **1,052,200** bytes (+5,000 = 200 x 25.0) — over the 1 MiB line
+    — so about seven rows of that shape were the whole margin. The fixture could
+    not express the shape itself: its rows are ``status="running"``, and
+    `retention_expired` refuses a running row before it looks at the clock, so
+    the roster window can never release one. The released arm of
+    ``test_the_attach_frame_fits_for_a_session_that_ran_all_year`` is what
+    measures that shape now.
 
-    This pins the arithmetic instead, from the two directions that make it a
-    ceiling question rather than an accident:
+    This pins the decision's two checkable halves:
 
-    * the key's OWN wire cost, bounded rather than pinned to a point, so a
-      change to its encoding has to pass through here; and
+    * the key is ABSENT from every serialized row, member or released. Nothing
+      in the tree reads it off the wire, and 25 B/row against 168 B of slack is
+      a trade nothing pays for. A bounded per-row WIDTH pin lived here before
+      this and is deliberately gone rather than kept: a `<= 32 B` bound passes
+      vacuously once the key costs 0, so re-introducing the serialization would
+      slip through it while this assertion fails. That is the falsifier for the
+      elision, and the reason it is stated here rather than assumed. When a real
+      wire consumer lands, reach for a STATE-level enumeration (measured at the
+      guard's 200 released rows: bit string 221 B, hex-packed 71 B, id list
+      1,912 B — 9.6 B/row — a FAIL), never a per-row key: see
+      ``_elide_row_facts_in_place``; and
     * that releasing a row does NOT shrink it on the ATTACH path. It is tempting
       to argue the per-row flag pays for itself by shedding the retained window,
       and it does not: `sync_wire_payload` already elides the window from this
       path (the fixture's rows ship `trajectory_length` with an empty
-      `trajectory`), so on the attach frame the released projection is strictly
-      LARGER than the member projection of the same job.
+      `trajectory`), so on the attach frame the released projection is at least
+      as large as the member projection of the same job.
 
     Both are asserted against the real wire, so the next person to touch
-    `_released_row` or the frame's caps sees the cost here.
+    `_released_row`, the frame's caps or the elision sees the cost here.
     """
     job = AsyncJob(
         id="job0",
@@ -641,39 +679,33 @@ def test_the_released_flag_costs_a_bounded_number_of_bytes_per_row() -> None:
         trajectory=[_event(row) for row in range(500)],
         result_text="r" * 40_000,
     )
-    comms = SimpleNamespace(node=lambda _job_id: None)
 
-    def wire_bytes(row: JobState, *, drop_flag: bool = False) -> int:
+    def wire_frame(row: JobState) -> dict[str, Any]:
         store = FrontendStateStore(FrontendSessionState(session_id="s1", epoch="e1", jobs=[row]))
-        frame = {
+        return {
             "op": "frontend_sync",
             "data": sync_wire_payload(store.subscribe(lambda _u: None).sync),
         }
-        if drop_flag:
-            # The key's own cost, taken off the SERIALIZED row: a JobState is
-            # frozen, so neither `model_copy(update=...)` nor `model_validate`
-            # on its own dump can change a field (both measured while writing
-            # this test).
-            for serialized in frame["data"]["snapshot"]["jobs"]:
-                serialized.pop("roster_released", None)
-        return _line_bytes(frame)
 
     member = JobState.from_job(job)
-    released = _with_lineage(_released_row(job), comms)
+    released = _with_lineage(_released_row(job), _NO_LINEAGE)
 
-    assert wire_bytes(released) >= wire_bytes(member), (
+    for name, row in (("member", member), ("released", released)):
+        serialized = wire_frame(row)["data"]["snapshot"]["jobs"]
+        assert len(serialized) == 1, "the fixture stopped serializing exactly one row"
+        assert "roster_released" not in serialized[0], (
+            f"the {name} row serialized `roster_released`. The flag is in-process "
+            "only (QA round 1, Q1): nothing reads it off the wire, and 25 B/row "
+            "does not fit the attach ceiling's 168 B of slack. If a wire consumer "
+            "has landed, re-derive the wire form as a STATE-level enumeration "
+            "rather than re-adding this key — see `_elide_row_facts_in_place`."
+        )
+
+    assert _line_bytes(wire_frame(released)) >= _line_bytes(wire_frame(member)), (
         "the released projection is now smaller than the member projection on the "
-        "attach path, which would mean the window is no longer elided here -- that "
-        "is a change to this test's premise, and the per-row flag's cost below is "
-        "the thing to re-derive if it happens."
-    )
-
-    marginal = wire_bytes(released) - wire_bytes(released, drop_flag=True)
-    assert marginal <= _RELEASED_FLAG_WIRE_BUDGET_BYTES, (
-        f"the `roster_released` key costs {marginal} bytes on each released row, "
-        f"over its {_RELEASED_FLAG_WIRE_BUDGET_BYTES}-byte budget. The attach "
-        "ceiling this file certifies has 168 bytes of slack across a 200-row "
-        "roster, so this is a ceiling question, not a rounding one."
+        "attach path, which would mean the window is no longer elided here — that "
+        "is a change to this test's premise, and the right response is to "
+        "re-derive the premise rather than to relax the assertion."
     )
 
 
@@ -942,6 +974,97 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
         "Some field in FrontendSessionState grows without bound and is not "
         "capped at accumulation or stripped in sync_wire_payload. "
         f"{oversized_frame_report(frame, _MAX_LINE_BYTES)}"
+    )
+
+    # ------------------------------------------------------------------
+    # THE RELEASED ARM (QA round 1, Q1). Everything above is one half of the
+    # ceiling: rows that are still roster MEMBERS. A released row is a different
+    # shape — it has shed the retained window and its output tail — and it was
+    # invisible here for as long as it existed, because every row in `jobs` is
+    # `status="running"` and `retention_expired` refuses a running row before it
+    # looks at the clock, so no row this fixture can build is ever releasable.
+    # That blindness is what let a per-row flag the class guard never measured
+    # sit over the line with every shipped test green.
+    #
+    # A SECOND ARM OF THIS TEST rather than a sibling test, deliberately: the
+    # worst case IS this fixture, so a sibling would rebuild ~1 MB of `populated`
+    # (1,000 live_events, a 5,000-row catalogue) to arrive at the same state and
+    # cost a second full fixture on a host running ~25 sessions. This arm adds
+    # `sync_wire_payload` passes over the same objects, and it cannot drift from
+    # the member arm because it reads the same `populated` dict.
+    #
+    # The rows go through the REAL release path (`_released_row` +
+    # `_with_lineage`) rather than being hand-stamped with the flag, so what the
+    # socket would actually carry for a long session's roster is what gets
+    # measured. They are settled — as every releasable row must be — so
+    # `settled_at` rides them, which is the wider of the two shapes a released
+    # row can take.
+    settled = [
+        job.model_copy(update={"status": "completed", "settled_at": _RELEASED_ARM_SETTLED_AT})
+        for job in jobs
+    ]
+    released_rows = [_with_lineage(_released_row(job), _NO_LINEAGE) for job in settled]
+    released_store = FrontendStateStore(state.model_copy(update={"jobs": released_rows}))
+    released_frame = {
+        "op": "frontend_sync",
+        "data": sync_wire_payload(released_store.subscribe(lambda _u: None).sync),
+    }
+    released_size = _line_bytes(released_frame)
+
+    # The rows really are the released projection. Without this the arm could
+    # silently become a second copy of the member arm and guard nothing, which is
+    # the exact failure mode it exists to close.
+    assert all(row.roster_released for row in released_rows), (
+        "the released arm's rows are not marked released, so this arm measures the "
+        "member shape a second time and guards nothing (QA round 1, Q1)."
+    )
+
+    # THE INVARIANT THIS ARM OWNS: releasing a row must not make the frame
+    # heavier than the same roster projected as members. This is the property the
+    # per-row key broke and the elision restores — with `roster_released`
+    # serialized the released arm is 5,000 bytes (200 x 25.0) heavier than this
+    # baseline and this assertion fails, which is the falsifier quoted on the PR.
+    #
+    # The baseline is `JobState.from_job` + `_with_lineage`, NOT the member arm
+    # above, and that is the point of the comparison: `jobs` is hand-built
+    # (`_jobs`) and carries `direct_cost: null` / `direct_cost_knowledge: null`,
+    # while every row the production builder emits carries a float and a token.
+    # Charging the fixture's own rows ONLY those two fields measures 1,050,600 B
+    # — 2,024 over the line — on a tree this PR's code does not touch
+    # (`JobState.from_job`, `sync_wire_payload` and
+    # `_bound_model_catalogue_in_place` are all unchanged by it). So the residual
+    # is PRE-EXISTING and belongs to the fixture rather than to the release path:
+    # both projections measure 1,050,626 B, i.e. releasing adds nothing.
+    #
+    # Recorded rather than fixed HERE: making the fixture charge its own
+    # accounting turns the MEMBER arm red as well, and paying for the difference
+    # means either lowering a shipped cap or re-calibrating a certified
+    # instrument — a ceiling decision, not an elision one. It is reported on the
+    # PR; `_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES` bounds the residual so it
+    # cannot grow unnoticed in the meantime.
+    member_rows = [_with_lineage(JobState.from_job(job), _NO_LINEAGE) for job in settled]
+    member_store = FrontendStateStore(state.model_copy(update={"jobs": member_rows}))
+    member_frame = {
+        "op": "frontend_sync",
+        "data": sync_wire_payload(member_store.subscribe(lambda _u: None).sync),
+    }
+    member_size = _line_bytes(member_frame)
+    assert released_size <= member_size, (
+        f"a roster of {len(released_rows)} released rows is {released_size - member_size:,} "
+        "bytes heavier on the attach frame than the same roster projected as members. "
+        "Releasing a row keeps the same fields and the same accounting, so this means the "
+        "released shape has grown a per-row cost of its own — the shape `roster_released` "
+        "was, and the reason it is elided at both wire boundaries (QA round 1, Q1). "
+        "`_elide_row_facts_in_place` carries the measurement and the deferred wire form."
+    )
+    assert released_size <= _MAX_LINE_BYTES + _RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES, (
+        f"the released arm is {released_size - _MAX_LINE_BYTES:,} bytes over the "
+        f"{_MAX_LINE_BYTES:,}-byte line, past the "
+        f"{_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES:,} bytes of pre-existing excess this "
+        "fixture already carries (accounting the production builder charges and the "
+        "fixture does not — see the comment above), so something NEW is spending per-row "
+        f"bytes at the guard's worst case. "
+        f"{oversized_frame_report(released_frame, _MAX_LINE_BYTES)}"
     )
 
 
