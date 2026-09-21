@@ -33,8 +33,9 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from local_operator import launchd, procname, procstate, supervisors
 from local_operator.mobile.auth import (
@@ -110,6 +111,22 @@ _GROUP_POLL_SECONDS = 0.05
 #: (``taskkill /T``). Same spelling — and same reason — as
 #: ``clipboard._SUPPORTS_PROCESS_GROUPS``.
 _SUPPORTS_PROCESS_GROUPS = hasattr(os, "killpg") and hasattr(os, "getpgid")
+
+#: The signals that must not leave a running step behind when they arrive from
+#: OUTSIDE this process (see :func:`_arm_step_handlers`). SIGINT is deliberately
+#: absent: Python turns it into ``KeyboardInterrupt`` in the main thread, which
+#: the abort arm of :func:`_run_build_step` already reaps on the way out. SIGHUP
+#: and SIGQUIT are the other two ``scripts/run_bounded.py`` forwards — a terminal
+#: or ssh teardown, and a `kill -QUIT`, must not leave a group running either.
+_STEP_ORPHANING_SIGNALS = tuple(
+    signum
+    for signum in (
+        getattr(signal, "SIGTERM", None),
+        getattr(signal, "SIGHUP", None),
+        getattr(signal, "SIGQUIT", None),
+    )
+    if signum is not None
+)
 
 
 def _failure_detail(result: subprocess.CompletedProcess[str]) -> str:
@@ -359,6 +376,98 @@ def _sweep_step_group(proc: subprocess.Popen[str], pgid: int | None) -> None:
         time.sleep(_GROUP_POLL_SECONDS)
 
 
+def _step_stop_handler(
+    proc_box: list[subprocess.Popen[str] | None], pgid_box: list[int | None], signum: int
+) -> Callable[[int, object], None]:
+    """The signal handler for ``signum``, closed over the step's spawn boxes.
+
+    A factory rather than a lambda in the install loop so the signal and the two
+    boxes are captured explicitly: the boxes are read at DELIVERY time, which is
+    what lets the handlers be armed before the spawn (see
+    :func:`_arm_step_handlers`).
+    """
+
+    def handler(_received: int, _frame: object) -> None:
+        _reap_step_and_die(proc_box, pgid_box, signum)
+
+    return handler
+
+
+def _arm_step_handlers(
+    proc_box: list[subprocess.Popen[str] | None], pgid_box: list[int | None]
+) -> dict[int, Any]:
+    """Make an EXTERNAL stop signal reap the step's group before we die.
+
+    WHY (the opening move of the incident — QA round 1, Q-1). The step is its OWN
+    session, so a signal sent to THIS process — a `kill`, a supervisor winding
+    down, a `lop-update` wrapper being stopped — never reaches it. And because
+    nothing is raised in this process when someone ELSE sends SIGTERM, the arms
+    inside :func:`_run_build_step` never run either: the default disposition is
+    to terminate, and the group is left running. That is exactly how the
+    incident began — its first install was SIGTERM'd and the tree kept growing
+    afterwards, with nothing left that owned it.
+
+    Armed BEFORE the spawn, because the window between `Popen` and an installed
+    handler is one a signal can slip through (the ordering
+    `tests/unit/scripts/test_run_bounded.py` pins for the same reason). Only
+    where there is a group to reap: Windows has none (see
+    :func:`_sweep_step_group`), and a caller on a non-main thread cannot install
+    handlers at all — those callers keep the exception arms and nothing else.
+    Returns the handlers it replaced, for :func:`_disarm_step_handlers`.
+    """
+    if not _SUPPORTS_PROCESS_GROUPS:
+        return {}
+    previous: dict[int, Any] = {}
+    for signum in _STEP_ORPHANING_SIGNALS:
+        try:
+            previous[signum] = signal.signal(signum, _step_stop_handler(proc_box, pgid_box, signum))
+        except (OSError, ValueError):  # pragma: no cover - not installable here
+            continue
+    return previous
+
+
+def _disarm_step_handlers(previous: dict[int, Any]) -> None:
+    """Put back exactly the handlers that were there before the step.
+
+    A library function that leaves a handler installed would change how the whole
+    process dies afterwards, so this runs in a ``finally`` on every path out of
+    the step — including the ones that are already raising.
+    """
+    for signum, handler in previous.items():
+        try:
+            signal.signal(signum, handler)
+        except (OSError, ValueError):  # pragma: no cover - see _arm_step_handlers
+            continue
+
+
+def _reap_step_and_die(
+    proc_box: list[subprocess.Popen[str] | None], pgid_box: list[int | None], signum: int
+) -> None:
+    """The handler body: reap the step's group, then die of the signal that asked.
+
+    Runs between bytecodes in the main thread, so it is short, silent, and never
+    raises on the way out — and it NEVER returns normally. Returning would let
+    `lop mobile install` carry on behind a signal that was meant to stop it, so
+    the default disposition is restored and the signal is re-delivered: the
+    process then reports the platform's own status (killed by ``signum``),
+    exactly what a process that had installed no handler would have reported.
+
+    A signal that arrives before the spawn has no group to reap yet; it is
+    re-delivered all the same, so that window is a delay, never a leak.
+    """
+    try:
+        signal.signal(signum, signal.SIG_DFL)
+    except (OSError, ValueError):  # pragma: no cover - see _arm_step_handlers
+        pass
+    proc, pgid = proc_box[0], pgid_box[0]
+    if proc is not None:
+        _reap_step_group(proc, pgid)
+    try:
+        os.kill(os.getpid(), signum)
+    except OSError:  # pragma: no cover - no other way to honour the signal
+        raise SystemExit(128 + signum) from None
+
+
 def _run_build_step(
     argv: Sequence[str], cwd: Path, *, timeout: float | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -374,14 +483,19 @@ def _run_build_step(
     spawning — +100 processes and +5 GB every 25 s until the host had 0.1 GB free
     and no swap, and was rebooted.
 
-    So the step runs in its own session/group and the GROUP is signalled on all
-    three paths that end the wait: the bound, an abort (Ctrl-C: the child is its
-    own session, so the terminal's SIGINT never reaches it), and the ordinary
-    exit, where a descendant can outlive its leader. Two of those are narrower
-    than they sound, and both are stated where a reader asking "what exactly is
-    covered" ends up: the third is POSIX-only, and the pipe-holding shape of the
-    second is the bound's case rather than the sweep's (see
-    :func:`_sweep_step_group`).
+    So the step runs in its own session/group and the GROUP is signalled on every
+    path that can end the wait:
+
+    * the bound firing;
+    * an abort raised IN this process (Ctrl-C -> ``KeyboardInterrupt``);
+    * an EXTERNAL stop signal (SIGTERM/SIGHUP/SIGQUIT), which raises nothing here
+      and is why :func:`_arm_step_handlers` exists;
+    * and the ordinary exit, where a descendant can outlive its leader.
+
+    Two of those are narrower than they sound, and both are stated where a reader
+    asking "what exactly is covered" ends up: the last is POSIX-only, and the
+    pipe-holding shape of the third is the bound's case rather than the sweep's
+    (see :func:`_sweep_step_group`).
 
     NOT ``scripts/run_bounded.py``: this follows that wrapper's semantics
     deliberately, but the wrapper lives in the repository's ``scripts/`` tree,
@@ -389,29 +503,40 @@ def _run_build_step(
     run. The inline spelling therefore reuses ``procstate`` for the one part
     that must not be hand-rolled (the platform decision).
     """
-    proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
-        list(argv),
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        **procstate.detached_popen_kwargs(),
-    )
+    #: Boxes rather than locals: the handlers are armed BEFORE the spawn and read
+    #: these at delivery time, so they see the process once it exists.
+    proc_box: list[subprocess.Popen[str] | None] = [None]
+    pgid_box: list[int | None] = [None]
+    handlers = _arm_step_handlers(proc_box, pgid_box)
     bound = _BUILD_STEP_TIMEOUT if timeout is None else timeout
-    pgid = _step_group(proc)
     try:
-        stdout, stderr = proc.communicate(timeout=bound)
-    except subprocess.TimeoutExpired:
-        _reap_step_group(proc, pgid)
-        raise
-    except BaseException:
-        # Any abort — the operator's Ctrl-C above all: the step is its own
-        # session, so the terminal does not deliver SIGINT to it and the group
-        # would otherwise carry on building behind a `lop mobile install` that
-        # has already exited.
-        _reap_step_group(proc, pgid)
-        raise
-    _sweep_step_group(proc, pgid)
+        proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            list(argv),
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **procstate.detached_popen_kwargs(),
+        )
+        proc_box[0] = proc
+        pgid = _step_group(proc)
+        pgid_box[0] = pgid
+        try:
+            stdout, stderr = proc.communicate(timeout=bound)
+        except subprocess.TimeoutExpired:
+            _reap_step_group(proc, pgid)
+            raise
+        except BaseException:
+            # Any abort raised HERE — the operator's Ctrl-C above all: the step is
+            # its own session, so the terminal does not deliver SIGINT to it and
+            # the group would otherwise carry on building behind a `lop mobile
+            # install` that has already exited. An external SIGTERM/SIGHUP raises
+            # nothing here at all; that is `_arm_step_handlers`' half.
+            _reap_step_group(proc, pgid)
+            raise
+        _sweep_step_group(proc, pgid)
+    finally:
+        _disarm_step_handlers(handlers)
     return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
 
 
@@ -419,28 +544,66 @@ def _run_build_step(
 #: integrity suffix (``pnpm@11.22.0+sha512.…``), which is not part of the version.
 _PACKAGE_MANAGER_PIN = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)@(?P<version>[^+\s]+)")
 
+#: An EXACT version, which is all equality can judge — see
+#: :func:`_dev_engines_pin` for why ``devEngines``' ranges are not enforced.
+_EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.\-]+)?$")
+
+
+def _dev_engines_pin(manifest: dict[str, Any]) -> str | None:
+    """The pnpm version ``devEngines.packageManager`` names, if it is EXACT.
+
+    pnpm 11 added this second spelling (pnpm 11.0.0, and it is the one whose
+    ``onFail`` decides whether a miss errors, warns or DOWNLOADS), so it resolves
+    a mismatch through the same managed-version path the guard exists to refuse —
+    hence it is read rather than ignored.
+
+    A RANGE is deliberately not a pin here: ``^11.5.1`` is not a version, and
+    refusing on it would refuse builds whose range the host's pnpm satisfies
+    perfectly well. Judging a range needs a semver implementation, which is not
+    what this fix is; the exact-version case is what these trees carry and what
+    is decidable here.
+    """
+    dev = manifest.get("devEngines")
+    entry = dev.get("packageManager") if isinstance(dev, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    name, version = entry.get("name"), entry.get("version")
+    if not isinstance(name, str) or name.lower() != "pnpm" or not isinstance(version, str):
+        return None
+    candidate = version.strip()
+    return candidate if _EXACT_VERSION.match(candidate) else None
+
 
 def _pinned_pnpm(web_dir: Path) -> str | None:
     """The pnpm version ``web_dir``'s ``package.json`` pins, or ``None``.
 
+    BOTH SPELLINGS pnpm reads, because both resolve a mismatch through the same
+    managed-version path: the ``packageManager`` field (``pnpm@11.22.0``), and
+    ``devEngines.packageManager`` when the first is absent (see
+    :func:`_dev_engines_pin`). ``packageManager`` WINS when both are present — it
+    is the field Corepack resolves first and the one these trees carry — and a
+    manifest whose two pins disagree is a broken manifest rather than a guess
+    this guard should make; it fails loudly in pnpm's own hands either way.
+
     ``None`` covers every "there is no pin to enforce" case — no manifest,
-    unreadable JSON, no ``packageManager`` field, a pin naming a different
-    manager — because refusing to build a tree that pins nothing would break the
-    snapshot updater's older trees for no gain: this guard is an extra wall, not
-    the wall (the group bound around every step is what makes a bad build
-    survivable).
+    unreadable JSON, neither field, a pin naming a different manager, a
+    ``devEngines`` range — because refusing to build a tree that pins nothing
+    would break the snapshot updater's older trees for no gain: this guard is an
+    extra wall, not the wall (the group bound around every step is what makes a
+    bad build survivable).
     """
     try:
         manifest = json.loads((web_dir / "package.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if not isinstance(manifest, dict):
+        return None
     pin = manifest.get("packageManager")
-    if not isinstance(pin, str):
-        return None
-    match = _PACKAGE_MANAGER_PIN.match(pin.strip())
-    if match is None or match.group("name").lower() != "pnpm":
-        return None
-    return match.group("version")
+    if isinstance(pin, str):
+        match = _PACKAGE_MANAGER_PIN.match(pin.strip())
+        if match is not None and match.group("name").lower() == "pnpm":
+            return match.group("version")
+    return _dev_engines_pin(manifest)
 
 
 def _runner_reports(runner: Sequence[str]) -> str | None:
