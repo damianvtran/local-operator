@@ -17,10 +17,13 @@ from local_operator import scratchpad as scratchpad_module
 from local_operator.scratchpad import (
     SCRATCHPAD_DIRNAME,
     SCRATCHPAD_NAMESPACE,
+    SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadPathError,
     parse_scratchpad_url,
+    scratchpad_dir_of,
+    scratchpad_env_injection,
     scratchpad_root,
 )
 
@@ -251,3 +254,78 @@ def test_a_scheme_inside_the_path_is_refused_as_a_nested_url(root: Path) -> None
 
     # A colon without a scheme separator is still an ordinary file name.
     assert parse_scratchpad_url("scratchpad://a:b.txt", root).path == (root / "a:b.txt")
+
+
+# ---------------------------------------------------------------------------
+# The exported path: `LOCAL_OPERATOR_SCRATCHPAD`, in three arms
+# ---------------------------------------------------------------------------
+#
+# The scheme cannot cross a process boundary — a shell cannot resolve a URL — so
+# the pad's absolute path travels as an environment variable, and how that
+# variable is written is the whole contract. Measured 2026-09-21 over 400
+# transcripts: 8,766 shell calls created scratch under a temp root against 44
+# that reached the pad, and before this the variable did not exist at all.
+
+
+def test_the_path_name_is_one_constant_both_spawn_sites_read() -> None:
+    """The name is defined ONCE, because two spawn sites sign it and a second
+    literal is how one of them silently stops being the variable the other
+    exports — the tools would then advertise a remedy that is not there."""
+    assert SCRATCHPAD_PATH_ENV == "LOCAL_OPERATOR_SCRATCHPAD"
+    assert scratchpad_module.SCRATCHPAD_PATH_ENV is SCRATCHPAD_PATH_ENV
+
+
+def test_the_path_is_exported_to_a_session_that_has_a_pad() -> None:
+    """ARM 1 — SET. The session holds a pad, so the child is told where it is."""
+    assert scratchpad_env_injection("/sessions/abc123/scratchpad") == {
+        SCRATCHPAD_PATH_ENV: "/sessions/abc123/scratchpad"
+    }
+
+
+def test_an_inherited_path_is_cleared_for_a_session_without_a_pad(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARM 2 — CLEARED, and this is the arm the bug is about. A nested session
+    starts from a COPY of its parent's environment, so a writer that only ever
+    SET the variable leaves a pad-less session holding its parent's path: it
+    would then create files outside the store it was told to use, in a session
+    whose own directory does not contain them. The empty value is the no, the
+    same spelling ``MAY_DELEGATE_ENV`` uses."""
+    monkeypatch.setenv(SCRATCHPAD_PATH_ENV, "/sessions/parent/scratchpad")
+
+    assert scratchpad_env_injection(None) == {SCRATCHPAD_PATH_ENV: ""}
+    # An empty string is not a path in the other direction either: reading it
+    # back off a context must yield None, never the cwd.
+    assert scratchpad_dir_of(_Ctx("")) is None
+
+
+def test_a_session_that_never_had_a_path_is_not_given_the_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ARM 3 — OMITTED. Nothing to clear and nothing to set, so the name is not
+    written at all: a session with no pad is not handed the variable (there is
+    nothing it could usefully read from it, and an empty one would only invite
+    the question)."""
+    monkeypatch.delenv(SCRATCHPAD_PATH_ENV, raising=False)
+
+    assert scratchpad_env_injection(None) == {}
+
+
+class _Ctx:
+    """A tool-context DOUBLE: the field read is duck-typed on purpose, because a
+    `tests/e2e` host is not a ``ToolContext`` and a bare attribute access would
+    make it raise."""
+
+    def __init__(self, scratchpad_dir: object = None) -> None:
+        self.scratchpad_dir = scratchpad_dir
+
+
+def test_the_context_read_rejects_anything_that_is_not_a_usable_path() -> None:
+    """``""`` and a non-string are ABSENT, not paths: ``Path("")`` is the cwd, so
+    accepting the empty string would make the whole working directory the
+    session's scratch area."""
+    assert scratchpad_dir_of(_Ctx("/pad")) == "/pad"
+    assert scratchpad_dir_of(_Ctx("")) is None
+    assert scratchpad_dir_of(_Ctx(Path("/pad"))) is None
+    assert scratchpad_dir_of(_Ctx()) is None
+    assert scratchpad_dir_of(None) is None
