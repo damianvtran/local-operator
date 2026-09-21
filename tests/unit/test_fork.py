@@ -886,9 +886,13 @@ class TestThePickerPaysNothingForSessionsThatAreNotForks:
             rows = recent_session_rows(tmp_path)
 
         assert len(rows) == 12
-        # PER-ROW reads only: the store-wide origin-verdict cache is read once
-        # for the whole scan and is not a per-row cost, so it is excluded.
-        per_row = [name for name in calls if name != "origin-verdicts.json"]
+        # STORE-WIDE reads only, which is not a per-row cost: the
+        # origin-verdict cache and the archive index are each read ONCE for the
+        # whole scan (and the archive index only behind a stat, so an
+        # unarchived store contributes no read here at all).
+        per_row = [
+            name for name in calls if name not in {"origin-verdicts.json", "archived-sessions.json"}
+        ]
         # One bounded head read per row for the NAME, and nothing else. The
         # origin verdict rides out of the scan that already parsed it, so no
         # `origin.json` is opened here at all — that is the regression this

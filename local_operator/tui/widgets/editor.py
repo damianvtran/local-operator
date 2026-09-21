@@ -2016,7 +2016,14 @@ class Editor(TextArea):
     #: credential and an OAuth one costs another browser round trip to get back,
     #: so its rows are gated harder than the shared ambiguity rule gates the
     #: rest: see :meth:`_picker_choice_is_unambiguous` and :meth:`_apply_command`.
-    DESTRUCTIVE_COMMANDS = ("logout",)
+    #:
+    #: `/delete` joins it for the plainest reason in the tuple's history: its one
+    #: row IS the confirmation, and a single Enter on a highlighted row must not
+    #: be able to remove a conversation. The gate turns that Enter into a FILL of
+    #: the word `yes`, so the deletion is authorised by a second submission
+    #: rather than by a keystroke — the shape `/logout`'s rows already have,
+    #: reused rather than a second confirmation mechanism.
+    DESTRUCTIVE_COMMANDS = ("logout", "delete")
 
     #: Commands whose ARGUMENT is a NAME optionally followed by a free-text
     #: message (`/team <name> <request>`, `/agent <name> <message>`). Completing
