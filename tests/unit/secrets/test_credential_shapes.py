@@ -427,6 +427,96 @@ def test_a_known_value_split_at_every_offset_is_still_masked() -> None:
         assert secret not in published.decode(), f"value leaked when split at {offset}"
 
 
+def test_a_shape_straddling_the_deferral_boundary_is_masked_and_registered() -> None:
+    """A cap-forced cut must not publish the two halves of a credential.
+
+    The release point has always refused to cut through a KNOWN value; the same
+    rule was missing for a SHAPE, and the cap is the one release chosen without
+    regard to the text around it. A DSN sitting on that boundary came out as an
+    unmasked head in one released slice and an unmasked tail in the next —
+    neither half carries the spelling the pattern needs — and nothing later can
+    repair it, because the live stream is the one surface no pass re-reads.
+
+    Swept rather than sampled: with 4 KiB reads the cap puts a slice boundary
+    every 4096 bytes, so the offsets below walk the credential across it. The
+    real store is the sink, because the second half of the property is that a
+    value the pipe masks is CONTAINED — masked later in a form no rule knows.
+    """
+    store = VariableStore(cwd=".")
+    # The mask removes the whole userinfo, but the value the shape REGISTERS is the
+    # password group — so the reuse below spells only that, which is the form no
+    # rule in the table has a spelling for.
+    password = SENTINEL_FRAGMENT.rsplit(":", 1)[-1]
+    for offset in range(4080, 4112):
+        body = "." * offset + SENTINEL + "." * 20000
+        redactor = builtin._PipeRedactor([], contain=store.register_shape_hits_for_containment)
+        raw = body.encode()
+        published = [redactor.feed(raw[i : i + 4096]) for i in range(0, len(raw), 4096)]
+        published.append(redactor.feed(b"", final=True))
+        text = b"".join(published).decode()
+        assert SENTINEL_FRAGMENT not in text, f"the password was published, cut at {offset}"
+        assert REDACTION_MARKER in text, f"the shape was not masked, cut at {offset}"
+    assert store.redact(f"prefix {password} suffix") == (
+        f"prefix {REDACTION_MARKER} suffix"
+    ), "the value the pipe masked was not registered for containment"
+
+
+def test_no_chunk_boundary_publishes_what_one_pass_would_mask() -> None:
+    """The invariant the boundary fix exists for, stated as the property itself.
+
+    Whatever the filter publishes, concatenated, must be what a single pass over
+    the same bytes produces. That is stronger than "the password is absent": it
+    also fails if a fix buys the mask by dropping, duplicating or reordering
+    output, which is the way this class of change usually goes wrong.
+
+    The filler is a character a DSN spelling follows: a WORD character runs into
+    the scheme and defeats the pattern's leading ``\\b``, so the table matches
+    neither release and the property is vacuous there. That spelling's own
+    behaviour — a slice boundary CREATING the boundary word the one-piece text
+    lacks, so the streamed pass masks MORE than the single pass — is pre-existing,
+    identical before and after this change, and in the safe direction; it is not
+    this fix's to move.
+    """
+    for offset in (4090, 4094, 4095, 4096, 4097, 8190, 8191, 8192):
+        body = "." * offset + SENTINEL + "." * 20000
+        for chunk in (7, 4096, 8192, 8193):
+            redactor = builtin._PipeRedactor([])
+            raw = body.encode()
+            published = [redactor.feed(raw[i : i + chunk]) for i in range(0, len(raw), chunk)]
+            published.append(redactor.feed(b"", final=True))
+            assert b"".join(published).decode() == scrub_secrets(body), (
+                f"streamed output diverged from the one-piece pass at offset {offset}, "
+                f"chunk {chunk}"
+            )
+
+
+def test_the_boundary_hold_is_bounded_and_still_streams() -> None:
+    """The fix holds bytes back, so the hold is asserted rather than implied.
+
+    Moving a cut out of a shape means publishing less per read, and the whole
+    reason the cap exists is that the held buffer must not be a function of what
+    the child prints. Both halves are asserted on the STRUCTURE (a peak and a
+    bound), never on a wall clock — see AGENTS.md, "Calibrate ceilings from CI".
+    The peak assertion is what keeps this test honest: it fails if the hold stops
+    being exercised, which is how the bound would go stale without anyone
+    noticing.
+    """
+    line = "." * 4095 + SENTINEL + "." * (4 * 1024 * 1024)
+    redactor = builtin._PipeRedactor([])
+    peak = 0
+    published = 0
+    for start in range(0, len(line), 4096):
+        published += len(redactor.feed(line[start : start + 4096].encode()))
+        peak = max(peak, len(redactor.pending))
+        assert (
+            len(redactor.pending) <= builtin._PIPE_HOLD_LIMIT
+        ), "the hold must not grow with the child's output"
+    published += len(redactor.feed(b"", final=True))
+    assert redactor.pending == ""
+    assert peak > builtin._PIPE_DEFERRAL_LIMIT, "the boundary hold was never exercised"
+    assert published >= len(line) - builtin._PIPE_HOLD_LIMIT, "the line must still stream"
+
+
 def test_a_line_with_no_terminator_is_released_and_stays_bounded() -> None:
     """A 10 MB single line neither stalls nor grows the held buffer.
 

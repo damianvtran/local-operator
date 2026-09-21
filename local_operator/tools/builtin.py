@@ -127,6 +127,7 @@ from local_operator.procstate import (
     terminate_process_tree,
 )
 from local_operator.redaction_shapes import (
+    CREDENTIAL_SHAPES,
     PEM_BODY_LINE_RE,
     PEM_END_LINE_RE,
     PEM_HEADER_LINE_RE,
@@ -134,6 +135,7 @@ from local_operator.redaction_shapes import (
     ShapeHit,
     ShapeReport,
     credential_dump_notice,
+    has_shape_anchor,
     scrub_secrets_with_hits,
     shape_report,
 )
@@ -2149,6 +2151,42 @@ class _BashOutput:
 #: line still publishes most of it promptly.
 _PIPE_DEFERRAL_LIMIT = 8192
 
+#: How much raw text the filter may hold back in total, as a HARD bound.
+#:
+#: Twice :data:`_PIPE_DEFERRAL_LIMIT`, and the factor is derived rather than
+#: chosen. A shape match the table can see is complete inside the buffer, which
+#: caps its length at the deferral window — so a match straddling a cap-forced
+#: cut ALWAYS starts less than one window before that cut, and moving the cut
+#: back to the match's start therefore holds at most one further window of
+#: bytes. Anything longer than the window itself cannot be protected this way
+#: (see :meth:`_PipeRedactor._shape_safe_spans`), so the bound is not a tuning
+#: knob and does not move when the table gains a rule.
+_PIPE_HOLD_LIMIT = 2 * _PIPE_DEFERRAL_LIMIT
+
+
+def _shape_match_spans(text: str, offset: int) -> list[tuple[int, int]]:
+    """Every span of ``text`` a credential shape could match, in absolute offsets.
+
+    The pattern objects and the table are the scrubber's own — this is a second
+    USE of one table, never a second copy of it, so a rule added there is
+    visible here and a rule changed there cannot drift from what this finds.
+
+    Deliberately coarser than the scrub in two ways, both in the safe direction:
+    a rule's ``guard`` is not consulted (a span the guard would reject is
+    reported anyway, which can only make the caller hold bytes longer) and the
+    search runs against pristine text, so it cannot see a span an earlier rule's
+    mask created — reported spans are therefore a SUPERSET of what the scrubber
+    can mask, which is the direction a "do not cut inside a match" rule needs.
+
+    ``offset`` locates ``text`` inside the buffer it was sliced from, so the
+    caller can move a cut that is an offset into that buffer.
+    """
+    spans: list[tuple[int, int]] = []
+    for shape in CREDENTIAL_SHAPES:
+        for match in shape.pattern.finditer(text):
+            spans.append((match.start() + offset, match.end() + offset))
+    return spans
+
 
 class _PipeRedactor:
     """Delay only a possible credential suffix before publishing pipe bytes.
@@ -2181,10 +2219,29 @@ class _PipeRedactor:
     released in cap-sized pieces rather than accumulating, so memory does not
     grow with the command's output. The cap is a CONSTANT, not a function of the
     longest possible match — a bound derived from the pattern table would be
-    wrong the moment a rule was added. The residual is the obvious one: a shape
-    straddling a cap-forced cut, or one whose whole block (a PEM body) exceeds
-    the cap, is split across two releases and not matched here. Both are
-    contained by the result path, which scrubs the finished text in one piece.
+    wrong the moment a rule was added.
+
+    **The cap used to publish credentials, and the release point is what fixed
+    it.** The line rule is safe by construction only while a line is whole — the
+    cap is what breaks that, cutting through the middle of one. A
+    ``scheme://user:pass@host`` or a ``KEY=value`` line the table masks whole was
+    then published as an unmasked HEAD by the release that cut it and an
+    unmasked TAIL by the next one, because neither slice holds the shape the
+    pattern needs, and NO later pass can repair it: the live stream — the card
+    and ``jobs(op='peek')`` — is the one surface nothing re-reads. So a
+    cap-forced cut is moved back out of any shape it would split
+    (:meth:`_shape_safe_spans`), exactly as the loop below already does for a
+    KNOWN value.
+
+    The bound that buys is :data:`_PIPE_HOLD_LIMIT`: the search is confined to
+    the last two windows of the buffer, so ``pending`` stays bounded whatever
+    the child prints. The residual is what the bound costs — a SINGLE match
+    longer than a deferral window can still be split, because it cannot be
+    COMPLETE in the buffer at the moment its start reaches the cut, so nothing
+    there is there to find (measured at 4 KiB reads: a match of 9,039 bytes is
+    protected, one of 12,039 bytes is not; key material past the cap is handled
+    on its own by :meth:`_mask_open_key_block`). Every shape the table can match
+    inside the window is not split.
 
     Trailing partial lines are therefore withheld until they complete. That is
     a real trade for a line-oriented surface, taken deliberately: a credential
@@ -2384,12 +2441,21 @@ class _PipeRedactor:
         # is the property that must not depend on what the child prints, so a
         # command that opens a PEM block and never closes it cannot pin the
         # buffer forever.
-        if len(text) - cut > _PIPE_DEFERRAL_LIMIT:
+        cap_forced = len(text) - cut > _PIPE_DEFERRAL_LIMIT
+        if cap_forced:
             cut = len(text) - _PIPE_DEFERRAL_LIMIT
         # Never cut through a KNOWN value. The newline rule above already
         # prevents that for any value without a newline in it, which is every
         # credential in practice; this keeps the guarantee for the ones with
         # one, and for the cap-forced cut above.
+        #
+        # A SHAPE gets the same rule, for the same reason and by a stricter
+        # mechanism — see _shape_safe_spans / _cut_outside: the cap is the one
+        # release the line rule does not cover, and it is the one that used to
+        # publish a credential in two unmasked halves.
+        spans = self._shape_safe_spans(text) if cap_forced else []
+        if spans:
+            cut = self._cut_outside(cut, spans)
         while True:
             previous_cut = cut
             for secret in self.secrets:
@@ -2399,6 +2465,56 @@ class _PipeRedactor:
             if cut == previous_cut:
                 break
         return cut
+
+    def _shape_safe_spans(self, text: str) -> list[tuple[int, int]]:
+        """Every shape span a cap-forced release must not land inside.
+
+        Called only when the CAP forced the cut — the one release point chosen
+        without regard to the text around it, and so the only one the newline
+        rule above does not already make safe. The cheap anchor gate then stands
+        in front of the table, so a cap-forced cut inside ordinary output (a
+        10 MB blob of JSON, a progress line) pays a lowercase substring search
+        and nothing else.
+
+        Offsets are absolute in ``text``, and the search is confined to the last
+        :data:`_PIPE_HOLD_LIMIT` bytes. That confinement is what keeps the hold
+        bounded: the caller may move a cut back to any span reported here, so
+        ``pending`` cannot grow past the hold limit, and a match beginning
+        earlier than the window is longer than a whole deferral window and
+        could not be held without defeating the cap.
+        """
+        floor = max(len(text) - _PIPE_HOLD_LIMIT, 0)
+        window = text[floor:]
+        if not has_shape_anchor(window):
+            return []
+        # A match CLOSED BY THE BUFFER END is dropped. Holding cannot protect it —
+        # the next read may extend it — so backing off to its start would hold a
+        # span that keeps growing while CHANGING THE PARTITION, and the partition
+        # is what the truncation-sensitive rules read: measured, including it
+        # masked a value the one-piece pass leaves alone on an input this change
+        # does not fix. It is also the >window case by construction (it crosses
+        # the cut and reaches the buffer end, so it is longer than one window),
+        # which is the residual this bound already states.
+        return [(start, end) for start, end in _shape_match_spans(window, floor) if end < len(text)]
+
+    @staticmethod
+    def _cut_outside(cut: int, spans: list[tuple[int, int]]) -> int:
+        """Move ``cut`` back to the start of the last span it would split.
+
+        Iterated to a fixed point rather than filtered once, because moving the
+        cut can put it inside a DIFFERENT, overlapping span: two rules can
+        propose spans that overlap, and the first move is not necessarily the
+        last (a span ending inside the new cut is a split the single pass would
+        have missed). The existing
+        known-value loop below is written the same way for the same reason.
+        """
+        while True:
+            previous_cut = cut
+            for start, end in spans:
+                if start < cut < end:
+                    cut = start
+            if cut == previous_cut:
+                return cut
 
 
 def _bash_progress_line(
