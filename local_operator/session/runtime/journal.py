@@ -853,10 +853,73 @@ def install_moved(row: TurnJournalRow) -> bool:
     return (_now() - age) <= alive_until
 
 
+def _stall_bound_leg(row: TurnJournalRow) -> str | None:
+    """Which leg of the runtime's stall bound ended it, or ``None`` when it did not.
+
+    THE DUMP IS THE EVIDENCE AND THE MTIME IS THE KEYS: a dump is keyed by pid
+    alone (``stall_watchdog.dump_path``), and a pid the OS has since recycled
+    would otherwise let another runtime's freeze be narrated as this row's death.
+    A file written after this row's turn began can only be about this run — the
+    dump's last write IS the fire, because ``faulthandler`` writes with a bare
+    descriptor at the moment its timer expires.
+
+    NEVER RAISES: this runs while a session is opening, on a file a killed
+    process may have been midway through, and an unreadable instrument must
+    degrade to the rungs below rather than stop the reader.
+    """
+    try:
+        from local_operator.session.runtime import stall_watchdog
+
+        path = stall_watchdog.dump_path(row.pid)
+        if not path.exists() or path.stat().st_mtime < row.started_at:
+            return None
+        return stall_watchdog.fired_leg(row.pid)
+    except Exception:  # noqa: BLE001 — an unreadable dump is not a dead session
+        logger.debug("stall dump unreadable for pid %s", row.pid, exc_info=True)
+        return None
+
+
+def _stall_bound_detail(leg: str) -> str:
+    """The clause that tells the bound's two legs apart on every surface.
+
+    The CLASS is deliberately one token for both (see
+    ``incidents.STALL_BOUND_CAUSE``), so this is the only place a reader learns
+    whether a runtime went silent or spun without advancing — and the two want
+    different investigations. The peer's case of 2026-09-21 was the SILENCE leg
+    over a thread parked in ``queue.get``: a wait, not a wedge, which is a design
+    decision this bound tolerates right up to the point where nothing has
+    reported for the whole bound.
+    """
+    from local_operator.session.runtime.stall_watchdog import LEG_PROGRESS
+
+    if leg == LEG_PROGRESS:
+        return (
+            "its own stall bound fired: the loops kept running while the work "
+            "stopped advancing, and every thread's stack is in its dump"
+        )
+    return (
+        "its own stall bound fired: no plane reported for the whole bound, and "
+        "every thread's stack is in its dump"
+    )
+
+
 def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
     """``(kind, cause, reason)`` for a runtime that left an open row behind.
 
     THE PREFERENCE ORDER IS THE FIX, and every rung is a NAMED cause:
+
+    0. **the runtime's own stall bound ended it** → ``runtime-stall-bound``. The
+       bound's dump is keyed to this row's pid and is written AT THE INSTANT OF
+       DEATH — ``faulthandler`` reaches it from a C thread that runs no Python —
+       so it is strictly later evidence about this process than anything the row
+       itself carries, which is why it sits above every rung below. It is also
+       the ONLY rung that can answer for this death: the bound's exit runs no
+       exit hook, writes no journal row and reaches no reaper, so without this
+       the loudest possible ending — a runtime that dumped every thread and
+       killed itself — was narrated as ``unattributed``. See
+       :func:`_stall_bound_leg` for how a fired dump is told from a file a
+       SIGKILL left, and :data:`incidents.STALL_BOUND_CAUSE` for what its absence
+       cost.
 
     1. **the row's own recorded exit cause, when it names a signal** →
        ``runtime-shutdown``. This is a stop sweep that reached its target: the
@@ -917,9 +980,17 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         CUT_OFF_CAUSES,
         KILL_CAUSE,
         KILL_UNATTRIBUTED,
+        STALL_BOUND_CAUSE,
         render_cut_off_reason,
     )
 
+    leg = _stall_bound_leg(row)
+    if leg is not None:
+        return (
+            "error",
+            STALL_BOUND_CAUSE,
+            render_cut_off_reason(STALL_BOUND_CAUSE, detail=_stall_bound_detail(leg)),
+        )
     signal = signal_exit_token(row.exit_cause)
     if signal:
         return (
