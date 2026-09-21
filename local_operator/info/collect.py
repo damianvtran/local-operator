@@ -399,6 +399,12 @@ def collect_sessions(
                 # and the reader must be able to see that the session is still on the
                 # build it loaded (design review round 1, D1).
                 update_failed=getattr(rec, "update_failed", "") or "",
+                # WHAT THE LAST BEAT MEASURED, defaulted through getattr for the
+                # same mid-upgrade reason as every live-state field above: a record
+                # written by an OLDER runtime has no such field, and ``None`` there
+                # means "this build does not report" rather than a zero reading.
+                beat_lag_s=getattr(rec, "beat_lag_s", None),
+                cpu_since_beat_s=getattr(rec, "cpu_since_beat_s", None),
                 detached=bool(getattr(rec, "detached", False)),
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
@@ -629,6 +635,13 @@ def session_rows(
     from local_operator.session.placement import local_placement
 
     info = collect_sessions(root, include_stored=include_stored, stored_limit=stored_limit)
+    # THE FLEET'S OWN STALL BOUND, and what it left behind. ONE scan of the log
+    # directory for the whole listing rather than one per row: the marker has to
+    # be read out of each candidate file, so a per-row call would re-glob and
+    # re-read the same directory once per session.
+    from local_operator.session.runtime import stall_watchdog
+
+    fired = stall_watchdog.fired_pids()
     return [
         {
             "state": line.state,
@@ -727,6 +740,24 @@ def session_rows(
             # failed update lists as such instead of as an ordinary idle session — the
             # gap design review round 1 (D1) measured against the real renderer.
             "update_failed": line.update_failed,
+            # WHAT THE LAST BEAT MEASURED: seconds of no progress, and this
+            # process's own CPU time over the same gap. Appended at the END for the
+            # same append-only reason as the keys above — the established key order
+            # is a published contract and this EXTENDS it. They ride here because
+            # ``wedged`` alone is one ambiguous word for three situations (starved
+            # by its own work / starved by the host / not running), and these are the
+            # two readings that tell them apart; ``None`` means a runtime that does
+            # not report them, exactly as ``subagents_queued``'s ``None`` does.
+            "beat_lag_s": line.beat_lag_s,
+            "cpu_since_beat_s": line.cpu_since_beat_s,
+            # WHERE THIS SESSION'S OWN STALL DUMP IS, when its bound fired: the
+            # path, or ``None`` for every row whose runtime never tripped it.
+            # Appended at the END for the same append-only reason as the keys
+            # above. It rides here because the dump is the ONE artifact a reader
+            # needs after a freeze and the runtime that wrote it is gone by
+            # definition — a listing is where they arrive (``stall_watchdog``
+            # owns the naming, so the path is never composed twice).
+            "stall_dump": str(stall_watchdog.dump_path(line.pid)) if line.pid in fired else None,
         }
         for line, stamp in zip(info.lines, _stamps(info.lines, root), strict=True)
     ]

@@ -71,6 +71,11 @@ async def run_session(session: Any, prompt: str, args: Any, team: Any) -> int:
             cwd=os.getcwd(),
             yolo=bool(args.yolo),
             supervised=bool(getattr(args, "control", False)),
+            # The supervisor's descriptor, if one was inherited (stage E). Read with
+            # ``getattr`` for the same reason the ``control`` flag above is: this
+            # runner is also driven by tests and by the detached worker, which build
+            # args objects that predate the flag.
+            supervisor_fd=getattr(args, "supervisor_fd", None),
         )
         lifetime = asyncio.current_task()
 

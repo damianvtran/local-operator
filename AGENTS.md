@@ -883,9 +883,11 @@ Development and the global launcher deliberately use different installations:
 
 - `uv run local-operator` and `.venv/bin/local-operator` execute the current
   checkout. Use them while developing and validating source changes.
-- `lop` executes the non-editable uv tool installation under
-  `~/.local/share/uv/tools/local-operator`. It must remain independent of the
-  checkout so branch switches and uncommitted work cannot break the global TUI.
+- `lop` executes the non-editable generation install that the launcher resolves
+  to: `~/.local/bin/lop` goes through `~/.local/share/lop/current/bin/lop` into
+  `~/.local/share/lop/generations/<stamp>-<sha-or-version>/`. It must remain
+  independent of the checkout so branch switches and uncommitted work cannot
+  break the global TUI.
 
 A release here is a **combined release**: one version bump, one tag and one
 GitHub Release covering every PR merged since the previous tag, cut by one
@@ -1113,10 +1115,15 @@ gh pr edit <claim-pr-number> --title 'chore(release): bump version to X.Y.Z'
 gh pr ready <claim-pr-number>
 # ... independent scope-check round, merge; then:
 
-# 3. Advance the local main ref to the merged bump WITHOUT checking it out.
+# 3. Advance the local main ref to the merged bump WITHOUT checking it out —
+#    after the compare, because nothing downstream refuses a stale ref. Both
+#    calls must print the SAME sha (`rev-parse --short` takes ONE revision, so
+#    the two refs cannot share the flag).
 git -C ~/local-operator fetch origin
+git -C ~/local-operator rev-parse --short main
+git -C ~/local-operator rev-parse --short origin/main
 git -C ~/local-operator update-ref refs/heads/main origin/main
-# If main IS the checked-out branch, use lop-update's own remedy instead:
+# If main IS the checked-out branch, use this instead:
 #   git -C ~/local-operator merge --ff-only origin/main
 
 # 4. Write the notes from the collected `Release:` lines, then tag + GitHub
@@ -1131,31 +1138,67 @@ gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/ma
 #    See "Installing over a live fleet" below; a plain `lop-update` is only
 #    safe when nothing is running.
 <install>
-cat ~/.local/share/uv/tools/local-operator/.lop-source
+# The revision record lives INSIDE the installed generation, at `sys.prefix`:
+# a git build writes "<sha> <ref>"; a PyPI install writes "pypi <version>".
+cat "$(readlink ~/.local/share/lop/current)/tools/local-operator/.lop-source"
 # Smoke the built command from outside the repository, naming the uv-tool build
 # by path where the host has more than one `lop`: a bare `lop` can resolve to a
 # different install and report a version that is not this one.
 cd /tmp && ~/.local/bin/lop --version
+# Two checks, two different questions — do not use one to answer the other:
+#   * `.lop-source` (above) says WHICH BUILD is installed (ref, or `pypi <v>`);
+#   * a symbol check in the installed tree answers a DIFFERENT question — what
+#     code that build contains. The glob must stay OUTSIDE the quotes, or the
+#     shell passes it through literally and grep reports "No such file or
+#     directory":
+#     g=$(readlink ~/.local/share/lop/current)
+#     grep -c _SurvivalIndex "$g"/tools/local-operator/lib/python*/site-packages/local_operator/redaction_shapes.py
+#     A docstring can quote a removed line verbatim, so a grep for a code string
+#     is not evidence either way; the symbol is.
 
 # 6. Reclaim the worktree.
 git -C ~/local-operator worktree remove /tmp/lop-release-next
 ```
 
 `lop-update` archives the committed `main` ref, builds and installs that
-snapshot, and records the exact source revision in
-`~/.local/share/uv/tools/local-operator/.lop-source`. It never packages the
+snapshot, and records the exact source revision in the installed generation's
+`.lop-source` (at `sys.prefix` — see step 5). It never packages the
 currently checked-out branch or uncommitted files. A specific committed ref can
-be installed deliberately with `lop-update <git-ref>`. Before building it
-compares the ref against its remote counterpart and **refuses** a local `main`
-that is behind or diverged — that is why step 3 exists, and why it uses
-`update-ref` rather than a checkout: the root checkout is usually on another
-branch with uncommitted work, and `update-ref` moves the branch pointer without
-touching the working tree. The script's own refusal message says which form to
-use: `update-ref refs/heads/main origin/main` is "safe while another branch is
-checked out", and "if `main` is the checked-out branch, use
-`git -C ~/local-operator merge --ff-only origin/main` instead" — `update-ref`
-under a checked-out `main` moves the branch without touching the index, so
-`git status` would then show every merged change as a local modification.
+be installed deliberately with `lop-update <git-ref>`.
+
+**It does NOT compare that ref against a remote.** The compare-and-refuse gate
+belonged to the retired legacy installer; this build has no remote check at all
+(the compare is step 3's, and the wrong-build measurement is below), the refusal
+text survives only in
+`~/.local/bin/lop-update.legacy-uvtool.bak` **as history**, and
+`--skip-remote-check` is gone with it. So the fetch-and-compare is the release
+owner's own step, never a backstop — that is why step 3 exists. It uses
+`update-ref` rather than a checkout because the root checkout is usually on
+another branch with uncommitted work, and `update-ref` moves the branch pointer
+without touching the working tree: `update-ref refs/heads/main origin/main` is
+safe while another branch is checked out, and under a checked-out `main` it moves
+the branch without touching the index, so `git status` would then show every
+merged change as a local modification — use
+`git -C ~/local-operator merge --ff-only origin/main` in that case.
+
+**There is no remote check to rely on — the fetch IS the protection.** The
+current `lop-update` does not compare the ref against a remote at all: it takes
+its ref from its argument (defaulting to the local `main`) and delegates to
+`lop update --from-snapshot "$REF"`. The compare-and-refuse body that this step
+used to contain was retired with the legacy installer. It survives only in
+`~/.local/bin/lop-update.legacy-uvtool.bak` **as history**; its `REFUSING to
+release a stale ref` message lives there (`:154-170`), nothing runs the script,
+and the `--skip-remote-check` flag went with it. So nothing refuses a stale
+local `main`: measured on 2026-09-21,
+`lop-update` built **0.61.6 from `f6eaea3d`** while `origin/main` was several
+releases ahead, and the wrong build was installed before anyone noticed. The
+BEFORE-install check is therefore not a fallback to a gate; it is the only
+protection there is: `git fetch origin main`, confirm `git rev-parse --short
+main` equals `git rev-parse --short origin/main`, and when in doubt name the ref
+explicitly — `lop-update <sha>` installs exactly that commit. The generation
+directory name also carries the commit or version it was built from
+(`…/generations/<timestamp>-<sha-or-version>`), so every build is auditable
+after the fact, including when the marker is the `pypi <version>` form.
 
 ### Installing over a live fleet
 
@@ -1188,12 +1231,14 @@ summary that resolves `lop` on `PATH` can describe a different install than
 the one it just wrote: measured on 2026-09-15, such a summary printed
 `v0.55.9` after installing `0.55.10`, because a bare `lop` had resolved to a
 desktop app's managed environment. Read
-`~/.local/share/uv/tools/local-operator/.lop-source` and smoke the built
+the installed generation's `.lop-source`
+(`$(readlink ~/.local/share/lop/current)/tools/local-operator/.lop-source`) and smoke the built
 command from outside the repository for the answer.
 
 It is still `lop-update` underneath, so the mechanics above about the committed
-`main` ref, the source revision record and the remote-check gate apply
-unchanged.
+`main` ref and the source revision record apply unchanged — but the
+remote-check gate does NOT exist in this build (see step 3): nothing compares
+your ref against a remote, so fetch and compare it yourself before installing.
 
 Warnings that still hold, each of which has already cost a release:
 
@@ -1298,12 +1343,14 @@ Warnings that still hold, each of which has already cost a release:
   already points at — which is how a release once shipped the previous
   version's code under the new number. Let `gh release create --target`
   create the tag.
-- **Never pass `--skip-remote-check` to `lop-update` for a release.** The
-  gate exists because a stale local `main` was once installed and reported as
-  a successful release while `lop` silently downgraded from 0.18.1 to 0.17.5.
-  The flag is for deliberate offline or pre-push installs of a branch you are
-  developing, and its use is printed in the summary so it cannot be mistaken
-  for a release.
+- **There is no `--skip-remote-check` any more, and no gate for it to skip.**
+  The flag was retired with the legacy installer along with the compare-and-
+  refuse step, so `lop-update` installs whatever ref you name — including a
+  stale local `main`, which is how 0.61.6 was once built from an old commit
+  while main was several releases ahead. The protection is the fetch-and-compare
+  in step 3, not a flag; it exists because a stale local `main` was once
+  installed and reported as a successful release while `lop` silently downgraded
+  from 0.18.1 to 0.17.5.
 - **Never repoint `lop` at the editable `.venv`**; doing so couples the stable
   command back to in-progress work. Publication is always the separate final
   step: merge, bump, tag, the drained install, verify `.lop-source`, then smoke

@@ -117,18 +117,23 @@ the dist-info with `skewpkg-0.49.0.dist-info`; re-read in the same process →
 **Caveat that shapes the design:** `lop-update` between releases rebuilds from
 `main` while `pyproject.toml` still says the *last released* version. Then the
 dist-info name is identical and only content changes — `version()` cannot
-distinguish the builds, but `~/.local/share/uv/tools/local-operator/.lop-source`
-can: `lop-update` records `<git-sha> <tag>` there (live example:
-`4d3ce1d1a48f4f3b799efdfabb014979e70e0630 v0.49.0`). So the drift token is a
-**pair**: `(version, source_ref)`, with `version` the fallback when
-`.lop-source` is absent (PyPI/pipx installs, editable checkouts).
+distinguish the builds, but the `.lop-source` marker inside the installed
+generation (at `sys.prefix`) can: a git build records `<git-sha> <ref>` there
+(live example: `4d3ce1d1a48f4f3b799efdfabb014979e70e0630 v0.49.0`), while a
+PyPI-installed generation records `pypi <version>` instead — so the marker is
+present in BOTH shapes and the form of its first token is what says which kind of
+build this is. So the drift token is a **pair**: `(version, source_ref)`, with
+`version` the fallback when `.lop-source` is absent (pipx installs, editable
+checkouts).
 
 > **Amended after the stale-marker fix.** `lop-update` is no longer the only
 > writer: a PyPI upgrade through `perform_upgrade` (`lop update` and the TUI's
 > `/update`) now records `pypi <version>` at the same path, because leaving the
 > marker alone made it describe the build the upgrade had *displaced*. The file
 > therefore no longer implies "git snapshot" by its mere existence — the first
-> token does, and `source_ref` returns `""` for the `pypi` sentinel so a wheel
+> token does, and `source_ref` returns `""` for the sentinel tokens — `pypi`,
+> `snapshot`, and any future non-hex one (see the constraint on adding sentinels in
+> `update.py`) — so a wheel
 > still compares on version alone exactly as described above.
 
 ## 4. The change, file by file
@@ -154,9 +159,16 @@ class BuildStamp:
 def installed_build() -> BuildStamp: ...
 ```
 
-Reads `.lop-source` at `sys.prefix` (the same root `is_git_snapshot` uses),
-first whitespace-separated token as `source_ref`, `""` when absent. One small
-file read; called rarely (adopt/engage/bind), never on a hot path.
+Reads `.lop-source` at `sys.prefix` (the same root `is_git_snapshot` uses) and
+takes its first whitespace-separated token as `source_ref` **only when that token
+looks like a commit** — 7 to 40 hexadecimal characters (`_looks_like_git_sha`),
+and `""` otherwise. The shape test, not a list of known sentinels, is what keeps
+a wheel (`pypi <version>`) comparing on version alone, and what makes an
+unrecognised token — `snapshot`, or a sentinel added later — degrade to "no ref"
+instead of rendering as a bogus commit; the length arm is part of the rule, so a
+hex token shorter than 7 or longer than 40 degrades too. `""` is also the answer
+when the marker is absent. One small file read; called rarely
+(adopt/engage/bind), never on a hot path.
 
 ### 4.1 B — runtime-side completion
 

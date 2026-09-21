@@ -6873,3 +6873,126 @@ async def test_a_refused_warm_open_leaves_no_reservation_behind(tmp_path):
 
     assert pool._handouts == {}, "the warm refusal stranded a reservation"
     assert pool._locate_flights == {}, "the refusal left a lookup flight behind"
+
+
+@pytest.mark.asyncio
+async def test_the_command_and_answer_routes_carry_the_authority_refusal(tmp_path, monkeypatch):
+    """The refusal reaches the desktop VERBATIM, on the route that refused.
+
+    QA could not drive this cell at all before: the refusal crossed as a bare
+    ``RuntimeError``, so the command route fell through the shared ladder to
+    ``503 runtime_unreachable`` ("reconnect and reconcile before retrying") and
+    the card route answered ``409 no longer pending`` — while the card was still
+    parked. Both describe a different problem than the operator has, and neither
+    carried the remedies the phone relay's 422 has always carried (agent review
+    round 1 R1-2 = design D1 = UX U4 = QA Q1).
+
+    The bridge's remote is a STUB here because this test is about the ROUTE's
+    arm: what the ladder does with the category, and what the card route says
+    about a card that is still parked. The refusal's real provenance — a live
+    runtime this backend did not spawn — is covered end to end by
+    ``tests/unit/session/runtime/test_approval_authority_seam.py``
+    (``..._desktop_route_cannot_loosen_a_runtime_this_backend_did_not_start``),
+    which drives these same two methods through a real ``AttachedSession``.
+    """
+    import os
+    from typing import Any, cast
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from local_operator.config import ConfigManager
+    from local_operator.harness.approval import OPERATOR_AUTHORITY_REQUIRED_NOTICE
+    from local_operator.server.routes import capabilities, desktop_sessions
+    from local_operator.server.utils.desktop_sessions import DesktopSessions
+    from local_operator.session.errors import OperatorAuthorityRequired
+
+    for name in list(os.environ):
+        if name.startswith("CMUX_"):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LOCAL_OPERATOR_DESKTOP_TOKEN", "authority-token")
+
+    app = FastAPI()
+    app.state.config_manager = ConfigManager(tmp_path)
+    pool = DesktopSessions(tmp_path)
+    app.state.desktop_sessions = pool
+    app.include_router(desktop_sessions.router)
+    app.include_router(capabilities.router)
+    sid = await pool.create(str(tmp_path))
+
+    async def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OperatorAuthorityRequired()
+
+    async def noop(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    class RefusingRemote(SimpleNamespace):
+        """A remote that refuses the two authority-increasing methods.
+
+        Everything else it is asked for answers with an inert coroutine: the
+        bridge touches a long tail of its surface around a command (watch
+        leases, disposal, guarding), and listing that tail here would make this
+        test fail every time the bridge learns a new one. What is UNDER test is
+        the route's arm, so only the two methods that produce the refusal are
+        anything in particular.
+        """
+
+        def __getattr__(self, name: str) -> Any:
+            if name.startswith("_"):
+                raise AttributeError(name)
+
+            async def inert(*_args: object, **_kwargs: object) -> None:
+                return None
+
+            return inert
+
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://localhost",
+            headers={"Authorization": "Bearer authority-token"},
+        ) as client:
+            async with pool.session(sid) as bridge:
+                bridge.remote = cast(
+                    Any,
+                    RefusingRemote(
+                        is_cold=False,
+                        frontend_state=SimpleNamespace(epoch="epoch-1"),
+                        bind_runtime=noop,
+                        route_shared_slash=refuse,
+                        answer_gate=refuse,
+                    ),
+                )
+                command = await client.post(
+                    f"/v1/desktop/sessions/{sid}/commands",
+                    json={
+                        "request_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "command": "approvals",
+                        "args": "auto",
+                    },
+                )
+                assert command.status_code == 422, command.text
+                body = command.json()
+                assert body["detail"]["code"] == "operator_authority_required", body
+                assert body["detail"]["message"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, body
+
+                answer = await client.post(
+                    f"/v1/desktop/sessions/{sid}/answers",
+                    json={
+                        "request_id": "deadbeefdeadbeef",
+                        "approved": True,
+                        # The route compares the answer's epoch with the
+                        # session's, so the refusal is reached only for an answer
+                        # to the CURRENT owner.
+                        "epoch": "epoch-1",
+                    },
+                )
+                # BOTH halves in one request: the card route must not swallow the
+                # refusal as "no longer pending".
+                assert answer.status_code == 422, answer.text
+                detail = answer.json()["detail"]
+                assert detail["code"] == "operator_authority_required", detail
+                assert detail["message"] == OPERATOR_AUTHORITY_REQUIRED_NOTICE, detail
+                assert detail["still_pending"] is True, detail
+    finally:
+        await pool.close()

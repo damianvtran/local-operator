@@ -7200,7 +7200,9 @@ class Session:
         """Reconcile cross-process receipts without changing the read watermark."""
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
+            AttentionReadDeferred,
             AttentionStore,
+            AttentionWriteDeferred,
             conversation_identity,
         )
 
@@ -7213,21 +7215,74 @@ class Session:
                 and saved.get("conversation_id") == identity
                 and saved.get("eligible", True)
             ):
-                await asyncio.to_thread(
-                    store.publish,
-                    identity,
-                    saved["token"],
-                    saved["anchor"],
-                    saved["kind"],
-                    reason=str(saved.get("reason") or ""),
-                    cause=str(saved.get("cause") or ""),
-                )
+                try:
+                    await asyncio.to_thread(
+                        store.publish,
+                        identity,
+                        saved["token"],
+                        saved["anchor"],
+                        saved["kind"],
+                        reason=str(saved.get("reason") or ""),
+                        cause=str(saved.get("cause") or ""),
+                    )
+                except AttentionWriteDeferred as deferred:
+                    logger.warning(
+                        "attention: restoring the journalled outcome for %s is deferred; "
+                        "the journal still holds it: %s",
+                        identity,
+                        deferred,
+                    )
+                except Exception:  # noqa: BLE001 — attention is an observability nicety
+                    # THE SAME RULE THE BOOT PATH STATES (see `bootstrap_transcript`),
+                    # for the same reason: this runs on request paths (the runtime's
+                    # refresh op, the mobile handle, the desktop poll), and the
+                    # caller asked for a RECEIPT, not for a store write. A raise here
+                    # failed the whole call -- `snapshot` already suppresses
+                    # `sqlite3.Error` around exactly this call for exactly that
+                    # reason. Logged rather than silent: the store row is what the
+                    # sidebar reads, so a failure to write it is real.
+                    logger.warning(
+                        "attention: could not restore the journalled outcome for %s",
+                        identity,
+                        exc_info=True,
+                    )
+            # MARKED RESTORED EVEN WHEN THE PUBLISH FAILED (recorded here rather
+            # than cited: review round 1 of this PR lists this decision under
+            # "Accepted, not findings", which is exactly what it is -- a trade-off
+            # somebody chose, so this is where its reasoning lives). The one-shot
+            # import is not retried per tick. The outcome is durable in the
+            # transcript, and the next boot's `bootstrap_transcript` re-imports it,
+            # so leaving the flag unset would buy nothing but a warning per poll --
+            # precisely the spam the desktop poll documents against ("log the
+            # TRANSITION, not the tick"). `publish` is idempotent by token, so the
+            # boot path doing it again is free.
             self._attention_restored = True
         # The in-process TUI never calls ``async_init``, so this is its only
         # route to the restored cut-off notice. Deduped on the token, so the
         # runtime path (which calls both) narrates exactly once.
         await self._journal_restored_cut_off()
-        state = await asyncio.to_thread(store.state, identity)
+        # The read that carries the reconcile answer, and the one the incident's
+        # log shows dying: 36 of its 60 `database is locked` occurrences, and all
+        # 36 of those are the daemon's scan records -- a scan record carries the
+        # phrase once, so the read class's RECORD and OCCURRENCE counts coincide
+        # here and the number alone does not say which unit it is in. It is retried
+        # inside the store (`AttentionStore._retry_read`), and a budget that still
+        # ran out degrades HERE rather than propagating, for the reason the write
+        # arm above does:
+        # this runs on request paths (the runtime's refresh op, the mobile handle,
+        # the desktop poll), and the caller asked for a receipt, not for a store
+        # read. The previous state stands and the next tick re-reads it, which is
+        # the same disposition `_publish_attention_outcome` gives a deferred
+        # publish -- logged, never silent, because a stale receipt is real.
+        try:
+            state = await asyncio.to_thread(store.state, identity)
+        except AttentionReadDeferred as deferred:
+            logger.warning(
+                "attention: could not read the store for %s; keeping the previous state: %s",
+                identity,
+                deferred,
+            )
+            return self._attention
         if state != self._attention:
             self._attention = state
             self.refresh_frontend_state()
@@ -7258,6 +7313,7 @@ class Session:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
             AttentionStore,
+            AttentionWriteDeferred,
             conversation_identity,
             provisional_anchor,
         )
@@ -7338,15 +7394,42 @@ class Session:
                 "reason": reason,
             },
         )
-        self._attention = await asyncio.to_thread(
-            AttentionStore().publish,
-            conversation_identity(self._transcript.directory),
-            token,
-            anchor,
-            kind,
-            reason=reason,
-            cause=cause,
-        )
+        try:
+            self._attention = await asyncio.to_thread(
+                AttentionStore().publish,
+                conversation_identity(self._transcript.directory),
+                token,
+                anchor,
+                kind,
+                reason=reason,
+                cause=cause,
+            )
+        except AttentionWriteDeferred as deferred:
+            # CONTENTION OUTLASTED THE STORE'S BOUNDED RETRY, and the completion
+            # is still not lost: the durable journal marker was appended just
+            # above, and the next boot's `bootstrap_transcript` re-imports it.
+            # That ordering is what makes deferring honest here rather than a
+            # quiet drop -- and it is why this arm does not re-raise.
+            logger.warning(
+                "attention: completion outcome for %s deferred to the next boot's import: %s",
+                conversation_identity(self._transcript.directory),
+                deferred,
+            )
+        except Exception:  # noqa: BLE001 — attention is an observability nicety
+            # THE OUTAGE PATH. This runs in the turn's `finally`, on the runtime
+            # an ASGI request handler drives, so a raise here did not merely lose
+            # a receipt: it ended the response with "ASGI callable returned
+            # without completing response" and skipped the rest of the teardown
+            # with it (2026-09-20). Attention bookkeeping outranks a receipt, not
+            # the work the caller asked for -- the same rule, and the same broad
+            # guard, as `bootstrap_transcript` and `_journal_witnessed_cut_off`.
+            # `self._attention` keeps its previous value rather than being set to
+            # a state nothing wrote.
+            logger.warning(
+                "attention: could not publish the outcome for %s",
+                conversation_identity(self._transcript.directory),
+                exc_info=True,
+            )
         # The model has to learn WHY even when this process survives the
         # cut-off (a graceful termination signal aborts the turn and then exits,
         # but a retirement that caught a live turn does not). Deduped on the
@@ -9324,12 +9407,12 @@ class Session:
         live production DSN was found in a transcript with nothing anywhere saying
         it had happened, and every such miss today is discovered by accident. One
         :data:`SESSION_INCIDENT_MESSAGE_TYPE` row names the tool and the shapes, so
-        it becomes a ticket rather than a footnote. The classification is what kind
-        of ticket: a value that was masked whole before the model could read it is
-        contained and owes only cleanup, while readable material left in the text is
-        the one case that asks the operator for a rotation. Labels only, never
-        values: a notice carrying the credential would be the leak it exists to
-        report.
+        it becomes a ticket rather than a footnote — but ONLY for the case that is
+        a ticket: readable material the model can see. A value the pass masked
+        whole is contained, nothing was leaked to the transcript, and it files
+        nothing at all (the operator's instruction: no incident indicated anywhere
+        unless something was actually leaked). Labels only, never values: a notice
+        carrying the credential would be the leak it exists to report.
 
         Called with text alone, so the tool identity rides
         :func:`local_operator.harness.redaction.current_tool_source` — published
@@ -9365,12 +9448,45 @@ class Session:
         except Exception:  # noqa: BLE001 — see the docstring's never-raises note
             logger.warning("credential shape pass failed; withholding this text", exc_info=True)
             return "[output withheld: this session's credential redaction sink could not be read]"
-        if labels or reached_model:
-            self._queue_shape_incident(labels, reached_model)
+        # The filing decision belongs to the SINK, not to either producer: it is the
+        # one place every surface funnels through (this result hook, the pipe filter
+        # and the live-text path, both of which report through
+        # :func:`local_operator.harness.redaction.report_shape_hits`), so "an incident
+        # means an exposure" cannot drift between them. Called with the report as it
+        # is: a contained hit is dropped inside, before the tool lookup or the dedupe
+        # set is touched.
+        self._queue_shape_incident(labels, reached_model)
         return scrubbed
 
     def _queue_shape_incident(self, labels: list[str], reached_model: bool) -> None:
-        """Record one shape-masked result for the boundary flush. Never raises."""
+        """Record one EXPOSED shape hit for the boundary flush. Never raises.
+
+        AN INCIDENT IS AN EXPOSURE, and nothing else. A credential the shape pass
+        masked WHOLE never reached this session's context, so there is nothing to
+        rotate and nothing the model has to be told: it files nothing (the
+        operator's instruction — "as long as something wasn't actually leaked to
+        the transcript we shouldn't get a session incident indicated anywhere"), and
+        a notice shown for a non-event is the noise that teaches an operator to
+        skip the one that is real.
+
+        THIS IS THE ONLY GATE, deliberately. Every surface reports through this
+        method — the session installs it as the reporter
+        (``set_shape_hit_reporter``) and the pipe filter and live-text path reach it
+        via :func:`~local_operator.harness.redaction.report_shape_hits` — so one
+        predicate here covers all three and a fourth added later cannot forget it.
+        The PROTECTION is not here and must not become conditional, and it now
+        reaches every masking surface: ``VariableStore.redact_with_report``
+        registers each hit for containment before any of this runs, and the bash
+        pipe filter — which masks bytes before a result exists, so no later pass
+        over that result can match the value — registers the hits it holds through
+        ``VariableStore.register_shape_hits_for_containment`` as it masks them.
+        Agent review R1/E1: without that second registration path a credential the
+        pipe removed was left unregistered for the rest of the session, and a
+        later bare reuse of it printed it in the clear while this gate correctly
+        said nothing.
+        """
+        if not reached_model:
+            return
         try:
             tool, summary = current_tool_source()
             # The classification is part of the identity: the first result of a
@@ -9400,7 +9516,7 @@ class Session:
     async def journal_shape_incident(
         self, tool: str, labels: list[str], summary: str, *, reached_model: bool = True
     ) -> None:
-        """Tell the model (and the transcript) that a result was masked.
+        """Tell the model (and the transcript) that READABLE material was masked.
 
         Rendered rather than classified: this is not a FAILURE, and running it
         through :func:`~local_operator.incidents.classify_incident` would attach
@@ -9409,7 +9525,15 @@ class Session:
         change and a model switch carry their own formatter.
 
         ``reached_model`` is the severity, and its default is the ESCALATED one so
-        that a caller which does not know cannot make the quieter claim.
+        that a caller which does not know cannot make the quieter claim. In-tree it
+        is now always True: both producers (the session result hook and
+        ``harness.redaction.report_shape_hits``, which every other surface goes
+        through) gate on it, because a credential masked WHOLE was never leaked to
+        the transcript and so is no incident at all. The quieter wording is kept in
+        the formatter rather than deleted — it is the formatter's own contract, and
+        a caller that deliberately has something to say about a contained hit
+        should not have to invent the words — and what the operator asked for is
+        silence on the contained case, not the deletion of the sentence.
 
         Persisted, unlike an MCP recovery: what it records (a credential reached a
         tool result, and either it was contained there or it is readable in this

@@ -31,6 +31,15 @@ async def _settle(pilot) -> None:  # type: ignore[no-untyped-def]
     await pilot.pause()
 
 
+def _rows(app) -> list[str]:  # type: ignore[no-untyped-def]
+    """The painted frame as plain text, one entry per row.
+
+    Read from the compositor, so a row that a block authored but the sheet did
+    not paint is not counted as present (the same reader the flow tests use).
+    """
+    return [strip.text.rstrip() for strip in app.screen._compositor.render_strips()]
+
+
 def test_the_labels_are_the_ones_the_frame_shows() -> None:
     """A block whose header is the only thing naming it must name itself.
 
@@ -86,15 +95,22 @@ async def test_reasoning_streams_labelled_above_the_answer_and_stops_growing() -
 
 
 @pytest.mark.asyncio
-async def test_retiring_the_phase_collapses_it_to_its_header() -> None:
-    """``retire`` collapses the phase: ONE row saying this call reasoned.
+async def test_retiring_the_phase_leaves_nothing_for_the_container_to_keep() -> None:
+    """``retire`` closes the phase; the container drops the block WHOLE.
 
-    Removing the block would delete rows from under the reader's cursor, and
-    keeping its rows was the other extreme — one ~7-row block per model call,
-    dozens per session, with no way to dismiss them (UX review round 1, U1).
-    The collapsed row is the middle the tool cards already use, and it still
-    refuses text: the fragments that arrive after the phase closes must not
-    grow a block the reader has watched settle.
+    The terminal state is VANISHING, not collapsing. The app calls ``retire``
+    and then removes the block in the same breath
+    (``_retire_reasoning_block``), so the settled transcript reads
+    ``user -> tools -> answer``. The previous behaviour kept one ``· reasoning``
+    header row per model call — the residue the operator reported, accumulating
+    for the life of a session, saying nothing a reader can act on because the
+    reasoning it stood for is gone either way.
+
+    Both halves of the guard are asserted, because each can be lost on its own:
+    ``_collapsed`` refuses TEXT (the controller's final flush can land after the
+    phase closed) and ``_rows`` refuses ROWS, so a repaint in the window between
+    the close and the detach cannot re-author a block the reader has already
+    watched settle.
     """
     app = StyledTranscriptApp()
     async with app.run_test(size=(100, 30)) as pilot:
@@ -105,14 +121,19 @@ async def test_retiring_the_phase_collapses_it_to_its_header() -> None:
         await _settle(pilot)
         assert block.size.height == REASONING_VISIBLE_ROWS + 1
 
+        # The app's own sequence, in its own order: close, then remove.
         block.retire()
         block.update_text("a later thought that must never be painted")
+        assert "later thought" not in block.text(), "a closed phase takes no text"
+        assert block._rows(80) == [], "and it authors no rows if it is repainted"
+        assert block.is_finalized(), "closed and immutable before it is detached"
+        view.remove_block(block)
         await _settle(pilot)
 
-        assert block.size.height == 1
-        assert REASONING_LABEL in _plain(block)
-        assert "word199" not in _plain(block), "the rows are shed, not frozen"
-        assert "later thought" not in _plain(block)
+        assert view.blocks() == []
+        # The painted frame, not just the tree: a block removed while its row
+        # stayed painted would pass every assertion above.
+        assert not any(REASONING_LABEL in row for row in _rows(app))
 
 
 @pytest.mark.asyncio

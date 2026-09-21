@@ -38,9 +38,11 @@ from local_operator.harness.types import (
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
     ToolResult,
+    Usage,
 )
 from local_operator.session import frontend_state as module
 from local_operator.session.frontend_state import (
+    FRONTEND_CHECKPOINT_CUSTOM_TYPE,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
@@ -1046,3 +1048,585 @@ def test_the_end_event_the_relay_records_is_a_row_the_cache_can_stamp() -> None:
     ).model_dump(mode="json")
     assert "type" in row
     assert _is_row_shaped(row)
+
+
+# ---------------------------------------------------------------------------
+# Released rows: identity survives, the tick stops paying for it
+#
+# The window memo above makes a tick cost the DELTA for a child that is still
+# working. It does nothing for a child that has FINISHED: ``comms.job_rows()``
+# re-adds every settled child the execution ledger already swept (through
+# ``_ChildRecord.job_ref``, deliberately -- the publish is a follower's only
+# handle on a swept child), so a long session's roster only grows, and every
+# one of those rows was rebuilt, re-validated and re-frozen on every 50 ms
+# tick even though nothing about it can change again.
+#
+# Measured on the operator's own wedged session: 48 rows, 42 hours, the loop
+# pinned at 100 % of a core with the roster generation not advancing. These
+# pin the two halves of the fix -- the row is projected without its window and
+# stamped ``roster_released``, and it is then reused by identity rather than
+# rebuilt.
+# ---------------------------------------------------------------------------
+
+
+def _settled(job: AsyncJob, *, ago: float = 3600.0) -> AsyncJob:
+    """The job as the ledger leaves it once retention has let it go."""
+    job.status = "completed"
+    job.settled_at = __import__("time").time() - ago
+    return job
+
+
+def _released_session(jobs: list[Any], *, retention_ms: float = 5 * 60_000) -> Any:
+    """A session whose manager publishes a retention window, as a live one does."""
+    session = _session(jobs)
+    session.jobs.retention_ms = retention_ms
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: list(jobs),
+        nodes=lambda: [],
+        node=lambda _job_id: None,
+    )
+    return session
+
+
+class _CheckpointTranscript:
+    """A transcript double for both halves of the durable round trip.
+
+    ``checkpoint`` APPENDS through ``append_custom``; ``_restored_state`` READS
+    through ``latest_custom``. One object serves both so a test writes a
+    checkpoint and restores from exactly what was written, rather than from a
+    hand-built state that could differ from the durable row in the one field
+    under test.
+    """
+
+    def __init__(self) -> None:
+        self.checkpoint: tuple[str, dict[str, Any]] | None = None
+
+    async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+        self.checkpoint = (custom_type, payload)
+
+    def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
+        assert self.checkpoint is not None, "latest_custom read before any checkpoint"
+        kind, payload = self.checkpoint
+        return payload if kind == custom_type else None
+
+
+def test_a_released_row_keeps_its_identity_and_says_it_was_released() -> None:
+    """Released means "not a current member", never "gone"."""
+    live, done = _job("child-live"), _settled(_job("child-done"))
+    session = _released_session([live, done])
+    store = _store([live, done])
+    store.refresh_jobs(session)
+
+    rows = {row.id: row for row in store.state.jobs}
+    assert set(rows) == {"child-live", "child-done"}, "a released child vanished from the roster"
+    assert rows["child-done"].roster_released is True
+    assert rows["child-done"].status == "completed"
+    assert rows["child-done"].label == "child-done"
+    # The live child is untouched by any of this.
+    assert rows["child-live"].roster_released is False
+    assert len(rows["child-live"].trajectory) == ROWS
+
+
+def test_a_released_row_sheds_the_retained_window_it_can_no_longer_change() -> None:
+    """The per-ROW half: a settled child stops carrying 500 rows on every tick."""
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    store = _store([done])
+    store.refresh_jobs(session)
+
+    row = store.state.jobs[0]
+    assert row.trajectory == (), "a released row still carried its retained window"
+    # The rows are not lost -- they are on disk in the child's own transcript,
+    # which is what the subagent page reads. The COUNT still rides along so the
+    # page can say how many events there were.
+    assert row.trajectory_length == ROWS
+
+
+def test_a_running_child_is_never_released_whatever_its_stamps_say() -> None:
+    """``retention_expired`` refuses a running row; this must inherit that."""
+    running = _job("child-live")
+    running.settled_at = 0.0  # an ancient stamp, but it is still running
+    session = _released_session([running])
+    store = _store([running])
+    store.refresh_jobs(session)
+
+    row = store.state.jobs[0]
+    assert row.roster_released is False, "a RUNNING child was released"
+    assert len(row.trajectory) == ROWS
+
+
+def test_a_settled_child_inside_the_window_is_not_released_yet() -> None:
+    """Retention is a window, and a child that just finished is still in it."""
+    fresh = _settled(_job("child-done"), ago=1.0)
+    session = _released_session([fresh])
+    store = _store([fresh])
+    store.refresh_jobs(session)
+
+    assert store.state.jobs[0].roster_released is False
+    assert len(store.state.jobs[0].trajectory) == ROWS
+
+
+def test_a_released_row_is_reused_by_identity_across_ticks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The per-JOB half, and the one the wedge actually turned on.
+
+    Shedding the window removes the per-row cost; this removes the per-row-ROW
+    cost that remained -- validating and freezing a fresh ``JobState`` for every
+    settled child, on every tick, forever. Asserted by IDENTITY rather than by
+    timing, per this file's header: the same object, not an equal rebuild.
+    """
+    done = [_settled(_job(f"child-{index}")) for index in range(4)]
+    live = _job("child-live")
+    session = _released_session([live, *done])
+    store = _store([live, *done])
+    store.refresh_jobs(session)
+
+    # Read CANONICAL state, not the ``state`` property: that one deep-copies
+    # every row on the way out by design (it must never share an owning model),
+    # so it can never answer an identity question about what the store holds.
+    before = {row.id: row for row in store._state.jobs if row.roster_released}
+    assert len(before) == 4, "the settled children were not released"
+
+    # A tick driven by the LIVE child appending, which is what a real tick is.
+    _trajectory(live).append(_row(ROWS))
+    store.refresh_jobs(session)
+
+    after = {row.id: row for row in store._state.jobs if row.roster_released}
+    assert set(after) == set(before)
+    for job_id, row in after.items():
+        assert row is before[job_id], f"{job_id} was rebuilt on a tick it cannot have changed"
+
+
+def test_a_released_row_is_rebuilt_when_its_terminal_facts_move(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The memo is a fingerprint, not a latch: a changed row must not be served stale."""
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    store = _store([done])
+    store.refresh_jobs(session)
+    # CANONICAL state, not the `state` property: that one runs every row through
+    # `_public_job`, which `model_copy`s unconditionally, so two `state` reads
+    # are never the same object and an identity assertion across them is
+    # vacuously true. The value assertion below is what carried this test; the
+    # identity one now means something too.
+    first = store._state.jobs[0]
+
+    done.result_text = "the answer the child came back with"
+    store.refresh_jobs(session)
+    second = store._state.jobs[0]
+
+    assert second is not first, "a released row was served from a stale memo"
+    assert second.result_text == "the answer the child came back with"
+
+
+def test_a_released_row_is_rebuilt_when_its_derived_inputs_move() -> None:
+    """The key covers what ``_released_row`` DERIVES, not only terminal text.
+
+    AGENT REVIEW ROUND 1, S1. ``_released_row`` prices the row from ``job.usage``
+    and ``job.descendant_usage``, carries ``trajectory_length`` off the retained
+    window and reads ``model_label`` -- and the fingerprint covered none of
+    them. A released row whose accounting moved was therefore served the SAME
+    object for ever, with no later tick able to repair it, because the mark
+    never moves again. Each leg below moves exactly one derived input and
+    asserts a REBUILD, which is the only observable a memo can offer.
+
+    Read CANONICAL state for the identity legs (``_public_job`` copies on every
+    ``state`` read, so an identity assertion across two of those is vacuous).
+    """
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    store = _store([done])
+    store.refresh_jobs(session)
+    current = store._state.jobs[0]
+    assert current.roster_released is True, "the premise is unmet: the row was not released"
+    assert current.trajectory_length == ROWS
+
+    # EACH LEG RE-BASELINES AND CARRIES BOTH ASSERTIONS, deliberately. Comparing
+    # every leg back to the FIRST row would let an earlier leg's rebuild satisfy
+    # a later leg's identity check, and an identity check with no value check
+    # says nothing about what the row actually holds -- both were true of the
+    # first draft of this test, and a per-element sabotage sweep is what showed
+    # it (each element below must be able to fail the file ON ITS OWN).
+
+    # (a) accounting is accumulated IN PLACE on the job, so an identity check on
+    # the usage object would never fire -- the counters have to be keyed.
+    done.usage = Usage(input_tokens=11, output_tokens=22)
+    store.refresh_jobs(session)
+    after_usage = store._state.jobs[0]
+    assert after_usage is not current, "a released row priced from a moved usage was reused"
+    assert after_usage.usage is not None and after_usage.usage.output_tokens == 22
+    current = after_usage
+
+    # (b) the retained window: the length is the cheap discriminator, and it is
+    # what ``trajectory_length`` on the row is built from.
+    _trajectory(done).append(_row(ROWS))
+    store.refresh_jobs(session)
+    after_window = store._state.jobs[0]
+    assert after_window is not current, "a released row's trajectory_length moved unnoticed"
+    assert after_window.trajectory_length == ROWS + 1
+    current = after_window
+
+    # (c) settled-descendant accounting, replaced wholesale at the ownership
+    # boundary by ``detach_child_manager``.
+    done.descendant_usage = [Usage(input_tokens=3, output_tokens=4)]
+    store.refresh_jobs(session)
+    after_descendants = store._state.jobs[0]
+    assert after_descendants is not current, "a released row's descendants moved unnoticed"
+    assert len(after_descendants.descendant_usage) == 1
+
+
+def test_the_release_key_covers_every_element_that_can_move_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4: each element added for S1 must be able to fail this file ON ITS OWN.
+
+    Round 2's per-element sweep found the first test pinned only the usage and
+    descendant elements: ``model_label`` and the plan could also be dropped with
+    the file still green, and the trajectory pair was falsifiable only as a PAIR
+    until the front-deletion leg below gave the length element a shape of its
+    own. (``context_window`` had no row in that sweep because it was not in the
+    key at all -- that was round 2's R1, not a gap in the pinning; review round
+    3, T5.)
+
+    Driven through ``_ReleasedRows.row`` directly rather than through
+    ``refresh_jobs``, because one of these legs -- a rotation at constant
+    length -- is VALUE-EQUAL for everything a released row projects, so
+    ``_jobs_equal`` keeps the old row and discards the rebuild. A store-level
+    identity assertion cannot see that element work; the memo can.
+    """
+    from local_operator.tools.builtin import TODO_STORE
+
+    session_id = "abcdef123456"
+    memo = module._ReleasedRows("e1")
+    job = _settled(_job("child-done"))
+    comms = SimpleNamespace(
+        node=lambda _job_id: SimpleNamespace(
+            session_id=session_id,
+            live=False,
+            session_dir=None,
+            parent_job_id=None,
+            launch_message_id="",
+            launch_prompts=None,
+            attempt_aliases=(),
+        )
+    )
+
+    def row() -> JobState:
+        return memo.row("child-done", job, comms)
+
+    current = row()
+
+    # (d) the relay's ``ModelChangeEvent`` arm writes ``model_label`` and
+    # ``context_window`` on consecutive lines of the same block; round 2 (R1)
+    # caught the key carrying only the first while the row reads BOTH.
+    job.model_label = "other-provider/other-model"
+    after_label = row()
+    assert after_label is not current, "model_label moved and the row was reused"
+    assert after_label.model_label == "other-provider/other-model"
+    current = after_label
+
+    job.context_window = 200_000
+    after_context = row()
+    assert after_context is not current, "context_window moved and the row was reused"
+    assert after_context.context_window == 200_000
+    current = after_context
+
+    # (e) a rotation at CONSTANT length: an append that evicts the front, which
+    # is the shape a length-only key cannot see.
+    rows = _trajectory(job)
+    rows.pop(0)
+    rows.append(_row(ROWS))
+    assert len(rows) == ROWS, "the rotation must leave the length unchanged"
+    after_rotation = row()
+    assert after_rotation is not current, "a rotation at constant length was not noticed"
+    current = after_rotation
+
+    # (e2) a FRONT deletion on its own: the length moves while the newest stamp
+    # does NOT, which is the one shape the relay-stamp element cannot see. This
+    # leg is what makes the length element falsifiable without its pair -- a
+    # sweep with only (e) leaves it green, because both elements catch an
+    # append-plus-evict and only the length catches a bare front drop.
+    rows.pop(0)
+    assert len(rows) == ROWS - 1, "the front drop must shorten the window"
+    after_front_drop = row()
+    assert after_front_drop is not current, "a front deletion was not noticed"
+    assert after_front_drop.trajectory_length == ROWS - 1
+    current = after_front_drop
+
+    # (f) a plan APPEARING. ``todos`` rides onto the row from ``TODO_STORE`` via
+    # ``_with_lineage``, so no node-derived element can cover it.
+    monkeypatch.setitem(
+        TODO_STORE,
+        session_id,
+        [{"name": "Todos", "items": [{"text": "ship it", "status": "pending"}]}],
+    )
+    after_plan = row()
+    assert after_plan is not current, "a plan appearing did not move the key"
+    assert after_plan.todos, "the key moved but the row did not gain the plan"
+
+
+def test_a_released_row_keeps_the_lineage_its_transcript_page_needs() -> None:
+    """A swept child's page is reachable ONLY through the lineage on its row.
+
+    ``_with_lineage`` is what stamps ``session_id``/``session_dir``, and the
+    released projection has to run it too -- skipping it is what
+    ``test_a_swept_child_keeps_its_durable_identity_on_the_roster`` catches at
+    the session level, pinned here at the unit the projection lives in.
+    """
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: [done],
+        nodes=lambda: [],
+        node=lambda _job_id: SimpleNamespace(
+            session_id="abcdef123456",
+            live=False,
+            session_dir=Path("/tmp/sessions/abcdef123456"),
+            parent_job_id="parent-0",
+            launch_message_id="subagent-launch:child-done",
+            launch_prompts=None,
+            attempt_aliases=(),
+        ),
+    )
+    store = _store([done])
+    store.refresh_jobs(session)
+
+    row = store.state.jobs[0]
+    assert row.roster_released is True
+    assert row.session_id == "abcdef123456"
+    assert row.session_dir == "/tmp/sessions/abcdef123456"
+    assert row.parent_job_id == "parent-0"
+
+
+def test_a_host_that_publishes_no_retention_window_releases_nothing() -> None:
+    """Fail CLOSED: an unknown window costs the old work, never a wrong release."""
+    done = _settled(_job("child-done"))
+    session = _session([done])  # no ``retention_ms`` on the manager at all
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: [done], nodes=lambda: [], node=lambda _job_id: None
+    )
+    store = _store([done])
+    store.refresh_jobs(session)
+
+    row = store.state.jobs[0]
+    assert row.roster_released is False
+    assert len(row.trajectory) == ROWS
+
+
+def test_a_paused_child_is_not_released_however_long_it_has_been_parked() -> None:
+    """A pause is mechanically a cancel; the roster window exempts it deliberately."""
+    parked = _settled(_job("child-paused"))
+    parked.status = "cancelled"
+    session = _released_session([parked])
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: [parked],
+        nodes=lambda: [SimpleNamespace(job_id="child-paused", status="paused")],
+        node=lambda _job_id: None,
+    )
+    store = _store([parked])
+    store.refresh_jobs(session)
+
+    assert store.state.jobs[0].roster_released is False, "a PAUSED child was released"
+
+
+def test_an_unresolved_failure_is_not_released_on_the_quiet_clock() -> None:
+    """Retention is a timer on quiet resolutions, not on unfinished business."""
+    failed = _settled(_job("child-failed"))
+    failed.status = "failed"
+    session = _released_session([failed])
+    store = _store([failed])
+    store.refresh_jobs(session)
+
+    assert store.state.jobs[0].roster_released is False, "a FAILED child was released"
+
+
+def test_the_released_flag_never_rides_the_wire() -> None:
+    """The flag reaches no wire frame: `_released_row` sets it, no reader is on the socket.
+
+    QA ROUND 1 (Q1). It used to be sent whenever it was true — "the informative
+    value" — and that cost 25 bytes on EVERY released row against an attach
+    ceiling with 168 bytes of slack across a 200-row roster. Nothing in the tree
+    consumes it off the wire, so it is elided at both boundaries until a reader
+    exists (``frontend_state._elide_row_facts_in_place`` records the measurement
+    and the state-level shapes to use when one lands).
+    """
+    live, done = _job("child-live"), _settled(_job("child-done"))
+    session = _released_session([live, done])
+    store = _store([live, done])
+    store.refresh_jobs(session)
+
+    # The PREMISE, and asserted on the canonical state rather than on the wire:
+    # the released child really was released, so the absence assertions below are
+    # about the elision and not about a row that never carried the flag at all.
+    canonical = {row.id: row for row in store._state.jobs}
+    assert canonical["child-done"].roster_released is True, "the premise is unmet"
+
+    payload = sync_wire_payload(
+        FrontendSync(epoch=store.state.epoch, sequence=store.state.sequence, snapshot=store.state)
+    )
+    rows = {row["id"]: row for row in payload["snapshot"]["jobs"]}
+    assert "roster_released" not in rows["child-live"], "a member row carried the flag"
+    assert "roster_released" not in rows["child-done"], (
+        "a released row carried the flag; nothing reads it off the wire and 25 B/row "
+        "does not fit the attach ceiling (QA round 1, Q1)"
+    )
+
+    # THE DELTA ROUTE, asserted separately because the two routes serialize job
+    # rows by their own paths and a saving at one does not reach the other (this
+    # file's module docstring, and the reason `_elide_row_facts_in_place` runs at
+    # both). Review round 4 (V2) removed `mutate`'s call alone and every assertion
+    # above still passed, so the delta boundary was unpinned: the mirrored shape
+    # here is the one the empty-value elision already has in
+    # ``test_subagent_view_state.py``.
+    changed = [
+        row.model_copy(update={"result_text": "moved on"}) if row.id == "child-done" else row
+        for row in store.state.jobs
+    ]
+    update = store.mutate(jobs=changed)
+    assert update is not None, "the roster change produced no delta to assert against"
+    delta_rows = {row["id"]: row for row in update.model_dump(mode="json")["changes"]["jobs"]}
+    assert (
+        "roster_released" not in delta_rows["child-live"]
+    ), "a member row carried the flag on the delta route"
+    assert "roster_released" not in delta_rows["child-done"], (
+        "a released row carried the flag on the DELTA route; `mutate` serializes job rows "
+        "by its own path, so the snapshot elision does not reach `frontend_update` "
+        "(review round 4, V2)"
+    )
+
+
+def test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it() -> None:
+    """The flag's ONE durable route, pinned by test rather than by prose.
+
+    REVIEW ROUND 4 (V1). The docstrings said the flag is "never serialized". It
+    is: :meth:`FrontendStateStore.checkpoint` writes the CANONICAL state — the one
+    that keeps the flag — to the session transcript at every turn end, and
+    ``_restored_state`` reads it back in a later process. That route deliberately
+    stays (the checkpoint is the store's record of its OWN canonical state, not a
+    frame for a peer), so this pins the two facts that make it harmless instead:
+    the durable row really does carry the flag, and a restored store RE-DERIVES it
+    rather than trusting the durable copy.
+
+    Re-derivation is the load-bearing half, and it is OBSERVABLE here only because
+    the test makes the durable copy STALE first (review round 5, W1): it writes a
+    ``True`` onto a LIVE child's durable row before restoring. ``JobState.from_job``
+    never sets the field, so a restore that merely inherited the durable value
+    would hold a ``True`` released by a PREVIOUS process; the first
+    ``refresh_jobs`` rebuilds every row through ``from_job``/``_released_row`` and
+    so overwrites it. The stale ``True`` is what the terminal assertion catches,
+    and without that seed the assertion is satisfied by the map the restore
+    already holds — so it would pass even against a refresh that does nothing.
+    Nothing in the tree reads the flag off the checkpoint (or off any wire frame),
+    which is why carrying it costs bytes and no correctness.
+    """
+    live, done = _job("child-live"), _settled(_job("child-done"))
+    session = _released_session([live, done])
+    store = _store([live, done])
+    store.refresh_jobs(session)
+
+    transcript = _CheckpointTranscript()
+    asyncio.run(store.checkpoint(transcript))
+
+    assert transcript.checkpoint is not None, "the store wrote no checkpoint at all"
+    custom_type, payload = transcript.checkpoint
+    assert custom_type == FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    durable = {row["id"]: row for row in payload["state"]["jobs"]}
+    assert durable["child-done"]["roster_released"] is True, (
+        "the durable checkpoint dropped the flag. The docstrings' claim is that the "
+        "flag never goes ON THE WIRE; the checkpoint is the route that keeps it, and "
+        "if that changed the restore path's expectations changed with it"
+    )
+    assert durable["child-live"]["roster_released"] is False
+
+    # Make the durable copy STALE before the restore, which is the only thing that
+    # makes the re-derivation observable (review round 5, W1). `child-live` is a
+    # MEMBER of the live roster, so a durable `True` on it can only be a flag
+    # released by a PREVIOUS process — precisely the hazard the docstrings name.
+    # `durable` holds the very dicts the transcript reports from `latest_custom`,
+    # so this seeds what the restore will read. Without it the post-refresh
+    # assertion below asserts the map the restore already holds, and passes even
+    # when the refresh is a no-op.
+    durable["child-live"]["roster_released"] = True
+
+    restored = FrontendStateStore.from_checkpoint(
+        SimpleNamespace(session_id="frame-cost", _transcript=transcript)
+    )
+    assert {row.id: row.roster_released for row in restored.state.jobs} == {
+        "child-live": True,
+        "child-done": True,
+    }, "a same-session restore did not adopt the durable flags (stale seed included)"
+
+    # The premise, asserted before the refresh so a future `from_job` that set the
+    # field is caught here rather than silently turning the refresh into a no-op
+    # check that the durable value survived.
+    released_row = next(row for row in restored.state.jobs if row.id == "child-done")
+    assert JobState.from_job(released_row).roster_released is False, (
+        "`from_job` now sets the flag, so a refresh no longer re-derives it and this "
+        "test no longer proves what it claims"
+    )
+    restored.refresh_jobs(_released_session([live, done]))
+    assert {row.id: row.roster_released for row in restored.state.jobs} == {
+        "child-live": False,
+        "child-done": True,
+    }, (
+        "the refresh after a restore did not re-derive the released flags: the stale "
+        "durable `True` on a live child survived it, so the restore inherited a flag "
+        "released by a previous process instead of rebuilding the row"
+    )
+
+
+def test_a_released_row_holds_only_frozen_containers() -> None:
+    """A released row must obey the SAME immutability contract as any other.
+
+    The near-miss this pins. ``_released_row`` freezes, but ``_with_lineage``
+    runs after it and re-stamps ``launch_prompts`` (a ``dict``),
+    ``attempt_aliases`` and ``todos`` (``list``s) straight off the comms node,
+    so the row it returns is not frozen however frozen its input was. An
+    earlier draft MARKED that result frozen instead of freezing it -- and since
+    ``_freeze_job`` early-returns on a marked row, the raw containers then
+    survived every later tick: ``_public_job`` shares a non-``BaseModel`` field
+    by reference, so canonical state was reachable and mutable through the
+    public ``state`` accessor, and the row raised on ``hash()``.
+
+    Asserted on the CONTAINER TYPES rather than on behaviour because that is
+    the invariant: the earlier released-row tests all passed against the broken
+    version, since an empty ``dict`` and an empty ``_FrozenMapping`` compare
+    equal and only a NON-EMPTY one can tell them apart.
+    """
+    done = _settled(_job("child-done"))
+    session = _released_session([done])
+    session._subagent_comms = SimpleNamespace(
+        job_rows=lambda: [done],
+        nodes=lambda: [],
+        node=lambda _job_id: SimpleNamespace(
+            session_id="abcdef123456",
+            live=False,
+            session_dir=Path("/tmp/sessions/abcdef123456"),
+            parent_job_id="parent-0",
+            launch_message_id="subagent-launch:child-done",
+            # Non-empty on purpose: the empty case cannot distinguish a raw
+            # container from a frozen one.
+            launch_prompts={"subagent-launch:child-done": "go do a thing"},
+            attempt_aliases=["older-attempt"],
+        ),
+    )
+    store = _store([done])
+    store.refresh_jobs(session)
+
+    row = store._state.jobs[0]
+    assert row.roster_released is True
+    assert isinstance(row.launch_prompts, module._FrozenMapping), "launch_prompts was not frozen"
+    assert isinstance(row.attempt_aliases, module._FrozenSequence), "attempt_aliases was not frozen"
+    # The whole point of the frozen containers: the row is a value, so it
+    # hashes and can be shared without a defensive copy.
+    assert isinstance(hash(row), int)
+
+    # And it STAYS frozen: ``_freeze_job`` early-returns on a row it recognises,
+    # so a row that slipped through unfrozen once would never be repaired.
+    _trajectory(done)  # the released row sheds its window; the job still has one
+    store.refresh_jobs(session)
+    again = store._state.jobs[0]
+    assert isinstance(again.launch_prompts, module._FrozenMapping)
+    assert isinstance(again.attempt_aliases, module._FrozenSequence)

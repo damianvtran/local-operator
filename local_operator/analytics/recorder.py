@@ -135,13 +135,25 @@ class AnalyticsRecorder:
         self._dropped = 0
         self._last_prune = 0.0
         self._closed = False
-        #: Monotonic counters used ONLY by ``flush_for_test`` as a commit
-        #: barrier: ``_enqueued`` counts accepted samples, ``_committed``
-        #: counts samples the writer has actually persisted. Real sessions
-        #: never read these — they are how a test waits for a durable write
-        #: without a fixed sleep that races the writer thread.
-        self._enqueued = 0
-        self._committed = 0
+        #: Fail-soft write observability, read ONLY by ``flush_for_test``: every
+        #: write the store did not make is counted here with a one-line detail.
+        #: Two shapes reach it and they are the same event to a caller — the
+        #: call RAISED (a bad sample, which must never kill the writer), or it
+        #: RETURNED a drop, which is what the real store does on a lost lock: it
+        #: retries, gives up, and returns 0 rows / ``False`` rather than raising.
+        #: An item whose write was lost still settles, so the completion count
+        #: alone cannot tell a test that its row landed; this is how the barrier
+        #: reports the difference instead of letting a test read a missing row
+        #: and fail on a bare ``None``. The swallow-and-log policy itself is
+        #: unchanged and deliberate, and production never reads these: the
+        #: increments happen only on the failure path.
+        self._write_failures: dict[str, int] = {}
+        self._write_failure_detail: dict[str, str] = {}
+        #: How many failures per kind a ``flush_for_test`` has already reported,
+        #: so a report names only what is NEW since the last one (and one
+        #: failure is surfaced by exactly one barrier rather than by every
+        #: barrier for the rest of the process).
+        self._reported_write_failures: dict[str, int] = {}
 
     # -- lifecycle -----------------------------------------------------------
     def _ensure_thread(self) -> None:
@@ -165,36 +177,59 @@ class AnalyticsRecorder:
         as they come (rare). Handling both here — rather than a second thread
         for names — is what keeps a single write connection and avoids the
         first-connection race two writers hit on a fresh database.
+
+        ``task_done()`` is called for every item ``get()`` returned — the
+        sentinel included — and only AFTER the ``_flush`` carrying it has
+        returned. That ordering is the whole meaning of the queue's completion
+        count: ``flush_for_test`` waits on it, so a ``task_done`` taken before
+        the write lets the barrier return with the row still unwritten. It used
+        to be taken as each item was CLASSIFIED, with the flush at the end of
+        the iteration — which is #1250 item 2, where a session-name upsert the
+        writer had already dequeued could still be pending when a test read the
+        ``session_names`` row. Nothing in production joins this queue, so
+        settling after the flush costs a session nothing.
+
+        If ``_flush`` ever did raise, the count would stop short and the next
+        ``flush_for_test`` would report it as an unsettled item rather than
+        passing — loudly, which is the point. Every store call inside ``_flush``
+        is individually guarded so this stays theoretical.
         """
         while True:
             batch: list[CallSnapshot] = []
             names: list[_NameTask] = []
             tools: list[_ToolCallTask] = []
+            # How many queue items this iteration took off, so the settle below
+            # accounts for each of them exactly once (``unfinished_tasks`` is
+            # raised by ``put`` and lowered by ``task_done``, never by ``get``).
+            consumed = 0
+            stopping = False
             try:
                 item = self._queue.get(timeout=_FLUSH_INTERVAL_S)
             except queue.Empty:
                 self._maybe_prune()
                 continue
-            if item is None:  # sentinel: flush and exit
-                self._flush(batch, names, tools)
-                self._queue.task_done()
-                return
-            self._classify(item, batch, names, tools)
-            self._queue.task_done()
-            # Opportunistically drain whatever else is already queued so a
-            # burst becomes one transaction.
-            while len(batch) < 256:
-                try:
-                    item = self._queue.get_nowait()
-                except queue.Empty:
-                    break
-                if item is None:
-                    self._flush(batch, names, tools)
-                    self._queue.task_done()
-                    return
+            consumed += 1
+            if item is None:  # sentinel: flush, settle, exit
+                stopping = True
+            else:
                 self._classify(item, batch, names, tools)
-                self._queue.task_done()
+                # Opportunistically drain whatever else is already queued so a
+                # burst becomes one transaction.
+                while len(batch) < 256:
+                    try:
+                        item = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    consumed += 1
+                    if item is None:
+                        stopping = True
+                        break
+                    self._classify(item, batch, names, tools)
             self._flush(batch, names, tools)
+            for _ in range(consumed):
+                self._queue.task_done()
+            if stopping:
+                return
             self._maybe_prune()
 
     @staticmethod
@@ -222,27 +257,65 @@ class AnalyticsRecorder:
             # calls are produced DURING a turn and the ledger row at the end of
             # it, so the two never share a batch anyway.
             try:
-                self._store.record_tool_calls([task.as_row() for task in tools])
-            except Exception:  # noqa: BLE001 — a bad sample must not kill the writer
+                # ``as_row()`` belongs INSIDE the guard with the call it feeds:
+                # the guard's contract is that no bad sample can kill the writer
+                # thread, and an expression outside it is one edit away from
+                # doing exactly that (a dead writer turns every later barrier
+                # into a ``TimeoutError``).
+                rows = [task.as_row() for task in tools]
+                written = self._store.record_tool_calls(rows)
+            except Exception as exc:  # noqa: BLE001 — a bad sample must not kill the writer
                 logger.debug("analytics: tool-call flush failed", exc_info=True)
+                self._note_write_failure("tool call", repr(exc))
+            else:
+                if written != len(rows):
+                    self._note_write_failure(
+                        "tool call", f"the store wrote {written} of {len(rows)} rows"
+                    )
         if names:
             for task in names:
                 try:
-                    self._store.upsert_session_name(task.session_id, task.name, rank=task.rank)
-                except Exception:  # noqa: BLE001 — a bad name must not kill the writer
+                    landed = self._store.upsert_session_name(
+                        task.session_id, task.name, rank=task.rank
+                    )
+                except Exception as exc:  # noqa: BLE001 — a bad name must not kill the writer
                     logger.debug("analytics: name upsert failed", exc_info=True)
+                    self._note_write_failure("session name", repr(exc))
+                else:
+                    if not landed:
+                        # ``False`` is the store's DROP signal, not a rank-gated
+                        # refusal: a refusal still ran the statement and returns
+                        # True, so only a write the database never saw lands here.
+                        self._note_write_failure("session name", "the store dropped the upsert")
         if not batch:
             return
         try:
-            self._store.record_batch(batch)
-        except Exception:  # noqa: BLE001 — writer must never die on a bad batch
+            written = self._store.record_batch(batch)
+        except Exception as exc:  # noqa: BLE001 — writer must never die on a bad batch
             logger.debug("analytics: flush failed", exc_info=True)
-        finally:
-            # Advance the commit barrier whether or not the write succeeded: a
-            # dropped batch still "settled", and a test waiting on this count
-            # must not hang because a batch failed. Counted in the finally so
-            # the barrier tracks attempts, matching ``_enqueued``.
-            self._committed += len(batch)
+            self._note_write_failure("ledger batch", repr(exc))
+        else:
+            if written != len(batch):
+                self._note_write_failure(
+                    "ledger batch", f"the store wrote {written} of {len(batch)} rows"
+                )
+
+    def _note_write_failure(self, kind: str, detail: str) -> None:
+        """Count a write the store did not make, for ``flush_for_test`` to report.
+
+        Called on BOTH shapes of a lost write — the store raising, and the real
+        store's silent drop, which it reports by returning 0 rows / ``False``
+        rather than by raising (``AnalyticsStore.record_batch`` retries a lost
+        lock ``_WRITE_RETRIES`` times and then gives up). The store's return
+        values are the source of truth here: a store that drops a write by
+        swallowing it internally would otherwise be indistinguishable from one
+        that wrote it.
+
+        Only the writer thread writes, so the read-modify-write below needs no
+        lock; the barrier reads a snapshot after the queue has settled.
+        """
+        self._write_failures[kind] = self._write_failures.get(kind, 0) + 1
+        self._write_failure_detail[kind] = detail
 
     def _maybe_prune(self) -> None:
         now = time.monotonic()
@@ -267,7 +340,6 @@ class AnalyticsRecorder:
         self._ensure_thread()
         try:
             self._queue.put_nowait(snapshot)
-            self._enqueued += 1
         except queue.Full:
             # Count and log ONCE per power-of-two so a wedged disk says so
             # without spamming, and never block the caller.
@@ -356,30 +428,110 @@ class AnalyticsRecorder:
         return self._dropped
 
     def flush_for_test(self, timeout: float = 5.0) -> None:
-        """Block until the queue drains. TEST ONLY — never called on a session.
+        """Block until every queued item has been through the write path. TEST ONLY.
 
-        Real sessions never wait for the writer; this exists so a test can
-        assert a recorded call reached the store deterministically.
+        Never called on a session: real sessions do not wait for the writer.
+        It exists so a test can assert that a recorded sample reached the store
+        deterministically, which is only worth having if returning MEANS the
+        write happened.
+
+        It did not mean that before #1250 item 2. The old body waited on a
+        commit count that only call snapshots advanced, then polled
+        ``queue.empty()`` and slept a flat 50 ms — three separate holes:
+
+        * the queue empties the moment the writer DEQUEUES, so an item in the
+          writer's hands passed the empty check; and the queued items it did
+          see were counted as settled by the 50 ms sleep, not by a write;
+        * an item carrying no snapshot — a session name, a tool call — never
+          moved a counter at all, so the barrier never waited on it;
+        * on expiry it returned as if it had succeeded.
+
+        That is why ``tests/unit/evaluation/runner/test_provider_client.py``
+        could read a ``session_names`` row the writer had not committed yet.
+
+        The barrier is the queue's own completion count: the writer calls
+        ``task_done()`` for an item only after the ``_flush`` carrying it has
+        returned, so returning means every item enqueued before now has been
+        through ``_flush``, names and tool calls included. That is a statement
+        about the write PATH, not about the row: the writer's store calls are
+        fail-soft (a bad sample must never kill the writer or stall a session),
+        so an item whose write was LOST settles like any other. A lost write is
+        reported two ways — the store raised, or it returned a drop (the real
+        ``AnalyticsStore`` never raises on a lost lock: it retries, gives up and
+        returns 0 rows / ``False``) — and the writer counts both. This method
+        raises on any it has not already reported, so it cannot return clean
+        while the row a caller is about to read is missing, which is the failure
+        mode this whole method exists to remove.
+
+        ON EXPIRY OR A LOST WRITE THIS RAISES rather than returning. A caller
+        that asked for a guarantee must get either the guarantee or a failure
+        naming what went wrong. The write-loss report names only the failures
+        since the previous report, so its counts are new losses rather than a
+        running total.
         """
         self._ensure_thread()
         deadline = time.monotonic() + timeout
-        # First: the commit barrier catches up to enqueued SNAPSHOTS. This is a
-        # DURABLE barrier (the writer advances ``_committed`` only after a batch
-        # write returns), so it cannot return before the row is on disk the way
-        # a bare ``queue.empty()`` check can — the queue empties the instant the
-        # writer dequeues, before it commits.
-        target = self._enqueued
-        while self._committed < target and time.monotonic() < deadline:
-            time.sleep(0.005)
-        # Then: drain any remaining items (name tasks carry no barrier of their
-        # own, and a name enqueued after the last snapshot rides a later batch).
-        # ``join`` waits for every ``task_done``, which the writer calls only
-        # after processing the item, so the name upsert has run when this
-        # returns.
-        while not self._queue.empty() and time.monotonic() < deadline:
-            time.sleep(0.005)
-        # A final short settle so an item dequeued-but-not-yet-committed lands.
-        time.sleep(0.05)
+        # ``queue.Queue.join()`` is the right barrier but takes no timeout, and
+        # an unbounded wait on a wedged writer fails the suite by HANGING it
+        # instead of by reporting. So the bounded wait is spelled the way
+        # ``Queue.join`` itself spells it — on ``all_tasks_done``, the condition
+        # ``task_done`` notifies — rather than by handing the queue to a helper
+        # thread, which would leak one thread per expiry and still could not say
+        # what was outstanding.
+        queued = self._queue
+        with queued.all_tasks_done:
+            while queued.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    writer = self._thread
+                    raise TimeoutError(
+                        f"flush_for_test: {queued.unfinished_tasks} unsettled item(s) "
+                        f"still pending {timeout:.2f}s after the call — the "
+                        f"analytics writer thread has not written them "
+                        f"(writer alive: {writer is not None and writer.is_alive()}, "
+                        f"recorder closed: {self._closed})"
+                    )
+                queued.all_tasks_done.wait(remaining)
+        # The items are settled; the rows are a separate question, because a
+        # dropped write is not an exception here — the real store reports one by
+        # RETURNING 0 rows / ``False`` (``record_batch`` gives up after
+        # ``_WRITE_RETRIES`` lost lock races), and the recorder counts that shape
+        # and a raising store alike. Report only what is NEW since the last
+        # report, so the counts name this barrier's losses rather than a running
+        # total that reads like fresh damage.
+        #
+        # The snapshot is taken first and it is a COPY: a producer can keep
+        # enqueuing while this runs (every session records without waiting), so
+        # the writer may be counting a loss at this instant, and iterating a dict
+        # it is mutating is asking for "dictionary changed size during
+        # iteration".
+        current = self._write_failures.copy()
+        new = {
+            kind: count - self._reported_write_failures.get(kind, 0)
+            for kind, count in current.items()
+            if count > self._reported_write_failures.get(kind, 0)
+        }
+        if new:
+            # Advance the watermark by the deltas actually REPORTED, never to the
+            # live totals: a loss counted between the snapshot above and this line
+            # would otherwise be marked reported without ever appearing in a
+            # message, which is the same silent-success bug this method fixes.
+            # Advancing by the delta leaves it greater than the watermark, so the
+            # next barrier reports it.
+            for kind, count in new.items():
+                self._reported_write_failures[kind] = (
+                    self._reported_write_failures.get(kind, 0) + count
+                )
+            detail = ", ".join(
+                f"{kind} ×{count} ({self._write_failure_detail.get(kind, 'no detail')})"
+                for kind, count in sorted(new.items())
+            )
+            raise RuntimeError(
+                f"flush_for_test: {sum(new.values())} analytics write(s) were lost "
+                f"since the last report — {detail}. The items are settled but their "
+                f"rows are missing; the writer has already logged each one as "
+                f"'analytics: …' at debug level."
+            )
 
     def close(self, timeout: float = 2.0) -> None:
         """Stop the writer and close the store (process teardown / tests)."""
