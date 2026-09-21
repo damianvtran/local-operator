@@ -7200,6 +7200,7 @@ class Session:
         """Reconcile cross-process receipts without changing the read watermark."""
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
+            AttentionReadDeferred,
             AttentionStore,
             AttentionWriteDeferred,
             conversation_identity,
@@ -7245,8 +7246,11 @@ class Session:
                         identity,
                         exc_info=True,
                     )
-            # MARKED RESTORED EVEN WHEN THE PUBLISH FAILED (review: the one-shot
-            # import is not retried per tick). The outcome is durable in the
+            # MARKED RESTORED EVEN WHEN THE PUBLISH FAILED (recorded here rather
+            # than cited: review round 1 of this PR lists this decision under
+            # "Accepted, not findings", which is exactly what it is -- a trade-off
+            # somebody chose, so this is where its reasoning lives). The one-shot
+            # import is not retried per tick. The outcome is durable in the
             # transcript, and the next boot's `bootstrap_transcript` re-imports it,
             # so leaving the flag unset would buy nothing but a warning per poll --
             # precisely the spam the desktop poll documents against ("log the
@@ -7257,7 +7261,24 @@ class Session:
         # route to the restored cut-off notice. Deduped on the token, so the
         # runtime path (which calls both) narrates exactly once.
         await self._journal_restored_cut_off()
-        state = await asyncio.to_thread(store.state, identity)
+        # The read that carries the reconcile answer, and the one the incident's
+        # log shows dying (36 of its 60 lock lines). It is retried inside the store
+        # (`AttentionStore._retry_read`), and a budget that still ran out degrades
+        # HERE rather than propagating, for the reason the write arm above does:
+        # this runs on request paths (the runtime's refresh op, the mobile handle,
+        # the desktop poll), and the caller asked for a receipt, not for a store
+        # read. The previous state stands and the next tick re-reads it, which is
+        # the same disposition `_publish_attention_outcome` gives a deferred
+        # publish -- logged, never silent, because a stale receipt is real.
+        try:
+            state = await asyncio.to_thread(store.state, identity)
+        except AttentionReadDeferred as deferred:
+            logger.warning(
+                "attention: could not read the store for %s; keeping the previous state: %s",
+                identity,
+                deferred,
+            )
+            return self._attention
         if state != self._attention:
             self._attention = state
             self.refresh_frontend_state()
