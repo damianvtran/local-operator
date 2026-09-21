@@ -38,10 +38,25 @@ from local_operator.resume import (
 )
 from local_operator.server.models.desktop_sessions import AdmissionStatus, MoveReceipt
 from local_operator.server.retire import RETIRING_MESSAGE, DaemonRetiring
+
+# The pin store is the sidebar's OWN module, reused rather than re-implemented —
+# for the reason the `move_targets` import above cites, which is also that
+# module's stated model: it imports no Textual, so a non-Textual frontend can
+# read the pins without a terminal. A second pin format here would be two
+# surfaces disagreeing about which conversations are pinned, and the file would
+# have two writers with two sets of rules for the cap and the prune.
+# `tests/unit/test_import_graph.py` pins the absence of `textual`/`rich` on this
+# module's own import graph, so the reuse cannot quietly start costing the
+# server a terminal stack.
+#
+# ``set_pin`` is aliased only because this adapter's own method of that name is
+# the caller's entry point; the store function stays the single writer.
+from local_operator.session.archived import set_archived as set_session_archived
 from local_operator.session.attached import READ_ATTACH_BUDGET_S, AttachedSession
 from local_operator.session.attachments import ATTACHMENTS_DIRNAME, AttachmentStore
 from local_operator.session.attention import AttentionStore
 from local_operator.session.catalog import DECORATION_ATTENTION, load_catalog
+from local_operator.session.cleanup import delete_session
 from local_operator.session.cold_model import resolve_birth_effort
 from local_operator.session.errors import MoveIndeterminate
 from local_operator.session.frontend_state import (
@@ -73,19 +88,6 @@ from local_operator.tui.move_targets import (
     remember_recent,
     validate_target,
 )
-
-# The pin store is the sidebar's OWN module, reused rather than re-implemented —
-# for the reason the `move_targets` import above cites, which is also that
-# module's stated model: it imports no Textual, so a non-Textual frontend can
-# read the pins without a terminal. A second pin format here would be two
-# surfaces disagreeing about which conversations are pinned, and the file would
-# have two writers with two sets of rules for the cap and the prune.
-# `tests/unit/test_import_graph.py` pins the absence of `textual`/`rich` on this
-# module's own import graph, so the reuse cannot quietly start costing the
-# server a terminal stack.
-#
-# ``set_pin`` is aliased only because this adapter's own method of that name is
-# the caller's entry point; the store function stays the single writer.
 from local_operator.tui.sidebar_pins import read_pins
 from local_operator.tui.sidebar_pins import set_pin as set_sidebar_pin
 
@@ -2349,6 +2351,32 @@ class DesktopSessionBridge:
                 await self.refresh_watch()
 
 
+class SessionDeletionRefused(ValueError):
+    """A hard guard refused an explicit deletion, and nothing was removed.
+
+    A ``ValueError`` so it rides the route ladder's existing 409 arm rather than
+    adding a second refusal path beside it — that arm already answers typed
+    refusals with ``{"code", "message"}``, and this is one of them.
+
+    ``code`` is the machine contract and ``message`` is the SENTENCE the store
+    composed, and the two say different things on purpose: the code names the
+    condition (a client keys on it, and it does not vary by which guard fired),
+    while the sentence names the specific remedy — stop the session, cancel the
+    wake, read the mail, or reconcile a store whose guard could not be read.
+    A client that rendered the code would have to invent those four sentences
+    itself; a client that rendered only a status would tell the user nothing.
+
+    The same shape ``MoveIndeterminate`` and ``SubagentChildUnavailable`` use
+    one arm up, for the same reason: the reader distinguishes conditions by a
+    stable token and reads a human sentence beside it.
+    """
+
+    code = "session_delete_refused"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class SubagentChildUnavailable(Exception):
     """A child-route URL does not name a readable child of that conversation.
 
@@ -2800,6 +2828,105 @@ class DesktopSessions:
 
         return await asyncio.to_thread(apply)
 
+    async def set_archived(self, session_id: str, archived: bool) -> dict[str, Any]:
+        """Put a session's archive into the state the caller asked for.
+
+        ``set_pin``'s method, field for field, because it is the same verb on
+        the same address: a per-session flag the client reconciles its row on,
+        idempotent by construction and therefore receipt-free.
+
+        DESIRED STATE RATHER THAN A TOGGLE, for the reason ``set_pin`` gives: a
+        toggle is not idempotent over a link that can drop a response and retry,
+        and a retried toggle would flip the archive back — the user reporting
+        "the archive keeps un-archiving itself".
+
+        ADMISSION IS ID SHAPE AND IS-DIR, deliberately NOT ``is_user_session``:
+        the archive is REVERSIBLE, so the cost of being permissive is a flag that
+        can be unset, and the sidebar can pin a delegated run — a route that
+        refused to archive one would leave a state the user can see and cannot
+        change. ``/v1/desktop/sessions/{id}`` DELETE takes the stricter admission
+        for exactly the opposite reason (see ``delete`` below); the asymmetry is
+        deliberate and this is where it is written down.
+
+        A no-op writes nothing (the store's own contract), so re-archiving an
+        archived session does not rewrite the index — which is also what keeps a
+        retry from reordering it.
+        """
+
+        def apply() -> dict[str, Any]:
+            if not SESSION_ID.fullmatch(session_id):
+                raise KeyError("Unknown session")
+            if not (self.root / "sessions" / session_id).is_dir():
+                raise KeyError("Unknown session")
+            return {
+                "session_id": session_id,
+                "archived": set_session_archived(self.root, session_id, archived),
+            }
+
+        return await asyncio.to_thread(apply)
+
+    async def delete(self, session_id: str) -> dict[str, Any]:
+        """Permanently remove ONE conversation, or refuse with a sentence.
+
+        THREE ANSWERS, and the shape of each is the interface:
+
+        * **200** with ``{"session_id", "deleted": True}`` when it happened.
+        * **404** (``KeyError``, through the route's shared ladder) for an
+          unknown or malformed id — INCLUDING a session the user did not open.
+          A delegated subagent run resolves by id like anything else, but it is
+          not a conversation anyone opened, so an id that is not
+          ``is_user_session`` is answered as unknown rather than deleted.
+          Deleting is irreversible and the user cannot see the row they are
+          naming; the reversible verb above keeps the looser admission, and that
+          asymmetry is the point.
+        * **409** (:class:`SessionDeletionRefused`, the guard sentence) when a
+          hard guard refuses: a live claim or lease, an armed wake, unread
+          spooled mail, or a guard that could not be evaluated. NOT 404, because
+          the conversation exists and the user can see it; NOT 500, because
+          nothing failed — the machine is in a state the user can clear, and the
+          sentence says which one.
+
+        Runs the whole decision on a WORKER THREAD: the guards stat records,
+        read the wake index and touch spooled mail, and the removal itself walks
+        a directory — none of which may block the loop a streaming turn is using.
+
+        Receipt-free, like ``set_pin`` and unlike the mutating routes around it.
+        A receipt buys at-most-once for calls that ADMIT WORK; this one either
+        removed the directory or did not, and a retry after a lost response finds
+        the id gone and answers 404 — which is the truth, because the deletion is
+        requested by explicit id and removing an already-removed conversation is
+        the same end state the caller asked for.
+
+        THE DAEMON FORGETS THE SESSION on the way out, and that is a consistency
+        requirement rather than tidiness: this pool serves a conversation it has
+        already opened from a resident bridge without re-reading the directory, so
+        without the drop this process would keep answering 200 for an id a fresh
+        daemon 404s (desktop QA round 2, PR #390). Only after the removal landed,
+        never before — a bridge whose directory still exists is what serves its
+        readers.
+        """
+
+        def apply() -> dict[str, Any]:
+            outcome = delete_session(self.root, session_id, actor="desktop")
+            if not outcome.found:
+                raise KeyError("Unknown session")
+            if outcome.refusal:
+                raise SessionDeletionRefused(outcome.refusal)
+            return {"session_id": session_id, "deleted": True}
+
+        result = await asyncio.to_thread(apply)
+        # BEST-EFFORT, and it cannot be anything else: the directory is already
+        # gone, so letting a failure out of here would answer 500 for a deletion
+        # that HAPPENED — telling the client the act failed when the conversation
+        # is destroyed, and inviting a retry the docstring two paragraphs up says
+        # must find the id gone. What a close that fails costs is one resident
+        # bridge until the next delete or restart, which the log line names.
+        try:
+            await self.forget(session_id)
+        except Exception:
+            logger.exception("desktop pool could not drop the deleted session %s", session_id)
+        return result
+
     async def acknowledge_attention_many(self, items: Sequence[tuple[str, str]]) -> dict[str, Any]:
         """Clear the unread completion marks a CLIENT enumerated, in one write.
 
@@ -3181,7 +3308,11 @@ class DesktopSessions:
         return await asyncio.to_thread(read)
 
     async def list(
-        self, limit: int, status_stamps: tuple[str, dict[str, int]] | None = None
+        self,
+        limit: int,
+        status_stamps: tuple[str, dict[str, int]] | None = None,
+        *,
+        include_archived: bool = False,
     ) -> SessionPage:
         """One page of rows, plus the pinned rows the page does not carry.
 
@@ -3239,7 +3370,19 @@ class DesktopSessions:
             # from needing a second scan to interpret. Nothing in the store's
             # scan is bounded by this number (it is limit-independent), so the
             # extra row costs one rank position.
-            entries = load_catalog(self.root, limit=limit + 1, pinned_off_page=tuple(pins))
+            entries = load_catalog(
+                self.root,
+                limit=limit + 1,
+                pinned_off_page=tuple(pins),
+                # THE ARCHIVE FILTER, at the one choke point the two surfaces
+                # share. ``load_catalog`` reaches the predicate through
+                # ``_scan_sessions``, so this route and the TUI sidebar cannot
+                # disagree about which conversations exist to be offered — and
+                # a pinned ARCHIVED conversation is filtered with the rest, so
+                # it cannot come back through the off-page pinned resolution
+                # below as a phantom row with no section to belong to.
+                include_archived=include_archived,
+            )
             page_entries = entries[:limit]
             # A PINNED ROW THE PAGE DOES NOT CARRY, and the filter is on the id
             # rather than on the projected row's flag so it runs before the
@@ -3297,6 +3440,11 @@ class DesktopSessions:
                         # so a `false` here is load-bearing and omitting it would
                         # let a stale optimistic pin outlive a successful unpin.
                         "pinned": entry.id in pins,
+                        # Same rule, second axis: `archived` is always present and
+                        # carries the scan's own answer rather than a re-read, so
+                        # a row cannot be filtered out of the catalogue and still
+                        # claim to be un-hidden by the row it came from.
+                        "archived": bool(entry.row.archived),
                         # ``_asdict`` already carried this through as a tuple;
                         # spelled as a list here rather than left to the
                         # serializer, because JSON has one array type and a
@@ -3334,7 +3482,9 @@ class DesktopSessions:
 
         return await asyncio.to_thread(rows)
 
-    async def search(self, query: str, limit: int) -> list[dict[str, Any]]:
+    async def search(
+        self, query: str, limit: int, *, include_archived: bool = False
+    ) -> list[dict[str, Any]]:
         """Past conversations matching ``query``, each carrying its pin state.
 
         The projection lives here rather than in the route for the reason
@@ -3352,7 +3502,7 @@ class DesktopSessions:
         """
 
         def rows() -> list[dict[str, Any]]:
-            matches = search_store(self.root, query, limit=limit)
+            matches = search_store(self.root, query, limit=limit, include_archived=include_archived)
             pins = set(read_pins(self.root))
             return [
                 {
@@ -3367,6 +3517,11 @@ class DesktopSessions:
                     # absent key as "no claim", and a pinned conversation would
                     # then render outside the Pinned section with no way back.
                     "pinned": match.row.id in pins,
+                    # Same rule, and on this surface it is the ONLY way the
+                    # client learns a hit is archived: the default search does
+                    # not return one at all, so every hit of a default search is
+                    # `false` and the key exists for the answer that is not.
+                    "archived": bool(match.row.archived),
                 }
                 for match in matches
             ]
@@ -3730,6 +3885,21 @@ class DesktopSessions:
                         # single flight rather than a single LOOKUP.
                         bridge = self.bridges.get(session_id)
                         if bridge is None:
+                            # THE DIRECTORY IS RE-CHECKED HERE, at INSERT time, not
+                            # at lookup time (round 3, R3-1). ``forget`` drops the
+                            # resident bridge and the shared flight, but a caller
+                            # already parked on that flight resumes with a result
+                            # that PREDATES the delete — so without this read it
+                            # re-inserts a bridge for a directory that is gone, and
+                            # the removed conversation is served (and resident)
+                            # again for the whole cold-open window, which this
+                            # module's own evidence file puts at seconds on a large
+                            # journal. One stat, inside a lock already held for
+                            # bookkeeping frames only, and it asks the same question
+                            # ``locate()`` asks — so a conversation RE-CREATED under
+                            # the same id passes it exactly as it did the first time.
+                            if not (self.root / "sessions" / session_id).is_dir():
+                                raise KeyError("Unknown session")
                             if len(self.bridges) >= BRIDGE_COUNT:
                                 idle = [b for b in self.bridges.values() if self._evictable(b)]
                                 if not idle:
@@ -3757,6 +3927,40 @@ class DesktopSessions:
         finally:
             with CancelScope(shield=True):
                 await bridge.release()
+
+    async def forget(self, session_id: str) -> bool:
+        """Drop a removed conversation's resident bridge; True if one existed.
+
+        WHY A SESSION EVER HAS TO BE FORGOTTEN (desktop QA round 2, PR #390):
+        ``session()`` hands out a RESIDENT bridge without re-checking the
+        directory — that lookup is the expensive half of every read (see
+        ``docs/evidence/session-load-central-cache``) — so a conversation this
+        process had already opened kept answering ``sessions.get``, ``/history``
+        and ``/mcp`` with 200 after its directory was deleted. Measured: the
+        deleting daemon answered 200 where a FRESH one answered 404 for the same
+        store, so a client that reloaded onto the removed id never saw the 404 its
+        tombstone is written against. The delete is the only event that makes
+        residency wrong, so it is the only caller.
+
+        CLOSED AS WELL AS DROPPED, and the order matters: dropping the reference
+        alone would leave the bridge's facade, subscribers and (after a watch
+        beat) its lease running with nothing able to reach them — an orphan that
+        this pool's own ``close()`` would no longer find, which is the leak this
+        method exists to avoid as much as the wrong 200. The close is awaited
+        AFTER the pool lock, because it takes the BRIDGE's lock and this pool's
+        lock is held for frames only.
+
+        The single-flight lookup is dropped with the bridge: a locate still in
+        flight was started for a directory that is now gone, and leaving it in
+        place would hand its answer to a later caller.
+        """
+        async with self.lock:
+            bridge = self.bridges.pop(session_id, None)
+            self._locate_flights.pop(session_id, None)
+        if bridge is None:
+            return False
+        await bridge.close()
+        return True
 
     async def close(self) -> None:
         await asyncio.gather(*(bridge.close() for bridge in self.bridges.values()))
