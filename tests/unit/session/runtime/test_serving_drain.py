@@ -1060,6 +1060,7 @@ async def test_a_steer_during_the_drain_is_still_admitted(tmp_path: Path) -> Non
     assert session.steered == ["actually, the other way"], "the session never saw it"
     assert peek_inbox(session.transcript.directory) == [], "a steer is not deferred"
 
+
 # -- the promise a spooled row carries, and who keeps it -------------------------
 #
 # THE CIRCUIT, and these cells are the writer half of it. The receipt a spooling

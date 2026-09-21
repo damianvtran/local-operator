@@ -965,6 +965,7 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         if child is not None:
             _reap(child, config_dir)
 
+
 # -- the per-pid reader: WHOSE bound fired ---------------------------------------
 #
 # ``fired_pids`` answers "which pids in this store tripped their bound", which is
@@ -973,8 +974,15 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
 # ``journal.death_verdict`` consults before it calls a death unattributed.
 
 
-def _dump(dirpath: Path, pid: int, *, armed_at: float, fired: bool = True, bound: float = 300.0,
-          header_pid: int | None = None) -> Path:
+def _dump(
+    dirpath: Path,
+    pid: int,
+    *,
+    armed_at: float,
+    fired: bool = True,
+    bound: float = 300.0,
+    header_pid: int | None = None,
+) -> Path:
     path = stall_watchdog.dump_path(pid, dirpath)
     body = (
         f"{stall_watchdog.ARM_MARKER}pid {pid if header_pid is None else header_pid} armed for "
