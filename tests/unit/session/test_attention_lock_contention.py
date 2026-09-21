@@ -21,6 +21,16 @@ the house range (``_BUSY_TIMEOUT_MS``, the value the sibling stores document) an
 retries a contended write on a bounded budget, and a caller that treats a store
 failure as fatal now degrades, observably.
 
+THE READ CLASS GETS THE SAME TREATMENT, and had tests of its own added later
+because it did not: 36 of the 60 `database is locked` lines in that log are the
+DAEMON'S SCAN, a read, against 12 on the publish path. A wider window left those
+36 exactly as they were -- a read that raised at 2 s raised at 5 s instead. So
+the reads are retried too (:meth:`AttentionStore._retry_read`), they get their
+own typed verdict (:class:`AttentionReadDeferred`), and the retry set is asserted
+to BE the classifier's set, because the version that shipped listed two of its
+five members and let the other three escape as the bare error this file exists to
+remove.
+
 WHY THE FIRST TEST SPENDS ~2 SECONDS. It is the one test whose subject IS a
 duration: the shipped 2 s window is what has to be shown losing a race the new
 budget wins. Nothing is polled and no wall-clock assertion is made -- the lock is
@@ -33,6 +43,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -42,10 +53,15 @@ import pytest
 import local_operator.session.attention as attention
 from local_operator.session.attention import (
     ATTENTION_CUSTOM_TYPE,
+    AttentionReadDeferred,
     AttentionStore,
     AttentionWriteDeferred,
 )
-from local_operator.session.store_failures import STORE_BUSY, store_failure
+from local_operator.session.store_failures import (
+    BUSY_ERRONAMES,
+    STORE_BUSY,
+    store_failure,
+)
 
 #: The shipped connection shape, quoted from ``_connect`` as it stood before the
 #: fix (``sqlite3.connect(self.path, timeout=2.0)``). Written out rather than
@@ -78,6 +94,32 @@ class _HeldWriteLock:
         self._conn.close()
 
 
+class _HeldExclusiveLock:
+    """A sibling holding SQLite's EXCLUSIVE lock -- the one that blocks a READER.
+
+    The write-path fixture above uses ``BEGIN IMMEDIATE``, which conflicts with a
+    sibling WRITER but leaves readers free on a rollback-journal store: a reader
+    that is not itself blocked is exactly how the read class went untested while
+    the write class was covered. ``BEGIN EXCLUSIVE`` is the shape QA's daemon rig
+    held for its read cells, and it is what the operator's log shows the daemon's
+    own scan losing to.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._conn = sqlite3.connect(path, timeout=0.0, check_same_thread=False)
+        self._conn.execute("BEGIN EXCLUSIVE")
+        self._conn.execute(
+            "INSERT INTO completions(conversation,token,anchor,kind) VALUES(?,?,?,?)",
+            ("session/b", str(uuid.uuid4()), "held-exclusively", "complete"),
+        )
+
+    def release(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
 def _seed(path: Path) -> AttentionStore:
     """A store with its schema materialised, as any live machine's would be."""
     store = AttentionStore(path)
@@ -88,7 +130,15 @@ def _seed(path: Path) -> AttentionStore:
 def _shrink_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """A millisecond-scale retry budget, so the bounded case is not a wait."""
     monkeypatch.setattr(attention, "_BUSY_TIMEOUT_MS", 50)
-    monkeypatch.setattr(attention, "_WRITE_BACKOFF_S", (0, 0))
+    monkeypatch.setattr(attention, "_CONTENTION_BACKOFF_S", 0)
+
+
+def _contention_error(errorname: str) -> sqlite3.OperationalError:
+    """A refusal shaped the way SQLite reports one: text, plus the certified code."""
+    error = sqlite3.OperationalError("database is locked")
+    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    error.sqlite_errorname = errorname
+    return error
 
 
 def test_a_held_write_lock_used_to_cost_the_completion_and_no_longer_does(
@@ -183,7 +233,7 @@ def test_a_lock_that_never_clears_is_a_classified_deferral_not_a_bare_error(
     classified = store_failure(error, tmp_path)
     assert classified is not None, "a SQLite error must classify as a store failure"
     assert classified.code == STORE_BUSY
-    assert len(attempts) == attention._WRITE_ATTEMPTS, "the retry must be bounded"
+    assert len(attempts) == attention._CONTENTION_ATTEMPTS, "the retry must be bounded"
     # Nothing half-written: a failed attempt leaves no row, and the previous
     # completion still stands.
     assert store.state("session/a")["completion_token"] == seeded
@@ -278,5 +328,235 @@ async def test_the_turn_outcome_publish_degrades_instead_of_killing_the_turn(
         # exactly so the next boot re-imports what the store refused.
         saved = session._transcript.latest_custom(ATTENTION_CUSTOM_TYPE)
         assert saved is not None and saved["conversation_id"] == identity
+    finally:
+        await session.dispose()
+
+
+# ---------------------------------------------------------------------------
+# The retry set and the classifier's set are one fact, not two lists.
+#
+# `attention.py` retried on two hand-written names while `store_failures.py`
+# classified five, so `SQLITE_BUSY_SNAPSHOT`, `SQLITE_BUSY_RECOVERY` and
+# `SQLITE_LOCKED_SHAREDCACHE` escaped `publish` as a bare `OperationalError`
+# while the very same ladder answered 503 for them. Parametrizing over the
+# CLASSIFIER's set is what makes a re-narrowing fail a NAMED case instead of
+# going unnoticed -- the drift is unrepresentable now (the set is imported), and
+# these two tests are what would notice if somebody un-imported it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("errorname", sorted(BUSY_ERRONAMES))
+def test_every_verdict_the_classifier_calls_contention_is_retried(
+    errorname: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each contended verdict gets a second attempt and a typed deferral."""
+    _shrink_the_budget(monkeypatch)
+    assert (
+        attention._CONTENTION_ERRONAMES == BUSY_ERRONAMES
+    ), "the retry set must BE the classifier's set, not a narrower copy of it"
+    assert attention._is_contention(_contention_error(errorname))
+    store = AttentionStore(tmp_path / "attention.db")
+    attempts: list[int] = []
+
+    def refuse() -> None:
+        attempts.append(1)
+        raise _contention_error(errorname)
+
+    with pytest.raises(AttentionWriteDeferred) as raised:
+        store._retry_write(refuse)
+    # SQLite's own verdict rides through, so the ladder keeps naming the
+    # condition rather than the type.
+    assert raised.value.sqlite_errorname == errorname
+    assert len(attempts) == attention._CONTENTION_ATTEMPTS
+
+
+@pytest.mark.parametrize("errorname", sorted(BUSY_ERRONAMES))
+def test_every_contended_verdict_is_503_busy_at_the_ladder_and_never_500(
+    errorname: str, tmp_path: Path
+) -> None:
+    """Retrying must not move a verdict's answer: contention is 503, never 500."""
+    classified = store_failure(_contention_error(errorname), tmp_path)
+    assert classified is not None, "a SQLite error must classify as a store failure"
+    assert (classified.status, classified.code) == (503, STORE_BUSY)
+
+
+def test_a_directly_constructed_deferral_already_carries_the_busy_code(
+    tmp_path: Path,
+) -> None:
+    """The code belongs to the TYPE, not to the helper that happens to build it.
+
+    ``AttentionWriteDeferred`` used to take only a message, with
+    ``sqlite_errorcode``/``sqlite_errorname`` attached afterwards by ``_deferred``:
+    a direct construction -- a caller, a rig, a future test -- classified as 500
+    ``store_unavailable`` and told the operator to check the machine, which is
+    the exact downgrade the type exists to prevent.
+    """
+    for deferred_type in (AttentionWriteDeferred, AttentionReadDeferred):
+        error = deferred_type("attention store stayed busy through 2 attempts: database is locked")
+        assert error.sqlite_errorname == "SQLITE_BUSY"
+        assert error.sqlite_errorcode == sqlite3.SQLITE_BUSY
+        classified = store_failure(error, tmp_path)
+        assert classified is not None, "a SQLite error must classify as a store failure"
+        assert (classified.status, classified.code) == (503, STORE_BUSY)
+
+
+def test_a_third_attempt_is_a_retry_not_an_index_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attempt count and the wait between attempts are independent.
+
+    The backoff used to be a per-attempt tuple, so the variant the constants
+    discuss -- three attempts -- raised ``IndexError`` on the third instead of
+    retrying. A scalar cannot be indexed out of range; this pins that raising the
+    budget actually buys the attempts it says it does.
+    """
+    _shrink_the_budget(monkeypatch)
+    monkeypatch.setattr(attention, "_CONTENTION_ATTEMPTS", 3)
+    store = AttentionStore(tmp_path / "attention.db")
+    attempts: list[int] = []
+
+    def refuse() -> None:
+        attempts.append(1)
+        raise _contention_error("SQLITE_BUSY")
+
+    with pytest.raises(AttentionWriteDeferred):
+        store._retry_write(refuse)
+    assert len(attempts) == 3
+
+
+# ---------------------------------------------------------------------------
+# The read class: 36 of the 60 lock lines in the incident's log.
+# ---------------------------------------------------------------------------
+
+
+def test_a_read_rides_out_a_lock_that_outlasts_the_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blocked read is RETRIED, not merely given a wider window.
+
+    The operator's log is mostly this shape: the daemon's own scan
+    (``revision -> _uninitialized``) meeting a sibling writer's lock. Pre-fix it
+    raised a bare ``OperationalError``; with the wider window alone it still
+    raised, five seconds later instead of two. The release is triggered by the
+    read's own second connection -- the sequence, not a clock.
+    """
+    monkeypatch.setattr(attention, "_BUSY_TIMEOUT_MS", 60)
+    monkeypatch.setattr(attention, "_CONTENTION_BACKOFF_S", 0)
+    path = tmp_path / "attention.db"
+    store = _seed(path)
+    holder = _HeldExclusiveLock(path)
+    original = AttentionStore._connect_read_only
+    connects: list[int] = []
+
+    def release_for_the_second_attempt(inner_self: AttentionStore) -> sqlite3.Connection:
+        connects.append(1)
+        if len(connects) == 2:
+            # The event, not a sleep: attempt 1 has already paid its whole
+            # window and failed, which is what makes this "outlasts the window".
+            holder.release()
+        return original(inner_self)
+
+    monkeypatch.setattr(AttentionStore, "_connect_read_only", release_for_the_second_attempt)
+    started = time.monotonic()
+    try:
+        revision = store.revision()
+    finally:
+        holder.release()
+        holder.close()
+    elapsed = time.monotonic() - started
+
+    assert len(connects) == 2, "the read must have been attempted twice"
+    assert elapsed >= 0.06, "the first attempt must have paid its whole window"
+    assert revision[0] >= 1, "the retried read returns the real frame"
+
+
+def test_a_read_that_never_gets_the_lock_is_a_classified_deferral(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What escapes a blocked read is named and still classifies as contention."""
+    _shrink_the_budget(monkeypatch)
+    path = tmp_path / "attention.db"
+    store = _seed(path)
+    original = AttentionStore._connect_read_only
+    attempts: list[int] = []
+
+    def counting(inner_self: AttentionStore) -> sqlite3.Connection:
+        attempts.append(1)
+        return original(inner_self)
+
+    monkeypatch.setattr(AttentionStore, "_connect_read_only", counting)
+    holder = _HeldExclusiveLock(path)
+    try:
+        with pytest.raises(AttentionReadDeferred) as raised:
+            store.revision()
+    finally:
+        holder.release()
+        holder.close()
+
+    error = raised.value
+    assert isinstance(error, sqlite3.OperationalError)
+    assert error.sqlite_errorname == "SQLITE_BUSY"
+    assert len(attempts) == attention._CONTENTION_ATTEMPTS, "the retry must be bounded"
+    # 503 "busy, retry" at every ladder that already classifies store failures --
+    # a blocked read is never reported as a broken store.
+    classified = store_failure(error, tmp_path)
+    assert classified is not None, "a SQLite error must classify as a store failure"
+    assert (classified.status, classified.code) == (503, STORE_BUSY)
+
+
+def test_a_non_contention_read_failure_is_never_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupt or unreadable store is not a race, so it is reported at once."""
+    _shrink_the_budget(monkeypatch)
+    store = AttentionStore(tmp_path / "attention.db")
+    attempts: list[int] = []
+
+    def refuse() -> dict[str, object]:
+        attempts.append(1)
+        error = sqlite3.OperationalError("disk I/O error")
+        error.sqlite_errorcode = sqlite3.SQLITE_IOERR
+        error.sqlite_errorname = "SQLITE_IOERR"
+        raise error
+
+    with pytest.raises(sqlite3.OperationalError) as raised:
+        store._retry_read(refuse)
+    assert type(raised.value) is sqlite3.OperationalError, "not a deferral"
+    assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_refresh_read_degrades_instead_of_killing_the_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The read arm of the outage path, asserted at the caller.
+
+    ``Session.refresh_attention`` runs on request paths (the runtime's refresh op,
+    the mobile handle, the desktop poll), so a raise out of its state read is the
+    same defect the write arm's deferral exists to remove -- one lock met an
+    ASGI request handler and the request never completed. The previous state
+    stands and the next tick re-reads it; the delay is logged, never silent.
+    """
+    from local_operator.paths import config_dir
+    from tests.unit.session.test_session import ScriptedStream, make_session
+
+    _shrink_the_budget(monkeypatch)
+    session = make_session(tmp_path, ScriptedStream([]))
+    try:
+        path = config_dir() / "attention.db"
+        store = AttentionStore(path)
+        identity = "session/sess"
+        store.publish(identity, str(uuid.uuid4()), "anchor-earlier", "complete")
+        session._attention = store.state(identity)
+        previous = dict(session._attention)
+        holder = _HeldExclusiveLock(path)
+        try:
+            with caplog.at_level(logging.WARNING, logger="local_operator.session.session"):
+                state = await session.refresh_attention()
+        finally:
+            holder.release()
+            holder.close()
+        assert state == previous, "the previous state stands rather than raising"
+        assert "keeping the previous state" in caplog.text, caplog.text
     finally:
         await session.dispose()
