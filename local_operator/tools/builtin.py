@@ -2028,9 +2028,14 @@ def _configured_memory_budget(override_mb: float | None) -> memory_guard.Budget:
     Fresh ``ConfigManager`` per call for the same reason ``_configured_bash_shell``
     uses one: the ``memory_guard`` keys are LIVE, so an edit lands on the next
     command. A config read that fails means "the constants' defaults" (enabled,
-    auto) so a command still runs when ``config.yml`` is broken; the per-call
-    ``memory_mb`` override is applied regardless, because it is the caller's
-    explicit instruction and does not depend on the config being readable (F9).
+    auto) so a command still runs when ``config.yml`` is broken.
+
+    The ``memory_mb`` argument is passed through to ``compute_budget`` even when
+    the config read failed — the caller said the number, so it does not depend on
+    the config being readable. That is about a config-read FAILURE, not the
+    precedence over the off switch: ``enabled=False`` still wins over a positive
+    ``memory_mb``, because ``enabled`` is the machine-wide master switch (F9;
+    contract §6/§7, QA round 1 Q1).
     """
     mode = memory_guard.BASH_MEMORY_MODE_DEFAULT
     limit_mb = memory_guard.BASH_MEMORY_LIMIT_MB_DEFAULT
@@ -2976,16 +2981,12 @@ async def execute_bash(
         # wallpaper, and `source="disabled"` is a machine-wide condition.
         logger.debug("memory guard disabled for this command: %s", memory_budget.reason)
 
-    # The latched soft advisory, folded into the next live update by
-    # ``_emit_update`` (see ``_memory_tick``). A cell rather than a guard method
-    # so the ONE-SHOT latch lives with the update channel that spends it.
+    # The soft advisory line, held for the life of the command once the guard
+    # fires it. PERSISTENT, not one-shot: it rides the card's state line on every
+    # update so it stays painted until the command settles (design review D1).
+    # The guard's own latch stops it RE-FIRING; this cell is what makes the ONE
+    # firing stay visible rather than surviving a single 500 ms snapshot.
     memory_advisory: str | None = None
-
-    def _take_memory_advisory() -> str | None:
-        nonlocal memory_advisory
-        line = memory_advisory
-        memory_advisory = None
-        return line
 
     def _unregister_group() -> None:
         # Drop this group's ledger line once it is confirmed dead, so a clean
@@ -2996,6 +2997,24 @@ async def execute_bash(
             return
         with contextlib.suppress(Exception):
             group_reaper.unregister_group(spawned_pgid)
+
+    def _reap_synchronously() -> None:
+        """The drain/reap tail's NON-awaiting cleanup, shareable by early returns.
+
+        The steering-path memory branch returns before the tail (it cannot await
+        there — a caught cancellation would re-deliver), but the group is already
+        killed, so its ledger line, its transport and the abort waiter still need
+        releasing. Every step here is synchronous or a cancel, so it is safe on a
+        cancelled task (review round 1, m2). Idempotent: the normal tail runs the
+        same steps, so calling this on the way to that tail would be harmless too.
+        """
+        transport = getattr(process, "_transport", None)
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+        _unregister_group()
+        if abort_waiter is not None and not abort_waiter.done():
+            abort_waiter.cancel()
 
     stdout_chunks = _BashOutput()
     stderr_chunks = _BashOutput()
@@ -3134,17 +3153,27 @@ async def execute_bash(
             # operator the opposite of what is happening.
             stdout = _LIVE_PENDING_TEXT
         summary = _bash_output_summary(stdout, stderr)
-        advisory = _take_memory_advisory()
-        if advisory:
-            # The soft (memory.high) advisory rides the SAME live channel the
-            # operator already watches, once, so they see the pressure before the
-            # kill. ADVISORY ONLY — see the module docstring: userspace cannot
-            # throttle an allocation, so this is a warning, never a slowdown.
-            summary = f"{advisory}\n{summary}"
+        # The soft (memory.high) advisory is carried as its OWN field, not
+        # prepended to the output text (design review D1). Prepended, it rode the
+        # HEAD of a block that keeps the TAIL, so on a chatty command — the exact
+        # memory-pressure case it exists for — it scrolled off, and the one-shot
+        # latch meant the next snapshot overwrote it anyway. As a field it reaches
+        # the card's persistent state line and stays put.
+        #
+        # ADVISORY ONLY — see the module docstring: userspace cannot throttle an
+        # allocation, so this is a warning, never a slowdown. The line is the
+        # latch's text; once the guard has fired it we resend the SAME line on
+        # every subsequent update (the latch returns it once, so it is held here),
+        # so it stays painted until the command settles.
+        advisory = memory_advisory
         on_update(
             AgentToolUpdate(
                 content=[TextContent(text=summary)],
-                details={"tool_name": "bash", "running": True},
+                details={
+                    "tool_name": "bash",
+                    "running": True,
+                    "memory_advisory": advisory,
+                },
             )
         )
 
@@ -3320,6 +3349,19 @@ async def execute_bash(
                     if guard is not None and bg_sample is not None
                     else MEMORY_EXCEEDED_FALLBACK
                 )
+                # Structured details on the job row, mirroring the foreground
+                # result's `details` (contract §8.2, review round 1 m3): a
+                # renderer or compaction can read the measured peak and ceiling
+                # by key instead of parsing the head text. `report_progress`
+                # merges a mapping into `latest_details`, so this rides the same
+                # channel the heartbeat uses without displacing it.
+                report_progress(
+                    {
+                        "memory_exceeded": True,
+                        "memory_peak_bytes": guard.peak_bytes if guard else None,
+                        "memory_ceiling_bytes": guard.hard_bytes if guard else None,
+                    }
+                )
             if cancelled_bg:
                 head = "CANCELLED (process killed)"
             out, err, footer, _spill_details = await asyncio.to_thread(
@@ -3482,10 +3524,17 @@ async def execute_bash(
             # §10: a memory-killed command must NEVER be reported as "continues
             # in the background". The guard set the flag before its _kill(), so if
             # a steering CancelledError arrives in the same tick the memory branch
-            # wins. Return the memory result directly rather than falling into the
-            # drain/reap tail: awaiting there after a caught cancellation would
-            # re-deliver the cancellation and lose the attribution this branch
-            # exists to preserve.
+            # wins.
+            #
+            # We return here rather than falling into the drain/reap tail below:
+            # awaiting there after a caught cancellation would re-deliver the
+            # cancellation and lose the attribution this branch exists to
+            # preserve. But skipping the tail must not skip its SYNCHRONOUS
+            # cleanup — the group is already killed, so reap its ledger line and
+            # release its transport here (review round 1, m2). The `await`s of
+            # the tail are what we cannot do; `_unregister_group()`,
+            # `transport.close()` and cancelling the abort waiter are not.
+            _reap_synchronously()
             partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
             message = (
                 guard.over_budget_message(memory_sample)
