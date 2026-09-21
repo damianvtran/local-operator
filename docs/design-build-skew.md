@@ -159,12 +159,16 @@ class BuildStamp:
 def installed_build() -> BuildStamp: ...
 ```
 
-Reads `.lop-source` at `sys.prefix` (the same root `is_git_snapshot` uses),
-its first whitespace-separated token as `source_ref` — **except** a sentinel
-token (`pypi`, `snapshot`, or any later one), which yields `""` so a wheel
-compares on version alone (see the amendment above; sentinels are why a naive
-reader must not stamp `source_ref="pypi"`) — and `""` when the marker is absent. One small
-file read; called rarely (adopt/engage/bind), never on a hot path.
+Reads `.lop-source` at `sys.prefix` (the same root `is_git_snapshot` uses) and
+takes its first whitespace-separated token as `source_ref` **only when that token
+looks like a commit** — 7 to 40 hexadecimal characters (`_looks_like_git_sha`),
+and `""` otherwise. The shape test, not a list of known sentinels, is what keeps
+a wheel (`pypi <version>`) comparing on version alone, and what makes an
+unrecognised token — `snapshot`, or a sentinel added later — degrade to "no ref"
+instead of rendering as a bogus commit; the length arm is part of the rule, so a
+hex token shorter than 7 or longer than 40 degrades too. `""` is also the answer
+when the marker is absent. One small file read; called rarely
+(adopt/engage/bind), never on a hot path.
 
 ### 4.1 B — runtime-side completion
 
