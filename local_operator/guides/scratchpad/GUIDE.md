@@ -19,7 +19,7 @@ not.
 
 ## Use it for
 
-Every kind of text file you would otherwise drop into their tree:
+Text, and rendered frames:
 
 - **A one-off script or snippet you write for yourself** — a `.sh`, a `.py`, a
   SQL fragment, a throwaway harness. Here, and only here, when it is your own
@@ -29,6 +29,15 @@ Every kind of text file you would otherwise drop into their tree:
   scheme).
 - **Data you are still shaping** — a `.csv`/`.tsv` extract, a `.json` payload, a
   scratch list of rows you will filter next turn.
+- **A rendered frame or a still** — a PNG, a JPEG/GIF/WebP, or a screenshot of a
+  UI under test. These are first-class here, not a special case: a raster image
+  written into the pad by `bash` reads back through the scheme as a VIEWABLE
+  image. (An SVG is stored here just as happily, but the reader does not decode
+  vector formats — it comes back as its own text, so render it to a PNG first if
+  what you need is to LOOK at the frame. The case that really needs a temp dir is
+  narrower and is set out below.) The standing rule for
+  any user-visible change is before/after frames, so the pad is where the
+  capture script, the frames and the numbers behind them belong together.
 - **A benchmark or perf run** — raw numbers, timings, before/after tables. Keep
   the measurements and re-read them instead of re-running the work.
 - **Wake and scheduled-run bookkeeping** — before a scheduled run, read
@@ -51,11 +60,13 @@ cannot tell apart from output.
   directory, so deleting the session takes the whole folder, and the automatic
   cleanup pass does too when its policy is switched on). An output that has to
   survive belongs in the working directory, or wherever the user wants it.
-- **Binary scratch** (an image, an archive, a model file) → not here: this
-  store is text (markdown, JSON, CSV/TSV, TXT, YAML, logs, script sources), and
-  a binary file put here cannot be read back — the reader refuses it. It gets a
-  real temp dir instead: `bash mktemp -d` with NO template, which lands in
-  `$TMPDIR`, the per-user temp directory. Do NOT pass a template that carries
+- **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
+  has no text to return, so the reader refuses it as text and there is nothing
+  useful to do with it. (`bash mktemp -d` with NO template, which lands in
+  `$TMPDIR`, the per-user temp directory, is the home for those.) An IMAGE is
+  not in this class — measured 2026-09-21: a PNG written into the pad by `bash`
+  reads back through the scheme as a viewable image, so rendered frames belong
+  here with everything else. Do NOT pass a template that carries
   the `/tmp` directory in its path — that is what puts you back in the one
   directory macOS reaps. `/tmp` belongs to the system cleaner:
   `/usr/libexec/tmp_cleaner` (launchd `com.apple.tmp_cleaner`, run daily)
@@ -84,6 +95,17 @@ write's verb says whether it created or overwrote the file. That real path is wh
 `bash`, `ls`, `grep` and `eval` need — a shell cannot resolve a scheme — so use
 it whenever you step outside the tools. A listing prints its entries as relative
 names and carries the resolved folder in its header.
+
+**You do not have to write a file first to learn that path.** `bash` and the
+`eval` kernel are each given this session's pad as `$LOCAL_OPERATOR_SCRATCHPAD`,
+an absolute path, so a shell can create directly into it:
+`mkdir -p "$LOCAL_OPERATOR_SCRATCHPAD/logs"`, `> "$LOCAL_OPERATOR_SCRATCHPAD/x.log"`.
+The idiom for a rig that wants a private subdirectory is
+`mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXX"` — the template keeps the
+directory inside the pad, so the files stay readable through the scheme and
+survive the session, which a `/tmp` one does not. The name is set only inside an
+agent's own shell and kernel; it is unset in the user's terminal, where the
+`scratchpad://` calls are the way in.
 
 ## File names and types
 

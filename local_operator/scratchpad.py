@@ -48,6 +48,7 @@ guide and the system prompt.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
@@ -67,6 +68,31 @@ SCRATCHPAD_SCHEME = f"{SCRATCHPAD_NAMESPACE}://"
 
 #: Directory name under a session directory. Derived from the same token.
 SCRATCHPAD_DIRNAME = SCRATCHPAD_NAMESPACE
+
+#: The environment variable that carries this session's scratchpad ROOT into a
+#: child process — the ``bash`` tool's shell and the ``eval`` worker — as an
+#: absolute path.
+#:
+#: WHY A PATH AND NOT JUST THE SCHEME. An agent needs an absolute path BEFORE it
+#: can create anything: ``mktemp -d``, ``nohup … > log``, ``sys.path.insert(0,
+#: dir)``. With ``scratchpad://`` alone the only way to learn that path is to
+#: write a file first and read the receipt — one extra round trip that ``/tmp``
+#: does not cost, and the reason the scheme lost the shell channel by ~9:1
+#: (measured 2026-09-21 over 400 transcripts: 8,766 shell calls created scratch
+#: under a temp root, against 44 that reached the scratchpad).
+#:
+#: THREE ARMS, the same rule ``agent_shell.MAY_DELEGATE_ENV`` is signed with,
+#: and signed from the same spawn sites. Set to this session's root when it has
+#: one; CLEARED (the empty string) when the name is inherited from the launcher
+#: and this session has none; NOT WRITTEN AT ALL otherwise. The clear is what
+#: keeps a nested session from writing into its PARENT's scratchpad: a child's
+#: environment starts as a copy of the harness's own in ``shell_env``'s default
+#: ``inherit`` mode, so an inherited path would survive a child that has no
+#: scratchpad of its own and hand it somewhere it must not write. Unlike the
+#: delegation allowance the NAME is not a mechanism — knowing it grants nothing —
+#: so the omit arm exists only so a session without a scratchpad is not handed a
+#: variable it would then read as empty and have to interpret.
+SCRATCHPAD_PATH_ENV = "LOCAL_OPERATOR_SCRATCHPAD"
 
 #: The one message every scratchpad operation returns on a host that has no
 #: session directory. The fallback it names is the guide's: a real temporary
@@ -122,6 +148,42 @@ def scratchpad_root(session_dir: Path | str | None) -> Path | None:
     if directory.parent.name != SESSIONS_DIRNAME:
         return None
     return directory / SCRATCHPAD_DIRNAME
+
+
+def scratchpad_dir_of(context: object | None) -> str | None:
+    """The scratchpad root a live tool context carries, or ``None``.
+
+    ``""`` is treated as absent rather than as a path: ``Path("")`` is the cwd,
+    which would silently make the whole working directory the session's scratch
+    area. Duck-typed rather than annotated as ``ToolContext`` because the
+    ``tests/e2e`` doubles are not one, and a bare attribute access would make
+    them raise.
+    """
+    raw = getattr(context, "scratchpad_dir", None)
+    if not isinstance(raw, str) or not raw:
+        return None
+    return raw
+
+
+def scratchpad_env_injection(scratchpad_dir: str | None) -> dict[str, str]:
+    """The three-arm :data:`SCRATCHPAD_PATH_ENV` write for a child environment.
+
+    See :data:`SCRATCHPAD_PATH_ENV` for why the arms are what they are. The root
+    is a PARAMETER rather than a read of this process's environment because the
+    caller is the code that knows which session it is spawning for — one process
+    holds several child sessions, and the ``eval`` worker in particular is spawned
+    per ``session_key``. The only environment read here is the presence test that
+    chooses between the clear and the omit, and that test is exactly the right
+    one: it asks whether THIS process inherited the name from whatever launched
+    it, which is the fact that decides whether a child would carry a stale path
+    with nothing to clear it. An injection survives ``shell_env``'s strict mode
+    by construction, so the arm that is written is the arm the child sees.
+    """
+    if scratchpad_dir:
+        return {SCRATCHPAD_PATH_ENV: str(scratchpad_dir)}
+    if SCRATCHPAD_PATH_ENV in os.environ:
+        return {SCRATCHPAD_PATH_ENV: ""}
+    return {}
 
 
 def parse_scratchpad_url(url: str, root: Path) -> ScratchpadTarget:

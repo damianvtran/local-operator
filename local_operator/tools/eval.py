@@ -52,6 +52,7 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
+from local_operator.scratchpad import scratchpad_dir_of, scratchpad_env_injection
 from local_operator.tools import shell_env
 from local_operator.tools.builtin import (
     TOOL_OUTPUT_LIMIT_CHARS,
@@ -516,7 +517,7 @@ def _restore(key: str, kernel: _Kernel, position: int) -> None:
     _KERNELS.update(items)
 
 
-async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
+async def _spawn(cwd: str, session_key: str = "", scratchpad_dir: str | None = None) -> _Kernel:
     """Start a worker with platform-native process-tree ownership.
 
     POSIX uses a new session/process group. Windows assigns the worker to a
@@ -526,6 +527,15 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
     id, never user text — see the argv-is-public note in
     :mod:`local_operator.procname`), so an operator looking at Activity Monitor
     can tell WHICH session's eval kernel is burning CPU.
+
+    ``scratchpad_dir`` is the SESSION's own scratchpad root, passed in rather
+    than read from this process's environment: this function is keyed per
+    ``session_key`` and one process holds several child sessions, so a single
+    process-environment read would hand every kernel whichever session happened
+    to be current. A cell is where a great deal of this fleet's scratch is
+    created (``open('/tmp/…')``, ``tempfile.mkdtemp()``), and a persistent
+    kernel can only read the path if it is exported when the worker STARTS —
+    there is no later injection point.
     """
     spawn_options: dict[str, Any] = {
         "stdin": asyncio.subprocess.PIPE,
@@ -586,7 +596,16 @@ async def _spawn(cwd: str, session_key: str = "") -> _Kernel:
         # reading a blocking fd inside the response path.
         os.set_blocking(scrub_read, False)
         env = shell_env.child_environment(
-            injections={"LOCAL_OPERATOR_EVAL_SCRUB_FD": str(scrub_write)},
+            injections={
+                "LOCAL_OPERATOR_EVAL_SCRUB_FD": str(scrub_write),
+                # The scratchpad path rides the same three arms as the bash
+                # tool's (see ``scratchpad.SCRATCHPAD_PATH_ENV``): set for this
+                # session, CLEARED when the name is inherited and this session
+                # has none, omitted otherwise. The worker is long-lived and
+                # inherits the environment for its whole life, so an inherited
+                # path would outlive the session that set it.
+                **scratchpad_env_injection(scratchpad_dir),
+            },
         )
         spawn_options["env"] = env
         # ``close_fds=False`` so the worker inherits the scrub-write fd; every
@@ -891,7 +910,7 @@ async def _run_in_background(
             "attached; re-run without background.",
         )
     try:
-        kernel = await _spawn(_safe_cwd(context), _session_key(context))
+        kernel = await _spawn(_safe_cwd(context), _session_key(context), scratchpad_dir_of(context))
     except OSError as exc:
         return _error(tool_call_id, "eval", f"failed to start Python kernel: {exc}")
 
@@ -1113,7 +1132,7 @@ async def execute_eval(
     kernel = _KERNELS.pop(key, None)
     if kernel is None:
         try:
-            kernel = await _spawn(_safe_cwd(context), key)
+            kernel = await _spawn(_safe_cwd(context), key, scratchpad_dir_of(context))
         except OSError as exc:
             _ACTIVE_KERNELS.discard(key)
             _CLOSE_ON_RETURN.discard(key)

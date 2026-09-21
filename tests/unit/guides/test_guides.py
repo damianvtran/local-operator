@@ -11,6 +11,7 @@ import pytest
 
 from local_operator.guides import discover_guides, make_guide_resolver
 from local_operator.prompts_api import render_template
+from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
 from local_operator.session_factory import (
     _KnowledgeHooks,
     _registered_agent_hints,
@@ -245,18 +246,20 @@ def test_scratchpad_guide_prints_no_absolute_path_shaped_example() -> None:
 
 
 def test_scratchpad_guide_says_where_binary_scratch_goes() -> None:
-    """The guide refuses binaries and used to stop there, so a session with an
-    image to write had nowhere the two documents agreed on. Its binary bullet now
-    names the home (a real temp dir in the per-user temp directory, NOT the one
-    macOS reaps) and where to record the path it made — so the omission
-    ``system.md`` leaves is answered where the reader lands, instead of being a
-    gap to fall into.
+    """The guide separates the two cases an earlier revision conflated, and the
+    separation is a MEASURED correction rather than a preference: a PNG written
+    into the pad by ``bash`` reads back through the scheme as a viewable image,
+    while a non-image binary has no text to return and is refused. Only the
+    second needs a real temp dir — the home this bullet names (the per-user temp
+    directory, NOT the one macOS reaps) plus where to record the path it made —
+    so the omission ``system.md`` leaves is answered where the reader lands
+    instead of being a gap to fall into.
     """
     resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
     body = resolver("guide://scratchpad")
     assert body is not None
     section = body[body.index("## Use something else for") : body.index("## The protocol")]
-    assert "**Binary scratch**" in section
+    assert "**A NON-image binary**" in section
     assert "mktemp" in section
     assert "$TMPDIR" in section
     # The verified mechanism, named rather than gestured at, and the window it
@@ -265,6 +268,57 @@ def test_scratchpad_guide_says_where_binary_scratch_goes() -> None:
     assert "three days" in section
     # Where the made temp dir's path is recorded, so a later turn finds the files.
     assert "scratchpad://" in section
+
+
+def test_scratchpad_guide_makes_a_rendered_frame_first_class_content() -> None:
+    """The correction this pin exists for. The guide used to say a binary put in
+    the pad "cannot be read back — the reader refuses it", and it named an image
+    FIRST, so the single most common scratch artifact this fleet makes (681 PNGs
+    sat in ``/tmp`` at the time of the audit) was sent away from the pad by the
+    document that is supposed to hold it. Measured 2026-09-21: a PNG written into
+    the pad by ``bash`` and read back through the scheme renders as an image, and
+    only a NON-image binary is refused — for having no text to return, which is a
+    different fact from being unreadable.
+
+    The stale claim and its replacement are pinned together, because the failure
+    this guards is a future revision restoring the blanket refusal: that reads as
+    a harmless simplification and would silently re-create the funnel.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    assert "cannot be read back" not in body
+    assert "A rendered frame or a still" in body
+    # Whitespace-collapsed: the guide is PROSE and re-wraps as it is edited, so
+    # an assertion on the raw bytes pins the line width rather than the claim —
+    # it broke on a rewording that changed nothing else.
+    permitted = " ".join(
+        body[body.index("## Use it for") : body.index("## Use something else for")].split()
+    )
+    assert "VIEWABLE image" in permitted
+    # The distinction is stated where the reader decides, not only where the
+    # reader is told to go elsewhere.
+    assert "NON-image binary" in body
+
+
+def test_scratchpad_guide_names_the_exported_path_and_the_pad_local_mktemp() -> None:
+    """The path is what a shell actually needs, and the guide is where an agent
+    looks after being nudged. Both the variable and the idiom have to be here:
+    `mktemp -d` with no template is the sanctioned escape hatch, so an agent that
+    wants a private rig directory has to be shown the TEMPLATED form that keeps
+    the directory inside the pad — otherwise the nudge and the guide disagree and
+    the escape hatch wins.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    assert f"${SCRATCHPAD_PATH_ENV}" in body
+    assert f'mktemp -d "${SCRATCHPAD_PATH_ENV}/rig.XXXXXX"' in body
+    # The unset case is stated, because the operator's own terminal does not
+    # have it and a recipe that assumes it is a recipe that fails there.
+    assert "unset in the user's terminal" in body
 
 
 def test_browser_and_agent_guides_require_terminal_surface_cleanup() -> None:

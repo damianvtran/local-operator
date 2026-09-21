@@ -139,10 +139,13 @@ from local_operator.redaction_shapes import (
 )
 from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
+    SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadPathError,
     parse_scratchpad_url,
+    scratchpad_dir_of,
+    scratchpad_env_injection,
 )
 from local_operator.tools import group_reaper, shell_env
 from local_operator.tools.spill import (
@@ -2758,6 +2761,13 @@ async def execute_bash(
     elif MAY_DELEGATE_ENV in os.environ:
         # Clear what this child would otherwise inherit — and only that.
         injections[MAY_DELEGATE_ENV] = ""
+    # The session's scratchpad root rides the SAME three arms, from one helper, so
+    # the two writers of an inherited-shaped variable cannot drift apart: set to
+    # this session's root, cleared when the name is inherited and this session has
+    # none (so a nested session never writes into its parent's scratchpad), and
+    # not written at all otherwise. The scheme cannot cross this boundary — a
+    # shell cannot resolve one — which is the whole reason the path is exported.
+    injections.update(scratchpad_env_injection(scratchpad_dir_of(context)))
     if isinstance(extra, dict):
         injections.update({str(name): str(value) for name, value in extra.items()})
 
@@ -3402,6 +3412,14 @@ async def execute_bash(
     notice = credential_dump_notice(params.command)
     if notice:
         parts.insert(1, notice)
+    # The scratch nudge rides the SAME head window and for the same measured
+    # reason (a line at the end of a long result is the first thing the card
+    # drops). It goes AFTER the credential notice, which keeps first position:
+    # a secret already in the transcript outranks where a scratch file landed.
+    # It costs nothing when it does not fire, which is the ordinary command.
+    scratch = _bash_scratch_hint(params.command, context)
+    if scratch:
+        parts.insert(2 if notice else 1, scratch)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
@@ -3486,7 +3504,23 @@ def build_bash_tool() -> AgentTool:
         name="bash",
         label="Shell",
         describe_approval=_describe_shell_approval,
-        description=("Run a bash command and return its exit code, stdout and stderr."),
+        description=(
+            # The ONE standing token cost of the scratchpad work, measured against
+            # the start-of-session budget this repo guards (30,025 billed tokens):
+            # this clause is ~24 of them, and it is deliberately at that size. The
+            # budget is nearly exhausted — before this change the guard passed
+            # with 48 tokens of headroom — so the examples are two rather than
+            # four and the rest of the rule lives in ``guide://scratchpad``, which
+            # costs nothing until it is read. What the clause must do is name the
+            # PATH variable: a shell cannot resolve ``scratchpad://``, the nudge
+            # above only fires after the fact, and the packaged prompt's paragraph
+            # is not in front of the model at the moment it writes a redirect.
+            "Run a bash command and return its exit code, stdout and stderr. "
+            # Interpolated rather than spelled out, so the name the model is told
+            # to use and the name both spawn sites export are one constant — a
+            # second literal here is how the advice would outlive a rename.
+            f"Own scratch (scripts, logs): ${SCRATCHPAD_PATH_ENV}, not /tmp."
+        ),
         parameters=BashParams.model_json_schema(),
         approval_tier="exec",
         # bash runs shared when non-pty; models batch independent
@@ -4789,14 +4823,12 @@ def _scheme_refusal(
 def _scratchpad_root(context: ToolContext | None) -> Path | None:
     """The scratchpad root off the context, or ``None``. ``""`` reads as ``None``.
 
-    ``""`` is treated as absent rather than as a path: ``Path("")`` is the cwd,
-    which would silently make the whole working directory listable through the
-    scheme.
+    The field reading itself lives in ``scratchpad.scratchpad_dir_of`` so the
+    ``eval`` worker's spawn reads the same field the same way; the ``Path``
+    conversion stays here because this is the module that resolves paths.
     """
-    raw = getattr(context, "scratchpad_dir", None) if context else None
-    if not isinstance(raw, str) or not raw:
-        return None
-    return Path(raw)
+    raw = scratchpad_dir_of(context)
+    return None if raw is None else Path(raw)
 
 
 #: This module's view of the platform, a module-local copy for the same reason
@@ -4881,9 +4913,12 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
 
     Contract, deliberately narrow in four ways:
 
-    * Only ``write``/``edit`` call it, from their own RESOLVED target path —
-      never from ``bash`` and never from ``read``, so a script or a test that
-      deliberately writes under ``/tmp`` through the shell is unaffected.
+    * Its callers are the two writers, from their own RESOLVED target path — not
+      from ``read``, so a script or a test that deliberately writes under ``/tmp``
+      through the shell is unaffected by the ``write``/``edit`` line. ``bash`` has
+      its own entry point (``_bash_scratch_hint``) for the same advisory, because
+      a shell command has no resolved target path to hand in — it has a command
+      string whose CREATING positions have to be read instead.
     * Depth-1 only: the parent must BE a temp root. Several of this fleet's real
       agent worktrees live at ``/private/tmp/<name>``, so anything nested deeper
       is a plausible deliverable and a nudge there would be a false positive on
@@ -4915,11 +4950,393 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
             # TARGET — named once, as the subject the reason clauses hang off.
             # The ``write(path=…)`` example is gone too: taught by
             # ``system.md``, the guide and the tool description.
-            return (
-                f"[scratch] Your own scratch belongs in {SCRATCHPAD_SCHEME} — {resolved} "
-                f"sits directly under a temp root: {why}."
-            )
+            return _temp_scratch_line(resolved, why, SCRATCHPAD_SCHEME)
     return ""
+
+
+def _temp_scratch_line(resolved: Path, why: str, remedy: str) -> str:
+    """The one advisory line BOTH temp-root nudges emit, verbatim in one place.
+
+    ``remedy`` is what the two channels can actually act on and it is the only
+    thing that differs between them: ``write``/``edit`` take the
+    ``scratchpad://`` scheme, while a shell cannot resolve a scheme at all and is
+    given the exported path variable instead. The reason clauses and the word
+    order are shared, because the word order is the load-bearing part (see
+    :func:`_temp_scratch_hint`) and a second hand-written copy is how it would
+    quietly stop being true of one of the two lines.
+    """
+    return (
+        f"[scratch] Your own scratch belongs in {remedy} — {resolved} "
+        f"sits directly under a temp root: {why}."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The bash-side scratch nudge
+# ---------------------------------------------------------------------------
+#
+# The SAME advisory as ``_temp_scratch_hint``, reaching the channel the measured
+# volume actually uses. The audit that produced this (2026-09-21, 400
+# transcripts) counted 8,766 shell calls creating scratch under a temp root
+# against 44 that reached the scratchpad, and the shipped nudge's own docstring
+# recorded that it fired only from ``write``/``edit``. The shell is where the
+# rule has to be present at the moment of creating.
+
+#: The commands whose OPERANDS are CREATED by the call, and which operands count.
+#: ``all`` for the file creators; ``last`` for ``cp``/``mv``, where only the
+#: DESTINATION is created — a source under a temp root is a read, and pointing
+#: the agent at it would be advice about the wrong file; ``template`` for
+#: ``mktemp``, whose operand is a template rather than a path.
+#:
+#: The template-less form (plain ``mktemp -d``) is the guide's sanctioned escape
+#: hatch for a directory that genuinely needs a real temp path, and it is exempt
+#: WITHOUT a deny-list entry: it has no operand, so no candidate is ever produced.
+#: The exemption is structural, which is what keeps "nudge the template" and
+#: "never nudge the escape hatch" from having to be kept in sync by hand.
+_CREATING_COMMANDS: dict[str, str] = {
+    "tee": "all",
+    "mkdir": "all",
+    "touch": "all",
+    "cp": "last",
+    "mv": "last",
+    "mktemp": "template",
+}
+
+#: Words that precede a command without BEING one, so the word after them is
+#: still in command position. Without this, the commonest way this fleet runs a
+#: creating command — ``sudo mkdir /tmp/x``, ``env FOO=1 cp a /tmp/b`` — would
+#: read its command name as an ordinary argument and never nudge.
+_COMMAND_PREFIXES = frozenset(
+    {"sudo", "command", "nohup", "env", "time", "exec", "do", "then", "else"}
+)
+
+#: ``NAME=value`` ahead of a command word.
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
+    """One advisory line when ``command`` CREATES a path directly under a temp
+    root, else ``""``.
+
+    Same voice, same reason clauses and the same word order as the
+    ``write``/``edit`` nudge (:func:`_temp_scratch_hint`); the remedy differs
+    because this channel needs a PATH. Contract, all of it load-bearing:
+
+    * CREATING positions only — redirect ``>``/``>>``, the operands of ``tee``,
+      ``mkdir``, ``touch``, ``cp``/``mv`` (destination) and an explicit ``mktemp``
+      template. A ``read``, ``rm``, ``cat`` or ``grep`` target is not a creation
+      and is never nudged, and a heredoc BODY is data rather than commands.
+    * Depth-1 only: the target's parent must BE the temp root. This fleet keeps
+      real worktrees at ``/private/tmp/<name>``, so a deeper path is a plausible
+      deliverable and nudging it would be a false positive on real work — the
+      same narrowness ``write``/``edit`` already document and accept.
+    * Exempt: a template-less ``mktemp -d`` (the guide's escape hatch) and every
+      ``mktemp`` template that does not carry the ``X`` run — neither produces a
+      candidate.
+    * No scratchpad on this host means no nudge: there is nowhere better to point
+      the session, and the export is absent in exactly that case.
+    * At most ONE line per result (this returns one string), and no module-level
+      state of any kind — the dedupe that would need it does not exist because a
+      single result is built from a single command.
+    * NOT a ``background: true`` call, and this one is a deliberate GAP rather
+      than a decision the code makes: a detached command settles through
+      ``_detach_to_job``, whose job result is assembled on its own path and never
+      reaches the advisory insert below. Measured 2026-09-21 — ``mkdir -p
+      /tmp/…`` with ``background=True`` nudges in neither the immediate result nor
+      the settled ``result_text``. Left as a miss on purpose: the advisory would
+      arrive at job-settle time, which can be long after the file was created and
+      acted on, so buying it costs more surface than it returns. The foreground
+      path is where the volume is (``nohup … > log`` is a foreground shell).
+    """
+    if not command:
+        return ""
+    if _scratchpad_root(context) is None:
+        return ""
+    roots = dict(_temp_scratch_roots())
+    if not roots:
+        return ""
+    for candidate in _bash_created_paths(command):
+        resolved = _temp_root_target(candidate, roots)
+        if resolved is not None:
+            return _temp_scratch_line(resolved, roots[resolved.parent], f"${SCRATCHPAD_PATH_ENV}")
+    return ""
+
+
+def _bash_created_paths(command: str) -> Iterator[str]:
+    """The candidate paths ``command`` creates, in the order the shell meets them.
+
+    A structural walk over the token stream rather than a pattern match, because
+    "is this token CREATED" is a fact about its position — an operand of a
+    creating command, or a redirect target — and not about how the path is
+    spelled. Quoted and backslash-escaped text has already been dequoted by the
+    scanner, so ``> "/tmp/x.log"`` yields the same token as ``> /tmp/x.log``.
+    """
+    tokens = _bash_tokens(_strip_heredoc_bodies(command))
+    index = 0
+    at_command = True
+    while index < len(tokens):
+        kind, text = tokens[index]
+        index += 1
+        if kind == "redir":
+            if index < len(tokens) and tokens[index][0] == "word":
+                yield tokens[index][1]
+                index += 1
+            continue
+        if kind == "op":
+            at_command = True
+            continue
+        if not at_command:
+            continue
+        if text.startswith("-") or _ASSIGNMENT.match(text) or text in _COMMAND_PREFIXES:
+            continue
+        mode = _CREATING_COMMANDS.get(text.rsplit("/", 1)[-1])
+        if mode is None:
+            at_command = False
+            continue
+        operands: list[str] = []
+        while index < len(tokens) and tokens[index][0] == "word":
+            if not tokens[index][1].startswith("-"):
+                operands.append(tokens[index][1])
+            index += 1
+        if mode == "last":
+            operands = operands[-1:]
+        elif mode == "template":
+            operands = [operand for operand in operands if "X" in operand]
+        yield from operands
+        at_command = False
+
+
+def _temp_root_target(candidate: str, roots: dict[Path, str]) -> Path | None:
+    """``candidate`` resolved, when it sits DIRECTLY under one of ``roots``.
+
+    The root spellings a shell writes are the point of the expansion below:
+    ``"$TMPDIR/x.log"`` and ``"${TMPDIR}/x.log"`` are the same trap as the
+    literal ``/var/folders/…/T/x.log`` they expand to, and they are how the
+    shells on this fleet spell it. Every other form is left alone: a relative
+    path, a ``~`` path and anything carrying a scheme are not temp-root targets
+    and must not be guessed at.
+    """
+    text = candidate.strip()
+    if not text or "://" in text:
+        return None
+    # ``${TMPDIR}`` FIRST: the longer spelling contains no ``$TMPDIR`` substring,
+    # but replacing in the other order would leave ``${}`` behind and rewrite a
+    # literal that was never a variable.
+    for spelling in ("${TMPDIR}", "$TMPDIR"):
+        text = text.replace(spelling, tempfile.gettempdir())
+    if not text.startswith("/"):
+        return None
+    try:
+        resolved = Path(text.rstrip("/") or "/").resolve()
+    except OSError:  # pragma: no cover - a path that cannot be resolved
+        return None
+    return resolved if resolved.parent in roots else None
+
+
+def _strip_heredoc_bodies(command: str) -> str:
+    """``command`` with every heredoc BODY removed.
+
+    A body is DATA being written, not commands being run: in ``cat > /tmp/x.sh
+    <<'EOF'`` the lines that follow are the file's contents, so a ``> /tmp/y``
+    inside them is not a second creation at this level. The operator and its
+    delimiter are left in place — only the body is dropped — so the token scan
+    still sees the command's real shape.
+
+    Quote- and comment-aware, because ``echo "a << b"`` is one word rather than a
+    heredoc. One delimiter per line is what this models; a second ``<<`` on the
+    same line is a shape the shell accepts and this scanner does not follow, and
+    the cost of that is a body tokenised as commands — an advisory MISS, which is
+    the direction this nudge is allowed to be wrong in.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char in "'\"":
+            end = _consume_quoted(command, index, [])
+            out.append(command[index:end])
+            index = end
+            continue
+        if char == "\\" and index + 1 < length:
+            out.append(command[index : index + 2])
+            index += 2
+            continue
+        if char == "#" and (index == 0 or command[index - 1] in " \t\n;&|"):
+            newline = command.find("\n", index)
+            end = length if newline == -1 else newline
+            out.append(command[index:end])
+            index = end
+            continue
+        if (
+            char == "<"
+            and command[index : index + 2] == "<<"
+            and command[index : index + 3] != "<<<"
+        ):
+            tabs_only = command[index : index + 3] == "<<-"
+            cursor = _skip_whitespace(command, index + (3 if tabs_only else 2))
+            delimiter, after = _read_shell_word(command, cursor)
+            out.append(command[index:after])
+            newline = command.find("\n", after)
+            if newline == -1:
+                break
+            out.append("\n")
+            index = _end_of_heredoc(command, newline + 1, delimiter, tabs_only)
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _end_of_heredoc(command: str, start: int, delimiter: str, tabs_only: bool) -> int:
+    """Index just past the line that terminates a heredoc body, or the end.
+
+    ``<<-`` strips leading TABS from the body AND from the terminator, which is
+    the one thing that would make a delimiter match fail on a body the shell
+    itself accepts — so the tab strip is part of matching, not decoration.
+    """
+    cursor = start
+    length = len(command)
+    while cursor <= length:
+        newline = command.find("\n", cursor)
+        line_end = length if newline == -1 else newline
+        line = command[cursor:line_end]
+        if (line.lstrip("\t") if tabs_only else line).strip() == delimiter:
+            return length if newline == -1 else newline + 1
+        if newline == -1:
+            break
+        cursor = newline + 1
+    return length
+
+
+def _skip_whitespace(command: str, index: int) -> int:
+    """Index of the first character at or after ``index`` that is not blank."""
+    length = len(command)
+    while index < length and command[index] in " \t":
+        index += 1
+    return index
+
+
+def _read_shell_word(command: str, index: int) -> tuple[str, int]:
+    """The dequoted word at ``index``, and the index after it."""
+    buffer: list[str] = []
+    length = len(command)
+    while index < length and command[index] not in " \t\n;&|<>":
+        if command[index] in "'\"":
+            index = _consume_quoted(command, index, buffer)
+            continue
+        if command[index] == "\\" and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+            continue
+        buffer.append(command[index])
+        index += 1
+    return "".join(buffer), index
+
+
+def _consume_quoted(command: str, start: int, buffer: list[str]) -> int:
+    """Append the CONTENTS of the quote at ``start`` to ``buffer``; return the
+    index after it.
+
+    Backslash escapes are honoured inside double quotes only, which is what the
+    shell does: ``'\\'`` is a literal backslash in single quotes, and treating it
+    as an escape there would dequote a path the shell would have kept verbatim.
+    An unterminated quote runs to the end of the command, which is also what the
+    shell does with it.
+    """
+    quote = command[start]
+    index = start + 1
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if char == "\\" and quote == '"' and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+            continue
+        if char == quote:
+            return index + 1
+        buffer.append(char)
+        index += 1
+    return index
+
+
+def _bash_tokens(command: str) -> list[tuple[str, str]]:
+    """Split a command into ``(kind, text)`` with kind ``word``/``op``/``redir``.
+
+    Deliberately a SMALL scanner rather than a shell parser: its only consumer is
+    an advisory filter, so anything it does not model degrades to "no nudge"
+    rather than to a wrong one. What it DOES model is the set of positions the
+    nudge fires on and the things that would make a word look like one of them:
+    quoting and escapes (a quoted ``>`` is a word), the ``;``/``&&``/``||``/``|``/
+    newline separators that end an operand list, fd redirections (``2>``, ``&>``,
+    ``2>&1``, ``>&2``) which must be neither a word nor a path, and ``<``/``<<``
+    — a heredoc's delimiter is not a created path.
+    """
+    tokens: list[tuple[str, str]] = []
+    buffer: list[str] = []
+    index = 0
+    length = len(command)
+
+    def flush() -> None:
+        if buffer:
+            tokens.append(("word", "".join(buffer)))
+            buffer.clear()
+
+    while index < length:
+        char = command[index]
+        if char in " \t":
+            flush()
+            index += 1
+        elif char == "\\" and index + 1 < length:
+            buffer.append(command[index + 1])
+            index += 2
+        elif char in "'\"":
+            index = _consume_quoted(command, index, buffer)
+        elif char == "#" and not buffer:
+            newline = command.find("\n", index)
+            index = length if newline == -1 else newline
+        elif char == "\n":
+            flush()
+            tokens.append(("op", "\n"))
+            index += 1
+        elif char == ">" or (char == "&" and command[index : index + 2] == "&>"):
+            # A digit-only buffer before ``>`` is a file descriptor (``2>``), not
+            # a word — flushing it would put a bare ``2`` in the operand list and
+            # break the "last operand is the cp destination" rule.
+            if buffer and all(digit in "0123456789" for digit in buffer):
+                buffer.clear()
+            flush()
+            index += 1 if char == ">" else 2  # ``&>`` carries its own ``>``
+            if index < length and command[index] == ">":
+                index += 1
+            if index < length and command[index] == "&":
+                # ``>&2`` / ``2>&1`` / ``>&-``: a duplicated descriptor, no path.
+                index += 1
+                while index < length and (command[index].isdigit() or command[index] == "-"):
+                    index += 1
+                continue
+            tokens.append(("redir", ">"))
+        elif char == "<":
+            flush()
+            index += 1
+            heredoc = index < length and command[index] == "<"
+            if heredoc:
+                index += 1
+                if index < length and command[index] == "<":
+                    index += 1
+            tokens.append(("op", "<<" if heredoc else "<"))
+            if heredoc:
+                # The delimiter (or herestring operand) is never a created path.
+                _, index = _read_shell_word(command, _skip_whitespace(command, index))
+        elif char in ";&|()":
+            flush()
+            index += 2 if command[index : index + 2] in ("&&", "||") else 1
+            tokens.append(("op", char))
+        else:
+            buffer.append(char)
+            index += 1
+    flush()
+    return tokens
 
 
 def _scratchpad_address(result: ToolResult, url: str, path: Path) -> ToolResult:
