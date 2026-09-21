@@ -341,11 +341,16 @@ def test_detached_popen_kwargs_are_accepted_by_popen(
 # nothing reaps it but the system — so "gone" has to be a bounded poll rather
 # than a single probe. 10 s is bounded from BOTH sides:
 #
-# * ABOVE the measured settling window. Over 30 raw iterations of this exact
-#   spawn the descendant was unreachable within 0.25 ms of the kill, and it was
-#   always already gone by the time the leader was reaped. 10 s leaves ~4
-#   orders of magnitude of headroom over that window for a loaded runner's
-#   reaper.
+# * ABOVE the measured settling window, which is TENS OF MILLISECONDS and not
+#   the sub-millisecond a thinner instrument reports. Measured from the kill on
+#   this host over 40 iterations: min 0.8 ms, p50 6.9 ms, max 26.3 ms, with 36
+#   of the 40 at or above 1 ms (an independent n=40 read max 41.8 ms). 10 s is
+#   ~2.4 orders of magnitude above the worst window either instrument saw. Two
+#   ways to under-read it, both guarded against here: measuring from the
+#   leader's reap instead of the kill sees the window already closed — that
+#   reading is ~25 us and is how this comment first carried 0.25 ms — and the
+#   window really can outlast the reap, which is what this test's 1-in-30
+#   failure on the descendant probe was.
 # * BELOW the descendant's own lifetime. The descendant is a `sleep 30`: a bound
 #   at or above 30 s would let a descendant that was never signalled exit on its
 #   own and turn the poll green — i.e. the bound would stop the test
@@ -389,18 +394,37 @@ def test_terminate_process_tree_kills_the_group_and_descendants(tmp_path: Path) 
     try:
         # Wait for the marker's CONTENT, not its existence: ``> {marker}``
         # creates the file (truncated) and the ``echo`` builtin fills it in a
-        # second step, so under load an existence check reads ''. Nothing
-        # truncates the file again after that, so one parse covers it.
+        # second step, so an existence check reads ''. The second read guards
+        # the other half of that hazard: a torn read of a longer pid would probe
+        # a DIFFERENT process — a false green if that pid is free, a false 10 s
+        # red if it is live.
         deadline = time.monotonic() + 20.0
         descendant: int | None = None
+        seen_marker = False
+        last_read = ""
         while time.monotonic() < deadline:
             try:
-                descendant = int(marker.read_text().strip())
-            except (OSError, ValueError):
-                time.sleep(0.02)
-                continue
-            break
-        assert descendant is not None, "the command never started its descendant"
+                first = marker.read_text().strip()
+                settled = bool(first) and marker.read_text().strip() == first
+            except OSError:
+                # Not created yet (or unreadable): the next pass re-reads.
+                pass
+            else:
+                seen_marker = True
+                last_read = first
+                if settled:
+                    descendant = int(first)
+                    break
+            time.sleep(0.02)
+        # Two failures, two diagnoses: a file that never appeared is a spawn
+        # that never ran, and a file that appeared without a settled pid is a
+        # write that never completed. Naming the wrong one costs the next reader
+        # the same hour this test used to cost them.
+        assert descendant is not None, (
+            f"the descendant's pid never settled in {marker.name}: last read {last_read!r}"
+            if seen_marker
+            else "the command never started its descendant"
+        )
         assert procstate.terminate_process_tree(child.pid, force=True) is True
 
         # WHICH PROCESS DIED BY THE SIGNAL IS NOT OURS TO ASSERT. The shell is
