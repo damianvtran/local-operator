@@ -61,7 +61,11 @@ server's tool catalogue into context:
 2. Read `mcp://<server>` to list that server's tool names and truncated
    descriptions. This does not enable any schema.
 3. Read `mcp://<server>/<tool>` only after choosing a relevant tool. That read
-   enables exactly that tool's full input schema on the next model call.
+   enables exactly that tool. Its full input schema reaches the request's tool
+   definitions at the next model call, or at the next turn when this turn has
+   already published its tool list — a list in flight is never repriced mid-turn,
+   because it rides ahead of the conversation in the cached prefix. The read's
+   own reply says which of the two it is.
 4. Call the model-visible tool name shown by the detail read, normally
    `mcp__<server>_<tool>`.
 

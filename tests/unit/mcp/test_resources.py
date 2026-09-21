@@ -287,3 +287,31 @@ def test_unknown_resource_errors_are_actionable_and_namespaces_do_not_leak() -> 
     missing = resolver("mcp://linear/missing")
     assert missing is not None
     assert "Read `mcp://linear` for available tools" in missing
+
+
+def test_a_deferred_enable_says_next_turn_not_next_model_call() -> None:
+    """The reply must not promise a schema the request in flight does not carry.
+
+    ``activate`` reports whether the swap reaches the next model call. The session
+    host publishes its tools array once per turn (``Session._wire_tools``), so an
+    enable read mid-turn lands at the next TURN — and "the next model call" is a
+    claim the model acts on: it would reach for a tool whose schema is not in this
+    turn's request. ``None`` (a host that reports nothing) keeps the historical
+    sentence, which is what the test above pins.
+    """
+    manager = FakeManager()
+    deferred = make_mcp_resolver(manager, lambda server, tool: False)
+    immediate = make_mcp_resolver(manager, lambda server, tool: True)
+
+    deferred_detail = deferred("mcp://linear/get_user")
+    assert deferred_detail is not None
+    assert "NEXT TURN, not the next model call" in deferred_detail
+    assert "full input schema is now available" not in deferred_detail
+    # Everything else about the reply is unchanged: same activation, same header,
+    # same untrusted-description warning.
+    assert "# Enabled MCP tool: mcp__linear_get_user" in deferred_detail
+    assert "untrusted reference data" in deferred_detail
+
+    immediate_detail = immediate("mcp://linear/get_user")
+    assert immediate_detail is not None
+    assert "full input schema is now available" in immediate_detail

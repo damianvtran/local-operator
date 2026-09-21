@@ -4801,9 +4801,15 @@ async def test_a_tool_enabled_mid_turn_waits_for_the_next_turn_in_the_array(
         execute=never_execute,
     )
     published: list[bool] = []
+    side_channel: list[list[str]] = []
 
     async def execute(tool_call_id, args, signal, on_update, context):
         published.append(session.refresh_tools([*session._tools, enabled]))
+        # What an aside or a compaction-advisor request would send. They must ride
+        # the SAME prefix the turn sends (the tools block is the front of it), so
+        # they read the published array — not the live inventory, which the swap
+        # above has already moved.
+        side_channel.append([tool.name for tool in session._side_channel_tools()])
         return ToolResult(
             tool_call_id=tool_call_id,
             tool_name="enable",
@@ -4841,6 +4847,9 @@ async def test_a_tool_enabled_mid_turn_waits_for_the_next_turn_in_the_array(
     # before the turn, deferred once the turn's array is on the wire.
     assert was_published is True
     assert published == [False]
+    # And the side channels that must reproduce this prefix send what the turn
+    # sent, not the inventory the mid-turn enable already grew.
+    assert side_channel == [[tool.name for tool in first.tools]]
     await session.dispose()
 
 

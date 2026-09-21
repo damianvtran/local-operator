@@ -1865,6 +1865,20 @@ class Session:
         #: just-removed tool would come back "Tool not found" mid-turn; the
         #: per-call gate inside the tools already refuses immediately.
         self._web_tools_dirty = False
+        #: The tools array this TURN published, or ``None`` while it has
+        #: published nothing yet. :meth:`_wire_tools` is the single reader and
+        #: captures the live inventory on its first call of a turn, then serves
+        #: that same array for the rest of it; the turn boundary clears it back
+        #: to ``None``. THE REASON IS THE CACHE PREFIX: the array rides ahead of
+        #: the conversation, so a tool published after this turn's first
+        #: provider call reprices every message behind it on a strict contiguous
+        #: prefix cache — measured at 38.77% of sent tokens re-sent (32 of 35
+        #: mid-turn leading-region changes were the tools array). Deferring the
+        #: PUBLISH is not a freeze of the session: :meth:`refresh_tools` still
+        #: swaps the inventory immediately, so the tool is resolvable and
+        #: callable, and the prompt's inventory block reports it through the
+        #: usual ``[session-state]`` delta.
+        self._published_tools: list[AgentTool] | None = None
         #: True while a mid-session model selection has not reached the
         #: transcript yet; the same dispose-flush contract as the title (the
         #: write is a background task, and dispose cancels background tasks,
@@ -3512,6 +3526,17 @@ class Session:
         narrative reason to reach for; one named but not offered is a promise
         it cannot keep.
 
+        RELAXED FOR THE REST OF A TURN, deliberately, by the array's one-publish
+        latch (``_wire_tools``): once this turn's array is on the wire, a tool
+        enabled mid-turn reaches this block immediately and the array only at
+        the next turn. Within the turn the DELTA IS AUTHORITATIVE — it names what
+        the session can actually resolve, and resolution reads the live
+        inventory — while the array lags by one turn because moving it costs the
+        whole conversation's cached prefix. The reverse direction (a removal) is
+        the same trade: the delta stops naming the tool, the array keeps its
+        schema until the turn ends, and the per-call gate gives the better answer
+        if the model calls it anyway.
+
         This lives here, and not in the block providers, because the session is
         the only object that knows what the array will contain. Providers close
         over the inventory they were BUILT with, which is never the final one:
@@ -3534,7 +3559,20 @@ class Session:
         no inventory to reconcile and is passed through untouched rather than
         having block 1 overwritten with a section it never had.
         """
-        rendered = render_tool_inventory_block(self._tools)
+        rendered = render_tool_inventory_block(
+            self._tools,
+            # The SAME host probes the frozen head block was built with, when the
+            # provider can supply them. This render is the block's other arm —
+            # the note below the tool list — and it has the same two absence
+            # diagnoses, so probing it live would let a heartbeat-age flip move
+            # block 1 after block 0 was pinned: not a prefix loss (block 1 rides
+            # the ``[session-state]`` delta), but a journalled churn with no
+            # authority behind it, and two renderers of one note disagreeing.
+            # ``None`` (a host's own provider, a benchmark's fixed blocks) keeps
+            # the historical live probe.
+            host_has_browser=getattr(self._system_blocks_provider, "host_has_browser", None),
+            host_has_console=getattr(self._system_blocks_provider, "host_has_console", None),
+        )
         for index, block in enumerate(blocks):
             if block.startswith(TOOL_INVENTORY_HEADING):
                 if block == rendered:
@@ -6134,15 +6172,26 @@ class Session:
         """
         self._on_mcp_startup_settled = sink
 
-    def refresh_tools(self, tools: Sequence[AgentTool]) -> None:
+    def refresh_tools(self, tools: Sequence[AgentTool]) -> bool:
         """Replace the full tool inventory mid-session.
 
         THE committed hook for MCP ``set_on_tools_changed`` (orchestrator
         MCP-20): the caller passes the merged set (builtins + all currently
-        loaded MCP tools) and this swaps it in. The loop reads
-        ``context.tools`` fresh on every model call and every tool resolution,
-        so the new set is effective from the NEXT model call onward — and even
-        mid-turn at the next tool batch — with no restart.
+        loaded MCP tools) and this swaps it in. The swap is IMMEDIATE for what
+        the session can do — tool RESOLUTION reads ``context.tools``, so the new
+        set is effective from the very next tool batch, mid-turn, with no
+        restart — and the prompt's ``## Available tools`` inventory block
+        follows it at the next provider step (through ``_reconcile_tool_inventory``
+        and its ``[session-state]`` delta).
+
+        The provider's tools ARRAY is the exception, and the return value is how
+        a caller learns it: the array is published at most ONCE per turn
+        (:meth:`_wire_tools`), because it rides ahead of the conversation in the
+        prompt-cache prefix, so a mid-turn swap would reprice every message
+        behind it. Returns ``True`` when this swap can still reach the next
+        model call (nothing has been published this turn) and ``False`` when it
+        is deferred to the next turn — which is what an MCP enable's reply has
+        to say instead of promising "the next model call".
 
         A session with a declared inventory (:meth:`set_tool_inventory`) narrows
         the set it is handed here before swapping it in, so an MCP tool that
@@ -6155,6 +6204,49 @@ class Session:
         self._context.tools = self._tools
         if hasattr(self, "_frontend_state_store"):
             self.refresh_frontend_state()
+        return self._published_tools is None
+
+    def _wire_tools(self) -> list[AgentTool]:
+        """The tools array to advertise to the provider NOW — at most once a turn.
+
+        Wired into ``LoopConfig.get_tools``, so this is read immediately before
+        EVERY provider call in a turn, and every one of them after the first
+        gets the same array back. One publish per turn is the cache contract:
+        the array sits ahead of the conversation in the request prefix, and on a
+        strict contiguous prefix cache a tool appended at the END of the array
+        still invalidates every message after it.
+
+        The latch is keyed to the TURN, not to the session. A session-lifetime
+        freeze would be cheaper still and is deliberately not what this does: a
+        lazily enabled MCP tool has to enter the array on some turn, and the
+        enable reply says so. Clearing at the turn boundary is what makes the
+        next turn publish the live inventory — and makes :meth:`refresh_tools`'
+        return value meaningful, since it answers exactly the question this
+        latch decides.
+        """
+        if self._published_tools is None:
+            self._published_tools = list(self._tools)
+        return self._published_tools
+
+    def _side_channel_tools(self) -> list[AgentTool]:
+        """The array a SIDE CHANNEL must send to stay on the turn's cached prefix.
+
+        The aside and compaction-advisor requests are deliberately not turns: they
+        carry the conversation to the provider with ``tool_choice="none"`` and the
+        whole point of their shape is to reproduce the working turn's prefix byte
+        for byte — tools -> system -> messages on Anthropic, and the tools block is
+        the front of the request body on the OpenAI-compatible and Gemini wires.
+        So they read the SAME array the turn is publishing, not ``context.tools``,
+        which a mid-turn enable has already moved: sending the live array here
+        would change position 0 and force a full re-process at write price instead
+        of the cache READ these requests exist to be.
+
+        They do NOT latch an array of their own: publishing is the turn's job, and
+        a read-only side channel must not be what decides which array a turn
+        advertised. With nothing published yet this is the live inventory, which
+        is what the turn's first call will capture anyway.
+        """
+        return list(self._published_tools if self._published_tools is not None else self._tools)
 
     def _filter_declared(self, tools: Sequence[AgentTool]) -> list[AgentTool]:
         """Narrow a candidate inventory to this session's declared one.
@@ -8410,6 +8502,12 @@ class Session:
             # turn, so the schema the model sees is consistent for the whole
             # turn (see ``_reconcile_web_tools`` for why not on the tick).
             self._reconcile_web_tools()
+            # This turn has published nothing yet, so the first provider call
+            # below captures the inventory as it stands NOW — with the web-tool
+            # reconcile above already applied — and every later call in the turn
+            # re-sends that array (see ``_wire_tools`` for why the array may
+            # move only here).
+            self._published_tools = None
             blocks = await self._prepare_system_blocks(commit_state=False)
             self._context.system_blocks = list(blocks)
             self._context.tool_context = self._build_tool_context()
@@ -8426,6 +8524,12 @@ class Session:
                 # waiting for another user message. The loop keeps the turn-start
                 # snapshot as a fallback if this host resolver ever fails.
                 get_system_blocks=self._prepare_system_blocks,
+                # The tools array, re-read per provider step and latched to one
+                # publish per turn; see ``_wire_tools``. The loop's tool
+                # RESOLUTION deliberately keeps reading the live
+                # ``context.tools``, so a tool enabled mid-turn is still
+                # executable on the very call that enabled it.
+                get_tools=self._wire_tools,
                 # Cross-turn seed for the prompt-cache TTL hint: the loop stamps
                 # it on the run's first request and then prefers the counts its
                 # own calls report. Lives here — not on the shared stream fn —
@@ -12217,7 +12321,10 @@ class Session:
             # working turn builds. See the docstring for why this is a cache
             # read rather than a full re-process, and why Anthropic puts the
             # turn's own tool_choice on the wire rather than this "none".
-            tools=list(self._context.tools),
+            # ``_side_channel_tools``, not ``context.tools``: the turn's array is
+            # latched for its whole turn, so the LIVE inventory can be a step
+            # ahead of the last request the turn actually sent.
+            tools=self._side_channel_tools(),
             tool_choice="none",
             # Same prefix as the turn, so the same TTL: the session stamps its
             # own hint here because the shared stream fn holds none (a child
@@ -12340,10 +12447,12 @@ class Session:
             purpose="compaction_advisor",
             system_blocks=list(blocks),
             messages=messages,
-            # Live tools, same as an aside: the tools block is the FRONT of the
-            # provider cache prefix, so sending [] would change position 0 and
-            # force a full re-process at write price instead of a cache read.
-            tools=list(self._context.tools),
+            # Same array as the running turn (not []): the tools block is the
+            # FRONT of the provider cache prefix, so sending [] would change
+            # position 0 and force a full re-process at write price instead of a
+            # cache read. ``_side_channel_tools`` because the turn's array is
+            # latched for its turn — see that method.
+            tools=self._side_channel_tools(),
             tool_choice="none",
             replayable=True,
             isolated=False,
