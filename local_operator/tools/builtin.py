@@ -2151,7 +2151,7 @@ class _BashOutput:
 #: line still publishes most of it promptly.
 _PIPE_DEFERRAL_LIMIT = 8192
 
-#: How much raw text the filter may hold back in total, as a HARD bound.
+#: How much raw text the SHAPE rule may hold back, as a hard bound.
 #:
 #: Twice :data:`_PIPE_DEFERRAL_LIMIT`, and the factor is derived rather than
 #: chosen. A shape match the table can see is complete inside the buffer, which
@@ -2161,6 +2161,14 @@ _PIPE_DEFERRAL_LIMIT = 8192
 #: bytes. Anything longer than the window itself cannot be protected this way
 #: (see :meth:`_PipeRedactor._shape_safe_spans`), so the bound is not a tuning
 #: knob and does not move when the table gains a rule.
+#:
+#: **This is not the filter's total hold**, and reading it as one is a mistake
+#: this comment used to invite. The `never cut through a KNOWN value` rule below
+#: predates it and holds as much as the value needs — ``pending`` is bounded by
+#: ``max(_PIPE_HOLD_LIMIT, longest registered value + _PIPE_DEFERRAL_LIMIT)``,
+#: because a registered value is a credential the session was told about and the
+#: hold is what keeps it off the wire in two halves. See the class docstring for
+#: the measurement and for what a long registration costs.
 _PIPE_HOLD_LIMIT = 2 * _PIPE_DEFERRAL_LIMIT
 
 
@@ -2234,14 +2242,26 @@ class _PipeRedactor:
     KNOWN value.
 
     The bound that buys is :data:`_PIPE_HOLD_LIMIT`: the search is confined to
-    the last two windows of the buffer, so ``pending`` stays bounded whatever
-    the child prints. The residual is what the bound costs — a SINGLE match
-    longer than a deferral window can still be split, because it cannot be
-    COMPLETE in the buffer at the moment its start reaches the cut, so nothing
-    there is there to find (measured at 4 KiB reads: a match of 9,039 bytes is
-    protected, one of 12,039 bytes is not; key material past the cap is handled
-    on its own by :meth:`_mask_open_key_block`). Every shape the table can match
+    the last two windows of the buffer, so the SHAPE rule never holds more than
+    two windows. The residual is what the bound costs — a SINGLE match longer
+    than a deferral window can still be split, because it cannot be COMPLETE in
+    the buffer at the moment its start reaches the cut, so nothing there is
+    there to find. That is phase-dependent rather than a clean boundary: with
+    the release point landing where it does, a 8,039-byte match is protected on
+    every placement tried, a 9,039-byte one on seven of eight, and by 12,039
+    bytes on two of eight (4 KiB reads; key material past the cap is handled on
+    its own by :meth:`_mask_open_key_block`). Every shape the table can match
     inside the window is not split.
+
+    **The hold is the max of two rules, and this is the honest one.** ``pending``
+    is bounded by ``max(_PIPE_HOLD_LIMIT, longest registered value + one window)``:
+    the KNOWN-value rule below is older, is not a window rule at all, and holds
+    whatever a registered value needs — measured, a 24,576-byte registered value
+    peaks at 31,072 bytes held at 64 KiB reads, where the same input under this
+    limit alone peaks at 8,192. That is bounded by what the SESSION knows rather
+    than by what the child prints, which is the property the cap exists for, and
+    it is the same in kind as the shape rule: a value too long to be complete in
+    the buffer is split here too, registered or not.
 
     Trailing partial lines are therefore withheld until they complete. That is
     a real trade for a line-oriented surface, taken deliberately: a credential
@@ -2454,10 +2474,16 @@ class _PipeRedactor:
         # release the line rule does not cover, and it is the one that used to
         # publish a credential in two unmasked halves.
         spans = self._shape_safe_spans(text) if cap_forced else []
-        if spans:
-            cut = self._cut_outside(cut, spans)
+        # ONE fixed point over BOTH rules, not a sequence of them: moving the cut
+        # for a shape can put it inside a value and vice versa, so the two have to
+        # be re-checked against each other until neither moves it. The reviewer of
+        # this change measured 0 violations from applying them in sequence across
+        # 2,232 buffer/phase combinations, so this is a latent hole being closed
+        # rather than a live one.
         while True:
             previous_cut = cut
+            if spans:
+                cut = self._cut_outside(cut, spans)
             for secret in self.secrets:
                 start = text.find(secret, max(cut - len(secret) + 1, 0))
                 if 0 <= start < cut < start + len(secret):
@@ -2477,11 +2503,12 @@ class _PipeRedactor:
         and nothing else.
 
         Offsets are absolute in ``text``, and the search is confined to the last
-        :data:`_PIPE_HOLD_LIMIT` bytes. That confinement is what keeps the hold
-        bounded: the caller may move a cut back to any span reported here, so
-        ``pending`` cannot grow past the hold limit, and a match beginning
-        earlier than the window is longer than a whole deferral window and
-        could not be held without defeating the cap.
+        :data:`_PIPE_HOLD_LIMIT` bytes. That confinement is what keeps the SHAPE
+        rule bounded: the caller may move a cut back to any span reported here,
+        so ``pending`` cannot be pushed past the hold limit by a shape, and a
+        match beginning earlier than the window is longer than a whole deferral
+        window and could not be held without defeating the cap. The pre-existing
+        known-value rule is a separate, larger hold — see the class docstring.
         """
         floor = max(len(text) - _PIPE_HOLD_LIMIT, 0)
         window = text[floor:]
