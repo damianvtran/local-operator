@@ -115,8 +115,19 @@ to the app bundle and its updater rather than to the CLI installer.
 the install prefix, which depends on how the CLI was installed (`install_kind()`
 in `local_operator/update.py` distinguishes them):
 
-- **uv tool** (the documented end-user path): `~/.local/share/uv/tools/local-operator/`,
-  with console scripts in that tree's `bin/`.
+- **a generation install (what `lop-update` produces)**: `~/.local/bin/lop` is a
+  symlink to `~/.local/share/lop/current/bin/lop`, and `current` names one
+  generation root, `~/.local/share/lop/generations/<stamp>-<sha-or-version>/`.
+  The install prefix (`sys.prefix`) is that root's `tools/local-operator/`, so the
+  branded image is `<generation>/tools/local-operator/bin/Local Operator`. Resolve
+  the pointer (`readlink ~/.local/share/lop/current`) rather than quoting a
+  generation name, which changes at every update; `.lop-source` in that same tree
+  records which build it is (`<sha> <ref>` for a git build, `pypi <version>` for a
+  wheel).
+- **uv tool**: `~/.local/share/uv/tools/local-operator/`, with console scripts in
+  that tree's `bin/` — the pre-generation layout, which `uv tool install --force`
+  writes in place; a machine that only ever installed through the generation
+  layout has no such tree at all.
 - **pipx**: `~/.local/pipx/venvs/local-operator/`.
 - **plain pip**: the venv prefix or the base interpreter that received the
   package, wherever the user's toolchain put it.
@@ -629,9 +640,11 @@ stop.
 
 Scope the exclusion to:
 
-- the install prefix — `~/.local/share/uv/tools/local-operator/**` for a uv
-  tool install, `~/.local/pipx/venvs/local-operator/**` for pipx, or the
-  equivalent venv prefix for a plain pip install;
+- the install prefix — `~/.local/share/lop/**` for the generation layout (the
+  `current` pointer and every generation root the launcher resolves through),
+  `~/.local/share/uv/tools/local-operator/**` for a pre-generation uv tool
+  install, `~/.local/pipx/venvs/local-operator/**` for pipx, or the equivalent
+  venv prefix for a plain pip install;
 - **the branded image name, and the shared interpreter it is a hardlink of** —
   `*/bin/Local Operator` (which the plant creates in every tree the product runs
   from, including each `lop` generation) **and** the interpreter paths the same
@@ -705,7 +718,7 @@ it more bluntly — Interoperability *"reduces the monitoring level on the
 excluded processes, in addition to suppressing alerts"* and Performance Focus
 *"disables monitoring of the excluded processes"*. Following this section while
 selecting one of those trades a false positive for blindness to
-`~/.local/share/uv/tools/local-operator/**`, the app bundle and the managed
+`~/.local/share/lop/**`, the app bundle and the managed
 Python environment — the opposite of what SECURITY.md promises.
 - On **macOS agents 4.6+** the vendor support matrix lists `Interoperability` as
 **No** and `Performance Focus` as **Yes**, so on a current agent the only
@@ -785,6 +798,12 @@ apply the exclusion first — these exclusions are path-scoped and do not requir
 the file to exist — and then reinstall.
 
 1. **Reinstall**, so there is something to allow:
+   - the `lop` CLI: `lop-update` installs a committed revision into a new
+     generation. It takes its ref from its argument and defaults to the **local**
+     `main`, and it performs **no** remote comparison, so a checkout whose local
+     `main` is stale builds an old commit and installs it: `git fetch origin
+     main` and confirm `git rev-parse --short main` equals `git rev-parse --short
+     origin/main` first, or name the ref explicitly — `lop-update <sha>`.
    - uv tool: `uv tool install --force local-operator`
    - pipx: `pipx install --force local-operator`
    - desktop app: reinstall the app bundle.
