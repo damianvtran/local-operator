@@ -22195,6 +22195,12 @@ class OperatorApp(App[None]):
         self._stop_all_listing = None
         self._stop_all_armed_at = None
         self._streaming_block = None
+        # The reasoning phase goes with the streaming block and for the same
+        # reason: `clear_blocks` has just removed the widget, so keeping the
+        # reference would leave `retire()`'s claim that "the OWNER removes the
+        # widget" untrue for this path, and the next fragment mounts a fresh
+        # phase anyway (mount-on-demand, exactly like `_streaming_block`).
+        self._reasoning_block = None
         self._tool_cards = {}
         self._composing_cards = {}
         # An empty transcript is the welcome view's whole precondition, so the
@@ -41878,7 +41884,11 @@ class OperatorApp(App[None]):
         without leaving one behind.
 
         Letting go of the reference is what lets the NEXT model call of the same
-        turn open a fresh phase.
+        turn open a fresh phase. ``ReasoningBlock.retire`` records the measured
+        scroll cost of the removal (a reader above the block sees nothing move;
+        a reader at the tail has the window slide back by the rows removed) —
+        the argument the collapsed header row was defended with is answered
+        there, not here.
         """
         block = self._reasoning_block
         if block is None:
@@ -41895,11 +41905,14 @@ class OperatorApp(App[None]):
         # a frame (D5). `on_assistant_delta`'s guard is the same shape.
         if not message.text.strip():
             return
-        # `display.reasoning` is this channel's escape hatch (UX review round 1,
-        # U1). Read at MOUNT, not cached on the app, so a write from `/settings`
-        # applies to the next phase; a mid-session flip is forward-only, like
-        # `display.narration`, because re-projecting mounted blocks in one
-        # synchronous pass is what paints a blank frame.
+        # `display.reasoning` gates this channel, read at MOUNT rather than
+        # cached on the app so a write from `/settings` applies to the next
+        # phase. It ships OFF: ON is the opt-in for a reader who wants to watch
+        # the model think, not an escape hatch from a default that shows it
+        # (the polarity flipped with the default — see `DEFAULT_REASONING`).
+        # A mid-session flip is forward-only, like `display.narration`, because
+        # re-projecting mounted blocks in one synchronous pass is what paints a
+        # blank frame.
         if not settings_get("display.reasoning", DEFAULT_REASONING):
             return
         self._ensure_reasoning_block().update_text(message.text)
@@ -42046,6 +42059,11 @@ class OperatorApp(App[None]):
             self._composing_cards = {}
             self._streaming_block = None
             self._working_block = None
+            # The reasoning block is cleared here for the reason
+            # `_on_transcript_cleared` records: `clear_blocks` has removed the
+            # widget, and a reference to it would be a phase the app no longer
+            # owns.
+            self._reasoning_block = None
             self._shell_card = None
             self._project_settled_rows(message.messages, bound=RESUME_RENDER_MESSAGES)
             view.follow_tail()

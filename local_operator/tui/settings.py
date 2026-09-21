@@ -64,8 +64,14 @@ _DEFAULT_NOTES: dict[str, Any] = {
     # model working rather than a record, and a live view that is on by default
     # spends rows on every model call of every turn for a reader who never asked
     # to watch — the operator reported the accumulated frames as pollution.
-    # Reasoning is never durable, so OFF is also the value under which the live
-    # transcript and the resumed one agree exactly.
+    #
+    # OFF is also the value under which the live transcript and the RESUMED one
+    # agree exactly, which is the argument the `/settings` help string no longer
+    # has room for: reasoning is never durable, so there is nothing to re-show,
+    # and a reader who opens `/resume` sees the same transcript they left. That
+    # help string is deliberately ONE sentence of 87 characters because the field
+    # paints 93 at 100 columns and elides the rest without wrapping (design
+    # review round 1, D1) — do not grow it back into the argument.
     #
     # Collapsing is not what this flag turns off: a finished phase leaves
     # NOTHING behind, header row included (`retire` closes the block and the app

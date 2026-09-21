@@ -1574,10 +1574,20 @@ SETTINGS: tuple[Setting, ...] = (
         label="Live model reasoning",
         kind=Kind.BOOL,
         default=False,
+        # ONE sentence, sized to the field rather than to the argument: the help
+        # column paints 93 characters at 100 columns (133 at 140, 152 at 160) and
+        # elides the rest, so a longer string loses its tail silently — the
+        # previous revision's 178-character sentence had its whole `so nothing is
+        # left in the transcript` clause cut off screen (design review round 1,
+        # D1; `after-d1-reasoning-help-100x30.svg` paints this one whole). The
+        # `/resume` argument that was cut is recorded in `tui/settings.py`'s
+        # `_DEFAULT_NOTES` and in `tui/widgets/reasoning.py`'s module docstring,
+        # where it has room. The trigger says the thinking ENDS, not "the answer
+        # starts", because `reasoning_end` also drops the block on a turn that
+        # goes on to a tool call (round 1, D4).
         help=(
-            "Show the model's private thinking while it streams. The phase "
-            "vanishes when the answer starts, so nothing is left in the "
-            "transcript and there is nothing to re-show after /resume."
+            "Show the model's private thinking while it streams; it vanishes "
+            "once the thinking ends."
         ),
         choices=_bool_choices("show live reasoning", "hide reasoning"),
     ),

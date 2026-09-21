@@ -158,8 +158,12 @@ class ReasoningBlock(TranscriptBlock):
         super().__init__()
         self.add_class("reasoning-block")
         self._text: str = ""
-        #: Whether the phase has been closed and collapsed to its header. Set by
-        #: :meth:`retire`; the block stops accepting text and sheds its rows.
+        #: Whether the phase has been CLOSED. Set by :meth:`retire`: the block
+        #: stops accepting text and authors no further rows, and its owner (the
+        #: app) removes the widget in the same breath. It does NOT mean "collapsed
+        #: to a header row" — an earlier revision kept that row, and this PR
+        #: removed it, so a reader following the old wording would expect a row
+        #: that no longer exists.
         self._collapsed: bool = False
         #: The rows last authored, so an update whose VISIBLE tail is unchanged
         #: (a fragment arriving below the fold, a re-flush of the same text) is a
@@ -229,6 +233,25 @@ class ReasoningBlock(TranscriptBlock):
         flush can land after the phase is closed), and ``finalize`` refuses
         later ROWS, so a delta that arrives between the close and the detach
         cannot repaint a block the reader has watched settle.
+
+        THE SCROLL COST, measured rather than assumed (design review round 1,
+        D3, which also refines the code round's n1). The argument against
+        removal was that it "deletes rows from under the reader's cursor", and
+        the frames say that is not what happens ABOVE the block: with 8 settled
+        turns behind it and the transcript scrolled 6 rows above its tail
+        (``scroll_y=22`` of ``max=28``), every content row stayed where it was
+        across the removal (``▌ turn 8`` at row 15 before and after, ``▎ answer
+        8`` at 17) — the block sits at the FOOT of the transcript and
+        ``remove_block`` re-decides the gap below it — and the same held 12 rows
+        above the tail. What a reader AT the tail sees is the window sliding
+        back by exactly the rows removed: ``scroll_y`` 28 → 22, clamped to the
+        new max, with content moving down 6 rows as older history enters at the
+        top (on the answer path the answer's own rows arrive in the same frame,
+        so the net slide there is smaller). That slide is the price paid for a
+        transcript that does not accumulate a row per model call, and it is
+        inherited from the collapse this replaces, which shed rows from the
+        same window. If it is ever judged too large, the lever is the body
+        budget (:data:`REASONING_VISIBLE_ROWS`), never the removal.
         """
         if self._collapsed:
             return
