@@ -62,11 +62,67 @@ simply fires at the deadline the last tick set.
 WHAT THIS BOUND MEANS, STATED PLAINLY, BECAUSE IT IS STRICTER THAN "WEDGED":
 a synchronous step is indistinguishable from a wedge from outside the process,
 so the bound is also a CEILING ON ONE SILENT SYNCHRONOUS STEP: a step that takes
-tens of seconds passes, one that never returns is cut. What the bound
-measures is the LOOPS RUNNING, never the work advancing: a plane that keeps
-ticking while its work stands still is outside this design (nothing here can
-see that, and inventing a second, footprint-based clock is what
-``process._work_motion`` already does for the drain).
+tens of seconds passes, one that never returns is cut.
+
+A SECOND LEG: TICKING IS NOT ADVANCING, AND ONE FLEET SESSION WAS BOTH ALIVE AND
+MAKING NO PROGRESS FOR SEVEN MINUTES
+--------------------------------------------------------
+As first shipped, this module measured the LOOPS RUNNING and nothing else, so a
+loop that keeps ticking while its work stands still sat outside the design
+entirely. That is not hypothetical. Session ``14066af01c7a`` on build 0.61.16 —
+i.e. WITH this bound armed — was measured by another session's probe with no
+progress in its transcript, its roster or its four subagent counters across 75 s,
+**+14.3 s of process CPU burned in that window**, and 231 s of heartbeat age,
+while its plane ticks kept re-arming this very timer. The probe's own words: no
+build, no command, no work in flight. A four-way subagent batch had been launched
+16 s after a sibling settled, the parent acknowledged the launch, and then it
+produced nothing for the rest of the window. Its serving plane's last beat was
+18:34:58 and the operator's reap landed 18:39:46 — **12 s before** the 300 s
+liveness deadline of 18:39:58. Both instruments were right: the bound saw a live
+loop, the probe saw a stalled session, and nothing could see "spinning without
+advancing".
+
+So the bound carries a SECOND, COMPOSITE leg, and it is deliberately NOT a
+progress-only bound. A legitimate long step — a model call, a tool, a subprocess
+— produces no transcript movement, and a bound keyed on movement alone would cut
+it; separating WAITING from SPINNING is the whole difficulty, so three facts must
+hold together for a whole window:
+
+1. NO MOTION. The process's progress footprint has not changed since the previous
+   sample — :func:`process._work_motion`, which is the DRAIN's clock and is
+   REUSED here rather than re-derived. It is the one tuple in this tree whose
+   every field is moved by work and not by a clock (see its docstring), and a
+   second footprint clock would be a second definition of "movement".
+2. NOTHING IN FLIGHT. No tool batch is executing: the live context does not end
+   in an assistant message whose tool calls have no answers — the state
+   ``Session._wire_legal_snapshot`` documents as holding "for the whole duration
+   of every tool batch" — and no on-demand compaction is running. THIS is the
+   leg that spares the legitimate long step, and the reason "CPU advancing"
+   alone is not the predicate: an in-process tool (a render, a local scan) burns
+   CPU with no transcript movement for as long as it runs.
+3. CPU ADVANCING. This process burned at least :data:`PROGRESS_CPU_FLOOR` of one
+   core across the sample. A step that WAITS burns none — a model call is a
+   socket read, and a bash child's CPU belongs to the child, never to
+   ``time.process_time`` — while a loop that SPINS burns it. That is the whole
+   discriminator.
+
+THE WINDOW IS THE BOUND, and the argument that sized :data:`DEFAULT_STALL_S`
+sizes this one too: 300 s sits above the largest legitimate silence ever measured
+on this fleet (205.8 s, 1.5x), and the measured false-positive class for a reader
+calling a runtime ``wedged`` at 45 s — 105.8 s and 205.8 s of beat gap on
+sessions whose CPU time was advancing — is a STARVED SCHEDULER, which is a
+session DOING work: such a sample fails leg 2 (a batch is in flight) or leg 1 (a
+lane is stepping, so ``_subagent_roster_generation`` moves). A run where all
+three legs held for 300 continuous seconds is not a slow step; it is a process
+burning a core to produce nothing.
+
+WHAT THIS LEG STILL CANNOT SEE, named so a reader does not assume coverage. The
+in-flight leg reads the PROCESS's own step and its compaction. A SUBAGENT LANE
+running a long in-process tool of its own is not "in flight" by that measure, so
+a lane parked in private CPU work with no step boundary for longer than the
+window is cut with its parent. Widening the probe to every child session is its
+own change — ``comms._records`` holds those sessions privately today — and is NOT
+in this one.
 
 WHY THE EXIT IS THE BLUNT ONE, AND WHAT IT COSTS
 ------------------------------------------------
@@ -170,7 +226,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import IO
+from typing import IO, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +319,70 @@ def min_bound_seconds() -> float:
 #: short enough that "overdue" and "fires now" are the same thing to a reader.
 MIN_REARM_S = 0.05
 
+#: The samples one window is divided into, and so the shortest run the progress
+#: leg can call a stall. A run is only ever declared after this many CONSECUTIVE
+#: agreeing samples, which is what makes the leg a claim about a SUSTAINED state
+#: rather than about the instant of one reading — and it is also the narrowest
+#: run that can fire, so a two-sample blip cannot.
+PROGRESS_SAMPLES_PER_WINDOW = 12
+
+#: The share of ONE core this process must have burned across a sample for that
+#: sample to count as SPINNING rather than WAITING. Sized well below the
+#: measurement it exists for and well above an idle runtime: the incident's
+#: session burned 14.3 s of CPU in a 75 s window (19% of a core, i.e. 3.8x this
+#: floor), while a loop waiting on a model, a tool result or a subprocess burns
+#: ~0. Set as a RATE rather than a total so a run is only accumulated while the
+#: burn continues: a process that spins for a minute and then waits must not
+#: carry that minute's CPU into a later window.
+PROGRESS_CPU_FLOOR = 0.05
+
+#: The line this module writes into the dump when the PROGRESS leg — not the
+#: silence leg — fired. It shares :data:`ARM_MARKER`'s prefix, so one search
+#: finds both of this module's own lines in a dump, and it is distinct from
+#: :data:`FIRED_MARKER`, which ``faulthandler`` writes and which says only that
+#: the C timer expired, never which leg set it. A reader therefore learns from
+#: the file itself whether a runtime went silent or spun without advancing.
+PROGRESS_MARKER = "[stall watchdog] no progress: "
+
+#: What the first sample of a progress clock holds before it has anything to
+#: compare against. A sentinel rather than ``None`` because a probe is free to
+#: return ``None`` as its own motion value, and "no previous sample" and "the
+#: previous sample was None" must not be the same state.
+_NO_SAMPLE = object()
+
+
+class _ProgressClock:
+    """The progress leg's own state: the last sample, and how long a run has held.
+
+    SAMPLED STATE RATHER THAN A SECOND C TIMER, and the asymmetry with the
+    liveness leg is the point rather than an economy. That leg must survive a
+    thread that holds the GIL for hours, which is why it is ``faulthandler``'s
+    C thread; THIS leg is only ever about a process whose loops ARE running — a
+    spinning loop reaches the sampler every interval, because a spin that
+    starves the sampler is precisely the state the liveness leg already covers.
+    So a plain sampler thread is sufficient here where the other leg needed a C
+    timer, and the two legs cannot mask each other: whichever one's condition
+    holds sets the single process-wide timer first.
+
+    ``since`` is the instant the CURRENT run of agreeing samples began, and the
+    window is measured from it; ``None`` means the last sample disagreed, so
+    there is no run to measure. Storing the run's start rather than a countdown
+    is what makes the window elastic in the right direction: a sample that
+    arrives late (a loaded host, a GIL-hungry neighbour) does not shorten the
+    run, it only delays the next look.
+    """
+
+    __slots__ = ("motion", "since", "cpu", "wall")
+
+    def __init__(self) -> None:
+        self.motion: object = _NO_SAMPLE
+        self.since: float | None = None
+        # Seeded at construction (the arm, or the sampler's own start) so the
+        # FIRST sample already has an interval to compute a rate over; a zero
+        # interval would divide by ~0 and read as an infinite spin.
+        self.cpu: float = time.process_time()
+        self.wall: float = time.monotonic()
+
 
 class _Armed:
     """One process's armed timer: its file, its bound, and each plane's stamp.
@@ -272,9 +392,27 @@ class _Armed:
     closing the object would leave the timer firing at a closed fd.
     """
 
-    __slots__ = ("path", "handle", "seconds", "pid", "last_beat")
+    __slots__ = (
+        "path",
+        "handle",
+        "seconds",
+        "pid",
+        "last_beat",
+        "probe",
+        "progress_deadline",
+        "clock",
+        "stop",
+        "thread",
+    )
 
-    def __init__(self, path: Path, handle: IO[str], seconds: float, pid: int) -> None:
+    def __init__(
+        self,
+        path: Path,
+        handle: IO[str],
+        seconds: float,
+        pid: int,
+        probe: "ProgressProbe | None" = None,
+    ) -> None:
         self.path = path
         self.handle = handle
         self.seconds = seconds
@@ -285,15 +423,38 @@ class _Armed:
         #: the arm rather than treated as infinitely silent — which would fire the
         #: bound on every healthy boot.
         self.last_beat: dict[str, float] = {plane: time.monotonic() for plane in PLANES}
+        #: The progress leg's probe, or ``None`` when no runtime supplied one (an
+        #: in-process host, a test of the liveness leg alone, an older spawner).
+        #: ``None`` means the progress leg is INERT, not that it is satisfied.
+        self.probe = probe
+        #: The instant the progress leg has decided to fire at, or ``None`` while
+        #: its predicate does not hold. Absolute ``time.monotonic``, like the
+        #: plane stamps, so that :meth:`deadline` can take one ``min`` over both
+        #: legs rather than reason about each separately.
+        self.progress_deadline: float | None = None
+        self.clock = _ProgressClock()
+        #: The sampler's own stop latch and thread, both ``None`` when no probe
+        #: was supplied. The latch is a ``threading.Event`` rather than a flag the
+        #: sampler polls so that ``disarm`` wakes it immediately instead of
+        #: leaving a thread asleep for up to a full sample interval after the
+        #: process has already decided to leave.
+        self.stop: threading.Event | None = None
+        self.thread: threading.Thread | None = None
 
     def deadline(self) -> float:
-        """The earliest moment any plane's silence reaches the bound.
+        """The earliest moment ANY leg's condition reaches its bound.
 
         THE EARLIEST, not the latest, and that is the whole of A2's fix: a healthy
         plane's tick must shorten the timer toward a silent plane's deadline, never
-        push it out. See the module docstring.
+        push it out. The progress leg joins on the same rule rather than beside
+        it — a beat that re-armed only the planes would push a decided progress
+        fire out by a whole heartbeat, which is exactly the masking this method
+        exists to prevent. See the module docstring.
         """
-        return min(stamp for stamp in self.last_beat.values()) + self.seconds
+        earliest = min(stamp for stamp in self.last_beat.values()) + self.seconds
+        if self.progress_deadline is None:
+            return earliest
+        return min(earliest, self.progress_deadline)
 
 
 #: The process's armed timer, or ``None``. Module state rather than an object a
@@ -379,11 +540,68 @@ def dump_path(pid: int | None = None, directory: Path | None = None) -> Path:
     return base / f"{DUMP_PREFIX}-{pid or os.getpid()}.log"
 
 
+def _sample_interval(seconds: float) -> float:
+    """How often the progress leg looks, derived from the window it measures.
+
+    DERIVED rather than fixed, because the window is the knob an operator — and a
+    test — actually sets, and the granularity has to follow it: a 1 s window
+    sampled every 15 s could never accumulate a single run, while a 300 s window
+    sampled every 0.05 s would spend a thread waking 6000 times to learn nothing
+    the previous wake had not already said. :data:`PROGRESS_SAMPLES_PER_WINDOW`
+    is the resolution the window was argued at; ``HEARTBEAT_INTERVAL_S`` is the
+    ceiling, because a look coarser than the liveness beat could let a spin start
+    and end entirely between two of them.
+    """
+    from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S
+
+    return max(MIN_REARM_S, min(HEARTBEAT_INTERVAL_S, seconds / PROGRESS_SAMPLES_PER_WINDOW))
+
+
+#: What a runtime supplies so the progress leg has facts to judge: a
+#: zero-argument callable returning ``(motion, in_flight)``.
+#:
+#: ``motion`` is any value that is EQUAL to the previous sample exactly when the
+#: work did not advance — ``process._work_motion``'s tuple is what the runtime
+#: passes, and this module deliberately does not know its shape, so the clock
+#: stays in the module that owns the definition of movement (see the docstring).
+#: ``in_flight`` is the runtime's own answer to "is a step executing right now?".
+#:
+#: INJECTED RATHER THAN REACHED FOR, because the alternative is this module
+#: importing ``process`` — which imports this one, from its own entry point — and
+#: because a bound that can only be tested by booting a whole runtime is a bound
+#: whose false-positive cases are never tested. A caller with no probe gets no
+#: progress leg, which is the honest default for the in-process hosts.
+ProgressProbe = Callable[[], "tuple[object, bool]"]
+
+
+def _bound_class() -> str:
+    """The incident class this bound's exit is recorded under, imported lazily.
+
+    THE DUMP NAMES ITS OWN CLASS, and this is how it gets the token without
+    ``stall_watchdog`` depending on the taxonomy module at import time: the file
+    lives in a log directory beside ``runtime.log``, and a reader who finds a
+    fired marker there should not have to know which module owns the vocabulary
+    to say what happened. The import is function-local for the same reason every
+    other import in this module is — this file is on the child's boot path.
+
+    Falls back to the literal when the taxonomy cannot be imported, which is the
+    one direction that cannot mislead: an unreadable class must not stop a bound
+    from being armed, and a dump that says what it is in words is still evidence.
+    """
+    try:
+        from local_operator.incidents import STALL_BOUND_CAUSE
+
+        return STALL_BOUND_CAUSE
+    except Exception:  # noqa: BLE001 — a missing label is not a reason to skip the bound
+        return "runtime-stall-bound"
+
+
 def arm(
     *,
     seconds: float | None = None,
     directory: Path | None = None,
     pid: int | None = None,
+    probe: "ProgressProbe | None" = None,
 ) -> bool:
     """Arm the process's stall bound. Returns whether it is now armed.
 
@@ -419,7 +637,16 @@ def arm(
             handle.write(
                 f"{ARM_MARKER}pid {pid or os.getpid()} armed for {bound:g}s at {time.time():.0f} "
                 f"({time.strftime('%Y-%m-%d %H:%M:%S')}); the runtime's own loops re-arm this "
-                f"timer, so a dump below means this process made no progress for {bound:g}s.\n"
+                f"timer, so a dump below means this process made no progress for {bound:g}s. "
+                f"IF A DUMP FOLLOWS THIS HEADER, the bound ENDED this runtime -- incidents "
+                f"class {_bound_class()} -- and because the timer fires from a C thread that "
+                f"runs no Python, THIS FILE IS THE ONLY PLACE THAT CLASS IS WRITTEN. A "
+                f"further line below it carrying the words 'no progress' means the reason was a "
+                f"loop SPINNING without advancing; its absence means the runtime went SILENT. "
+                f"NEITHER MARKER IS SPELLED HERE, and that is load-bearing rather than tidy: "
+                f"readers test for each as a SUBSTRING, so a header quoting one would make "
+                f"every armed file -- including one left by a SIGKILL -- read as a fired bound "
+                f"or as a progress fire.\n"
             )
             handle.flush()
             faulthandler.dump_traceback_later(bound, file=handle, exit=True)
@@ -434,7 +661,9 @@ def arm(
             except OSError:
                 pass
             return False
-        _ARMED = _Armed(target, handle, bound, pid or os.getpid())
+        _ARMED = _Armed(target, handle, bound, pid or os.getpid(), probe)
+        if probe is not None:
+            _start_sampler(_ARMED)
         return True
 
 
@@ -479,6 +708,142 @@ def beat(plane: str) -> None:
             logger.warning("stall watchdog could not re-arm its timer", exc_info=True)
 
 
+def _start_sampler(armed: "_Armed") -> None:
+    """Give the progress leg the thread it samples on. Called once, from ``arm``.
+
+    A DAEMON thread, and it is not the process's exit that makes that safe —
+    ``faulthandler`` leaves through ``_exit(1)`` from its own C thread and takes
+    every thread with it — but the arming sequence: a thread that outlived its
+    ``_Armed`` would be a leak, and the sampler's own first act on every wake is
+    to check that it is still the armed one. ``disarm`` waking it through the
+    same latch is what keeps a clean exit from leaving it asleep for a whole
+    interval; see ``_Armed.stop``.
+    """
+    stop = threading.Event()
+    armed.stop = stop
+    thread = threading.Thread(
+        target=_progress_sampler,
+        args=(armed, stop),
+        name="stall-watchdog-progress",
+        daemon=True,
+    )
+    armed.thread = thread
+    thread.start()
+
+
+def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
+    """Sample the progress predicate until it holds for a window, or we are disarmed.
+
+    THE ONE LOOP the progress leg has, and it is a sleep loop rather than a call
+    from the workload's own tick for the reason ``_beat_stall_watchdog``
+    documents on the other side: this must keep looking at a loop that is
+    spinning, and a hook the spin never reaches is a hook the spin disables.
+
+    THE SAMPLER IS NOT A TURN'S CLOCK. Nothing here counts turns, awaits work or
+    holds a reference to the session: it asks the injected probe the same two
+    questions every interval and keeps the answer. That is what lets the leg be
+    tested against a fake probe without a runtime, and it is why an unevaluable
+    probe errs toward NOT firing — see :func:`_sample`.
+    """
+    interval = _sample_interval(armed.seconds)
+    while not stop.wait(interval):
+        with _LOCK:
+            if _ARMED is not armed:
+                return
+            if _sample(armed):
+                return
+
+
+def _sample(armed: "_Armed") -> bool:
+    """One progress sample. True when the bound was FIRED, so the sampler is done.
+
+    Called with :data:`_LOCK` held, and it must be: it reads and writes the same
+    ``progress_deadline`` that :func:`beat` re-arms from, on another thread, and
+    the interleaving that lets slip is a beat re-arming the long deadline over a
+    fire that had already decided to happen.
+
+    EVERY LEG IS EVALUATED ON THE SAMPLE IT ARRIVES, all three to the same
+    instant: reading the CPU rate at one moment and the motion at another is how
+    a legitimate tool boundary gets read as a spin.
+    """
+    clock = armed.clock
+    now = time.monotonic()
+    cpu = time.process_time()
+    elapsed = max(1e-6, now - clock.wall)
+    probe = armed.probe
+    try:
+        motion, in_flight = probe() if probe is not None else (_NO_SAMPLE, True)
+    except Exception:  # noqa: BLE001 — an unevaluable probe must not end a process
+        logger.debug("stall watchdog: progress probe failed", exc_info=True)
+        motion, in_flight = _NO_SAMPLE, True
+    moved = clock.motion is not _NO_SAMPLE and motion != clock.motion
+    spinning = not in_flight and not moved and (cpu - clock.cpu) / elapsed >= PROGRESS_CPU_FLOOR
+    if not spinning:
+        # ANY disagreement ends the run. A leg that is not true NOW is not
+        # "possibly true": a window that kept accumulating across a sample where
+        # the process was working would fire on a runtime that had done
+        # legitimate work inside it, which is the false positive this predicate
+        # exists to avoid. The deadline is cleared with it, so a runtime that
+        # recovered between a decision and its timer re-arming is left running.
+        clock.since = None
+        armed.progress_deadline = None
+    elif clock.since is None:
+        clock.since = now
+    elif now - clock.since >= armed.seconds:
+        _fire_progress(armed, now)
+        return True
+    clock.motion, clock.cpu, clock.wall = motion, cpu, now
+    return False
+
+
+def _fire_progress(armed: "_Armed", now: float) -> None:
+    """Leave through the SAME dump-and-exit path the liveness leg uses.
+
+    Past the window the runtime must stop being a session that burns a core to
+    produce nothing, and the graceful rungs cannot be reached from the state
+    being detected — this is the module's oldest constraint, and the reason the
+    exit is ``faulthandler``'s rather than anything Python can sequence.
+
+    SO IT REUSES THAT PATH RATHER THAN ADDING A SECOND ONE: the dump file, the
+    ``FIRED_MARKER``, the every-thread stack and the ``_exit(1)`` are all the
+    liveness leg's, which is what keeps a reader's rule ("a dump with the fired
+    marker is evidence a bound actually fired") true for both. What this adds is
+    the ONE line above it naming WHICH leg fired — without it a reader could not
+    tell a runtime that went silent from one that spun, and the two want
+    different investigations.
+
+    ARMING FOR ``MIN_REARM_S`` IS WHAT FIRES IT: ``deadline()`` takes the minimum
+    over the legs, and setting the progress leg to ``now`` makes that minimum the
+    present moment, so this call and every later :func:`beat` agree on when the
+    timer expires. The write is before the arm, and it has to be: ``faulthandler``
+    reaches its timer from a C thread that runs no Python, so this line has no
+    later moment available to it.
+    """
+    armed.progress_deadline = now
+    try:
+        armed.handle.write(
+            f"{PROGRESS_MARKER}{_bound_class()}: {armed.seconds:g}s of CPU with no progress "
+            f"from the work -- no transcript, roster or job movement, no tool batch in "
+            f"flight, and at least {PROGRESS_CPU_FLOOR:.0%} of a core burned across every "
+            f"sample of the window.\n"
+        )
+        armed.handle.flush()
+    except (OSError, ValueError):  # noqa: BLE001 — the dump below is the evidence
+        logger.debug("stall watchdog could not write its progress line", exc_info=True)
+    try:
+        faulthandler.dump_traceback_later(
+            max(MIN_REARM_S, armed.deadline() - now), file=armed.handle, exit=True
+        )
+    except (OSError, ValueError, RuntimeError):
+        # The deadline STAYS set, deliberately. The timer already armed from the
+        # last beat is at most one heartbeat away, and every beat re-arms from
+        # ``deadline()``, so a failed re-arm here still ends the process within
+        # that heartbeat rather than silently withdrawing a decision already
+        # taken. Withdrawing it would make a transient arming failure a way for
+        # this leg never to fire again.
+        logger.warning("stall watchdog could not fire its progress leg", exc_info=True)
+
+
 def disarm() -> None:
     """Cancel the bound and remove the file: this process left on its own terms.
 
@@ -505,6 +870,12 @@ def disarm() -> None:
             armed.path.unlink()
         except OSError:
             pass
+        sampler = armed.stop
+        if sampler is not None:
+            # AFTER the file is gone and the timer is cancelled, so a woken
+            # sampler finds nothing armed and returns rather than reading a
+            # closed descriptor as "a process that never moved".
+            sampler.set()
 
 
 def is_armed() -> bool:
@@ -532,6 +903,66 @@ def announce() -> None:
             armed.seconds,
             armed.path,
         )
+
+
+#: Which of the bound's two legs ended a runtime. The vocabulary is exported
+#: rather than spelled at the reader, because ``incidents``' class is one token
+#: for both legs and the DETAIL is the only place they are told apart.
+#:
+#: ``SILENCE`` is the liveness leg: no plane ticked for the whole bound, which is
+#: a loop parked in a call it never came back from. ``PROGRESS`` is the composite
+#: leg: the loops ran and kept re-arming the timer, and the work still did not
+#: advance while the process burned CPU.
+LEG_SILENCE = "silence"
+LEG_PROGRESS = "progress"
+
+
+def _dump_text(path: Path) -> str:
+    """One candidate dump's text, or ``""`` when it cannot be read.
+
+    An unreadable file is NOT evidence of a fire — the reader's whole contract is
+    that the marker is what makes a file mean something — so the direction is the
+    quiet one.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _fires(text: str) -> bool:
+    """Whether a dump's text carries the fired marker, as a whole line.
+
+    ``FIRED_MARKER`` at the start of a line, exactly as
+    ``tests/e2e/watchdog.py`` defines it, because surviving the clean exit is not
+    enough to call a file a freeze report: a runtime killed without disarming
+    leaves a header-only file, and that is a hard death rather than this bound.
+    """
+    return any(line.startswith(FIRED_MARKER) for line in text.splitlines())
+
+
+def fired_leg(pid: int | None = None, directory: Path | None = None) -> str | None:
+    """WHICH leg fired for this pid, or ``None`` when no bound did.
+
+    The class a fired bound is recorded under is one token for both legs (see
+    ``incidents.STALL_BOUND_CAUSE``), so this is the only thing that tells a
+    reader whether a runtime went SILENT or SPUN WITHOUT ADVANCING — the two
+    want different investigations, and the dump already distinguishes them: the
+    progress leg writes its own line at the moment it decides, and the silence
+    leg cannot, because the C thread that fires it runs no Python.
+
+    Read from the artifact rather than from a record, because that is the only
+    thing the firing path can leave: ``faulthandler`` writes the dump and calls
+    ``_exit(1)`` from its own thread, so nothing that runs afterwards — no exit
+    hook, no journal write, no reaper — can be relied on. ``journal.death_verdict``
+    is the caller that turns this into an incident class.
+    """
+    text = _dump_text(dump_path(pid, directory))
+    if not _fires(text):
+        return None
+    if any(line.startswith(PROGRESS_MARKER) for line in text.splitlines()):
+        return LEG_PROGRESS
+    return LEG_SILENCE
 
 
 def fired_pids(directory: Path | None = None) -> set[int]:
@@ -562,11 +993,8 @@ def fired_pids(directory: Path | None = None) -> set[int]:
     except OSError:
         return fired
     for path in candidates:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if not any(line.startswith(FIRED_MARKER) for line in text.splitlines()):
+        text = _dump_text(path)
+        if not _fires(text):
             continue
         suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
         if suffix.isdigit():

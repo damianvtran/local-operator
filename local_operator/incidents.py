@@ -402,6 +402,28 @@ def _overdue_cause_sentence() -> str:
     )
 
 
+def _stall_bound_cause_sentence() -> str:
+    """The sentence for :data:`STALL_BOUND_CAUSE`, written in the same shape.
+
+    THE BOUND IS RENDERED FROM THE CONSTANT for the reason
+    ``_overdue_cause_sentence`` gives, with one qualification stated rather than
+    hidden: the bound an operator may override
+    (``LOP_RUNTIME_STALL_SECONDS``) is not knowable from here, so this names the
+    DEFAULT and says so. The exact figure the runtime was armed with is in its
+    own dump header, and the detail a reader adds names which leg fired — that is
+    where an operator who moved the number looks, rather than in a taxonomy
+    sentence shared by every runtime on every host.
+    """
+    from local_operator.session.runtime.stall_watchdog import DEFAULT_STALL_S
+    from local_operator.session.runtime.types import bound_text
+
+    return (
+        "the runtime ended ITSELF: its own stall bound fired after "
+        f"{bound_text(DEFAULT_STALL_S)} of no progress by default, and the dump it "
+        "left beside its log names what every thread was doing"
+    )
+
+
 def _update_failed_cause_sentence() -> str:
     """The sentence for the bounded UPDATE WINDOW (``types.UPDATE_FAILED_CAUSE``).
 
@@ -441,8 +463,36 @@ def _update_failed_cause_sentence() -> str:
 #: harness-caused death on the arm that cannot name its actor.
 KILL_CAUSE = "runtime-killed"
 
+#: The class a runtime's OWN stall bound leaves behind when it fires — the one
+#: death in this taxonomy whose author is the victim itself.
+#:
+#: WHY IT NEEDED A NAME, and what its absence cost. ``stall_watchdog`` arms a C
+#: timer that, past its bound, dumps every thread and ``_exit(1)s``; the dump
+#: names the pid and the arming time and nothing else, and until this token
+#: existed there was no class anywhere that said the bound had done it. Measured
+#: 2026-09-21: a peer session (pid 4698) died with its dump present and its death
+#: recorded as ``unattributed`` — not "we could not tell", which is what
+#: :data:`KILL_UNATTRIBUTED` is for, but **"the instrument knew and did not say
+#: so"**. A firing instrument that cannot name itself leaves a reader unable to
+#: tell a bound that fired from a bound that never fired, which is the whole
+#: value of having armed it.
+#:
+#: ONE TOKEN FOR BOTH LEGS, and the legs are told apart in the DETAIL rather than
+#: in the class. They are the same event to everyone downstream — the runtime
+#: ended itself, on purpose, and left a dump — and splitting them into two
+#: taxonomy keys would make every reader that branches on ``CUT_OFF_CAUSES``
+#: learn a distinction it does not act on. What a reader DOES act on ("was this
+#: a wait or a spin?") is the leg, and ``stall_watchdog.fired_leg`` names it.
+STALL_BOUND_CAUSE = "runtime-stall-bound"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
+    # THE RUNTIME'S OWN BOUND ARMED AGAINST ITSELF. The sentence says who acted
+    # (the runtime, not the operator and not another process) because that is the
+    # fact this arm exists to state: every other involuntary arm here names an
+    # actor outside the victim, and a reader who found one of those would go
+    # looking for a reaper or a sweep that never ran.
+    STALL_BOUND_CAUSE: _stall_bound_cause_sentence(),
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
     "runtime-shutdown": "the runtime was terminated while this turn was running",
     # The BOUNDED handover: a build drain that stopped waiting for its own work
