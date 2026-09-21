@@ -388,11 +388,55 @@ def test_over_budget_message_is_plain_text_and_names_the_numbers() -> None:
     assert "was killed; the session is fine" in message
     assert "memory_mb" in message  # names the escape hatch
     assert "bash.memory.limit_mb" in message
-    # ONE paragraph, no internal newline (design review D3): the card claims only
-    # the first result line for its wrapping reason block, so a second line fell
-    # into captured output and was cropped at canonical widths, cutting the
-    # remedy and the escape hatch.
+    # ONE paragraph, no internal newline (design review D3/D6): the card claims
+    # only the first result line for its wrapping reason block, so a second line
+    # fell into captured output and was cropped.
     assert "\n" not in message
+    # AND the whole sentence must fit the reason block's CELL budget, not merely
+    # be one line. The card drops a sentence's TAIL behind a marker once it
+    # passes REASON_MAX_CELLS, and the tail is the escape hatch — so "one line"
+    # is not enough to prove it survives, which is why the earlier assertion
+    # passed while the card still cropped (design review D6). Measured with the
+    # same counter the card uses (`rich.cells.cell_len`), against the card's own
+    # bound, so a device clause that grows the sentence fails HERE instead of
+    # cropping in a frame.
+    from rich.cells import cell_len
+
+    from local_operator.tui.widgets.tool_card import REASON_MAX_CELLS
+
+    assert cell_len(message) <= REASON_MAX_CELLS, (
+        f"the settled message is {cell_len(message)} cells, over the card's "
+        f"REASON_MAX_CELLS={REASON_MAX_CELLS}; its tail (the escape hatch) will "
+        f"crop behind a marker"
+    )
+
+
+def test_the_over_budget_message_fits_the_card_at_large_device_sizes() -> None:
+    """The message must not grow past the reason block as the HOST grows.
+
+    Design review D6: the old `(N GB total, M GB available)` clause made the
+    sentence 433 cells on a 36 GB host and 434 on a 128 GB host — over the 432
+    bound, so it cropped at every width AND cropped SOONER the more RAM the host
+    had. This pins the two measured sizes so a regression is caught at the
+    largest total the clause can print.
+    """
+    from rich.cells import cell_len
+
+    from local_operator.tui.widgets.tool_card import REASON_MAX_CELLS
+
+    sample = mg.Sample(
+        pgid=100,
+        bytes_used=int(3.4 * 1024**3),
+        bytes_soft=2640 * 1024 * 1024,
+        bytes_hard=3300 * 1024 * 1024,
+        over_soft=True,
+        over_hard=True,
+    )
+    for total_mb in (36864, 131072):
+        budget = mg.Budget(3300, 2640, 6600, total_mb, 2048, "auto", "test")
+        guard = mg.Guard(100, budget, runner=_fake_runner(), footprint_probe=lambda pid: None)
+        message = guard.over_budget_message(sample)
+        assert cell_len(message) <= REASON_MAX_CELLS, (total_mb, cell_len(message))
 
 
 # ---------------------------------------------------------------------------
