@@ -9,14 +9,17 @@ free of disk I/O.
 
 The barrier those writes are observed through is ``flush_for_test``: a plain
 ``record`` is asynchronous by design, so every test here that reads the store
-is really asserting something about that barrier as well. Two of the tests
-below exist only to pin the barrier itself — a deliberately slow store makes
-the dequeued-but-unwritten window wide enough to be a fact rather than a race.
+is really asserting something about that barrier as well. Three of the tests
+below exist only to pin the barrier itself — two deliberately slow stores make
+the dequeued-but-unwritten window wide enough to be a fact rather than a race,
+and a third pins the two ways the barrier is allowed to fail (a deadline, and a
+write the writer swallowed).
 """
 
 from __future__ import annotations
 
 import multiprocessing as mp
+import sqlite3
 import threading
 import time
 from collections.abc import Sequence
@@ -213,6 +216,48 @@ def test_flush_for_test_waits_for_a_tool_call_row_already_dequeued(tmp_path):
         rec.close()
 
 
+class _FailingWriteStore(AnalyticsStore):
+    """A store whose writes always raise, for the swallowed-failure path.
+
+    The writer must survive this (fail-soft is the deliberate policy), so the
+    only thing left to check is that the barrier does not report success.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.attempts = 0
+
+    def upsert_session_name(
+        self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
+    ) -> None:
+        self.attempts += 1
+        raise sqlite3.OperationalError("disk I/O error")
+
+
+def test_flush_for_test_reports_a_write_the_writer_swallowed(tmp_path):
+    """A settled item is not a written row, and the barrier has to say so.
+
+    ``_flush`` swallows a failed store call on purpose — a bad sample must
+    never kill the writer — so an item whose write raised settles exactly like
+    one that succeeded and the completion count cannot tell them apart. Without
+    this, the barrier would return clean and the caller would read a row that
+    is not there: the same bare ``None`` the rest of this file exists to remove.
+    """
+    store = _FailingWriteStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    try:
+        rec.note_session_name("never-made-it", "never lands")
+        with pytest.raises(RuntimeError, match="session name"):
+            rec.flush_for_test()
+        # Reported ONCE: a failure is surfaced by the next barrier, not by every
+        # barrier for the rest of the process, so a test that reads its store
+        # after a deliberate failure is not fighting the barrier forever.
+        rec.flush_for_test()
+    finally:
+        rec.close()
+    assert store.attempts == 1, "the writer retried a name the store refused"
+
+
 def test_flush_for_test_raises_at_its_deadline_instead_of_returning(tmp_path):
     """Expiry is a failure, not a return: a barrier without its guarantee IS the bug.
 
@@ -225,7 +270,7 @@ def test_flush_for_test_raises_at_its_deadline_instead_of_returning(tmp_path):
     try:
         rec.record(_snap())
         assert store.entered.wait(5.0), "the writer never reached the batch write"
-        with pytest.raises(TimeoutError, match="1 queued item"):
+        with pytest.raises(TimeoutError, match="1 unsettled item"):
             rec.flush_for_test(timeout=0.2)
         # Not a wedge: once the writer is free the barrier completes and the
         # row lands, which is what makes the deadline a bound rather than a
