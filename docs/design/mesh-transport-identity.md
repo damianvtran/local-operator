@@ -1760,6 +1760,28 @@ network's side without anyone visiting it.
 > establish a member-phase link by anybody, including a fully current member.
 > Past the age the only thing a peer can do with its secret is prove possession
 > of it in a **reconcile**-phase handshake, whose answer tells it to rotate.
+>
+> **STATUS: THE INVARIANT IS NOT ENFORCED AND THE BOUND IS DEFERRED — this note
+> is the record of that, so nothing below reads as shipped.** Nothing reads
+> `network.epoch_max_age_s`, `SecretState` carries no epoch mint time, and no
+> phase decision consults an age (round-1 review, MAJOR 2). It is deferred rather
+> than half-built because the REMEDY half is missing and enforcing the age alone
+> would be a regression, not a partial win: the invariant ends with "the answer
+> tells it to rotate", and that answer has no client anywhere in this build —
+> nothing sends `net_reconcile`, nothing applies the epoch and secret a
+> `net_reconcile` answer carries, and its `close_after` has no reader either
+> (`_op_reconcile` is the answering half only). A device that missed a rotation
+> already lands in `reconcile` phase today and stays there. Enforcing the age
+> would extend that trap to every link on an aged epoch, while §8.4 promises the
+> opposite: "nothing stops, and no operator action is needed while an admin is
+> reachable". So the two halves land together or not at all, in this order:
+> **(1)** the reconcile client — send `net_reconcile`, apply the epoch/secret it
+> answers, close and re-handshake at the new epoch, with the phase's own tests;
+> **(2)** then the age bound here — the mint time beside the secret, the key, the
+> phase decision, the admin-initiated rotation (`reason: "max_age"`), and the
+> `ls`/`doctor` reporting below. Until then, the honest operator-facing statement
+> is that a member which never returns keeps working authority: the bound is a
+> design decision with a named invariant and no code.
 
 Concretely, and this is the part that must be implemented rather than described:
 

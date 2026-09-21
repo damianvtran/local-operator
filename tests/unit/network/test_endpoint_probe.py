@@ -411,9 +411,7 @@ def test_the_listener_learns_the_member_table_from_the_peer_that_dialled_it(
     link.close("test")
 
 
-def test_learning_a_member_is_audited(
-    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_learning_a_member_is_audited(peer_pair: Devices, monkeypatch: pytest.MonkeyPatch) -> None:
     """A membership change an operator cannot see is a membership change they
     discover by surprise: `lop network log` is where this one has to land."""
     server_a, server_b, host_a, port_a = peer_pair

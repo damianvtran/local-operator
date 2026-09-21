@@ -90,10 +90,11 @@ from local_operator.network.identity import (
 )
 from local_operator.network.invite import (
     MintedInvite,
-    claim,
+    claim_or_consume,
     consume,
     invite_credential_for,
     inviter_prompt_for,
+    mark_redeemed,
 )
 from local_operator.network.invite import mint as mint_invite
 from local_operator.network.types import (
@@ -109,6 +110,7 @@ from local_operator.network.types import (
     Refusal,
     SecretState,
     capabilities_for_role,
+    trust_state,
 )
 from local_operator.paths import config_dir, log_dir
 from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, PROTOCOL_VERSION
@@ -121,10 +123,38 @@ from local_operator.session.runtime.types import HEARTBEAT_INTERVAL_S, PROTOCOL_
 #: (this install never accepts an inbound link), ``0.0.0.0`` accepts on every
 #: interface, or a specific interface address. Dial-only is a supported
 #: configuration, not a degraded one: no design here assumes inbound reachability.
+#:
+#: THE WIDE DEFAULT WAS CHALLENGED, and it is kept (round-3 review, MAJOR 1).
+#: The argument against it: no design here assumes inbound reachability, so a
+#: default that opens every interface is a wider exposure than the feature needs,
+#: and any stranger on the same LAN can open a connection to it. The argument for
+#: it, which wins: the mesh's PRIMARY topology is one reachable device and one
+#: that is not (``mesh-transport-identity.md`` §13: the AWS instance's security
+#: group is open and the laptop is dial-only), and that needs a device accepting
+#: from elsewhere out of the box — a loopback default would make every mesh need a
+#: hand edit on the reachable device before the first pair could complete, which
+#: is exactly the friction ``lop network init`` exists to avoid. What made the
+#: wide bind DANGEROUS was not the bind, it was that an unauthenticated connection
+#: cost a thread with nothing bounding how many: that is now bounded at the accept
+#: (``DEFAULT_MAX_HANDSHAKES``), so the exposure is one silent close per
+#: connection past the cap. An operator who wants no inbound reachability at all
+#: sets this to ``127.0.0.1`` and says so once.
 DEFAULT_LISTEN_ADDRESS = "0.0.0.0"
 DEFAULT_PORT = 4097  # 4098 mobile, 4099 browser bridge, 4100 tunnel gateway taken
 DEFAULT_ADVERTISE_HOSTS: tuple[str, ...] = ()
 DEFAULT_MAX_LINKS = 32
+#: Handshakes allowed IN FLIGHT at once, counted BEFORE anything is authenticated.
+#:
+#: ``max_links`` bounds ESTABLISHED links and cannot bound this: a connection that
+#: sends nothing has no link, so before this cap N silent connections held N
+#: threads and N descriptors for up to ``handshake_timeout_s`` each (round-3
+#: review, MAJOR 1: 40 connections, 40 live ``mesh-handshake`` threads, 0 links).
+#: The bound is smaller than ``max_links`` on purpose — an unauthenticated
+#: connection has proved nothing, and the cost of refusing one is a silent close
+#: that the dialling peer retries on its ordinary reconnect backoff. It is a CAP
+#: and not a share, exactly as ``probe_candidates`` is: past it, a connection is
+#: closed rather than queued, because a queue is the resource being defended.
+DEFAULT_MAX_HANDSHAKES = 8
 DEFAULT_AUTOSTART = True
 
 #: Reconcile grants: at most this many per device per network per hour. "I keep
@@ -221,6 +251,7 @@ class NetworkSettings:
     queue_bytes: int = wire.QUEUE_BYTES
     max_inflight: int = wire.MAX_INFLIGHT
     max_links: int = DEFAULT_MAX_LINKS
+    max_handshakes: int = DEFAULT_MAX_HANDSHAKES
     autostart: bool = DEFAULT_AUTOSTART
 
     @classmethod
@@ -249,6 +280,7 @@ class NetworkSettings:
             queue_bytes=int(read(("network", "queue_bytes"), wire.QUEUE_BYTES)),
             max_inflight=int(read(("network", "max_inflight"), wire.MAX_INFLIGHT)),
             max_links=int(read(("network", "max_links"), DEFAULT_MAX_LINKS)),
+            max_handshakes=int(read(("network", "max_handshakes"), DEFAULT_MAX_HANDSHAKES)),
             autostart=bool(read(("network", "autostart"), DEFAULT_AUTOSTART)),
         )
 
@@ -500,9 +532,7 @@ def probe_reason(attempts: Sequence[CandidateAttempt]) -> str:
     return "unreachable: " + "; ".join(f"{row.endpoint} {row.detail}" for row in attempts)
 
 
-def adopt_members(
-    record: NetworkRecord, rows: Sequence[Any]
-) -> tuple[bool, list[str]]:
+def adopt_members(record: NetworkRecord, rows: Sequence[Any]) -> tuple[bool, list[str]]:
     """Take a peer's member rows into this device's record. Returns (changed, added).
 
     THE SAME TRUST DECISION THE JOIN ALREADY MAKES, made again where it is needed.
@@ -556,9 +586,7 @@ def adopt_members(
     return changed, added
 
 
-def advertise_endpoints(
-    settings: NetworkSettings, *, declared: Sequence[str] = ()
-) -> list[str]:
+def advertise_endpoints(settings: NetworkSettings, *, declared: Sequence[str] = ()) -> list[str]:
     """Where peers should TRY to reach a device, in preference order.
 
     THE UNION THE DESIGN ASKS FOR (§10.4: "from ``network.advertise_hosts`` PLUS
@@ -596,7 +624,11 @@ def advertise_endpoints(
     else:
         try:
             for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                address = info[4][0]
+                # ``getaddrinfo`` types its sockaddr as a union that includes the
+                # AF_UNIX/AF_INET6 shapes, so the index reads as ``str | int`` even
+                # though AF_INET guarantees a textual address. The cast is the
+                # narrowing, not a coercion.
+                address = str(info[4][0])
                 if not address.startswith("127."):
                     add(f"{address}:{settings.port}")
         except OSError:
@@ -1021,9 +1053,8 @@ class MembershipReport:
             return f"members verified with all {len(self.answered)} peer(s) ({age_text})"
         if not self.answered:
             detail = ", ".join(f"{row['device_id']} ({row['reason']})" for row in self.silent)
-            return (
-                "members NOT verified: no peer answered a table read this time"
-                + (f" — {detail}" if detail else "")
+            return "members NOT verified: no peer answered a table read this time" + (
+                f" — {detail}" if detail else ""
             )
         detail = ", ".join(f"{row['device_id']} ({row['reason']})" for row in self.silent)
         return (
@@ -1333,9 +1364,10 @@ def set_trust(
     step 3 and dispatch checks it again — so recovery is explicit and local
     (``lop network trust <net> --active``).
     """
-    if trust not in ("active", "untrusted", "disconnected"):
-        raise MeshRefusal("bad_trust", f"unknown trust state {trust!r}")
-    record.trust = trust  # type: ignore[assignment]
+    # ``types.trust_state`` is the package's one reader for this string; going
+    # through it keeps the refusal code and sentence single-sourced, and the
+    # attribute is assigned its declared ``TrustState`` rather than a bare ``str``.
+    record.trust = trust_state(trust)
     record.untrusted_reason = reason
     if trust == "active":
         record.untrusted_reason = ""
@@ -2132,6 +2164,12 @@ class RelayServer:
         #: Serialises invite claim + mark, so two concurrent redemptions of one
         #: token cannot both pass the `minted` check.
         self._invite_lock = threading.Lock()
+        #: The pre-auth bound (see DEFAULT_MAX_HANDSHAKES): acquired BEFORE a
+        #: handshake thread exists and released by that thread on every exit path,
+        #: so the cap counts connections that have not authenticated. Bounded, not
+        #: plain: a release without an acquire is a bug this turns into a loud
+        #: ValueError rather than a cap that silently grows.
+        self._handshake_slots = threading.BoundedSemaphore(max(1, self.settings.max_handshakes))
         self._reconcile_grants: dict[tuple[str, str], list[float]] = {}
         self._handlers: dict[str, Callable[[PeerLink, dict[str, Any]], dict[str, Any] | None]] = {
             "ping": self._op_ping,
@@ -2399,11 +2437,7 @@ class RelayServer:
             return "bad_answer"
         rows = detail["members"]
         record = next(
-            (
-                item
-                for item in store.list_networks(self.root)
-                if item.network_id == link.network_id
-            ),
+            (item for item in store.list_networks(self.root) if item.network_id == link.network_id),
             None,
         )
         if record is None:
@@ -2470,9 +2504,7 @@ class RelayServer:
                     continue
                 link = self._link_for(member.device_id)
                 if link is None or not link.alive:
-                    report.silent.append(
-                        {"device_id": member.device_id, "reason": "no_live_link"}
-                    )
+                    report.silent.append({"device_id": member.device_id, "reason": "no_live_link"})
                     continue
                 age = now - link.member_pulled_at
                 if age < MEMBERSHIP_PULL_MIN_INTERVAL_S:
@@ -2492,8 +2524,7 @@ class RelayServer:
                         {
                             "device_id": member.device_id,
                             "reason": (
-                                "not_asked: the refresh budget ran out before "
-                                "this peer's turn"
+                                "not_asked: the refresh budget ran out before " "this peer's turn"
                             ),
                         }
                     )
@@ -2645,6 +2676,17 @@ class RelayServer:
             if len(self.links) >= self.settings.max_links:
                 sock.close()
                 continue
+            # THE PRE-AUTH BOUND, checked HERE because this is the last moment
+            # before the thread exists. ``max_links`` above counts LINKS, and a
+            # connection that has authenticated nothing has none, so a silent
+            # connection used to buy a thread and a descriptor for the whole
+            # handshake budget (see ``DEFAULT_MAX_HANDSHAKES``). Past the cap the
+            # socket is closed with no reply, exactly as a refused handshake is: an
+            # error frame here would be a probe oracle for a stranger who never
+            # authenticated.
+            if not self._handshake_slots.acquire(blocking=False):
+                sock.close()
+                continue
             thread = threading.Thread(
                 target=self._handshake_inbound,
                 args=(sock, addr),
@@ -2654,6 +2696,19 @@ class RelayServer:
             thread.start()
 
     def _handshake_inbound(self, sock: socket.socket, addr: Any) -> None:
+        """One accepted connection: take a pre-auth slot, give it back on EVERY exit.
+
+        The slot is released in a ``finally`` rather than at the end of the work
+        because the handshake below returns from a dozen places — three refusals,
+        a pair phase, a failed welcome write, an admitted link — and a cap that
+        leaked a slot on any of them would be a slower version of no cap at all.
+        """
+        try:
+            self._run_inbound_handshake(sock, addr)
+        finally:
+            self._handshake_slots.release()
+
+    def _run_inbound_handshake(self, sock: socket.socket, addr: Any) -> None:
         """Complete a listener-side handshake, or close silently and audit.
 
         NO REPLY on any failure: an open port that answers wrong keys with errors is
@@ -2686,34 +2741,62 @@ class RelayServer:
                 build=self.build,
             )
             handshake.accept_hello(peek)
+            invite_id = ""
             if handshake.mode == "join":
-                # THE INVITE IS CLAIMED HERE, BEFORE the challenge goes out and
-                # before any human sees a code: `redeemed` on disk is what makes a
-                # second redemption of one token fail, and a crash between "a valid
-                # redemption arrived" and "a person looked" must not leave a
-                # replayable token behind. The lock is what keeps two concurrent
-                # redemptions from both passing the `minted` check.
+                # VALIDATED HERE, WRITTEN LATER. Two things about a join have to
+                # happen before the challenge goes out: the invite's own checks
+                # (state, freshness, epoch, and the optional device binding), and
+                # the credential derived from the invite KEY, because that key is
+                # what verifies the joiner's auth frame. NOTHING IS WRITTEN YET, and
+                # that is the round-3 fix: marking the invite `redeemed` from the
+                # HELLO alone burned a perfectly good invite when a connection
+                # dropped before its auth frame, and the honest device's retry was
+                # then refused `invite_in_use` — an unauthenticated peer has proved
+                # nothing at this point.
                 with self._invite_lock:
                     joined = store.load(network_id, self.root)
                     invite_id = str(handshake.join_block.get("invite_id") or "")
-                    claim(
-                        joined,
-                        invite_id,
-                        device_id=handshake.peer_device_id,
-                        epoch=handshake.epoch,
-                    )
-                    open_invite = joined.invite(invite_id)
-                    assert open_invite is not None  # `claim` just proved it exists
-                    open_invite.state = "redeemed"
-                    open_invite.redeemed_by = handshake.peer_device_id
-                    open_invite.redeemed_at = time.time()
-                    store.save(joined, self.root)
+                    try:
+                        claim_or_consume(
+                            joined,
+                            invite_id,
+                            device_id=handshake.peer_device_id,
+                            epoch=handshake.epoch,
+                        )
+                    except PairingRefusal:
+                        # ``claim_or_consume`` may have written the TERMINAL state
+                        # (a bound invite presented by another device, design §5.4),
+                        # so the save happens on this path too — otherwise the rule
+                        # would live only in memory and the token would stay
+                        # redeemable by exactly the device it was bound away from.
+                        store.save(joined, self.root)
+                        raise
                     joined_secrets = store.require_secrets(network_id, self.root)
                     handshake.credential = invite_credential_for(
                         joined, joined_secrets.secret, invite_id
                     )
             handshake.send_challenge(sock, policy)
             handshake.verify_auth(reader, deadline, policy)
+            if handshake.mode == "join":
+                # NOW the durable state change, and still BEFORE any human is shown
+                # a code: the auth frame MACs under the invite key, so this is the
+                # earliest moment at which `redeemed` means what it says. Re-checked
+                # rather than assumed — a challenge round trip has happened since
+                # the read above, and the record on disk is the authority.
+                with self._invite_lock:
+                    joined = store.load(network_id, self.root)
+                    try:
+                        claim_or_consume(
+                            joined,
+                            invite_id,
+                            device_id=handshake.peer_device_id,
+                            epoch=handshake.epoch,
+                        )
+                    except PairingRefusal:
+                        store.save(joined, self.root)
+                        raise
+                    mark_redeemed(joined, invite_id, device_id=handshake.peer_device_id)
+                    store.save(joined, self.root)
             result = handshake.establish()
         except MeshRefusal as refusal:
             self._audit_handshake_refusal(refusal, network_id, peer_addr, mode)
@@ -3443,7 +3526,7 @@ class RelayServer:
         record = self.store_view.network(link.network_id)
         if record is None:
             raise MeshRefusal("not_a_member", "this device is not in that network")
-        trust = str(frame.get("trust") or "active")
+        trust = trust_state(frame.get("trust") or "active")
         set_trust(record, trust=trust, reason=f"set by {link.device_id}", root=self.root)
         return {"op": "ack", "req": frame.get("req"), "detail": {"trust": trust}}
 
@@ -3930,6 +4013,15 @@ class RelayServer:
         if action == "send":
             return self._accept_stream_frame(link, frame, stream_id)
         if action == "close":
+            # CLOSING IS A REQUEST, so it is dispatched and answered rather than
+            # routed — but it ENDS a stream, and it goes through the same
+            # ownership rule the push path uses. Without it, a member that knew a
+            # stream id could kill another member's stream: "unguessable" is not
+            # "unforgeable" (round-3 review, MINOR 5). ``unknown_stream`` rather
+            # than a distinct refusal, so the answer never confirms whether the id
+            # exists on this device.
+            if self._stream_for(link, stream_id) is None:
+                raise MeshRefusal("unknown_stream", "that stream is not open on this device")
             self._close_stream(stream_id)
             return {"stream": stream_id, "closed": True}
         raise MeshRefusal("protocol_error", f"{action!r} is not a stream action")
@@ -4005,7 +4097,7 @@ class RelayServer:
         resolved through `INNER_OP_CAPABILITY` exactly as `net_forward`'s inner
         frame is — one table, one answer, for both carriers.
         """
-        stream = self._streams.get(stream_id)
+        stream = self._stream_for(link, stream_id)
         if stream is None or stream.closed or stream.dial is None:
             raise MeshRefusal("unknown_stream", "that stream is not open on this device")
         inner = frame.get("frame")
@@ -4141,11 +4233,7 @@ class RelayServer:
         # whole budget. A probe WITHOUT one is a real session op's dial (stream
         # open, session create) and keeps the full handshake budget per attempt,
         # which is what it had before this and what a slow WAN leg needs.
-        cap = (
-            PROBE_CONNECT_TIMEOUT_S
-            if deadline is not None
-            else self.settings.handshake_timeout_s
-        )
+        cap = PROBE_CONNECT_TIMEOUT_S if deadline is not None else self.settings.handshake_timeout_s
         reason = "not_a_member"
         for record in store.list_networks(self.root):
             member = record.member(device_id)
@@ -4271,6 +4359,24 @@ class RelayServer:
             stream.write_to_viewer({"op": "error", "req": frame.get("req"), "message": message})
             self._close_stream(stream.stream_id)
 
+    def _stream_for(self, link: PeerLink, stream_id: str) -> "_Stream | None":
+        """The stream ``stream_id`` names, IF this link is the one that owns it.
+
+        THE OWNERSHIP RULE, in one place. A stream id is unpredictable
+        (``os.urandom``) and that is what authorises a push — but unpredictable is
+        not unforgeable: a member that learns an id from a log, a traceback or a
+        bug must not be able to write into, or end, another member's stream. The
+        push and closed paths below check this; ``send`` and ``close``, which
+        arrive as REQUESTS through ``_op_stream``, did not, so knowing the id was
+        enough (round-3 review, MINOR 5). Returns ``None`` rather than raising, so
+        each caller answers with its own shape.
+        """
+        with self._streams_lock:
+            stream = self._streams.get(stream_id)
+        if stream is None or stream.link is not link:
+            return None
+        return stream
+
     def route_stream_push(self, link: PeerLink, frame: dict[str, Any]) -> bool:
         """Deliver one pushed session frame, or answer "not mine".
 
@@ -4281,9 +4387,8 @@ class RelayServer:
         named) stream can push on it.
         """
         stream_id = str(frame.get("stream") or "")
-        with self._streams_lock:
-            stream = self._streams.get(stream_id)
-        if stream is None or stream.link is not link:
+        stream = self._stream_for(link, stream_id)
+        if stream is None:
             return False
         payload = frame.get("frame")
         if isinstance(payload, dict):
@@ -4293,9 +4398,7 @@ class RelayServer:
     def route_stream_closed(self, link: PeerLink, frame: dict[str, Any]) -> bool:
         """Mark a stream dead when the peer says the owner is gone."""
         stream_id = str(frame.get("stream") or "")
-        with self._streams_lock:
-            stream = self._streams.get(stream_id)
-        if stream is None or stream.link is not link:
+        if self._stream_for(link, stream_id) is None:
             return False
         self._close_stream(stream_id, notify_peer=False)
         return True
@@ -4576,7 +4679,11 @@ class RelayServer:
             store.save(record, self.root)
             state = store.require_secrets(result.network_id, self.root)
             frame = pair_result_frame(
-                req=ready.get("req"),
+                # The joiner's correlation id, echoed so it can match this answer
+                # to its own request. It is read off an UNTRUSTED frame, so a
+                # missing or non-integer id answers 0 rather than putting a null
+                # (or a string) on the wire where the joiner's frame carried an int.
+                req=int(ready["req"]) if isinstance(ready.get("req"), int) else 0,
                 admit=True,
                 network={
                     "network_id": record.network_id,
@@ -4835,9 +4942,11 @@ class RelayServer:
             reader = wire.FrameReader(sock)
             handshake.read_challenge(reader, deadline)
             handshake.send_auth(sock, credential)
-            frame = handshake.read_welcome(reader, deadline)
+            handshake.read_welcome(reader, deadline)
+            # ``read_welcome`` takes the phase off that very frame — the ONE place
+            # it is decided (``Handshake.read_welcome``) — so re-reading it here
+            # would be a second rule for one fact.
             result = handshake.establish()
-            result.phase = str(frame.get("phase") or result.phase)
             if result.phase == "pair":
                 # Ownership of the socket belongs to whichever call opened it: here
                 # that is this method, so the early return closes it. A caller that
@@ -4892,9 +5001,7 @@ class RelayServer:
         record.stale = ""
         store.save(record, self.root)
 
-    def _note_refused_handshake(
-        self, record: NetworkRecord, host: str, mode: str
-    ) -> None:
+    def _note_refused_handshake(self, record: NetworkRecord, host: str, mode: str) -> None:
         """Name a peer's SILENT refusal of this device's handshake, LOCALLY.
 
         THE REFUSAL IS SILENT BY DESIGN AND THAT LEFT THIS DEVICE WITHOUT A CLUE. A
@@ -5220,7 +5327,7 @@ class RelayServer:
         before = record.trust
         set_trust(
             record,
-            trust=str(frame.get("trust") or "active"),
+            trust=trust_state(frame.get("trust") or "active"),
             reason=str(frame.get("reason") or "operator"),
             root=self.root,
         )
@@ -5570,13 +5677,14 @@ class RelayServer:
                     # reporting "it did not answer" while holding a reason is how a
                     # listing withholds the one fact the operator needs (QA round 1).
                     block["reachable"] = False
-                    block["reason"] = str(
-                        reply.get("message") or "the peer refused the listing"
-                    )[:200]
+                    block["reason"] = str(reply.get("message") or "the peer refused the listing")[
+                        :200
+                    ]
                     peers.setdefault(member.device_id, block)
                     continue
                 peers[member.device_id] = block
-                detail = reply.get("detail") if isinstance(reply.get("detail"), dict) else {}
+                raw_detail = reply.get("detail")
+                detail: dict[str, Any] = raw_detail if isinstance(raw_detail, dict) else {}
                 for row in detail.get("sessions") or ():
                     if not isinstance(row, dict):
                         continue
@@ -5618,8 +5726,7 @@ class RelayServer:
             "sessions": rows,
             "peers": peers,
             "membership": {
-                network_id: report.to_json()
-                for network_id, report in sorted(reports.items())
+                network_id: report.to_json() for network_id, report in sorted(reports.items())
             },
             "device_id": self.identity.device_id,
             "device_name": self.identity.name,
@@ -6200,6 +6307,20 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _domain() -> str:
+    """``gui/<uid>`` — the launchd domain every caller feeds to ``launchctl``.
+
+    The platform guard is INSIDE this function rather than at its call sites,
+    each of which is behind ``supervisors``/``is_supported()``: ``os.getuid``
+    does not exist off POSIX, so an unguarded call was an ``AttributeError``
+    waiting for any arm that forgot the check — and a guard at the call site is
+    invisible to a reader and to the cross-platform scan that grades this
+    branch (``scripts/xplat_probe.py``), neither of which can see that the arm
+    is unreachable. Guarded here, the function is safe to call on its own
+    merits. The same spelling, for the same reason, as ``wakes/install.py`` and
+    ``mobile/install.py``.
+    """
+    if sys.platform != "darwin":
+        raise RuntimeError("launchd domains exist only on macOS")
     return f"gui/{os.getuid()}"
 
 

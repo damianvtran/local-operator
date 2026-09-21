@@ -1218,15 +1218,19 @@ def _join_one(
                 "fingerprint": fingerprint,
             },
         )
-    except MeshRefusal:
-        raise
     except HandshakeRefusal as refusal:
         # NOT named as a peer refusal: the listener closes the socket on a refusal
         # rather than explaining (an oracle would let a stranger probe token
         # validity), so what arrives here is a frame that never came. The sentence
         # is still the honest one, and it reaches the user instead of being
         # dropped on the floor.
+        #
+        # BEFORE ``MeshRefusal``, and it has to be: ``HandshakeRefusal`` is a
+        # SUBCLASS of it, so the broader clause would swallow this one and the
+        # sentence below would be unreachable.
         return f"the handshake at {host} stopped: {refusal.sentence}"
+    except MeshRefusal:
+        raise
     except (wire.LinkCryptoError, OSError, TimeoutError) as exc:
         return f"the handshake at {host} stopped ({exc.__class__.__name__})"
     finally:
@@ -1315,6 +1319,7 @@ def _persist_join(
         MeshRefusal,
         NetworkRecord,
         SecretState,
+        trust_state,
     )
 
     network = answer.get("network") or {}
@@ -1358,7 +1363,7 @@ def _persist_join(
         name=str(network.get("name") or envelope.network_name),
         epoch=int(network.get("epoch") or envelope.epoch),
         sequence=int(network.get("sequence") or 0),
-        trust=str(network.get("trust") or "active"),
+        trust=trust_state(network.get("trust") or "active"),
         self_device_id=identity.device_id,
         self_role=self_row.role if self_row else "read",
         self_capabilities=list(self_row.capabilities) if self_row else [],
@@ -1463,10 +1468,23 @@ def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
         relay_mod = _import_relay()
         result = relay_mod.service_action(action)
         ok = bool(result.get("ok"))
+        payload: dict[str, Any] = {"ok": ok, "action": action}
+        if not ok:
+            # THE FAMILY'S SHAPE, even here: `code` + `message`, because a consumer
+            # that reads `code` (which GUIDE.md tells it to) saw nothing at all on
+            # this verb. The relay's own `reason` is the NAME when it has one —
+            # `no_launchd` and `isolated_home` are diagnoses with their own
+            # remedies, not launchctl failures — and `service_failed` covers the
+            # rest. `error` is kept beside them: it is what this verb has always
+            # carried.
+            message = str(result.get("error") or "")
+            payload["code"] = str(result.get("reason") or "") or "service_failed"
+            payload["message"] = message
+            payload["error"] = message
         return _emit(
             args,
-            {"ok": ok, "action": action, "error": result.get("error", "")},
-            [f"relay {action} ok" if ok else f"relay {action} failed: {result.get('error')}"],
+            payload,
+            [f"relay {action} ok" if ok else f"relay {action} failed: {payload.get('message')}"],
         )
 
     return _run
@@ -1710,9 +1728,10 @@ def _cmd_peers(args: argparse.Namespace) -> int:
         )
     # ``net_peer_ls`` answers a LIST (a peer table), so the control client wraps it
     # as ``{"value": [...]}`` rather than pretending it is a mapping.
-    rows = live.get("value")
-    if not isinstance(rows, list):
-        rows = live.get("peers") if isinstance(live.get("peers"), list) else []
+    raw_rows = live.get("value")
+    if not isinstance(raw_rows, list):
+        raw_rows = live.get("peers")
+    rows: list[Any] = raw_rows if isinstance(raw_rows, list) else []
     return _emit(
         args,
         {"ok": True, "peers": rows},
@@ -1861,7 +1880,15 @@ def _cmd_log(args: argparse.Namespace) -> int:
     if args.export is not None:
         path = store.audit_path()
         if not path.exists():
-            return _emit(args, {"ok": False, "error": "no audit log yet"}, ["no audit log yet"])
+            # `code` + `message` like the rest of the family (GUIDE.md §"every
+            # refusal names the component"): this one carried a bare `error`, so the
+            # documented reader saw no code and no sentence to act on.
+            message = "no audit log yet"
+            return _emit(
+                args,
+                {"ok": False, "code": "no_audit_log", "message": message, "error": message},
+                [message],
+            )
         args.export.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         return _emit(
             args,
@@ -2255,7 +2282,12 @@ def _cmd_identity_show(args: argparse.Namespace) -> int:
     if identity is None:
         return _emit(
             args,
-            {"ok": False, "error": "identity_missing"},
+            {
+                "ok": False,
+                "code": "identity_missing",
+                "message": "this device has no mesh identity yet; run `lop network init`",
+                "error": "identity_missing",
+            },
             ["this device has no mesh identity yet; run `lop network init`"],
         )
     return _emit(
@@ -2290,7 +2322,12 @@ def _cmd_identity_rotate(args: argparse.Namespace) -> int:
 
     previous = load()
     if previous is None:
-        return _emit(args, {"ok": False, "error": "identity_missing"}, ["no identity to rotate"])
+        message = "no identity to rotate: this device has one only after `lop network init`"
+        return _emit(
+            args,
+            {"ok": False, "code": "identity_missing", "message": message, "error": message},
+            [message],
+        )
     new, old = rotate()
     relay_mod = _import_relay()
     announced = {"sent": 0, "queued": 0}

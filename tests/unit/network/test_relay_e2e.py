@@ -13,7 +13,7 @@ import threading
 import time
 from argparse import Namespace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -386,6 +386,167 @@ def test_a_replayed_invite_is_refused(
     assert len(refreshed.active_members()) == 2
     assert refreshed.invites[0].state == "consumed"
     assert "handshake_refused" in _events(server_a)
+
+
+def _drop_after_the_hello(
+    server: relay.RelayServer, *, host: str, port: int, envelope: Any
+) -> None:
+    """A join handshake that sends its hello, takes the challenge, and vanishes.
+
+    It stops at ``read_challenge`` on purpose: that frame is proof the listener got
+    PAST ``accept_hello`` and past the invite's own checks, which is the state the
+    round-1 defect needed. A helper that returned before the challenge would leave
+    this test unable to tell "the invite was not burned" from "the listener never
+    looked".
+    """
+    import socket
+
+    from local_operator.network.identity import mint_instance_id
+
+    sock = socket.create_connection((host, port), timeout=5)
+    try:
+        handshake = Handshake.new(
+            role="dialer",
+            identity=server.identity,
+            network_id=envelope.network_id,
+            epoch=envelope.epoch,
+            instance_id=mint_instance_id(),
+            session_protocol=net_cli._session_protocol(),  # noqa: SLF001 — the CLI's own value
+            mode="join",
+            capabilities=list(wire.LINK_CAPABILITIES),
+            build={},
+        )
+        handshake.join_block = {
+            "invite_id": envelope.invite_id,
+            "joiner_public_key": server.identity.public_key,
+            "joiner_name": server.identity.name,
+        }
+        handshake.send_hello(sock)
+        handshake.read_challenge(wire.FrameReader(sock), wire.deadline_in(5.0))
+    finally:
+        sock.close()
+
+
+def test_a_hello_that_never_authenticates_does_not_burn_the_invite(
+    devices: tuple[relay.RelayServer, relay.RelayServer, str, int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-1 MAJOR 3: an unauthenticated hello must not consume a valid invite.
+
+    ``redeemed`` used to be written from the hello alone, so a connection that
+    dropped before its auth frame left the invite unusable and the honest device's
+    retry was refused ``invite_in_use``. Driven as the wire drives it: a real join
+    hello (and a real challenge back, so the listener is past its invite checks),
+    then a close, then the SAME token joined properly.
+    """
+    server_a, server_b, host, port = devices
+    record = _init_network(server_a)
+    token, envelope = _mint_invite(server_a, record)
+
+    _drop_after_the_hello(server_b, host=host, port=port, envelope=envelope)
+    refreshed = store.load(record.network_id, server_a.root)
+    assert (
+        refreshed.invites[0].state == "minted"
+    ), "an unauthenticated hello consumed a valid invite"
+
+    # The honest retry, on the same token, succeeds — which is the whole property.
+    _type_the_code(monkeypatch)
+    thread = threading.Thread(target=lambda: _answer_confirmation(server_a), daemon=True)
+    thread.start()
+    try:
+        joined = _join(server_b, host=host, port=port, token=token, envelope=envelope)
+    finally:
+        thread.join(15)
+    assert joined is not None and not isinstance(joined, str), joined
+    assert store.load(record.network_id, server_a.root).invites[0].state == "consumed"
+    assert len(store.load(record.network_id, server_a.root).active_members()) == 2
+
+
+def test_silent_connections_are_capped_before_authentication(root: Path) -> None:
+    """Round-1 MAJOR 1: the pre-auth phase is BOUNDED, so a silent connection
+    costs a slot and not an unbounded thread.
+
+    The finding's shape: N connections that send nothing produced N live handshake
+    threads and 0 links, because ``max_links`` counts established links and an
+    unauthenticated connection has none. Asserted on the wire rather than on a
+    thread count: past the cap the socket is closed at the accept, so a read on it
+    returns EOF immediately, while a slot-holder's read times out because nothing
+    has been written to it and it is still open.
+    """
+    import socket
+
+    root_a = root / "cap"
+    server = relay.RelayServer(
+        root=root_a,
+        settings=relay.NetworkSettings(
+            port=0, listen_address="127.0.0.1", max_handshakes=2
+        ),
+        identity=identity.mint(root_a, name="cap-device"),
+        audit=audit_mod.AuditLog(root_a),
+    )
+    host, port = server.bind()
+    server.bind_control()
+    server.start()
+    held: list[socket.socket] = []
+    try:
+        for _ in range(6):
+            held.append(socket.create_connection((host, port), timeout=5))
+        # Accept order is the connect order on one loopback listener, so the first
+        # `max_handshakes` are the ones holding slots.
+        for quiet in held[2:]:
+            quiet.settimeout(5.0)
+            assert quiet.recv(1) == b"", "a connection past the pre-auth cap was held open"
+        for busy in held[:2]:
+            busy.settimeout(1.0)
+            with pytest.raises(TimeoutError):
+                busy.recv(1)
+    finally:
+        for sock in held:
+            sock.close()
+        server.stop()
+
+
+def test_a_member_cannot_send_into_or_close_another_members_stream(root: Path) -> None:
+    """Round-1 MINOR 5: the stream-ownership rule holds on send and close, not
+    only on push.
+
+    A stream id is unpredictable (``os.urandom``), but unpredictable is not
+    unforgeable — a member that learns one from a log, a traceback or a bug must not
+    be able to write into, or end, another member's stream. The PUSH path always
+    checked ``stream.link is link``; the request path (``net_stream`` with
+    ``send``/``close``) did not, so knowing the id was enough.
+    """
+    root_a = root / "streams"
+    server = relay.RelayServer(
+        root=root_a,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1"),
+        identity=identity.mint(root_a, name="stream-device"),
+        audit=audit_mod.AuditLog(root_a),
+    )
+    owner = cast(relay.PeerLink, object())
+    other = cast(relay.PeerLink, object())
+    stream = relay._Stream(  # noqa: SLF001 — the object the ownership rule protects
+        stream_id="s_" + "a" * 16,
+        session_id="sess-1",
+        peer_device_id="d_owner",
+        link=owner,
+    )
+    server._streams[stream.stream_id] = stream  # noqa: SLF001
+
+    assert server._stream_for(owner, stream.stream_id) is stream  # noqa: SLF001
+    assert server._stream_for(other, stream.stream_id) is None  # noqa: SLF001
+    # The push and closed routes answer "not mine" for a link that does not own it.
+    assert server.route_stream_push(other, {"stream": stream.stream_id, "frame": {}}) is False
+    assert server.route_stream_closed(other, {"stream": stream.stream_id}) is False
+    # A close REQUEST from the wrong link is refused by name rather than obeyed, and
+    # with the same refusal an unknown id gets — the answer never confirms whether
+    # the id exists on this device.
+    with pytest.raises(types.MeshRefusal) as excinfo:
+        server._op_stream(  # noqa: SLF001
+            other, {"op": "net_stream", "action": "close", "stream": stream.stream_id}
+        )
+    assert excinfo.value.code == "unknown_stream"
+    assert stream.closed is False, "a member closed another member's stream"
 
 
 # ---------------------------------------------------------------------------

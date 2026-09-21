@@ -410,7 +410,10 @@ class LinkCrypto:
 
     def __init__(self, keys: LinkKeys, *, role: Role) -> None:
         self._keys = keys
-        self._role = role
+        # ANNOTATED, not inferred: pyright widens an attribute assigned from a
+        # ``Literal``-typed parameter to ``str``, so the ``role`` property below
+        # would promise a ``Role`` it cannot prove. The annotation is the promise.
+        self._role: Role = role
         self._key, self._iv, self._direction = keys.send_params(role)
         recv_key, recv_iv, recv_direction = keys.receive_params(role)
         self._recv_key = recv_key
