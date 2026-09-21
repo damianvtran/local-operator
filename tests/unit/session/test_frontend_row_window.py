@@ -42,6 +42,7 @@ from local_operator.harness.types import (
 )
 from local_operator.session import frontend_state as module
 from local_operator.session.frontend_state import (
+    FRONTEND_CHECKPOINT_CUSTOM_TYPE,
     FrontendSessionState,
     FrontendStateStore,
     FrontendSync,
@@ -1087,6 +1088,28 @@ def _released_session(jobs: list[Any], *, retention_ms: float = 5 * 60_000) -> A
     return session
 
 
+class _CheckpointTranscript:
+    """A transcript double for both halves of the durable round trip.
+
+    ``checkpoint`` APPENDS through ``append_custom``; ``_restored_state`` READS
+    through ``latest_custom``. One object serves both so a test writes a
+    checkpoint and restores from exactly what was written, rather than from a
+    hand-built state that could differ from the durable row in the one field
+    under test.
+    """
+
+    def __init__(self) -> None:
+        self.checkpoint: tuple[str, dict[str, Any]] | None = None
+
+    async def append_custom(self, custom_type: str, payload: dict[str, Any]) -> None:
+        self.checkpoint = (custom_type, payload)
+
+    def latest_custom(self, custom_type: str) -> dict[str, Any] | None:
+        assert self.checkpoint is not None, "latest_custom read before any checkpoint"
+        kind, payload = self.checkpoint
+        return payload if kind == custom_type else None
+
+
 def test_a_released_row_keeps_its_identity_and_says_it_was_released() -> None:
     """Released means "not a current member", never "gone"."""
     live, done = _job("child-live"), _settled(_job("child-done"))
@@ -1420,7 +1443,7 @@ def test_an_unresolved_failure_is_not_released_on_the_quiet_clock() -> None:
 
 
 def test_the_released_flag_never_rides_the_wire() -> None:
-    """The flag is in-process only: `_released_row` sets it, no reader is on the socket.
+    """The flag reaches no wire frame: `_released_row` sets it, no reader is on the socket.
 
     QA ROUND 1 (Q1). It used to be sent whenever it was true — "the informative
     value" — and that cost 25 bytes on EVERY released row against an attach
@@ -1449,6 +1472,90 @@ def test_the_released_flag_never_rides_the_wire() -> None:
         "a released row carried the flag; nothing reads it off the wire and 25 B/row "
         "does not fit the attach ceiling (QA round 1, Q1)"
     )
+
+    # THE DELTA ROUTE, asserted separately because the two routes serialize job
+    # rows by their own paths and a saving at one does not reach the other (this
+    # file's module docstring, and the reason `_elide_row_facts_in_place` runs at
+    # both). Review round 4 (V2) removed `mutate`'s call alone and every assertion
+    # above still passed, so the delta boundary was unpinned: the mirrored shape
+    # here is the one the empty-value elision already has in
+    # ``test_subagent_view_state.py``.
+    changed = [
+        row.model_copy(update={"result_text": "moved on"}) if row.id == "child-done" else row
+        for row in store.state.jobs
+    ]
+    update = store.mutate(jobs=changed)
+    assert update is not None, "the roster change produced no delta to assert against"
+    delta_rows = {row["id"]: row for row in update.model_dump(mode="json")["changes"]["jobs"]}
+    assert (
+        "roster_released" not in delta_rows["child-live"]
+    ), "a member row carried the flag on the delta route"
+    assert "roster_released" not in delta_rows["child-done"], (
+        "a released row carried the flag on the DELTA route; `mutate` serializes job rows "
+        "by its own path, so the snapshot elision does not reach `frontend_update` "
+        "(review round 4, V2)"
+    )
+
+
+def test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it() -> None:
+    """The flag's ONE durable route, pinned by test rather than by prose.
+
+    REVIEW ROUND 4 (V1). The docstrings said the flag is "never serialized". It
+    is: :meth:`FrontendStateStore.checkpoint` writes the CANONICAL state — the one
+    that keeps the flag — to the session transcript at every turn end, and
+    ``_restored_state`` reads it back in a later process. That route deliberately
+    stays (the checkpoint is the store's record of its OWN canonical state, not a
+    frame for a peer), so this pins the two facts that make it harmless instead:
+    the durable row really does carry the flag, and a restored store RE-DERIVES it
+    rather than trusting the durable copy.
+
+    Re-derivation is the load-bearing half. ``JobState.from_job`` never sets the
+    field, so a restore that merely inherited the durable value would hold a
+    ``True`` released by a PREVIOUS process; the first ``refresh_jobs`` rebuilds
+    every row through ``from_job``/``_released_row`` and so overwrites it. Nothing
+    in the tree reads the flag off the checkpoint (or off any wire frame), which is
+    why carrying it costs bytes and no correctness.
+    """
+    live, done = _job("child-live"), _settled(_job("child-done"))
+    session = _released_session([live, done])
+    store = _store([live, done])
+    store.refresh_jobs(session)
+
+    transcript = _CheckpointTranscript()
+    asyncio.run(store.checkpoint(transcript))
+
+    assert transcript.checkpoint is not None, "the store wrote no checkpoint at all"
+    custom_type, payload = transcript.checkpoint
+    assert custom_type == FRONTEND_CHECKPOINT_CUSTOM_TYPE
+    durable = {row["id"]: row for row in payload["state"]["jobs"]}
+    assert durable["child-done"]["roster_released"] is True, (
+        "the durable checkpoint dropped the flag. The docstrings' claim is that the "
+        "flag never goes ON THE WIRE; the checkpoint is the route that keeps it, and "
+        "if that changed the restore path's expectations changed with it"
+    )
+    assert durable["child-live"]["roster_released"] is False
+
+    restored = FrontendStateStore.from_checkpoint(
+        SimpleNamespace(session_id="frame-cost", _transcript=transcript)
+    )
+    assert {row.id: row.roster_released for row in restored.state.jobs} == {
+        "child-live": False,
+        "child-done": True,
+    }, "a same-session restore did not adopt the durable flags"
+
+    # The first refresh RE-DERIVES rather than trusting the durable copy, and the
+    # premise is asserted first: if ``from_job`` ever started setting the field,
+    # the refresh below would be a no-op test that the durable value survived.
+    released_row = next(row for row in restored.state.jobs if row.id == "child-done")
+    assert JobState.from_job(released_row).roster_released is False, (
+        "`from_job` now sets the flag, so a refresh no longer re-derives it and this "
+        "test no longer proves what it claims"
+    )
+    restored.refresh_jobs(_released_session([live, done]))
+    assert {row.id: row.roster_released for row in restored.state.jobs} == {
+        "child-live": False,
+        "child-done": True,
+    }, "the refresh after a restore did not re-derive the released flags"
 
 
 def test_a_released_row_holds_only_frozen_containers() -> None:

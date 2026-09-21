@@ -633,13 +633,16 @@ def test_shareable_state_fields_are_real_and_immutable() -> None:
 
 
 def test_the_released_flag_never_reaches_the_wire() -> None:
-    """`roster_released` is in-process only, and this is what says so.
+    """`roster_released` reaches no wire frame, and this is what says so.
 
     QA ROUND 1 (Q1), closed by eliding the key at BOTH wire boundaries rather
     than by lowering a cap or re-tuning the instrument. Setting it on the
     calibrated ``ran_all_year`` fixture's 200 rows took the attach frame from
-    1,048,408 to **1,052,200** bytes (+5,000 = 200 x 25.0) — over the 1 MiB line
-    — so about seven rows of that shape were the whole margin. The fixture could
+    1,048,408 to **1,052,200** bytes: +5,000 GROSS (200 x 25.0), of which the
+    catalogue's 1,208 B of travel absorbs all but the NET +3,792 — the two
+    numbers are different quantities and only the net is an endpoint of this
+    frame. Either way it was over the 1 MiB line, so about seven rows of that
+    shape were the whole margin. The fixture could
     not express the shape itself: its rows are ``status="running"``, and
     `retention_expired` refuses a running row before it looks at the clock, so
     the roster window can never release one. The released arm of
@@ -694,8 +697,8 @@ def test_the_released_flag_never_reaches_the_wire() -> None:
         serialized = wire_frame(row)["data"]["snapshot"]["jobs"]
         assert len(serialized) == 1, "the fixture stopped serializing exactly one row"
         assert "roster_released" not in serialized[0], (
-            f"the {name} row serialized `roster_released`. The flag is in-process "
-            "only (QA round 1, Q1): nothing reads it off the wire, and 25 B/row "
+            f"the {name} row serialized `roster_released`. The flag reaches no "
+            "wire frame (QA round 1, Q1): nothing reads it off the wire, and 25 B/row "
             "does not fit the attach ceiling's 168 B of slack. If a wire consumer "
             "has landed, re-derive the wire form as a STATE-level enumeration "
             "rather than re-adding this key — see `_elide_row_facts_in_place`."
@@ -1042,6 +1045,21 @@ def test_the_attach_frame_fits_for_a_session_that_ran_all_year(tmp_path: Path) -
     # instrument — a ceiling decision, not an elision one. It is reported on the
     # PR; `_RELEASED_ARM_PRE_EXISTING_EXCESS_BYTES` bounds the residual so it
     # cannot grow unnoticed in the meantime.
+    #
+    # AND THE RESIDUAL IS AN UNDER-CHARGE, not merely a rounding (QA round 2, Q6):
+    # the fixture charges 17 B less per row than the production builder, so the
+    # guard's 168 B of slack certifies a roster shape roughly 2 KB LIGHTER than a
+    # real one. The bounding constant stays where it is and the fixture is NOT
+    # charged: doing so is the ceiling decision described above, and the excess is
+    # confirmed pre-existing (released − member-projection = 0 B, so it is not a
+    # property of releasing).
+    #
+    # The baseline must be read from the FIXTURE'S OWN rows (`settled`), not from
+    # `store.state.jobs`: `JobState.from_job` drops a frozen window —
+    # `_is_retained_row` refuses the `_FrozenMapping` a canonically-frozen window
+    # holds, so the derived `trajectory_length` follows it to 0 and the baseline
+    # measures 400 B LIGHT (200 x 2 digits). A lighter baseline makes the
+    # invariant below pass for the wrong reason (QA round 2, Q5).
     member_rows = [_with_lineage(JobState.from_job(job), _NO_LINEAGE) for job in settled]
     member_store = FrontendStateStore(state.model_copy(update={"jobs": member_rows}))
     member_frame = {
