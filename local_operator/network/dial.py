@@ -41,9 +41,57 @@ from typing import Any, Callable
 #: ``session/runtime/control.py`` uses for the same socket, deliberately: two
 #: readers of one socket disagreeing about "too big" is a frame one accepts and
 #: the other loses.
+#:
+#: THIS IS ALSO THE RELAY'S CONTROL-SOCKET BOUND, for both directions and both
+#: halves — the server frames a client's op with this reader (``relay
+#: ._control_connection``) and ``relay.control_request`` reads the reply with it.
+#: One socket, one line bound: the client used to read its reply under
+#: ``wire.MAX_HANDSHAKE_LINE`` (16 KiB, a PRE-AUTH bound for attacker-controlled
+#: handshake frames), so a federated catalogue reply of ~17 sessions was refused
+#: by the reader and reported as a wedged relay (QA round 8, Q-R8-1).
 MAX_SESSION_FRAME_BYTES = 1 << 23
 
 _READ_CHUNK = 1 << 16
+
+
+class FrameTooLarge(Exception):
+    """A line longer than the reader's bound, REPORTED rather than silently dropped.
+
+    THE TWO CALLERS OF THIS READER WANT OPPOSITE THINGS FROM A BAD FRAME, and this
+    exception is how the difference is spelled. A session STREAM must survive one:
+    the frames after an oversized line are still good, and the viewer's guarantee
+    (§3.2) is that one junk frame never costs the session — so ``read_frame``
+    discards the line and carries on. A ONE-SHOT REQUEST has nothing to carry on
+    TO: the client wrote its op and is waiting for exactly one line, so a line it
+    cannot read IS the answer, and ``None`` — the reader's "nothing yet" — would be
+    a lie the caller cannot tell from a silent socket.
+
+    ``size`` is therefore a LOWER BOUND on the line rather than its length: a
+    reader refuses the moment its buffer passes the bound with no newline in sight,
+    and the bytes still in flight are never counted (counting them would mean
+    buffering the line, which is the allocation the bound exists to prevent). When
+    the newline had already arrived, ``size`` IS the line's length.
+    """
+
+    def __init__(self, size: int, limit: int) -> None:
+        self.size = size
+        self.limit = limit
+        super().__init__(f"a line of at least {size} bytes exceeded the {limit}-byte bound")
+
+
+class FrameUnreadable(Exception):
+    """A line that is not a JSON object. A stream skips it; a one-shot request names it.
+
+    The same split as :class:`FrameTooLarge`: skipping is what keeps a session alive
+    through a frame that cannot be parsed, and for a one-shot request that behaviour
+    turns a relay that answered with rubbish into a relay that "did not answer" —
+    two different incidents with two different remedies.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
 
 #: How long to wait for the runtime's unsolicited welcome after authenticating.
 #: The same budget ``control.py`` uses for its identity check, because it is the
@@ -73,6 +121,11 @@ class LineReader:
 
     sock: socket.socket
     limit: int = MAX_SESSION_FRAME_BYTES
+    #: REPORT A BAD LINE INSTEAD OF DROPPING IT — for a ONE-SHOT caller, whose only
+    #: answer is the next line. Off by default, because a stream's contract is the
+    #: opposite one (see :class:`FrameTooLarge`), and the relay's control socket and
+    #: the owner dials both take the default.
+    report_bad_frames: bool = False
     #: Set when the socket reached EOF or failed rather than merely going
     #: quiet. A pump that only sees ``None`` cannot tell "nothing yet" from
     #: "owner gone", and those are different events to a viewer.
@@ -81,7 +134,13 @@ class LineReader:
     _skipping: bool = False
 
     def read_frame(self, timeout_s: float) -> dict[str, Any] | None:
-        """The next frame, or ``None`` on timeout or a closed socket."""
+        """The next frame, or ``None`` on timeout or a closed socket.
+
+        With ``report_bad_frames`` a line this reader cannot use raises
+        :class:`FrameTooLarge` or :class:`FrameUnreadable` instead of being skipped,
+        which is what a caller waiting for exactly one line needs (see those
+        classes).
+        """
         deadline = time.monotonic() + timeout_s
         while True:
             newline = self._buffer.find(b"\n")
@@ -93,17 +152,33 @@ class LineReader:
                     # follows it is a real frame again.
                     self._skipping = False
                     continue
+                if len(raw) > self.limit:
+                    # THE BOUND IS CHECKED ON A COMPLETE LINE TOO, not only on a
+                    # prefix. A read is up to ``_READ_CHUNK`` bytes, so the newline
+                    # can arrive in the same fill that crossed the bound; a reader
+                    # that only checked the prefix would then parse a line it had
+                    # already decided was too big. Here the length is EXACT.
+                    if self.report_bad_frames:
+                        raise FrameTooLarge(len(raw), self.limit)
+                    continue
                 try:
                     frame = json.loads(raw.decode("utf-8", "replace"))
                 except ValueError:
+                    if self.report_bad_frames:
+                        raise FrameUnreadable("the line was not valid UTF-8 JSON") from None
                     continue
                 if isinstance(frame, dict):
                     return frame
+                if self.report_bad_frames:
+                    raise FrameUnreadable("the line was not a JSON object")
                 continue
             if len(self._buffer) > self.limit:
                 # Bounded memory, and the frames after such a line still
                 # survive in the buffer — see the module docstring.
+                size = len(self._buffer)
                 self._buffer.clear()
+                if self.report_bad_frames:
+                    raise FrameTooLarge(size, self.limit)
                 self._skipping = True
                 continue
             remaining = deadline - time.monotonic()

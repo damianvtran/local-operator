@@ -50,6 +50,13 @@ from local_operator.network.types import HandshakeRefusal, LinkPhase, MeshRefusa
 #: A handshake frame is JSON on one line and nothing in the ceremony comes close
 #: to this; the cap exists so a peer cannot make the listener buffer without
 #: limit before any authentication has happened.
+#:
+#: A PRE-AUTH BOUND, AND ONLY THAT: it does not bound the relay's loopback control
+#: socket, whose replies are post-auth, peer-to-peer and grow with the mesh (a
+#: federated catalogue is one row per session per device). That path reads under
+#: ``dial.MAX_SESSION_FRAME_BYTES``, through ``dial.LineReader`` — see
+#: ``relay.control_request`` — and applying THIS number to it is what made a busy
+#: mesh's listing report a wedged relay (QA round 8, Q-R8-1).
 MAX_HANDSHAKE_LINE = 16 * 1024
 
 #: A single AES-GCM record's plaintext ceiling. Checked against the LENGTH
