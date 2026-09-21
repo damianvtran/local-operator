@@ -24,7 +24,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from local_operator.procstate import is_zombie, pid_liveness
+from local_operator.procstate import is_zombie, pid_liveness, process_sample
 
 # The archive index is imported at module scope deliberately: it is stdlib-only
 # at ITS module scope (its one local import, of ``session.catalog``, is made
@@ -39,6 +39,7 @@ from local_operator.session.archived import archived_ids
 #: imports no stdlib and no engine. Hiding the refusal behind a function-local
 #: import would make the type unreachable to a caller that wants to catch it.
 from local_operator.session.errors import SessionStoreUnavailable
+from local_operator.session_lease import LEASE_NAME, _read_claim
 
 logger = logging.getLogger(__name__)
 
@@ -1198,10 +1199,28 @@ def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = 
     lost (the schedule stays overdue until a runtime loads). It is also strictly
     narrower than the behaviour before this branch, when such a record read as
     live for the ~45 s until its heartbeat quieted.
+
+    **A PID IS NOT AN OWNER EITHER — the marker outlives its writer.** The
+    marker holds a number, and the kernel hands a reaped process's number to the
+    next process that wants one, so this reported a dead runtime's session as
+    "already open in pid N" naming an unrelated stranger: every attach path
+    refused it and nothing was running (session bfbc971ef537, 2026-09-21). The
+    identity comes from the session's ``.execution-lease`` CLAIM, which records
+    the birth token of the process that wrote it
+    (:func:`local_operator.procstate.same_birth`): when the claim names THIS
+    pid and its recorded birth differs from the live process's, the writer is
+    gone and this returns ``None``. The marker itself keeps its bare-pid format
+    on purpose — ``retention``, ``cleanup`` and this module all parse it as an
+    ``int()``, and an unparseable value reads there as "no owner", which is a
+    second writer against a live one. A marker with no claim beside it, or a
+    claim naming a different pid, has no recorded identity and keeps today's
+    pid-liveness behaviour: that is the mixed-generation cell that keeps an
+    older build's live owner safe.
     """
     if session_id in ("", ".", "..") or Path(session_id).name != session_id:
         return None
-    marker = config_dir / "sessions" / session_id / ".session.pid"
+    session_dir = config_dir / "sessions" / session_id
+    marker = session_dir / ".session.pid"
     try:
         raw = marker.read_text(encoding="utf-8").strip()
         pid = int(raw)
@@ -1220,14 +1239,58 @@ def live_runtime_pid(config_dir: Path, session_id: str, *, check_zombie: bool = 
     # ``/resume`` starts a second runtime against.
     if pid_liveness(pid) is False:
         return None
-    if check_zombie and is_zombie(pid):
+    if not check_zombie:
+        # The engage loop's dense 10 ms grid: the cheap answer only, which is
+        # the same deferral the corpse proof gets below and the identity proof
+        # gets with it. The grid exists to shorten the dead time between a
+        # runtime publishing and the parent noticing; a ``ps`` fork costs
+        # 2.4-4.6 ms against a 23-30 µs iteration budget. What it can cost here
+        # is bounded and cannot recovers the impersonation: on that path the
+        # cheap answer selects a record or reports an errand ready, and the
+        # decision to attach or spawn still ends in a runtime that must acquire
+        # the lease — and acquisition always proves identity.
+        return pid
+    sample = process_sample(pid)
+    if sample is None:
+        # The platform could not answer at all. Fall back to the question this
+        # used to ask alone, which never displaces a live owner.
+        return None if is_zombie(pid) else pid
+    if sample.zombie:
         # The probe is spent only here, where signal 0 has already said
         # "exists". At the user-facing call sites the difference between a
         # working runtime and its corpse decides whether someone is told to go
         # and steer a session that nobody is running; on the engage loop's dense
         # discovery path it is deferred, because there it can only cost a wait.
         return None
+    identity = _mirror_identity(session_dir, pid)
+    if identity is not None and sample.is_birth(*identity) is False:
+        # THE MARKER NAMES A PID, AND THIS PROCESS IS NOT THE ONE THAT WROTE IT.
+        # A pid is not an identity: the mirror outlives the process that wrote
+        # it, and the kernel hands the number to the next process that wants one,
+        # so this used to report a session as "already open in pid N" naming a
+        # stranger — every attach path refused while nothing was running. The
+        # identity is read from the CLAIM (the mirror stays a bare pid, because
+        # its readers parse it as an int and an unparseable value there means
+        # "no owner", i.e. a second writer).
+        return None
     return pid
+
+
+def _mirror_identity(session_dir: Path, pid: int) -> tuple[str | None, str | None] | None:
+    """The birth the CLAIM records for ``pid``, or ``None`` for a legacy mirror.
+
+    ``None`` — the legacy cell, and the whole compatibility story — covers both
+    a mirror with no claim beside it (an older build's marker, or the window
+    between release unlinking the claim and the mirror) and a claim that names a
+    DIFFERENT pid than the mirror, where the mirror's writer is not the claim's
+    and nothing about that pid's identity has been recorded. Both are read as
+    "no identity available", which keeps today's pid-liveness behaviour; only a
+    live process whose measured birth differs from the recorded one is demoted.
+    """
+    claim = _read_claim(session_dir / LEASE_NAME)
+    if claim.pid != pid or claim.pid is None:
+        return None
+    return claim.birth
 
 
 def origin_cache_path(config_dir: Path) -> Path:

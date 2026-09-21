@@ -13,6 +13,15 @@ over:
 - :mod:`local_operator.resume` — should an attach be offered, or refused
   because the session is already open in another process?
 
+There are TWO questions here, and one of them was missing until a reused pid
+made a session unopenable (2026-09-21): "is this pid a live process" is not the
+same as "is this pid still the process that wrote this record". A pid is not an
+identity — the kernel hands the number to the next process that wants one as
+soon as the owner is reaped — so a claim whose pid was recycled reads live
+forever. That case is a :func:`birth_token` matter, and the token is read from
+the SAME platform probe as the zombie answer, so neither can be asked without
+the other being available.
+
 They must agree, and the cost of disagreement is not a stale row: discovery
 reporting "gone" while the lease reports "held" is a session **no interface can
 open and no mechanism can recover**. That is not hypothetical — see
@@ -32,6 +41,7 @@ import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -435,53 +445,335 @@ def _is_zombie_state(state: str) -> bool:
     return state.strip().upper().startswith("Z")
 
 
-def _proc_state(pid: int) -> str | None:
-    """Linux's own answer, or ``None`` where ``/proc`` does not exist.
+# ---------------------------------------------------------------------------
+# Birth tokens: "is this pid still the process that wrote this record?"
+# ---------------------------------------------------------------------------
+#
+# WHY A PID IS NOT AN IDENTITY (the incident this section exists for).
+# A session runtime died and left its sole-writer claim behind naming pid 1969;
+# the kernel then gave pid 1969 to an unrelated live process. Every probe in this
+# package asked "is there a process with this pid", which the stranger answered
+# yes to, so the dead owner's claim read live for as long as the stranger happened
+# to hold the number: engage waited out its 30 s deadline without spawning (the
+# user was told "the runtime is reconnecting"), the lease refused the session from
+# every interface, and the attach guard reported it as owned. The round-3 zombie
+# fix cannot reach this case — its reasoning is "the pid is not reused while the
+# corpse lingers", which an unreaped zombie satisfies and a reaped one does not,
+# one instant after it is reaped.
+#
+# WHAT THE TOKEN IS: the process's START TIME, which the platform will answer
+# for any live pid and which cannot be made true again once that process is
+# gone.
+#
+#   - macOS / BSD: ``ps -o lstart=`` — whole seconds (see ``_PS_RENDER_ENV`` for
+#     why the child's environment is fixed, and ``ProcessSample.is_birth`` for
+#     what
+#     the resolution does and does not catch);
+#   - Linux: ``/proc/<pid>/stat`` field 22, the start time in clock ticks since
+#     boot — 10 ms at the usual 100 Hz, and fork-free;
+#   - Windows: none, deliberately. There the process identity is a HANDLE rather
+#     than a process-table entry, and a pid can be recycled the instant its
+#     handle closes, so every caller keeps today's pid-liveness behaviour there.
+#
+# The token is an OPAQUE STRING paired with a SCHEME, and the two are compared
+# together: the scheme names what was measured (``ps-lstart-c-v1``,
+# ``proc-starttime-v1``) and the token is that measurement, verbatim. A token
+# written with a scheme this build does not produce — another platform, or a
+# build that measured something else — is DOUBT rather than a mismatch. That
+# direction matters: see ``same_birth`` and ``ProcessSample.is_birth``.
 
-    ``comm`` can contain spaces and parentheses, so the state is the field after
-    the LAST ``)``.
+#: `ps -o lstart=` (macOS/BSD): the process start time, as `ps` renders it.
+#:
+#: Scheme-tagged in the CLAIM rather than in the token bytes: the tag is what a
+#: reader compares first, so a token written by a build that measured something
+#: else is UNREADABLE rather than different, and unreadable means "keep the
+#: holder" (:func:`same_birth`). The version suffix is the point — if the `ps`
+#: invocation ever changes (padding, a different `ps`, an extra field), the tag
+#: must move, or every live owner in the fleet reads as mismatched at once.
+BIRTH_SCHEME_PS_LSTART = "ps-lstart-c-v1"
+
+#: `/proc/<pid>/stat` field 22 (Linux): start time in clock ticks since boot.
+BIRTH_SCHEME_PROC_STARTTIME = "proc-starttime-v1"
+
+#: The `ps` keywords that answer BOTH per-process questions in ONE invocation.
+#:
+#: One probe rather than two because every caller of the identity question is
+#: also asking the zombie question, and the zombie probe's cost is what the
+#: engage loop's cadence is set by (2.4-4.6 ms per fork against the 23-30 µs
+#: budget of one dense poll iteration). `lstart` rides the invocation that was
+#: already being spent instead of adding a second one beside it.
+#:
+#: It is also a CORRECTNESS property, not only a cost one: a second fork for the
+#: identity would sample a DIFFERENT instant, so the pid could be recycled
+#: between the liveness answer and the token answer and the successor would
+#: answer the identity question. One line, one sample, both answers.
+_PS_SAMPLE_KEYWORDS = "pid=,state=,lstart="
+
+#: The environment every `ps` child is given. CORRECTNESS, not tidiness:
+#: `lstart` is rendered in the process table's LOCAL time zone and locale, so
+#: two callers with different `LC_ALL`/`TZ` would sample DIFFERENT tokens for the
+#: SAME live process. A false mismatch is the one dangerous outcome of this whole
+#: mechanism — it says "the writer is gone" and lets a second runtime take a
+#: transcript a working process is still appending to — so the rendering is fixed
+#: in the ONE place the probe lives, where no caller can forget it.
+#:
+#: Measured on this host (2026-09-21): `TZ=UTC /bin/ps -o lstart= -p <pid>` prints
+#: `13:52:44` where `TZ=Asia/Tokyo` prints `22:52:44` for the same process — and
+#: `LC_ALL=C` is what keeps the month name parseable at all.
+_PS_PINNED_ENV = {"LC_ALL": "C", "TZ": "UTC"}
+
+
+@dataclass(frozen=True)
+class ProcessSample:
+    """One probe's answers about a pid: is it a corpse, and is it still the writer?
+
+    ONE sample, TWO answers, and that is a correctness property as much as a
+    cost one: the two questions are asked about the same holder by the same
+    callers, and a probe that answered them from separate instants could report
+    a pid that was a corpse when it was asked about liveness and a stranger by
+    the time it was asked about identity.
     """
-    try:
-        data = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
+
+    #: Exited but unreaped. See :func:`is_zombie`.
+    zombie: bool
+
+    #: The measurement itself, opaque to every reader but the platform that
+    #: produced it, paired with :func:`birth_scheme` (WHICH measurement this is).
+    #: ``None`` when the platform (or this probe, on this run) produced none —
+    #: DOUBT, never death: see :func:`same_birth`.
+    birth: str | None
+
+    def is_birth(self, scheme: str | None, token: str | None) -> bool | None:
+        """Whether THIS sample's process is the one that produced ``token``.
+
+        The whole comparison, and its only home: :func:`same_birth` is the
+        pid-based accessor for callers that hold no sample, and the callers that
+        do hold one — the acquisition and reap paths, which need the zombie
+        answer from the same instant — ask the sample directly. A second
+        spelling of this comparison beside it is exactly the drift
+        :func:`same_birth` documents.
+
+        See :func:`same_birth` for the three-valued contract.
+        """
+        if not scheme or not token:
+            return None
+        if scheme != birth_scheme():
+            # A scheme this build does not produce: written on another platform,
+            # or by a build that measured something else. Unreadable, not a
+            # mismatch — the difference is a live writer's claim.
+            return None
+        if self.birth is None:
+            return None
+        return self.birth == token
+
+
+def birth_scheme() -> str | None:
+    """What this platform's birth token measures, or ``None`` where it cannot.
+
+    Windows is the ``None`` case, deliberately: liveness there is a HANDLE
+    question (``OpenProcess``), a terminated process is immediately reusable,
+    and there is no process-table field to sample. Every caller therefore writes
+    no birth fields, reads them as unreadable, and falls back to exactly today's
+    pid-liveness behaviour — see :func:`same_birth`.
+    """
+    if is_windows():
         return None
-    return data.rpartition(")")[2].strip()
+    return BIRTH_SCHEME_PROC_STARTTIME if os.path.isdir("/proc") else BIRTH_SCHEME_PS_LSTART
 
 
-def _ps_states(pids: Sequence[int]) -> dict[int, bool]:
-    """ONE ``ps`` fork answering the zombie question for a whole pid SET.
+def _ps_samples(pids: Sequence[int]) -> dict[int, ProcessSample]:
+    """ONE ``ps`` invocation answering both questions for a whole pid SET.
 
     ``ps`` takes a pid LIST, which is what makes the batch cost one fork rather
-    than one per pid — the difference between a probe that scales with the
-    record population and one that does not. A pid ``ps`` does not report (it
-    exited between the caller's signal-0 check and this call) is simply ABSENT
-    from the result: existence is the caller's question and it has already asked
-    it, so inventing a verdict here would answer a different one.
+    than one per pid — the difference between a probe that scales with the record
+    population and one that does not. A pid ``ps`` does not report (it exited
+    between the caller's signal-0 check and this call) is simply ABSENT from the
+    result: existence is the caller's question and it has already asked it, so
+    inventing a verdict here would answer a different one.
 
-    An unprobeable set answers ``{}`` — the same "treat as alive" failure
-    :func:`is_zombie` documents, and the reason this can be a dict rather than a
-    raise.
+    The start time is taken as `ps` RENDERS it (``lstart``, under the pinned
+    ``_PS_PINNED_ENV``) and is never parsed into a date. That is deliberate: the
+    token only ever has to equal another rendering of the same process, and a
+    parse is where a locale, a format surprise or a clock step could turn two
+    renderings of one process into two different values — the mismatch direction
+    that costs a live writer its claim. Left as text, those surprises can only
+    make two tokens differ, which is the safe side.
     """
     if not pids:
         return {}
     try:
         result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-            ["/bin/ps", "-o", "pid=,state=", "-p", ",".join(str(pid) for pid in pids)],
+            [
+                "/bin/ps",
+                "-o",
+                _PS_SAMPLE_KEYWORDS,
+                "-p",
+                ",".join(str(pid) for pid in pids),
+            ],
             capture_output=True,
             text=True,
             timeout=1.0,
             check=False,
+            env={**os.environ, **_PS_PINNED_ENV},
         )
     except Exception:  # noqa: BLE001 — an unprobeable set is treated as alive
         return {}
-    states: dict[int, bool] = {}
+    samples: dict[int, ProcessSample] = {}
+    # ``pid=`` suppresses the header; ``state`` is padded to its column, so the
+    # line splits into pid, state, and the five fields of ``lstart``.
     for line in result.stdout.splitlines():
-        # ``-o pid=`` suppresses the header, so every line is "<pid> <state>".
-        fields = line.split(None, 1)
-        if len(fields) != 2 or not fields[0].isdigit():
+        fields = line.split(None, 2)
+        if len(fields) != 3 or not fields[0].isdigit():
             continue
-        states[int(fields[0])] = _is_zombie_state(fields[1])
-    return states
+        rendered = " ".join(fields[2].split())
+        samples[int(fields[0])] = ProcessSample(
+            zombie=_is_zombie_state(fields[1]),
+            birth=rendered or None,
+        )
+    return samples
+
+
+def _proc_samples(pids: Sequence[int]) -> dict[int, ProcessSample]:
+    """The Linux answer: state and start time from ``/proc/<pid>/stat``.
+
+    One read per pid and no fork. Field 22 (``starttime``, in clock ticks since
+    boot) is the counterpart of ``ps``'s ``lstart``, and it is kept as the RAW
+    INTEGER: the token is compared against another sample of the same process, so
+    ticks are sufficient, exact, and immune to NTP steps and to any TZ or DST
+    rule — strictly better than a wall-clock rendering, which is why they are
+    never converted.
+    """
+    samples: dict[int, ProcessSample] = {}
+    for pid in pids:
+        try:
+            data = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            continue
+        # The command name is parenthesised and may itself contain spaces and
+        # parentheses, so the remaining fields are read from the LAST ')'.
+        tail = data.rpartition(")")[2].split()
+        # tail[0] is field 3 (state); ``starttime`` (field 22) is tail[19].
+        if len(tail) < 20:
+            continue
+        starttime = tail[19]
+        samples[pid] = ProcessSample(
+            zombie=_is_zombie_state(tail[0]),
+            birth=starttime if starttime.isdigit() else None,
+        )
+    return samples
+
+
+def process_samples(pids: Iterable[int]) -> dict[int, ProcessSample]:
+    """Both facts for a pid set, from the platform's ONE probe.
+
+    Windows answers ``{}`` rather than probing (see :func:`birth_scheme`), which
+    is the same answer the current implementation gives and the reason its
+    callers read absence as "not a zombie".
+    """
+    wanted = sorted({int(pid) for pid in pids if int(pid) > 0})
+    if not wanted or is_windows():
+        return {}
+    if os.path.isdir("/proc"):
+        return _proc_samples(wanted)
+    return _ps_samples(wanted)
+
+
+def process_sample(pid: int) -> ProcessSample | None:
+    """The same sample, for one pid; ``None`` when this host cannot answer.
+
+    ``None`` means a Windows host, a ``ps`` that failed, or a pid with no
+    ``/proc`` entry left. Every caller treats it as doubt and leaves a holder's
+    claim exactly where it is (:func:`same_birth`); the alternative, calling an
+    unproven pid dead, is the one direction that forks a live transcript.
+    """
+    if pid <= 0:
+        return None
+    return process_samples([pid]).get(pid)
+
+
+def birth_token(pid: int) -> str | None:
+    """The birth token of the process now holding ``pid``, or None.
+
+    Raw, and meaningful only together with :func:`birth_scheme` — the pair is
+    what a claim records and what :func:`same_birth` compares. The single
+    accessor for the platform's answer, so a caller that wants only identity does
+    not reach for a probe of its own: two spellings of "when did this process
+    start" are two answers, and this module exists because the probes it replaced
+    disagreed.
+    """
+    sample = process_sample(pid)
+    return None if sample is None else sample.birth
+
+
+#: ``pid -> token`` for THIS process. The token is fixed at process creation and
+#: cannot change while the process lives, so one probe answers every later
+#: question — but it is keyed by pid and re-sampled if that ever differs, so a
+#: ``fork``ed child (which inherits this module's globals) cannot answer with its
+#: parent's identity. Getting that wrong would write a claim naming a writer that
+#: never held it.
+_SELF_BIRTH: tuple[int, str] | None = None
+
+
+def self_birth_token() -> str | None:
+    """This process's own birth token, or ``None`` where the platform has none.
+
+    A FAILED SAMPLE IS NOT CACHED: ``None`` means "the platform has no token"
+    (Windows) or "this probe failed", and caching the second would poison every
+    later call in that process — one transient ``ps`` failure and every claim the
+    runtime writes from then on would carry no identity at all. Only a token is
+    remembered, and only under the pid it was read for.
+    """
+    global _SELF_BIRTH
+    pid = os.getpid()
+    if _SELF_BIRTH is not None and _SELF_BIRTH[0] == pid:
+        return _SELF_BIRTH[1]
+    token = birth_token(pid)
+    if token is not None:
+        _SELF_BIRTH = (pid, token)
+    return token
+
+
+def same_birth(scheme: str | None, token: str | None, pid: int) -> bool | None:
+    """Whether the process at ``pid`` is the one that produced ``token``.
+
+    THREE-VALUED, and the third value is the load-bearing one:
+
+    - ``True`` — a process holds this pid and it is the one that wrote the
+      record. A caller must treat such a holder as LIVE.
+    - ``False`` — a process holds this pid and it is NOT the writer: the writer
+      is gone and the number was reused. The record is stale, and the
+      generation-fenced recovery path may take it.
+    - ``None`` — the question could not be asked: no recorded birth at all (an
+      older build's record), no sample (``ps`` failed, ``/proc`` unreadable), or
+      a scheme this build does not produce (written elsewhere, or by a build
+      that measured something else). DOUBT IS NOT DEATH, exactly as it is not
+      for :func:`pid_liveness`: calling a live writer dead is what puts two
+      runtimes on one transcript, while calling a dead one live leaves its
+      record where it was.
+
+    **What the macOS token's one-second resolution does and does not catch.**
+    ``lstart`` is rendered to whole seconds, so two processes born inside the SAME
+    second are indistinguishable to it — and a same-second spawn is ORDINARY, not
+    exotic: two processes started back to back share a token, measured on this host
+    (Linux's ticks are 10 ms, and a pid reused there requires the counter to wrap
+    through ``pid_max``). What that means for a claim, stated as the frequency it
+    is rather than as a bound: a false ``True`` needs the current occupant of the
+    pid to have been born in the same second as the WRITER, and since the writer
+    had to die and be reaped before the pid could be handed on, it means the writer
+    started and was reaped inside one second — a process whose whole life fits in
+    one tick. A false ``True`` leaves the claim un-takeable until the stranger
+    exits — the incident's symptom, which the same interfaces report honestly — and
+    never a second writer. Measured on
+    this host: a canary pid killed immediately was not handed to any of the next
+    400 short-lived processes in 19 s, so on macOS the reuse itself is the slow
+    part (the counter wraps through ``pid_max``).
+    """
+    if not scheme or not token:
+        return None
+    sample = process_sample(pid)
+    if sample is None:
+        return None
+    return sample.is_birth(scheme, token)
 
 
 def zombie_states(pids: Iterable[int]) -> dict[int, bool]:
@@ -512,19 +804,16 @@ def zombie_states(pids: Iterable[int]) -> dict[int, bool]:
     immediately reusable there, and liveness is a *handle* question
     (``OpenProcess``), not a process-table one — the answer the POSIX probe
     would reach through a doomed ``/bin/ps`` fork, without the fork.
+
+    The probe is :func:`process_samples`, the SAME one that answers the birth-token
+    question. That is deliberate: the two questions are asked about the same
+    holder by the same callers, and one probe means a caller can never be told
+    that a pid is a corpse with one answer and a stranger with another. On macOS
+    this also means the identity tag rides the fork this batch was already
+    spending, rather than a second fork beside it.
     """
     wanted = sorted({int(pid) for pid in pids if int(pid) > 0})
-    if not wanted or is_windows():
-        return {}
-    if os.path.isdir("/proc"):
-        # Linux: no subprocess needed, and no fork for the whole set.
-        scraped: dict[int, bool] = {}
-        for pid in wanted:
-            state = _proc_state(pid)
-            if state is not None:
-                scraped[pid] = _is_zombie_state(state)
-        return scraped
-    return _ps_states(wanted)
+    return {pid: sample.zombie for pid, sample in process_samples(wanted).items()}
 
 
 def is_zombie(pid: int) -> bool:
@@ -535,7 +824,14 @@ def is_zombie(pid: int) -> bool:
     been reaped yet, so every probe built on it reports such a pid as alive
     for as long as its parent fails to reap it — and for a runtime spawned by
     a long-lived TUI, that parent may never reap it at all. The pid is not
-    reused while it lingers, so the wrong answer is stable, not a race.
+    reused while it lingers, so the wrong answer is stable, not a race — **and
+    that is the limit of what this probe can promise.** The number is free the
+    instant the corpse is reaped, so "this pid is a live process" stops being a
+    statement about the WRITER one instant later. That second question — "is
+    this pid still the process that wrote this record?" — is
+    :func:`ProcessSample.is_birth`, and a caller that asks only this one is asking
+    half of what it needs. Everything that arbitrates a sole-writer claim asks
+    both.
 
     Where the wrong answer costs a row: `registry` fixed this for discovery
     records in round 3 (U10) — a SIGKILLed runtime reported ``live`` with
