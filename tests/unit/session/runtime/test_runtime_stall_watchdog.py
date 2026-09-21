@@ -758,7 +758,11 @@ def test_an_in_process_entry_point_arms_nothing(
 
     monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path))
 
-    async def fake_amain() -> int:
+    async def fake_amain(**_kwargs: object) -> int:
+        # ``**kwargs`` because ``main`` passes the operator capability through to
+        # the real ``amain`` (issue #1310); a double that pins the signature would
+        # fail on a parameter this test is not about. Same shape as
+        # ``test_process_reaper``'s double, for that shared reason.
         return 0
 
     monkeypatch.setattr(process, "amain", fake_amain)
