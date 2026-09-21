@@ -44,6 +44,7 @@ import pytest
 import pytest_asyncio
 import uvicorn
 
+from local_operator.agents import AgentRegistry
 from local_operator.server.app import app
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
@@ -57,6 +58,7 @@ from local_operator.session.runtime.presence import (
 )
 from local_operator.session.runtime.types import SessionRecord
 from local_operator.session.runtime.viewers import ViewerRecord
+from local_operator.tools.agent_tool import AgentParams, write_profile
 from tests.notification_opt_in import notification_path_opt_in
 
 pytestmark = pytest.mark.e2e
@@ -893,3 +895,154 @@ async def test_a_pin_written_over_the_route_rings_the_catalogue_doorbell(
 
     assert streamed_later[0]["payload"]["catalogue_revision"] == revision
     assert [frame for frame in streamed_later if frame["type"] == "catalogue"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_authored_profile_and_team_ring_the_authoring_doorbell(
+    desktop_server, workspace: Path
+):
+    """THE AUTHORING DOORBELL, over the real stack.
+
+    The reported defect: an agent inside a session creates a team or a profile and
+    the app's Teams/Agents lists keep showing the rows they were mounted with until
+    a refresh or a tab switch. The only vehicle for the fix is this feed, so this
+    is the test that says the token actually moves for BOTH registries — a unit
+    test of the key string cannot, because the failure it guards against (a probe
+    that never notices the write) lives entirely in the timing between a write and
+    a frame.
+
+    Both legs drive the real surfaces rather than a hand-written file: the profile
+    through ``write_profile``, which is the call the ``agent`` tool makes from
+    inside a session, and the team through ``POST /v1/desktop/teams``, which is the
+    route the app (and its own agents) use.
+
+    Four claims, each needing the HTTP layer:
+
+    1. authoring a profile publishes exactly one ``authoring`` frame, within the
+       probe interval;
+    2. a team created over the route publishes exactly one more, with the counter
+       advanced by one;
+    3. a QUIET window after each publishes none — otherwise the feed would refetch
+       every sidebar's profiles and teams once a second for nothing;
+    4. a client connecting afterwards is not REPLAYED the invalidation: its ``open``
+       snapshot carries the counter it would otherwise have been told about.
+    """
+    root, client = desktop_server
+
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        opened = await _next_frame(lines, lambda f: f["type"] == "open")
+        assert opened["payload"]["authoring_revision"] is not None
+
+        # A READER TASK, not a bounded read per window: cancelling an
+        # `aiter_lines()` iteration closes the response it is reading, so a
+        # windowed read tears the subscription down and every later window reads
+        # nothing at all. The same idiom the pin-doorbell test above uses.
+        streamed: list[dict[str, Any]] = []
+
+        async def pump() -> None:
+            async for line in lines:
+                if line.startswith("data: "):
+                    streamed.append(json.loads(line[6:]))
+
+        reader = asyncio.create_task(pump())
+
+        def authoring(since: int) -> list[dict[str, Any]]:
+            return [frame for frame in streamed[since:] if frame["type"] == "authoring"]
+
+        try:
+            # The feed's own first probe establishes the token, so it is DRAINED
+            # rather than asserted away: the windows below have to be attributable
+            # to the writes.
+            await asyncio.sleep(2.5)
+
+            quiet_from = len(streamed)
+            await asyncio.sleep(2.5)
+            assert authoring(quiet_from) == [], streamed[quiet_from:]
+
+            # (1) A role authored the way the `agent` tool authors one.
+            registry = AgentRegistry(root)
+            name, kind = await asyncio.to_thread(
+                write_profile,
+                registry,
+                AgentParams(
+                    op="create",
+                    name="e2e-doorbell-role",
+                    instructions="Answer the question in one sentence.",
+                ),
+                creating=True,
+            )
+            assert (name, kind) == ("e2e-doorbell-role", "role"), (name, kind)
+            assert (root / "agents").is_dir(), "the write did not create a profile row"
+
+            wrote_from = len(streamed)
+            await asyncio.sleep(2.5)
+            profiles = authoring(wrote_from)
+            assert len(profiles) == 1, streamed[wrote_from:]
+            revisions = [frame["payload"]["revision"] for frame in profiles]
+
+            # ...and nothing follows it while both registries sit still. This is
+            # the half that catches a token keyed on something a turn moves: with
+            # the projection missing, a write of this shape keeps publishing.
+            after_from = len(streamed)
+            await asyncio.sleep(2.5)
+            assert authoring(after_from) == [], streamed[after_from:]
+
+            # (2) A team created over the route the app uses.
+            created = await client.post(
+                "/v1/desktop/teams",
+                json={"request_id": str(uuid.uuid4()), "name": "e2e-doorbell-team"},
+            )
+            assert created.status_code == 200, created.text
+
+            team_from = len(streamed)
+            await asyncio.sleep(2.5)
+            teams = authoring(team_from)
+            assert len(teams) == 1, streamed[team_from:]
+            revisions.append(teams[0]["payload"]["revision"])
+            # The feed is not a session, and a fabricated id would make the
+            # client's `observe(sessionId, frame)` look like it had one.
+            assert "session_id" not in teams[0], teams[0]
+
+            # (3) ...and the team write is followed by a quiet window too.
+            quiet_after_from = len(streamed)
+            await asyncio.sleep(2.5)
+            assert authoring(quiet_after_from) == [], streamed[quiet_after_from:]
+        finally:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await reader
+
+    # The counter is MONOTONE across both writes, which is what makes it usable as
+    # a dependency value on the client: two invalidations cannot share a number.
+    assert revisions == [revisions[0], revisions[0] + 1], revisions
+
+    # (4) A LATER subscriber is not replayed the invalidation: its own `open`
+    # snapshot is the answer, and a replayed frame would make every reconnecting
+    # client refetch two lists nothing has changed.
+    async with client.stream("GET", "/v1/desktop/events") as response:
+        assert response.status_code == 200, response.read()
+        lines = response.aiter_lines()
+        streamed_later: list[dict[str, Any]] = []
+
+        async def pump_later() -> None:
+            async for line in lines:
+                if line.startswith("data: "):
+                    streamed_later.append(json.loads(line[6:]))
+
+        later_reader = asyncio.create_task(pump_later())
+        try:
+            for _ in range(200):
+                if streamed_later:
+                    break
+                await asyncio.sleep(0.05)
+            assert streamed_later and streamed_later[0]["type"] == "open", streamed_later
+            await asyncio.sleep(2.5)
+        finally:
+            later_reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await later_reader
+
+    assert streamed_later[0]["payload"]["authoring_revision"] == revisions[-1]
+    assert [frame for frame in streamed_later if frame["type"] == "authoring"] == []
