@@ -465,19 +465,46 @@ def test_an_armed_wake_still_refuses_and_names_a_remedy_that_exists(tmp_path: Pa
 
     assert outcome.deleted is False
     assert "has a wake armed for it" in outcome.refusal
-    # THE DOOR IS ADDRESSABLE (design round 2, D8): the id is known here and the
-    # sentence is printed on a screen where the app holds it, so a literal
-    # ``<session-id>`` template told the user to go and find a filename. The
-    # resolved path is what a user can act on, and it is relative to the store
-    # this delete is running against — not to wherever the notice is read.
-    wake_file = str(tmp_path / "wakes" / f"{A}.json")
-    assert wake_file in outcome.refusal, outcome.refusal
+    # THE DOOR IS ADDRESSABLE AND STORE-RELATIVE (design round 2, D8; desktop QA
+    # round 4, Q14): a literal ``<session-id>`` template told the user to go and
+    # find a filename, and resolving it to a machine-absolute path leaked this
+    # host's layout inside a dialog for a conversation the user is looking at.
+    # The relative form is the one the CLI's ghost row uses, and the id is still
+    # resolved so the file can be found without hunting.
+    assert f"wakes/{A}.json" in outcome.refusal, outcome.refusal
     assert "<session-id>" not in outcome.refusal, outcome.refusal
+    assert str(tmp_path) not in outcome.refusal, "the host's layout is not the user's business"
+    assert "/Users" not in outcome.refusal
     assert "Cancel the wake" not in outcome.refusal, (
         "that action has no surface reachable from the terminal that printed the "
         "sentence: " + outcome.refusal
     )
     assert (tmp_path / "sessions" / A).is_dir()
+
+
+def test_every_refusal_names_the_conversation_and_never_a_host_path() -> None:
+    """THE REFUSAL SET, READ AS A SET (desktop QA round 4, Q14).
+
+    Five sentences can stand in front of an irreversible act — claimed, leased, an
+    armed wake, unread mail, and the fallback for a guard that could not be
+    evaluated — and each is read by a user looking at one conversation. Two rules
+    bind all of them, and they were found one at a time rather than together: no
+    template placeholders (D8: the app holds the id, so ``<session-id>`` asked the
+    user to go and find a filename) and no machine-absolute paths (Q14: a dialog
+    is not the place to learn this host's directory layout). Every one names the
+    conversation, which is the thing the user has.
+    """
+    import re
+
+    from local_operator.session.cleanup import _GUARD_REFUSALS, _GUARD_REFUSAL_FALLBACK
+
+    sentences = list(_GUARD_REFUSALS.values()) + [_GUARD_REFUSAL_FALLBACK]
+    assert len(sentences) == 5, "the set this rule is written for"
+    for sentence in sentences:
+        assert "conversation" in sentence, sentence
+        assert "<" not in sentence and ">" not in sentence, sentence
+        assert not re.search(r"\s/[A-Za-z]", sentence), f"absolute path in: {sentence}"
+        assert str(Path("/Users")) not in sentence
 
 
 def test_the_rehearsal_sentence_has_exactly_one_source() -> None:
