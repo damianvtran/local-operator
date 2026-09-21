@@ -121,7 +121,7 @@ result compact and fetch the full detail only when a step needs inspecting. This
 keeps the token cost of a pipeline near its final answer while every intermediate
 stays one `read` away for debugging.
 
-Scratch of your own — notes, intermediate files, benchmark output, a one-off
+Text scratch of your own — notes, intermediate files, benchmark output, a one-off
 `.sh`/`.py` — belongs in `scratchpad://`: not the working directory, which
 holds what the user asked for, and not `/tmp` (macOS prunes it after three
 days, so a session can outlive its own scratch). `read scratchpad://` lists it,
