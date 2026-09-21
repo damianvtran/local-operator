@@ -691,10 +691,11 @@ install:
    control is still a disagreement an engine has to resolve on its own.
 
 An install that persists itself, fetches new code, runs a temp-directory
-installer, writes an executable environment into Application Support and
-supervises daemons out of that directory is, to a heuristic, indistinguishable
-from the pattern those heuristics are designed to catch. That is the finding,
-and it is why the fix in §4 is an allow-list rather than an argument.
+installer, writes an executable environment into Application Support — a data
+root, not an execution origin — and supervises daemons out of its own install
+tree is, to a heuristic, indistinguishable from the pattern those heuristics
+are designed to catch. That is the finding, and it is why the fix in §4 is an
+allow-list rather than an argument.
 
 ## 4. The admin recipe
 
@@ -730,7 +731,7 @@ Scope the exclusion to:
   a label the browser bridge derives from a non-default config root, §1);
 - for desktop-app installs, `/Applications/Local Operator.app/**` and
   `~/Library/Application Support/Local Operator/**` (the managed Python
-  environment and the data directory the app executes helpers from);
+  environment and the app's data directory);
 - the notifier bundle the TUI builds at runtime —
   `~/.local-operator/notifier/LocalOperator.app/**` (§1). It sits **inside the
   config directory** rather than in an install prefix, and its bundle
@@ -847,8 +848,9 @@ Report it as a behavioural false positive with the evidence attached:
   out explicitly as a **hardlink to the environment's CPython**, so the
   analyst can see in one step why the name and the signature disagree;
 - the paths in `~/Library/Application Support/Local Operator` for a
-  desktop-app install, including the fact that helper processes execute from
-  there;
+  desktop-app install, including the fact that the directory is the app's data
+  root and what it provisions, not an execution origin — the helper processes
+  run from the app bundle and the generation tree;
 - **per-release file hashes**, so the vendor can distinguish our releases from
   anything else using the same names.
 
