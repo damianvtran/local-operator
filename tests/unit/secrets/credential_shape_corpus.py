@@ -584,6 +584,18 @@ NEGATIVE_CASES: tuple[Case, ...] = (
         "npm_config_manage_package_manager_versions=11.22.0",
         "the same NAME with a version value: the dot lookahead already spares it",
     ),
+    #     The four rows above cover the reported family in HALVES — the underscore
+    #     join with a value, and the dash join without one. The row below is the
+    #     combination, and it is the one #1399 moved: an ordinary env NAME joined by
+    #     dashes CARRYING a value was read as a prefixed issuer token and masked
+    #     (measured against the pre-fix module, where it fired as
+    #     ``vendor-prefixed-token``), so an edit that made the ``=`` arm
+    #     separator-specific would red THIS row rather than nothing at all. It is a
+    #     true negative on this tree, and it carries its reason like every other row.
+    Case(
+        "npm-config-manage-package-manager-versions=false",
+        "the same NAME with the dash join AND a value: the two rows above, combined",
+    ),
     Case(
         "whsec_config_update_notifier",
         "the same NAME under a prefix that carries its own separator",
@@ -787,6 +799,84 @@ NEGATIVE_CASES: tuple[Case, ...] = (
             f"a qualified quantity tail the tail arm releases: {name} is a count",
         )
         for name in COUNT_TAIL_RELEASED_NAMES
+    ),
+    # --- 2026-09-21: the MASK MARKER itself, which a peer session reported three
+    #     times in one hour. The third report was this claim: a message CONTAINING
+    #     the marker re-fires a fresh incident — "a detector whose output is its own
+    #     input cannot settle". Measured false on this table's own tree, and unpinned
+    #     by the table until now, which is why the claim travelled as a message
+    #     instead of meeting a row. Each of the three shapes below is byte-identical
+    #     on all seven surfaces, files no hit, takes no label and does not escalate.
+    #
+    #     THAT IS A PROPERTY OF THESE THREE TEXTS, NOT OF THE MARKER, and the
+    #     difference is the whole of agent review R1-1: the section first stated the
+    #     wider generalisation — that a text carrying the marker "holds no credential
+    #     material for a rule to grade" — and it is measurably FALSE. What decides it
+    #     is a value CLASS wide enough to hold the marker's own brackets. The rule
+    #     matches, files a hit and labels the text, and then rewrites the marker back
+    #     to ITSELF, so the bytes survive and neither half here can hold such a
+    #     spelling: a POSITIVE row asserts its text was rewritten, and a NEGATIVE row
+    #     asserts the pass left it alone in every OBSERVABLE way — the hit list is the
+    #     observable that moves.
+    #
+    #     The corrected boundary, measured 2026-09-21 by taking every POSITIVE row's
+    #     masked form (``scrub_shapes_with_hits(text)[0]``) and driving THAT back
+    #     through ``match_shape_names``: 23 rows re-fire, over EIGHT labels, and every
+    #     one of the 23 is byte-stable on all seven surfaces with ``reached_model``
+    #     False. Agent review R2-1 counted the first version of this list and it was
+    #     short on BOTH halves — seven labels over ten spellings against its own
+    #     nine-item enumeration — so what follows is the measurement rather than a
+    #     recollection. Each family is spelled with the marker in its VALUE position,
+    #     which is what this class IS: the rule matches, files a hit, labels the text
+    #     and then rewrites the marker back to itself. By label, with the row count
+    #     each accounts for:
+    #     ``npmrc-auth-token`` (3): ``_authToken=[redacted]``,
+    #     ``//registry.npmjs.org/:_authToken=[redacted]`` and the base64 ``_auth=[redacted]``
+    #     ``netrc-password`` (2): ``machine api.github.com login robot password [redacted]``
+    #     ``machine example.com login bob password [redacted]``
+    #     ``cookie-header`` (3): ``Cookie: [redacted]``, ``Set-Cookie: [redacted]``
+    #     and a cookie header inside a curl invocation
+    #     ``client-inline-password`` (3): ``redis-cli -a [redacted]``, ``mongosh -p[redacted]``
+    #     ``mysql -u root -p[redacted]``
+    #     ``docker-login-password`` (1): ``docker login -u robot -p [redacted]``
+    #     ``openssl-pass-phrase`` (3): the bare ``-pass [redacted]``, ``-passin [redacted]``
+    #     and the ``pass: [redacted]`` form
+    #     ``curl-user-credential`` (1): ``curl -u user:[redacted]``
+    #     ``credential-query-param`` (7): ``api_key=[redacted]``, ``token=[redacted]``,
+    #     ``access_token=[redacted]``, ``secret=[redacted]``, ``password=[redacted]``,
+    #     ``signature=[redacted]`` and a JSON ``apikey`` spelling
+    #     That is eight labels over 23 spellings, every row carrying exactly one.
+    #     The ROWS are a closed set, because they are the corpus rows that re-fire
+    #     today; the LABELS are not, because a rule added tomorrow claims a row
+    #     without anyone editing this comment. The class is already driven through
+    #     the shipped path by ``test_a_marker_valued_hit_no_longer_escalates``.
+    #
+    #     DEFERRED, and PRE-EXISTING rather than introduced here: the marker spelled
+    #     as the VALUE of a lower-case assignment does NOT survive.
+    #     ``password="[redacted]"`` comes back as ``[redacted]"`` — the NAME and its
+    #     separator are DELETED, with 0 hits, 0 labels and no notice, on all seven
+    #     surfaces (``api_key="[redacted]"`` likewise). ``_INCOMPLETE_MASK_LEFT_RE``
+    #     reads the ``name=`` run as the readable HEAD of a credential whose mask
+    #     stopped at a quote — its NAME exclusion is capitals-only, and its run class
+    #     carries ``=`` — and ``_close_partial_masks`` records no hit, so the notice
+    #     path never learns the text was rewritten. A rewrite with no label is exactly
+    #     the "blinding the agent to the text it is reading" case this half exists to
+    #     prevent, which is why it is recorded rather than left implicit; it is NOT
+    #     fixed here because the production diff of this commit against the PR's merge
+    #     base ``2a9a737a`` is empty (tests only) and the fix is a production change, so
+    #     the rows below
+    #     are narrowed to what they measure rather than widened to answer for it.
+    Case(
+        "[redacted]",
+        "the mask marker alone: the pass's own output is not its own input",
+    ),
+    Case(
+        "The alert quoted MONGO_DSN=mongodb+srv://svc:[redacted]@db.invalid/x as " "its evidence.",
+        "the marker inside prose, in a credential position: a peer's evidence",
+    ),
+    Case(
+        '{"command": "grep -rn \'MONGO_DSN=[redacted]\' notes/"}',
+        "the marker inside a JSON tool argument: the shape a bash call journals",
     ),
 )
 
