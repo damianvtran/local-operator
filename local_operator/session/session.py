@@ -167,6 +167,7 @@ from local_operator.incidents import (
     format_cut_off_raw,
     render_cut_off_reason,
 )
+from local_operator.model.effort import cheapest_real_rung
 from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
@@ -12074,11 +12075,16 @@ class Session:
 
     @staticmethod
     def _lowest_effort(spec: ModelSpec) -> ModelSpec:
-        """``spec`` on the bottom rung of its own effort ladder, if it has one."""
+        """``spec`` on the cheapest REAL rung of its own effort ladder, if it has one.
+
+        The ``auto`` sentinel is skipped: it is a delegation, not a depth, so
+        the "lowest" rung is the cheapest member that names a real level.
+        """
         efforts = spec.reasoning_efforts
-        if not efforts or spec.reasoning_effort == efforts[0]:
+        lowest = cheapest_real_rung(efforts)
+        if lowest is None or spec.reasoning_effort == lowest:
             return spec
-        return spec.model_copy(update={"reasoning_effort": efforts[0]})
+        return spec.model_copy(update={"reasoning_effort": lowest})
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
         """One non-tool provider call used to produce the compaction summary.

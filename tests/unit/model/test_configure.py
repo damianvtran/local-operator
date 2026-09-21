@@ -5185,3 +5185,25 @@ def test_the_router_ladder_is_scoped_to_the_router_route_not_the_hosting() -> No
     local_auto = build_model_spec("ollama", "auto")
     assert local_auto.reasoning_efforts == ()
     assert local_auto.reasoning_effort is None
+
+
+def test_the_router_seed_is_the_routes_own_default_per_provider() -> None:
+    """The SEED is asked of ``aggregator_router_effort_default`` rather than a
+    shared constant, so it is keyed on the provider beside the ladder and the
+    two cannot drift.
+
+    This is the half the ladder-membership test cannot see: the Radient router
+    seeds its ``auto`` sentinel (the server resolves it), while OpenRouter --
+    with no ``auto`` enum member -- seeds ``high``. A shared default would leave
+    one route wrong.
+    """
+    from local_operator.model.configure import aggregator_router_effort_default
+
+    assert aggregator_router_effort_default("radient", "auto") == "auto"
+    assert aggregator_router_effort_default("radient-key", "auto") == "auto"
+    assert aggregator_router_effort_default("openrouter", "auto") == "high"
+
+    # Non-router routes have NO seed: the sibling returns None, which is what
+    # keeps the ``if router_levels`` branch the only place a seed is applied.
+    assert aggregator_router_effort_default("ollama", "auto") is None
+    assert aggregator_router_effort_default("radient", "some-vendor/other") is None

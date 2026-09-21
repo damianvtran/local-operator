@@ -6086,14 +6086,18 @@ async def test_router_model_request_carries_the_sticky_routing_key_and_cache_mar
 
 
 @pytest.mark.parametrize(
-    ("provider", "model_id", "base_url"),
+    ("provider", "model_id", "base_url", "expected"),
     [
-        ("radient", "auto", "https://api.radienthq.com/v1"),
-        ("openrouter", "openrouter/auto", "https://openrouter.ai/api/v1"),
+        # Radient resolves the `auto` sentinel server-side, so the seeded level
+        # that reaches the wire IS the sentinel.
+        ("radient", "auto", "https://api.radienthq.com/v1", "auto"),
+        # OpenRouter has no `auto` enum member and 400s on one it does not
+        # define, so its router still seeds the real rung `high`.
+        ("openrouter", "openrouter/auto", "https://openrouter.ai/api/v1", "high"),
     ],
 )
 def test_the_router_request_carries_the_seeded_effort_on_the_wire(
-    provider: str, model_id: str, base_url: str
+    provider: str, model_id: str, base_url: str, expected: str
 ) -> None:
     """The consequence test for the router's ladder: the KEY reaches the body.
 
@@ -6103,6 +6107,10 @@ def test_the_router_request_carries_the_seeded_effort_on_the_wire(
     ``build_model_spec`` rather than a hand-set spec on purpose — the prior bug
     (the router's caching flag) stayed invisible exactly because the tests set
     the spec by hand.
+
+    The expected value is PER PROVIDER because the ladder is: the seed is only
+    meaningful if ``_reasoning_effort``'s membership re-check passes, so this
+    asserts the seeded level and the ladder membership together.
     """
     from local_operator.model.configure import build_model_spec
     from local_operator.model.registry import get_model_info
@@ -6112,7 +6120,7 @@ def test_the_router_request_carries_the_seeded_effort_on_the_wire(
         ChatRequest(model=spec, messages=[Message.user("hi")])
     )
 
-    assert body["reasoning_effort"] == "high", "the seeded router level must reach the wire"
+    assert body["reasoning_effort"] == expected, "the seeded router level must reach the wire"
 
 
 def test_a_no_ladder_model_still_omits_reasoning_effort() -> None:
