@@ -26,11 +26,14 @@ import os
 import plistlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 
 from local_operator import launchd, procname, procstate, supervisors
@@ -78,6 +81,33 @@ _BUILD_WRAPPER_NOISE = re.compile(
 )
 _BUILD_DETAIL_LINES = 3
 _BUILD_DETAIL_CHARS = 500
+
+#: How long one bundle-build step (``pnpm install`` / ``pnpm build``) may run
+#: before its whole process GROUP is signalled. The value this module always
+#: used; what changed is how much of the tree the bound reaches.
+_BUILD_STEP_TIMEOUT = 600.0
+
+#: Seconds a signalled build group gets between SIGTERM and SIGKILL. Deliberately
+#: short: the group this bounds is the pnpm self-install recursion documented on
+#: :func:`_pin_mismatch`, which was measured growing by ~1.2 GB per SECOND, so a
+#: graceful window sized for an ordinary build would cost gigabytes it exists to
+#: save. A real pnpm build is never signalled on this path unless the bound fired.
+_BUILD_KILL_GRACE = 5.0
+
+#: How long the ``--version`` probe in :func:`_runner_reports` may run. It is a
+#: one-line answer from a runner that is working; a runner that has started
+#: resolving a pin instead of answering does not finish (measured: past 120 s).
+_PIN_PROBE_TIMEOUT = 20.0
+
+#: How long to wait between samples while a signalled group dies.
+_GROUP_POLL_SECONDS = 0.05
+
+#: Whether this platform can signal a whole process GROUP. ``os.killpg`` and
+#: ``os.getpgid`` are "Availability: Unix", so the group half of the bound is
+#: POSIX-only and Windows goes through ``procstate.terminate_process_tree``
+#: (``taskkill /T``). Same spelling — and same reason — as
+#: ``clipboard._SUPPORTS_PROCESS_GROUPS``.
+_SUPPORTS_PROCESS_GROUPS = hasattr(os, "killpg") and hasattr(os, "getpgid")
 
 
 def _failure_detail(result: subprocess.CompletedProcess[str]) -> str:
@@ -210,6 +240,261 @@ def _package_runner(web_dir: Path) -> tuple[list[str] | None, str | None]:
     return [*corepack, "pnpm"], None
 
 
+def _step_group(proc: subprocess.Popen[str]) -> int | None:
+    """The process group to signal for a build step, REMEMBERED at spawn.
+
+    ``procstate.detached_popen_kwargs`` gives the child its own session on POSIX,
+    so its group id equals its pid. Remembering it here rather than looking it up
+    when the kill is needed is what makes the SWEEP possible at all:
+    ``os.getpgid`` raises once the leader has been reaped, which is exactly the
+    case a leaked descendant survives in — the same reasoning that makes
+    ``clipboard._kill_tree`` take its pgid from the spawn rather than the lookup.
+
+    ``None`` on Windows, where there is no group to signal and
+    :func:`local_operator.procstate.terminate_process_tree` walks the tree with
+    ``taskkill /T`` instead.
+    """
+    return proc.pid if _SUPPORTS_PROCESS_GROUPS else None
+
+
+def _signal_step_group(proc: subprocess.Popen[str], pgid: int | None, *, force: bool) -> bool:
+    """Signal everything a build step spawned; False when none was there.
+
+    Never raises. Every caller is on a path where an exception would replace the
+    failure it is already reporting (the bound, an abort, the post-exit sweep),
+    and an already-empty group is the ordinary case there rather than an error.
+    """
+    if pgid is None:  # pragma: no cover - exercised on Windows hosts
+        return procstate.terminate_process_tree(proc.pid, force=force)
+    try:
+        os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
+    except OSError:  # the group is already gone, or is not ours to signal
+        return False
+    return True
+
+
+def _reap_step_group(
+    proc: subprocess.Popen[str], pgid: int | None, grace: float | None = None
+) -> None:
+    """SIGTERM the step's group, escalate to SIGKILL, then let its pipes drain.
+
+    Two rungs because a bounded tree that ignores SIGTERM would otherwise be
+    waited out (the same lesson as ``scripts/run_bounded.py``, whose semantics
+    this follows): SIGTERM gives a cooperative build a chance to exit, and the
+    SIGKILL after ``grace`` is what actually clears the case this exists for — a
+    pnpm that is forking more of itself and will never exit on its own.
+
+    ``grace`` defaults to :data:`_BUILD_KILL_GRACE` READ AT CALL TIME rather than
+    bound into the signature, so the constant stays one place a test (or an
+    operator tuning the host) can move.
+
+    ``communicate`` afterwards is not tidiness: it reaps the leader (no zombie
+    behind a `lop mobile install`) and drains the pipes, which a later reader of
+    ``result.stdout`` depends on.
+    """
+    grace = _BUILD_KILL_GRACE if grace is None else grace
+    _signal_step_group(proc, pgid, force=False)
+    deadline = time.monotonic() + grace
+    while proc.poll() is None and time.monotonic() < deadline:
+        time.sleep(_GROUP_POLL_SECONDS)
+    _signal_step_group(proc, pgid, force=True)
+    try:
+        proc.communicate(timeout=grace)
+    except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL cannot be ignored
+        proc.kill()
+        proc.communicate()
+
+
+def _sweep_step_group(proc: subprocess.Popen[str], pgid: int | None) -> bool:
+    """SIGKILL whatever is still in the step's group after the leader exited.
+
+    NOT redundant with the bound, and this is the incident's own mechanism: the
+    recursion regrew AFTER the first kill, because that kill signalled only the
+    processes it could see. A bound covers the timeout; an ordinary exit covers
+    nothing at all, and a descendant forked in the instant the leader exited is
+    the shape that survives one. Several passes because such a child can land
+    after the previous pass resolved the group; the whole sweep is a quarter of a
+    second against a build that has already finished.
+
+    The pgid is the one REMEMBERED at spawn (:func:`_step_group`), so this still
+    targets the right group once the leader is gone.
+    """
+    reaped = False
+    for _ in range(5):
+        reaped = _signal_step_group(proc, pgid, force=True) or reaped
+        time.sleep(_GROUP_POLL_SECONDS)
+    return reaped
+
+
+def _run_build_step(
+    argv: Sequence[str], cwd: Path, *, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run one bundle-build command in its OWN process group, and reap the group.
+
+    WHY (incident, 2026-09-21 — this is the defect that took the machine down).
+    ``subprocess.run(..., timeout=600)`` bounds the DIRECT CHILD only: when the
+    bound fires, Python kills the leader and returns, and everything the leader
+    forked keeps running. On a fresh clone the portal build reached that state
+    through a ``packageManager`` pin the global pnpm did not match (see
+    :func:`_pin_mismatch`): pnpm resolves such a pin by installing that pnpm WITH
+    pnpm, and the tree GREW BACK after the first kill because the survivors kept
+    spawning — +100 processes and +5 GB every 25 s until the host had 0.1 GB free
+    and no swap, and was rebooted.
+
+    So the step runs in its own session/group and the GROUP is signalled on all
+    three paths that end the wait: the bound, an abort (Ctrl-C: the child is its
+    own session, so the terminal's SIGINT never reaches it), and the ordinary
+    exit, where a descendant can outlive its leader.
+
+    NOT ``scripts/run_bounded.py``: this follows that wrapper's semantics
+    deliberately, but the wrapper lives in the repository's ``scripts/`` tree,
+    which is not shipped in the wheel — an installed ``lop`` has no such file to
+    run. The inline spelling therefore reuses ``procstate`` for the one part
+    that must not be hand-rolled (the platform decision).
+    """
+    proc = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        list(argv),
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **procstate.detached_popen_kwargs(),
+    )
+    bound = _BUILD_STEP_TIMEOUT if timeout is None else timeout
+    pgid = _step_group(proc)
+    try:
+        stdout, stderr = proc.communicate(timeout=bound)
+    except subprocess.TimeoutExpired:
+        _reap_step_group(proc, pgid)
+        raise
+    except BaseException:
+        # Any abort — the operator's Ctrl-C above all: the step is its own
+        # session, so the terminal does not deliver SIGINT to it and the group
+        # would otherwise carry on building behind a `lop mobile install` that
+        # has already exited.
+        _reap_step_group(proc, pgid)
+        raise
+    _sweep_step_group(proc, pgid)
+    return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
+
+
+#: ``packageManager`` is spelled ``name@version``, optionally with a Corepack
+#: integrity suffix (``pnpm@11.22.0+sha512.…``), which is not part of the version.
+_PACKAGE_MANAGER_PIN = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)@(?P<version>[^+\s]+)")
+
+
+def _pinned_pnpm(web_dir: Path) -> str | None:
+    """The pnpm version ``web_dir``'s ``package.json`` pins, or ``None``.
+
+    ``None`` covers every "there is no pin to enforce" case — no manifest,
+    unreadable JSON, no ``packageManager`` field, a pin naming a different
+    manager — because refusing to build a tree that pins nothing would break the
+    snapshot updater's older trees for no gain: this guard is an extra wall, not
+    the wall (the group bound around every step is what makes a bad build
+    survivable).
+    """
+    try:
+        manifest = json.loads((web_dir / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    pin = manifest.get("packageManager")
+    if not isinstance(pin, str):
+        return None
+    match = _PACKAGE_MANAGER_PIN.match(pin.strip())
+    if match is None or match.group("name").lower() != "pnpm":
+        return None
+    return match.group("version")
+
+
+def _runner_reports(runner: Sequence[str]) -> str | None:
+    """What ``runner`` answers for ``--version``, or ``None`` if it cannot.
+
+    Run in a THROWAWAY directory, and that is load-bearing rather than tidy: pnpm
+    reads the nearest ``package.json`` above its cwd, so a probe run INSIDE the
+    pinned tree does not answer at all — it starts RESOLVING the pin, which is
+    the recursion this guard exists to refuse. Measured on this host: `pnpm
+    --version` under a ``packageManager: pnpm@11.22.0`` manifest had not returned
+    after 120 s and was spawning ``pnpm add pnpm@11.22.0`` children (28 processes,
+    3.2 GB RSS in 8 s), while the same command in an empty directory answered in
+    under a second. Through :func:`_run_build_step` so the probe is itself
+    bounded and group-reaped: a probe that can hang must not hang the install.
+    """
+    with tempfile.TemporaryDirectory(prefix="lop-pnpm-probe-") as probe_dir:
+        try:
+            result = _run_build_step(
+                [*runner, "--version"], Path(probe_dir), timeout=_PIN_PROBE_TIMEOUT
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+    if result.returncode != 0:
+        return None
+    lines = (result.stdout or "").strip().splitlines()
+    return lines[0].strip() if lines else None
+
+
+def _corepack_shaped(runner: Sequence[str]) -> bool:
+    """Whether ``runner`` is Corepack's pnpm rather than a global one.
+
+    Two shapes reach here: the argv :func:`_package_runner`'s Corepack arm
+    returns (``corepack pnpm``), and a ``pnpm`` that Corepack itself installed as
+    a shim on PATH — a script that re-executes Corepack. Both RESOLVE the pin,
+    which is the whole point of Corepack and the route the refusal below
+    recommends, so comparing their reported version against the pin would refuse
+    a build that was about to be handled correctly. Checked by reading the shim,
+    and only ever to AVOID refusing: a wrong answer here costs one unguarded
+    build, never a refused good one.
+    """
+    if not runner:
+        return False
+    if any(
+        Path(part).name.lower() in {"corepack", "corepack.cmd", "corepack.exe"} for part in runner
+    ):
+        return True
+    resolved = shutil.which(runner[0])
+    if resolved is None:
+        return False
+    try:
+        with open(resolved, "rb") as shim:
+            return b"corepack" in shim.read(4096).lower()
+    except OSError:
+        return False
+
+
+def _pin_mismatch(runner: Sequence[str], web_dir: Path) -> str | None:
+    """Refuse a build whose pnpm is not the version the tree pins, or ``None``.
+
+    WHY (the incident's other half). pnpm does not fail when the version on PATH
+    disagrees with ``packageManager``: it resolves the pin by INSTALLING that
+    pnpm with pnpm (``pnpm add pnpm@11.22.0``), and on a machine that cannot
+    finish that install each attempt forks more of the same — measured here as 28
+    processes and 3.2 GB RSS in 8 s, and as +100 processes / +5 GB every 25 s in
+    the incident until the host was out of memory. The bound in
+    :func:`_run_build_step` turns that into a bounded failure; this guard is what
+    makes it not start at all.
+
+    The comparison is against what the RESOLVED runner reports, never against
+    the pin's own claim, because the pin is the thing in doubt. A runner that
+    cannot answer (no output, non-zero exit, the probe's own timeout) is NOT
+    refused: the bound protects that case, and refusing an install because a
+    probe was inconclusive would trade a rare hang for a common false refusal on
+    machines whose pnpm is entirely fine.
+    """
+    pinned = _pinned_pnpm(web_dir)
+    if pinned is None or _corepack_shaped(runner):
+        return None
+    reported = _runner_reports(runner)
+    if reported is None or reported == pinned:
+        return None
+    return (
+        f"the pnpm on PATH is {reported} but {web_dir / 'package.json'} pins "
+        f"pnpm@{pinned}: install the pinned version (`npm install -g pnpm@{pinned}`) "
+        "or use Corepack (`corepack enable`, which makes `pnpm` resolve the pin), "
+        "then re-run `lop mobile install`. A pnpm that does not match its own pin "
+        "resolves it by installing pnpm WITH pnpm, which fans out until the "
+        "machine dies"
+    )
+
+
 def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) -> str | None:
     """Build the SPA in place. Returns an error string, or None on success.
 
@@ -228,6 +513,13 @@ def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) 
     paths share this one builder rather than carrying a second copy of the
     pnpm invocation. ``runner`` is passed by a caller that already resolved it
     (so ``corepack enable`` runs once, not twice).
+
+    Every step runs through :func:`_run_build_step`, which bounds and reaps the
+    step's whole process GROUP, and the pinned pnpm is checked by
+    :func:`_pin_mismatch` first. Both exist because of one incident: see those
+    two docstrings, and note that this builder is shared with the updater, so a
+    bound that only covered `lop mobile install` would leave `lop update`'s
+    snapshot build unbounded.
     """
     web_dir = _WEB_DIR if web_dir is None else web_dir
     try:
@@ -284,10 +576,15 @@ def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) 
                     "(https://pnpm.io/installation), then re-run "
                     "`lop mobile install`"
                 )
+        # Before any pnpm process is started: a runner whose version is not the
+        # pinned one is the recursion's engine (see :func:`_pin_mismatch`), and
+        # refusing here is the difference between an install that stops with a
+        # sentence and one that stops when the machine runs out of memory.
+        mismatch = _pin_mismatch(runner, web_dir)
+        if mismatch is not None:
+            return mismatch
         for args in (["install", "--frozen-lockfile"], ["build"]):
-            result = subprocess.run(
-                [*runner, *args], cwd=web_dir, capture_output=True, text=True, timeout=600
-            )
+            result = _run_build_step([*runner, *args], web_dir)
             if result.returncode != 0:
                 # A failed `build` can leave a dist/ behind: vite writes it
                 # before npm's `postbuild` guard judges it, and the guard
