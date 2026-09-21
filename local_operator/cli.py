@@ -3885,6 +3885,12 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
       ``relay_unavailable`` refusal — the same code and sentence ``lop network
       peers`` ships;
     * the relay answered an error frame ABOUT THE LISTING is ``relay_refused``;
+    * the relay answered a reply THIS BUILD CANNOT READ — over the control socket's
+      own line bound, or not a JSON object at all — is refused with the control
+      client's own named code (``frame_too_large``/``frame_unreadable``) rather than
+      re-worded as a relay that stayed silent (QA round 8, Q-R8-1: the federated
+      catalogue passes a HANDSHAKE frame's cap at ~17 sessions, and reporting that as
+      a wedged relay named the wrong component and prescribed the wrong remedy);
     * the relay answered and the DEVICE named is the reason (not in the network,
       or in it and not answering) stays ``peer_unreachable``.
 
@@ -3896,6 +3902,7 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
     """
     try:
         from local_operator.network import relay, store
+        from local_operator.network.types import MeshRefusal
     except Exception:  # noqa: BLE001 — a mesh that cannot load is no mesh
         return _local_relay_refusal()
     try:
@@ -3974,6 +3981,16 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
             ]
         rows = [{**_REMOTE_ROW_FILL, **dict(item)} for item in remote if isinstance(item, dict)]
         return _RemoteListing(rows, notes)
+    except MeshRefusal as refused:
+        # A REFUSAL THIS DEVICE'S RELAY PRODUCED IS REPORTED AS ITSELF (QA round 8,
+        # Q-R8-1). The handler below turns anything it does not recognise into
+        # ``_local_relay_refusal()``, whose sentence is about a relay that did NOT
+        # ANSWER — so a named refusal (``control_request``'s ``frame_too_large`` and
+        # ``frame_unreadable``, and anything else that raises out of the relay call)
+        # would be re-worded as a wedged relay: the wrong component, and the wrong
+        # remedy. The code and the sentence travel together because they are the pair
+        # this front end prints.
+        return _RemoteListing([], [], refusal=refused.sentence, code=refused.code)
     except Exception:  # noqa: BLE001 — a broken mesh must not break a listing
         # A mesh that raised under us is this device's own component failing to
         # produce an answer — never a fact about a peer (Q-R5-1).

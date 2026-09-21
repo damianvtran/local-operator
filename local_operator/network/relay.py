@@ -5222,7 +5222,11 @@ class RelayServer:
         session frames share a socket, and a second reader would lose whatever the
         first had already buffered. The session-frame bound is therefore the
         bound for both, which is the safe direction for an authenticated local
-        client whose frames are otherwise capped at a welcome projection's size.
+        client whose frames are otherwise capped at a welcome projection's size —
+        AND IT IS THE BOUND THE CLIENT HALF NOW READS UNDER TOO
+        (``control_request``, QA round 8 / Q-R8-1): the reply this loop writes is
+        read under this same ``MAX_SESSION_FRAME_BYTES``, so the two halves of one
+        socket cannot disagree about "too big" in either direction.
         """
         reader = session_dial.LineReader(sock)
         stream: _Stream | None = None
@@ -6805,11 +6809,28 @@ def service_action(action: str) -> dict[str, Any]:
 
 
 def health(timeout: float = 3.0) -> dict[str, Any] | None:
-    """Ask the running relay for its status over the loopback control socket."""
+    """Ask the running relay for its status over the loopback control socket.
+
+    THE ONE PLACE A NAMED CONTROL REFUSAL IS NOT RE-RAISED, and the reason is this
+    probe's own contract: every caller asks a BOOLEAN (``_autostart``, the identity
+    rotation's announcement, the install readiness loop, ``status``) or a boolean plus
+    the relay record (``cli._relay_state``), and each of their sentences falls back to
+    ``store.scan_own_relay``, which reads the process rather than the socket. A
+    ``MeshRefusal`` escaping here would traceback those four callers.
+
+    What makes that safe rather than a swallow: ``net_status`` is the SMALLEST reply
+    this socket serves — this device's own document, sized by its own networks — so a
+    bound or parse failure on it is a bug in this build, not a size an operator can
+    reach. The ops whose replies grow with the mesh are the LISTING family, and those
+    refuse by name all the way out to the operator's terminal.
+    """
     record = store.find_own_relay()
     if record is None:
         return None
-    reply = control_request(record, "net_status", timeout=timeout)
+    try:
+        reply = control_request(record, "net_status", timeout=timeout)
+    except MeshRefusal:
+        return None
     if reply is None:
         return None
     detail = reply.get("detail")
@@ -6889,17 +6910,67 @@ def control_request(
     The client half of §2.5. A CLI, a TUI or the desktop daemon all use this rather
     than opening peer links themselves, which is what keeps ONE place that speaks
     the peer protocol and one place that holds a control key.
+
+    THE REPLY IS READ UNDER THE CONTROL SOCKET'S OWN BOUND, NOT THE HANDSHAKE'S
+    (QA round 8, Q-R8-1). ``wire.MAX_HANDSHAKE_LINE`` is 16 KiB because a handshake
+    frame is PRE-AUTH and attacker-controlled, and that tight bound is the property
+    this package wants there. A control reply is neither: the socket is loopback-only
+    and key-authenticated (the key lives in the 0600 peers record), and the reply
+    grows with the thing it describes — the federated catalogue is one row per
+    session on every device — so ``peer_session_rows`` legitimately passed 16 KiB at
+    ~17 sessions. The reader refused the frame, this function returned ``None``, and
+    every caller read that ``None`` as "this device's relay did not answer" — a
+    sentence about a WEDGED RELAY for a relay that answered in milliseconds.
+
+    So the reply is read with ``dial.LineReader`` under
+    ``dial.MAX_SESSION_FRAME_BYTES`` — the reader and the number the RELAY half
+    already frames this same socket with — which is what makes the two halves of one
+    socket unable to disagree about "too big". The wire format is unchanged (JSON
+    lines, one reply per request), deliberately: a ``lop`` CLI and a relay of
+    adjacent builds talk over this socket during an update, and only the READER's
+    bound changed, so an old relay and a new client keep working.
+
+    A REPLY THAT CANNOT BE READ REFUSES BY NAME, and is never a ``None``: ``None``
+    is reserved for "no relay answered me" (a refused connect, a closed socket, a
+    deadline), which is the condition the callers' own sentences are about. An
+    over-bound reply raises ``frame_too_large`` carrying this socket's bound and a
+    lower-bound byte count; a reply that is not a JSON object raises
+    ``frame_unreadable``. Both reach the operator with the relay named as the
+    component that answered, not as a component that stayed silent.
     """
     try:
         sock = socket.create_connection(("127.0.0.1", record.control_port), timeout=timeout)
     except OSError:
         return None
     try:
-        reader = wire.FrameReader(sock)
+        # The bound is read here rather than left to the reader's default: this call
+        # CHOOSES the control socket's bound, and ``dial.MAX_SESSION_FRAME_BYTES`` is
+        # its one home.
+        reader = session_dial.LineReader(
+            sock, session_dial.MAX_SESSION_FRAME_BYTES, report_bad_frames=True
+        )
         sock.sendall(wire.encode_line({"key": record.control_key, "client": "cli"}))
         sock.sendall(wire.encode_line({"op": op, "req": 1, **fields}))
-        return reader.read_line(wire.deadline_in(timeout))
-    except (OSError, ConnectionError, TimeoutError, wire.LinkCryptoError):
+        return reader.read_frame(timeout)
+    except session_dial.FrameTooLarge as exc:
+        raise MeshRefusal(
+            "frame_too_large",
+            f"this device's relay answered `{op}` with a line of at least {exc.size} bytes, "
+            f"over the {exc.limit}-byte bound on one control reply, so the answer was "
+            "refused rather than truncated; the relay itself is answering — nothing was "
+            "listed and nothing was changed.",
+        ) from exc
+    except session_dial.FrameUnreadable as exc:
+        raise MeshRefusal(
+            "frame_unreadable",
+            f"this device's relay answered `{op}` with a line this build cannot read "
+            f"({exc.reason}), so whether the op ran is unknown; the relay answered — it is "
+            "not a relay that stayed silent.",
+        ) from exc
+    except (OSError, ConnectionError, TimeoutError):
+        # NO ANSWER, which is the only condition ``None`` means. A ``LinkCryptoError``
+        # cannot reach here any more: the reader is ``dial.LineReader``, whose failures
+        # are the two named ones above.
         return None
     finally:
         _close_quietly(sock)
