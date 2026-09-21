@@ -500,21 +500,74 @@ def test_the_boundary_hold_is_bounded_and_still_streams() -> None:
     The peak assertion is what keeps this test honest: it fails if the hold stops
     being exercised, which is how the bound would go stale without anyone
     noticing.
+
+    The credential assertion comes FIRST, and deliberately: on the pre-fix source
+    this row has to fail for the reason it exists — the value being published —
+    and not because ``_PIPE_HOLD_LIMIT`` does not exist there. A test whose only
+    pre-fix failure is a missing symbol pins the seam rather than the property.
     """
     line = "." * 4095 + SENTINEL + "." * (4 * 1024 * 1024)
     redactor = builtin._PipeRedactor([])
     peak = 0
     published = 0
+    chunks: list[bytes] = []
     for start in range(0, len(line), 4096):
-        published += len(redactor.feed(line[start : start + 4096].encode()))
+        chunk = redactor.feed(line[start : start + 4096].encode())
+        chunks.append(chunk)
+        published += len(chunk)
         peak = max(peak, len(redactor.pending))
-        assert (
-            len(redactor.pending) <= builtin._PIPE_HOLD_LIMIT
-        ), "the hold must not grow with the child's output"
-    published += len(redactor.feed(b"", final=True))
-    assert redactor.pending == ""
+    tail = redactor.feed(b"", final=True)
+    chunks.append(tail)
+    published += len(tail)
+    assert (
+        SENTINEL_FRAGMENT not in b"".join(chunks).decode()
+    ), "the credential straddling the boundary was published"
+    assert peak <= builtin._PIPE_HOLD_LIMIT, "the hold must not grow with the child's output"
     assert peak > builtin._PIPE_DEFERRAL_LIMIT, "the boundary hold was never exercised"
+    assert redactor.pending == ""
     assert published >= len(line) - builtin._PIPE_HOLD_LIMIT, "the line must still stream"
+
+
+def test_the_hold_is_the_max_of_two_rules_and_stays_bounded() -> None:
+    """``_PIPE_HOLD_LIMIT`` bounds the SHAPE rule, not the filter's whole hold.
+
+    The older KNOWN-value rule holds whatever a registered value needs, because a
+    registered value is a credential the session was told about and publishing it
+    in two halves is the leak that rule exists to prevent. So the filter's total
+    hold is ``max(_PIPE_HOLD_LIMIT, len(value) + _PIPE_DEFERRAL_LIMIT)`` — a bound
+    over what the SESSION knows, never over what the child prints, which is the
+    property the cap is for. Asserted with a NON-EMPTY secret on purpose: an empty
+    one exercises only the first term, which is how this limit came to be
+    documented as the whole bound in the first place.
+
+    ``getattr`` because this row is a guard on the filter as a whole rather than a
+    discriminator for this change — the rule it measures predates it and the
+    numbers are the same on the pre-fix source, so it must not fail there for a
+    missing symbol.
+    """
+    limit = getattr(builtin, "_PIPE_HOLD_LIMIT", builtin._PIPE_DEFERRAL_LIMIT)
+    worst = 0
+    for size, read in ((1_000, 4096), (5_000, 4096), (24_576, 65536), (30_000, 65536)):
+        secret = ("q7Xk2m" * (size // 6 + 1))[:size]
+        line = "." * 100_000 + secret + "." * 100_000
+        raw = line.encode()
+        redactor = builtin._PipeRedactor([secret])
+        published: list[bytes] = []
+        peak = 0
+        for start in range(0, len(raw), read):
+            published.append(redactor.feed(raw[start : start + read]))
+            peak = max(peak, len(redactor.pending))
+        published.append(redactor.feed(b"", final=True))
+        assert (
+            secret not in b"".join(published).decode()
+        ), f"a registered value of {size} B was published at {read} B reads"
+        assert peak <= max(
+            limit, size + builtin._PIPE_DEFERRAL_LIMIT
+        ), f"holding a {size} B value at {read} B reads took {peak} B"
+        worst = max(worst, peak)
+    assert (
+        worst > limit
+    ), "the second term must actually bind at some size, or this test measures the first one twice"
 
 
 def test_a_line_with_no_terminator_is_released_and_stays_bounded() -> None:
