@@ -634,3 +634,9 @@ class Guard:
             f"pass memory_mb on the bash call or raise bash.memory.limit_mb in "
             f"settings."
         )
+
+
+#: ``MemoryGuard`` is the name the design doc uses in prose (§2/§9); ``Guard`` is
+#: the name §8's signature block fixes. Both resolve to the same class so an
+#: importer may use either without a second, drifting definition.
+MemoryGuard = Guard

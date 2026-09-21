@@ -496,7 +496,7 @@ class Guard:
 | F7 | Legit big long-runner killed | explicit `memory_mb` override and `mode=manual`; documented, not a silent exemption |
 | F8 | `ps` unavailable / non-POSIX | guard degrades to `source="disabled"`; one loud line, then silent |
 | F9 | Config unreadable | read failure → constants' defaults (enabled, auto); a command must run when `config.yml` is broken |
-| F10 | A group id reused after the group dies | `should_kill` also requires the process still in the `ps` output; a vanished pgid is skipped |
+| F10 | A group id reused after the group dies | `group_rss_bytes` returns ``None`` for a group absent from the `ps` output and `should_kill` refuses a `None` reading, so a reused pgid is never charged the dead group's memory |
 | F11 | Ceiling computed on a host whose probes are all absent | `source="disabled"` with `reason`; no kill, no exception — the pre-guard behaviour |
 
 ## 10. Risks to watch during rollout
