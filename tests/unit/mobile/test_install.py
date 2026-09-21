@@ -614,22 +614,28 @@ def test_failure_detail_is_bounded_and_falls_back_to_the_tail() -> None:
 
 
 def test_build_bundle_returns_the_compiler_error_on_one_line() -> None:
-    """The wiring, not just the helper: what `_build_bundle` hands `install`."""
+    """The wiring, not just the helper: what `_build_bundle` hands `install`.
 
-    def run(cmd: list[str], **kwargs: object) -> FakeProc:
-        if cmd[1] == "install":
-            return FakeProc(returncode=0)
-        return FakeProc(
-            returncode=2,
-            stdout=(
-                "src/fixture.test.ts(1,1): error TS2307: Cannot find module './fixtures/x.json'.\n"
-            ),
-            stderr="$ tsc -b && vite build\n",
+    The step runner and the pin guard are patched here rather than exercised: this
+    test is about the FAILURE's shape (one line, the compiler's reason), which is
+    the half a build error reaches an operator through. The runner and the guard
+    have their own tests in `test_bundle_build_bound.py`.
+    """
+
+    def step(argv: list[str], _cwd: Path, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if "install" in argv:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(
+            argv,
+            2,
+            "src/fixture.test.ts(1,1): error TS2307: Cannot find module './fixtures/x.json'.\n",
+            "$ tsc -b && vite build\n",
         )
 
     with (
         patch.object(install.shutil, "which", side_effect=lambda name: f"/usr/bin/{name}"),
-        patch.object(install.subprocess, "run", side_effect=run),
+        patch.object(install, "_run_build_step", side_effect=step),
+        patch.object(install, "_pin_mismatch", return_value=None),
     ):
         error = install._build_bundle()
 
@@ -740,13 +746,19 @@ def test_verify_bundle_is_optional_without_node_or_the_script(tmp_path: Path) ->
 
 def test_build_bundle_reports_what_its_guard_rejects(tmp_path: Path) -> None:
     """Exit 0 is not proof the bundle is servable, and this is the wiring that
-    makes a degenerate one loud instead of serving an unstyled phone."""
+    makes a degenerate one loud instead of serving an unstyled phone.
+
+    The step runner is patched rather than ``subprocess.run``: the steps of a
+    build are run by `_run_build_step` (its own process group, see
+    `test_bundle_build_bound.py`), so patching the old call would leave this test
+    running the REAL pnpm against a temp tree.
+    """
     web = tmp_path / "web"
     (web / "dist").mkdir(parents=True)
     (web / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
 
     with (
-        patch.object(install.subprocess, "run", return_value=FakeProc(returncode=0)),
+        patch.object(install, "_run_build_step", return_value=FakeProc(returncode=0)),
         patch.object(install, "_verify_bundle", return_value="bundle check failed: nope"),
     ):
         error = install._build_bundle(web, ["pnpm"])
