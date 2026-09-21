@@ -6083,3 +6083,75 @@ async def test_router_model_request_carries_the_sticky_routing_key_and_cache_mar
 
     assert body["prompt_cache_key"] == "lineage-123"
     assert body["messages"][-1]["content"][-1].get("cache_control") == {"type": "ephemeral"}
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "base_url"),
+    [
+        ("radient", "auto", "https://api.radienthq.com/v1"),
+        ("openrouter", "openrouter/auto", "https://openrouter.ai/api/v1"),
+    ],
+)
+def test_the_router_request_carries_the_seeded_effort_on_the_wire(
+    provider: str, model_id: str, base_url: str
+) -> None:
+    """The consequence test for the router's ladder: the KEY reaches the body.
+
+    The spec-level test pins the ladder and the seed; this pins that the seeded
+    level survives all the way onto a real request built from the real registry
+    row, which is the observable the operator asked for. Built from
+    ``build_model_spec`` rather than a hand-set spec on purpose — the prior bug
+    (the router's caching flag) stayed invisible exactly because the tests set
+    the spec by hand.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.model.registry import get_model_info
+
+    spec = build_model_spec(provider, model_id, get_model_info(provider, model_id))
+    body = OpenAICompatClient(base_url)._build_body(
+        ChatRequest(model=spec, messages=[Message.user("hi")])
+    )
+
+    assert body["reasoning_effort"] == "high", "the seeded router level must reach the wire"
+
+
+def test_a_no_ladder_model_still_omits_reasoning_effort() -> None:
+    """The omission rule is unchanged, and this is its control.
+
+    A model with no ladder rejects the key however politely it is spelled, so
+    the body must not carry it at all. The router's new ladder must not have
+    widened this rule to models that still have none.
+    """
+    spec = _spec(provider="google", model_id="gemini-2.0-flash-001")
+    assert spec.reasoning_efforts == ()
+
+    body = OpenAICompatClient("https://x/v1")._build_body(
+        ChatRequest(model=spec, messages=[Message.user("hi")])
+    )
+
+    assert "reasoning_effort" not in body
+
+
+def test_an_explicit_override_wins_over_the_router_seed() -> None:
+    """A user's ``/effort`` choice outranks the seeded default, and an off-ladder
+    choice is still dropped rather than sent.
+
+    The seed is only a starting point: ``_reasoning_effort`` re-checks the value
+    against the ladder because the spec is mutable at runtime. Both halves are
+    pinned here — the router route gained a ladder, not an exemption from the
+    membership check.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.model.registry import get_model_info
+
+    spec = build_model_spec("radient", "auto", get_model_info("radient", "auto"))
+    client = OpenAICompatClient("https://api.radienthq.com/v1")
+
+    chosen = spec.model_copy(update={"reasoning_effort": "low"})
+    body = client._build_body(ChatRequest(model=chosen, messages=[Message.user("hi")]))
+    assert body["reasoning_effort"] == "low"
+
+    # `max` is not a rung this ladder offers, so it is dropped, not sent.
+    off_ladder = spec.model_copy(update={"reasoning_effort": "max"})
+    dropped = client._build_body(ChatRequest(model=off_ladder, messages=[Message.user("hi")]))
+    assert "reasoning_effort" not in dropped
