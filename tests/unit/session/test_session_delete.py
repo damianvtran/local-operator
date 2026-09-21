@@ -496,7 +496,7 @@ def test_every_refusal_names_the_conversation_and_never_a_host_path() -> None:
     """
     import re
 
-    from local_operator.session.cleanup import _GUARD_REFUSALS, _GUARD_REFUSAL_FALLBACK
+    from local_operator.session.cleanup import _GUARD_REFUSAL_FALLBACK, _GUARD_REFUSALS
 
     sentences = list(_GUARD_REFUSALS.values()) + [_GUARD_REFUSAL_FALLBACK]
     assert len(sentences) == 5, "the set this rule is written for"
