@@ -1095,9 +1095,9 @@ def _base64_value_guard(match: Match[str]) -> bool:
 #: ``\S*`` value arm takes anything after the ``=``, so a credential spelled
 #: ``<prefix>-<lowercase words>=<secret>`` survives where the underscore-only rule
 #: masked it. Measured: 0 occurrences across 2.6 GB of the fleet's transcripts, and
-#: a real issuer tail cannot reach the form at all, since it carries mixed case or a
-#: digit. Closing it needs a predicate on the VALUE half — a wider rule than this
-#: fix, with the same false-positive risk on the other side (QA round 1, Q8).
+#: a tail carrying mixed case or a digit cannot reach the form. Closing it needs a
+#: predicate on the VALUE half — a wider rule than this fix, with the same
+#: false-positive risk on the other side (QA round 1, Q8).
 _VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[_-][a-z]+)+(?:=\S*)?")
 
 
@@ -1889,9 +1889,9 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # carry is a token this rule can match and the gate will skip. That was a
         # real defect — `pk-`, `rk-`, `hf-` and `npm-` were published verbatim
         # while the rule itself masked them, and the corpus had no `-` variant to
-        # notice. The suffix must also look like a token: at least 8 characters
-        # AND at least one digit, which is what keeps `pypi-local-operator.json`
-        # (a filename, 159 such lines in this repo) readable.
+        # notice. The suffix must also look like a token: at least 8 characters,
+        # no dot, and no digit requirement — the dot is what keeps
+        # `pypi-local-operator.json` (a filename, 159 such lines in this repo) readable.
         _VENDOR_PATTERN,
         None,
         0,

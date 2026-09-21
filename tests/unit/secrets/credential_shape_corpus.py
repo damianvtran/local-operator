@@ -591,10 +591,11 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     # --- the RESIDUAL the tail rule ACCEPTS, pinned on purpose (agent review
     #     R1-1): a run of lowercase words joined by separators is a NAME whatever
     #     prefix precedes it, so a hypothetical issuer tail spelled that way is
-    #     left readable. No token of the shape exists in the corpus, or in the
-    #     2.6 GB of the fleet's transcripts the survey covered; the row is here so
-    #     that a real one breaks a test instead of passing silently, and so the
-    #     cost of the rule is visible to anyone reading the two halves together.
+    #     left readable. No **real** token of the shape exists in the corpus, or
+    #     in the 2.6 GB of the fleet's transcripts the survey covered; the row is
+    #     here so that a real one breaks a test instead of passing silently, and
+    #     so the cost of the rule is visible to anyone reading the two halves
+    #     together.
     Case(
         "glpat-lowercase-token-value",
         "the accepted residual: a lowercase separator-carrying tail is a NAME",
