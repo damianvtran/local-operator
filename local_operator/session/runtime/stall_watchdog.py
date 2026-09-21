@@ -167,8 +167,10 @@ from __future__ import annotations
 import faulthandler
 import logging
 import os
+import re
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
@@ -572,3 +574,101 @@ def fired_pids(directory: Path | None = None) -> set[int]:
         if suffix.isdigit():
             fired.add(int(suffix))
     return fired
+
+
+#: The header :func:`arm` writes, in the one shape a reader parses.
+#:
+#: SPELLED ONCE, next to the writer, for the reason ``FIRED_MARKER`` is: a reader
+#: that guessed the format would fail SILENTLY, and the failure of this reader is
+#: indistinguishable from "this pid did not trip its bound" — a death that reads
+#: ``unattributed`` while its own dump names the act, which is the defect this
+#: reader exists to close (the 2026-09-21 ``runtime-killed`` verdicts).
+#:
+#: ``armed_at`` is an epoch second, and it is the run-identity half rather than
+#: decoration: the file is keyed by pid alone, so a pid recycled by a LATER
+#: runtime truncates and rewrites it, and a bound fired by that later process
+#: must not be attributed to the earlier one (see :func:`fired_bound`).
+ARMED_HEADER_RE = re.compile(
+    r"^" + re.escape(ARM_MARKER) + r"pid (\d+) armed for ([0-9.]+)s at (\d+)"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FiredBound:
+    """One process's stall bound, as the artifact it left behind describes it.
+
+    ``armed_at`` and ``seconds`` come out of the header the arming process wrote
+    (so the bound is the number THAT process ran under, not this build's default),
+    and ``fired_at`` is the file's mtime — the instant the C thread wrote the dump
+    and left, which is the closest thing to a death time any artifact carries.
+    """
+
+    path: Path
+    pid: int
+    seconds: float
+    armed_at: float
+    fired_at: float
+
+    def covers(self, alive_until: float | None) -> bool:
+        """Whether this dump can be the one THIS run left.
+
+        THE BOUND IS THE ROW'S OWN LAST WRITE, and it is what separates "the
+        process that wrote this row tripped the bound" from "a LATER runtime was
+        given the same pid". A pid-keyed file has no session in it, so the only
+        ordering available is time: the dump is this run's only when the bound was
+        ARMED no later than the run's last known sign of life (a process arms its
+        bound at boot, before its first turn, so armed-at is always at or before
+        its first write). A recycled pid arms AFTER the earlier row's last write
+        and is refused.
+
+        No bound on the other side on purpose: a run that armed at boot and then
+        made no progress for hours is exactly the shape this rung exists to name,
+        so requiring the fire to be near the last write would hide the slow freeze.
+        """
+        if alive_until is None:
+            return False
+        return self.armed_at <= float(alive_until)
+
+
+def fired_bound(pid: int | None = None, directory: Path | None = None) -> FiredBound | None:
+    """The bound that FIRED for ``pid``, or ``None`` when nothing fired for it.
+
+    The per-pid reader next to :func:`fired_pids`' whole-store scan, and it exists
+    because the two consumers want different things: a listing wants the SET (one
+    glob for every row it renders), while a post-mortem verdict wants ONE process's
+    evidence, with the bound it ran under, to name a death that would otherwise be
+    recorded as ``unattributed``.
+
+    ``None`` for every shape that is not this pid's own fired bound: no file (never
+    armed, or a clean exit removed it), a header-only file (armed and then killed —
+    a hard death, not this bound), an unreadable file, and a header naming a
+    DIFFERENT pid. The caller still has to bound the fire against the run it is
+    judging; see :meth:`FiredBound.covers` for the ordering that does it.
+    """
+    target = dump_path(pid, directory)
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+        fired_at = target.stat().st_mtime
+    except OSError:
+        return None
+    lines = text.splitlines()
+    if not any(line.startswith(FIRED_MARKER) for line in lines):
+        return None
+    header = next((line for line in lines if line.startswith(ARM_MARKER)), "")
+    matched = ARMED_HEADER_RE.match(header) if header else None
+    if matched is None:
+        # A fired marker with no readable header is evidence that SOMETHING
+        # tripped a bound, and no evidence of which process or which bound — the
+        # one shape this reader must not guess at, because the guess would name a
+        # cause on an artifact it cannot read.
+        return None
+    armed_pid, seconds, armed_at = matched.groups()
+    if pid is not None and int(armed_pid) != int(pid):
+        return None
+    return FiredBound(
+        path=target,
+        pid=int(armed_pid),
+        seconds=float(seconds),
+        armed_at=float(armed_at),
+        fired_at=float(fired_at),
+    )

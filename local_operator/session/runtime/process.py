@@ -2670,6 +2670,31 @@ async def _drain_for_signal(
 
 
 async def _drain_inbox_into(handle: object) -> int:
+    """``_drain_inbox_into_rows``, plus the owed-turn bookkeeping it owes.
+
+    A wrapper rather than three calls at the function's exits, because the body
+    returns from several places (a spool it will not deliver yet, an empty spool,
+    a failed read) and every one of them has to settle the record: the obligation
+    this session placed in ``local_operator.wakes.spooled`` is a claim that a turn is
+    OWED, and the only thing that can retire it is the spool being empty of
+    turn-asking rows — which is exactly what the settle asks, so the deferred
+    branches keep their claim and the draining ones drop it.
+
+    Imported in-function like everything else here: this runs on the boot path,
+    before the session's own serving plane exists.
+    """
+    try:
+        return await _drain_inbox_into_rows(handle)
+    finally:
+        session = getattr(handle, "_session", None)
+        directory = getattr(getattr(session, "transcript", None), "directory", None)
+        if directory is not None:
+            from local_operator.session.runtime.inbox import settle_owed_turn
+
+            settle_owed_turn(directory)
+
+
+async def _drain_inbox_into_rows(handle: object) -> int:
     """Deliver every message spooled while this session was cold. Count sent.
 
     Also the handover path: the same file is where a DRAINING runtime spools what

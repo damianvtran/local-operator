@@ -633,6 +633,160 @@ def _write_open_row(
     return row
 
 
+# -- the runtime's own stall bound (rung 3) -------------------------------------
+#
+# THE 2026-09-21 MEASUREMENT, which these cells replay from the artifacts it left
+# behind: pids 57975, 4698 and 79757 each have a ``logs/runtime-stall-<pid>.log``
+# carrying ``Timeout (`` — i.e. their own bound FIRED, written by a C thread
+# ``faulthandler`` armed at boot — and each was narrated to its successor as
+# ``runtime-killed`` with ``(unattributed, ...)``, because no reader on the death
+# path had ever looked at the file. The artifact named the act; the taxonomy did
+# not read it.
+
+
+def _write_stall_dump(
+    monkeypatch: pytest.MonkeyPatch,
+    directory: Path,
+    pid: int,
+    *,
+    armed_at: float,
+    fired: bool = True,
+    seconds: float = 300.0,
+) -> Path:
+    """A dump in the shape ``stall_watchdog.arm`` writes, and the redirect.
+
+    The file is composed from the module's OWN markers rather than typed, so a
+    change to the header format fails here instead of silently un-naming every
+    stalled death — the failure mode this whole rung exists to close.
+
+    ``dump_path`` is patched rather than the log directory: the reader under test
+    asks the module where a pid's dump is, and the module's own answer is the one
+    piece of the path a test should not re-derive.
+    """
+    from local_operator.session.runtime import stall_watchdog
+
+    body = (
+        f"{stall_watchdog.ARM_MARKER}pid {pid} armed for {seconds:g}s at {armed_at:.0f} "
+        f"(2026-09-21 18:11:40); the runtime's own loops re-arm this timer, so a dump below "
+        f"means this process made no progress for {seconds:g}s.\n"
+    )
+    if fired:
+        body += f"{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n  File \"x.py\", line 1\n"
+    dump = directory / f"runtime-stall-{pid}.log"
+    dump.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(stall_watchdog, "dump_path", lambda pid=None, directory=None: dump)
+    return dump
+
+
+def test_a_fired_stall_bound_is_named_rather_than_unattributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The act the artifact already named must reach the verdict.
+
+    The row is the real successor's: an open turn whose writer is gone, a build
+    that has since moved on disk (which is why rung 4 used to refuse the tear
+    inference and fall through to the unattributed arm).
+    """
+    from local_operator.incidents import KILL_UNATTRIBUTED, STALL_CAUSE
+
+    directory = _session_directory(tmp_path, "sess-stalled")
+    row = _write_open_row(directory, 57975, alive_until=time.time() - 60)
+
+    dump = _write_stall_dump(monkeypatch, tmp_path, 57975, armed_at=row.started_at - 30.0)
+
+    kind, cause, reason = journal.death_verdict(row)
+
+    assert kind == "error"
+    assert cause == STALL_CAUSE, cause
+    assert "stall bound" in reason, reason
+    assert str(dump) in reason, "the reader has to be able to open the dump"
+    assert "300" in reason, "the bound the process RAN under, not this build's default"
+    assert KILL_UNATTRIBUTED not in reason, (
+        "the whole point of the rung: a death with a named act must not read as one "
+        "where nobody acted"
+    )
+
+
+def test_the_bound_is_read_from_the_dump_not_from_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator's ``LOP_RUNTIME_STALL_SECONDS`` is what the sentence quotes."""
+    from local_operator.incidents import STALL_CAUSE
+
+    directory = _session_directory(tmp_path, "sess-stalled-bound")
+    row = _write_open_row(directory, 4242, alive_until=time.time() - 5)
+    _write_stall_dump(monkeypatch, tmp_path, 4242, armed_at=row.started_at - 1.0, seconds=45.0)
+
+    _kind, cause, reason = journal.death_verdict(row)
+
+    assert cause == STALL_CAUSE
+    assert "45s" in reason, reason
+    assert "300" not in reason, "the default must not be asserted over the evidence"
+
+
+def test_a_header_only_dump_is_a_hard_death_not_this_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An armed file that never fired is the shape a SIGKILL leaves.
+
+    ``stall_watchdog``'s own contract: the FIRED marker is the single definition
+    of the bound having tripped, and a header alone means the process was taken
+    away by something else. Naming the bound here would be a FALSE attribution —
+    worse than none, because it sends the investigation at this module.
+    """
+    from local_operator.incidents import KILL_CAUSE, KILL_UNATTRIBUTED
+
+    directory = _session_directory(tmp_path, "sess-armed-only")
+    row = _write_open_row(directory, 700, alive_until=time.time() - 5)
+    _write_stall_dump(monkeypatch, tmp_path, 700, armed_at=row.started_at - 1.0, fired=False)
+
+    _kind, cause, reason = journal.death_verdict(row)
+
+    assert cause == KILL_CAUSE, cause
+    assert KILL_UNATTRIBUTED in reason, reason
+
+
+def test_a_recycled_pid_is_not_attributed_to_the_earlier_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dump is keyed by pid alone, so the ARM TIME is what identifies the run.
+
+    A later runtime given the same pid truncates the file and arms its own bound;
+    without the ordering, that runtime's stall would be recorded as a cause of
+    death of a process that had been dead for hours.
+    """
+    from local_operator.incidents import KILL_CAUSE, KILL_UNATTRIBUTED
+
+    directory = _session_directory(tmp_path, "sess-recycled")
+    row = _write_open_row(directory, 909, alive_until=time.time() - 3_600)
+    # Armed an hour AFTER this row's last write: a different process wore the pid.
+    _write_stall_dump(monkeypatch, tmp_path, 909, armed_at=row.updated_at + 3_600)
+
+    _kind, cause, reason = journal.death_verdict(row)
+
+    assert cause == KILL_CAUSE, cause
+    assert KILL_UNATTRIBUTED in reason, reason
+
+
+def test_a_missing_dump_leaves_the_verdict_unattributed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No artifact is no evidence, and the taxonomy says so rather than guessing."""
+    from local_operator.incidents import KILL_CAUSE, KILL_UNATTRIBUTED
+    from local_operator.session.runtime import stall_watchdog
+
+    directory = _session_directory(tmp_path, "sess-no-dump")
+    row = _write_open_row(directory, 111, alive_until=time.time() - 5)
+    monkeypatch.setattr(
+        stall_watchdog, "dump_path", lambda pid=None, directory=None: tmp_path / "absent.log"
+    )
+
+    _kind, cause, reason = journal.death_verdict(row)
+
+    assert cause == KILL_CAUSE, cause
+    assert KILL_UNATTRIBUTED in reason, reason
+
+
 # NOTE ON ISOLATION. ``LOP_BUILD_PREFIX`` points the install stamp at a fake
 # tree, so a developer who has it exported would have every cell here compare a
 # row's build against a different root from the one it was stamped with — the
