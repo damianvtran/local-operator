@@ -109,6 +109,40 @@ mesh. From a shell:
 | `lop network sessions --peer <id> --create --name <n> [--prompt <p>]` | create the session ON the peer, which mints its id |
 | `lop network sessions --peer <id> --engage <session>` | warm a stored session on the peer |
 | `lop network sessions --peer <id> --stop <session>` | stop it where it lives |
+| `lop network sessions --peer <id> --stop <session> --force` | the same stop on a target whose turn is in flight, or that will not answer its socket |
+
+EVERY REFUSAL NAMES THE COMPONENT THAT CAUSED IT, so read the `code` before
+acting on one (QA round 5, Q-R5-1):
+
+- `relay_unavailable` — **this** device's relay could not be asked: it is not
+  running, or it is running and wedged (the message names which, from its own
+  record). The sibling `lop network peers` has always refused this way, and
+  `sessions --peer` / `--all-peers` refuse in the SAME words rather than answering
+  an empty list. Remedy: `lop network start`, or `lop network restart` for a wedged
+  relay. An empty list from either listing means "asked, and nothing is held" —
+  never "could not ask".
+- `relay_refused` — the relay answered and declined; its sentence is the relay's
+  own.
+- `peer_unreachable` — the relay ANSWERED, and the DEVICE NAMED is the reason: it
+  is not in the network, or it is in it and did not answer. An unreachable peer is a
+  `doctor` question and not an error to retry (`lop network doctor --json`).
+- `stop_unreported` / `engage_unreported` / `create_unreported` — a receipt arrived
+  without the field it is a receipt for, so whether the peer acted is UNKNOWN:
+  restart the relay and ask again, and do not read the answer as a failure of the
+  act.
+
+`--all-peers` merges the rows it could read and NAMES the peers it could not
+(`<device>: unreachable (<reason>)` on stderr), so a partial listing is never
+mistaken for a complete one.
+
+A STOP THAT DID NOT ACT EXITS NON-ZERO. `--stop` answers `{"ok": true}` with rc 0
+only for an outcome that ENDED the target: `stopped`, `killed`, `already-gone`, or
+`not_running` (which is itself the answer to "did it stop"). A target whose turn is
+in flight is `{"ok": false, "outcome": "skipped", "rung": "busy"}` with rc 1, a
+sentence naming both ways forward, and the target LEFT UNTOUCHED — stop it again
+once the turn ends, or add `--force`. The same rule covers `refused`, where the
+owner could not prove the process it would signal was the one it recorded. The
+`outcome` word is what says which happened; rc alone does not.
 
 WHAT IS **NOT** IN THIS BUILD, although the design names it: `lop exec --peer`,
 `lop send --peer`, `lop sessions move <id> --to <peer>|local`, and the TUI's
@@ -259,16 +293,22 @@ lop network identity rotate --json    # for a suspected key compromise
   system.
 - Do not add a member by editing a member list. Membership changes through
   `invite`/`join`, `member rm`, and the epoch rotation they carry.
-- Do not force a full re-sync or invent a `--force`: nothing here takes one.
+- Do not force a full re-sync, and do not invent a `--force` on a verb that does
+  not take one: the only verb in this family with a `--force` is `network sessions
+  --stop`, and it means the owner's own `lop stop --force` — signal a target whose
+  turn is in flight or whose socket will not answer, accepting that the turn goes
+  with it.
 
 ## Reference
 
-**Exit codes.** `0` success; `1` a refusal or a failed operation (the sentence is
-on stderr, and it is the sentence to show the user); `2` a usage error, including
-`--print` together with `--json`. The design reserves `3` for "a human decision
-is required"; this build never emits it — the one human step (`join`) is a
-prompt on the joining device rather than a two-phase command, so there is no
-`--confirm` flag to reach for.
+**Exit codes.** `0` success; `1` a refusal or a failed operation — INCLUDING a verb
+that answered and did not act, such as a stop whose `outcome` is `skipped` — with
+the sentence on stderr, which is the sentence to show the user (read `outcome`, not
+the code alone: a receipt is not a success); `2` a usage error, including `--print`
+together with `--json` and `--force` without `--stop`. The design reserves `3` for
+a "human decision is required"; this build never emits it — the one human step
+(`join`) is a prompt on the joining device rather than a two-phase command, so
+there is no `--confirm` flag to reach for.
 
 **Commands.**
 

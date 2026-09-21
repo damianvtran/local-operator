@@ -64,6 +64,12 @@ def test_sessions_peer_json_refuses_with_a_document(
     printed its sentence on stderr and left stdout EMPTY with rc=1, so a parser
     could not tell a refusal from a crash. The other front end for the same rows is
     `lop network sessions`, which already answered with a document.
+
+    WHICH refusal it is here is the Q-R5-1 half and is asserted in its own section
+    below: with no relay on this device the reason is this device's own relay, so
+    the code is the family's ``relay_unavailable`` rather than a claim about the
+    peer. THIS test is about the document existing at all, which is why its
+    assertions are the keys every refusal carries.
     """
     from local_operator import cli as main_cli
 
@@ -79,8 +85,8 @@ def test_sessions_peer_json_refuses_with_a_document(
     assert main_cli.sessions_command(args) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["code"] == "peer_unreachable"
-    assert "reachable" in payload["message"]
+    assert payload["code"] == "relay_unavailable"
+    assert payload["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +478,7 @@ _SESSIONS_FLAGS: dict[str, object] = {
     "create": False,
     "engage": "",
     "stop": "",
+    "force": False,
     "cwd": "",
     "name": "",
     "prompt": "",
@@ -661,3 +668,264 @@ def test_the_stop_word_map_never_turns_a_method_it_does_not_know_into_success() 
         assert method in _STOP_OUTCOME_WORD, method
     assert _STOP_OUTCOME_WORD["draining"] == "skipped"
     assert _STOP_OUTCOME_DEFAULT not in net_cli._STOP_ENDED_OUTCOMES  # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# Q-R5-1 — the ordinary session list, and WHICH component it blames
+# ---------------------------------------------------------------------------
+#
+# The session verbs inside `network.cli` refuse by name when this device's relay
+# is down (Q-R4-1). The ORDINARY listing — `lop sessions --all-peers` / `--peer`,
+# `local_operator/cli.py::_remote_listing`, the guide's "the same rows through the
+# ordinary session list" — was the one consumer the sweep missed: `--all-peers`
+# answered `[]` with rc 0 and printed "no active lop sessions" (a lying emptiness),
+# and `--peer` answered `peer_unreachable`, blaming the peer for a fault here.
+#
+# The tests below pin the three outcomes apart, because the rule QA round 5 states
+# is about the PAIR: a missing outcome may not render as success or as silence, and
+# a refusal must not blame the wrong component. A test for either half alone goes
+# green on the bug (an empty table IS silence; `peer_unreachable` IS a refusal).
+
+
+def _ordinary_sessions_args(**fields: object) -> Namespace:
+    """`lop sessions`'s own flag set, as `main` hands it to `sessions_command`."""
+    flags: dict[str, object] = {
+        "json": True,
+        "sessions_command": None,
+        "all": False,
+        "limit": None,
+        "peer": "",
+        "all_peers": False,
+    }
+    flags.update(fields)
+    return Namespace(**flags)
+
+
+def _live_relay(root: Path, monkeypatch: pytest.MonkeyPatch) -> relay.RelayServer:
+    """A REAL relay on this root, reached the way the CLI reaches it: its record.
+
+    The relay is the only process that speaks the mesh, so "the relay answered"
+    cannot be unit-tested at a lesser boundary. It publishes its own record on
+    ``start()``, and the CLI finds that record through the ambient config dir and
+    dials loopback — which is the path an operator's `lop sessions --peer` takes.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    server = relay.RelayServer(
+        root=root, settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1")
+    )
+    server.start()
+    return server
+
+
+def _admit_a_member_that_cannot_answer(
+    server: relay.RelayServer, *, name: str, endpoints: list[str]
+) -> types.NetworkRecord:
+    """A network this device admins, holding ONE member nothing can dial.
+
+    Built from the RELAY's own identity, because ``_fan_out_catalog`` skips the
+    member whose id is its own: a record naming a different self would make the
+    relay dial itself, and the test would then be about a different failure than
+    the one it claims.
+    """
+    from local_operator.network import wire
+
+    record = types.NetworkRecord(
+        network_id=store.new_network_id(),
+        name="home-net",
+        created_by=server.identity.device_id,
+        self_device_id=server.identity.device_id,
+        self_role="admin",
+        self_capabilities=sorted(types.capabilities_for_role("admin")),
+    )
+    relay.admit(
+        record,
+        device_id=server.identity.device_id,
+        public_key=server.identity.public_key,
+        name=server.identity.name,
+        role="admin",
+        added_by=server.identity.device_id,
+        added_via="self",
+        root=server.root,
+        persist=False,
+    )
+    relay.admit(
+        record,
+        device_id="d_" + "b" * 32,
+        public_key=wire.b64u(bytes(range(32))),
+        name=name,
+        role="drive",
+        endpoints=list(endpoints),
+        root=server.root,
+        persist=False,
+    )
+    store.save(record, server.root)
+    store.save_secrets(
+        types.SecretState(
+            network_id=record.network_id, epoch=1, secret=wire.b64u(bytes(reversed(range(32))))
+        ),
+        server.root,
+    )
+    return record
+
+
+@pytest.mark.parametrize(
+    "fields", [{"all_peers": True}, {"peer": "lop-mesh-peer-b"}], ids=["all-peers", "peer"]
+)
+def test_the_ordinary_session_list_refuses_locally_when_this_devices_relay_is_down(
+    fields: dict[str, object],
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Q-R5-1, and it is the SAME document `peers` ships, compared field by field.
+
+    ``_relay_down`` is QA's own condition: an admitted member whose own relay was
+    never started (`relay_running=false relay_answering=false relay_state=stopped`).
+    Both flags must refuse — an `--all-peers` that printed `[]` here told an
+    operator "no remote sessions" about a question this device never asked anybody
+    — and the refusal must be the FAMILY's: one code and one sentence, checked
+    against `_cmd_peers` rather than against a literal, so a second spelling of the
+    same incident fails this test instead of shipping beside the first.
+    """
+    from local_operator import cli as main_cli
+
+    _relay_down(root, monkeypatch)
+    assert net_cli._cmd_peers(_args()) == 1  # noqa: SLF001
+    reference = json.loads(capsys.readouterr().out)
+
+    assert main_cli.sessions_command(_ordinary_sessions_args(**fields)) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["code"] == reference["code"] == "relay_unavailable"
+    assert payload["message"] == reference["message"]
+    assert "relay" in payload["message"]
+
+
+@pytest.mark.parametrize(
+    "fields", [{"all_peers": True}, {"peer": "lop-mesh-peer-b"}], ids=["all-peers", "peer"]
+)
+def test_the_human_form_refuses_on_stderr_rather_than_printing_no_sessions(
+    fields: dict[str, object],
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The human half of the same finding: rc 0 and a sentence, not rc 0 and none.
+
+    QA round 5 ran this without `--json` and got "no active lop sessions" with an
+    empty stderr — the shape an operator reads as "there is nothing out there".
+    """
+    from local_operator import cli as main_cli
+
+    _relay_down(root, monkeypatch)
+    assert main_cli.sessions_command(_ordinary_sessions_args(json=False, **fields)) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "relay" in captured.err
+
+
+def test_with_the_relay_up_an_unknown_peer_is_still_blamed_on_the_peer(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other side of the pair: the relay ANSWERED, so the peer is the reason.
+
+    An empty peer set with a live relay is a fact ("asked, and it holds nothing"),
+    not a missing answer: `--all-peers` exits 0 with no rows, and a NAMED device
+    that is not in the network keeps the peer's own code and sentence.
+    """
+    from local_operator import cli as main_cli
+
+    server = _live_relay(root, monkeypatch)
+    try:
+        assert main_cli.sessions_command(_ordinary_sessions_args(peer="d_absent")) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["code"] == "peer_unreachable"
+        assert "reachable" in payload["message"]
+
+        assert main_cli.sessions_command(_ordinary_sessions_args(all_peers=True)) == 0
+        assert json.loads(capsys.readouterr().out) == []
+    finally:
+        server.stop()
+
+
+def test_with_the_relay_up_a_member_that_does_not_answer_is_blamed_on_that_member(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The reachable:false branch, which is what "the peer is genuinely the reason" means.
+
+    A member with an endpoint nothing listens on is asked and fails by name: the
+    named form refuses with THAT device's name and the observed reason (not with
+    the relay's code), and the merged form still lists with a note on stderr —
+    the F-2 contract, which an over-refusal would have broken.
+    """
+    from local_operator import cli as main_cli
+
+    server = _live_relay(root, monkeypatch)
+    try:
+        _admit_a_member_that_cannot_answer(
+            server, name="lop-mesh-peer-b", endpoints=["127.0.0.1:1"]
+        )
+
+        assert main_cli.sessions_command(_ordinary_sessions_args(peer="lop-mesh-peer-b")) == 1
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["code"] == "peer_unreachable"
+        assert "lop-mesh-peer-b" in payload["message"]
+        assert "cannot be reached" in payload["message"]
+
+        assert main_cli.sessions_command(_ordinary_sessions_args(all_peers=True)) == 0
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == []
+        assert "lop-mesh-peer-b: unreachable" in captured.err
+    finally:
+        server.stop()
+
+
+# ---------------------------------------------------------------------------
+# Q-R5-2 — the flag the busy refusal names is one this verb must accept
+# ---------------------------------------------------------------------------
+
+
+def test_the_stop_verb_takes_force_and_sends_the_owners_own_mode(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--force` on the mesh verb is the OWNER's `--force`, carried by ``mode``.
+
+    The ladder's busy refusal names ``--force`` as the way past a turn in flight,
+    and only the owner's own ``lop stop`` had it: the sentence therefore offered an
+    action this verb could not accept (the defect UX round 2 called U7, QA round 5,
+    Q-R5-2). The flag is now real here, and it must keep the owner's semantics
+    rather than grow a second meaning — so the assertion is the FRAME: ``mode`` is
+    the ladder's own spelling, and the relay maps ``immediate`` to
+    ``control.stop_session(force=True)`` (``test_session_plane`` owns that hop; the
+    flag's meaning is pinned in ``tests/unit/session/runtime/test_control.py``).
+    """
+    frames: list[dict[str, object]] = []
+
+    def _capture(op: str, **fields: object) -> dict[str, object]:
+        frames.append({"op": op, **fields})
+        return {"rung": "socket", "outcome": "stopped", "pid": 1, "detail": "stopped"}
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    monkeypatch.setattr(net_cli, "_relay_answer", _capture)
+    assert net_cli.main(_sessions_args(peer=PEER, stop="deadbeefcafe", force=False)) == 0
+    assert net_cli.main(_sessions_args(peer=PEER, stop="deadbeefcafe", force=True)) == 0
+    capsys.readouterr()
+    assert [frame["op"] for frame in frames] == ["peer_session_stop", "peer_session_stop"]
+    assert [frame["mode"] for frame in frames] == ["graceful", "immediate"]
+
+
+def test_force_without_a_stop_is_a_usage_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A flag accepted and then quietly dropped is the same untruth as one invented.
+
+    ``--force`` means one thing — the ladder's way past a turn in flight — so a
+    caller who passes it without ``--stop`` has asked for an act this verb is not
+    performing. The guide's exit-code table gives a usage error its own rc (2), and
+    a refusal (rc 1, the relay's code) would misreport it as a relay condition.
+    """
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(root))
+    assert net_cli.main(_sessions_args(peer=PEER, force=True)) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--force applies to --stop only" in captured.err

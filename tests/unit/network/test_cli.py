@@ -69,6 +69,23 @@ def test_every_action_from_the_design_is_registered() -> None:
     assert set(subcommands.choices) == set(ACTIONS)
 
 
+def test_the_stop_verb_accepts_the_force_the_ladder_names() -> None:
+    """Q-R5-2: the busy refusal names `--force`, so `--stop` must take it.
+
+    The owner's ladder declines to signal a target whose turn is in flight and
+    states the way past it in the same sentence — a sentence the mesh viewer
+    paints verbatim. Before this flag existed the verb named an action it could not
+    accept (UX round 2's U7, one front end over); the PARSER is asserted here so
+    the flag cannot be dropped while the sentence keeps promising it, and the
+    semantics (mode ``immediate`` = the owner's own force) are pinned in
+    ``test_refusals``/``test_session_plane``.
+    """
+    parsed = _parser().parse_args(["network", "sessions", "--peer", "b", "--stop", "s", "--force"])
+    assert parsed.force is True
+    # AND IT DEFAULTS OFF, so every existing caller keeps the plain stop.
+    assert _parser().parse_args(["network", "sessions", "--stop", "s"]).force is False
+
+
 def test_every_leaf_action_accepts_json() -> None:
     """The agent path drives this CLI and parses it, so ``--json`` is a contract on
     every action that produces output."""

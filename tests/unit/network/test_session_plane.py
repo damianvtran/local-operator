@@ -789,3 +789,81 @@ def test_a_read_only_member_may_open_a_stream_and_may_not_prompt_through_it(
         client.close()
     finally:
         _stop_all(served)
+
+
+# ---------------------------------------------------------------------------
+# Q-R5-2 — `--force` is the owner's own force, and `mode` is how it travels
+# ---------------------------------------------------------------------------
+
+
+def test_the_forwarded_stop_mode_is_the_owners_own_force(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mesh verb's `--stop --force` must BE the owner's `lop stop --force`.
+
+    WHY THIS TEST EXISTS. The owner's ladder declines to signal a target that
+    reports a turn in flight, and the refusal it composes NAMES ``--force`` as the
+    way past it. That sentence is painted by whichever front end asked, so the
+    mesh viewer has to accept the flag it offers — a surface offering an action it
+    cannot accept is the defect UX round 2 called U7, and here the machine holding
+    the session may be one the operator cannot sit down at (QA round 5, Q-R5-2).
+
+    WHAT IS TESTED WHERE. The flag's MEANING is one place and one test —
+    ``control.stop_session(force=True)``, "signal the target the plain stop left
+    alone" (``tests/unit/session/runtime/test_control.py``). This test owns the ONE
+    hop between the wire and that flag: ``mode`` is the ladder's own spelling
+    (``relay._op_session_stop``), the frame travels a REAL paired link, and the two
+    ends of the pair are asserted so the mapping cannot silently become a no-op —
+    ``graceful`` skips the busy target, ``immediate`` signals it. The signal seams
+    are the ones the ladder's own test uses, because no unit test may send a real
+    signal (see that module's header).
+    """
+    import signal as signal_mod
+
+    from local_operator.session.runtime import control as control_mod
+    from tests.unit.session.runtime.test_control import _bare_record
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    link = _dial_to(server_a, record, host_b, port_b)
+
+    sent: list[tuple[int, int]] = []
+    #: A record for a runtime that is busy and whose socket does NOT answer: the
+    #: one shape that reaches the busy skip, which is the skip `--force` bypasses.
+    target = _bare_record(busy=True, control_port=1)
+    # The session must LIVE on B before its relay will act on it: the authoriser
+    # refuses a session-scoped op for an id this device does not own (§7.2/INV-1).
+    _own_locally(server_b.root, target.session_id, server_b.identity.device_id)
+    monkeypatch.setattr(server_b, "_session_record", lambda _sid: target)
+    monkeypatch.setattr(control_mod, "_identity_by_record", lambda _r: (True, ""))
+    monkeypatch.setattr(control_mod.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(control_mod.registry, "pid_alive", lambda _pid, **_: not sent)
+    plain = link.request(
+        {
+            "op": "net_session_stop",
+            "req": 11,
+            "locality": "remote",
+            "session_id": target.session_id,
+            "mode": "graceful",
+        }
+    )
+    assert plain is not None and plain["op"] == "ack", plain
+    assert plain["detail"]["outcome"] == "skipped", plain["detail"]
+    assert plain["detail"]["rung"] == "busy"
+    assert sent == [], "a plain stop must not signal a target mid-turn"
+
+    forced = link.request(
+        {
+            "op": "net_session_stop",
+            "req": 12,
+            "locality": "remote",
+            "session_id": target.session_id,
+            "mode": "immediate",
+        }
+    )
+    assert forced is not None and forced["op"] == "ack", forced
+    assert [sig for _pid, sig in sent] == [signal_mod.SIGTERM]
+    assert forced["detail"]["outcome"] == "stopped", forced["detail"]
+    assert forced["detail"]["rung"] == "sigterm"
+    link.close("test")

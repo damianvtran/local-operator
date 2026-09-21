@@ -3563,55 +3563,146 @@ _REMOTE_ROW_FILL: dict[str, Any] = {
 }
 
 
+#: The code for "the device you named is the reason": the relay ANSWERED, and
+#: that device is either not in the network or in it and not answering. It is also
+#: what an unknown name answers, which is the shape QA round 1 pinned.
+_CODE_PEER_UNREACHABLE = "peer_unreachable"
+
+#: The code for "this device's relay answered an error about the listing", the
+#: family's word for a relay that answered "no" (`network.cli._relay_call`'s
+#: ``relay_refused``). Kept distinct from ``relay_unavailable`` because they want
+#: different remedies: one is a relay to restart or un-wedge, the other is a relay
+#: that was reached and declined.
+_CODE_RELAY_REFUSED = "relay_refused"
+
+#: The refusal for the one case where the sentence's OWN module is what is
+#: missing: `network.cli` could not be imported, so this device's mesh code — not
+#: its relay process — is the reason no peer could be asked. Named rather than
+#: guessed at, and worded with the family's own remedy, so an operator still has a
+#: next step (`network.cli._relay_unavailable_message` exists for every other case).
+_MESH_UNLOADABLE_SENTENCE = (
+    "this device's mesh code could not be loaded, so no peer could be asked; "
+    "reinstall it with `lop-update` and check `lop network doctor`"
+)
+
+
+def _local_relay_refusal() -> _RemoteListing:
+    """This device's own relay being the reason no peer could be asked.
+
+    ONE VOICE (QA round 5, Q-R5-1). The code and the sentence are IMPORTED from
+    `network.cli` — the module `lop network peers` ships them from — rather than
+    restated here: a `--json` consumer branches on the code, and a copy is how a
+    family comes to read as two voices (the same reason the session verbs inside
+    `network.cli` share ``CODE_RELAY_UNAVAILABLE``). The import is at CALL time
+    because this module is the entry point every `lop` run loads, and the mesh must
+    stay off that path.
+
+    ``_relay_unavailable_message`` consults this device's own relay record, so the
+    refusal distinguishes a relay that is not running from one that is running and
+    not answering (a wedged relay: a different incident with a different remedy).
+    """
+    try:
+        # Imported as a MODULE rather than by name: the two names below are the
+        # family's one spelling of this refusal, and reaching for them by attribute
+        # keeps this module's own import surface out of the mesh package (the entry
+        # point every `lop` run loads must not pull the mesh in).
+        from local_operator.network import cli as family_cli
+
+        return _RemoteListing(
+            [],
+            [],
+            refusal=family_cli._relay_unavailable_message(),
+            code=family_cli.CODE_RELAY_UNAVAILABLE,
+        )
+    except Exception:  # noqa: BLE001 — the sentence's own module is the missing one
+        return _RemoteListing([], [], refusal=_MESH_UNLOADABLE_SENTENCE, code="relay_unavailable")
+
+
 class _RemoteListing(NamedTuple):
     """What the relay said about the peers: rows, why the rest are missing, and —
-    when an explicitly named peer cannot be reached — the sentence to refuse with.
+    when the listing could not be taken — the sentence and code to refuse with.
 
     ``notes`` is why this is a type rather than a bare list. An ``--all-peers``
     listing that returned ``[]`` could not be told from "every peer is
     unreachable", and an unreachable peer's reason is a sentence the human needs
     (QA round 1, F-2). The notes go to stderr so the JSON document on stdout keeps
-    its published shape. ``refusal`` is non-empty only for a NAMED peer, and the
-    caller turns it into a rc=1 refusal rather than an empty table.
+    its published shape. ``refusal`` is non-empty when the caller must refuse
+    instead of printing a table, for EITHER flag, and ``code`` says WHICH component
+    is the reason — a named peer (``peer_unreachable``) or this device's own relay
+    (``relay_unavailable``/``relay_refused``). Both travel together because a
+    refusal that blames the wrong component is its own defect (Q-R5-1).
     """
 
     rows: list[dict[str, Any]]
     notes: list[str]
     refusal: str = ""
+    code: str = _CODE_PEER_UNREACHABLE
 
 
 def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListing | None:
     """Sessions held by other devices, read through this device's relay.
 
     Asked of the RELAY because that is the only process holding peer links and
-    the only one that speaks the mesh. ``None`` means "I could not ask, or nobody
-    by that name answered" — distinct from an empty listing, which is "asked, and
-    it holds nothing": the first is why the caller reports a sentence and a
-    non-zero exit, and collapsing them would make an unreachable device look
-    empty.
+    the only one that speaks the mesh. ``None`` means "the relay answered, and
+    nobody by that name is in the network" — distinct from an empty listing,
+    which is "asked, and it holds nothing": the first is why the caller reports a
+    sentence and a non-zero exit, and collapsing them would make an unreachable
+    device look empty.
 
-    NO NETWORK, NO RELAY, NO ROWS. Either may be absent for reasons that are not
-    errors (never joined, or the relay is not running), so both degrade to an
-    empty answer for ``--all-peers`` — while an explicitly named ``--peer`` gets
-    ``None`` so the operator is told instead of shown an empty table.
+    A MISSING OUTCOME IS NOT AN EMPTY ANSWER, AND A REFUSAL MUST NOT BLAME THE
+    WRONG COMPONENT (QA round 5, Q-R5-1). This used to degrade a LOCAL relay
+    outage to ``[]`` for ``--all-peers`` — which the front end printed as "no
+    active lop sessions" with rc 0, a lying emptiness an operator cannot tell from
+    "no remote sessions" — and to ``peer_unreachable`` for a named ``--peer``,
+    blaming a peer for a fault on this machine. The three cases are now told apart
+    and each names its own component:
+
+    * this device's relay could not be asked (no relay record, a control socket
+      that did not answer, or a mesh that would not even load) is the family's
+      ``relay_unavailable`` refusal — the same code and sentence ``lop network
+      peers`` ships;
+    * the relay answered an error frame ABOUT THE LISTING is ``relay_refused``;
+    * the relay answered and the DEVICE named is the reason (not in the network,
+      or in it and not answering) stays ``peer_unreachable``.
+
+    Retried a round later the degradation is what it always was, in the words QA
+    round 5 filed it under: a missing outcome may not render as SUCCESS or as
+    SILENCE, and a refusal must not blame the wrong component. Neither an empty
+    list nor a peer sentence may stand in for a relay this device never got an
+    answer from.
     """
-    empty = _RemoteListing([], [])
     try:
         from local_operator.network import relay, store
     except Exception:  # noqa: BLE001 — a mesh that cannot load is no mesh
-        return None if peer else empty
+        return _local_relay_refusal()
     try:
         record = store.find_own_relay()
+        # NO RELAY RECORD IS NOT AN EMPTY PEER SET: it is this device's relay being
+        # the reason nothing could be asked, which is the same condition `lop network
+        # peers` refuses on (its own ``_relay_call`` finds no record and refuses).
         if record is None:
-            return None if peer else empty
+            return _local_relay_refusal()
         # The relay PROBES each peer here, so the client waits out the relay's own
         # listing budget instead of timing out on it and reporting a running relay
         # as absent.
         reply = relay.control_request(
             record, "peer_session_rows", timeout=relay.LISTING_PROBE_BUDGET_S + 8.0
         )
-        if reply is None or reply.get("op") != "ack":
-            return None if peer else empty
+        if reply is None:
+            # The record was there and the socket answered nothing: a stopped or
+            # wedged relay, and `_relay_unavailable_message`'s probe says which.
+            return _local_relay_refusal()
+        if reply.get("op") == "error":
+            return _RemoteListing(
+                [],
+                [],
+                refusal=str(reply.get("message") or "this device's relay refused the listing"),
+                code=_CODE_RELAY_REFUSED,
+            )
+        if reply.get("op") != "ack":
+            # Neither the op's ack nor its own error frame: a relay this build does
+            # not know, which is still THIS device's relay being the reason.
+            return _local_relay_refusal()
         payload = reply.get("detail") or {}
         remote = list(payload.get("sessions") or [])
         blocks = payload.get("peers") or {}
@@ -3640,6 +3731,9 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
                     block = candidate
                     break
             if not matched:
+                # The relay ANSWERED and knows no such device: the peer is the
+                # reason, so this is the peer's own code (and `None` lets the caller
+                # say which name was not found).
                 return None
             if not block.get("reachable"):
                 return _RemoteListing(
@@ -3655,14 +3749,12 @@ def _remote_listing(*, peer: str = "", all_peers: bool = False) -> _RemoteListin
                 for item in remote
                 if str((item.get("peer") or {}).get("device_id") or "") == matched
             ]
-        rows = [
-            {**_REMOTE_ROW_FILL, **dict(item)}
-            for item in remote
-            if isinstance(item, dict)
-        ]
+        rows = [{**_REMOTE_ROW_FILL, **dict(item)} for item in remote if isinstance(item, dict)]
         return _RemoteListing(rows, notes)
     except Exception:  # noqa: BLE001 — a broken mesh must not break a listing
-        return None if peer else empty
+        # A mesh that raised under us is this device's own component failing to
+        # produce an answer — never a fact about a peer (Q-R5-1).
+        return _local_relay_refusal()
 
 
 def sessions_command(args: argparse.Namespace) -> int:
@@ -3705,20 +3797,29 @@ def sessions_command(args: argparse.Namespace) -> int:
     peer_name = getattr(args, "peer", None)
     if peer_name or getattr(args, "all_peers", False):
         listing = _remote_listing(peer=str(peer_name or ""), all_peers=bool(args.all_peers))
-        if peer_name and (listing is None or listing.refusal):
+        # A REFUSAL IS A REFUSAL FOR EITHER FLAG (QA round 5, Q-R5-1). This branch
+        # used to fire for a NAMED peer only, so an ``--all-peers`` whose relay could
+        # not be asked fell through to the rows below and printed "no active lop
+        # sessions" with rc 0 — an emptiness the operator cannot tell from "no remote
+        # sessions", and the same defect the session verbs inside `network.cli` were
+        # fixed for in round 4. ``listing.code`` names the component: a peer
+        # (``peer_unreachable``) or this device's own relay
+        # (``relay_unavailable``/``relay_refused``).
+        if listing is None or listing.refusal:
             message = (
                 listing.refusal
                 if listing is not None
                 else f"no device called {peer_name!r} is reachable over the mesh from here"
+            )
+            code = (
+                listing.code if listing is not None and listing.refusal else _CODE_PEER_UNREACHABLE
             )
             if args.json:
                 # ``--json`` MEANS THE CALLER PARSES THIS, so a refusal has to be a
                 # document. stdout used to be empty with rc=1 and the sentence only
                 # on stderr, which a parser reads as a crash or as no answer at all
                 # (QA round 1, F-5).
-                print(
-                    _json.dumps({"ok": False, "code": "peer_unreachable", "message": message})
-                )
+                print(_json.dumps({"ok": False, "code": code, "message": message}))
             else:
                 print(message, file=sys.stderr)
             return 1
