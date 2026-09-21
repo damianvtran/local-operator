@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 
 from local_operator.model import configure
@@ -942,11 +944,26 @@ def test_aggregator_router_rows_advertise_prompt_caching(provider: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "provider, model_id",
-    [("radient", "auto"), ("openrouter", "auto"), ("openrouter", "openrouter/auto")],
+    "provider, model_id, ladder, default",
+    [
+        # Radient's server interprets the `auto` sentinel, so its ladder carries
+        # `auto` as a member AND seeds it: the harness states the route's own
+        # dispatch intent rather than a depth it picked.
+        ("radient", "auto", ("auto", "low", "medium", "high"), "auto"),
+        # ``radient-key`` is the legacy login flavour of the same server-side
+        # sentinel resolution, so it carries the identical ladder and seed. It
+        # has no registry row of its own (``get_model_info`` does not dispatch
+        # it), so it is built without an explicit ``info``.
+        ("radient-key", "auto", ("auto", "low", "medium", "high"), "auto"),
+        # OpenRouter validates `reasoning_effort` against its own enum and 400s
+        # on a member it does not define (openclaw #77350), so `auto` must NOT
+        # reach its ladder; `high` is its documented current default.
+        ("openrouter", "auto", ("low", "medium", "high"), "high"),
+        ("openrouter", "openrouter/auto", ("low", "medium", "high"), "high"),
+    ],
 )
-def test_an_aggregator_router_route_gets_an_effort_ladder_defaulting_to_high(
-    provider: str, model_id: str
+def test_an_aggregator_router_route_gets_a_provider_keyed_effort_ladder(
+    provider: str, model_id: str, ladder: tuple[str, ...], default: str
 ) -> None:
     """The router is a ROUTE, and the operator's decision is that the harness
     EMITS an effort level on it rather than leaving the dial invisible.
@@ -954,22 +971,67 @@ def test_an_aggregator_router_route_gets_an_effort_ladder_defaulting_to_high(
     Before this the router carried an empty ladder, so ``_reasoning_effort``
     returned None and no ``reasoning_effort`` key ever reached the wire — the
     status band showed nothing and ``/effort`` reported "not adjustable" on the
-    route the harness selects by default on ``radient``. The ladder is the
-    aggregator's own vocabulary (low/medium/high: what Radient's request schema
-    documents for the field and what OpenRouter normalises), and `high` is the
-    level the route's own current model documents as its default, so the body
-    states the depth already in force rather than switching reasoning on.
+    route the harness selects by default on ``radient``.
+
+    THE LADDER IS KEYED ON THE PROVIDER, and this is the regression the split
+    exists to pin. Radient resolves the ``auto`` sentinel server-side, so
+    ``auto`` is a legitimate member and the seed; OpenRouter rejects enum
+    members it does not define, so sending ``auto`` there would 400 every router
+    turn — its ladder stays the three real rungs and its seed stays ``high``.
+    One shared ladder could satisfy only one of the two routes.
 
     ``openrouter/auto`` is included because ``AGGREGATOR_ROUTER_MODEL_IDS``
     names both spellings: the id-keyed rule is the router, whichever aggregator
     fronts it.
     """
-    spec = build_model_spec(provider, model_id, get_model_info(provider, model_id))
+    spec = build_model_spec(provider, model_id)
 
-    assert spec.reasoning_efforts == ("low", "medium", "high")
-    assert spec.reasoning_default_effort == "high"
-    assert spec.reasoning_effort == "high", "the band must show a level from boot"
+    assert spec.reasoning_efforts == ladder
+    assert spec.reasoning_default_effort == default
+    assert spec.reasoning_effort == default, "the band must show a level from boot"
     assert spec.reasoning is True
+
+
+def test_the_openrouter_router_never_offers_the_auto_sentinel() -> None:
+    """The one asymmetry that makes the provider split load-bearing: an
+    unrankable word on the wrong route is not a cosmetic difference — OpenRouter
+    400s on an enum member it does not define (openclaw #77350). Pinned as its
+    own assertion so a later edit that re-unifies the ladders fails here, where
+    the reason is spelled out, rather than only on Radient's ladder membership.
+    """
+    openrouter = build_model_spec("openrouter", "auto")
+    assert "auto" not in openrouter.reasoning_efforts
+    assert openrouter.reasoning_effort == "high"
+
+    radient = build_model_spec("radient", "auto")
+    assert "auto" in radient.reasoning_efforts
+    assert radient.reasoning_effort == "auto"
+
+
+def test_the_router_seed_reaches_the_wire_as_reasoning_effort() -> None:
+    """The end of the chain: not just the spec, but the BODY the client sends.
+
+    The seed is only meaningful if ``_reasoning_effort`` passes it through, and
+    that guard re-checks ``level in request.model.reasoning_efforts``. So a
+    ladder that omitted ``auto`` would make the Radient seed inert no matter what
+    the spec carried — the membership and the emission are one contract and are
+    asserted together here. Post-fix ``auto`` IS a Radient ladder member, so the
+    body carries it; OpenRouter emits its own ``high``. Built through the real
+    client so what is read is literally the request body, not a spec attribute.
+    """
+    from local_operator.harness.types import ChatRequest, Message, TextContent
+    from local_operator.providers.clients import OpenAICompatClient
+
+    def body_for(provider: str) -> dict[str, Any]:
+        spec = build_model_spec(provider, "auto", get_model_info(provider, "auto"))
+        return OpenAICompatClient("https://example.invalid/v1")._build_body(
+            ChatRequest(
+                model=spec, messages=[Message(role="user", content=[TextContent(text="hi")])]
+            )
+        )
+
+    assert body_for("radient")["reasoning_effort"] == "auto"
+    assert body_for("openrouter")["reasoning_effort"] == "high"
 
 
 def test_the_router_ladder_does_not_leak_onto_a_non_aggregator_auto() -> None:

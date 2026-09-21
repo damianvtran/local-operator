@@ -57,6 +57,24 @@ def test_allow_max_and_models_without_effort() -> None:
     assert map_tier_to_effort("hi", ()) is None
 
 
+def test_a_lo_tier_never_lands_on_the_auto_sentinel() -> None:
+    """Radient's router ladder leads with ``auto`` (``ROUTER_EFFORT_LADDERS``),
+    and ``auto`` is not a depth — it delegates the level to the server. A ``lo``
+    classification must land on the cheapest REAL rung, so on that ladder it is
+    ``low`` (the rung after the sentinel), not ``auto``.
+
+    Without this arm the classifier would answer ``auto`` for a simple prompt,
+    letting the server pick a depth the classifier just judged too much — the
+    exact inversion the ``minimal`` arm already guards against.
+    """
+    radient_router = ("auto", "low", "medium", "high")
+    assert map_tier_to_effort("lo", radient_router) == "low"
+    # Controls: a plain ladder is untouched by the new arm.
+    assert map_tier_to_effort("lo", ("low", "medium", "high")) == "low"
+    assert map_tier_to_effort("med", radient_router) == "medium"
+    assert map_tier_to_effort("hi", radient_router) == "high"
+
+
 def test_disabled_by_default() -> None:
     assert auto_effort_for("implement x", ("low", "high"), {}) == (None, None)
 
