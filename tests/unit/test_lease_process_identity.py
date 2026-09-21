@@ -580,6 +580,11 @@ def test_the_self_token_is_memoised_and_follows_a_forked_pid(
     child inherits this module's globals and would otherwise write a claim naming
     the PARENT as its writer. A failed sample is not cached either: that would
     poison every later claim this process writes.
+
+    **The memo is process-global, so this test has to start it cold.** Without
+    the reset below the probe count depends on whether an earlier test already
+    warmed it — which is how this assertion first shipped passing for the wrong
+    reason (review round 1, M2: green on a cold memo, red on a warm one).
     """
     calls: list[int] = []
     real = procstate.birth_token
@@ -588,14 +593,27 @@ def test_the_self_token_is_memoised_and_follows_a_forked_pid(
         calls.append(pid)
         return real(pid)
 
+    monkeypatch.setattr(procstate, "_SELF_BIRTH", None)
     monkeypatch.setattr(procstate, "birth_token", counted)
+
     first = procstate.self_birth_token()
-    second = procstate.self_birth_token()
-    assert first is not None and first == second
+    assert first is not None
+    assert calls == [os.getpid()], calls
+    # Warm: the second question is answered from the memo, not by a probe.
+    assert procstate.self_birth_token() == first
     assert calls == [os.getpid()], calls
 
+    # A different pid is a different process: the memo must not answer for it.
     monkeypatch.setattr(procstate, "_SELF_BIRTH", (os.getpid() + 1, "inherited-from-a-parent"))
     assert procstate.self_birth_token() == first
+    assert calls == [os.getpid(), os.getpid()], calls
+
+    # A failed sample is not cached, so a transient failure cannot poison every
+    # later claim this process writes.
+    monkeypatch.setattr(procstate, "_SELF_BIRTH", None)
+    monkeypatch.setattr(procstate, "birth_token", lambda _pid: None)
+    assert procstate.self_birth_token() is None
+    assert procstate._SELF_BIRTH is None, "a failed sample was cached"
 
 
 def test_windows_records_no_birth_and_keeps_todays_verdicts(

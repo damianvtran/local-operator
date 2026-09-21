@@ -420,6 +420,7 @@ def acquire_session_lease(session_dir: Path, pid: int | None = None) -> SessionL
                     # or became live, or cannot still be proven dead. A changed
                     # token is a changed WRITER (a successor that took the claim
                     # and re-used the pid), not a new number to steal, so the
+                    # refusal stands and this recoverer yields to it.
                     raise SessionLeaseHeldError(session_dir, current.pid)
                 tombstone = session_dir / f"{LEASE_NAME}.stale.{secrets.token_hex(8)}"
                 try:

@@ -466,7 +466,8 @@ def _is_zombie_state(state: str) -> bool:
 # gone.
 #
 #   - macOS / BSD: ``ps -o lstart=`` — whole seconds (see ``_PS_RENDER_ENV`` for
-#     why the child's environment is fixed, and ``birth_token_verdict`` for what
+#     why the child's environment is fixed, and ``ProcessSample.is_birth`` for
+#     what
 #     the resolution does and does not catch);
 #   - Linux: ``/proc/<pid>/stat`` field 22, the start time in clock ticks since
 #     boot — 10 ms at the usual 100 Hz, and fork-free;
@@ -474,11 +475,12 @@ def _is_zombie_state(state: str) -> bool:
 #     than a process-table entry, and a pid can be recycled the instant its
 #     handle closes, so every caller keeps today's pid-liveness behaviour there.
 #
-# The token is an OPAQUE STRING and is only ever compared for equality. It
-# carries a tag naming what was measured (``lstart:<epoch>``,
-# ``proc22:<ticks>``) so a token this build cannot interpret — written on
-# another platform, or by a build that measured something else — is DOUBT
-# rather than a mismatch. That direction matters: see ``birth_token_verdict``.
+# The token is an OPAQUE STRING paired with a SCHEME, and the two are compared
+# together: the scheme names what was measured (``ps-lstart-c-v1``,
+# ``proc-starttime-v1``) and the token is that measurement, verbatim. A token
+# written with a scheme this build does not produce — another platform, or a
+# build that measured something else — is DOUBT rather than a mismatch. That
+# direction matters: see ``same_birth`` and ``ProcessSample.is_birth``.
 
 #: `ps -o lstart=` (macOS/BSD): the process start time, as `ps` renders it.
 #:
@@ -750,15 +752,18 @@ def same_birth(scheme: str | None, token: str | None, pid: int) -> bool | None:
       record where it was.
 
     **What the macOS token's one-second resolution does and does not catch.**
-    ``lstart`` is rendered to whole seconds, so two processes born inside the
-    SAME second are indistinguishable to it (Linux's ticks are 10 ms, and a
-    reused pid there requires the counter to wrap through ``pid_max``). The case
-    this leaves open is bounded and is the SAFE direction: a false ``True`` needs
-    the dead writer to have been born in the same second as the new occupant of
-    its pid, and since the writer had to die and be reaped first, that means it
-    both started and was reaped inside one second. A false ``True`` leaves the
-    claim un-takeable until the stranger exits — the incident's symptom, which
-    the same interfaces report honestly — and never a second writer. Measured on
+    ``lstart`` is rendered to whole seconds, so two processes born inside the SAME
+    second are indistinguishable to it — and a same-second spawn is ORDINARY, not
+    exotic: two processes started back to back share a token, measured on this host
+    (Linux's ticks are 10 ms, and a pid reused there requires the counter to wrap
+    through ``pid_max``). What that means for a claim, stated as the frequency it
+    is rather than as a bound: a false ``True`` needs the current occupant of the
+    pid to have been born in the same second as the WRITER, and since the writer
+    had to die and be reaped before the pid could be handed on, it means the writer
+    started and was reaped inside one second — a process whose whole life fits in
+    one tick. A false ``True`` leaves the claim un-takeable until the stranger
+    exits — the incident's symptom, which the same interfaces report honestly — and
+    never a second writer. Measured on
     this host: a canary pid killed immediately was not handed to any of the next
     400 short-lived processes in 19 s, so on macOS the reuse itself is the slow
     part (the counter wraps through ``pid_max``).
@@ -800,7 +805,7 @@ def zombie_states(pids: Iterable[int]) -> dict[int, bool]:
     (``OpenProcess``), not a process-table one — the answer the POSIX probe
     would reach through a doomed ``/bin/ps`` fork, without the fork.
 
-    The probe is :func:`_facts_for`, the SAME one that answers the birth-token
+    The probe is :func:`process_samples`, the SAME one that answers the birth-token
     question. That is deliberate: the two questions are asked about the same
     holder by the same callers, and one probe means a caller can never be told
     that a pid is a corpse with one answer and a stranger with another. On macOS
@@ -824,7 +829,7 @@ def is_zombie(pid: int) -> bool:
     instant the corpse is reaped, so "this pid is a live process" stops being a
     statement about the WRITER one instant later. That second question — "is
     this pid still the process that wrote this record?" — is
-    :func:`birth_token_verdict`, and a caller that asks only this one is asking
+    :func:`ProcessSample.is_birth`, and a caller that asks only this one is asking
     half of what it needs. Everything that arbitrates a sole-writer claim asks
     both.
 
