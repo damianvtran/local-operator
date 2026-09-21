@@ -1010,7 +1010,7 @@ def _idle_exit_reason() -> str:
     )
 
 
-async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
+async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
     """Exit the disposable session runtime after one uninterrupted idle drain.
 
     The drain is re-checked every ``REAP_CHECK_S`` against the full predicate,
@@ -1027,6 +1027,18 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
     replaced build past the bound — or has lost the tree it loaded — it stops
     admitting work and leaves at the first instant its OWN work is done, viewer
     or no viewer. Nothing in flight is ever aborted by either path.
+
+    IT RETURNS WHETHER IT RAN THE CLEAN ORDERING, and that is not decoration:
+    there are TWO normal returns and they mean opposite things to ``amain``.
+    ``True`` is the exit leg — ``_clean_exit`` has run (deny → dispose →
+    aclose) and the caller owes nothing. ``False`` is the empty-hands return,
+    taken when ``stop`` was set by a task OTHER than this one: the signal
+    drain's bound expiry or its no-latch fallback (``_drain_for_signal``),
+    ``_on_signal``'s nothing-in-flight rung, the socket ``stop`` op
+    (``_on_socket_stop``), or a drain another task ran to its own end. Nothing
+    was disposed HERE, so the caller still owes the whole ordering. A caller
+    that cannot tell the two apart skips an exit it owes — see
+    :func:`_clean_ordering_already_ran` and issue #1250.
     """
     grace_s = _grace_seconds()
     boot: BuildStamp | None = getattr(runtime, "_boot_build", None)
@@ -1072,7 +1084,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         if stop.is_set():
             continue
         if await refresh_check():
-            return
+            return True
         if stop.is_set():
             continue
         if drain is not None:
@@ -1083,7 +1095,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
             # window is for a runtime that might still be wanted — this one has
             # already stopped taking work.
             if await _drain_for(drain, handle, runtime, stop):
-                return
+                return True
             continue
         if not _should_exit(handle, runtime):
             continue
@@ -1092,7 +1104,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         while time.monotonic() < deadline:
             await asyncio.sleep(REAP_CHECK_S)
             if await refresh_check():
-                return
+                return True
             if stop.is_set() or not _should_exit(handle, runtime):
                 break  # a predicate term flipped back (or shutdown began)
         else:
@@ -1141,7 +1153,64 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> None:
         )
         await _clean_exit(handle, runtime, reason=reason)
         stop.set()  # amain's wait() returns; exit code stays 0
-        return
+        return True
+
+    # THE EMPTY-HANDS RETURN. ``stop`` was set by another task while this loop
+    # was parked — the signal drain's bound expiry (``_drain_for_signal``), that
+    # drain's no-latch fallback for a reduced handle, ``_on_signal``'s
+    # nothing-in-flight rung, the socket ``stop`` op (``_on_socket_stop``), or a
+    # drain another task ran to its own end — so an exit is under way and this
+    # loop is not the one running it. ``False`` is what tells ``amain`` that it
+    # still owes the deny → dispose → aclose ordering, and the ordering is
+    # exactly what a bare ``exception() is None`` at that call site used to
+    # lose: both returns look identical to it, so a 0.25 s tick landing in the
+    # same loop iteration as a drain bound skipped the whole exit block (#1250).
+    #
+    # NB a build rung the REAPER runs is NOT among those producers, and the
+    # distinction is worth keeping straight: ``_refresh_for``, ``_drain_for`` and
+    # ``_leave_overdue`` each run ``_clean_exit`` in the task that calls them and
+    # then return ``True``, so that rung is the exit leg, not this return.
+    return False
+
+
+def _clean_ordering_already_ran(reaper: "asyncio.Task[bool]") -> bool:
+    """Did a FINISHED reaper run the clean exit ordering itself?
+
+    The one question ``amain`` has to answer after ``await stop.wait()``:
+    whether the exit block below it — the ``exiting`` line, the turn journal's
+    exit note, ``_deny_pending_gates`` and ``dispose`` — is owed or already
+    done. It reads the reaper's own return value, because that is the only
+    thing that separates the two normal returns: a reaper that woke to an
+    already-set ``stop`` also finishes with no exception, and reading that as a
+    completed exit is how the block got skipped.
+
+    What the skip cost, measured on ``macos-latest`` and reproduced on this
+    host: no exit note reached the turn journal, so its row kept
+    ``exit_cause=''`` and the cell asserting
+    ``signal_exit_token(row.exit_cause) == "SIGTERM"`` failed with
+    ``'' == 'SIGTERM'`` (issue #1250: reported 10 occurrences over four days, all
+    on ``macos-latest``) — the row was then closed by the teardown's own dispose
+    instead, recording an aborted
+    turn as ``completed``. The gate deny and the dispose were skipped with it;
+    only ``aclose_remote`` still ran, which is why the process exited 0 and the
+    boot record was withdrawn while none of the ordering had happened.
+
+    ``cancelled()`` is tested BEFORE ``exception()`` deliberately:
+    ``exception()`` RAISES ``CancelledError`` on a cancelled task rather than
+    answering ``None``, so a reaper that is FINISHED *and* cancelled would make
+    this function raise instead of answering. Nothing in the tree cancels the
+    reaper but ``amain``'s own ``reaper.cancel()`` branch, and that branch never
+    reaches this read — so the ordering is defence against a future caller, not
+    a closed live escape. It is what makes the answer TOTAL, and that is the
+    reason it cannot be simplified away: the moment something else cancels a
+    finished reaper, the three-way answer below is the only one that still
+    holds.
+    """
+    if not reaper.done() or reaper.cancelled():
+        return False
+    if reaper.exception() is not None:
+        return False
+    return reaper.result() is True
 
 
 async def _refresh_for(
@@ -3290,9 +3359,10 @@ async def amain() -> int:
         draining.cancel()
     if not reaper.done():
         reaper.cancel()
-    elif reaper.exception() is None:
-        # The reaper completed (not was cancelled): it already ran the clean
-        # ordering. A signal-initiated stop still owes it.
+    elif _clean_ordering_already_ran(reaper):
+        # The reaper completed AND ran the clean ordering, so this path owes it
+        # nothing. A reaper that merely woke to find ``stop`` already set gets
+        # no such credit — see :func:`_clean_ordering_already_ran`.
         reaper_ran_clean_exit = True
     if not reaper_ran_clean_exit:
         # The reaper logs its own line from ``_clean_exit``; these are the
