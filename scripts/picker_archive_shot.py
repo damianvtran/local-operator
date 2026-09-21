@@ -10,6 +10,8 @@ on:
 
 * **default** — the archived conversation is not offered, and the toggle row says
   it exists ("Archived (1) hidden").
+* **hover-toggle** — the toggle line with the pointer on it (D5; design round 2, D9),
+  for the same store as the default frame.
 * **reveal** — the same store with `ctrl+a` pressed: the row is back, carrying its
   `[archived]` mark, and the toggle reads "shown".
 * **no-archive** — a store where nothing is archived, i.e. what every user of the
@@ -117,9 +119,11 @@ async def main() -> None:
             await pilot.press("escape")
             await pilot.pause()
         await pilot.press("enter")
+        screen = None
         for _ in range(40):
             await pilot.pause()
             if app.screen.__class__.__name__ == "SessionPickerScreen":
+                screen = app.screen
                 break
         await pilot.pause()
         if theme:
@@ -130,6 +134,16 @@ async def main() -> None:
             await pilot.pause()
         if reveal:
             await pilot.press("ctrl+a")
+            await pilot.pause()
+        if "hover-toggle" in sys.argv[2:]:
+            # D5's own frame (design round 2, D9): the toggle line had no hover
+            # state while the rows did, and a fix to a MOUSE affordance cannot be
+            # evidenced by a still that does not move a mouse. The offset is the
+            # toggle row's hit box, the same one the suite drives.
+            # The results pane is addressed by its CSS id (the suite's own
+            # selector constant lives in the test module, not in the widget).
+            body = screen.query_one("#session-picker-results")
+            await pilot.hover(body, offset=(4, 0))
             await pilot.pause()
         # SETTLE THE LIST BEFORE CAPTURING (design round 1, D1). The pane is
         # composed once, against the box it has at that moment, and a keystroke is
