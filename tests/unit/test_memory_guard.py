@@ -52,23 +52,44 @@ _VM_STAT_36G = "\n".join(
 )
 
 
-def test_budget_on_a_36gib_host_matches_the_contract_worked_numbers() -> None:
-    """36 GiB / 6.5 GiB available: ceiling 3,328 MB, soft 2,662 MB (§3.2)."""
-    # 180000 + 40000 + 235000 = 455000 pages x 16 KiB = 7,454,720,000 B ~ 7109 MB.
-    # The contract's 6,656 MB available is the same shape; assert the DERIVATION
-    # rather than the literal, so the test fails only if the arithmetic moves.
-    budget = mg.compute_budget(
-        runner=_fake_runner(vm_stat=_VM_STAT_36G, swapusage="total = 5120.00M  free = 1192.00M")
-    )
+def _pin_host(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    available_mb: int | None,
+    total_mb: int | None,
+    free_swap_mb: int | None = None,
+) -> None:
+    """Pin the three host probes so the arithmetic is platform-independent.
+
+    ``compute_budget`` resolves ``_total_memory_mb``/``_available_memory_mb``/
+    ``_free_swap_mb`` by GLOBAL NAME at call time, and the available/swap arms
+    branch on ``sys.platform`` internally — so feeding a fake ``runner`` pins the
+    parsing on macOS but does nothing on Linux, where the arm reads
+    ``/proc/meminfo`` and ignores the runner. A test that wants to assert the
+    ARITHMETIC (not the parsing) must therefore pin these functions, or it passes
+    on this 36 GiB macOS host and fails on the 16 GiB Linux CI runner — which is
+    exactly what happened in CI round 1. The parsing itself is covered separately,
+    below, with ``sys.platform`` pinned to darwin.
+    """
+    monkeypatch.setattr(mg, "_total_memory_mb", lambda: total_mb)
+    monkeypatch.setattr(mg, "_available_memory_mb", lambda runner: available_mb)
+    monkeypatch.setattr(mg, "_free_swap_mb", lambda runner: free_swap_mb)
+
+
+def test_budget_on_a_36gib_host_matches_the_contract_worked_numbers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """36 GiB / 7,109 MB available: ceiling 3,554 MB, soft 2,843 MB (§3.2)."""
+    # available = 455000 pages x 16 KiB = 7109 MB; total = 36864 MB; the reserve
+    # is min(2048, 36864//8) = 2048, so ceiling = min(3554, 7109-2048) = 3554.
+    _pin_host(monkeypatch, available_mb=7109, total_mb=36864, free_swap_mb=1192)
+    budget = mg.compute_budget()
     assert budget.source == "auto"
-    assert budget.total_mb == 36864  # 38654705664 B // 1 MiB
-    # available = 455000 * 16384 / 1MiB = 7109 MB (integer floor of 7108.9)
+    assert budget.total_mb == 36864
     assert budget.available_mb == 7109
-    reserve = min(2048, 36859 // 8)
-    assert budget.reserve_mb == reserve == 2048
-    expected = int(max(0, min(7109 * 0.5, 7109 - reserve)))
-    assert budget.ceiling_mb == expected == 3554
-    assert budget.soft_mb == int(expected * mg._SOFT_FRACTION)
+    assert budget.reserve_mb == 2048
+    assert budget.ceiling_mb == 3554
+    assert budget.soft_mb == int(3554 * mg._SOFT_FRACTION)
 
 
 def test_budget_on_a_32gib_device_keeps_the_reserve_floor(
@@ -76,31 +97,23 @@ def test_budget_on_a_32gib_device_keeps_the_reserve_floor(
 ) -> None:
     """32 GiB with 8 GiB available: reserve = min(2048, 4096) = 2048; ceiling
     = min(4096, 8192-2048) = 4096 MB (§3.2)."""
-    # 8 GiB available = 524288 pages of 16 KiB.
-    vm = "\n".join(
-        [
-            "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
-            f"Pages free:                              {524288}.",
-            "Pages speculative:                        0.",
-            "File-backed pages:                        0.",
-        ]
-    )
-    # Pin the physical-RAM arm: the test's VM page count sets AVAILABLE, while
-    # this host's real total would otherwise scale the reserve differently.
-    monkeypatch.setattr(mg, "_total_memory_mb", lambda: 32768)
-    budget = mg.compute_budget(
-        runner=_fake_runner(vm_stat=vm, swapusage="total = 4096.00M  free = 3000.00M")
-    )
+    _pin_host(monkeypatch, available_mb=8192, total_mb=32768, free_swap_mb=3000)
+    budget = mg.compute_budget()
     assert budget.ceiling_mb == 4096
 
 
-def test_available_is_free_plus_speculative_plus_file_backed_not_inactive() -> None:
-    """The macOS available arm ignores ``Pages inactive``.
+def test_the_darwin_available_arm_counts_free_speculative_and_file_backed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The macOS parsing itself: ``free + speculative + file-backed``, and NOT
+    ``inactive``.
 
-    The conftest measurement is the reason: counting inactive reported 8,137 MB
-    of headroom at a moment the host had 452 MB free. A probe answer that adds a
-    huge ``inactive`` line must NOT raise the budget.
+    ``sys.platform`` is pinned to darwin so this exercises the vm_stat parse on
+    any host. Counting ``inactive`` reported 8,137 MB of headroom at a moment the
+    host had 452 MB genuinely free, so a probe answer carrying a huge inactive
+    line must NOT raise the number.
     """
+    monkeypatch.setattr(mg.sys, "platform", "darwin")
     vm_inactive = "\n".join(
         [
             "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
@@ -110,24 +123,42 @@ def test_available_is_free_plus_speculative_plus_file_backed_not_inactive() -> N
             "Pages inactive:                          500000.",  # must be ignored
         ]
     )
-    budget = mg.compute_budget(
-        runner=_fake_runner(vm_stat=vm_inactive, swapusage="total = 4096.00M  free = 3000.00M")
-    )
+    available = mg._available_memory_mb(_fake_runner(vm_stat=vm_inactive))
     # 50000 pages x 16 KiB = 800,000,000 B -> 781 MB (floored), NOT ~8 GB.
-    assert budget.available_mb == 781
+    assert available == 781
 
 
-def test_swap_free_is_a_pressure_floor_never_spendable_budget() -> None:
+def test_the_darwin_available_arm_reads_the_header_page_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page size comes from ``vm_stat``'s header, never a hardcoded 4096.
+
+    This host uses 16 KiB pages, so a fixed 4096 would under-report by 4x.
+    """
+    monkeypatch.setattr(mg.sys, "platform", "darwin")
+    vm_4k = "\n".join(
+        [
+            "Mach Virtual Memory Statistics: (page size of 4096 bytes)",
+            "Pages free:                               30000.",
+            "Pages speculative:                        10000.",
+            "File-backed pages:                        10000.",
+        ]
+    )
+    assert mg._available_memory_mb(_fake_runner(vm_stat=vm_4k)) == 195  # 50000x4096 B
+
+
+def test_swap_free_is_a_pressure_floor_never_spendable_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Low free swap LOWERS the ceiling; it is never added to it (§3.3)."""
-    healthy = mg.compute_budget(
-        runner=_fake_runner(vm_stat=_VM_STAT_36G, swapusage="total = 5120.00M  free = 1192.00M")
-    )
-    pressured = mg.compute_budget(
-        runner=_fake_runner(vm_stat=_VM_STAT_36G, swapusage="total = 5120.00M  free = 64.00M")
-    )
+    _pin_host(monkeypatch, available_mb=7109, total_mb=36864, free_swap_mb=1192)
+    healthy = mg.compute_budget()
+    _pin_host(monkeypatch, available_mb=7109, total_mb=36864, free_swap_mb=64)
+    pressured = mg.compute_budget()
     assert pressured.ceiling_mb < healthy.ceiling_mb
-    # The floor is the min of the measured arm and (free swap + the floor).
-    assert pressured.available_mb is not None
+    # Free swap is a FLOOR on the effective available, not an addition: the
+    # effective arm is min(available, free_swap + the 256 MB floor).
+    assert pressured.available_mb == 7109  # reported arm unchanged
 
 
 def test_small_device_floor_keeps_ordinary_commands_alive(
@@ -135,20 +166,10 @@ def test_small_device_floor_keeps_ordinary_commands_alive(
 ) -> None:
     """An 8 GiB host at ~1 GiB available resolves below the floor; the floor
     keeps it usable (§10's small-device risk)."""
-    # 67200 pages x 16 KiB = 1050 MB available, total 8192 MB -> reserve 1024,
-    # so available - reserve = 26 MB, which is below the 64 MB floor.
-    vm = "\n".join(
-        [
-            "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
-            "Pages free:                               67200.",
-            "Pages speculative:                            0.",
-            "File-backed pages:                            0.",
-        ]
-    )
-    monkeypatch.setattr(mg, "_total_memory_mb", lambda: 8192)
-    budget = mg.compute_budget(
-        runner=_fake_runner(vm_stat=vm, swapusage="total = 1024.00M  free = 800.00M")
-    )
+    # available 1050 MB, total 8192 MB -> reserve 1024, so available - reserve =
+    # 26 MB, below the 64 MB floor.
+    _pin_host(monkeypatch, available_mb=1050, total_mb=8192, free_swap_mb=800)
+    budget = mg.compute_budget()
     assert budget.ceiling_mb == mg._MIN_CEILING_MB
     assert "small-device floor" in budget.reason
 
@@ -181,19 +202,21 @@ def test_manual_mode_uses_limit_mb() -> None:
     assert budget.ceiling_mb == 1234
 
 
-def test_manual_mode_with_zero_limit_falls_through_to_auto() -> None:
+def test_manual_mode_with_zero_limit_falls_through_to_auto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """`limit_mb=0` means "use the auto ceiling", never "zero"."""
-    budget = mg.compute_budget(
-        mode="manual",
-        limit_mb=0,
-        runner=_fake_runner(vm_stat=_VM_STAT_36G, swapusage="free = 1192.00M"),
-    )
+    _pin_host(monkeypatch, available_mb=7109, total_mb=36864, free_swap_mb=1192)
+    budget = mg.compute_budget(mode="manual", limit_mb=0)
     assert budget.source == "auto"
 
 
-def test_unmeasurable_host_degrades_to_disabled_never_raises() -> None:
+def test_unmeasurable_host_degrades_to_disabled_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """F8/F11: no probe answers -> disabled, not a guessed ceiling."""
-    budget = mg.compute_budget(runner=_fake_runner())  # every probe returns rc=1
+    _pin_host(monkeypatch, available_mb=None, total_mb=None, free_swap_mb=None)
+    budget = mg.compute_budget()
     assert budget.source == "disabled"
     assert budget.ceiling_mb == 0
 
