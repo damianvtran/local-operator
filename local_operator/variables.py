@@ -539,8 +539,14 @@ class VariableStore:
         carried the credential would be the leak it exists to report.
 
         Values are registered for containment here rather than by the caller, so
-        every path that masks also contains — including the live-text path that
-        never sees this return value.
+        every path that masks ALSO CONTAINS, in-tree: this one, the live-text path
+        that never sees this return value, and the bash pipe filter, which masks
+        before a result exists and therefore registers through
+        :meth:`register_shape_hits_for_containment` instead (it is handed text that
+        is already masked, so it could never match the credential here). A store
+        outside this tree that offers only the labels-only view keeps whatever
+        behaviour it has — ``tools/builtin._redact_tool_text`` reads that view as
+        the ESCALATED case, and says why in place.
         """
         scrubbed, hits = scrub_secrets_with_hits(text, self.redaction_values())
         if not hits:
@@ -610,3 +616,23 @@ class VariableStore:
                 continue
             self._shape_registrations.add(hit.value)
             self.register_redaction(hit.value)
+
+    def register_shape_hits_for_containment(self, hits: Sequence[ShapeHit]) -> None:
+        """Contain hits a masking layer has ALREADY removed from the bytes.
+
+        The entry point for the one masking surface that does not hand this store
+        any text: the bash pipe filter masks a running command's bytes before a
+        tool result exists, so the text the result path later gives
+        :meth:`redact_with_report` contains this store's own marker instead of the
+        credential and that pass matches nothing to register. Measured on the
+        shape this feature exists for (a ``kubectl exec … env`` whose credential
+        is in the OUTPUT and nowhere in the command): ``registered values: 0``,
+        and a later ``cat`` of the bare value — no shape around it, which is the
+        form the table cannot know — came back in the clear.
+
+        Same registration as :meth:`redact_with_report`, deliberately: identity
+        floor, dedupe and cap all live in :meth:`_register_shape_hits`, so the two
+        callers cannot disagree about what containment means. Values only reach
+        the §6 sink, never ``read_variable``.
+        """
+        self._register_shape_hits(hits)

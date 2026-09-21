@@ -2610,6 +2610,29 @@ class DumpShape:
     excluded: Optional[Pattern[str]] = None
 
 
+#: How far after the reading verb the credential FILENAME may sit, and how long
+#: the path-shaped token naming it may be. Bounds on COST, sized from the spellings
+#: that have to keep working rather than picked for round numbers: over 39,111
+#: harvested real commands, the largest gap any firing needed was 71 characters and
+#: the longest path token 79, so both bounds clear the real work with headroom.
+#: They are also what makes the rule's cost independent of the line's length — see
+#: the rule's own comment for the measurement that forced them.
+#:
+#: THE CUT IS DELIBERATE, and these are the measured edges of it (agent review
+#: R1/E3, reproduced here so the next reader does not have to re-derive them):
+#: ``cat `` + N×``x`` + `` .env`` fires at N=94 — a 96-character gap, the two
+#: spaces included, which is the whole of :data:`_FILE_GAP_CHARS` — and is silent
+#: at N=95 (97). ``cat /`` + N×``d`` + ``.pem`` fires at N=222 — 224 characters
+#: between the verb and the suffix, i.e. the two windows summed — and is silent
+#: at N=223 (225). Both are a shade INSIDE the nominal windows (a real read whose
+#: path is longer than that gets no advisory where the unbounded rule advised),
+#: and that is the trade for turning a quadratic scan linear — a deep path is
+#: rare, a 140 KB line cost 142 s. The residual is named here rather than left to
+#: be discovered.
+_FILE_GAP_CHARS = 96
+_FILE_PATH_CHARS = 128
+
+
 DUMP_SHAPES: tuple[DumpShape, ...] = (
     # A bare ``env`` / ``printenv`` / ``set`` prints every value in the
     # environment — this is the incident's own shape. The command has to be at a
@@ -2748,11 +2771,35 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
     ),
     DumpShape(
         "credential-file-read",
+        # THE GAP IS BOUNDED AND SEPARATOR-FREE, and both halves are load-bearing:
+        #
+        # * BOUNDED, because an unbounded lazy gap followed by an unbounded
+        #   ``[^\s]*`` is quadratic in the line's length — the engine retries the
+        #   path alternatives at every gap length, and a failing ``[^\s]*\.pem``
+        #   walks the rest of the line at each one. Measured on a 140,005-character
+        #   single line: 114.4 s of CPU for ONE ``search``, against 0.0009 s here;
+        #   on a line of 28,000 verb words, 171.6 s against 0.24 s, so the cost went
+        #   from quadratic to linear. Real commands reach 30,849 characters (p99
+        #   4.9 KB over 39,111 harvested commands), so the blowup was latent rather
+        #   than live — and latent is not safe: the same class of unbounded run had
+        #   frozen six sessions on this fleet hours earlier.
+        # * SEPARATOR-FREE, because the rule means "a command that READS a
+        #   credential file", and the filename has to be an argument OF the verb
+        #   for that to be true. ``[^\n]*`` let the two halves sit in different
+        #   commands on one line, in a comment, or in a heredoc body — measured
+        #   over the same corpus, 47 of the 74 firings were exactly that (``head -30;
+        #   echo ---; ls -la .env`` and ``cat /tmp/x); cd ... && cp .env``), i.e.
+        #   ordinary reads and unrelated commands nagged about a token they merely
+        #   MENTION. ``#`` is in the class for the same reason: a comment is not a
+        #   read, and the cost is one unreachable spelling (``cat file#1.env``).
         re.compile(
-            r"(?i)\b(?:cat|less|more|head|tail|bat|strings|xxd|base64)\b[^\n]*?"
+            r"(?i)\b(?:cat|less|more|head|tail|bat|strings|xxd|base64)\b"
+            rf"[^;&|#\n]{{0,{_FILE_GAP_CHARS}}}?"
             r"(?:\.netrc\b|\.npmrc\b|\.docker/config\.json\b|\.kube/config\b|"
-            r"mcp\.json\b|credentials\.env\b|\.env\b|[^\s]*\.pem\b|"
-            r"[^\s]*service-account[^\s]*\.json\b)"
+            r"mcp\.json\b|credentials\.env\b|\.env\b|"
+            rf"[^\s]{{0,{_FILE_PATH_CHARS}}}\.pem\b|"
+            rf"[^\s]{{0,{_FILE_PATH_CHARS}}}service-account"
+            rf"[^\s]{{0,{_FILE_PATH_CHARS}}}\.json\b)"
         ),
         "read the one field you need (e.g. `grep -c .`, `jq '.client_email'`), or "
         "use the value inside the command that needs it, e.g. `$(lop secret get NAME)`",
