@@ -34,6 +34,17 @@ a capture of the product's own sentence rather than a hand-built notice.
   fresh conversation.
 * ``eviction`` — the 200-cap receipt, naming the conversation the cap put back
   into every list.
+* ``delete-value-list`` — ``/delete`` with its value list OPEN: the row that says
+  what ``yes`` will do, captured where it used to be cut mid-word (D6).
+* ``guard-unreadable`` — ``/delete yes`` where a guard cannot be READ at all: the
+  fail-closed fallback sentence, which no other frame shows (D11).
+* ``no-session-saved`` — ``/delete`` on a conversation that has never been
+  written: the empty state a first-run user reaches (D11).
+* ``not-on-disk`` — ``/delete`` naming an id that is on disk but is not a
+  conversation the user opened (a delegated run): the other empty-side sentence.
+* ``subagent-kept`` — the rehearsal where the conversation launched subagent runs:
+  the clause that says what the delete does NOT touch, and the only frame of its
+  wrap (D11).
 
 The fixture is written through the real writers (``Transcript``-shaped JSONL,
 ``write_session_title``, ``wakes.store.write_entry``, ``archive_change``), so a
@@ -103,12 +114,40 @@ def _write_transcript(directory: Path, text: str) -> None:
 
 def _seed(root: Path, mode: str) -> None:
     mark_store(root / "sessions")
-    for session_id, title in ((SESSION, TITLE), (OTHER, SECOND_TITLE)):
+    pairs = ((SESSION, TITLE), (OTHER, SECOND_TITLE))
+    if mode == "no-session-saved":
+        # The app's OWN conversation has never been written, which is the state a
+        # user is in before their first message lands: the empty-state sentence is
+        # what they read if they type /delete hopefully at a fresh launch.
+        pairs = ((OTHER, SECOND_TITLE),)
+    for session_id, title in pairs:
         directory = root / "sessions" / session_id
         directory.mkdir(parents=True, exist_ok=True)
         _write_transcript(directory, f"{title}. Let's pick this up.")
         (directory / "created_at.json").write_text("1700000000", encoding="utf-8")
         write_session_title(directory, title, user_set=True, past_names=[])
+    if mode == "not-on-disk":
+        # A transcript that exists but is NOT a conversation the user opened (a
+        # delegated run): the delete resolves an id that IS on disk and refuses to
+        # treat it as a conversation, which is its own sentence.
+        from local_operator.resume import ORIGIN_SUBAGENT, mark_session_origin
+
+        mark_session_origin(root / "sessions" / SESSION, ORIGIN_SUBAGENT)
+    if mode == "subagent-kept":
+        # The blast-radius clause: two subagent runs this conversation launched
+        # live as SIBLINGS and are kept. Written in the sidecar's own shape, so the
+        # count is the runtime's rather than the fixture's.
+        (root / "sessions" / SESSION / "subagent-roster.v1.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "generation": 1,
+                    "jobs": [],
+                    "records": {f"s{index:012x}": f"{index:012x}" for index in range(2)},
+                }
+            ),
+            encoding="utf-8",
+        )
     if mode == "archive-receipt":
         return
     if mode == "eviction":
@@ -150,6 +189,11 @@ async def main() -> None:
     root = Path(config_dir())
     _seed(root, mode)
 
+    if mode == "guard-unreadable":
+        # A wake path that cannot be READ (a directory where the entry should be):
+        # the guard fails closed, and this is the sentence a user sees when it
+        # cannot be evaluated at all — the fallback, not the armed-wake copy.
+        (root / "wakes" / f"{SESSION}.json").mkdir(parents=True, exist_ok=True)
     if mode == "refusal-live":
         # A live claim, written the way a runtime writes one: the guard reads the
         # pid and asks whether the process is alive, and this process is.
@@ -183,6 +227,11 @@ async def main() -> None:
             "dormant-wake-deletes": "/delete yes",
             "delete-done": "/delete yes",
             "eviction": "/archive",
+            "guard-unreadable": "/delete yes",
+            "no-session-saved": "/delete",
+            "not-on-disk": "/delete",
+            "subagent-kept": "/delete",
+            "delete-value-list": "/delete ",
         }[mode]
         if mode == "unarchive-receipt":
             from local_operator.session.archived import set_archived
@@ -200,9 +249,18 @@ async def main() -> None:
         editor.text = command
         editor.cursor_location = (0, len(command))
         await pilot.pause()
-        if editor._picker.is_open():
+        if editor._picker.is_open() and mode != "delete-value-list":
             await pilot.press("escape")
             await pilot.pause()
+        if mode == "delete-value-list":
+            # THE VALUE LIST, left OPEN (D6; design round 2, D9): the row the user
+            # reads before typing `yes`, at the width where it used to be cut
+            # mid-word. The trailing space is what opens it, exactly as a user
+            # does — a hand-opened picker would not prove the row the command
+            # actually offers.
+            await pilot.pause()
+            save_capture(app, out)
+            return
         await pilot.press("enter")
         for _ in range(60):
             await pilot.pause()
