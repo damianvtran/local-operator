@@ -1115,8 +1115,13 @@ gh pr edit <claim-pr-number> --title 'chore(release): bump version to X.Y.Z'
 gh pr ready <claim-pr-number>
 # ... independent scope-check round, merge; then:
 
-# 3. Advance the local main ref to the merged bump WITHOUT checking it out.
+# 3. Advance the local main ref to the merged bump WITHOUT checking it out —
+#    after the compare, because nothing downstream refuses a stale ref. Both
+#    calls must print the SAME sha (`rev-parse --short` takes ONE revision, so
+#    the two refs cannot share the flag).
 git -C ~/local-operator fetch origin
+git -C ~/local-operator rev-parse --short main
+git -C ~/local-operator rev-parse --short origin/main
 git -C ~/local-operator update-ref refs/heads/main origin/main
 # If main IS the checked-out branch, use this instead:
 #   git -C ~/local-operator merge --ff-only origin/main
@@ -1163,7 +1168,8 @@ be installed deliberately with `lop-update <git-ref>`.
 
 **It does NOT compare that ref against a remote.** The compare-and-refuse gate
 belonged to the retired legacy installer; this build has no remote check at all
-(step 5 carries the measurement), the refusal text survives only in
+(the compare is step 3's, and the wrong-build measurement is below), the refusal
+text survives only in
 `~/.local/bin/lop-update.legacy-uvtool.bak` **as history**, and
 `--skip-remote-check` is gone with it. So the fetch-and-compare is the release
 owner's own step, never a backstop — that is why step 3 exists. It uses
@@ -1179,10 +1185,11 @@ merged change as a local modification — use
 current `lop-update` does not compare the ref against a remote at all: it takes
 its ref from its argument (defaulting to the local `main`) and delegates to
 `lop update --from-snapshot "$REF"`. The compare-and-refuse body that this step
-used to contain was retired with the legacy installer — it survives only in
-`~/.local/bin/lop-update.legacy-uvtool.bak`, whose refusal message is quoted
-elsewhere in this file as history — and the `--skip-remote-check` flag went with
-it. So nothing refuses a stale local `main`: measured on 2026-09-21,
+used to contain was retired with the legacy installer. It survives only in
+`~/.local/bin/lop-update.legacy-uvtool.bak` **as history**; its `REFUSING to
+release a stale ref` message lives there (`:154-170`), nothing runs the script,
+and the `--skip-remote-check` flag went with it. So nothing refuses a stale
+local `main`: measured on 2026-09-21,
 `lop-update` built **0.61.6 from `f6eaea3d`** while `origin/main` was several
 releases ahead, and the wrong build was installed before anyone noticed. The
 BEFORE-install check is therefore not a fallback to a gate; it is the only
@@ -1230,7 +1237,7 @@ command from outside the repository for the answer.
 
 It is still `lop-update` underneath, so the mechanics above about the committed
 `main` ref and the source revision record apply unchanged — but the
-remote-check gate does NOT exist in this build (see step 5): nothing compares
+remote-check gate does NOT exist in this build (see step 3): nothing compares
 your ref against a remote, so fetch and compare it yourself before installing.
 
 Warnings that still hold, each of which has already cost a release:
@@ -1341,7 +1348,7 @@ Warnings that still hold, each of which has already cost a release:
   refuse step, so `lop-update` installs whatever ref you name — including a
   stale local `main`, which is how 0.61.6 was once built from an old commit
   while main was several releases ahead. The protection is the fetch-and-compare
-  in step 5, not a flag; it exists because a stale local `main` was once
+  in step 3, not a flag; it exists because a stale local `main` was once
   installed and reported as a successful release while `lop` silently downgraded
   from 0.18.1 to 0.17.5.
 - **Never repoint `lop` at the editable `.venv`**; doing so couples the stable
