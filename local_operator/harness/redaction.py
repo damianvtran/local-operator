@@ -156,9 +156,15 @@ def report_shape_hits(labels: list[str], *, reached_model: bool) -> None:
     it — the two that have a ``ShapeReport`` pass it, and the labels-only path
     passes True and says why in place (agent review R1, finding 5).
 
-    An empty ``labels`` with ``reached_model`` true is a REAL case and is not
-    filtered out here: it is the hit that left a fragment behind while nothing
-    was contained whole, and it is the compromise the notice exists to escalate.
+    ONLY AN EXPOSURE BECOMES AN INCIDENT, and that decision is the SINK's rather
+    than this function's — the session's queue drops a contained report on sight
+    (``Session._queue_shape_incident``), so the policy lives in the one place every
+    surface funnels through instead of in each producer. What this function decides
+    is the narrower thing: whether there is anything to hand over at all.
+
+    An empty ``labels`` with ``reached_model`` true IS handed over: it is the hit
+    that left a fragment behind while nothing was contained whole, and it is the
+    compromise the notice exists to escalate.
     """
     if not labels and not reached_model:
         return

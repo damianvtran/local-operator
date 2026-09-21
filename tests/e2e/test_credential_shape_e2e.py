@@ -41,6 +41,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolContext,
 )
+from local_operator.redaction_shapes import REDACTION_MARKER
 from local_operator.tools.builtin import build_bash_tool, execute_bash
 from local_operator.variables import VariableStore
 from tests.e2e.harness import (
@@ -131,36 +132,26 @@ async def test_a_real_command_that_prints_a_dsn_never_reaches_the_model(
     # 1. The request the provider was handed: no credential anywhere in it.
     assert SENTINEL_PW not in _provider_saw(stream)
 
-    # 1b. ...and the operator was TOLD, live. The incident row's whole purpose is
-    # the ticket, and a row that reaches only the model is not one: measured before
-    # this wiring, the persisted row painted on no operator surface at all (design
-    # round 1, D1). Its CLASSIFICATION matters as much as its existence: this
-    # result was masked whole, which is the contained case, and an operator who
-    # cannot tell that apart from a value that reached the model is being asked to
-    # rotate credentials that never left the tool.
+    # 1b. ...and NOTHING is indicated, live or on disk. This result was masked
+    # WHOLE, which is the contained case: the value never entered the model's
+    # context, so there is nothing to rotate and nothing the operator has to be
+    # told — "as long as something wasn't actually leaked to the transcript we
+    # shouldn't get a session incident indicated anywhere". Measured before this
+    # change: a warning notice AND a journalled incident row, for a value the
+    # model never read.
     notices = [e for e in events if isinstance(e, NoticeEvent)]
-    assert notices, "no live receipt for the masked credential"
-    assert notices[0].kind == "warning"
-    assert "dsn-password" in notices[0].text, notices[0].text
-    assert "no exposure" in notices[0].text, notices[0].text
+    assert not notices, [notice.text for notice in notices]
 
-    # 2. The transcript on disk: the persistence surface, and the incident row.
+    # 2. The transcript on disk: the persistence surface, and no incident row.
     body = _transcript_text(directory)
     assert SENTINEL_PW not in body, "the credential reached transcript.jsonl"
-    assert "session_incident" in body, "no incident row was journalled"
-    assert "dsn-password" in body, "the incident must name the shape that fired"
-    rows = [json.loads(line) for line in body.splitlines() if "session_incident" in line]
-    assert rows[-1]["payload"]["details"]["reached_model"] is False, rows[-1]
+    assert "session_incident" not in body, "a contained value filed an incident"
 
-    # 3. The masking is visible rather than silent: the model is told the value was
-    #    hidden, so it cannot misread an empty-looking result — and it is told what
-    #    that owes, which for a CONTAINED value is the cleanup and never a rotation.
-    #    The absence assertion is the point of this change: this value never entered
-    #    the model's context, and demanding a rotation for it is the false alarm the
-    #    classification exists to remove.
+    # 3. The instrument is not dead. The mask really was written into the
+    #    transcript, so the absence above cannot be a session that never ran the
+    #    pass — and the word the rotation demand used is gone with it.
     assert "[redacted]" in body
     assert "rotate" not in body, "a contained value demanded a rotation"
-    assert "not to be done" in body, "the cleanup obligation is missing"
 
 
 def _collect(sink: list[str]) -> Any:
@@ -223,25 +214,29 @@ async def test_the_live_stream_of_a_real_command_carries_no_shape(
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_an_output_only_credential_still_files_its_incident(
+async def test_an_output_only_credential_files_nothing_when_it_is_masked_whole(
     headless_tui_env: Path, workspace: Path
 ) -> None:
-    """The incident this feature exists for: the credential is ONLY in the output.
+    """The output-only shape, contained: masked, and NOT an incident.
 
     The production shape — ``kubectl exec … env`` — has the credential in the
     command's OUTPUT and nowhere in the command text. The pipe filter masks those
     bytes while the command is still running, so by the time the loop's
-    ``redact_tool_result`` hook reads the finished result the credential is gone,
-    the shape pass finds nothing, and no incident is filed: measured before this
-    test existed, the row count for exactly this case was ZERO.
+    ``redact_tool_result`` hook reads the finished result the credential is gone.
+    The pipe is therefore the only layer that can report such a hit — and this
+    value is masked WHOLE, so it reports nothing: no row, no live notice. What the
+    test still pins is that the mask HAPPENED, because an absence assertion that
+    cannot tell "silent" from "never ran" is no evidence at all. The opposite
+    direction is the next test.
 
     The command therefore carries a FILENAME and nothing else; the credential is
     read out of the file by the child, which is the position the real incident was
     in.
     """
     directory = headless_tui_env / "sessions" / "output-only"
-    password = "qa-output-only-4b7f"
-    (workspace / "agent.env").write_text(f"MONGO_DSN=mongodb+srv://svc:{password}@db.invalid/x\n")
+    (workspace / "agent.env").write_text(
+        f"MONGO_DSN=mongodb+srv://svc:{SENTINEL_PW}@db.invalid/x\n"
+    )
     stream = ScriptedStream(
         [
             tool_call_turn(
@@ -263,10 +258,58 @@ async def test_an_output_only_credential_still_files_its_incident(
         await dispose_quietly(session)
 
     body = (directory / "transcript.jsonl").read_text()
-    assert password not in body, "the output-only credential reached the transcript"
-    assert "[redacted]" in body, "the mask did not happen at all"
+    assert SENTINEL_PW not in body, "the output-only credential reached the transcript"
+    assert REDACTION_MARKER in body, "the mask did not happen at all"
     rows = [line for line in body.splitlines() if "session_incident" in line]
-    assert rows, "an output-only credential filed no incident row"
+    assert not rows, "a contained output-only credential filed an incident"
     notices = [event for event in events if isinstance(event, NoticeEvent)]
-    assert notices, "an output-only credential produced no live notice"
+    assert not notices, "a contained output-only credential produced a live notice"
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_an_output_only_EXPOSURE_still_files_its_incident(
+    headless_tui_env: Path, workspace: Path
+) -> None:
+    """The other direction, and the one a too-eager gate would eat.
+
+    A DSN whose username IS its password is the documented escalating shape: the
+    DSN rule keeps the userinfo username readable by design, so the value's own
+    characters end up in the text the model reads. Fed in as OUTPUT ONLY — the
+    credential is in the file the child reads, never in the command — through the
+    same pipe, so this exercises the pipe's own report on a real subprocess.
+
+    The incident this feature was written for is this one. A gate that swallowed
+    every output-only hit would look exactly like a working one from the test
+    above, which is why both directions are pinned.
+    """
+    directory = headless_tui_env / "sessions" / "output-only-exposed"
+    payload = "amqp://guest:guest@rabbit.invalid:5672/"
+    (workspace / "exposed.env").write_text(f"AMQP_DSN={payload}\n")
+    stream = ScriptedStream(
+        [
+            tool_call_turn(
+                text="reading the environment",
+                tool_name="bash",
+                tool_call_id="call-exposed",
+                arguments={"command": "grep AMQP_DSN exposed.env"},
+            ),
+            text_turn("done"),
+        ]
+    )
+    session = build_session(directory, stream, tools=[build_bash_tool()], cwd=workspace)
+    events: list[Any] = []
+    session.subscribe(events.append)
+    await session.async_init()
+    try:
+        await session.prompt("print the environment")
+    finally:
+        await dispose_quietly(session)
+
+    body = (directory / "transcript.jsonl").read_text()
+    rows = [line for line in body.splitlines() if "session_incident" in line]
+    assert rows, "an output-only exposure filed no incident row"
+    notices = [event for event in events if isinstance(event, NoticeEvent)]
+    assert notices, "an output-only exposure produced no live notice"
     assert notices[0].kind == "warning"
+    assert "rotate" in notices[0].text, notices[0].text
