@@ -135,13 +135,6 @@ class AnalyticsRecorder:
         self._dropped = 0
         self._last_prune = 0.0
         self._closed = False
-        #: Monotonic counters used ONLY by ``flush_for_test`` as a commit
-        #: barrier: ``_enqueued`` counts accepted samples, ``_committed``
-        #: counts samples the writer has actually persisted. Real sessions
-        #: never read these — they are how a test waits for a durable write
-        #: without a fixed sleep that races the writer thread.
-        self._enqueued = 0
-        self._committed = 0
 
     # -- lifecycle -----------------------------------------------------------
     def _ensure_thread(self) -> None:
@@ -165,36 +158,59 @@ class AnalyticsRecorder:
         as they come (rare). Handling both here — rather than a second thread
         for names — is what keeps a single write connection and avoids the
         first-connection race two writers hit on a fresh database.
+
+        ``task_done()`` is called for every item ``get()`` returned — the
+        sentinel included — and only AFTER the ``_flush`` carrying it has
+        returned. That ordering is the whole meaning of the queue's completion
+        count: ``flush_for_test`` waits on it, so a ``task_done`` taken before
+        the write lets the barrier return with the row still unwritten. It used
+        to be taken as each item was CLASSIFIED, with the flush at the end of
+        the iteration — which is #1250 item 2, where a session-name upsert the
+        writer had already dequeued could still be pending when a test read the
+        ``session_names`` row. Nothing in production joins this queue, so
+        settling after the flush costs a session nothing.
+
+        If ``_flush`` ever did raise, the count would stop short and the next
+        ``flush_for_test`` would report it as an unsettled item rather than
+        passing — loudly, which is the point. Every store call inside ``_flush``
+        is individually guarded so this stays theoretical.
         """
         while True:
             batch: list[CallSnapshot] = []
             names: list[_NameTask] = []
             tools: list[_ToolCallTask] = []
+            # How many queue items this iteration took off, so the settle below
+            # accounts for each of them exactly once (``unfinished_tasks`` is
+            # raised by ``put`` and lowered by ``task_done``, never by ``get``).
+            consumed = 0
+            stopping = False
             try:
                 item = self._queue.get(timeout=_FLUSH_INTERVAL_S)
             except queue.Empty:
                 self._maybe_prune()
                 continue
-            if item is None:  # sentinel: flush and exit
-                self._flush(batch, names, tools)
-                self._queue.task_done()
-                return
-            self._classify(item, batch, names, tools)
-            self._queue.task_done()
-            # Opportunistically drain whatever else is already queued so a
-            # burst becomes one transaction.
-            while len(batch) < 256:
-                try:
-                    item = self._queue.get_nowait()
-                except queue.Empty:
-                    break
-                if item is None:
-                    self._flush(batch, names, tools)
-                    self._queue.task_done()
-                    return
+            consumed += 1
+            if item is None:  # sentinel: flush, settle, exit
+                stopping = True
+            else:
                 self._classify(item, batch, names, tools)
-                self._queue.task_done()
+                # Opportunistically drain whatever else is already queued so a
+                # burst becomes one transaction.
+                while len(batch) < 256:
+                    try:
+                        item = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    consumed += 1
+                    if item is None:
+                        stopping = True
+                        break
+                    self._classify(item, batch, names, tools)
             self._flush(batch, names, tools)
+            for _ in range(consumed):
+                self._queue.task_done()
+            if stopping:
+                return
             self._maybe_prune()
 
     @staticmethod
@@ -237,12 +253,6 @@ class AnalyticsRecorder:
             self._store.record_batch(batch)
         except Exception:  # noqa: BLE001 — writer must never die on a bad batch
             logger.debug("analytics: flush failed", exc_info=True)
-        finally:
-            # Advance the commit barrier whether or not the write succeeded: a
-            # dropped batch still "settled", and a test waiting on this count
-            # must not hang because a batch failed. Counted in the finally so
-            # the barrier tracks attempts, matching ``_enqueued``.
-            self._committed += len(batch)
 
     def _maybe_prune(self) -> None:
         now = time.monotonic()
@@ -267,7 +277,6 @@ class AnalyticsRecorder:
         self._ensure_thread()
         try:
             self._queue.put_nowait(snapshot)
-            self._enqueued += 1
         except queue.Full:
             # Count and log ONCE per power-of-two so a wedged disk says so
             # without spamming, and never block the caller.
@@ -356,30 +365,59 @@ class AnalyticsRecorder:
         return self._dropped
 
     def flush_for_test(self, timeout: float = 5.0) -> None:
-        """Block until the queue drains. TEST ONLY — never called on a session.
+        """Block until every queued item has been WRITTEN. TEST ONLY.
 
-        Real sessions never wait for the writer; this exists so a test can
-        assert a recorded call reached the store deterministically.
+        Never called on a session: real sessions do not wait for the writer.
+        It exists so a test can assert that a recorded sample reached the store
+        deterministically, which is only worth having if returning MEANS the
+        write happened.
+
+        It did not mean that before #1250 item 2. The old body waited on a
+        commit count that only call snapshots advanced, then polled
+        ``queue.empty()`` and slept a flat 50 ms — three separate holes:
+
+        * the queue empties the moment the writer DEQUEUES, so an item in the
+          writer's hands passed the empty check; and the queued items it did
+          see were counted as settled by the 50 ms sleep, not by a write;
+        * an item carrying no snapshot — a session name, a tool call — never
+          moved a counter at all, so the barrier never waited on it;
+        * on expiry it returned as if it had succeeded.
+
+        That is why ``tests/unit/evaluation/runner/test_provider_client.py``
+        could read a ``session_names`` row the writer had not committed yet.
+
+        The barrier is the queue's own completion count: the writer calls
+        ``task_done()`` for an item only after the ``_flush`` carrying it has
+        returned, so this returning means the store saw every item enqueued
+        before now — names and tool calls included.
+
+        ON EXPIRY THIS RAISES rather than returning. A caller that asked for a
+        guarantee must get either the guarantee or a failure naming what was
+        still outstanding.
         """
         self._ensure_thread()
         deadline = time.monotonic() + timeout
-        # First: the commit barrier catches up to enqueued SNAPSHOTS. This is a
-        # DURABLE barrier (the writer advances ``_committed`` only after a batch
-        # write returns), so it cannot return before the row is on disk the way
-        # a bare ``queue.empty()`` check can — the queue empties the instant the
-        # writer dequeues, before it commits.
-        target = self._enqueued
-        while self._committed < target and time.monotonic() < deadline:
-            time.sleep(0.005)
-        # Then: drain any remaining items (name tasks carry no barrier of their
-        # own, and a name enqueued after the last snapshot rides a later batch).
-        # ``join`` waits for every ``task_done``, which the writer calls only
-        # after processing the item, so the name upsert has run when this
-        # returns.
-        while not self._queue.empty() and time.monotonic() < deadline:
-            time.sleep(0.005)
-        # A final short settle so an item dequeued-but-not-yet-committed lands.
-        time.sleep(0.05)
+        # ``queue.Queue.join()`` is the right barrier but takes no timeout, and
+        # an unbounded wait on a wedged writer fails the suite by HANGING it
+        # instead of by reporting. So the bounded wait is spelled the way
+        # ``Queue.join`` itself spells it — on ``all_tasks_done``, the condition
+        # ``task_done`` notifies — rather than by handing the queue to a helper
+        # thread, which would leak one thread per expiry and still could not say
+        # what was outstanding.
+        queued = self._queue
+        with queued.all_tasks_done:
+            while queued.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    writer = self._thread
+                    raise TimeoutError(
+                        f"flush_for_test: {queued.unfinished_tasks} queued item(s) "
+                        f"still unwritten {timeout:.2f}s after the call — the "
+                        f"analytics writer thread has not settled them "
+                        f"(writer alive: {writer is not None and writer.is_alive()}, "
+                        f"recorder closed: {self._closed})"
+                    )
+                queued.all_tasks_done.wait(remaining)
 
     def close(self, timeout: float = 2.0) -> None:
         """Stop the writer and close the store (process teardown / tests)."""

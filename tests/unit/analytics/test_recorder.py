@@ -6,16 +6,27 @@ so the queue is bounded and a full one drops the sample (counted) rather than
 applying back-pressure. The writer thread turns queued samples into batched
 SQLite writes on a background thread, which is what keeps the provider path
 free of disk I/O.
+
+The barrier those writes are observed through is ``flush_for_test``: a plain
+``record`` is asynchronous by design, so every test here that reads the store
+is really asserting something about that barrier as well. Two of the tests
+below exist only to pin the barrier itself — a deliberately slow store makes
+the dequeued-but-unwritten window wide enough to be a fact rather than a race.
 """
 
 from __future__ import annotations
 
 import multiprocessing as mp
+import threading
 import time
+from collections.abc import Sequence
+from pathlib import Path
+
+import pytest
 
 from local_operator.analytics.model import CallSnapshot
 from local_operator.analytics.recorder import AnalyticsRecorder, reset_recorder_for_test
-from local_operator.analytics.store import AnalyticsStore
+from local_operator.analytics.store import SESSION_NAME_RANK_TITLE, AnalyticsStore
 
 
 def _snap(
@@ -78,17 +89,153 @@ def test_session_name_note_reaches_store(tmp_path):
     rec.record(_snap(session_id="abc"))
     rec.note_session_name("abc", "named it")
     rec.flush_for_test()
-    # The name upsert runs on its own short-lived thread; poll for it rather
-    # than sleeping a fixed amount, so the test is not flaky under load.
-    deadline = time.monotonic() + 5.0
-    names: dict[str, str] = {}
-    while time.monotonic() < deadline:
-        names = getattr(store.aggregate(), "session_names", {})
-        if names.get("abc") == "named it":
-            break
-        time.sleep(0.02)
-    assert names.get("abc") == "named it"
+    # Read straight after the barrier, with no poll loop in between: the barrier
+    # now covers a name task, so the loop this test used to carry — which only
+    # narrowed the race — is gone. See the two slow-store tests below for why it
+    # could not have been trusted without that. ``session_names`` is a SIDE
+    # attribute the store attaches to the aggregate, hence the ``getattr``.
+    assert getattr(store.aggregate(), "session_names", {}).get("abc") == "named it"
     rec.close()
+
+
+#: How long the deliberately slow stores below hold the writer inside one
+#: write. Long enough that a barrier which polls the queue and then sleeps a
+#: flat 50 ms provably returns first even on an idle machine, short enough to
+#: stay cheap in CI.
+_HOLD_S = 0.5
+
+
+class _SlowNameStore(AnalyticsStore):
+    """A store that parks the writer INSIDE the session-name upsert.
+
+    The window #1250 records — item dequeued, write not yet done — is invisible
+    at SQLite speed, so the witness has to widen it on purpose rather than hope
+    a loaded machine widens it. ``entered`` lets a test wait until the writer is
+    committed to the upsert, which is exactly the state the old barrier's
+    ``queue.empty()`` check read as "drained".
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.entered = threading.Event()
+
+    def upsert_session_name(
+        self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
+    ) -> None:
+        self.entered.set()
+        time.sleep(_HOLD_S)
+        super().upsert_session_name(session_id, name, rank=rank)
+
+
+class _SlowToolCallStore(AnalyticsStore):
+    """The same widening for a tool-call row, which never moved a counter at all."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.entered = threading.Event()
+
+    def record_tool_calls(self, rows: Sequence[tuple[int, str, str, str, str, float]]) -> int:
+        self.entered.set()
+        time.sleep(_HOLD_S)
+        return super().record_tool_calls(rows)
+
+
+class _BlockedBatchStore(AnalyticsStore):
+    """A store that will not finish a batch until the test releases it.
+
+    For the expiry path: the writer has to be genuinely stuck for the deadline
+    to be exercised at all, and the release has to exist so the test does not
+    leave a thread blocked inside SQLite behind it.
+    """
+
+    #: A ceiling the test never intends to reach — it releases first. The wait
+    #: is only here so a broken test cannot hang the suite instead of failing.
+    _CEILING_S = 10.0
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def record_batch(self, snapshots: Sequence[CallSnapshot]) -> int:
+        self.entered.set()
+        self.release.wait(self._CEILING_S)
+        return super().record_batch(snapshots)
+
+
+def test_flush_for_test_waits_for_a_name_upsert_already_dequeued(tmp_path):
+    """#1250 item 2's witness: a name the writer has DEQUEUED is still waited on.
+
+    This is the shape that went red intermittently: ``create_provider_model_client``
+    names its episode through ``note_session_name`` and the caller reads
+    ``session_names`` immediately after ``flush_for_test()``. A name task moves
+    no snapshot counter, and the queue is empty the instant the writer takes it
+    — so with the old body the read raced the upsert, and the assertion failed
+    under load with no hint that nothing had been waited for (run 35241086560,
+    ``assert None is not None``).
+    """
+    store = _SlowNameStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    try:
+        rec.note_session_name("slow-session", "held inside the writer")
+        assert store.entered.wait(5.0), "the writer never reached the name upsert"
+        rec.flush_for_test()
+        conn = store._connect()
+        assert conn is not None
+        row = conn.execute(
+            "SELECT name FROM session_names WHERE session_id = ?", ("slow-session",)
+        ).fetchone()
+        assert row is not None and row[0] == "held inside the writer"
+    finally:
+        rec.close()
+
+
+def test_flush_for_test_waits_for_a_tool_call_row_already_dequeued(tmp_path):
+    """The same hole for tool calls, which the old barrier never covered at all.
+
+    A ``_ToolCallTask`` carries no snapshot either, so it moved neither of the
+    counters the old body waited on: only the flat 50 ms settle ever stood
+    between this read and the write.
+    """
+    store = _SlowToolCallStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    try:
+        rec.record_tool_call("tool-session", "bash", "model", "")
+        assert store.entered.wait(5.0), "the writer never reached the tool-call write"
+        rec.flush_for_test()
+        conn = store._connect()
+        assert conn is not None
+        row = conn.execute(
+            "SELECT tool_name FROM tool_calls WHERE session_id = ?", ("tool-session",)
+        ).fetchone()
+        assert row is not None and row[0] == "bash"
+    finally:
+        rec.close()
+
+
+def test_flush_for_test_raises_at_its_deadline_instead_of_returning(tmp_path):
+    """Expiry is a failure, not a return: a barrier without its guarantee IS the bug.
+
+    The old body let the deadline pass and returned as though the queue were
+    drained, so a caller got a silent half-drain. Raising is what makes the
+    difference between "the store is wrong" and "nothing was ever waited for".
+    """
+    store = _BlockedBatchStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    try:
+        rec.record(_snap())
+        assert store.entered.wait(5.0), "the writer never reached the batch write"
+        with pytest.raises(TimeoutError, match="1 queued item"):
+            rec.flush_for_test(timeout=0.2)
+        # Not a wedge: once the writer is free the barrier completes and the
+        # row lands, which is what makes the deadline a bound rather than a
+        # verdict on the store.
+        store.release.set()
+        rec.flush_for_test()
+        assert store.aggregate().calls == 1
+    finally:
+        store.release.set()
+        rec.close()
 
 
 def test_reset_recorder_for_test_isolates(tmp_path):
