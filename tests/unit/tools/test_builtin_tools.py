@@ -2650,7 +2650,10 @@ def test_an_unexpanded_target_names_the_temp_root_not_a_fabricated_path(
     cannot resolve, and printing its "resolved" form invents a path that will never
     exist: `/private/tmp/f$i`. The advice and the reason do not change — only the
     subject, which becomes the temp root: a directory that really does exist, and
-    the thing the reader has to recognize."""
+    the thing the reader has to recognize. That subject then had to NAME the trap
+    instead of referring back to one (round-1 design finding D2): this arm is shown
+    to a reader who never saw the concrete target beside it, so "the same trap" had
+    no antecedent to resolve against."""
     temp_root = tmp_path / "shared-tmp"
     temp_root.mkdir()
     _point_the_nudge_at(monkeypatch, temp_root)
@@ -2662,7 +2665,11 @@ def test_an_unexpanded_target_names_the_temp_root_not_a_fabricated_path(
 
     assert line, "the loop still creates files under the temp root"
     assert "$i" not in line
-    assert f"a path directly under {temp_root.resolve()} is the same trap" in line
+    assert f"writing directly under {temp_root.resolve()} puts scratch in a temp root" in line
+    # The root arm NAMES the trap rather than referring back to one: the reader of
+    # this arm has not been shown the concrete target the other arm describes, so
+    # "the same trap" pointed at nothing (design review round 1, D2).
+    assert "the same trap" not in line
     assert f"${SCRATCHPAD_PATH_ENV}" in line
 
 
