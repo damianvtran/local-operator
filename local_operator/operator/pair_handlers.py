@@ -489,14 +489,17 @@ def describe_devices(args: argparse.Namespace) -> int:
                 )
             else:
                 # A REMEDY ON THE SAME STREAM, AND NO INTERLEAVING (design round 13, D5).
-                # Calling `install_anchor` here would print its own "nothing staged; run
-                # `lop operator init`" to STDERR, which in a piped run arrives BEFORE this
-                # stdout block — and the old stdout line then repeated the fact with no
-                # remedy at all. Says the remedy once, in the right order.
+                # Calling `install_anchor` here would print its own "nothing staged at …;
+                # run `lop operator init` first" to STDERR — a fact about ITS caller
+                # (`lop operator install`), not about this verb, whose real run stages the
+                # lifted statement itself before it installs — and in a piped run that
+                # stderr line arrives BEFORE this stdout block, with the old stdout line
+                # then repeating the fact and naming no route at all. So: no call, one
+                # remedy, in the right order, and the remedy is the route that exists.
                 print(
-                    "There is no staged anchor statement to install, so that privileged "
-                    "step cannot be offered yet: run `lop operator init` on this machine "
-                    "to write one, then run this command again."
+                    "There is no staged anchor statement to install, so there is no "
+                    f"privileged command to print yet: run `{command}` without "
+                    "--print-only and it writes the statement and takes that step itself."
                 )
 
     for device in paired:

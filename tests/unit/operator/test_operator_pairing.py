@@ -914,6 +914,13 @@ def test_the_authorise_preview_promises_exactly_what_its_own_run_does(
 
     monkeypatch.setattr(handlers, "install_anchor", fake_install)
 
+    def _agree(preview: dict[str, Any], real: dict[str, Any]) -> None:
+        """The property: the promise and the run's action cannot disagree."""
+        assert preview["claims_no_step"] == (not real["stepped"]), (
+            "the preview's promise and the real run's action disagree on the privileged "
+            f"step: claims_no_step={preview['claims_no_step']} vs stepped={real['stepped']}"
+        )
+
     def observe(*, preview: bool, anchor_usable: bool, staged: bool = True) -> dict[str, Any]:
         """One fresh fixture, one invocation, and what it claimed or did."""
         staged_path = trust.staging_path(root)
@@ -934,7 +941,12 @@ def test_the_authorise_preview_promises_exactly_what_its_own_run_does(
         return {
             "claims_local_clear": ("would clear the local revocation record" in out)
             or ("only the local record was cleared" in out),
-            "claims_privileged_step": "sudo install" in out,
+            # The claim compared below is "this operation needs no privileged step", which
+            # the preview states in the state that needs none. Whether the preview could
+            # PRINT a command is a different thing: a preview stages nothing, so with an
+            # empty spool it has no statement to build one from and says so.
+            "claims_no_step": "no privileged step would be needed" in out,
+            "prints_command": "sudo install" in out,
             "record_gone": not devices.revoked_path(root).exists(),
             "staged_changed": (staged_path.read_bytes() if staged else None) != before,
             "stepped": bool(calls),
@@ -945,14 +957,11 @@ def test_the_authorise_preview_promises_exactly_what_its_own_run_does(
     preview = observe(preview=True, anchor_usable=False)
     assert preview["record_gone"] is False and preview["staged_changed"] is False
     assert preview["stepped"] is False, "the preview took the privileged step"
-    assert preview["claims_privileged_step"] is False, preview["out"]
+    assert preview["prints_command"] is False, preview["out"]
     assert "no usable" in preview["out"] and "lop operator install" in preview["out"]
     real = observe(preview=False, anchor_usable=False)
     assert preview["claims_local_clear"] == real["record_gone"] is True
-    assert preview["claims_privileged_step"] == real["stepped"], (
-        "the preview's promise and the real run's action disagree: "
-        f"{preview['claims_privileged_step']} vs {real['stepped']}"
-    )
+    _agree(preview, real)
     assert real["stepped"] is False and real["record_gone"] is True
 
     # (b) the ordinary state: both halves revoked, anchor usable.
@@ -960,15 +969,19 @@ def test_the_authorise_preview_promises_exactly_what_its_own_run_does(
     assert preview["record_gone"] is False and preview["staged_changed"] is False
     real = observe(preview=False, anchor_usable=True)
     assert preview["claims_local_clear"] == real["record_gone"] is True
-    assert preview["claims_privileged_step"] == real["stepped"] is True
+    _agree(preview, real)
+    assert preview["prints_command"] is True and real["stepped"] is True
 
-    # (c) and nothing staged: the privileged step cannot be offered, and the remedy rides
-    # the same stream in the right order (design round 13, D5) instead of arriving on
-    # stderr before this block in a piped run.
+    # (c) and nothing staged: a preview stages nothing, so it has no statement to build a
+    # command from — and the remedy it names is the route that exists, on the same stream
+    # and in the right order (design round 13, D5), instead of `install_anchor`'s stderr
+    # line arriving before this block in a piped run with no remedy on stdout at all.
     preview = observe(preview=True, anchor_usable=True, staged=False)
-    assert preview["claims_privileged_step"] is False, preview["out"]
-    assert "lop operator init" in preview["out"], preview["out"]
+    assert preview["prints_command"] is False, preview["out"]
+    assert "without --print-only" in preview["out"], preview["out"]
+    assert "lop operator init" not in preview["out"], preview["out"]
     assert "nothing is staged to install yet" not in preview["out"], preview["out"]
+    _agree(preview, observe(preview=False, anchor_usable=True, staged=False))
 
     # (d) the caveat travels with the command (design round 13, D2): it used to sit
     # fifteen rows below it at 44 columns.
