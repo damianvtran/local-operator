@@ -2394,6 +2394,18 @@ def _corpus_grading() -> str:
 #: ``COUNT_TAIL_RELEASED_NAMES`` (the boundary the tail arm draws, pinned in the half
 #: it releases: QA round 2, Q2-1).
 #:
+#: MOVED ONCE MORE on 2026-09-21, in the commit that answers agent review R1-1, and
+#: the argument is again a measurement rather than a claim: no production code
+#: changed in that commit — the diff to ``redaction_shapes.py`` is comments only, so
+#: nothing could move — and the digest delta is exactly the one added row. Measured
+#: by recomputing this function over the corpus WITHOUT that row under the same
+#: module: 341 cases produce ``d76461eb…``, the constant this commit replaces, and
+#: 342 produce the value below. The row is ``glpat-lowercase-token-value``, the
+#: boundary agent review R1-1 named: an all-lowercase, separator-carrying tail is
+#: read as a NAME, and ``origin/main`` masked this one as ``vendor-prefixed-token``.
+#: It sits in the NEGATIVE half on purpose, so the accepted residual is a test that
+#: fails if a later rule narrows it, rather than a paragraph someone has to trust.
+#:
 #: Moved AGAIN on 2026-09-21, by the fix for a vendor-prefixed FALSE POSITIVE, and
 #: the argument is the same measurement rather than a claim: the 335-case corpus
 #: described just above produces a BYTE-IDENTICAL grading under the fixed module
@@ -2405,7 +2417,7 @@ def _corpus_grading() -> str:
 #: (``<prefix>_<name>=<value>``, the dash-joined form, and a fixed-prefix name), and
 #: one positive for the npm token's own hex-and-dash spelling, which pins the
 #: boundary the new tail predicate must leave alone.
-_CORPUS_GRADING_DIGEST = "d76461eb54f16cfe1722b88df2146c69c0a0dd0ab43694f27c1a115bf94740b0"
+_CORPUS_GRADING_DIGEST = "42390096fa184cd71c8ff6a3627739bccc13d30406f965ffef343a8f29d57c48"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
