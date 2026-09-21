@@ -45,7 +45,13 @@ REPO = Path(__file__).resolve().parents[4]
 #: a loop that fell over fails instead of blocking the worker (there is no
 #: pytest-timeout in this suite).
 BEAT_INTERVAL_S = 0.05
-BEAT_DEADLINE_S = 20.0
+#: How long a test waits for the FIRST beat to be published. Generous on
+#: purpose: the reading is a fact about the record, not about this host, and
+#: under the fleet load this box routinely carries (load 30-80) a boot plus
+#: one beat was measured once outside a 20 s window — the deadline exists so a
+#: loop that fell over fails instead of blocking the worker, never to assert
+#: that a machine is fast (AGENTS.md, "Prefer a structural invariant").
+BEAT_DEADLINE_S = 45.0
 
 
 def _stream(request: Any, signal: Any) -> Any:

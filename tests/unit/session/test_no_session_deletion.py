@@ -1461,6 +1461,25 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "Removes only the park FILE tunnel/state.json under the config dir; "
         "never a directory, never under sessions/",
     ),
+    # The stall watchdog's own dump files (2026-09-20). `dump_path` composes
+    # these from `paths.log_dir()` and an int pid ALONE — never a session id,
+    # never a `sessions/` path, never caller input — so neither call can name a
+    # session file. `arm` removes the header IT just wrote when the timer could
+    # not be armed (a header left there reads as an armed runtime), and `disarm`
+    # removes the file of a clean exit, which is what makes a surviving file mean
+    # the process died without disarming. The module docstring argues both, and
+    # the alternative — leave the file and carry the outcome in its content —
+    # accumulates one file per runtime process with nothing to prune them.
+    (
+        "local_operator/session/runtime/stall_watchdog.py::arm",
+        "<path>.unlink",
+        "log_dir()+pid FILE this call just created; a header-only survivor reads as armed",
+    ),
+    (
+        "local_operator/session/runtime/stall_watchdog.py::disarm",
+        "<path>.unlink",
+        "log_dir()+pid FILE of a CLEAN exit; surviving means the process died disarmed",
+    ),
 )
 
 _ALLOWED: dict[str, str] = {f"{row[0]}::{row[1]}": str(row[2]) for row in _ALLOWED_ROWS}
