@@ -75,6 +75,16 @@ NETWORK_NAME = "mesh-r4"
 #: * ``silent`` — declares NOTHING, so its row carries no endpoint at all and every
 #:   peer's dial gets `no_endpoint`. That is qa-mac2, behind a NAT, whose observed
 #:   address in the real run (`66.23.24.219:50821`) answered nobody.
+#:
+#: ``silent`` DECLARES NOTHING BY CONSTRUCTION RATHER THAN BY ASSUMPTION ABOUT THE
+#: HOST. `advertise_endpoints` answers for a ``0.0.0.0`` listener with the resolved
+#: addresses of ``socket.gethostname()``, so whether this mode's row carried a
+#: dialable address depended on the runner: on CI's name resolution it did, here it
+#: does not (`getaddrinfo` raises, and the `OSError` branch returns no host). A
+#: sibling that reads that row dials it, the link forms, and "this leaf can ask only
+#: one of its peers" stops being the state under test — the CI shard 0 failure in
+#: `test_a_member_count_reports_what_it_could_and_could_not_verify`. The `devices`
+#: fixture below enforces the absence at the source instead of reading the host.
 HUB = "hub"
 DIAL_ONLY = "dial_only"
 SILENT = "silent"
@@ -116,8 +126,37 @@ class Device:
 
 
 @pytest.fixture()
-def devices(tmp_path: Path) -> Any:
+def devices(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The relays a test builds, with each mode's DOCUMENTED reachability ENFORCED.
+
+    A mode is a claim about where a peer can reach a device, and this rig may not
+    leave that claim to the machine it runs on. ``advertise_endpoints`` answers
+    "where do peers reach us" from a device that listens on ``0.0.0.0`` by
+    resolving ``socket.gethostname()`` — runner-dependent by nature — so the mode
+    the module docstring calls ``silent`` ("declares NOTHING ... every peer's dial
+    gets ``no_endpoint``") carried a dialable address on a host whose name
+    resolves, and none on a host where it does not. The failure that produces is
+    not a fixture detail: the peer that reads the row dials it, the link forms, and
+    the topology the test is ABOUT (a leaf that can ask only one of its two peers)
+    is gone before the test reads it — which is exactly the CI shard 0 failure in
+    ``test_a_member_count_reports_what_it_could_and_could_not_verify``.
+
+    So the meaning is enforced at the source of the answer rather than inferred
+    from the hostname: a ``silent`` device declares nothing on EVERY path that
+    publishes an endpoint (its own member row, the hello it sends a peer, and the
+    copy that peer stores for it), because all of them go through this function.
+    Every other mode gets the real answer unchanged.
+    """
     built: list[Device] = []
+    original = relay.advertise_endpoints
+
+    def _advertise(settings: relay.NetworkSettings, *, declared: Any = ()) -> list[str]:
+        for device in built:
+            if device.mode == SILENT and device.server.settings is settings:
+                return []
+        return original(settings, declared=declared)
+
+    monkeypatch.setattr(relay, "advertise_endpoints", _advertise)
     try:
         yield built, tmp_path
     finally:
@@ -407,16 +446,23 @@ def test_a_member_count_reports_what_it_could_and_could_not_verify(
     b = _make(devices, "b", mode=SILENT)
     c = _make(devices, "c", mode=HUB)
 
-    # B MUST NOT DIAL A, and that is the topology this test is ABOUT rather than an
-    # optimisation. A dial-only relay advertises LOOPBACK (`advertise_endpoints`),
-    # which a sibling relay on the same host can reach, so on a loaded runner `b`
-    # established a link to `a` moments after the member list gave it `a`'s row —
-    # and then "verified with 1 of 2" was the wrong expectation for an honest
-    # report that HAD asked both. CI failed on exactly that shard: the assertions
-    # below read the race, not the rule. Blocking b's dials to a makes "this leaf
-    # can ask only one of its two peers" a property of the fixture instead of a
-    # hope about scheduling; the spy goes on before any network exists, so there is
-    # no window in which the link could already be up.
+    # THERE MUST BE NO LINK BETWEEN A AND B, IN EITHER DIRECTION, and the topology
+    # this test is ABOUT rests on that rather than on an optimisation: "this leaf
+    # can ask only one of its two peers" is a claim about which links exist, so a
+    # link that forms on its own makes the assertions below read the race instead of
+    # the rule.
+    #
+    # Direction A → B is forced by the `devices` fixture, which makes `b` declare no
+    # endpoint at all, so `a`'s contact path (`_ctl_ls` → `contact_peers`) dials the
+    # row it holds for `b` and gets `no_endpoint` — never a link. That is the
+    # direction CI failed in, and it is why the row `a` reads for `b`, not `b`'s
+    # behaviour, is what had to become deterministic.
+    #
+    # Direction B → A is held at the dial path, which is the one choke point every
+    # route to a link shares. It is the belt to the fixture's braces (`a` advertises
+    # only loopback): it makes "b cannot reach a either" a written fact rather than
+    # an inference from an address that happens to carry port 0. Installed before any
+    # network exists, so there is no window in which the link could already be up.
     original_dial = b.server._ensure_link_with_reason  # noqa: SLF001 — the dialling path
 
     def _hold_a(device_id: str, **fields: Any) -> Any:
@@ -439,9 +485,10 @@ def test_a_member_count_reports_what_it_could_and_could_not_verify(
 
     # THE FIXTURE'S PRECONDITION, ASSERTED RATHER THAN ASSUMED. If a link to `b`
     # exists by the time the report is read, then "b is the peer a cannot verify
-    # with" is not the state under test — and the accidental-dial race this fixture
-    # blocks would show up here, by name, instead of as a cryptically longer
-    # ``answered`` list three assertions later.
+    # with" is not the state under test — and the accidental dial that forms it is
+    # `a`'s own, over the row it holds for `b`, so that is the line the fixtures
+    # above have to close. It shows up here, by name, instead of as a cryptically
+    # longer ``answered`` list three assertions later.
     assert (
         a.server._link_for(b.device_id) is None
     ), "the leaf gained a link to its unverifiable peer"
