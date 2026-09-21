@@ -1969,6 +1969,234 @@ async def test_an_edit_of_a_missing_plain_file_names_the_next_call(tmp_path) -> 
 
 
 # ---------------------------------------------------------------------------
+# scratchpad:// — the temp-root nudge
+# ---------------------------------------------------------------------------
+#
+# The measured incident these cover: a session doing image work wrote its
+# generator to /tmp/lopost.py and its render passes under
+# `mktemp -d /tmp/lopost-XXXXXX`, and nothing at the moment of the write said
+# otherwise — the rule lived only in system.md, which never fires there.
+
+
+def _point_the_nudge_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Aim ``_temp_scratch_hint`` at a temp root the TEST owns.
+
+    ``_temp_scratch_roots`` is a function precisely so this is possible: the
+    alternative is writing into the machine's real ``$TMPDIR`` or ``/tmp``,
+    which is shared with every other process on the host and (under /tmp) is
+    pruned on a three-day clock.
+    """
+    monkeypatch.setattr(
+        builtin,
+        "_temp_scratch_roots",
+        lambda: ((root.resolve(), "the test's own reason"),),
+    )
+
+
+def _nudge_line(target: Path, pad: Path) -> str:
+    """The exact one line the nudge appends, so the assertion cannot drift."""
+    return (
+        f"[scratch] {target.resolve()} sits directly under a temp root — "
+        f"the test's own reason. Your own scratch belongs in scratchpad:// "
+        f"({pad.resolve()}), e.g. "
+        f'write(path="scratchpad://name.py", content="…").'
+    )
+
+
+def test_the_temp_roots_are_resolved_and_name_the_three_day_prune(monkeypatch, tmp_path) -> None:
+    """The helper's own contract. ``gettempdir`` is pinned to a distinct dir
+    because on Linux it IS ``/tmp`` — that is the dedupe case below, not this one.
+    """
+    system_tmp = tmp_path / "sys-tmp"
+    system_tmp.mkdir()
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: str(system_tmp))
+
+    roots = dict(builtin._temp_scratch_roots())
+
+    assert set(roots) == {system_tmp.resolve(), Path("/tmp").resolve()}
+    # The reason the guide and system.md both give, attached to the root it is
+    # actually true of — macOS's daily cleaner, not the per-user temp dir.
+    assert "three days" in roots[Path("/tmp").resolve()]
+    assert "three days" not in roots[system_tmp.resolve()]
+
+
+def test_duplicate_resolved_temp_roots_collapse(monkeypatch) -> None:
+    """Both candidates spelling the same directory must yield ONE root: a doubled
+    hint would read as two different traps and each would claim its own reason.
+    """
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: "/tmp")
+
+    roots = builtin._temp_scratch_roots()
+
+    assert len(roots) == 1
+    assert len({root for root, _ in roots}) == len(roots)
+
+
+@pytest.mark.asyncio
+async def test_write_directly_under_a_temp_root_nudges_toward_the_scratchpad(
+    tmp_path, monkeypatch
+) -> None:
+    """Depth ONE, deliberately: several of this fleet's real agent worktrees
+    live at /private/tmp/<name>, so a nested path is a plausible deliverable and
+    a nudge there would be a false positive on real work."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    target = temp_root / "generator.py"
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "print(1)\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    # The receipt is unchanged and the nudge is APPENDED to it, never
+    # substituted: the caller still needs to know what was written where.
+    first, second = result.text.split("\n")
+    assert first == f"Created {target.resolve()} (9 chars)."
+    assert second == _nudge_line(target, pad)
+    # The advice does not touch the file itself.
+    assert target.read_text(encoding="utf-8") == "print(1)\n"
+
+
+@pytest.mark.asyncio
+async def test_edit_under_a_temp_root_nudges_too(tmp_path, monkeypatch) -> None:
+    """Both writers share one helper, so ``edit`` must not be the tool that
+    silently lacks the hint — editing an existing /tmp file is exactly as
+    session-fragile as creating one."""
+    context, pad, tools = _scratchpad_context(tmp_path)
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    target = temp_root / "notes.md"
+    target.write_text("alpha\n", encoding="utf-8")
+
+    result = await tools["edit"].execute(
+        "c",
+        {"path": str(target), "old_text": "alpha", "new_text": "ALPHA"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    first, second = result.text.split("\n")
+    assert first == f"Edited {target.resolve()}: 1 hunk(s), 1 replacement(s) applied."
+    assert second == _nudge_line(target, pad)
+    assert target.read_text(encoding="utf-8") == "ALPHA\n"
+
+
+@pytest.mark.asyncio
+async def test_a_deeper_path_under_a_temp_root_is_not_nudged(tmp_path, monkeypatch) -> None:
+    temp_root = tmp_path / "shared-tmp"
+    (temp_root / "deliverable").mkdir(parents=True)
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["write"].execute(
+        "c",
+        {"path": str(temp_root / "deliverable" / "x.py"), "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_normal_workspace_path_is_not_nudged(tmp_path, monkeypatch) -> None:
+    """The nudge is about a temp root only; the ordinary case stays silent, which
+    is what keeps its cost at zero when it does not fire."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["write"].execute(
+        "c", {"path": "ws_report.md", "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_scratchpad_target_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The guard is the ``scratchpad://`` TARGET, not where the file lands — so
+    this scratchpad root IS the monkeypatched temp root: the depth-1 and
+    scratchpad-present conditions both hold, and only the target check keeps the
+    tool from telling the agent to move its scratch onto itself."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    approval = RecordingApproval(True)
+    context = _RecordingContext(
+        cwd=str(tmp_path / "ws"),
+        session_id="scratchpad-test",
+        scratchpad_dir=str(temp_root),
+        request_approval=approval,
+        recorder=approval,
+    )
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["write"].execute(
+        "c", {"path": "scratchpad://x.py", "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+    assert (temp_root / "x.py").read_text(encoding="utf-8") == "x\n"
+
+
+@pytest.mark.asyncio
+async def test_a_host_without_a_scratchpad_gets_no_nudge(tmp_path, monkeypatch) -> None:
+    """Same contract as ``SCRATCHPAD_UNAVAILABLE``: with nowhere better to point
+    the session, the hint has nothing to say and says nothing."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    context = ToolContext(cwd=str(workspace), session_id="no-scratchpad")
+    tools = {tool.name: tool for tool in create_tools(context)}
+
+    result = await tools["write"].execute(
+        "c", {"path": str(temp_root / "gen.py"), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_the_nudge_follows_the_resolved_temp_root(tmp_path, monkeypatch) -> None:
+    """macOS makes /tmp a symlink to /private/tmp, so a comparison against the
+    UNRESOLVED spelling never matches and the nudge silently disappears — the
+    no-op class this whole helper exists to avoid. The file is written through
+    the symlinked spelling and the hint still fires on the resolved parent.
+    """
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    link = tmp_path / "tmp-link"
+    link.symlink_to(temp_root)
+    monkeypatch.setattr(
+        builtin, "_temp_scratch_roots", lambda: ((temp_root.resolve(), "the test's own reason"),)
+    )
+    context, pad, tools = _scratchpad_context(tmp_path)
+    target = link / "gen.py"
+
+    result = await tools["write"].execute(
+        "c", {"path": str(target), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert (temp_root / "gen.py").read_text(encoding="utf-8") == "x\n"
+    assert _nudge_line(target, pad) in result.text
+
+
+# ---------------------------------------------------------------------------
 # path safety and approval tiers (RT-09/RT-10/RT-14/RT-29)
 # ---------------------------------------------------------------------------
 
