@@ -68,6 +68,19 @@ import re
 #: the word already sorts in the right place.
 EFFORT_ORDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
+
+def is_effort_sentinel(level: str) -> bool:
+    """Whether ``level`` is a sentinel rather than a rankable rung.
+
+    A ladder member outside :data:`EFFORT_ORDER` names no depth: ``auto``
+    delegates the level to the server, so it is neither the cheapest nor the
+    most expensive rung. Helpers that walk a ladder for "the lowest rung" or
+    "one below the current" must SKIP these, or they pick the delegation while
+    reading it as a depth.
+    """
+    return level not in EFFORT_ORDER
+
+
 #: What a bare cycle starts on when the model documents no default of its own.
 #: The middle of the ladder is the only choice that is not a claim about an
 #: undocumented default, and it is one press from either end. The ends are both

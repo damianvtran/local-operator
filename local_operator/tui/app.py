@@ -32407,7 +32407,7 @@ class OperatorApp(App[None]):
         ``/model``: that command's listing volunteers that a pick persists, so
         this one has to volunteer that a level does not.
         """
-        rungs = ("auto", *levels)
+        rungs = levels if "auto" in levels else ("auto", *levels)
         marked = current or "auto"
         rendered = " ".join(
             f"{self.EFFORT_MARK}{name}" if name == marked else name for name in rungs
@@ -36935,7 +36935,7 @@ class OperatorApp(App[None]):
         the user is scanning for one they already understand.
         """
         current = getattr(_model_spec(self._session), "reasoning_effort", None) or "auto"
-        rungs = ("auto", *levels)
+        rungs = levels if "auto" in levels else ("auto", *levels)
         return [
             ArgumentChoice(
                 name,

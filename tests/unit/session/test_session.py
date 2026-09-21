@@ -3051,6 +3051,39 @@ async def test_naming_uses_the_supported_floor_on_every_openai_wire(
 
 
 @pytest.mark.asyncio
+async def test_the_errand_lowest_effort_skips_the_auto_sentinel(tmp_path, monkeypatch):
+    """``_lowest_effort`` must clamp onto the cheapest REAL rung, not
+    ``efforts[0]``.
+
+    On the Radient router ladder ``auto`` sits at index 0, so reading
+    ``efforts[0]`` put the ``auto`` SENTINEL on the errand — a delegation, not
+    a depth, which is exactly the whole-budget-burned-thinking case this clamp
+    exists to prevent. The OpenRouter router has no sentinel, so its clamp is
+    unchanged, and a spec already on the lowest real rung is returned as-is.
+    A direct-model test holds vacuously (no sentinel), so both router ladders
+    are exercised here.
+    """
+    from local_operator.model.configure import build_model_spec
+    from local_operator.session.session import Session
+
+    radient = build_model_spec("radient", "auto")
+    assert radient.reasoning_efforts == ("auto", "low", "medium", "high")
+    at_high = radient.model_copy(update={"reasoning_effort": "high"})
+    clamped = Session._lowest_effort(at_high)
+    assert clamped.reasoning_effort == "low", "the cheapest REAL rung, not auto"
+
+    # Already on the cheapest real rung: unchanged.
+    at_low = radient.model_copy(update={"reasoning_effort": "low"})
+    assert Session._lowest_effort(at_low) is at_low
+
+    # OpenRouter's ladder has no sentinel, so ``low`` is simply the bottom.
+    openrouter = build_model_spec("openrouter", "auto")
+    assert openrouter.reasoning_efforts == ("low", "medium", "high")
+    or_high = openrouter.model_copy(update={"reasoning_effort": "high"})
+    assert Session._lowest_effort(or_high).reasoning_effort == "low"
+
+
+@pytest.mark.asyncio
 async def test_the_errand_model_is_effort_clamped_on_both_routes(tmp_path, monkeypatch):
     """``ERRAND_MAX_TOKENS`` is an output cap that COUNTS REASONING TOKENS, so an
     errand left on a reasoning model's default effort can spend the whole

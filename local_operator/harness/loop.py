@@ -96,6 +96,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.incidents import REASONING_ECHO_MARKERS
+from local_operator.model.effort import is_effort_sentinel
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
 #: the byte counter visibly moves (so the row reads as progress rather than as a
@@ -504,7 +505,8 @@ def _lower_effort(model: "ModelSpec") -> str | None:
     if not ladder or current is None or current not in ladder:
         return None
     index = ladder.index(current)
-    return ladder[index - 1] if index > 0 else None
+    below = [r for r in ladder[:index] if not is_effort_sentinel(r)]
+    return below[-1] if below else None
 
 
 # How long the batch waits for tools to unwind after an ABORT before it stops
