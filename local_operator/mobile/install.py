@@ -89,9 +89,11 @@ _BUILD_STEP_TIMEOUT = 600.0
 
 #: Seconds a signalled build group gets between SIGTERM and SIGKILL. Deliberately
 #: short: the group this bounds is the pnpm self-install recursion documented on
-#: :func:`_pin_mismatch`, which was measured growing by ~1.2 GB per SECOND, so a
-#: graceful window sized for an ordinary build would cost gigabytes it exists to
-#: save. A real pnpm build is never signalled on this path unless the bound fired.
+#: :func:`_pin_mismatch`, which reached 3.2 GB of RSS in its first 8 seconds in
+#: the reproduction of that incident — 0.2-0.4 GB/s across the measurements taken
+#: here — so a graceful window sized for an ordinary build would cost gigabytes it
+#: exists to save. A real pnpm build is never signalled on this path unless the
+#: bound fired.
 _BUILD_KILL_GRACE = 5.0
 
 #: How long the ``--version`` probe in :func:`_runner_reports` may run. It is a
@@ -250,27 +252,38 @@ def _step_group(proc: subprocess.Popen[str]) -> int | None:
     case a leaked descendant survives in — the same reasoning that makes
     ``clipboard._kill_tree`` take its pgid from the spawn rather than the lookup.
 
-    ``None`` on Windows, where there is no group to signal and
-    :func:`local_operator.procstate.terminate_process_tree` walks the tree with
-    ``taskkill /T`` instead.
+    ``None`` on Windows, where there is no group id to signal, and that makes the
+    third path narrower there than the other two: the bound and abort rungs go
+    through :func:`local_operator.procstate.terminate_process_tree`
+    (``taskkill /T``), which walks the tree from the LEADER and so needs the
+    leader still alive. See :func:`_sweep_step_group` for why the post-exit sweep
+    is POSIX-only rather than a ``taskkill`` aimed at a reaped pid.
     """
     return proc.pid if _SUPPORTS_PROCESS_GROUPS else None
 
 
-def _signal_step_group(proc: subprocess.Popen[str], pgid: int | None, *, force: bool) -> bool:
-    """Signal everything a build step spawned; False when none was there.
+def _signal_step_group(proc: subprocess.Popen[str], pgid: int | None, *, force: bool) -> None:
+    """Signal everything a build step spawned.
 
-    Never raises. Every caller is on a path where an exception would replace the
-    failure it is already reporting (the bound, an abort, the post-exit sweep),
-    and an already-empty group is the ordinary case there rather than an error.
+    Signals, and reports nothing — including nothing about whether anything was
+    there. Every caller is on a path where an exception would replace the failure
+    it is already reporting (the bound, an abort, the post-exit sweep), and an
+    already-empty group is the ordinary case there rather than an error, so a
+    "did anything die?" flag would be a value no caller could act on.
+
+    POSIX signals the remembered GROUP. Windows has no group id, so it goes
+    through ``procstate.terminate_process_tree`` (``taskkill /T``), which walks
+    the tree from the leader — meaningful on the bound and abort rungs, where the
+    leader is still alive, and not on the post-exit sweep (see
+    :func:`_sweep_step_group`).
     """
     if pgid is None:  # pragma: no cover - exercised on Windows hosts
-        return procstate.terminate_process_tree(proc.pid, force=force)
+        procstate.terminate_process_tree(proc.pid, force=force)
+        return
     try:
         os.killpg(pgid, signal.SIGKILL if force else signal.SIGTERM)
     except OSError:  # the group is already gone, or is not ours to signal
-        return False
-    return True
+        pass
 
 
 def _reap_step_group(
@@ -305,7 +318,7 @@ def _reap_step_group(
         proc.communicate()
 
 
-def _sweep_step_group(proc: subprocess.Popen[str], pgid: int | None) -> bool:
+def _sweep_step_group(proc: subprocess.Popen[str], pgid: int | None) -> None:
     """SIGKILL whatever is still in the step's group after the leader exited.
 
     NOT redundant with the bound, and this is the incident's own mechanism: the
@@ -317,13 +330,33 @@ def _sweep_step_group(proc: subprocess.Popen[str], pgid: int | None) -> bool:
     second against a build that has already finished.
 
     The pgid is the one REMEMBERED at spawn (:func:`_step_group`), so this still
-    targets the right group once the leader is gone.
+    targets the right group once the leader is gone — the whole reason it is
+    remembered rather than looked up.
+
+    TWO LIMITS, stated because neither is visible from the name and both are
+    reachable:
+
+    * **POSIX only.** Windows has no group id, and ``taskkill /T`` walks the tree
+      from the LEADER — which is exactly what is gone here. Windows therefore
+      gets the bound and abort rungs (:func:`_reap_step_group`, where the leader
+      is still alive) and no post-exit sweep. Sweeping a reaped leader's children
+      there would mean a parent-pid walk, and this repo deliberately takes no
+      ``psutil`` dependency (see ``conftest.py``'s memory probe) — so the honest
+      answer is the narrow one, not a ``taskkill`` aimed at a pid that may since
+      have been recycled.
+    * **The pipe-holding descendant is the BOUND's case, not this one.** A
+      descendant that inherits the captured stdout/stderr keeps ``communicate()``
+      in :func:`_run_build_step` waiting until the bound fires, so that shape ends
+      as a bounded ``TimeoutExpired`` reaped by :func:`_reap_step_group`, not as an
+      instant sweep. What this does cover is the DETACHING shape — the one the
+      tests plant and the one the field incident showed: the leader exits on its
+      own and its descendants never touch our pipes.
     """
-    reaped = False
+    if pgid is None:  # pragma: no cover - Windows, see the first limit above
+        return
     for _ in range(5):
-        reaped = _signal_step_group(proc, pgid, force=True) or reaped
+        _signal_step_group(proc, pgid, force=True)
         time.sleep(_GROUP_POLL_SECONDS)
-    return reaped
 
 
 def _run_build_step(
@@ -344,7 +377,11 @@ def _run_build_step(
     So the step runs in its own session/group and the GROUP is signalled on all
     three paths that end the wait: the bound, an abort (Ctrl-C: the child is its
     own session, so the terminal's SIGINT never reaches it), and the ordinary
-    exit, where a descendant can outlive its leader.
+    exit, where a descendant can outlive its leader. Two of those are narrower
+    than they sound, and both are stated where a reader asking "what exactly is
+    covered" ends up: the third is POSIX-only, and the pipe-holding shape of the
+    second is the bound's case rather than the sweep's (see
+    :func:`_sweep_step_group`).
 
     NOT ``scripts/run_bounded.py``: this follows that wrapper's semantics
     deliberately, but the wrapper lives in the repository's ``scripts/`` tree,

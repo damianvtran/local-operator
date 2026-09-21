@@ -272,6 +272,37 @@ def test_a_descendant_does_not_outlive_a_step_that_exits_by_itself(
     )
 
 
+def test_the_post_exit_sweep_is_posix_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On Windows there is no group to sweep, and the sweep must not pretend otherwise.
+
+    ``taskkill /T`` walks the tree from the LEADER, and on this path the leader is
+    already reaped — so the only thing a call could do is aim at a pid that may
+    since have been recycled. Stated rather than fixed (the alternative is a
+    parent-pid walk, which needs a ``psutil`` dependency this repo deliberately
+    does not take), and pinned here so the honesty claim in
+    :func:`install._sweep_step_group` cannot drift from the code.
+    """
+    calls: list[tuple[int, bool]] = []
+    monkeypatch.setattr(
+        install.procstate,
+        "terminate_process_tree",
+        lambda pid, force=False: calls.append((pid, force)) or True,
+    )
+    # ``text=True`` because the helper is typed for a text Popen; the stand-in's
+    # output is irrelevant here, which is why both streams go to DEVNULL.
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    proc.wait()
+
+    install._sweep_step_group(proc, None)
+
+    assert calls == [], "a reaped leader has no tree left to walk: sweeping by its pid is aimless"
+
+
 def test_a_pnpm_that_is_not_the_pinned_one_is_refused_before_anything_runs(
     tmp_path: Path,
 ) -> None:
