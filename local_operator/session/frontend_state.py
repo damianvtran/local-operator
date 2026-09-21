@@ -1562,10 +1562,11 @@ def _elide_row_facts_in_place(job: dict[str, Any]) -> None:
 
     Two KINDS of drop live here, and they are different arguments that happen to
     share a boundary. One is a byte saving on values that are EMPTY; the other is
-    a key the session keeps INTERNALLY and deliberately never publishes. Both are
-    applied at BOTH wire boundaries — the delta assembly in ``mutate`` and the
-    attach snapshot in :func:`sync_wire_payload` — because the two serialize job
-    rows by different routes and a saving in one does not reach the other.
+    a key the session keeps INTERNALLY and deliberately never publishes on the
+    wire. Both are applied at BOTH wire boundaries — the delta assembly in
+    ``mutate`` and the attach snapshot in :func:`sync_wire_payload` — because the
+    two serialize job rows by different routes and a saving in one does not reach
+    the other.
 
     EMPTY-VALUED, because an absent fact must not buy wire bytes.
     ``launch_message_id`` and ``launch_prompts`` are empty on every bash job and
@@ -1593,18 +1594,40 @@ def _elide_row_facts_in_place(job: dict[str, Any]) -> None:
     against the ``ran all year`` guard), and the certified worst case has 168
     bytes of slack across a 200-row roster, so SEVEN released rows exhaust it.
     An oversized ``frontend_sync`` is worse than a dropped line here rather than
-    merely large: it is the one frame family that bypasses both
-    :func:`fit_frame_for_wire` and :func:`relay_frame_or_degraded` —
-    ``_enqueue_client_frame`` routes only ``frontend_update``/``event`` through
-    that chokepoint — so the peer is answered with an ``error`` frame and then a
-    disconnect, at ERROR, with no re-send.
+    merely large: it is the one frame family whose substitute is an ``error``
+    frame FOLLOWED BY A DISCONNECT. ``_readable_frame`` substitutes the
+    ``welcome``/``projection`` families and re-degrades ``event``/
+    ``frontend_update`` (fitted already at ``_enqueue_client_frame``); it closes
+    only on an unsendable ``frontend_sync`` push, because a viewer left on a base
+    that never comes applies no delta and reports the owner as unresponsive.
+    This route has no fit pass either: the :func:`fit_frame_for_wire` chokepoint
+    lives in ``_enqueue_client_frame``, which only the two relay families reach.
+    So the peer is answered with an ``error`` frame and then a disconnect, at
+    ERROR, with no re-send.
 
-    So the key does not travel at all until something reads it, and NOTHING in
-    the tree does: the only writer is :func:`_released_row`, the only reader is
-    ``_ReleasedRows.adopt_from``'s in-process gate, and outside those two the
-    name appears in this module and two test modules. The perf win is entirely
-    owner-side, no part of the memoisation consults the wire, and a per-row key
-    with no consumer is a per-row cost with nothing to pay for.
+    So the key does not travel ON THE WIRE at all until something reads it there,
+    and NOTHING in the tree does: the only writer is :func:`_released_row`, the
+    only reader is ``_ReleasedRows.adopt_from``'s in-process gate, and outside
+    those two the name appears in this module and two test modules. The perf win
+    is entirely owner-side, no part of the memoisation consults the wire, and a
+    per-row key with no consumer is a per-row cost with nothing to pay for.
+
+    THE ONE ROUTE THAT KEEPS IT, named because the claim above is about the
+    SOCKET and "never serialized" would be false (review round 4, V1):
+    :meth:`FrontendStateStore.checkpoint` dumps the CANONICAL state — the one
+    that keeps the flag — into the session transcript
+    (``FRONTEND_CHECKPOINT_CUSTOM_TYPE``), once per turn end for any session with
+    a UI or an attach subscriber, and ``_restored_state`` reads it back in a
+    later process. That stays, deliberately. The checkpoint is the store's record
+    of its OWN canonical state rather than a frame for a peer; nothing on the
+    durable route reads the flag, and ``_jobs`` re-derives it on the first
+    refresh after a restore (``JobState.from_job`` never sets it,
+    :func:`_released_row` re-stamps it), so a ``True`` released by a previous
+    process is overwritten before anything can consult it. Both halves are pinned
+    by ``test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it``.
+    Eliding the durable copy too is a SEPARATE change with its own measurement —
+    it would save ~24 B/row per checkpoint, in a row the code rewrites IN FULL at
+    every turn end, and it is not this PR's certified attach ceiling.
 
     WHEN A CONSUMER LANDS, the wire form is a STATE-LEVEL enumeration rather
     than this per-row key, and the measured options are recorded here so nobody
@@ -1670,7 +1693,7 @@ def _released_predicate(manager: Any, comms: Any) -> Callable[[Any], bool]:
     exact clock, and adopting the reader's rounded one here would move the
     canonical roster OFF the ledger's clock to fix a cosmetic disagreement. No
     consumer filters on it today, and none can until a wire form exists: the
-    flag is in-process only (see :func:`_elide_row_facts_in_place`).
+    flag reaches no wire frame (see :func:`_elide_row_facts_in_place`).
     """
     retention_ms = getattr(manager, "retention_ms", None)
     if isinstance(retention_ms, bool) or not isinstance(retention_ms, (int, float)):
@@ -2271,14 +2294,27 @@ class JobState(BaseModel):
     #: consumer that needs IDENTITY ("resolve this child's page") ignores it and
     #: still finds the row.
     #:
-    #: IN-PROCESS ONLY: this flag is never serialized (QA round 1, Q1 — see
-    #: :func:`_elide_row_facts_in_place` for the measurement that decided it, and
-    #: for the state-level shapes to use when a wire consumer finally needs it).
-    #: The two readers that exist are both owner-side: :func:`_released_row` sets
-    #: it, ``_ReleasedRows.adopt_from``'s reuse gate consults it. The perf win
-    #: this flag was added for is entirely owner-side too — nothing in the
-    #: memoisation consults the wire — so a per-row wire key has nothing to pay
-    #: for and 25 bytes of a certified ceiling to pay with.
+    #: NEVER ON THE WIRE: this flag is not serialized into any frame (QA round 1,
+    #: Q1 — see :func:`_elide_row_facts_in_place` for the measurement that decided
+    #: it, and for the state-level shapes to use when a wire consumer finally needs
+    #: it). The ONE writer is :func:`_released_row`; the ONE reader is
+    #: ``_ReleasedRows.adopt_from``'s reuse gate, and both are owner-side and
+    #: in-process. The perf win this flag was added for is entirely owner-side too
+    #: — nothing in the memoisation consults the wire — so a per-row wire key has
+    #: nothing to pay for and 25 bytes of a certified ceiling to pay with.
+    #:
+    #: "On the wire" is exact rather than a hedge, because the flag IS serialized
+    #: somewhere (review round 4, V1). :meth:`FrontendStateStore.checkpoint` writes
+    #: the canonical state — this flag included — to the session transcript at
+    #: every turn end, and ``_restored_state`` reads it back in a later process.
+    #: That route deliberately keeps it: it is the store's record of its own
+    #: canonical state, not a frame for a peer. Nothing reads the flag there, and
+    #: ``_jobs`` re-derives it from ``from_job``/``_released_row`` on the first
+    #: refresh after a restore, so a stale ``True`` carried across the process
+    #: boundary is overwritten before anything can consult it. Eliding the durable
+    #: copy as well is a separate change with its own measurement — see
+    #: :func:`_elide_row_facts_in_place`. Both facts are pinned by
+    #: ``test_the_durable_checkpoint_carries_the_flag_and_a_restore_rederives_it``.
     #:
     #: WHAT A VIEWER LOSES, exhaustively, because "nothing is hidden" would be
     #: the easier sentence and it is not true (review round 1, S4). Identity,
@@ -2296,10 +2332,10 @@ class JobState(BaseModel):
     #: 42-hour session accumulated 48 rows whose retained windows were re-frozen
     #: on a 50 ms coalescer until the loop could not keep up.
     #:
-    #: The flag is absent off this process entirely — no runtime serializes it —
-    #: so a reader looking for it takes the ``False`` default: the same path a
-    #: follower of a runtime that predates it took (``extra='allow'``). Nothing
-    #: reads it, so nothing degrades.
+    #: The flag is absent from every WIRE frame — no runtime puts it on the socket
+    #: — so a reader looking for it there takes the ``False`` default: the same
+    #: path a follower of a runtime that predates it took (``extra='allow'``).
+    #: Nothing reads it, so nothing degrades.
     roster_released: bool = False
     # Canonical lineage (U5): the runtime's subagent-comms tree is not itself
     # serializable, but its one fact — who launched whom — is. Stamping the
@@ -6198,8 +6234,11 @@ class FrontendStateStore:
         a long session's tick cost stops growing with the children it has
         already finished. They keep travelling — see
         :attr:`JobState.roster_released` for why dropping them is not an option.
-        The stamp stays in this process: it is elided at every wire boundary
-        (:func:`_elide_row_facts_in_place`).
+        The stamp reaches no wire frame: it is elided at every wire boundary
+        (:func:`_elide_row_facts_in_place`). It DOES survive into the durable
+        checkpoint, which records this store's own canonical state rather than a
+        frame for a peer — see :attr:`JobState.roster_released` for why that route
+        keeps it and why nothing reads it there.
         """
         manager = getattr(session, "jobs", None)
         try:
