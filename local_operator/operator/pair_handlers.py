@@ -324,47 +324,14 @@ def describe_devices(args: argparse.Namespace) -> int:
             "install step)."
         )
 
-    if authorise:
+    if authorise and not bool(getattr(args, "print_only", False)):
         # THE TWO HALVES, and every FACT is read before either is changed, so the
         # receipt can say what was true rather than what the code just did: running
         # `--authorise` twice would otherwise report the same lift twice. Local record
         # first, then the anchor's entry through the same privileged install step
         # `--revoke` uses (host-side only, like every other half of this).
-        print_only = bool(getattr(args, "print_only", False))
         recorded_here = devices.is_revoked_here(root, authorise)
         recorded_in_anchor = _anchor_revokes(root, authorise)
-        command = devices.AUTHORISE_COMMAND.format(device_id=authorise)
-
-        if print_only:
-            # A PREVIEW ACTS ON NOTHING (UX round 11, U5). Measured defect: the local
-            # clear sat ABOVE the old `print_only` branch, so `--authorise --print-only`
-            # removed the record for real — and in the state `--revoke --print-only`
-            # itself creates (the local record is the only holder of the revocation) the
-            # "preview" had already lifted it, while its own sentence said the anchor
-            # still refused the device. A preview that acts is not a preview, and this
-            # one contradicted itself about the state it left. Nothing below this return
-            # runs: no clear, no staging, no privileged command.
-            if not recorded_here and not recorded_in_anchor:
-                print(
-                    f"preview: nothing recorded a revocation of {authorise} on this machine, "
-                    f"so `{command}` would have nothing to lift."
-                )
-            else:
-                halves = " and ".join(
-                    part
-                    for part, present in (
-                        ("the local revocation record", recorded_here),
-                        ("the anchor's revocation entry", recorded_in_anchor),
-                    )
-                    if present
-                )
-                print(
-                    f"preview: `{command}` would clear {halves}, stage an anchor without "
-                    "the entry, and print the one privileged command that installs it. "
-                    f"NOTHING has been changed by this run: {authorise} is still refused "
-                    "until that command is run and completes."
-                )
-            return 0
 
         cleared = devices.forget_revocation(root, authorise)
         if recorded_here and not cleared:
@@ -432,6 +399,62 @@ def describe_devices(args: argparse.Namespace) -> int:
                     "if you expected an anchor here",
                     file=sys.stderr,
                 )
+
+    elif authorise:
+        # A PREVIEW ACTS ON NOTHING, AND STILL PRINTS WHAT THE FLAG PROMISES
+        # (UX round 11, U5; UX/QA/review round 12, U7 = Q12-1 = R12-1). Round 11's fix
+        # was right about the first half and lost the second: the local clear sat above
+        # the old `print_only` branch, so the dry run mutated the state — and the early
+        # `return` that replaced it also removed the privileged command the flag's own
+        # help advertises ("print the privileged command instead of running it"), the
+        # listing rows below, and the next step. Measured by both roles: 0 `sudo install`
+        # lines against `--revoke --print-only`'s one, and no device table at all.
+        #
+        # So this arm writes nothing and PRINTS the three things: what it would do, the
+        # privileged command, and the route to actually take it. It deliberately does not
+        # `return`, so the listing at the end of this verb runs exactly as it does for
+        # every other invocation.
+        from local_operator.operator import staging_path
+
+        command = devices.AUTHORISE_COMMAND.format(device_id=authorise)
+        recorded_here = devices.is_revoked_here(root, authorise)
+        recorded_in_anchor = _anchor_revokes(root, authorise)
+        if not recorded_here and not recorded_in_anchor:
+            print(
+                f"preview: nothing recorded a revocation of {authorise} on this machine, "
+                f"so `{command}` would have nothing to lift and no privileged step "
+                "would be needed."
+            )
+        else:
+            halves = " and ".join(
+                part
+                for part, present in (
+                    ("the local revocation record", recorded_here),
+                    ("the anchor's revocation entry", recorded_in_anchor),
+                )
+                if present
+            )
+            print(
+                f"preview: `{command}` would clear {halves}, write the anchor statement "
+                f"without the entry to {staging_path(root)}, and need ONE privileged "
+                "step to install it."
+            )
+            if install_anchor(root, print_only=True) == 0:
+                # THE COMMAND IS THE ONE THE REAL RUN WOULD OFFER, NOT ONE THAT WORKS YET:
+                # the statement it installs is only written by that run, so saying "run
+                # this" without saying that would install the UNCHANGED anchor — the same
+                # class of misdirection as claiming a lift that had not happened.
+                print(
+                    "NOTHING has been changed by this run: the statement named above is "
+                    "not on disk yet, so that command would install the anchor unchanged. "
+                    f"Next step: run `{command}` without --print-only — it writes the "
+                    "statement and takes that step itself — then pair the phone again with "
+                    "`lop pair`."
+                )
+            else:
+                # `install_anchor`'s own message names what to run instead; the preview
+                # does not fail because the host has nothing staged.
+                print("nothing is staged to install yet")
 
     for device in paired:
         expires = time.strftime("%Y-%m-%d", time.localtime(device.not_after))

@@ -628,10 +628,19 @@ def test_authorise_print_only_is_a_preview_that_changes_nothing(
             exists=True,
         )
 
+    real_install = handlers.install_anchor
+
     def fake_install(config_root: Path, *, print_only: bool = False) -> int:
-        """Models the ONE privileged step: the staged statement lands, or it does not."""
-        if not print_only:
-            installed_path.write_bytes(trust.staging_path(config_root).read_bytes())
+        """Models the ONE privileged step — and delegates the PRINT half to the product.
+
+        The preview is asserted to print the privileged command, so the rig must not
+        stand in for the code that prints it: `print_only=True` goes to the real
+        implementation (which writes nothing), and only the taking of the step is
+        simulated, because that is the sudo call no cell here may raise.
+        """
+        if print_only:
+            return real_install(config_root, print_only=True)
+        installed_path.write_bytes(trust.staging_path(config_root).read_bytes())
         return 0
 
     installed_path.write_bytes(trust.staging_path(root).read_bytes())
@@ -660,7 +669,18 @@ def test_authorise_print_only_is_a_preview_that_changes_nothing(
         "here": devices.is_revoked_here(root, device_id),
     }
     assert before == after, f"the preview changed the state: {before} -> {after}"
-    assert "preview:" in preview and "NOTHING has been changed" in preview, preview
+    # AND THE PROMISED OUTPUT IS THERE. The flag's own help says "print the privileged
+    # command instead of running it", and round 11's fix kept the "instead of running it"
+    # half while losing this one: the early return removed the command, the listing rows
+    # and the next step, so the two previews of one verb family disagreed (measured by
+    # both UX and the reviewer — 0 `sudo install` lines against `--revoke`'s one, and no
+    # device table at all). Both halves are pinned here so neither can be fixed by
+    # breaking the other.
+    assert "preview:" in preview, preview
+    assert "sudo install" in preview, preview
+    assert "NOTHING has been changed" in preview, preview
+    assert "without --print-only" in preview, preview
+    assert f"{device_id}" in preview and "certificate cleared" in preview, preview
     assert "accepted at once" not in preview, preview
     assert devices.AUTHORISE_COMMAND.format(device_id=device_id) in preview, preview
 
@@ -670,6 +690,14 @@ def test_authorise_print_only_is_a_preview_that_changes_nothing(
     capsys.readouterr()
     assert devices.is_revoked(root, device_id) is False
     assert devices.revoked_path(root).exists() is False
+
+    # (b) and with nothing left to lift, the preview says so and offers no command: a
+    # reader must not be sent at a privileged step that would do nothing.
+    assert describe_devices(_args(authorise=device_id, print_only=True)) == 0
+    idle_preview = capsys.readouterr().out
+    assert "nothing recorded a revocation" in idle_preview, idle_preview
+    assert "no privileged step would be needed" in idle_preview, idle_preview
+    assert "sudo install" not in idle_preview, idle_preview
 
 
 def test_authorise_does_not_claim_the_lift_when_the_local_record_survives(
