@@ -137,6 +137,91 @@ below. A scanner that reads only `ProgramArguments[0]` reads an image path on
 such a plist and a role label on a branded one, which is exactly why the field
 to read is `Program`.
 
+### What decides the name an endpoint tool sees
+
+Two independent readers answer "what is this process called", and they are
+**not** decided by the same thing. Measured on macOS 25.6.0 (2026-09-19, six
+calls per pid, stable within each run):
+
+| Reader | Source | Decided by |
+| --- | --- | --- |
+| Activity Monitor, `proc_name()`, `ps -o ucomm` / `-o comm` | `p_comm` | the **basename of the path used at `execve`** |
+| `ps -o args`, `top -o command`, `pgrep -f` | `argv[0]` | whatever the parent passed (world-readable) |
+| `proc_pidpath()` — the file path an EDR builds its threat name from | the vnode path of the executable **inode** | **not reliably**: for a hardlinked inode it returns whichever link name the VFS cached |
+
+Measured, on four live processes of this product:
+
+```console
+$ ps -o pid=,ucomm=,args=  # abbreviated; full series in the 2026-09-19 audit
+pid 42028  ucomm=Local Operator   exec'd through <gen>/bin/Local Operator   proc_pidpath=<uv>/cpython-3.14.3-…/bin/python3.14
+pid 19821  ucomm=Local Operator   exec'd through <gen>/bin/Local Operator   proc_pidpath=<uv>/cpython-3.14.3-…/bin/python3.14
+pid  1343  ucomm=python3.14       exec'd through <gen>/bin/python3 (symlink) proc_pidpath=<uv>/cpython-3.14.3-…/bin/python3.14
+pid 60013  ucomm=python3.14       exec'd through <uv-tool>/bin/python3 (symlink) proc_pidpath=<uv>/python3.14
+```
+
+Two consequences an admin needs, and neither is obvious from the plists alone:
+
+- **The exec path is what decides the reported name, so it is what an exclusion
+  has to cover.** `p_comm` — the Activity Monitor column, and the axis the
+  2026-09-19 incident was about — is fixed by the path the process was executed
+  *through*: a symlink is resolved by the kernel (so `…/bin/python3` reports
+  `python3.14`), while a hardlink is not (so `…/bin/Local Operator` reports
+  `Local Operator`). Both processes above run the same interpreter build.
+- **`proc_pidpath()` is NOT a reliable way to name a hardlinked image**, so a
+  file-path exclusion written only against `*/bin/Local Operator` is
+  incomplete: the branded file and the interpreter it is a second name for are
+  one inode, and the path an EDR reports for that inode is whichever link name
+  the VFS cached. Write the exclusion for `*/bin/Local Operator` **and** for the
+  interpreter paths the same inode answers to (see §4).
+
+**The plant is a hard link, and that has a blast radius worth stating plainly.**
+Because the branded `Local Operator` file and the interpreter are one inode,
+anything a security tool does to the file — quarantine, ownership change, mode
+change, content replacement — reaches the interpreter every venv on the machine
+resolves to. Measured on this machine, 2026-09-19 ~23:44 local:
+
+```console
+$ ls -la ~/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/bin/python3.12
+-rw-------  3 _sentinel  _sentinel  49968 …  python3.12
+$ ~/local-operator/.venv/bin/python -c pass
+/bin/bash: …/.venv/bin/python: Permission denied
+```
+
+Both `cpython-3.12.13` and `cpython-3.13.12` were found in that state (mode
+`0600`, the agent user's ownership, the interpreter's own byte size) and every
+3.12/3.13 virtualenv on the host — the development venvs, whose `bin/python` is
+a symlink to exactly that binary — was dead with `Permission denied`. Recovery
+is one command per version, and it worked:
+
+```console
+$ uv python install --reinstall 3.12.13     # same version, fresh inode, 0755
+ Installed Python 3.12.13 in 3.90s
+$ uv python install --reinstall 3.13.12
+```
+
+**The cause is not proven, and this document will not claim one.** What is
+recorded is the state, the timestamp and the recovery. The reading that fits is
+that the remediation an EDR applies to a flagged `Local Operator` file reaches
+the interpreter through the shared inode; against that reading, the same
+`_sentinel`-owned shape had already been measured on five worktree *links*
+before this session, and `cpython-3.13.12` was found damaged on a machine where
+no process of ours had executed a 3.13 binary at all — so it may be ambient
+scanning of the interpreter tree rather than a reaction to an execution. Waking
+the same file to a mode our code chose would be the same mistake from the other
+side; nothing in `procname.py` writes modes or ownership, and nothing should
+(the module docstring records the measurement: a `chmod` on the link once broke
+an unrelated worktree's console script, because the mode belongs to the shared
+inode).
+
+A future change could reduce this blast radius: planting a per-venv **copy** of
+the interpreter is viable now that the mandatory `lib/libpython3.X.dylib`
+symlink is planted beside it (the failure the module docstring records for a
+copy is the missing dylib, not the copy shape; §5 already measures a detached
+copy executing beside a venv-like `lib/`). That would cost ~50 KB per venv and
+replace the inode staleness check with a content one, and it is deliberately NOT
+done in the change that added this measurement — it is its own decision with its
+own measurements.
+
 ### The config directory
 
 `~/.local-operator/` unless `LOCAL_OPERATOR_CONFIG_DIR` says otherwise. It holds
@@ -203,16 +288,38 @@ A freshly written Mach-O that is then executed out of the config directory is
 precisely the kind of item §3 is about, which is why it is in §4's exclusion
 list as well.
 
-### Installs rewrite and restart their own job at upgrade time
+### Installs compare before they rewrite, and restart only when something needs it
 
 Every installer treats an existing plist as a stale artefact rather than as
 state to trust, because the plist embeds an **absolute interpreter path** that
-an upgrade invalidates:
+an upgrade invalidates. What they do about it changed with this branch:
 
-- mobile and browser write the plist unconditionally and then
-  `launchctl bootout` + `launchctl bootstrap` it, so the old registration is
-  replaced rather than left running against a path that no longer exists.
-- tunnel does the same (`bootout` then `bootstrap`, tolerating a missing unit).
+- mobile, browser bridge and tunnel now compare the rendering with the file on
+disk (the tunnel also compares its mode — 0600 is that installer's own) and,
+when they are equal, neither write nor reload. The generation shim made the
+plist path stable, so a re-install is normally a no-op: it used to rewrite
+identical bytes and then `bootout` + `bootstrap` the job, which is two signals
+an EDR reads as "Persistence: launchd job / plist file modification".
+- When the bytes differ they write and reload exactly as before. A job that is
+loaded but not running is repaired with `launchctl kickstart -k` rather than by
+rewriting the file, and the reload is also taken when the daemon is not
+answering — `health` for mobile and the bridge, the connector's own
+`/_lop_tunnel/health` on `127.0.0.1:<gateway_port>` for the tunnel.
+- **Which installers verify, and which report launchd's verdict — not the same
+thing.** Mobile (a 20 s `_serving` loop) and the browser bridge (a health loop)
+re-probe after loading, so their success means a daemon that is answering. The
+tunnel does not re-probe: it reports what `launchctl` said, so a successful
+`lop tunnel install` means the unit is LOADED. The unanswering state is what
+makes it reinstall in the first place, but nothing asks again afterwards, so
+"install succeeded" is not evidence the gateway came back.
+- Before this branch the write and the `bootout` + `bootstrap` were
+unconditional in all three, and a **fresh** install still writes and loads,
+which is the state this section describes for an admin reading a newly
+installed machine.
+- What this does **not** claim: the 2026-09-19 incident's plist-modification
+indicators came from `lop update --refresh-daemons`, whose repair path
+(`launchd.rewrite_if_stale`) already compared content before writing, and from a
+plist that was genuinely stale — a real repair, not an identical write.
 - wakes compares the rendered plist with the file it finds; if they differ it
   rewrites and re-bootstraps, and if the plist matches but launchd has the
   label stopped it repairs with `launchctl kickstart -k` rather than leaving a
@@ -512,17 +619,27 @@ and it is why the fix in §4 is an allow-list rather than an argument.
 
 Exclusions for this product must be **path-scoped**, and the reason is not
 convenience: what the exclusion would have to identify changes on every
-release. The plists are rewritten by every installer run, they embed an
-absolute path to an interpreter that an upgrade replaces, and the desktop app
-provisions its managed Python environment under a new path when it updates. A
-hash-based exclusion would break at each upgrade and the install would be
-quarantined again — which is the failure this document is trying to stop.
+release. The plists embed an absolute path to an interpreter that an upgrade
+replaces (and an upgrade rewrites the plist when that path changed — a re-install
+that would change nothing now writes nothing, but the rewrite case is real), and
+the desktop app provisions its managed Python environment under a new path when
+it updates. A hash-based exclusion would break at each upgrade and the install
+would be quarantined again — which is the failure this document is trying to
+stop.
 
 Scope the exclusion to:
 
 - the install prefix — `~/.local/share/uv/tools/local-operator/**` for a uv
   tool install, `~/.local/pipx/venvs/local-operator/**` for pipx, or the
   equivalent venv prefix for a plain pip install;
+- **the branded image name, and the shared interpreter it is a hardlink of** —
+  `*/bin/Local Operator` (which the plant creates in every tree the product runs
+  from, including each `lop` generation) **and** the interpreter paths the same
+  inode answers to, e.g.
+  `~/.local/share/uv/python/cpython-*/bin/python3.*` and the uv-tool
+  environment's own `…/bin/python3`. Both halves are needed: the exec path
+  decides `p_comm`, while the path an EDR reports for the inode is whichever
+  link name its cache holds (§1);
 - the plist paths — `~/Library/LaunchAgents/com.local-operator.*` (the glob is
   deliberately `com.local-operator.*` rather than `*.plist`, so it also matches
   a label the browser bridge derives from a non-default config root, §1);
@@ -538,6 +655,33 @@ Scope the exclusion to:
 Do **not** disable the persistence detection story globally to make this go
 away. That trades a product-specific false positive for blindness to the
 technique itself, and would not have been necessary here.
+
+### What this recipe cannot cover, and why
+
+Four shapes run under a `Local Operator` parent and are **not** named by any of
+the above — an admin should expect them and exclude by path or ancestry rather
+than by the product name:
+
+- **Third-party MCP servers launched through `uv tool`/`uvx`** (measured:
+  `uv tool uvx workspace-mcp …` and the interpreter it execs). The launcher is
+  another product's binary and execs its own interpreter; our spawn site hands
+  it no label, and it could not honour one — the name is decided by the path
+  that process uses at `execve` (§1), which is `uv`'s.
+- **Framework interpreters** (`/opt/homebrew/…/Python.framework/…`). A branded
+  hardlink of one reports `Python`, not the link name, because the framework's
+  `bin/python3.x` is a stub that re-executes the real binary inside
+  `Resources/Python.app` — the second exec is what the kernel names. An
+  exclusion has to cover the framework path itself.
+- **Anything an agent's `bash` tool starts** (`pytest`, `python`, a QA rig, a
+  build). The child's `p_comm` is fixed at its own `execve` by `bash`, and on
+  macOS a hardlink to the SIP-protected `/bin/bash` cannot be executed, so this
+  is attributable by ancestry or by path exclusion, not by renaming.
+- **The desktop app's `-c` identity probe** (`python3 -c "from
+  local_operator.cli import main; main()" serve …`). It is deliberately left
+  unbranded: the app launches its backend that way and then asks the SAME `-c`
+  string to report `sys.executable`, refusing a backend whose base interpreter
+  does not match — a branded answer would break the app's own backend on every
+  machine (`local_operator/procname.py`, `is_own_launch`).
 
 ### Name the exclusion mode: `Suppress Alerts`, on **all engines**
 
@@ -731,6 +875,19 @@ Two pieces of work, stated as work rather than intent:
 
 Until both have shipped, path-scoped exclusions are the supported answer, and
 this document is the evidence to justify them.
+
+One further change belongs on this list, and it is about the blast radius rather
+than about detection: **plant a per-venv copy of the interpreter instead of a
+hardlink to it.** It would not stop an EDR flagging the name, but it would stop
+whatever an EDR does to that name from reaching the interpreter every venv on the
+machine resolves to through the shared inode (measured, §1: two uv interpreters
+left unreadable on 2026-09-19, every 3.12/3.13 venv on the host dead until
+reinstalled). The cost is stated with it: ~50 KB per venv, and a
+content-staleness check where the inode comparison is today. It is not done
+yet, and the reason to note it here rather than only in an issue is that the
+copy shape's known failure — `dyld: Library not loaded: @rpath/libpython3.X.dylib`
+— is exactly what the mandatory `lib/libpython3.X.dylib` symlink fixes, so the
+objection to it has already been measured away.
 
 ## 6. Where to find this
 

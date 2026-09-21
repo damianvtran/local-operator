@@ -132,24 +132,35 @@ async def test_a_real_command_that_prints_a_dsn_never_reaches_the_model(
     assert SENTINEL_PW not in _provider_saw(stream)
 
     # 1b. ...and the operator was TOLD, live. The incident row's whole purpose is
-    # the rotation ticket, and a row that reaches only the model is not one:
-    # measured before this wiring, the persisted row painted on no operator
-    # surface at all (design round 1, D1).
+    # the ticket, and a row that reaches only the model is not one: measured before
+    # this wiring, the persisted row painted on no operator surface at all (design
+    # round 1, D1). Its CLASSIFICATION matters as much as its existence: this
+    # result was masked whole, which is the contained case, and an operator who
+    # cannot tell that apart from a value that reached the model is being asked to
+    # rotate credentials that never left the tool.
     notices = [e for e in events if isinstance(e, NoticeEvent)]
     assert notices, "no live receipt for the masked credential"
     assert notices[0].kind == "warning"
     assert "dsn-password" in notices[0].text, notices[0].text
+    assert "no exposure" in notices[0].text, notices[0].text
 
     # 2. The transcript on disk: the persistence surface, and the incident row.
     body = _transcript_text(directory)
     assert SENTINEL_PW not in body, "the credential reached transcript.jsonl"
-    assert "session_incident" in body, "no rotation ticket was journalled"
+    assert "session_incident" in body, "no incident row was journalled"
     assert "dsn-password" in body, "the incident must name the shape that fired"
+    rows = [json.loads(line) for line in body.splitlines() if "session_incident" in line]
+    assert rows[-1]["payload"]["details"]["reached_model"] is False, rows[-1]
 
-    # 3. The masking is visible rather than silent: the model is told the value
-    #    was hidden, so it cannot misread an empty-looking result.
+    # 3. The masking is visible rather than silent: the model is told the value was
+    #    hidden, so it cannot misread an empty-looking result — and it is told what
+    #    that owes, which for a CONTAINED value is the cleanup and never a rotation.
+    #    The absence assertion is the point of this change: this value never entered
+    #    the model's context, and demanding a rotation for it is the false alarm the
+    #    classification exists to remove.
     assert "[redacted]" in body
-    assert "rotate" in body
+    assert "rotate" not in body, "a contained value demanded a rotation"
+    assert "not to be done" in body, "the cleanup obligation is missing"
 
 
 def _collect(sink: list[str]) -> Any:

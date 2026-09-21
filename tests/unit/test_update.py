@@ -1354,12 +1354,160 @@ class TestServiceDaemonRefresh:
         assert refresh.lines == ()
 
     def test_a_timeout_is_a_warning(self) -> None:
+        """A kill with NOTHING announced still says a daemon may be STOPPED.
+
+        The child can die before it announces anything (a wedge inside its first
+        repair, or a build whose announcements predate these lines), and this is the
+        sentence that has to stand on its own then. It may not name a daemon it does
+        not know, and it may not lose the recovery 0.61.4's reload failure preserved.
+        """
         with (
             patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
             patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="x", timeout=1)),
         ):
             refresh = update_mod.refresh_service_daemons_after_upgrade()
-        assert refresh.warnings == ("warning: daemon refresh timed out",)
+        assert len(refresh.warnings) == 1
+        warning = refresh.warnings[0]
+        assert warning.startswith("warning: the daemon refresh did not finish within")
+        assert "was stopped" in warning
+        assert "may now be STOPPED" in warning
+        assert "`lop tunnel install`" in warning, "the recovery is still named"
+
+    def test_the_bound_names_the_daemon_the_child_was_repairing(self) -> None:
+        """The killed child's own announcement is what makes the line actionable.
+
+        REPRODUCED against a real launchd job before this fix (macOS 27.0.0,
+        ``gui/501``, scratch label, a stale plist): the bound killed the child with
+        the ``bootout`` already issued, the job left the domain, the plist was
+        rewritten, and the upgrade's only line was *"warning: daemon refresh timed
+        out"* — no daemon, no state, no recovery. The child is the only side that
+        knows where it was, so its announcement comes back out of the output
+        ``subprocess.run`` captured before the kill. It arrives as BYTES even under
+        ``text=True`` (measured), which is why the fixture below is bytes.
+        """
+        stdout = (
+            "refreshing: mobile :: lop mobile install\n"
+            "refreshing: tunnel :: lop tunnel install\n"
+        )
+        expired = subprocess.TimeoutExpired(cmd="x", timeout=1, output=stdout.encode())
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", side_effect=expired),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        warning = refresh.warnings[0]
+        assert "while the tunnel daemon was being repaired" in warning
+        assert "run `lop tunnel install` to bring it back" in warning
+        assert "mobile" not in warning, "the LAST announcement is the one in flight"
+
+    def test_a_half_written_announcement_names_no_daemon(self) -> None:
+        """A marker the child was killed mid-write must not become a daemon's name.
+
+        The daemon would be invented and the recovery command absent, which is a
+        worse sentence than the one that admits it does not know.
+        """
+        expired = subprocess.TimeoutExpired(cmd="x", timeout=1, output=b"refreshing: tun")
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", side_effect=expired),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert "may now be STOPPED" in refresh.warnings[0]
+        assert "while the" not in refresh.warnings[0]
+
+    def test_a_healthy_run_does_not_print_the_announcements(self) -> None:
+        """They are for a KILLED child, not for every upgrade.
+
+        Both streams are filtered: the child writes the marker to stdout, and a
+        summary that printed progress on every upgrade would be a new line of noise
+        on a step that is deliberately silent when nothing changed.
+        """
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="refreshing: tunnel :: lop tunnel install\ntunnel daemon: refreshed\n",
+            stderr="refreshing: tunnel :: lop tunnel install\nwarning: other\n",
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", return_value=completed),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh.lines == ("tunnel daemon: refreshed",)
+        assert refresh.warnings == ("warning: other",)
+
+    def test_a_dead_child_cannot_report_an_announcement_as_its_failure(self) -> None:
+        """A non-zero exit whose last output is the marker reports the exit, not it.
+
+        The annotations are this side's progress, never the child's answer — the
+        failure detail is a sentence for the operator and an announcement is not one.
+        """
+        completed = subprocess.CompletedProcess(
+            [], 3, stdout="refreshing: tunnel :: lop tunnel install\n", stderr=""
+        )
+        with (
+            patch.object(update_mod, "_installed_daemon_plists", return_value=[Path("/tmp/x")]),
+            patch("subprocess.run", return_value=completed),
+        ):
+            refresh = update_mod.refresh_service_daemons_after_upgrade()
+        assert refresh.warnings == ("warning: could not refresh installed daemons: exit 3",)
+
+    def test_the_child_announces_each_daemon_before_it_repairs_it(self, monkeypatch) -> None:
+        """The announcement is written BEFORE the repair, and flushed.
+
+        This is the whole mechanism: a kill can land at any point in a repair, so the
+        line has to be out of the child's buffer before the first `launchctl` call of
+        that daemon's reload — an announcement printed afterwards would never be read
+        for the daemon that was actually down. Checked by snapshotting what the child
+        had WRITTEN at the moment each repair ran, which is what the parent sees when
+        it kills the pipe.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        from local_operator import launchd
+        from local_operator.browser_bridge import install as browser_install
+        from local_operator.mobile import install as mobile_install
+        from local_operator.tunnels import install as tunnel_install
+        from local_operator.wakes import install as wakes_install
+
+        written: list[str] = []
+        buffer = io.StringIO()
+
+        def repair_for(name: str):
+            def repair() -> launchd.PlistRefresh:
+                written.append(buffer.getvalue())
+                return launchd.PlistRefresh(name=name, kind="current")
+
+            return repair
+
+        monkeypatch.setattr(update_mod, "_repair_refusal", lambda: None)
+        for module, name in (
+            (mobile_install, "mobile"),
+            (browser_install, "browser bridge"),
+            (tunnel_install, "tunnel"),
+            (wakes_install, "wakes supervisor"),
+        ):
+            monkeypatch.setattr(module, "refresh_plist_if_stale", repair_for(name))
+
+        with redirect_stdout(buffer):
+            assert update_mod.daemons_refresh_command() == 0
+
+        steps = update_mod._refresh_steps()
+        names = tuple(name for name, _recovery, _repair in steps)
+        assert names == ("mobile", "browser bridge", "tunnel", "wakes supervisor")
+        assert len(written) == len(names), "every daemon was repaired once"
+        announcements = [
+            update_mod._refresh_announcement(name, recovery) for name, recovery, _repair in steps
+        ]
+        for index, announcement in enumerate(announcements):
+            # Already written when THIS repair runs, and no later daemon announced
+            # yet: the marker is a position, and a position read out of order would
+            # name the wrong daemon in the killed child's report.
+            assert f"{announcement}\n" in written[index]
+            for later in announcements[index + 1 :]:
+                assert later not in written[index]
+        assert buffer.getvalue().splitlines() == announcements
 
     def test_the_services_run_before_the_mobile_bounce(self) -> None:
         """The order the plist repair makes load-bearing.
@@ -1502,11 +1650,25 @@ class TestServiceDaemonRefresh:
                 )
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
-        assert captured.out == ""
+        # NOTHING was repaired, so the child's only output is its per-daemon
+        # announcements — the progress lines the upgrade summary strips. The
+        # contract this test has always asserted (no repair, no line about one)
+        # is unchanged; what the run says out loud is now pinned exactly.
+        assert captured.out.splitlines() == [
+            update_mod._refresh_announcement(name, recovery)
+            for name, recovery, _repair in update_mod._refresh_steps()
+        ]
         assert captured.err == ""
 
     def test_the_child_repairs_every_daemon_and_reports_each(self, capsys) -> None:
-        """One line per daemon that CHANGED; silence for one already current."""
+        """One line per daemon that CHANGED; silence for one already current.
+
+        Each daemon is ANNOUNCED before it is repaired (the line the parent reads
+        back out of a killed child — see ``update._PROGRESS_PREFIX``), so the pinned
+        output below is announcement, report, announcement, … The summary's lines
+        are still only the daemons that CHANGED: the browser bridge and the tunnel
+        were current and failed respectively, and neither gets one.
+        """
         from local_operator import launchd
         from local_operator.browser_bridge import install as browser_install
         from local_operator.mobile import install as mobile_install
@@ -1530,7 +1692,11 @@ class TestServiceDaemonRefresh:
             assert update_mod.daemons_refresh_command() == 0
         captured = capsys.readouterr()
         assert captured.out.splitlines() == [
+            update_mod._refresh_announcement("mobile", "lop mobile install"),
             "mobile daemon: refreshed a stale LaunchAgent and restarted it",
+            update_mod._refresh_announcement("browser bridge", "lop browser install"),
+            update_mod._refresh_announcement("tunnel", "lop tunnel install"),
+            update_mod._refresh_announcement("wakes supervisor", "lop wake install"),
             "wakes supervisor daemon: refreshed a stale LaunchAgent and restarted it",
         ]
         assert captured.err.splitlines() == ["warning: tunnel daemon was not refreshed: boom"]

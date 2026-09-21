@@ -69,17 +69,31 @@ byte-identical, and it is as much a part of the contract as the positive set.
 
 INVARIANT: **a mask is all of the credential or none of it** — never a masked prefix
 with the remainder readable. A notice that says a credential was masked has to be
-true, because the operator's next action is a rotation. `_close_partial_masks`
-enforces it for every rule, and `tests/unit/secrets/test_credential_shapes.py`
-sweeps it over the corpus with a frozen, ratcheted residual (three rules, each with
-its reason recorded beside the table).
+true: a readable fragment left behind has entered the model's context window, which
+is the one condition this harness treats as a compromise (see the next paragraph).
+`_close_partial_masks` enforces it for every rule, and
+`tests/unit/secrets/test_credential_shapes.py` sweeps it over the corpus with a
+frozen, ratcheted residual (three rules, each with its reason recorded beside the
+table).
+
+**WHAT "COMPROMISED" MEANS HERE, because the severity of the notice hangs off it.**
+A credential is compromised when a VALUE reaches the MODEL'S CONTEXT WINDOW — the
+unmasked text of a request, the transcript it is journaled to, and so plausibly a
+training corpus. A credential that reaches `bash` (its `argv`, a child's
+environment), that lives in this process's memory, or that is written to disk in
+plaintext is NOT compromised: each of those is a containment, and the only thing it
+owes anyone is cleanup. That is why :attr:`ShapeHit.exposed` exists and why it is
+the sole input to the escalated notice: a hit that was masked whole is reported as
+an event with NO exposure, and only a fragment that survived into the text the model
+reads escalates. This paragraph is about SEVERITY; it changes nothing about
+coverage, where under-masking is still a leak and over-masking is still a defect.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
-from typing import Callable, Iterable, Match, Optional, Pattern, Union
+from typing import Callable, Iterable, Match, Optional, Pattern, Sequence, Union
 
 REDACTION_MARKER = "[redacted]"
 """What a credential is replaced with in anything about to be surfaced.
@@ -924,9 +938,50 @@ def _vendor_tail_guard(match: Match[str]) -> bool:
     return not re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tail)
 
 
+#: An ENVIRONMENT-VARIABLE (or secret-store NAME) spelling: capitals, digits and
+#: underscores, no lower case. ``OS_PROD2_ADMIN_PASSWORD``, ``API_KEY``.
+_ENV_NAME_SHAPED = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
 def _flag_value_guard(match: Match[str]) -> bool:
-    """A ``--flag VALUE`` pair, unless the value is syntax rather than a secret."""
-    return not any(char in match.group(2) for char in _EXPRESSION_CHARS)
+    """A ``--flag VALUE`` pair, unless the value is syntax or a NAME.
+
+    The syntax half is the original rule: a value carrying brackets or parentheses
+    is a usage-string placeholder, not a secret.
+
+    **The NAME half is measured, not hypothetical.** ``lop secret run --secret
+    OS_PROD2_ADMIN_PASSWORD -- <command>`` is the documented way to hand a stored
+    secret to a child, and the token after that flag is the secret's NAME in the
+    store — the one thing the operator needs to be able to read. On 2026-09-19 a
+    watch-log entry that QUOTED that command set this rule off, which filed a
+    rotation ticket in a production transcript for a credential that was not in
+    the text at all (the second firing of this class). A value that is spelled as
+    an environment variable AND ends in a credential word is a reference to a
+    credential, never one: the same judgement the rule already makes for
+    ``--secret NAME[=VAR]``.
+
+    **The SEPARATOR is required, and that is the whole of the narrowing.** Capitals
+    plus a credential-word tail is not enough on its own: it also describes exactly
+    the values this rule exists to catch — ``--password PASSWORD``, ``--token
+    TOKEN``, ``--api-key APIKEY``, ``--secret DBPASSWORD`` — and a first cut that
+    omitted the underscore stopped masking all four (agent review R1, reproduced
+    through the session hook: the values came back byte-identical with no mask and
+    no notice at all). Multi-segment capitals is what a NAME in a store or an
+    environment looks like; a single run of capitals is a credential someone chose,
+    and it stays masked. The residual is a real value spelled ``PROD_SECRET``-style,
+    and it is accepted deliberately — that spelling IS the shape of a stored
+    secret's name, which is the same judgement the rule already made for
+    ``--secret NAME[=VAR]``.
+
+    A value that could BE a credential — mixed case, any lower case, a single
+    unseparated token, or any token without a credential-word tail — is still masked.
+    """
+    value = match.group(2)
+    if any(char in value for char in _EXPRESSION_CHARS):
+        return False
+    if "_" in value and _ENV_NAME_SHAPED.fullmatch(value) and is_credential_name(value):
+        return False
+    return True
 
 
 def _BARE_SCHEME_REPLACEMENT(match: Match[str]) -> str:
@@ -1430,6 +1485,11 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # it rewrites the help text the agent is reading. The pattern stays
         # simple and the guard does the judging, which keeps the gate's anchors
         # easy to keep honest.
+        #
+        # The guard's NAME clause extends that judgement to the spelling real
+        # commands use — ``--secret OS_PROD2_ADMIN_PASSWORD``, where the token
+        # after the flag is a reference to a stored secret. See
+        # ``_flag_value_guard`` for the production incident that measured it.
         re.compile(
             r"(?i)(--(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
             r"client[-_]?secret|auth[-_]?token|access[-_]?token)(?:=|\s+))([^\s\"']{3,})"
@@ -1648,9 +1708,67 @@ class ShapeHit:
     window: str = ""
     #: Whether the ENTIRE credential is gone from the scrubbed text. A hit with
     #: ``complete=False`` still registers (containment of what can be contained)
-    #: but must NOT be announced: the row tells the operator the value was masked,
-    #: and the operator's next action is not to rotate it.
+    #: but may not be announced AS CONTAINED: the containment notice tells the
+    #: operator the value was masked, and that claim has to be true.
     complete: bool = True
+    #: Whether READABLE credential material survived the mask in this text.
+    #:
+    #: This is the whole severity classification, and it is deliberately a
+    #: separate fact from ``complete``: ``complete`` says whether the mask may be
+    #: CLAIMED (a truncated PEM is fully masked and still unclaimable, because
+    #: nothing proves the rest of the key is not further down), while ``exposed``
+    #: says whether anything readable is left in the text the model is about to
+    #: read. Only ``exposed`` is a compromise: a value in the model's context may
+    #: be in training data, which is the one exposure this harness cannot undo, so
+    #: it is the one that asks the operator for a rotation. Everything else the
+    #: table catches — masked whole in a command's `argv`, in a tool result, in a
+    #: file on disk — is contained before the model sees it.
+    exposed: bool = False
+
+
+@dataclass(frozen=True)
+class ShapeReport:
+    """One run of the table over one piece of text: what it contained, and what escaped.
+
+    The pair every consumer needs, and the reason it is one object rather than two
+    return values: the two facts have to travel together, because the notice's
+    SEVERITY (see :attr:`ShapeHit.exposed`) is decided by the second while its
+    wording is decided by the first, and a caller that reads one without the other
+    either loses a real compromise or announces a containment it cannot prove.
+
+    ``labels`` are shape NAMES, never values — a report that carried the credential
+    would be the leak it exists to describe. Only hits whose mask may be CLAIMED
+    appear in it, so it is exactly the set of shapes the contained notice may name.
+
+    ``reached_model`` is true when any hit left readable credential material in the
+    text the model reads. A text can produce both — one rule masks a DSN whole while
+    another leaves a fragment of a different credential behind — and the louder fact
+    wins, which is why this is a single boolean on the pair rather than a per-label
+    flag.
+    """
+
+    labels: tuple[str, ...] = ()
+    reached_model: bool = False
+
+
+def shape_report(hits: Sequence[ShapeHit]) -> ShapeReport:
+    """Summarise one run's hits: the claimable labels, and whether anything escaped.
+
+    The single place that decides which hits may be named in a notice, so the
+    contained notice and the escalated one can never disagree about what the table
+    found: containment takes every hit (values are registered elsewhere, by
+    :meth:`local_operator.variables.VariableStore._register_shape_hits`), the
+    ANNOUNCEMENT takes only the claimable ones, and the escalation takes any hit
+    that left something readable.
+    """
+    ordered: dict[str, None] = {}
+    for hit in hits:
+        if hit.complete:
+            ordered.setdefault(hit.label, None)
+    return ShapeReport(
+        labels=tuple(ordered),
+        reached_model=any(hit.exposed for hit in hits),
+    )
 
 
 def scrub_shapes_with_hits(text: str) -> tuple[str, list[ShapeHit]]:
@@ -1711,27 +1829,147 @@ def _make_hit(shape: Shape, match: Match[str], value: str) -> ShapeHit:
     return ShapeHit(label=shape.label, value=value, window=region)
 
 
-def _credential_fragments_survive(hit: ShapeHit, text: str) -> bool:
-    """Whether any readable piece of the matched credential is still in ``text``.
+#: The shortest run of a credential worth calling a leak. Short enough that a
+#: partial mask cannot hide behind it, long enough not to fire on ordinary text.
+_FRAGMENT_WINDOW = 6
 
-    The check is against the CREDENTIAL, not the matched fragment: a DSN password
-    containing ``@`` used to be masked to the first ``@`` while the password
-    group's value disappeared, so a value-only check reported success while the
-    rest of the credential sat in the transcript. Six characters is the shortest
-    run worth calling a leak and short enough that a partial mask cannot hide
-    behind it.
+
+class _GramIndex:
+    """The six-character runs of one model-visible text, built on FIRST use.
+
+    **Why an index rather than a substring search per fragment.** The check that
+    came before this one spells it ``fragment in text`` for every offset of the
+    credential, so it scans the whole text once per offset and its price is linear
+    in the text for EVERY credential in it. Building the text's six-character runs
+    ONCE turns each fragment test into a set lookup instead.
+
+    **It is a trade, not a win, and the numbers below are the whole of the claim.**
+    Measured on this host (CPython 3.12.13, best of three runs, against a 1 MB
+    high-entropy tool result built from 32-hex-character lines; the scan column is
+    ``_credential_fragments_survive`` at ``91d70791``):
+
+    * one hit, 64-character value — scan **8 ms**, this index **224 ms**;
+    * one hit, 512-character value — scan **102 ms**, this index **221 ms**;
+    * one hit, 4 KB PEM body — scan **823 ms**, this index **278 ms**;
+    * 20 hits of 512 characters over one text — scan **2729 ms**, this index **241 ms**.
+
+    So the index pays a fixed one-pass build — **224 ms** and a peak of **76 MB** of
+    transient set for a 1 MB text (708,574 distinct runs) — and only earns it back
+    where the scan it replaces is longer than that build: a value of a couple of KB
+    or more, several hits sharing one text, or a text large enough that one scan is
+    already the expensive half. For a single short credential in a large result it
+    is genuinely SLOWER than the loop it replaces, and the memory is proportional to
+    the text. Both facts are why it stays lazy and why most results never touch it.
+
+    **How large that memory gets, measured, because 76 MB is the small end and
+    nothing below bounds it (agent review R2, finding 2).** The peak is set by the
+    TEXT and not by the credential — one six-character run per text position, each a
+    fresh string rather than a slice, at roughly **100 bytes of transient set per
+    byte of text** — so it grows linearly with no plateau. Measured through the
+    shipped entry point on this host, one masked 40-character credential inside a
+    high-entropy hex result, one process per reading (peak RSS delta against the
+    same text built without the scan; the pre-index column is
+    ``_credential_fragments_survive`` at ``91d70791``):
+
+    * 1 MB text — pre-index **3.0 MB**, this index **101.7 MB** (~761,000 runs),
+      and the index is slower here too: **0.39 s** against **0.25 s**, because the
+      mask pass dominates and the build is pure addition. In the single-hit shape it
+      is therefore strictly memory-negative — it buys no wall time and pays ~100 MB;
+    * 4 MB text — this index **391.0 MB** (~2,719,000 runs), i.e. the same ~98 bytes
+      per text byte, i.e. linear in the text.
+
+    So a multi-megabyte tool result carrying ONE secret pays hundreds of megabytes
+    transiently, on a check that runs per tool result. Read the ratio rather than
+    the megabyte — the absolute figure follows the text's distinct-run count (1 MB
+    of one repeated line is far cheaper than 1 MB of random hex) — and read it as a
+    disclosure, not a bound: the build is bounded only by the length of the text
+    handed in.
+
+    Reproduce a row by loading this module by path in one process (it has no
+    intra-package imports, so the pre-index revision loads beside it), building the
+    text, and diffing ``resource.getrusage(RUSAGE_SELF).ru_maxrss`` around a single
+    ``scrub_shapes_with_hits`` call — one process per reading, since ``ru_maxrss`` is
+    a high-water mark and never falls back.
+
+    LAZY, because most results contain no hit at all: nothing is built unless a hit
+    needs a fragment tested, so the ordinary-text path is untouched. Most results
+    are also far too small for either side to matter — every text in the credential
+    corpus is under 200 characters, where the whole question is moot.
+
+    The redaction MARKER is stripped before the runs are taken: it is what a mask
+    writes, never material a mask left behind, and a run straddling one would
+    otherwise match a credential whose own value IS the marker — the two ``.npmrc``
+    cases and the cookie-header case QA round 1 found escalating on nothing readable
+    at all. The seam the strip creates is harmless (a credential's own characters
+    are never joined by it, and a seam match would require the value's characters
+    to be readable on both sides of a marker, which is a real survivor anyway); what
+    it does cost is stated in :func:`_credential_fragments_survive`.
     """
-    if not hit.value:
+
+    __slots__ = ("_text", "_grams")
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._grams: set[str] | None = None
+
+    def __contains__(self, gram: str) -> bool:
+        if self._grams is None:
+            readable = self._text.replace(REDACTION_MARKER, "")
+            self._grams = {
+                readable[start : start + _FRAGMENT_WINDOW]
+                for start in range(len(readable) - _FRAGMENT_WINDOW + 1)
+            }
+        return gram in self._grams
+
+
+def _credential_fragments_survive(
+    hit: ShapeHit, text: str, grams: "_GramIndex | None" = None
+) -> bool:
+    """Whether a readable piece of the CREDENTIAL survived in the masked ``text``.
+
+    **Anchored on the credential's own characters, never on the matched region**,
+    and that is the whole of the judgement (QA round 1, Q1). The region is not all
+    secret: a DSN rule keeps ``amqp://user:`` and ``@host`` readable BY DESIGN, so a
+    region-wide window search graded a fully-masked ``amqp://guest:guest@host`` as
+    exposed — the surviving window was the USERNAME — and filed a rotation demand
+    for a value that never left the tool. Four corpus hits were affected, three of
+    the four because the "survivor" was the redaction MARKER itself. So:
+
+    * the marker is not material (``_GramIndex`` strips it, and a value that IS the
+      marker is never a survivor);
+    * the whole VALUE present in the text is a leak: the rule's group was narrower
+      than the credential, or this copy was never masked;
+    * a window OF THE VALUE present is a partial leak — the mask stopped inside the
+      credential, which is the case the floor exists for and what a truncating rule
+      (a PEM without its END line, a base64 body) produces.
+
+    Reading the VALUE rather than the region means material a rule deliberately
+    preserves can never be counted as a survivor.
+
+    **A stated limit, not an oversight.** Because ``_GramIndex`` strips the marker
+    before taking its runs, a credential whose own value literally contains
+    ``[redacted]`` and survives only PARTIALLY is unrepresentable: the fragment
+    still in the text is spelled exactly like the marker a mask would have written,
+    and no reading of the text can tell them apart. That identity is what makes the
+    ``.npmrc`` and cookie false positives above impossible to grade correctly by
+    inspection, so it is not closable here — only the wholly-surviving copy of such
+    a value is still caught, by the ``value in text`` test above. Reaching it needs
+    an operator secret that itself contains the harness's marker string, which is
+    why the limit is recorded rather than paid for.
+    """
+    value = hit.value
+    if not value or value == REDACTION_MARKER:
         return False
-    if hit.value in text:
+    if value in text:
         return True
-    window = hit.window or hit.value
-    if len(window) <= 6:
-        return window in text and window != hit.value
-    for start in range(0, len(window) - 5, 3):
-        if window[start : start + 6] in text:
-            return True
-    return False
+    if len(value) < _FRAGMENT_WINDOW:
+        return False
+    if grams is None:
+        grams = _GramIndex(text)
+    return any(
+        value[start : start + _FRAGMENT_WINDOW] in grams
+        for start in range(len(value) - _FRAGMENT_WINDOW + 1)
+    )
 
 
 def _is_truncated_pem(hit: ShapeHit) -> bool:
@@ -1756,35 +1994,63 @@ def _is_truncated_pem(hit: ShapeHit) -> bool:
 
 
 def _only_fully_masked(hits: list[ShapeHit], text: str) -> list[ShapeHit]:
-    """Drop any hit whose credential is still readable in ``text``.
+    """Grade every hit: contained, contained-but-unclaimable, or EXPOSED.
 
     **A notice may never announce a masking that did not happen.** The row the
-    operator is asked to act on says the value "was masked before you saw it",
-    and a claim like that is worse than silence when it is false: it is the
-    difference between rotating a credential and believing you already have.
-    This was a real defect — a DSN password containing ``@`` was masked only to
-    the first ``@`` while the incident row still promised the whole thing was
-    gone, and the tail was in the transcript.
+    operator is asked to act on says the value "was masked before you saw it", and
+    a claim like that is worse than silence when it is false: it is the difference
+    between rotating a credential and believing you already have. This was a real
+    defect — a DSN password containing ``@`` was masked only to the first ``@``
+    while the incident row still promised the whole thing was gone, and the tail
+    was in the transcript.
 
-    The check is a substring test per hit, not a proof: it catches a value that
-    survives WHOLE (the group was narrower than the credential) and not one that
-    survives in fragments. Fixing the patterns is the real work; this is the
-    backstop that stops the false claim if one slips through again.
+    Two flags come out of here, and they are different facts:
+
+    * ``exposed`` — readable credential material is still in ``text``. That text
+      is what the model reads, so this hit has reached the context window and is
+      the one case that asks for a rotation.
+    * ``complete`` — the mask may be CLAIMED as whole. A truncated PEM is fully
+      masked (nothing readable survives) and still unclaimable, because nothing
+      proves the rest of the key is not further down a transcript we have not
+      read. Withholding the claim is the honest half of that fix, and such a hit
+      is neither announced as contained nor escalated: no claim of any kind is
+      made about it.
+
+    A hit that is neither exposed nor unclaimable is CONTAINED, and that is the
+    ordinary outcome: the value was masked whole before the model could read it,
+    whatever surface it arrived on.
+
+    The check is a substring test per hit against the credential's own region,
+    not a proof: it catches a value that survives whole (the group was narrower
+    than the credential) and one that survives in six-character fragments.
+    Fixing the patterns is the real work; this is the backstop that stops the
+    false claim if one slips through again.
     """
     marked: list[ShapeHit] = []
+    # One index for the text, shared by every hit and built on first need: the
+    # fragment test is per-credential and the text is the same for all of them.
+    grams = _GramIndex(text)
     for hit in hits:
-        if _is_truncated_pem(hit):
+        # Readable material is checked FIRST, so the truncated-PEM branch below
+        # cannot swallow an exposure: a block that was masked is contained, and
+        # one that left a fragment readable is not.
+        exposed = _credential_fragments_survive(hit, text, grams)
+        if _is_truncated_pem(hit) or exposed:
             # A BEGIN with no END is a key whose LENGTH we cannot see: everything
             # visible is masked, and the claim is still withheld, because nothing
             # proves the rest of the key is not further down a transcript we have
-            # not read. Withholding the claim is the honest half of the fix.
-            marked.append(replace(hit, complete=False))
-            continue
-        if _credential_fragments_survive(hit, text):
-            # Keep it for CONTAINMENT, flag it out of the NOTICE: the value is
-            # registered for the rest of the session either way, and the honest
-            # thing to withhold is the claim, not the protection.
-            marked.append(replace(hit, complete=False))
+            # not read. The hit is kept for CONTAINMENT either way — the value is
+            # registered for the rest of the session — and the honest thing to
+            # withhold is the claim, not the protection.
+            #
+            # A hit graded this way therefore files NO notice at all, and that is a
+            # stated limit rather than an oversight: both notice texts make a
+            # containment claim ("nothing entered your context" / "it was contained
+            # at the tool"), and the reason the claim is withheld here is that the
+            # key's extent is unknown — so neither text would be true. Raising it
+            # needs a third, claim-free wording, which is a product decision rather
+            # than something to bolt onto this change (agent review R1, finding 3).
+            marked.append(replace(hit, complete=False, exposed=exposed))
         else:
             marked.append(hit)
     return marked

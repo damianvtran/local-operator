@@ -8,11 +8,13 @@ task on Windows. All three record the store the connector serves
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 from local_operator import launchd, procname, procstate, supervisors
@@ -144,6 +146,89 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 — fixed argv, no shell
         ["launchctl", *args], capture_output=True, text=True, timeout=20
     )
+
+
+def gateway_answers(timeout: float = 2.0) -> bool:
+    """Whether this connector's OWN gateway is serving on its loopback port.
+
+    The liveness half of the install's skip decision, and the counterpart of its
+    ``mobile``/``browser`` twins' ``health()`` — which is what review round 2
+    (R-7) caught the previous revision denying: this daemon does have a local
+    surface, and ``tunnels/cli.py`` already probes exactly it to tell a stopped
+    connector from a gateway that is not there.
+
+    WHAT IT DELIBERATELY DOES NOT ASK: ``ok``/``connected`` in that payload are
+    RELAY state (``not revoked and now < authorized_until``, plus the edge
+    connection), so a connector whose authorization lapsed answers ``ok: false``
+    while being perfectly alive. ``lop tunnel status`` owns that question; here
+    the only question is "did my own gateway answer on my port", which is what
+    the twins' ``health(port) is not None`` means too.
+
+    WHAT IT PROVES, AND WHAT IT DOES NOT. It proves that SOMETHING answered
+    ``200`` with a JSON object on that path of that port. It cannot prove the
+    answerer is OUR gateway: a foreign listener serving exactly that passes, and
+    nothing cheaper tells the two apart from here — measured (review round 3,
+    QA Q-1/N2, after this docstring claimed the opposite). What makes the
+    composite gate safe is the ORDER: ``job_running`` is asked first, and launchd
+    can hold a live pid only for OUR label, so a port is probed only while our
+    own supervised process is alive — the same argument the browser bridge's
+    health comment makes. The answer is therefore "my port produced a
+    gateway-shaped reply", which is all the repair-or-leave-alone decision
+    needs, and all this claims.
+
+    Never raises: an unreadable record, a closed port and a hung listener all
+    answer ``False``, which is the direction that reloads.
+    """
+    port = _configured_gateway_port()
+    if port is None:
+        return False
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/_lop_tunnel/health", timeout=timeout
+        ) as response:
+            served = response.status == 200
+            payload = json.loads(response.read().decode())
+    except Exception:  # noqa: BLE001 — a probe answers absent rather than raising
+        return False
+    return served and isinstance(payload, dict)
+
+
+def _configured_gateway_port() -> int | None:
+    """The gateway port this machine's tunnel record names, or ``None``.
+
+    Read from the same record the daemon binds and `lop tunnel status` probes
+    (``service.py`` binds ``127.0.0.1:<gateway_port>`` from that value), so the
+    probe above asks about the port THIS connector would answer on rather than
+    the default. ``None`` covers both an unconfigured machine (``load`` raises)
+    and a record whose port fails validation — neither is a reason to skip a
+    repair.
+    """
+    try:
+        return config.port(config.load().get("gateway_port", config.DEFAULT_GATEWAY_PORT))
+    except (OSError, ValueError):
+        # OSError as well as ValueError, and it is not theoretical (review round
+        # 3, M2): `load()` reads `config.json`, so an unreadable record — a
+        # directory where the file should be, a permission the sandbox lacks —
+        # arrives as `IsADirectoryError`/`PermissionError`, and catching only
+        # `ValueError` let it escape `install()` and turn a repair into a
+        # traceback. Anything that stops this probe from reading the port is
+        # "not answering", which is the direction that repairs.
+        return None
+
+
+def _plist_is_current(path: Path, wanted: bytes) -> bool:
+    """Whether the installed plist is already exactly ``wanted``, at 0600.
+
+    Bytes AND mode: this installer owns both, so a file whose content matches
+    while its mode drifted is still repaired rather than skipped. An
+    unreadable file answers ``False`` — the rewrite direction.
+    """
+    try:
+        if path.read_bytes() != wanted:
+            return False
+        return (path.stat().st_mode & 0o777) == 0o600
+    except OSError:
+        return False
 
 
 def render_plist(config_base: Path | None = None) -> dict[str, object]:
@@ -365,23 +450,60 @@ def install() -> None:
     if kind == supervisors.LAUNCHCTL:
         log = config.directory() / "service.log"
         config.private_write(log, "")
-        value = render_plist()
-        path.write_bytes(plistlib.dumps(value))
-        path.chmod(0o600)
-        # Reload through the shared helper, and REPORT what launchd said. This
-        # used to issue bootout+bootstrap and raise a generic "check your user
-        # service manager" that discarded launchd's stderr while the CLI went on
-        # to print "Tunnel service started." — a false success over a daemon
-        # that had just been booted out and never loaded back. See
-        # :mod:`local_operator.launchd` for the measurement.
-        reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
-        if not reloaded.ok:
-            # The same sentence the upgrade path prints, because the state is
-            # the same one it describes: the plist is written and the job is
-            # not loaded. `lop tunnel install` is the working recovery.
-            raise ValueError(
-                launchd.reload_failure("tunnel", path, "lop tunnel install", reloaded.detail).detail
-            )
+        # WRITE AND RELOAD ONLY WHEN SOMETHING WOULD CHANGE. What that claim is
+        # and is not (review round 1, R-3): an install that would change nothing
+        # no longer emits the two signals an EDR reads as "Persistence: launchd
+        # job / plist file modification" (MITRE T1543.001) — an identical-bytes
+        # rewrite followed by a bootout/bootstrap. It does NOT explain the
+        # 2026-09-19 incident's plist modification, which came from the
+        # `[daemons] refresh` child and a genuinely stale plist rather than from
+        # this path; see the longer note in `mobile/install.py`.
+        wanted = plistlib.dumps(render_plist())
+        # The MODE is part of "current": this installer is the one that sets
+        # 0600, so a file whose bytes match but whose mode drifted is still
+        # repaired rather than skipped.
+        current = _plist_is_current(path, wanted)
+        if not current:
+            path.write_bytes(wanted)
+            path.chmod(0o600)
+        # LIVENESS AND ANSWERING, the same shape its ``mobile`` and ``bridge``
+        # twins use, and a correction of what this comment used to claim (review
+        # round 2, R-7): the connector DOES have a local surface — its own
+        # gateway serves ``/_lop_tunnel/health`` on its loopback port — and
+        # liveness alone left an alive-but-unanswering connector in place while
+        # `lop tunnel install` reported success, which is the very command the
+        # CLI's own sentence names as the repair for that state.
+        #
+        # A DEAD JOB IS STILL REPAIRED: `kickstart` for the loaded-but-stopped
+        # case (the narrower repair, which does not briefly unregister the
+        # label), and the shared reload for anything else — including a label
+        # launchd has forgotten, which is what registers it.
+        reload_needed = True
+        if (
+            current
+            and launchd.job_running(label=LABEL, path=path, run=_launchctl)
+            and gateway_answers()
+        ):
+            reload_needed = False
+        elif current and launchd.kickstart(label=LABEL, path=path, run=_launchctl):
+            reload_needed = False
+        if reload_needed:
+            # Reload through the shared helper, and REPORT what launchd said. This
+            # used to issue bootout+bootstrap and raise a generic "check your user
+            # service manager" that discarded launchd's stderr while the CLI went on
+            # to print "Tunnel service started." — a false success over a daemon
+            # that had just been booted out and never loaded back. See
+            # :mod:`local_operator.launchd` for the measurement.
+            reloaded = launchd.reload_job(label=LABEL, path=path, runner=_launchctl)
+            if not reloaded.ok:
+                # The same sentence the upgrade path prints, because the state is
+                # the same one it describes: the plist is written and the job is
+                # not loaded. `lop tunnel install` is the working recovery.
+                raise ValueError(
+                    launchd.reload_failure(
+                        "tunnel", path, "lop tunnel install", reloaded.detail
+                    ).detail
+                )
     elif kind == supervisors.SYSTEMCTL:
         path.write_text(render_systemd())
         path.chmod(0o600)
@@ -420,6 +542,19 @@ def action(name: str) -> None:
         # file may exist from a machine backup, but nothing here can run it.
         raise ValueError(NO_SUPERVISOR_ERROR)
     if kind == supervisors.LAUNCHCTL:
+        # THE SAME HAZARD R-1 CLOSED ON THE INSTALL PATH (review round 2, R-8).
+        # `LABEL` is a fixed constant here while `service_path()` moves with
+        # $HOME, so a redirected home's `start|restart` would reload, and its
+        # `stop` would boot out, the OPERATOR's connector: a bare `bootout
+        # gui/<uid>/<label>` and a `bootstrap <domain> <path>` that launchd
+        # resolves to the Label INSIDE the file. Every call below addresses the
+        # label, so the refusal is here, ahead of all of them.
+        #
+        # `require_own_plist` rather than `is_own_plist`, so the three-way answer
+        # is not collapsed here (review round 4): a host that cannot read its
+        # passwd entry gets its own refusal instead of being reported as a
+        # redirected home.
+        launchd.require_own_plist(path, LABEL)
         if name == "stop":
             # A bare bootout, deliberately: stopping is not a reload, and there
             # is nothing to bootstrap afterwards.
@@ -461,7 +596,24 @@ def uninstall() -> None:
     path = service_path()
     if not path.exists():
         return
-    action("stop")
+    try:
+        action("stop")
+    except launchd.JobNotOurs:
+        # THE SUPERVISOR HALF MAY REFUSE; THE FILE HALF MUST STILL WORK (review
+        # round 3, N3). `action("stop")` applies the identity guard, so from a
+        # redirected home it declines rather than booting out the operator's
+        # connector — and calling it directly here turned that refusal into a
+        # traceback that left the SANDBOX's own plist on disk. What this function
+        # owns is the file, and being refused the launchd half is not a reason to
+        # keep it; nothing is reported that did not happen, because this returns
+        # no step list at all.
+        #
+        # `IdentityUnverifiable` is deliberately NOT caught (review round 4): a
+        # host that cannot read its passwd entry has not said "this plist is not
+        # ours", only that it cannot tell, and the conservative direction for a
+        # destructive verb is to leave the file and let the refusal reach the
+        # operator with the sentence that names which case they hit.
+        pass
     if kind == supervisors.SYSTEMCTL:
         _run(["systemctl", "--user", "disable", path.name])
     path.unlink()
