@@ -517,14 +517,23 @@ class SessionTable:
             # ``session/catalog.py``, ``info/collect.py``) all degrade.
             #
             # The contract is the durable half's, one read further out: keep
-            # what was last read -- the previous states, so the marks on the
-            # rows stay the last TRUE ones instead of every completion reading
-            # as "already seen" -- name the failure in ``listing_degraded``, and
-            # let the next build heal it. ``(sqlite3.Error, OSError)`` is the
-            # exact pair the two sibling readers catch: the deferred verdict is
-            # a ``sqlite3.Error`` (it subclasses ``OperationalError`` so the
-            # store's code rides through), and a store that cannot be OPENED is
-            # an ``OSError``.
+            # what was last READ -- the previous states, or the store's own
+            # DEFAULTS when nothing was ever read -- name the failure in
+            # ``listing_degraded``, and let the next build heal it. THAT IS
+            # RECENCY, NOT CURRENT TRUTH (round-3 review MINOR-2, round-3 QA
+            # Q-1): a completion that lands or is acknowledged during the outage
+            # is invisible to these marks until the next successful read, and
+            # the direction that can be silently wrong is the dangerous one -- a
+            # genuinely UNREAD completion served as ``unseen: false`` re-states
+            # the confident negative this store exists to stop. Nothing in the
+            # row discloses that, because no client can see it: ``degraded``
+            # carrying ``["attention"]`` is the ONLY thing that says these marks
+            # are stale rather than fresh.
+            #
+            # ``(sqlite3.Error, OSError)`` is the exact pair the two sibling
+            # readers catch: the deferred verdict is a ``sqlite3.Error`` (it
+            # subclasses ``OperationalError`` so the store's code rides
+            # through), and a store that cannot be OPENED is an ``OSError``.
             try:
                 self._attention_states = await asyncio.to_thread(
                     AttentionStore().state_many, identities
