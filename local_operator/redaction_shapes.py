@@ -1034,26 +1034,69 @@ def _base64_value_guard(match: Match[str]) -> bool:
     return any(char.isupper() for char in value) and any(char.islower() for char in value)
 
 
+#: The NEGATIVE SPACE of a real issuer tail, and the only half of it a regex can
+#: spell: lowercase words joined by ``_`` or ``-``, optionally with an ``=value``
+#: assignment appended. A real tail is ONE unbroken base64-ish run, so it carries
+#: mixed case and/or a digit; a string made only of lowercase letters and
+#: separators is a NAME someone wrote down, and ``docker_compose_build_args``,
+#: ``npm_config_update_notifier`` and
+#: ``npm_config_manage_package_manager_versions=false`` are all the same thing.
+#:
+#: **The ``=value`` arm is what the underscore-only rule missed, and the omission
+#: was expensive.** An environment variable written in PROSE carries its
+#: assignment, so the matched tail is the name AND the value: the old rule
+#: fullmatched ``[a-z]+(?:_[a-z]+)+`` against the whole tail, failed on the ``=``,
+#: and announced the pair as an npm token. On 2026-09-21 that produced an
+#: ESCALATED rotation notice (session ``78e6409f2ba1``, the second firing of this
+#: class — the first is the ``--secret NAME`` case on :func:`_flag_value_guard`).
+#: The escalation, not the mask, is what made it an incident: the tail is 48
+#: characters, ``_FRAGMENT_WINDOW`` is 6, and six-character fragments of an
+#: ordinary name (``config``, ``manage``, ``_versi``) are all over the prose
+#: around it, so ``_credential_fragments_survive`` graded the mask EXPOSED and the
+#: operator was asked to rotate a package-manager toggle. A guard that admits a
+#: name does not merely under-mask: it manufactures a false compromise.
+#:
+#: The two joins are ONE form, not two: ``-`` is the same name spelled the other
+#: way (``npm-config-manage-package-manager-versions``), and both spellings are
+#: already how every prefix in the table is written. The value half is deliberately
+#: character-agnostic (``\S*``) because a value may hold digits, dots and slashes
+#: (``npm_config_cache=/Users/…``) — the arm is anchored on the NAME half, which is
+#: the half that decides.
+#:
+#: **Nothing is lost by it, and that is measured rather than argued.** A run of
+#: lowercase letters with NO separator still does not match here — round 1's own
+#: repro (``pk-`` plus sixteen letters) stays masked — and neither does any tail
+#: carrying a digit or an uppercase letter, which is every real issuer token the
+#: corpus knows (the npm and PyPI cases carry seven capitals each).
+_VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[_-][a-z]+)+(?:=\S*)?")
+
+
 def _vendor_tail_guard(match: Match[str]) -> bool:
     """Reject an issuer-looking prefix followed by an ordinary NAME.
 
     ``npm_config_update_notifier`` and ``docker_compose_build_args`` are
     environment variables: lowercase words joined by underscores. A real issuer
-    tail is one unbroken run (``npm_<base64>``, ``docker_pat_…``). The rule's
-    pattern cannot express that without a variable-width look-behind, and a guard
-    costs nothing on text the gate has already skipped.
+    tail is one unbroken run (``npm_<base64>``, ``docker_pat_…``), so it carries
+    mixed case and/or a digit. The rule's pattern cannot express that without a
+    variable-width look-behind, and a guard costs nothing on text the gate has
+    already skipped.
+
+    Both prefix tables strip their own separators before the test, because
+    ``whsec``/``lin_api``/``pat_`` spell the separator INSIDE the prefix while
+    ``npm``/``pypi`` spell it in the pattern: a name is a name under either, and
+    the fixed table was the same defect left half-fixed.
     """
     tail = match.group(0)
     for prefix in _VENDOR_SEPARATED_PREFIXES:
         if tail.lower().startswith(prefix.lower()):
-            tail = tail[len(prefix) :].lstrip("_-")
+            tail = tail[len(prefix) :]
             break
     else:
         for prefix in _VENDOR_FIXED_PREFIXES:
             if tail.lower().startswith(prefix.lower()):
                 tail = tail[len(prefix) :]
                 break
-    return not re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tail)
+    return not _VENDOR_TAIL_IS_A_NAME.fullmatch(tail.lstrip("_-"))
 
 
 #: An ENVIRONMENT-VARIABLE (or secret-store NAME) spelling: capitals, digits and

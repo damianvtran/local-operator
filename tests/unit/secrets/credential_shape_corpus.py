@@ -364,6 +364,10 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case("glpat-EXAMPLEabcdefghijklmnop", "a GitLab personal access token"),
     Case("gsk_EXAMPLEabcdefghijklmnopqrst", "a Groq API key"),
     Case("npm_EXAMPLEabcdefghijklmnopqrstuvwxyz", "an npm token"),
+    Case(
+        "npm_8f3a2b1c-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "a same-prefix REAL token: its tail is hex and dashes, and a DIGIT carries it",
+    ),
     Case("pypi-EXAMPLEabcdefghijklmnopqrstuvwx", "a PyPI upload token"),
     Case("dckr_pat_EXAMPLEabcdefghijklmnop", "a Docker Hub access token"),
     Case("lin_api_EXAMPLEabcdefghijklmnop", "a Linear API key"),
@@ -554,6 +558,35 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     Case(
         '"npm_config_update_notifier": "false"',
         "an env var NAME that starts with a vendor prefix",
+    ),
+    # --- 2026-09-21: the same NAME carrying its ASSIGNMENT, which the guard's
+    #     lowercase-words rule had no arm for. Each of the first four below fired
+    #     as a vendor token, and the first ESCALATED: a 48-character tail against
+    #     a 6-character fragment window meant six-letter fragments of an ordinary
+    #     name were all over the prose around it, so the mask graded EXPOSED and a
+    #     session filed a rotation ticket for a package-manager toggle. The reason
+    #     all of them must survive is one reason: an all-lowercase run joined by
+    #     separators is a NAME, while a real issuer tail is one unbroken base64-ish
+    #     run carrying mixed case and/or a digit.
+    Case(
+        "npm_config_manage_package_manager_versions=false",
+        "an env assignment in prose: the tail is the NAME and its value",
+    ),
+    Case(
+        "`npm_config_manage_package_manager_versions=false`",
+        "the same assignment in backticks, the reported session's spelling",
+    ),
+    Case(
+        "npm-config-manage-package-manager-versions",
+        "the same NAME with the other join: a dash is the same name",
+    ),
+    Case(
+        "npm_config_manage_package_manager_versions=11.22.0",
+        "the same NAME with a version value: the dot lookahead already spares it",
+    ),
+    Case(
+        "whsec_config_update_notifier",
+        "the same NAME under a prefix that carries its own separator",
     ),
     Case("npm run build --prefix ./apps", "npm as a package manager"),
     Case("terraform output name", "the safer form the advisory itself recommends"),

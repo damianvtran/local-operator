@@ -2393,7 +2393,19 @@ def _corpus_grading() -> str:
 #: review R1-1, QA round 1 Q-1), and one negative per name in
 #: ``COUNT_TAIL_RELEASED_NAMES`` (the boundary the tail arm draws, pinned in the half
 #: it releases: QA round 2, Q2-1).
-_CORPUS_GRADING_DIGEST = "9f962ae4a02809e713b2493a142c4371d1b9ede141c189af7dd7ee03f0e9575b"
+#:
+#: Moved AGAIN on 2026-09-21, by the fix for a vendor-prefixed FALSE POSITIVE, and
+#: the argument is the same measurement rather than a claim: the 335-case corpus
+#: described just above produces a BYTE-IDENTICAL grading under the fixed module
+#: (``git show origin/main:local_operator/redaction_shapes.py`` loaded beside it, and
+#: ``_corpus_grading()`` computed for that corpus under both modules and compared),
+#: so nothing already in the table moved — not a masked text, not a label, not a
+#: value, not a window, not a severity. The digest moves because the corpus grew to
+#: 341: five negatives for the spellings an ordinary env-var NAME takes in prose
+#: (``<prefix>_<name>=<value>``, the dash-joined form, and a fixed-prefix name), and
+#: one positive for the npm token's own hex-and-dash spelling, which pins the
+#: boundary the new tail predicate must leave alone.
+_CORPUS_GRADING_DIGEST = "d76461eb54f16cfe1722b88df2146c69c0a0dd0ab43694f27c1a115bf94740b0"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
