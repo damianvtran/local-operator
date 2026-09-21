@@ -11,6 +11,7 @@ import time
 import types
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -5164,3 +5165,98 @@ def test_mcp_unavailable_is_persistable_and_the_recovery_is_not() -> None:
     )
     assert _is_persistable_message(warning) is True
     assert _is_persistable_message(recovery) is False
+
+
+# ---------------------------------------------------------------------------
+# the session scratchpad root
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_first_shell_call_can_use_a_pad_that_does_not_exist_yet(tmp_path) -> None:
+    """The advertised path is usable on its FIRST use, which is where it failed.
+
+    The export exists so a shell can create directly into the pad, and the idioms
+    that says — a bare ``> "$LOCAL_OPERATOR_SCRATCHPAD/x.log"``, the
+    ``mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXX"`` template the guide
+    documents — need the DIRECTORY, not just the name. On a session whose pad had
+    never been written to, every one of them failed with ``No such file or
+    directory``, at exactly the moment the model was being told where to put its
+    scratch, so the recovery it reaches for under that error is ``/tmp`` — the
+    behaviour the export was added to prevent. Nothing surfaced it either:
+    ``read scratchpad://`` answers ``(0 entries)`` for a root that does not exist.
+    Two channels were always fine (``write``/``edit`` create their own parents,
+    and ``mkdir -p`` makes the root), which is exactly how the idiom came to look
+    tested.
+
+    The pad is made where it is HANDED OVER and nowhere earlier, and this pins
+    both halves: it does not exist before the call (the session derives the path
+    during construction, where a mkdir would defeat ``defer_materialise`` — see
+    ``Transcript`` and ``test_birth_selection_is_durable_only_when_work_is_
+    admitted``), and the call itself works. Asserted through the REAL tool on a
+    REAL session rather than on the ``mkdir`` call, because the claim is about
+    what a shell does with the path the session hands over. The session directory
+    is spelled under ``sessions/`` on purpose: that predicate is what decides
+    whether a directory is a session store directory at all, so a transcript
+    anywhere else has no pad by design.
+    """
+    from local_operator.tools.registry import create_tools
+
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=await asyncio.to_thread(Transcript, tmp_path / "sessions" / "fresh01"),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    try:
+        context = session._build_tool_context()
+        pad = Path(str(context.scratchpad_dir))
+        assert not pad.exists(), "deriving the path must not create anything"
+
+        tools = {tool.name: tool for tool in create_tools(context)}
+        result = await tools["bash"].execute(
+            "c",
+            {
+                "command": (
+                    'echo hi > "$LOCAL_OPERATOR_SCRATCHPAD/first.log" && '
+                    'mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXX" && '
+                    'cat "$LOCAL_OPERATOR_SCRATCHPAD/first.log"'
+                )
+            },
+            None,
+            None,
+            context,
+        )
+
+        assert result.is_error is False, result.text
+        assert "hi" in result.text, result.text
+        assert (pad / "first.log").read_text(encoding="utf-8") == "hi\n"
+        # The template landed inside the pad, so the rig idiom works with no
+        # scratchpad call before it.
+        assert [entry for entry in pad.iterdir() if entry.name.startswith("rig.")]
+        # ...and it is now a real directory the durable channels can also see.
+        assert pad.is_dir()
+    finally:
+        await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_scratchpad_root_is_none_outside_the_session_store(tmp_path) -> None:
+    """No pad for a directory that is not under ``sessions/`` — and therefore no
+    directory created there either, which is the half that matters once the
+    derivation is also a WRITE (an ``--train`` agent directory is zipped whole and
+    published, so a scratch folder in one would ship to strangers)."""
+    session = Session(
+        model=MODEL,
+        stream_fn=ScriptedStream([[StreamEndEvent(stop_reason="stop")]]),
+        tools=[],
+        transcript=await asyncio.to_thread(Transcript, tmp_path / "agents" / "trained"),
+        system_blocks_provider=lambda: ["stable"],
+    )
+    try:
+        assert session._build_tool_context().scratchpad_dir is None
+        # Neither the name nor the DIRECTORY: the derivation is a write now.
+        assert not (tmp_path / "agents" / "trained" / "scratchpad").exists()
+    finally:
+        await session.dispose()

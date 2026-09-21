@@ -23,6 +23,7 @@ from local_operator.harness.types import (
     ToolContext,
     ToolResult,
 )
+from local_operator.scratchpad import SCRATCHPAD_PATH_ENV
 from local_operator.tools import builtin
 from local_operator.tools import eval as eval_tool
 
@@ -1151,3 +1152,76 @@ async def test_background_job_stays_deliverable_inside_a_subagent(tmp_path) -> N
     await asyncio.sleep(0.2)
     assert delivered == [job_id], "the child was never told its background job finished"
     await manager.dispose()
+
+
+# ---------------------------------------------------------------------------
+# the exported scratchpad path
+# ---------------------------------------------------------------------------
+#
+# A cell is where a great deal of this fleet's scratch is created — an extract, a
+# probe script, a rendered frame — and the worker is a LONG-LIVED process, so the
+# path can only be handed over when it starts. That is why the spawn site takes
+# the session's root as a parameter (one process holds several sessions' kernels)
+# and why the three arms have to be right here rather than merely present: an
+# inherited value outlives the session it described for as long as the worker
+# does.
+
+
+#: Reads the variable in the WORKER, and again in a grandchild the worker spawns
+#: with no ``env=`` — the shape any helper a cell shells out to has. The name
+#: comes from the module constant so a rename cannot leave this probe reading a
+#: variable nothing writes.
+_SCRATCH_PROBE = """
+import os, subprocess, sys
+from local_operator.scratchpad import SCRATCHPAD_PATH_ENV as k
+
+v = os.environ.get(k)
+print("RAW=" + ("<ABSENT>" if v is None else repr(v)))
+_nested = "import os;k=%r;v=os.environ.get(k);print('<ABSENT>' if v is None else repr(v))" % k
+child = subprocess.run(
+    [sys.executable, "-c", _nested], capture_output=True, text=True, check=False
+)
+print("NO_ENV_CHILD=" + child.stdout.strip())
+"""
+
+
+async def _kernel_scratch_env(context: ToolContext) -> tuple[str, str]:
+    result = await _call(context, _SCRATCH_PROBE)
+    assert result.is_error is False, result.text
+    lines = dict(line.split("=", 1) for line in result.text.splitlines() if "=" in line)
+    return lines["RAW"], lines["NO_ENV_CHILD"]
+
+
+@pytest.mark.asyncio
+async def test_the_kernel_is_given_the_scratchpad_path_in_three_arms(tmp_path, monkeypatch) -> None:
+    """SET / CLEARED / OMITTED, the same three arms the ``bash`` tool signs.
+
+    CLEARED is the arm this test exists for. The worker is spawned once and then
+    persists, so an inherited path is not merely carried one hop — it stays in a
+    living process for the life of the session, and a nested session's kernel
+    would keep writing into its parent's scratchpad with no later point at which
+    that could be corrected. The grandchild read is the hop below that.
+
+    OMITTED is why the name is scrubbed from the suite's own environment: the
+    presence test that chooses between CLEARED and OMITTED is a read of THIS
+    process's environment, so an inherited value would make this arm assert the
+    clear arm instead.
+    """
+    pad = tmp_path / "sessions" / "sess-pad" / "scratchpad"
+    with_pad = ToolContext(cwd=str(tmp_path), session_id="eval-pad", scratchpad_dir=str(pad))
+
+    raw, nested = await _kernel_scratch_env(with_pad)
+    assert raw == repr(str(pad))
+    assert nested == repr(str(pad))
+
+    monkeypatch.setenv(SCRATCHPAD_PATH_ENV, "/sessions/parent/scratchpad")
+    bare = ToolContext(cwd=str(tmp_path), session_id="eval-no-pad")
+    raw, nested = await _kernel_scratch_env(bare)
+    assert raw == repr(""), raw
+    assert nested == repr("")
+
+    monkeypatch.delenv(SCRATCHPAD_PATH_ENV, raising=False)
+    sparse = ToolContext(cwd=str(tmp_path), session_id="eval-lost-pad")
+    raw, nested = await _kernel_scratch_env(sparse)
+    assert raw == "<ABSENT>"
+    assert nested == "<ABSENT>"

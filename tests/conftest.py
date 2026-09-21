@@ -102,6 +102,14 @@ _AMBIENT_VARS = (
     # suite would take the allow path while looking like it tested the refusal.
     # Tests that need it set it explicitly.
     "LOCAL_OPERATOR_AGENT_MAY_DELEGATE",
+    # The session's own scratchpad root, exported to the `bash` child and the
+    # `eval` worker in the same three arms as the allowance above (set / cleared
+    # / omitted). It names a real machine resource — a directory inside ONE
+    # session's store — so an inherited value would have the suite's children
+    # writing into whichever session happened to launch pytest, and the OMITTED
+    # arm would be untestable because the writer's presence test would see a
+    # name it never set. Tests that need an arm set it explicitly.
+    "LOCAL_OPERATOR_SCRATCHPAD",
     # The escape that waives the test-hosting rule, so a suite whose subject is a
     # notification frame can observe one (it answers "not a test session", and
     # the process kill switch still wins). An inherited value is the

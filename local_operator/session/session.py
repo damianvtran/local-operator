@@ -8867,10 +8867,21 @@ class Session:
         and forgotten on the way to the executor" — the drop the parity test
         exists to catch, avoided by never letting a host configure it at all.
 
-        Defensive about a transcript with no usable ``.directory``, matching
-        how the id derivation tolerates one: a host with no session has no
-        scratch area, and that is a ``None`` rather than an exception on the
-        path every turn walks. Cost is one join and one ``parent.name`` compare.
+        THE ROOT IS NOT CREATED HERE, deliberately, and the reason is a pinned
+        invariant next door: ``Transcript(defer_materialise=True)`` exists so a
+        speculative runtime — a viewer's first keystroke warms a session before
+        the user has committed to a message — leaves NOTHING on disk, and this
+        method runs during construction (``_build_tool_context``), so a mkdir
+        here would defeat it. ``test_birth_selection_is_durable_only_when_work_
+        is_admitted`` fails on exactly that assertion. The root is instead created
+        where the path is HANDED OVER — ``scratchpad.ensure_scratchpad_dir``, called
+        by the two spawn sites — which is the moment that matters: a session's own
+        ``write``/``edit`` create their parents anyway, and a shell cannot, so the
+        only channel that needed the directory to pre-exist is the one that now
+        gets it made before it is told the path.
+
+        Cost is one join and one ``parent.name`` compare; the write is the spawn
+        site's.
         """
         from local_operator.scratchpad import scratchpad_root
 
