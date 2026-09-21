@@ -121,12 +121,13 @@ result compact and fetch the full detail only when a step needs inspecting. This
 keeps the token cost of a pipeline near its final answer while every intermediate
 stays one `read` away for debugging.
 
-Scratch of your own — notes, intermediate files, benchmark output, a one-off
-`.sh`/`.py` — belongs in `scratchpad://`, not on the user's disk; what the user
-asked for is an output and goes in the working directory. `read scratchpad://`
-lists it and `read`/`write`/`edit` take `scratchpad://<name>` like any path,
-printing the absolute path behind it. It is this session's own folder and is
-deleted with the session; `guide://scratchpad` has the rest.
+Text scratch of your own — notes, intermediate files, benchmark output, a one-off
+`.sh`/`.py` — belongs in `scratchpad://`: not the working directory, which
+holds what the user asked for, and not `/tmp` (macOS prunes it after three
+days, so a session can outlive its own scratch). `read scratchpad://` lists it,
+and `read`/`write`/`edit` take `scratchpad://<name>` like any path, printing
+the absolute path behind it; it dies with the session. `guide://scratchpad` has
+the rest.
 
 Keep the todo list honest. When a new requirement arrives mid-turn, `add` it
 instead of rewriting the list, and mark items `done` as you finish them rather
