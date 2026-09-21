@@ -661,4 +661,43 @@ DUMP_COMMAND_CASES: tuple[DumpCase, ...] = (
     DumpCase("grep -rn 'password' docs/", False, "a grep for the word"),
     DumpCase("git status", False, "ordinary git work"),
     DumpCase("ls -la ~/.ssh", False, "a directory listing, not a file read"),
+    # --- the file rule's SEPARATOR cases --------------------------------------
+    #
+    # Harvested from 39,111 real bash commands in this machine's session store: 47
+    # of the 74 the file rule fired on had the credential filename in a DIFFERENT
+    # simple command, in a comment, or in a heredoc body than the reading verb —
+    # ordinary work nagged for a token it merely MENTIONED (the operator's words:
+    # "remove the redaction warning just from credentials being used in bash").
+    # The five below are those firings, masked where a path was private.
+    DumpCase(
+        "head -30; echo ---; ls -la .env",
+        False,
+        "the read is of something else; `.env` is a later, unrelated command",
+    ),
+    DumpCase(
+        'cat /tmp/qa/app.log); cd "$QA/tree" && grep -n "VITE_" src/app.ts; ls .env',
+        False,
+        "the command substitution closes before the `.env`, which belongs to a "
+        "later, unrelated command",
+    ),
+    DumpCase(
+        "tail -f app.log # writes .env",
+        False,
+        "a comment is not a read",
+    ),
+    DumpCase(
+        "head -5 README.md; ls -la a.pem",
+        False,
+        "the token belongs to another command on the line",
+    ),
+    DumpCase(
+        "ls -la .env* 2>/dev/null | head; echo ---; git check-ignore .env",
+        False,
+        "the read is the listing; `.env` is an argument to check-ignore",
+    ),
+    # ...and the genuine reads the same harvest found, which must keep firing: a
+    # chained command, a path reached through a variable, and flags then the file.
+    DumpCase("cd /app && cat .env", True, "a chained read of an env file is a read"),
+    DumpCase("tail -c 120 .env | tr -d '\\n'", True, "flags, then the file"),
+    DumpCase("head -c 200 ~/tmp/openrouter_key.env", True, "a key file read through head"),
 )
