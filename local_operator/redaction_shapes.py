@@ -631,29 +631,30 @@ _VENDOR_FIXED_PREFIXES: tuple[str, ...] = (
     "pat_",
 )
 
-#: The token-tail grammar, shared by every vendor prefix: at least 8 token
-#: characters that must include a digit. The digit is the cheapest honest
-#: discriminator between a real issuer token and an ordinary hyphenated name
-#: (``pypi-local-operator.json``); a length floor alone was not enough.
-#: The token-tail grammar, shared by every vendor prefix: NO dot, and at least
-#: 12 characters. Two structural decisions, each measured:
+#: The token-tail grammar, shared by every vendor prefix: a run of at least 8
+#: token characters carrying NO dot. Three structural decisions, each measured:
 #:
+#: * **8 characters, not 12** — pre-existing callers of this pass treat a
+#:   9-character tail as a credential, and a longer floor published it. Reading
+#:   all-letter runs of this length is deliberate: what keeps a NAME among them from
+#:   being read as a token is the GUARD rather than the charset — round 1's own
+#:   repro (``pk-`` plus sixteen letters) is masked precisely because its tail
+#:   carries no separator, and that is :func:`_vendor_tail_guard`'s rule;
 #: * **no dot** — a dot is what a filename has and an issuer token does not, and
 #:   it is what separates ``pypi-local-operator.json`` and
 #:   ``pypi-local-operator.json.<random>.tmp`` (ordinary cache filenames, both
-#:   published while the dot counted toward a length floor) from a real tail;
-#: * **≥12 characters** — long enough to keep round 1's own repro (``pk-`` plus
-#:   16 letters) masked, which the digit-or-20-chars rule published.
+#:   published while the dot counted toward a length floor) from a real tail; the
+#:   lookahead keeps both readable;
+#: * **no digit requirement** — the charset witnesses a token's ALPHABET and
+#:   nothing more. "Must include a digit" was the first attempt at separating a
+#:   token from an ordinary hyphenated name, and it is wrong in both directions: a
+#:   tail of nothing but letters is a credential to the callers above, and a NAME
+#:   may carry digits (``npm_config_manage_package_manager_versions=11.22.0``).
 #:
-#: The third discriminator, an underscore-joined lowercase phrase, is checked by
-#: :func:`_vendor_tail_guard` rather than by the charset: a look-behind cannot
-#: express it (Python requires fixed width), and a guard runs only on a match.
-#: The tail is what distinguishes a token from a name. Eight characters rather than
-#: twelve: pre-existing callers of this pass treat `tvly-ABC123XYZ` (a 9-character
-#: tail) as a credential, and a longer floor published it. The all-letter 8-19
-#: escape window is closed by the GUARD instead — an underscore-joined lowercase
-#: run is a name (`npm_config_update_notifier`) — and the lookahead keeps a
-#: filename (`pypi-local-operator.json`) readable.
+#: The token/name discrimination is therefore the GUARD's, and the reason it is a
+#: guard rather than part of this pattern is representational: a phrase cannot be
+#: spelled in a look-behind (Python requires fixed width), and a guard runs only on
+#: a match, so it costs nothing on text that never reaches a prefix.
 _VENDOR_TAIL = r"[A-Za-z0-9_+/=\-]{8,}(?![A-Za-z0-9.])"
 
 _VENDOR_PATTERN = re.compile(
@@ -1034,26 +1035,100 @@ def _base64_value_guard(match: Match[str]) -> bool:
     return any(char.isupper() for char in value) and any(char.islower() for char in value)
 
 
+#: The NAME FORM of a vendor tail — the NEGATIVE SPACE of the real one, and the
+#: only half of that judgement a regex can spell: lowercase words joined by ``_``
+#: or ``-``, optionally with an ``=value`` assignment appended. A real tail is ONE
+#: unbroken base64-ish run (the npm and PyPI cases in the corpus carry seven
+#: capitals each), while a string made only of lowercase letters and separators is
+#: a NAME someone wrote down, and ``docker_compose_build_args``,
+#: ``npm_config_update_notifier`` and
+#: ``npm_config_manage_package_manager_versions=false`` are all the same thing.
+#:
+#: **What runs here is that NEGATIVE test, and the distinction is the whole of
+#: agent review R1-1.** The positive reading — "a real tail carries mixed case or a
+#: digit" — is true only in the direction that such a tail can never be a NAME; as
+#: a statement of the predicate it is false, because an issuer tail is a random run
+#: that USUALLY carries case or a digit rather than one that must. Only the
+#: negative form is what the code enforces, so only the negative form is written
+#: down here.
+#:
+#: **The ``=value`` arm is what the underscore-only rule missed, and the omission
+#: was expensive.** An environment variable written in PROSE carries its
+#: assignment, so the matched tail is the name AND the value: the old rule
+#: fullmatched ``[a-z]+(?:_[a-z]+)+`` against the whole tail, failed on the ``=``,
+#: and announced the pair as an npm token. On 2026-09-21 that produced an
+#: ESCALATED rotation notice (session ``78e6409f2ba1``, the second firing of this
+#: class — the first is the ``--secret NAME`` case on :func:`_flag_value_guard`).
+#: The escalation, not the mask, is what made it an incident: the tail is 48
+#: characters, ``_FRAGMENT_WINDOW`` is 6, and six-character fragments of an
+#: ordinary name (``config``, ``manage``, ``_versi``) are all over the prose
+#: around it, so ``_credential_fragments_survive`` graded the mask EXPOSED and the
+#: operator was asked to rotate a package-manager toggle. A guard that admits a
+#: name does not merely under-mask: it manufactures a false compromise.
+#:
+#: The two joins are ONE form, not two: ``-`` is the same name spelled the other
+#: way (``npm-config-manage-package-manager-versions``), and both spellings are
+#: already how every prefix in the table is written. The value half is deliberately
+#: character-agnostic (``\S*``) because a value may hold digits, dots and slashes
+#: (``npm_config_cache=/Users/…``) — the arm is anchored on the NAME half, which is
+#: the half that decides.
+#:
+#: **The rule's cost is one class of token, and it is accepted deliberately.** A
+#: tail that is lowercase words joined by separators is a NAME whatever separator
+#: joins it, so an issuer tail spelled that way (``sk-lowercase-words-here``) is
+#: left readable, where the underscore-only rule masked the dash-joined spelling of
+#: it. Measured against ``origin/main``, 29 of the 42 lowercase-word spellings
+#: across both prefix tables change verdict this way — 21 dash-joined, because the
+#: old rule knew only underscores, and 8 underscore-joined under the FIXED table,
+#: whose own ``_`` defeated its own NAME rule — while 0 tails carrying a digit or an
+#: uppercase letter do. That second set is every real issuer token the corpus
+#: knows, and no all-lowercase separator-carrying issuer tail has been observed
+#: anywhere. The trade is taken because the alternative is the false-positive class
+#: above, whose cost is not a missing mask but a manufactured compromise.
+#: ``glpat-lowercase-token-value`` in the corpus pins this boundary, so a real
+#: token of this shape would break a row rather than pass silently.
+#:
+#: A run of lowercase letters with NO separator is untouched by any of this: round
+#: 1's own repro (``pk-`` plus sixteen letters) still masks.
+#:
+#: **One residual is recorded rather than closed, and it is narrower still.** The
+#: ``\S*`` value arm takes anything after the ``=``, so a credential spelled
+#: ``<prefix>-<lowercase words>=<secret>`` survives where the underscore-only rule
+#: masked it. Measured: 0 occurrences across 2.6 GB of the fleet's transcripts, and
+#: a tail carrying mixed case or a digit cannot reach the form. Closing it needs a
+#: predicate on the VALUE half — a wider rule than this fix, with the same
+#: false-positive risk on the other side (QA round 1, Q8).
+_VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[_-][a-z]+)+(?:=\S*)?")
+
+
 def _vendor_tail_guard(match: Match[str]) -> bool:
     """Reject an issuer-looking prefix followed by an ordinary NAME.
 
     ``npm_config_update_notifier`` and ``docker_compose_build_args`` are
     environment variables: lowercase words joined by underscores. A real issuer
-    tail is one unbroken run (``npm_<base64>``, ``docker_pat_…``). The rule's
-    pattern cannot express that without a variable-width look-behind, and a guard
-    costs nothing on text the gate has already skipped.
+    tail is one unbroken run (``npm_<base64>``, ``docker_pat_…``), so what a NAME
+    looks like is its negative space — ``_VENDOR_TAIL_IS_A_NAME`` is the predicate
+    actually applied, and the token/name judgement is stated there rather than
+    restated here. The rule's pattern cannot express a phrase without a
+    variable-width look-behind, and a guard costs nothing on text the gate has
+    already skipped.
+
+    Both prefix tables strip their own separators before the test, because
+    ``whsec``/``lin_api``/``pat_`` spell the separator INSIDE the prefix while
+    ``npm``/``pypi`` spell it in the pattern: a name is a name under either, and
+    the fixed table was the same defect left half-fixed.
     """
     tail = match.group(0)
     for prefix in _VENDOR_SEPARATED_PREFIXES:
         if tail.lower().startswith(prefix.lower()):
-            tail = tail[len(prefix) :].lstrip("_-")
+            tail = tail[len(prefix) :]
             break
     else:
         for prefix in _VENDOR_FIXED_PREFIXES:
             if tail.lower().startswith(prefix.lower()):
                 tail = tail[len(prefix) :]
                 break
-    return not re.fullmatch(r"[a-z]+(?:_[a-z]+)+", tail)
+    return not _VENDOR_TAIL_IS_A_NAME.fullmatch(tail.lstrip("_-"))
 
 
 #: An ENVIRONMENT-VARIABLE (or secret-store NAME) spelling: capitals, digits and
@@ -1814,9 +1889,9 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         # carry is a token this rule can match and the gate will skip. That was a
         # real defect — `pk-`, `rk-`, `hf-` and `npm-` were published verbatim
         # while the rule itself masked them, and the corpus had no `-` variant to
-        # notice. The suffix must also look like a token: at least 8 characters
-        # AND at least one digit, which is what keeps `pypi-local-operator.json`
-        # (a filename, 159 such lines in this repo) readable.
+        # notice. The suffix must also look like a token: at least 8 characters,
+        # no dot, and no digit requirement — the dot is what keeps
+        # `pypi-local-operator.json` (a filename, 159 such lines in this repo) readable.
         _VENDOR_PATTERN,
         None,
         0,
