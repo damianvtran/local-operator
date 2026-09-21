@@ -9,7 +9,12 @@ import time
 import pytest
 
 from local_operator.session.runtime import process as child_mod
-from local_operator.session.runtime.process import _clean_exit, _reaper, _should_exit
+from local_operator.session.runtime.process import (
+    _clean_exit,
+    _clean_ordering_already_ran,
+    _reaper,
+    _should_exit,
+)
 
 
 class FakeRegistrant:
@@ -50,6 +55,17 @@ class FakeHandle:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+async def _finishes_with(value: bool) -> bool:
+    """A stand-in for one of ``_reaper``'s two normal returns."""
+    return value
+
+
+async def _never_finishes() -> bool:
+    """A stand-in for a reaper that is still running (or was cancelled)."""
+    await asyncio.sleep(5)
+    return True
 
 
 @pytest.mark.parametrize(
@@ -161,7 +177,69 @@ async def test_grace_elapses_then_clean_exit(monkeypatch) -> None:
         await asyncio.sleep(0.05)
     assert stop.is_set()
     assert handle.disposed and not handle.denied and reg.closed
-    await task
+    # The exit leg SAYS it ran the clean ordering: that return is what earns
+    # ``amain`` the right to skip its own deny → dispose → aclose block.
+    assert await task is True
+
+
+@pytest.mark.asyncio
+async def test_a_reaper_that_wakes_to_a_stop_reports_no_clean_exit(monkeypatch) -> None:
+    """The stop-wins race (issue #1250): the reaper parks, someone else sets ``stop``.
+
+    This is the return ``amain`` must still owe its own deny → dispose → aclose
+    ordering for. It happens for real whenever a signal drain's bound expires in
+    the same loop iteration as a 0.25 s reaper tick: the drain sets ``stop``, the
+    reaper wakes to find it already set and leaves with nothing disposed. The
+    parent commit read that return through ``reaper.exception() is None`` — which
+    is also ``None`` here — so the whole exit block was skipped: no turn
+    journal exit note (the row kept ``exit_cause=''``, and the SIGTERM cell
+    asserting ``signal_exit_token(row.exit_cause) == "SIGTERM"`` failed with
+    ``'' == 'SIGTERM'`` on ``macos-latest`` over four days (issue #1250), no
+    gate deny and no dispose.
+
+    DETERMINED HERE RATHER THAN RACED: park the reaper on its first tick, set
+    ``stop`` from outside, and read what it says about itself.
+    """
+    monkeypatch.setattr(child_mod, "REAP_CHECK_S", 0.05)
+    handle = FakeHandle()
+    reg = FakeRegistrant(supported=True)
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(_reaper(handle, reg, stop))
+    await asyncio.sleep(0)  # the first tick parks the reaper on its sleep
+    stop.set()
+    assert await task is False
+    # ...and it really did leave the exit to its caller: nothing was touched.
+    assert not handle.disposed and not handle.denied and not reg.closed
+
+
+@pytest.mark.asyncio
+async def test_the_skip_is_earned_only_by_a_clean_exit_return() -> None:
+    """``_clean_ordering_already_ran``: ask the reaper, not the absence of a raise.
+
+    The two normal returns of ``_reaper`` differ only in that value, and a
+    cancelled task raises rather than answering ``None``, so the three cases
+    below are the whole question ``amain`` asks after ``await stop.wait()``.
+    """
+
+    clean = asyncio.ensure_future(_finishes_with(True))
+    stopped = asyncio.ensure_future(_finishes_with(False))
+    await asyncio.gather(clean, stopped)
+    assert _clean_ordering_already_ran(clean) is True
+    assert _clean_ordering_already_ran(stopped) is False
+
+    cancelled = asyncio.ensure_future(_never_finishes())
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert _clean_ordering_already_ran(cancelled) is False
+
+    running = asyncio.ensure_future(_never_finishes())
+    try:
+        assert _clean_ordering_already_ran(running) is False
+    finally:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await running
 
 
 @pytest.mark.asyncio
