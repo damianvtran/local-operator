@@ -42,6 +42,35 @@ them actually moved, plus one bounded authoritative read every
 read. That is what makes detection p50 ~60 ms where the per-session poll's floor
 was 1 s.
 
+COST, CONTINUED — the two 1 s invalidation probes are NOT in that four-stat
+figure, and the authoring one is O(profiles). The catalogue probe is a readdir
+and two stats. The authoring probe cannot be, because the rows it watches are
+FILES whose CONTENT is what changes: its price is one ``readdir`` of each
+registry plus one ``os.stat`` per row (a few dozen stats on a machine with a few
+dozen profiles), and a row's file is READ only when that stat moved — an
+unchanged row costs a stat and no read at all. Both run on
+``CATALOGUE_PROBE_INTERVAL_S``, one second, NOT on the 100 ms tick, so a quiet
+tick still pays exactly the four stats above. The budget is deliberate and
+measured (34 ``agent.yml`` read + filter + ``crc32`` = 1.16 ms against 56.95 ms
+for a ``yaml.safe_load`` + re-dump of the same rows, both measured on this fleet;
+a probe whose stat memory is warm costs 0.31 ms and ZERO file reads — 36
+``stat``/``scandir`` calls for those 34 rows and the two readdirs); deleting the
+per-file term to "restore" the four-stat profile would re-open the defect this
+channel closes, so the count is stated here, in ``docs/DESKTOP_API.md`` and in the
+budget test beside it.
+
+THE AUTHORING CHANNEL. ``authoring`` frames say that the PROFILE and TEAM
+registries moved — a role an agent just authored from inside a session, a team
+created from the app. Nothing in this feed used to mention either: a session could
+create a team and the sidebar's Teams/Agents lists kept showing yesterday's rows
+until a refresh or a tab switch re-mounted the hook. The frame is the
+``catalogue`` one's shape (a monotone ``revision``, no ``session_id``, at most one
+frame per tick) and ``open`` carries ``authoring_revision`` beside
+``catalogue_revision``. The ``authoring`` section of
+``tests/unit/server/test_desktop_feed.py`` holds the two NEGATIVE pins that make it
+worth trusting: a turn's in-place ``agent.yml`` rewrite and an identical
+``system_prompt.md`` save must publish NOTHING.
+
 THE PER-SESSION STATUS CHANNEL. ``session_status`` frames carry the DERIVED
 ``{code, label}`` for one session (the list's own precedence, via
 ``catalog.status_of``) plus a per-session monotone ``revision``, published only
@@ -77,6 +106,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import time
 import zlib
@@ -134,6 +164,47 @@ HEARTBEAT_INTERVAL_S = 15.0
 #: ``sessions.list`` poll this replaces and keeps the feed's own I/O profile
 #: where the design bounds it (four stats per tick).
 CATALOGUE_PROBE_INTERVAL_S = 1.0
+
+#: The two AUTHORING registries under the config dir, and the file each row's
+#: metadata lives in. Spelled here rather than imported: ``AgentRegistry`` and
+#: ``TeamRegistry`` own these paths for their OWN writes, and importing either
+#: module would pull ``dill`` and the rest of the agent-tool stack into the feed's
+#: import graph to obtain two string constants.
+AGENTS_DIRNAME = "agents"
+TEAMS_DIRNAME = "teams"
+
+#: The ``agent.yml`` keys an ordinary TURN rewrites — dropped from the authoring
+#: probe's content projection, and the single most load-bearing line in this
+#: channel.
+#:
+#: ``AgentRegistry.update_agent_state`` is the per-turn persistence path
+#: (``server/utils/operator.py`` calls it after every turn): it funnels into
+#: ``update_agent``, whose ``open("w")`` rewrites ``agent.yml`` IN PLACE — same
+#: size or not, a new ``mtime_ns`` every time. What moved in that rewrite is
+#: ``last_message``, ``last_message_datetime`` (``update_agent`` stamps it whenever
+#: a message is passed) and ``current_working_directory`` (handed through by
+#: ``update_agent_state``). Digesting the file WHOLE would therefore fire the
+#: ``authoring`` frame on every turn of every chat and refetch the sidebar's
+#: profiles and teams 1x per turn — precisely the defect shape this channel exists
+#: to remove. Verified against the writers rather than inferred: ``save_agent`` and
+#: ``create_agent`` write the whole row, ``update_agent`` the same, and this is the
+#: only writer that moves anything without an authored change.
+_AGENT_VOLATILE_KEYS = frozenset(
+    {"last_message", "last_message_datetime", "current_working_directory"}
+)
+
+#: The same projection for ``team.yml`` — EMPTY on purpose rather than absent.
+#: Every key that file carries (id, name, created_date, description, manager,
+#: members) is authored, and ``save_team`` re-dumps the whole row for a no-op save.
+#: Keeping the projection uniform is what lets a future volatile key be added in
+#: one place instead of a second digest implementation.
+_TEAM_VOLATILE_KEYS: frozenset[str] = frozenset()
+
+#: A top-level YAML key line: ``<key>:`` at column 0, which is what both writers
+#: emit for every field. Continuation lines — a block scalar's body, a block
+#: sequence's ``- `` items, blank lines — never match it, so "which key is this line
+#: under" is answered without a YAML parse.
+_YAML_KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*):")
 
 #: THE AUTHORITATIVE STATUS CLOCK. Deliberately slower than the doorbell and
 #: equal to ``CATALOGUE_PROBE_INTERVAL_S``: what it exists for is the transitions
@@ -207,6 +278,52 @@ UNATTRIBUTED_PROBE_MIN_INTERVAL_S = STATUS_PROBE_INTERVAL_S
 #: than by convention: the two are the same promise on two transports, and two
 #: hand-maintained 3s are one edit away from disagreeing about it.
 BURST_LIMIT = 3
+
+
+def _authoring_projection(text: str, volatile: frozenset[str]) -> str:
+    """The AUTHORED lines of one registry row, with the volatile ones dropped.
+
+    A LINE FILTER rather than a parse, because it runs on the feed's one-second
+    clock: read + filter + ``crc32`` over 34 ``agent.yml`` measures 1.16 ms, where
+    ``yaml.safe_load`` + re-dump of the same rows measures 56.95 ms (both measured
+    on this fleet). The parse is not affordable at 1 Hz for the amount it buys here:
+    the projection only has to answer "did anything the user AUTHORED move", and
+    the keys that answer it are exactly the lines.
+
+    WHAT IT CANNOT SEE, stated because a projection is only as good as its
+    filter: a key this module does not know is volatile, and that a future writer
+    starts stamping per turn, would fire a frame per turn again. The projection is
+    therefore pinned by a test (``test_the_authoring_projection_drops_the_turn_keys``)
+    and by the two negative pins above it, rather than trusted to stay true.
+    """
+    kept: list[str] = []
+    keeping = True
+    for line in text.splitlines():
+        match = _YAML_KEY_RE.match(line)
+        if match is not None:
+            keeping = match.group(1) not in volatile
+        if keeping:
+            kept.append(line)
+    return "\n".join(kept)
+
+
+def _authoring_digest(path: Path, volatile: frozenset[str]) -> int | None:
+    """``crc32`` of one row file's projected content, or ``None`` when it is absent.
+
+    A STABLE digest rather than ``hash()``, for the catalogue token's own reason:
+    Python salts string hashing per process, so a ``hash()`` here would report a
+    change to every client that reconnects to a restarted backend. Absent is a
+    TERM rather than an error (``None``) — the create of a row's file moves the
+    token, and the delete of one moves it back.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # A row mid-rewrite, or one this process cannot read: both are "no content
+        # to compare yet" rather than a reason to take the poller down. The next
+        # probe reads the finished file.
+        return None
+    return zlib.crc32(_authoring_projection(text, volatile).encode()) & 0x7FFFFFFF
 
 
 def _fingerprint(path: Path) -> tuple[int, int, int] | None:
@@ -382,6 +499,46 @@ class DesktopFeed:
         #: them.
         self._catalogue_emitted_tick = -1
         self._tick_index = 0
+
+        # -- the authoring channel (profiles and teams) -------------------------
+        #: The two registries a session can AUTHOR into: ``agents/<id>/agent.yml``
+        #: (the profile/role rows the ``agent`` tool writes) and
+        #: ``teams/<id>/team.yml`` (the rows ``POST /v1/desktop/teams`` writes).
+        #: Paths only — nothing here constructs a registry, because a registry
+        #: mkdirs on construction and this feed must never be the process that
+        #: creates a directory (see the module docstring's reader rule).
+        self.agents_dir = root / AGENTS_DIRNAME
+        self.teams_dir = root / TEAMS_DIRNAME
+        #: When the authoring token was last recomputed. Its own clock rather than
+        #: the catalogue's, so each probe can be gated independently in a test —
+        #: the two measure different claims — while both run on
+        #: ``CATALOGUE_PROBE_INTERVAL_S``. No second interval constant: the cadence
+        #: is the invalidation cadence, and a second number here would be a second
+        #: clock to keep in step for no reason.
+        self._authoring_probed_at = 0.0
+        #: The monotone counter clients compare against, for the catalogue
+        #: counter's own reason (a repeatable hash token cannot tell a client "this
+        #: is new"). ``open`` reports this value, so a connecting client's view is
+        #: expressed in the currency the frames use.
+        self._authoring_revision = 0
+        #: The last token the counter was compared against — ``None`` until the
+        #: connection baseline sets it, which is what keeps a reconnecting client
+        #: from being told about a change that predates its connection.
+        self._authoring_token: int | None = None
+        #: Set when the token moved and cleared when the frame carrying it is
+        #: published.
+        self._authoring_invalidated = False
+        #: The tick the counter last published in, so a burst of authored rows — a
+        #: plan that creates four profiles — costs ONE refetch rather than four.
+        self._authoring_emitted_tick = -1
+        #: Per-row stat memory for the content projection: ``path -> (stat
+        #: fingerprint, projected digest)``. This is what makes the probe O(stats)
+        #: rather than O(reads) — a row whose stat did not move is never re-read,
+        #: and an idle probe reads nothing at all (pinned by
+        #: ``test_the_authoring_probe_reads_nothing_when_nothing_moved``). Rebuilt
+        #: per probe from the rows that probe actually saw, so a deleted row cannot
+        #: leave an entry behind.
+        self._authoring_files: dict[Path, tuple[tuple[int, int, int] | None, int | None]] = {}
 
         # -- the per-session status channel ------------------------------------
         #: The discovery-record directory (``run/mobile``). Resolved HERE as a
@@ -789,6 +946,12 @@ class DesktopFeed:
         # set that has not moved since the connection is not an invalidation —
         # the same no-replay rule the attention baseline applies to the revision.
         self._catalogue_token = _token
+        # The AUTHORING baseline, on the same rule and for the same reason: a
+        # profile or a team that predates this connection is not news to it (its
+        # sidebar is loading both lists right now), and priming the token rather
+        # than the clock means the first tick re-probes and still publishes
+        # nothing — so a change landing in that first second is still caught.
+        self._authoring_token = self._authoring_probe()
         candidates = [*records, *self._wake_index, *names]
         states = self.store.state_many([f"session/{session_id}" for session_id in candidates])
         for identity, state in states.items():
@@ -905,6 +1068,15 @@ class DesktopFeed:
         # it; the once-per-tick guard inside ``_maybe_emit_catalogue`` keeps a
         # burst of simultaneous transitions at one refetch.
         await self._maybe_emit_catalogue()
+        # 6. THE AUTHORING INVALIDATION. Outside the doorbell branch, like steps 3
+        # and 4, because neither registry lives under a directory the doorbell
+        # stats at all — a profile an agent authored from a session, or a team
+        # created from the app, moves nothing this tick already looks at. The rows
+        # are FILES rather than a directory listing, so this probe is O(rows) in
+        # stats: the number is stated in the module docstring and in the budget
+        # test rather than left to be read as a regression of the four-stat tick
+        # above — it runs on the 1 s cadence, not on the tick.
+        await self._maybe_emit_authoring()
 
     async def _maybe_probe_unattributed(self) -> None:
         """The doorbell's unattributed-move fallback, RATE-LIMITED (NIT 1).
@@ -1331,6 +1503,137 @@ class DesktopFeed:
         )
         return zlib.crc32(key.encode()) & 0x7FFFFFFF, tuple(names)
 
+    # -- authoring (profiles and teams) --------------------------------------
+
+    async def _maybe_emit_authoring(self) -> None:
+        """The authoring invalidation: a profile or a team was authored, or removed.
+
+        THE THIRD COPY OF THE ``catalogue`` SHAPE, deliberately rather than a
+        shared abstraction: the two channels differ in their probe (a readdir
+        against a readdir plus an O(rows) content projection), in what a changed
+        row means, and in nothing else — and the shape they do share is four
+        lines of counter arithmetic whose only invariant is "monotone, at most
+        one per tick". A helper taking a probe callable would hide the one thing
+        a reader has to see here: WHICH probe can move without a write, and why.
+
+        THE FRAME CARRIES ONLY THE REVISION. A burst collapses to at most one
+        frame per tick, so a per-name diff — "these three profiles appeared" — is
+        not expressible: the frame says "your profile and team lists are stale",
+        and the lists the client already knows how to fetch are the answer. A
+        second read per frame to build a diff would put back exactly the cost
+        this channel removed.
+
+        ``CATALOGUE_PROBE_INTERVAL_S``, not a constant of its own: both probes are
+        invalidations of a sidebar list, the catalogue's own comment already argues
+        one second as the cadence a person cannot distinguish from live, and a
+        second interval would be a second clock to keep in step for no gain.
+        """
+        now = time.monotonic()
+        if now - self._authoring_probed_at >= CATALOGUE_PROBE_INTERVAL_S:
+            self._authoring_probed_at = now
+            token = await asyncio.to_thread(self._authoring_probe)
+            if token != self._authoring_token:
+                self._authoring_token = token
+                self._authoring_invalidated = True
+        if not self._authoring_invalidated:
+            return
+        if self._authoring_emitted_tick == self._tick_index:
+            return
+        self._authoring_invalidated = False
+        self._authoring_emitted_tick = self._tick_index
+        self._authoring_revision += 1
+        self._publish("authoring", {"revision": self._authoring_revision})
+
+    def _authoring_probe(self) -> int:
+        """A cheap invalidation token for the PROFILES and TEAMS registries.
+
+        THREE TERMS: the row NAME SET of each registry (one ``readdir`` each) and
+        the CONTENT PROJECTION DIGEST of each row's metadata file. The file term is
+        what the name set cannot express — an edit that changes what a row SAYS —
+        and it is a projection over the AUTHORED lines rather than a digest over the
+        bytes, because the ordinary per-turn persistence path rewrites
+        ``agent.yml`` in place on every turn (see ``_AGENT_VOLATILE_KEYS``):
+        digesting the bytes would fire this frame on every turn of every chat.
+
+        WHY NO ``_fingerprint()`` OF THE TWO DIRECTORIES, which is the one place
+        this probe departs from the signed-off design — recorded here rather than
+        quietly omitted, because a reader will ask why the catalogue's token has a
+        directory stat and this one does not. A ``teams/`` mtime is not merely a
+        redundant term beside the name set: ``save_team`` publishes EVERY save
+        through ``tempfile.mkdtemp`` plus two ``os.replace`` calls INSIDE
+        ``teams/`` (``_swap_row_directory_locked``), so its ``mtime_ns`` moves on a
+        save that changed nothing at all — measured HERE, at implementation time,
+        as a no-op ``save_team`` moving ``teams/``'s ``mtime_ns`` — and the frame
+        would then fire once per team save, which is the class of spurious
+        refetch this channel exists to remove. ``agents/``'s stat is the same term
+        without the same harm (nothing writes a temp entry into it), so it is left
+        out for the reason the name set is the whole story for create and delete
+        in BOTH registries: a row's directory cannot appear or vanish without its
+        NAME moving, and the name set is the readdir we already pay for.
+
+        WHAT IT CANNOT SEE, the honest limit, stated because the client's backstop
+        is what covers it: the per-row term is guarded by a STAT comparison, so an
+        in-place edit that leaves ``(ino, size, mtime_ns)`` unchanged — a
+        coarse-resolution filesystem, a hand-edited file restored with its own
+        timestamp — is missed. The catalogue probe carries the same class of miss
+        (its own comment says so), and the desktop app's refetch on window focus
+        and on mount is the backstop for both. A profile's ``system_prompt.md``
+        (which is where the ``agent`` tool stores INSTRUCTIONS, not ``agent.yml``)
+        is deliberately NOT a term: it is not what either list renders, and adding
+        it would put a second file per profile on the probe.
+
+        A READER IN THE STRONG SENSE, like every other probe here: an absent
+        directory is an empty row set and an absent row file is a ``None`` term.
+        Nothing on this path mkdirs, touches, or repairs anything — a feed that
+        created ``agents/`` would be creating registry state, which is what
+        ``tests/unit/server/test_desktop_feed.py`` pins for this probe too.
+        """
+        parts: list[str] = []
+        cache: dict[Path, tuple[tuple[int, int, int] | None, int | None]] = {}
+        for directory, filename, volatile in (
+            (self.agents_dir, "agent.yml", _AGENT_VOLATILE_KEYS),
+            (self.teams_dir, "team.yml", _TEAM_VOLATILE_KEYS),
+        ):
+            names = self._authoring_row_names(directory)
+            parts.append(",".join(names))
+            for name in names:
+                path = directory / name / filename
+                fingerprint = _fingerprint(path)
+                previous = self._authoring_files.get(path)
+                if previous is not None and previous[0] == fingerprint:
+                    digest = previous[1]
+                else:
+                    digest = _authoring_digest(path, volatile)
+                cache[path] = (fingerprint, digest)
+                parts.append(f"{name}={digest}")
+        # The stat memory is REBUILT from the rows this probe saw, never appended
+        # to, for the catalogue's own reason: what it may hold is bounded by the
+        # registry as it is, so a backend up for weeks does not accumulate one
+        # entry per row the machine has ever had.
+        self._authoring_files = cache
+        return zlib.crc32("|".join(parts).encode()) & 0x7FFFFFFF
+
+    @staticmethod
+    def _authoring_row_names(directory: Path) -> tuple[str, ...]:
+        """The row names directly under one registry directory, sorted — one readdir.
+
+        DOT-PREFIXED ENTRIES ARE NOT ROWS, which is ``TeamRegistry._load``'s own
+        rule and load-bearing here rather than defensive: the team writer stages
+        and swaps every save through ``.<id>.<rand>`` and ``.<id>.backup.<rand>``
+        directories INSIDE ``teams/``, so counting them would make the probe
+        report a moved token during a save that changed nothing. A team id is
+        validated to ``[A-Za-z0-9._-]`` and an agent id is a uuid4, so no authored
+        row can be hidden.
+        """
+        try:
+            with os.scandir(directory) as entries:
+                return tuple(
+                    sorted(entry.name for entry in entries if not entry.name.startswith("."))
+                )
+        except OSError:
+            # Absent, or unreadable: no rows, and no attempt to create it.
+            return ()
+
     # -- the per-session status channel -------------------------------------
 
     def status_stamps(self) -> tuple[str, dict[str, int]]:
@@ -1714,8 +2017,8 @@ class DesktopFeed:
     # -- the open frame ----------------------------------------------------
 
     async def _open_frame(self, subscription: FeedSubscription) -> dict[str, Any]:
-        """The connection's snapshot: attention state and a catalogue revision."""
-        attention, catalogue_revision = await asyncio.to_thread(self._snapshot)
+        """The connection's snapshot: attention state and the two invalidation counters."""
+        attention, catalogue_revision, authoring_revision = await asyncio.to_thread(self._snapshot)
         return self._frame(
             "open",
             {
@@ -1724,12 +2027,13 @@ class DesktopFeed:
                 "lease_seconds": WATCH_TTL,
                 "watch_ttl_seconds": WATCH_TTL,
                 "catalogue_revision": catalogue_revision,
+                "authoring_revision": authoring_revision,
                 "attention": attention,
             },
         )
 
-    def _snapshot(self) -> tuple[dict[str, dict[str, Any]], int]:
-        """Every user session's attention state, plus the catalogue revision.
+    def _snapshot(self) -> tuple[dict[str, dict[str, Any]], int, int]:
+        """Every user session's attention state, plus both invalidation counters.
 
         Deliberately NOT the catalogue's rows: those carry a preview read per
         row, and putting that on the feed would move the sidebar's cost rather
@@ -1756,4 +2060,14 @@ class DesktopFeed:
         self._catalogue_probed_at = time.monotonic()
         identities = [f"session/{name}" for name in names if self._user_session(name)]
         states = self.store.state_many(identities) if identities else {}
-        return states, self._catalogue_revision
+        # The AUTHORING counter is reported WITHOUT re-probing the registries, which
+        # is the one place the two invalidation channels' snapshots differ. The
+        # catalogue probe above is already being paid here (its names are what the
+        # attention baseline is built from), so priming ITS token is free; the
+        # authoring probe is an O(rows) stats walk with no other caller on this
+        # path, and paying it per connection to set a token whose only job is to
+        # suppress the next tick's frame would be buying one refetch's silence with
+        # a scan. The no-replay rule is instead owned by the connection BASELINE
+        # (`_prime_status`, which every poller start runs): a profile or a team that
+        # predates the connection is already in the lists the client is loading.
+        return states, self._catalogue_revision, self._authoring_revision
