@@ -4713,8 +4713,17 @@ class ServingSessionHandle(SessionHandle):
             # offers a command the same connection is refused is the defect this
             # round is fixing — so the report is TOLD rather than guessing, and a
             # handle that serves every connection alike cannot guess.
+            #
+            # AND THIS ``may_loosen`` LINE IS THE ONE THAT STAYS (review MINOR-1 =
+            # QA Q15-1, round 15). The fold onto ``main`` left the plain
+            # ``self._approvals_slash(session, args, SlashResult)`` form unreachable
+            # directly below it; dropping that dead line must not tempt anyone into
+            # dropping this one, because the plain form would then BECOME live — a
+            # plausible-looking "cleanup" that silently un-fixes #1310 for every
+            # connection that CAN loosen, and no gate can see it: pyright sets no
+            # ``reportUnreachable`` and flake8 has no unreachable check, so CI stays
+            # green either way. The dead line is gone; this argument is not.
             return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
-            return self._approvals_slash(session, args, SlashResult)
         if command == "archive":
             return self._archive_slash(session, True, SlashResult)
         if command == "unarchive":
