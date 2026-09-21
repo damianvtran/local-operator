@@ -5287,10 +5287,14 @@ _UNEXPANDED_SHELL = re.compile(r"[$`]")
 _MISSING_TOOL_SIGNATURE = re.compile(
     # zsh puts the SHELL and the interjection FIRST and the name LAST.
     r"(?P<zsh_name>(?:bash|zsh|sh|dash|ksh): command not found: (?P<zsh_cmd>[^\s]{1,64}))"
-    # bash prefixes the failing line when the failure comes from a sourced line
-    # or a function, `bash: line 1: cmd: command not found`. Matched before the
-    # plain form, which would otherwise anchor on `line 1`.
-    r"|(?P<lineno_name>line \d{1,6}: (?P<lineno_cmd>[^:\n]{1,64}): command not found)"
+    # bash (and dash/sh) prefix the failing line when the failure comes from a
+    # sourced line, a function or a non-interactive `-c` invocation, which is
+    # what this tool itself runs: `bash: line 1: cmd: command not found`,
+    # `sh: 1: cmd: not found`. Matched before the plain form, which would
+    # otherwise anchor on `line 1`. The `line` keyword is optional because dash
+    # writes the number alone.
+    r"|(?P<lineno_name>[^:\n]{0,64}?: (?:line )?\d{1,6}: "
+    r"(?P<lineno_cmd>[^:\n]{1,64}): (?:command )?not found)"
     # LINE-ANCHORED, and that anchor is what stops this arm from swallowing the
     # Windows diagnostics: `<anything>: command not found` matched mid-line, so
     # `'winget' is not recognized as an internal or external command` was read as

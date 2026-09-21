@@ -5363,9 +5363,11 @@ async def test_a_present_tool_that_failed_is_never_nudged(tmp_path, monkeypatch)
     )
 
     # A working tool asked for a file that is not there: non-zero exit, no
-    # "no such command" line, and therefore no advisory.
+    # "no such command" line, and therefore no advisory. The exit code itself is
+    # NOT asserted: `ls` exits 1 on macOS and 2 on Linux, and pinning one of them
+    # passes locally and fails in CI's container.
     assert result.is_error is False
-    assert "exit code: 1" in result.text
+    assert not result.text.startswith("exit code: 0"), result.text
     assert "missing tool" not in result.text, result.text
 
 
@@ -5399,6 +5401,9 @@ async def test_a_host_without_a_console_gets_no_install_nudge(tmp_path, monkeypa
         ("zsh: command not found: magick\n", "magick"),
         ("bash: line 1: tesseract: command not found\n", "tesseract"),
         ("tesseract: command not found\n", "tesseract"),
+        # dash/POSIX sh, which is what `sh -c` is on Debian and Ubuntu: the
+        # `line` keyword is absent and the interjection drops `command`.
+        ("sh: 1: yt-dlp: not found\n", "yt-dlp"),
         # The shell's FILE form is NOT a missing command: `cd` exists and the
         # directory does not. Matching it reported `cd` as a tool to install.
         ("bash: cd: /nope: No such file or directory\n", ""),
@@ -5470,3 +5475,29 @@ def test_the_signature_is_linear_in_the_size_of_the_stderr(monkeypatch) -> None:
 def test_the_signature_scan_returns_nothing_without_a_context() -> None:
     """It rides a tool result; without a session there is nobody to advise."""
     assert builtin._missing_tool_notice("bash: ffmpeg: command not found\n", None) == ""
+
+
+def test_the_signature_matches_a_real_shells_real_output() -> None:
+    """The rows above are strings written from memory; this one is the shell's.
+
+    Written because a hand-written row would not have caught the shape the real
+    shell produces here, and the whole notice is worthless if it misses the only
+    line that actually arrives. The child is the same interpreter the `bash`
+    tool resolves (`/bin/bash -c`, which dash and zsh spell differently again),
+    and the assertion is on the COMMAND it names, not on the wording — so a
+    shell that changes its message fails this test rather than silently
+    disabling the notice.
+    """
+    missing = "lop-no-such-tool-xyz"
+    completed = subprocess.run(
+        ["/bin/bash", "-c", f"{missing} --help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode != 0
+    match = builtin._MISSING_TOOL_SIGNATURE.search(completed.stderr)
+    assert match is not None, f"the shell's own line did not match: {completed.stderr!r}"
+    assert builtin._missing_tool_name(match) == missing, completed.stderr
