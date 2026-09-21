@@ -2430,6 +2430,49 @@ def test_the_live_stream_files_only_an_exposure() -> None:
     assert _feed(session, _exposed_text()) == [True], "an exposure stopped being filed"
 
 
+def test_a_value_the_pipe_masked_is_registered_for_the_rest_of_the_session() -> None:
+    """The pipe is the ONE masking surface the store never sees raw text from.
+
+    Agent review R1/E1. ``_PipeRedactor`` masks a running command's bytes, so the
+    text the result path later hands ``VariableStore.redact_with_report`` already
+    carries the marker: that pass matches nothing, which left the value contained
+    for exactly one result and a later bare reuse of it — a spelling the shape
+    table has no rule for — readable. Measured before the fix, on the shape this
+    feature exists for (a credential in the command's OUTPUT only and nowhere in
+    the command): ``registered values: 0`` and the reuse in the clear. The MASK
+    never moved — only the registration was missing — so this test pins the
+    registration and the reuse, not the mask.
+    """
+    # Assembled rather than written whole, so this file keeps spelling no
+    # credential-shaped literal of its own (the same convention as SENTINEL
+    # above). Fed in two halves so the pipe's release point is what completes the
+    # line: registration has to survive the chunk boundary, not just one read.
+    password = "unit" + "pipe" + "9x7"
+    payload = f"MONGO_DSN=mongodb+srv://svc:{password}@db.invalid/x\n".encode()
+    half = len(payload) // 2
+    store = VariableStore(cwd=".")
+    redactor = builtin._PipeRedactor([], contain=builtin._shape_containment_sink(store))
+    masked = redactor.feed(payload[:half]) + redactor.feed(payload[half:])
+    masked += redactor.feed(b"", final=True)
+    assert REDACTION_MARKER in masked.decode(), "the pipe stopped masking its own hit"
+    assert password in store.redaction_values(), "the pipe masked a value it did not contain"
+    assert store.redact(f"prefix-{password}-suffix") == f"prefix-{REDACTION_MARKER}-suffix"
+
+
+def test_a_pipe_redactor_with_no_store_still_masks_and_contains_nothing() -> None:
+    """The historic single-argument construction: masking unchanged, no sink.
+
+    ``contain`` is optional because a third-party embedder's store — and every
+    bare tool test — constructs this filter with values alone. Those callers get
+    exactly the behaviour they had before E1's fix: the bytes are masked and
+    nothing is registered, which is a masking-only contract rather than a fault.
+    """
+    payload = f"MONGO_DSN=mongodb+srv://svc:{'unit' + 'pipe' + '9x7'}@db.invalid/x\n".encode()
+    masked = builtin._PipeRedactor([]).feed(payload)
+    assert REDACTION_MARKER in masked.decode()
+    assert builtin._shape_containment_sink(object()) is None
+
+
 def test_a_contained_report_cannot_file_by_any_route() -> None:
     """The gate is the SINK's, so every producer inherits it — including a new one.
 
