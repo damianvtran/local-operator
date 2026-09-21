@@ -7262,9 +7262,13 @@ class Session:
         # runtime path (which calls both) narrates exactly once.
         await self._journal_restored_cut_off()
         # The read that carries the reconcile answer, and the one the incident's
-        # log shows dying (36 of its 60 lock lines). It is retried inside the store
-        # (`AttentionStore._retry_read`), and a budget that still ran out degrades
-        # HERE rather than propagating, for the reason the write arm above does:
+        # log shows dying: 36 of its 60 `database is locked` occurrences, and all
+        # 36 of those are the daemon's scan records -- a scan record carries the
+        # phrase once, so the read class's RECORD and OCCURRENCE counts coincide
+        # here and the number alone does not say which unit it is in. It is retried
+        # inside the store (`AttentionStore._retry_read`), and a budget that still
+        # ran out degrades HERE rather than propagating, for the reason the write
+        # arm above does:
         # this runs on request paths (the runtime's refresh op, the mobile handle,
         # the desktop poll), and the caller asked for a receipt, not for a store
         # read. The previous state stands and the next tick re-reads it, which is

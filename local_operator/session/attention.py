@@ -1660,15 +1660,20 @@ class AttentionStore:
         MAJORITY of the incident: 36 RECORDS of the daemon's own scan dying
         inside `revision -> _uninitialized`, against 12 records on the publish
         path, over the 60 `database is locked` text OCCURRENCES in the
-        operator's log -- two units, not one, because a record such as the
-        publish one carries the phrase twice (36/12/1 records, 38/21/1
-        occurrences). Closing
-        the exposed window to 5 s (what this PR did first) left those 36 exactly
-        as they were -- they were merely given a larger window before failing,
-        with the phone's read routes still answering 500 on a lock the window
-        could not outlast (review round 1, Q-2). A read that raises costs the
-        caller its whole tick or its whole response, so it is ridden out like a
-        write, not just widened.
+        operator's log -- two units, not one. Each scan record carries the
+        phrase once and each publish record twice (its own header plus the last
+        line of its traceback), so the same log reads (36/12/1 records,
+        36/24/0 occurrences): the ASGI record carries the phrase zero times,
+        which is why the records sum to 49 and the occurrences to 60. Round-3
+        review MINOR-1 and round-3 QA Q-3 are the reason those two splits are
+        spelled out instead of asserted: the 38/21/1 this paragraph used to
+        print contradicted its own `12 x 2` and had no record behind the "1".
+        Closing the exposed window to 5 s (what this PR did first) left those 36
+        exactly as they were -- they were merely given a larger window before
+        failing, with the phone's read routes still answering 500 on a lock the
+        window could not outlast (review round 1, Q-2). A read that raises costs
+        the caller its whole tick or its whole response, so it is ridden out like
+        a write, not just widened.
 
         WHY A RETRY IS SAFE HERE, where `publish` needs an idempotency argument.
         The operation runs on a ``mode=ro`` connection: it holds SHARED, writes

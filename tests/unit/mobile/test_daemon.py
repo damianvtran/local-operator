@@ -1754,7 +1754,10 @@ async def test_a_deferred_attention_read_degrades_the_listing_instead_of_raising
     budget raised ``AttentionReadDeferred`` straight out of ``summaries``, so the
     phone's ``GET /api/sessions`` answered 500 while its neighbours degraded. The
     arms asserted here are what make it answer: the rows are kept, their last
-    TRUE marks are kept, and the failure is named in the list the marker already
+    truly READ marks are kept -- recency, not current truth, so a completion that
+    lands or is acknowledged during the outage stays invisible to the marks until
+    the next successful read, which ``degraded: ["attention"]`` is the only thing
+    to disclose -- and the failure is named in the list the marker already
     travels in.
 
     Injected at the CLASS, which pins THIS call site rather than the store: an
@@ -1788,8 +1791,12 @@ async def test_a_deferred_attention_read_degrades_the_listing_instead_of_raising
 
     assert [row["session_id"] for row in degraded] == ["aaaaaaaaaaaa"]
     assert [row["unseen"] for row in degraded] == [True], (
-        "a deferred read must keep the last TRUE marks: every completion reading "
-        "as already seen is the confident negative this store exists to stop"
+        "a deferred read must keep the marks of the last read that SUCCEEDED: "
+        "this completion was unread then, and re-deriving from defaults is the "
+        "``unseen: false`` the store exists to stop. The guarantee is recency, "
+        "NOT current truth -- a completion landing or acked while the read is "
+        "deferred stays invisible here until the next successful read, and "
+        "``degraded: ['attention']`` is what discloses it"
     )
     assert table.listing_degraded() == ["attention"]
 
