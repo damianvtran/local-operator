@@ -58,6 +58,12 @@ def _consumer_defaults() -> dict[str, object]:
         AUDIT_MAX_AGE_DAYS,
         AUDIT_MAX_BYTES,
     )
+
+    # The relay's pre-auth cap, from the module that reads it:
+    # ``NetworkSettings.from_config`` resolves an absent key against
+    # ``DEFAULT_MAX_HANDSHAKES``, so a registry default that disagrees with it is a
+    # page advertising a number the accept loop will not honour.
+    from local_operator.network.relay import DEFAULT_MAX_HANDSHAKES
     from local_operator.providers.failover import (
         CONNECTIVITY_BACKOFF_CAP_MS,
         CONNECTIVITY_MAX_RETRIES,
@@ -131,6 +137,7 @@ def _consumer_defaults() -> dict[str, object]:
         "network.audit.max_bytes": AUDIT_MAX_BYTES,
         "network.audit.generations": AUDIT_GENERATIONS,
         "network.audit.max_age_days": AUDIT_MAX_AGE_DAYS,
+        "network.max_handshakes": DEFAULT_MAX_HANDSHAKES,
         # The reader's own fallback, which is also what every unrecognised
         # shape resolves to — so the page cannot advertise a default the
         # delegating model's tier picker disagrees with.

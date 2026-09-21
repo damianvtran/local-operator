@@ -8,6 +8,8 @@ import stat
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from local_operator.network import audit as audit_mod
 from local_operator.network.audit import AuditEvent, AuditLog
 from local_operator.network.store import audit_path
@@ -38,6 +40,58 @@ def test_one_line_per_semantic_event(root: Path) -> None:
     assert records[0]["schema"] == audit_mod.SCHEMA
     assert records[0]["ts_iso"].endswith("Z")
     assert len(records[0]["ts_iso"]) == len("2026-01-01T00:00:00.000Z")
+
+
+def test_a_flush_inside_the_write_window_publishes_the_record_once(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One event, one line, even when a second flush lands mid-write.
+
+    THE INSTRUMENT IS THE EVENT, NOT A COUNTED RACE. The relay flushes this writer
+    from four threads — the accept loop, each handshake thread, the control loop and
+    the heartbeat — and they used to read ONE buffer into two payloads, so the log
+    held the same record twice with an identical ``seq`` and ``ts``. That was the
+    whole of the cap-drop e2e flake
+    (``test_relay_e2e.py::test_a_cap_drop_names_itself_in_the_local_audit``, 3 of 30
+    isolated runs) and it is a corruption of the artifact an incident is
+    reconstructed from: "this happened twice" is a different story from "this
+    happened once". Firing threads at the writer would catch it only when the
+    scheduler cooperated, so the interleaving is driven instead — the second flush
+    is issued from INSIDE the window between the payload being taken and the file
+    being opened, which is where two concurrent flushers actually meet.
+
+    The file is the assertion: one ``record`` call, one line. A writer that clears
+    its buffer after the disk write fails this deterministically; so does one that
+    joins the buffer without a lock.
+    """
+    log = AuditLog(root)
+    path = audit_path(root)
+    real_open = Path.open
+    reentered = False
+
+    def gated_open(self: Path, *args: Any, **kwargs: Any) -> Any:
+        """``Path.open``, with a flush issued inside the audit writer's write.
+
+        Guarded on the FIRST open of the audit path so the re-entrant flush's own
+        open goes straight through — one interleaving, not a recursion.
+        """
+        nonlocal reentered
+        handle = real_open(self, *args, **kwargs)
+        if self == path and not reentered:
+            reentered = True
+            log.flush()
+        return handle
+
+    monkeypatch.setattr(Path, "open", gated_open)
+    log.record(
+        AuditEvent(event="handshake_refused", network_id=NETWORK, detail={"cause": "handshake_cap"})
+    )
+    assert reentered, "the interleaving never happened, so this test proved nothing"
+
+    records = _lines(root)
+    assert len(records) == 1, records
+    assert records[0]["event"] == "handshake_refused"
+    log.close()
 
 
 def test_cost_is_per_semantic_event_and_not_per_frame(root: Path) -> None:

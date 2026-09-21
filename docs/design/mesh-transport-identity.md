@@ -828,7 +828,12 @@ Field notes that matter for implementation:
   nicety: Nebula's 1-year certificates, Tailscale's 180-day node keys, and
   OpenZiti's 24-hour enrolment token are all bounded lifetimes, and every one of
   those systems pairs them with exactly our handshake-step-6 membership
-  re-evaluation (`mesh-prior-art.md` §2).
+  re-evaluation (`mesh-prior-art.md` §2). **NOT IMPLEMENTED IN THIS BUILD — read
+  this bullet as the intended SCHEMA, not as a description of the tree:**
+  `SecretState` carries no `minted_at`, nothing reads `network.epoch_max_age_s`
+  (§11's row), and no phase decision consults an age. The bound is deferred
+  rather than half-built, because the reconcile half it ends on has no client
+  here, and §8.4's STATUS note is the record of both that and why.
 
 ---
 
@@ -2169,10 +2174,18 @@ its `_consumer_defaults()` entry (`AGENTS.md`, "Adding a configuration key").
 | `network.queue_bytes` | `("network","queue_bytes")` | `8388608` | `network/link.py` |
 | `network.max_inflight` | `("network","max_inflight")` | `64` | `network/server.py` |
 | `network.max_links` | `("network","max_links")` | `32` | `network/server.py` |
-| `network.epoch_max_age_s` | `("network","epoch_max_age_s")` | `2592000` (30 days — a policy statement about the operator's device-loss window, not a derived number; §8.4) | `network/membership.py:epoch_is_aged` (§8.4) |
+| `network.max_handshakes` | `("network","max_handshakes")` | `8` | `network/relay.py:NetworkSettings.from_config` (§2.1) — UNAUTHENTICATED connections in flight, not links: the slot is released when the handshake resolves, so this bounds neither `max_links` nor an established link |
+| `network.epoch_max_age_s` | `("network","epoch_max_age_s")` | `2592000` (30 days — a policy statement about the operator's device-loss window, not a derived number; §8.4) | quoted here only: **NOT IMPLEMENTED in this build** — no consumer exists (`network/membership.py:epoch_is_aged` is named by the design and is not in the tree), `SecretState` carries no epoch mint time, and no phase decision consults an age; §8.4's STATUS note is the record of the deferral |
 
 Audit retention keys are `mesh-incident-response.md`'s. Nothing here is a secret,
-so every key is `--json`-safe and `/settings`-visible.
+so every key is `--json`-safe. **The registry half is a SECTION-WIDE GAP, and this
+table must not be read as "all of these are in `/settings`":** the keys in the
+registry today are `network.max_handshakes` (added by the round that introduced it)
+and the audit retention keys; the transport and link keys above are read out of
+`config.yml` by `NetworkSettings.from_config`, which is a different mechanism from
+the registry and does not appear on the page. Recorded here rather than papered
+over, because a table whose closing line claims visibility is how an operator
+comes to edit a key nobody reads.
 
 ---
 
@@ -2373,12 +2386,14 @@ Membership and revocation:
   `<config>/network/outbox/`: none may contain the rotated secret or a value that
   derives the epoch key, and the entry for the removed member, if it exists at
   all, has `secret: null`.
-- `test_epoch_older_than_max_age_reconciles_only_and_rotates` (§8.4) — with
-  `network.epoch_max_age_s` set to 1 s and a live two-device pair, assert the
-  next handshake lands in `reconcile` phase, that a `prompt` over it is
-  `phase_forbidden`, and that the lowest-id admin's rotation lands as
-  `epoch_rotated {reason: "max_age"}` with both sides on the new secret.
-- `test_aged_epoch_is_never_used_for_a_member_phase_link` (§8.4) — the negative
+- `test_epoch_older_than_max_age_reconciles_only_and_rotates` (§8.4) — **NOT
+  WRITTEN, and it cannot be until the bound ships: §8.4's STATUS note is the
+  record of the deferral.** With `network.epoch_max_age_s` set to 1 s and a live
+  two-device pair, assert the next handshake lands in `reconcile` phase, that a
+  `prompt` over it is `phase_forbidden`, and that the lowest-id admin's rotation
+  lands as `epoch_rotated {reason: "max_age"}` with both sides on the new secret.
+- `test_aged_epoch_is_never_used_for_a_member_phase_link` (§8.4) — **NOT WRITTEN
+  either, for the same reason: there is no age bound to assert on.** The negative
   half of the same rule, asserted on the dialer as well as the listener.
 - `test_panic_marks_untrusted_and_refuses_later_connections` — a *fresh*
   connection after the panic is refused at handshake step 3.
@@ -2748,12 +2763,15 @@ places. Each is a correction with a named reason; nothing here is a preference.
    bearer token for the network's key material. Raised by
    `mesh-incident-response.md` §3.2 / §8 Q3.
 3. **A bounded secret lifetime** (§4.2 `epoch_minted_at`, §4.3, §8.4, §11's
-   `network.epoch_max_age_s` = 30 days). §8.4 covers the member you removed; it
-   did not cover the still-member that never comes back, which prior art
-   (Nebula, Tailscale, OpenZiti — `mesh-prior-art.md` §2) answers with a bounded
-   credential lifetime rather than with better re-evaluation. This is the one
-   change in the round that is a *schema shape* rather than a rule: the age sits
-   beside the key, which is what makes it enforceable by every reader of the key.
+   `network.epoch_max_age_s` = 30 days). **NOT IMPLEMENTED IN THIS BUILD — see
+   §8.4's STATUS note:** the key is registered nowhere and read by nothing, and the
+   reconcile half the invariant ends on has no client here. The design intent
+   stands — §8.4 covers the member you removed but not the still-member that never
+   comes back, which prior art (Nebula, Tailscale, OpenZiti — `mesh-prior-art.md`
+   §2) answers with a bounded credential lifetime rather than with better
+   re-evaluation — and it is the one intended change in the round that is a
+   *schema shape* rather than a rule: the age sits beside the key, which is what
+   would make it enforceable by every reader of the key.
 4. **One capability vocabulary, and three new ops that add no capability.** The
    three session ops mobility needs (`net_session_create` → `prompt`,
    `net_session_engage` → `view`, `net_session_stop` → `stop`) are rows in §6.4,

@@ -867,3 +867,106 @@ def test_the_forwarded_stop_mode_is_the_owners_own_force(
     assert forced["detail"]["outcome"] == "stopped", forced["detail"]
     assert forced["detail"]["rung"] == "sigterm"
     link.close("test")
+
+
+# ---------------------------------------------------------------------------
+# Q-R7-2 — the forced stop's hop budget
+# ---------------------------------------------------------------------------
+
+
+def test_a_forced_stop_hop_outlasts_the_ladder_that_answers_it() -> None:
+    """Q-R7-2: the requester's budget is at least the owner's own worst case.
+
+    STRUCTURAL, NOT A MEASUREMENT, deliberately: the defect was a relation between
+    two constants, so a test that waited the difference out would spend three
+    minutes re-proving what an inequality proves in a microsecond — and this host
+    cannot afford three-minute rigs.
+
+    The ladder's bound is ``SIGTERM_GRACE_S + SIGKILL_CONFIRM_S``, the only two
+    rungs a FORCED stop can reach when a socket is silent, and the hop's old budget
+    (``max(op_wait_s, ENGAGE_DEADLINE_S)`` — a SPAWN's budget) sat below it. That
+    was the whole bug: the owner's receipt was thrown away by a caller that had
+    stopped listening, so an operator was told a peer "stopped answering" about a
+    peer that was working, with no outcome, no rung and no pid.
+    """
+    from local_operator.session.runtime import control
+
+    ladder = control.SIGTERM_GRACE_S + control.SIGKILL_CONFIRM_S
+    assert relay.forced_stop_deadline_s() > ladder, "the hop must outlast the ladder it awaits"
+    # AND THE DEFAULT IS NOT ENOUGH, which is why the special case exists: if this
+    # ever stops holding, the forced-stop budget is dead code and should go.
+    assert max(relay.wire.OP_WAIT_S, relay.ENGAGE_DEADLINE_S) < ladder
+
+
+def test_only_the_forced_stop_hop_gets_the_ladder_budget(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forced mode passes the derived budget; every other mode keeps the default.
+
+    The LINK is the only thing stubbed: ``_ctl_peer_stop`` → ``_local_peer_call``
+    run for real, so what is asserted is the hop this code actually issues, and the
+    receipt is passed through untouched — the rung and the pid are what make "it
+    acted" distinguishable from "the caller gave up" (QA round 7, Q-R7-2).
+    """
+    server_a, _server_b, _host, _port = peer_pair
+    seen: list[float | None] = []
+    detail = {"outcome": "stopped", "rung": "sigterm", "pid": 4242}
+
+    class _RecordingLink:
+        """A peer that answers at once, whatever budget it was given."""
+
+        def request(self, frame: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+            seen.append(timeout)
+            return {"op": "ack", "req": frame.get("req"), "detail": dict(detail)}
+
+    monkeypatch.setattr(server_a, "_resolve_peer", lambda peer: peer)
+    monkeypatch.setattr(server_a, "_ensure_link", lambda _peer: _RecordingLink())
+
+    def _stop(mode: str) -> dict[str, Any]:
+        reply = server_a.control_dispatch(
+            "peer_session_stop",
+            {"peer": "d_" + "c" * 32, "session_id": SESSION, "mode": mode, "req": 1},
+        )
+        assert reply["op"] == "ack", reply
+        return reply["detail"]
+
+    forced = _stop("immediate")
+    passive = _stop("graceful")
+
+    assert forced["rung"] == "sigterm" and forced["pid"] == 4242, forced
+    # The receipt is the OWNER's, and it crosses unchanged in either mode: the
+    # budget decides how long this side waits, never what it reports.
+    assert passive == forced, passive
+    assert seen == [
+        relay.forced_stop_deadline_s(),
+        max(server_a.settings.op_wait_s, relay.ENGAGE_DEADLINE_S),
+    ]
+
+
+def test_the_pending_field_reads_as_one_vocabulary() -> None:
+    """Q-R7-1/N5: the wire value is a string or NO CLAIM — never ``"True"``.
+
+    The field is the string a NEEDS column renders, so a peer's legacy boolean has
+    to be translated into the vocabulary rather than stringified: ``True`` is the
+    pre-fix producer's spelling of an unread completion, and it reads as that
+    claim; ``"True"`` is a value no reader understands.
+    """
+    from local_operator.network.types import (
+        NEEDS_APPROVAL,
+        NEEDS_ASK,
+        normalise_pending,
+    )
+
+    assert normalise_pending(NEEDS_APPROVAL) == NEEDS_APPROVAL
+    assert normalise_pending(NEEDS_ASK) == NEEDS_ASK
+    assert normalise_pending("  ask  ") == NEEDS_ASK
+    assert normalise_pending(True) == NEEDS_ASK
+    assert normalise_pending(False) is None
+    assert normalise_pending(None) is None
+    assert normalise_pending("") is None
+    assert normalise_pending(1) is None
+
+    row = projection.PeerRow.from_json(
+        {"session_id": "s", "pending": True}, device_id="d_" + "e" * 32
+    )
+    assert row.pending == NEEDS_ASK

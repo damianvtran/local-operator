@@ -572,16 +572,20 @@ SECTIONS: tuple[Section, ...] = (
         Scope.LIVE,
         "Where a notification click sends you when the desktop app is not running.",
     ),
-    # NEW_LAUNCH, honestly: all three keys are read when the audit WRITER is built,
-    # and the writer is built once per relay process (``AuditLog.from_config``). A
-    # LIVE label would promise an effect the code cannot deliver — the open file
-    # handle already exists — and the repo's rule is that a scope label says when a
-    # change lands, not when the user would like it to.
+    # NEW_LAUNCH, honestly: the audit keys are read when the audit WRITER is built,
+    # and the writer is built once per relay process (``AuditLog.from_config``);
+    # ``max_handshakes`` is read when ``NetworkSettings.from_config`` builds the
+    # relay's settings. A LIVE label would promise an effect the code cannot deliver
+    # — the open file handle already exists, and the accept loop's cap is a
+    # constructor argument. The repo's rule is that a scope label says when a change
+    # lands, not when the user would like it to.
     Section(
         "network",
         "Mesh network",
         Scope.NEW_LAUNCH,
-        "Audit log retention for `lop network`. Bounds take effect when the relay " "restarts.",
+        "Bounds for `lop network`: audit retention, and how many unauthenticated "
+        "connections the relay will hold at once. All take effect when the relay "
+        "restarts.",
     ),
     Section(
         "retired",
@@ -2950,6 +2954,32 @@ SETTINGS: tuple[Setting, ...] = (
         help=(
             "Age and size both rotate, because age binds on a quiet install and size "
             "on a busy one. Export with `lop network log --export` before pruning."
+        ),
+    ),
+    # THE RELAY'S OWN LIMIT, and the one an operator needs exactly when a peer
+    # cannot connect: §2.1's cap on UNAUTHENTICATED connections in flight. The slot
+    # is held only until a handshake resolves, so this bounds neither `max_links`
+    # nor an established link; past the cap a connection is dropped at accept with
+    # no reply, and each drop is one audit record per window. Both ends read their
+    # OWN value, so raising it on one device does not raise it on the other.
+    #
+    # The default mirrors ``local_operator/network/relay.py``'s
+    # ``DEFAULT_MAX_HANDSHAKES``, which is what ``_consumer_defaults()`` in
+    # tests/unit/test_settings_io.py pins: a registry default that disagrees with
+    # the reader's is a painted lie nothing else reports.
+    Setting(
+        key="network.max_handshakes",
+        path=("network", "max_handshakes"),
+        section="network",
+        label="Concurrent handshakes",
+        kind=Kind.INT,
+        default=8,
+        minimum=1,
+        maximum=1024,
+        help=(
+            "Unauthenticated connections this relay will hold at once. A pairing "
+            "holds one for the seconds until the code is typed; anything past the "
+            "cap is dropped at accept, with no reply frame."
         ),
     ),
 )

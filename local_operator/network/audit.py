@@ -17,9 +17,18 @@ enforcement points, because one is a promise and two are a property:
 * ``_forbidden_key``, which drops the never-list even when a future whitelist
   entry names one by mistake.
 
-ONE WRITER PER INSTALL. The relay process owns this file; no other process opens
-it for append. That is what makes batching safe with no locking, and it is why
-the CLI's ``lop network log`` only ever READS (tail/export).
+ONE WRITER PER INSTALL — AND ONE LOCK PER WRITER. The relay process owns this
+file; no other process opens it for append, and that is why the CLI's ``lop
+network log`` only ever READS (tail/export). Within that process, however, the
+writer is shared by EVERY relay thread — the accept loop, each handshake thread,
+the control loop and the heartbeat all ``record`` or ``flush`` — and "no other
+process" says nothing about those. Two of them used to read the same buffer and
+each write it out, so the log carried the SAME record twice with an identical
+``seq`` and ``ts``: measured, the cap-drop e2e test failed 3 of 30 isolated runs,
+and it read as two cap refusals where the relay had recorded one. ``_write_lock``
+makes the append and the drain one critical section, and the payload is taken off
+the buffer BEFORE the file is opened, so a second writer in that window finds
+nothing left to publish.
 
 BATCHING, AND THE TWO WRITES THAT CANNOT WAIT. Records go into a byte buffer and
 are flushed when it reaches ``BUFFER_BYTES`` or when a second has passed since the
@@ -42,6 +51,7 @@ import gzip
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -246,16 +256,14 @@ DURABLE_EVENTS: frozenset[str] = frozenset(
         "handshake_refused",
         "authorisation_refused",
         "pairing_refused",
-        "pairing_awaiting_confirmation",
-        "pairing_confirmed",
-        "duplicate_identity",
-        "self_link",
         # The inviter's human step (§5.3): the pairing is parked until a person on
         # the INVITING device confirms the code. That wait is a semantic event an
         # incident review needs to see — a pairing that waited and was never
         # answered is exactly the shape of an attempt nobody noticed.
         "pairing_awaiting_confirmation",
         "pairing_confirmed",
+        "duplicate_identity",
+        "self_link",
         "device_rotated",
         "audit_rotated",
         "audit_pruned",
@@ -353,6 +361,11 @@ class AuditLog:
             _resolve("max_age_days", max_age_days, AUDIT_MAX_AGE_DAYS, float, root) * 24 * 60 * 60.0
         )
         self._enabled = enabled
+        #: Serialises append + drain. ``record`` and ``flush`` are called from every
+        #: thread the relay runs (see the module docstring), so this is the one lock
+        #: that keeps a record from being published twice; re-entrant because
+        #: ``record`` flushes a DURABLE event from inside its own critical section.
+        self._write_lock = threading.RLock()
         self._buffer: list[str] = []
         self._buffered_bytes = 0
         self._seq = _last_sequence(self._path)
@@ -391,47 +404,64 @@ class AuditLog:
         """
         if not self._enabled:
             return
-        line = self._render(event)
-        self._buffer.append(line)
-        self._buffered_bytes += len(line)
-        self.records_written += 1
-        if event.event in self.DURABLE_EVENTS:
-            self.flush()
-            return
-        elapsed = time.monotonic() - self._last_flush
-        if self._buffered_bytes >= self.BUFFER_BYTES or elapsed >= self.TICK_S:
-            self.flush()
+        # The render, the append and the flush are ONE critical section. ``_render``
+        # stamps ``seq``, so two threads rendering at once could stamp the same number
+        # onto two different records — the same corruption as a duplicated line, from
+        # the other end (the module docstring has the measured account).
+        with self._write_lock:
+            line = self._render(event)
+            self._buffer.append(line)
+            self._buffered_bytes += len(line)
+            self.records_written += 1
+            if event.event in self.DURABLE_EVENTS:
+                self.flush()
+                return
+            elapsed = time.monotonic() - self._last_flush
+            if self._buffered_bytes >= self.BUFFER_BYTES or elapsed >= self.TICK_S:
+                self.flush()
 
     def flush(self) -> None:
-        """Write the buffer to disk, rotating first if the file is at its cap."""
-        if not self._buffer:
-            self._last_flush = time.monotonic()
-            return
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(self._path.parent, 0o700)
-            self._rotate_if_needed()
+        """Write the buffer to disk, rotating first if the file is at its cap.
+
+        THE BUFFER IS DRAINED BEFORE THE FILE IS OPENED, and both halves run under
+        ``_write_lock``. Draining after the write (which is where this started) leaves
+        a window in which a second thread — the heartbeat's own tick, or a reader's
+        ``tail()``, both of which flush — reads the same buffer and publishes it
+        again: one event, two lines, identical ``seq``. The audit trail is what an
+        incident is reconstructed from, and "this happened twice" is a different
+        story from "this happened once", so a caller that could not write still finds
+        the records gone from the buffer rather than waiting to be written twice.
+        """
+        with self._write_lock:
+            if not self._buffer:
+                self._last_flush = time.monotonic()
+                return
             payload = "".join(self._buffer)
-            if not self._path.exists():
-                # Created 0600 at birth: a mode applied after the first write is a
-                # window during which the trail is world-readable.
-                descriptor = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-                os.close(descriptor)
-            with self._path.open("a", encoding="utf-8") as handle:
-                handle.write(payload)
             self._buffer.clear()
             self._buffered_bytes = 0
-            self._last_flush = time.monotonic()
-            # Checked AGAIN after the write: a single flush can carry many records
-            # (that is the point of batching), so checking only beforehand would let
-            # one large batch overshoot the cap by however much it happened to hold.
-            self._rotate_if_needed()
-        except OSError as exc:
-            self.degraded = True
-            self.degraded_reason = str(exc)
-            self._buffer.clear()
-            self._buffered_bytes = 0
-            print(f"warning: the network audit log could not be written: {exc}", file=sys.stderr)
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                os.chmod(self._path.parent, 0o700)
+                self._rotate_if_needed()
+                if not self._path.exists():
+                    # Created 0600 at birth: a mode applied after the first write is a
+                    # window during which the trail is world-readable.
+                    descriptor = os.open(self._path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                    os.close(descriptor)
+                with self._path.open("a", encoding="utf-8") as handle:
+                    handle.write(payload)
+                self._last_flush = time.monotonic()
+                # Checked AGAIN after the write: a single flush can carry many records
+                # (that is the point of batching), so checking only beforehand would
+                # let one large batch overshoot the cap by however much it held.
+                self._rotate_if_needed()
+            except OSError as exc:
+                self.degraded = True
+                self.degraded_reason = str(exc)
+                print(
+                    f"warning: the network audit log could not be written: {exc}",
+                    file=sys.stderr,
+                )
 
     def close(self) -> None:
         self.flush()

@@ -29,8 +29,11 @@ local audit record, and the reason never distinguishes on the wire:
    EPOCH'S MEMBER LIST — this is the line that makes revocation real, and it runs
    before any key is tried
 7. the signature verifies against the stored public key
-8. the MAC verifies against the current epoch key, else the previous one
-   (which admits the peer in the ``reconcile`` phase and nothing else)
+8. the MAC verifies: for a join, under the INVITE key from the token, which is
+   the joiner's only credential at that point; for a member, under the key of
+   the epoch the AUTH FRAME NAMES (step 4 has already bounded that to
+   {current, current-1}), and a previous-epoch answer is what puts the link in
+   the ``reconcile`` phase
 
 THE SAS IS DERIVED, NEVER TRANSMITTED. Its value is absent from every frame: a
 peer that sent it would let an on-path attacker echo the inviter's own digits
@@ -722,8 +725,9 @@ class Handshake:
         # indistinguishable while a changed one is detected.
         _verify_signature(public_key, signature, digest)
 
-        # STEP 8: the MAC. Current epoch first; previous only for member mode,
-        # which is what puts the link in the reconcile phase.
+        # STEP 8: the MAC, under the key of the epoch THIS FRAME NAMES — step 4 has
+        # already bounded that to {current, current-1} — which is what puts a
+        # previous-epoch link in the reconcile phase.
         if self.mode == "join":
             assert self.credential is not None
             keys = [self.credential]

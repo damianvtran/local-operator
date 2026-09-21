@@ -505,6 +505,19 @@ def test_silent_connections_are_capped_before_authentication(root: Path) -> None
         server.stop()
 
 
+def _refusal_was_delivered(sock: Any) -> bool:
+    """Has the relay closed this connection? Asked only of a socket ``select`` called readable.
+
+    A refused connection is closed with NO frame — that silence is what keeps the port
+    from being a probe oracle — so EOF is the only thing a dropped peer ever observes,
+    and it is therefore the event a test can wait on instead of polling the log.
+    """
+    try:
+        return sock.recv(1) == b""
+    except OSError:
+        return True
+
+
 def test_a_cap_drop_names_itself_in_the_local_audit(root: Path) -> None:
     """The cap's refusal is SILENT to the peer, so the operator's log is where it has
     to be named.
@@ -513,10 +526,11 @@ def test_a_cap_drop_names_itself_in_the_local_audit(root: Path) -> None:
     from being a probe oracle (`_accept_loop`) — so a saturated relay used to leave
     no trace at all on the device that was saturated: the symptom was a peer that
     could not connect while this device reported nothing. ONE record per window, not
-    one per connection: the flood below drops four connections and must produce
-    exactly one record, because an unauthenticated stranger may not churn the log an
+    one per connection: the flood below drops four connections and must NOT produce
+    four records, because an unauthenticated stranger may not churn the log an
     incident is reconstructed from.
     """
+    import select
     import socket
 
     root_a = root / "cap-audit"
@@ -533,23 +547,51 @@ def test_a_cap_drop_names_itself_in_the_local_audit(root: Path) -> None:
     try:
         for _ in range(6):
             held.append(socket.create_connection((host, port), timeout=5))
-        # Polled rather than slept on: the audit writer batches, so the record can
-        # land a moment after the fourth refusal.
-        deadline = time.time() + 5.0
-        rows: list[dict[str, Any]] = []
-        while time.time() < deadline:
-            rows = [
-                row
-                for row in server.audit.tail(limit=200)
-                if row.get("event") == "handshake_refused"
-            ]
-            if rows:
-                break
-            time.sleep(0.05)
-        assert len(rows) == 1, rows
-        assert rows[0]["cause"] == "handshake_cap", rows[0]
-        assert rows[0]["outcome"] == "refused", rows[0]
-        assert rows[0]["detail"] == {"cause": "handshake_cap", "mode": "unauthenticated"}, rows[0]
+        # WAIT FOR THE FLOOD TO HAVE HAPPENED, NOT FOR A RECORD TO APPEAR. The old
+        # loop polled the audit and broke at the FIRST record it saw, which reads a
+        # SNAPSHOT of a flood still in progress: a per-connection implementation
+        # passes whenever the read happens to land after one drop, and the assertion
+        # could not tell that from a coalescer doing its job (measured — deleting the
+        # coalescer left this test GREEN). What the relay actually does to a dropped
+        # connection is CLOSE it, silently and with no frame (`_accept_loop`), so EOF
+        # on the four sockets that never got a pre-auth slot IS "the drops have been
+        # delivered" — and ``_note_handshake_cap`` runs BEFORE that close, so a single
+        # read once the four are down sees everything the flood had to say. The two
+        # sockets that did get slots stay open: a silent peer holds its slot for
+        # ``handshake_timeout_s`` (10 s), well past this wait.
+        refused = 0
+        deadline = time.time() + 10.0
+        while refused < 4 and time.time() < deadline:
+            ready, _, _ = select.select(held, [], [], 0.05)
+            refused = sum(1 for sock in ready if _refusal_was_delivered(sock))
+        # A BACKSTOP, NOT THE ASSERTION: a relay that never delivered the four drops
+        # in ten seconds is wedged, and a wedged flood must not be read as a coalescer
+        # that behaved.
+        assert refused >= 4, f"the server closed only {refused} of the four dropped connections"
+        rows: list[dict[str, Any]] = [
+            row for row in server.audit.tail(limit=200) if row.get("event") == "handshake_refused"
+        ]
+        # THE CONTRACT IS A BOUND, NOT A COUNT. The window is
+        # ``HANDSHAKE_CAP_NOTICE_S`` wide, so a flood that straddles a boundary is
+        # told in two records — but never one per connection, which is the churn this
+        # record exists to prevent: FOUR drops, so a count approaching that is that
+        # bug. The ``== 1`` this replaces was reading a DIFFERENT defect as a count
+        # (below) and so punished a correct coalescer for it.
+        assert 1 <= len(rows) < 4, rows
+        # AND EVERY ROW MUST BE A DIFFERENT ROW. ``seq`` is stamped once per recorded
+        # event, so two rows sharing one is not the coalescer failing at all: it is
+        # the WRITER publishing ONE record twice. Measured on this head, that is what
+        # the flake was — 3 of 30 isolated runs, both rows identical in ``seq`` and
+        # ``ts`` — and it is why the bound above cannot be the only assertion: a
+        # duplicated line passes every bound. ``AuditLog.flush`` now takes the
+        # payload off the buffer before it opens the file, so a second flusher in
+        # that window (the heartbeat, or a reader's ``tail``) finds nothing to
+        # re-publish; ``tests/unit/network/test_audit.py`` pins that directly.
+        assert len({row["seq"] for row in rows}) == len(rows), rows
+        for row in rows:
+            assert row["cause"] == "handshake_cap", row
+            assert row["outcome"] == "refused", row
+            assert row["detail"] == {"cause": "handshake_cap", "mode": "unauthenticated"}, row
     finally:
         for sock in held:
             sock.close()
