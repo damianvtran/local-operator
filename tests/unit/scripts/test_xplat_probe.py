@@ -135,7 +135,7 @@ def test_a_capability_probe_constant_guards_the_call_it_wraps() -> None:
         "import os, signal\n"
         'debug_stacks = getattr(signal, "SIGUSR1", None)\n'
         "def install(loop, handle) -> None:\n"
-        '    if os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1" and debug_stacks is not None:\n'
+        "    if debug_stacks_enabled() and debug_stacks is not None:\n"
         "        loop.add_signal_handler(debug_stacks, handle)\n"
     )
     hits = _scan(source)

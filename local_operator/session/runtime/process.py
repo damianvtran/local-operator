@@ -71,9 +71,11 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 from local_operator import buildwatch as _buildwatch
 from local_operator import procstate
 from local_operator.procstate import install_loop_signal_handlers
+from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_OVERDUE_CAUSE,
     BUILD_DRAIN_PROGRESS_S,
+    HEARTBEAT_INTERVAL_S,
     LEAVING_FOR_BUILD,
     LEAVING_FOR_BUILD_OVERDUE,
     LEAVING_ON_SIGNAL,
@@ -2991,6 +2993,55 @@ def _install_sighup_ignore(loop: asyncio.AbstractEventLoop) -> None:
         logger.warning("could not install the SIGHUP ignore", exc_info=True)
 
 
+#: The switch that turns the SIGUSR1 task-stack dump off. ON BY DEFAULT since
+#: 2026-09-20; ``0``/``off``/``no``/``false`` restores the previous disposition.
+DEBUG_STACKS_ENV = "LOP_RUNTIME_DEBUG_STACKS"
+
+#: The spellings that mean "off". A harness that needs SIGUSR1's default (fatal)
+#: disposition back, or an operator debugging the dump itself, has one.
+DEBUG_STACKS_OFF = ("0", "no", "false", "off")
+
+
+def debug_stacks_enabled() -> bool:
+    """Whether the SIGUSR1 task-stack dump is installed in this runtime.
+
+    A function rather than an inline ``os.environ`` test so the default and its
+    opt-out are testable without booting a runtime — the decision is the whole
+    behaviour, and pinning it through a spawned child would make a one-line rule
+    cost a process. The capability probe stays at the CALL SITE
+    (``getattr(signal, "SIGUSR1", None)``), where the platform question belongs.
+    """
+    return os.environ.get(DEBUG_STACKS_ENV, "1").strip().lower() not in DEBUG_STACKS_OFF
+
+
+async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
+    """Report the WORKLOAD loop's progress to the process's stall bound.
+
+    The WORKLOAD plane's tick, and one of the two the bound tracks; the other is
+    the serving plane's heartbeat (``RuntimeServer._heartbeat_loop``). They are
+    tracked SEPARATELY (``stall_watchdog`` keeps a stamp per plane and arms for the
+    earliest deadline), because the measured failure is exactly this plane going
+    silent while the serving plane stays healthy — and a bound the healthy plane
+    could keep re-arming would never fire on it.
+
+    A plain sleep loop rather than a hook on the turn itself, and that is the
+    property the bound needs: a turn that WAITS (on a model, a tool, a
+    subprocess) yields and keeps this ticking, so what the bound measures is no
+    sign of life anywhere — never a slow step or a long turn.
+
+    Boot is not covered here: this starts with the reaper, after the runtime is
+    published. The entry point's own arming covers that window, with the whole
+    bound, which is longer than the engage deadline (180 s) the spawner sizes.
+    """
+    while not stop.is_set():
+        # The SAME cadence the serving plane's heartbeat keeps, and the same
+        # constant rather than a second copy of the number: the two ticks are
+        # interchangeable as "this plane is alive" signals, so a drift between
+        # them would be a drift in what the bound means.
+        await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+        stall_watchdog.beat(stall_watchdog.WORKLOAD)
+
+
 async def amain(operator_cap: bytes | None = None) -> int:
     """Run the owned session to completion.
 
@@ -3302,17 +3353,36 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # block is safe to reach on any platform rather than merely skipped because
     # the constant happens to be missing.
     debug_stacks = getattr(signal, "SIGUSR1", None)
-    if (
-        not procstate.is_windows()
-        and os.environ.get("LOP_RUNTIME_DEBUG_STACKS") == "1"
-        and debug_stacks is not None
-    ):
-        # SIGUSR1 prints every asyncio task's stack to the child log. The
-        # child has no terminal and no attached debugger, and a wedged turn
-        # (round 2, U6) is exactly the state whose cause is "which await is
-        # the turn parked in" — invisible to py-spy without root and to the
-        # main-thread faulthandler dump, which shows the loop idling under a
-        # parked task. Opt-in so a normal runtime pays nothing.
+    # ON BY DEFAULT, and that is the change the 2026-09-20 freeze forced. This
+    # was opt-in (``LOP_RUNTIME_DEBUG_STACKS=1``), and on every one of the five
+    # runtime processes found wedged that day — 1.5 to 7.2 h each, all of them
+    # parked in a C-level regex call with the transcript taking zero writes —
+    # the variable was NOT set on the launcher, so the ONE instrument that could
+    # have named the parked await was unavailable and the question "which line?"
+    # stayed unanswerable for hours. A diagnostic that must be predicted before
+    # the freeze it explains is a diagnostic nobody has when they need it.
+    #
+    # WHAT IT COSTS: one `add_signal_handler` under a capability probe, off the
+    # hot path — nothing here is read per turn. WHAT IT CHANGES beyond the dump:
+    # SIGUSR1's default disposition is fatal, so the signal used to kill a
+    # runtime outright; it now prints this process's task stacks to the child log
+    # instead, which is strictly more than the old behaviour offered and is the
+    # convention a debugger and an operator both expect. The opt-out survives
+    # (``=0``) for a harness that needs the default disposition back.
+    #
+    # It is NOT the whole answer to the freeze: this handler is an asyncio signal
+    # handler, so like every other Python-level instrument it needs the loop, and
+    # a loop parked in a C call never runs it. That class is what
+    # ``stall_watchdog``'s C-thread dump covers; this one is for the state the
+    # C-thread dump cannot show — a loop that is RUNNING but has its turn parked
+    # on an await (round 2, U6).
+    if not procstate.is_windows() and debug_stacks_enabled() and debug_stacks is not None:
+
+        # SIGUSR1 prints every asyncio task's stack to the child log. The child
+        # has no terminal and no attached debugger, and a wedged turn is exactly
+        # the state whose cause is "which await is the turn parked in" —
+        # invisible to py-spy without root and to the main-thread C dump, which
+        # shows the loop idling under a parked task.
         def _dump_task_stacks() -> None:
             session = getattr(handle, "_session", None)
             try:
@@ -3361,6 +3431,11 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.
     reaper = asyncio.ensure_future(_reaper(handle, runtime, stop))
+    # The workload half of the stall bound, beside the reaper because it shares
+    # its lifetime exactly: both run for the whole session and both stop with
+    # it. Nothing is armed for an in-process host that never went through this
+    # module's entry point, where ``beat`` is a no-op.
+    stall_beats = asyncio.ensure_future(_beat_stall_watchdog(stop))
     reaper_ran_clean_exit = False
     await stop.wait()
     if draining is not None and not draining.done():
@@ -3370,6 +3445,8 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # which has now happened, so it is cancelled rather than left to wake
         # against a session that is already disposing.
         draining.cancel()
+    if not stall_beats.done():
+        stall_beats.cancel()
     if not reaper.done():
         reaper.cancel()
     elif _clean_ordering_already_ran(reaper):
@@ -3489,6 +3566,11 @@ def main() -> int:
     from local_operator.harness.approval import read_operator_cap_from_argv
 
     operator_cap = read_operator_cap_from_argv(sys.argv[1:])
+    # The stall bound was armed in the entry point, before this file existed, so
+    # its dump path is named here — next to the log a person reads after a
+    # freeze, which is where they need it. A no-op when nothing is armed, i.e.
+    # for every in-process caller of this function.
+    stall_watchdog.announce()
     # One record per runtime, naming its own process: this file is shared by every
     # runtime child, so a reader has to be able to attribute a line to the
     # process that wrote it.
@@ -3497,6 +3579,15 @@ def main() -> int:
         return asyncio.run(amain(operator_cap=operator_cap))
     except KeyboardInterrupt:
         return 0
+    finally:
+        # A clean exit cancels the bound and writes its own outcome over the
+        # header — the file STAYS, because the evidence is its content (the
+        # fired marker), never its existence: a SIGKILL leaves the same file an
+        # armed runtime has. See ``stall_watchdog``'s docstring for why nothing
+        # here deletes anything. Reached on every graceful leave — the drain's,
+        # the reaper's and a plain stop's — and never on the paths that exit
+        # from the C thread (that is the point of the file).
+        stall_watchdog.disarm()
 
 
 if __name__ == "__main__":
@@ -3508,4 +3599,16 @@ if __name__ == "__main__":
     from local_operator import procname
 
     procname.brand_this_process()
+    # THE STALL BOUND IS ARMED HERE, AND ONLY HERE, for the same reason the comm
+    # branding is: this branch is reachable by ``python -m`` alone, i.e. by a
+    # real runtime child (``launch._spawn_runtime``, ``mobile/daemon.py``), while
+    # ``main()`` and every constructor are reachable in-process. The C timer is
+    # process-global and shared with the two pytest-side watchdogs
+    # (``tests/e2e/watchdog.py``, ``tests/shard_stall_watchdog.py``), so arming
+    # it from a library path would let an in-process boot silence a CI stage's
+    # only bound; see ``stall_watchdog``'s docstring and
+    # ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``, which pins
+    # both halves of that. Arming before ``main()`` also means a stall during
+    # boot — the window nothing else can report — is bounded and named.
+    stall_watchdog.arm()
     sys.exit(main())

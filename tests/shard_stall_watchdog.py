@@ -102,7 +102,7 @@ is the repair. A wall-clock controller timer armed at startup is NOT an
 alternative: it would fire on every healthy long run and keep a file, breaking
 the rule that a file's existence means something fired.
 
-THE OTHER C TIMER IN THIS REPO
+THE OTHER C TIMERS IN THIS REPO
 ------------------------------
 ``faulthandler``'s timer is process-global, so ``tests.e2e.watchdog.bounded``
 -- a second C timer, for tests whose failure mode is a hang -- displaces the
@@ -111,6 +111,16 @@ stacks. Nothing interlocks them because nothing runs them together: the shard
 job sets :data:`ENV_SECONDS` and deselects ``e2e``, while the ``tui-e2e`` job
 runs ``-n0`` (one process, no worker branch) without the variable. Both halves
 of that invariant are pinned by the unit guards rather than left to prose.
+
+A THIRD armed timer exists in the product -- ``session/runtime/stall_watchdog``,
+the runtime's own bound on a wedged interpreter -- and it is outside that
+invariant for a structural reason rather than a job's configuration: it arms in
+the runtime child's ``__main__`` branch, which only ``python -m`` reaches, so no
+pytest process can arm it however the CI jobs are arranged. That placement is
+the interlock (arming it from a runtime constructor would let any in-process
+boot in this suite displace the worker timer), and it is pinned as a fact about
+the source AND about behaviour in
+``tests/unit/session/runtime/test_runtime_stall_watchdog.py``.
 
 WHERE IT IS ENABLED
 -------------------
