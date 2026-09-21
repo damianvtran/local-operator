@@ -16,6 +16,20 @@ from local_operator.providers.auth_store import AuthStore
 from local_operator.providers.registry import get_provider_definition
 
 
+def _radient_api_key(manager: CredentialManager) -> SecretStr:
+    """The `RADIENT_API_KEY` value, store-first then the legacy tier.
+
+    Reads a `LOP_PROVIDER_RADIENT_API_KEY` provider-class row before
+    `CredentialManager.get_credential`, matching every other provider-key reader.
+    """
+    from local_operator.providers.registry import provider_secret_value
+
+    stored = provider_secret_value("RADIENT_API_KEY")
+    if stored:
+        return SecretStr(stored)
+    return manager.get_credential("RADIENT_API_KEY")
+
+
 def canonical_radient_destination(base_url: str) -> bool:
     definition = get_provider_definition("radient")
     if definition is None or not definition.base_url:
@@ -41,8 +55,10 @@ async def resolve_radient_credential(
 ) -> SecretStr:
     if not canonical_radient_destination(base_url):
         # An explicit legacy gateway must not receive a centrally signed-in
-        # account's bearer. Preserve its previous dedicated key lookup instead.
-        return manager.get_credential("RADIENT_API_KEY")
+        # account's bearer. Preserve its previous dedicated key lookup instead —
+        # store-first, so a RADIENT_API_KEY saved via the store outranks an
+        # ambient export and the plaintext file.
+        return _radient_api_key(manager)
     owns_store = store is None
     store = store or AuthStore(manager.config_dir / "auth.db", credential_manager=manager)
     try:
@@ -53,7 +69,7 @@ async def resolve_radient_credential(
             return SecretStr(value)
         # Preserve the per-key extension seam of older/custom credential
         # managers after all canonical tiers, never ahead of a central login.
-        return manager.get_credential("RADIENT_API_KEY") or SecretStr("")
+        return _radient_api_key(manager) or SecretStr("")
     finally:
         if owns_store:
             store.close()
