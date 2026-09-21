@@ -1993,20 +1993,85 @@ def _point_the_nudge_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     )
 
 
-def _nudge_line(target: Path, pad: Path) -> str:
-    """The exact one line the nudge appends, so the assertion cannot drift."""
+def _nudge_line(target: Path) -> str:
+    """The exact one line the nudge appends, so the assertion cannot drift.
+
+    Takes the TARGET only: the store's own root is deliberately not in the
+    sentence any more (D3 — the card had already printed it twice, and every
+    successful scratchpad write prints it), so a helper that took it would be
+    pinning a value the line no longer carries.
+    """
     return (
-        f"[scratch] {target.resolve()} sits directly under a temp root — "
-        f"the test's own reason. Your own scratch belongs in scratchpad:// "
-        f"({pad.resolve()}), e.g. "
-        f'write(path="scratchpad://name.py", content="…").'
+        f"[scratch] Your own scratch belongs in scratchpad:// — {target.resolve()} "
+        f"sits directly under a temp root: the test's own reason."
     )
 
 
-def test_the_temp_roots_are_resolved_and_name_the_three_day_prune(monkeypatch, tmp_path) -> None:
-    """The helper's own contract. ``gettempdir`` is pinned to a distinct dir
-    because on Linux it IS ``/tmp`` — that is the dedupe case below, not this one.
+#: The tool card's painted output lane at a 100-column terminal.
+#: ``_append_output_body`` computes it as ``width - 2 - tool_card.OUTPUT_INDENT``
+#: from the card's INNER width — the value ``_build_row`` works in, already
+#: reduced by the transcript's padding — which the design round measured at 96
+#: cells inside a 100-column frame, leaving 92. A longer line is CUT TAIL-FIRST
+#: (``truncate_cells``) and never reflows. The STRICTER reading is taken on
+#: purpose: a reader who derives 96 from the terminal width alone still passes
+#: the property asserted below, and a lane estimate that is too generous is the
+#: one that would let the regression through.
+_CARD_LANE_CELLS_AT_100_COLS = 92
+
+
+@pytest.mark.asyncio
+async def test_the_nudge_names_the_store_inside_the_cards_tail_truncation(
+    tmp_path, monkeypatch
+) -> None:
+    """D1, pinned as a PROPERTY: the card cuts a long line tail-first, so the
+    sentence's order decides whether the operator can act on it at all.
+
+    The first draft put the resolved target first and the remedy last, which put
+    ``scratchpad://`` far outside the lane at EVERY width — unreachable, so the
+    line said nothing in the only surface a person reads. This asserts what the
+    regression would break: the lane-clipped line still names the store. Two path
+    lengths, because the length is what moved the remedy out of reach before:
+    with the remedy FIRST, its cell position does not depend on the path at all.
     """
+    # Local import: ``tool_card`` pulls Textual in and this module is not a TUI
+    # test — but the emulation has to be the CARD's own cut, not a copy of it.
+    from local_operator.tui.widgets.tool_card import truncate_cells
+
+    lane = _CARD_LANE_CELLS_AT_100_COLS
+    remedy_at: list[int] = []
+    for extra in ("", "p" * 48):
+        temp_root = tmp_path / extra / "shared-tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        _point_the_nudge_at(monkeypatch, temp_root)
+        target = temp_root / "generator-with-a-realistic-name.py"
+        context, _, tools = _scratchpad_context(tmp_path)
+
+        result = await tools["write"].execute(
+            "c", {"path": str(target), "content": "print(1)\n"}, None, None, context
+        )
+
+        assert result.is_error is False
+        line = result.text.split("\n")[1]
+        assert line == _nudge_line(target)
+        # The cut is REAL here — the line is longer than the lane — so the
+        # assertion below cannot pass by the line happening to fit.
+        assert cell_len(line) > lane, (cell_len(line), line)
+        clipped = truncate_cells(line, lane)
+        assert cell_len(clipped) <= lane
+        assert "scratchpad://" in clipped, clipped
+        remedy_at.append(cell_len(line.split("scratchpad://")[0]))
+
+    # ...and it is not merely inside the lane, it is at a FIXED cell: the remedy
+    # leads, so no path length can push it past the cut.
+    assert remedy_at[0] == remedy_at[1]
+
+
+def test_the_temp_roots_are_resolved_and_name_the_three_day_prune(monkeypatch, tmp_path) -> None:
+    """The helper's own contract, on the host the reason is about. ``gettempdir``
+    is pinned to a distinct dir because on Linux it IS ``/tmp`` — that is the
+    dedupe case below, not this one.
+    """
+    monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", True)
     system_tmp = tmp_path / "sys-tmp"
     system_tmp.mkdir()
     monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: str(system_tmp))
@@ -2023,13 +2088,53 @@ def test_the_temp_roots_are_resolved_and_name_the_three_day_prune(monkeypatch, t
 def test_duplicate_resolved_temp_roots_collapse(monkeypatch) -> None:
     """Both candidates spelling the same directory must yield ONE root: a doubled
     hint would read as two different traps and each would claim its own reason.
+
+    The surviving reason is the SPECIFIC one on macOS, which is the order's
+    whole purpose: unset ``$TMPDIR`` falls back to the directory ``/tmp`` names,
+    so a ``gettempdir``-first candidate list would collapse onto the generic
+    reason on the one host where the three-day prune is true.
     """
+    monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", True)
     monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: "/tmp")
 
     roots = builtin._temp_scratch_roots()
 
     assert len(roots) == 1
     assert len({root for root, _ in roots}) == len(roots)
+    assert "three days" in roots[0][1]
+
+
+def test_a_linux_host_is_never_told_about_the_macos_prune(monkeypatch, tmp_path) -> None:
+    """R4: ``/tmp`` is on macOS's cleaner list, not on anyone else's. A host whose
+    temp dir is ``/tmp`` because that is simply where temp lives must not be told
+    a fact about a different OS — and on Linux both candidates collapse to that
+    one directory, so this is also the collapsed shape of a non-macOS host.
+    """
+    monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", False)
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: "/tmp")
+
+    roots = builtin._temp_scratch_roots()
+
+    assert len(roots) == 1
+    assert "three days" not in roots[0][1]
+
+
+def test_a_non_darwin_host_with_its_own_tmpdir_gets_the_generic_reason(
+    monkeypatch, tmp_path
+) -> None:
+    """``$TMPDIR`` set to something that is not ``/tmp`` — a Linux container, a
+    Windows host — gets the generic reason on BOTH candidates: the prune claim is
+    never made off macOS, even for the entry spelled ``/tmp``.
+    """
+    monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", False)
+    system_tmp = tmp_path / "sys-tmp"
+    system_tmp.mkdir()
+    monkeypatch.setattr(builtin.tempfile, "gettempdir", lambda: str(system_tmp))
+
+    roots = builtin._temp_scratch_roots()
+
+    assert len(roots) == 2
+    assert all("three days" not in why for _, why in roots)
 
 
 @pytest.mark.asyncio
@@ -2039,7 +2144,7 @@ async def test_write_directly_under_a_temp_root_nudges_toward_the_scratchpad(
     """Depth ONE, deliberately: several of this fleet's real agent worktrees
     live at /private/tmp/<name>, so a nested path is a plausible deliverable and
     a nudge there would be a false positive on real work."""
-    context, pad, tools = _scratchpad_context(tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
     temp_root = tmp_path / "shared-tmp"
     temp_root.mkdir()
     _point_the_nudge_at(monkeypatch, temp_root)
@@ -2054,7 +2159,7 @@ async def test_write_directly_under_a_temp_root_nudges_toward_the_scratchpad(
     # substituted: the caller still needs to know what was written where.
     first, second = result.text.split("\n")
     assert first == f"Created {target.resolve()} (9 chars)."
-    assert second == _nudge_line(target, pad)
+    assert second == _nudge_line(target)
     # The advice does not touch the file itself.
     assert target.read_text(encoding="utf-8") == "print(1)\n"
 
@@ -2064,7 +2169,7 @@ async def test_edit_under_a_temp_root_nudges_too(tmp_path, monkeypatch) -> None:
     """Both writers share one helper, so ``edit`` must not be the tool that
     silently lacks the hint — editing an existing /tmp file is exactly as
     session-fragile as creating one."""
-    context, pad, tools = _scratchpad_context(tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
     temp_root = tmp_path / "shared-tmp"
     temp_root.mkdir()
     _point_the_nudge_at(monkeypatch, temp_root)
@@ -2082,7 +2187,7 @@ async def test_edit_under_a_temp_root_nudges_too(tmp_path, monkeypatch) -> None:
     assert result.is_error is False
     first, second = result.text.split("\n")
     assert first == f"Edited {target.resolve()}: 1 hunk(s), 1 replacement(s) applied."
-    assert second == _nudge_line(target, pad)
+    assert second == _nudge_line(target)
     assert target.read_text(encoding="utf-8") == "ALPHA\n"
 
 
@@ -2184,7 +2289,7 @@ async def test_the_nudge_follows_the_resolved_temp_root(tmp_path, monkeypatch) -
     monkeypatch.setattr(
         builtin, "_temp_scratch_roots", lambda: ((temp_root.resolve(), "the test's own reason"),)
     )
-    context, pad, tools = _scratchpad_context(tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
     target = link / "gen.py"
 
     result = await tools["write"].execute(
@@ -2193,7 +2298,54 @@ async def test_the_nudge_follows_the_resolved_temp_root(tmp_path, monkeypatch) -
 
     assert result.is_error is False
     assert (temp_root / "gen.py").read_text(encoding="utf-8") == "x\n"
-    assert _nudge_line(target, pad) in result.text
+    assert _nudge_line(target) in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_read_under_a_temp_root_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """R5: the hint is about where a WRITE lands, and the contract says ``read``
+    never reaches it. Reading a temp file is an ordinary act — the reader is not
+    told to move anything — and widening the hint to ``read`` would decorate
+    every read of a temp file with advice about a file it did not create.
+    """
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = temp_root / "gen.py"
+    target.write_text("print(1)\n", encoding="utf-8")
+
+    result = await tools["read"].execute("c", {"path": str(target)}, None, None, context)
+
+    assert result.is_error is False
+    assert "print(1)" in result.text
+    assert "[scratch]" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_edit_under_a_temp_root_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """R5: the line rides a SUCCESSFUL receipt only. A result that reports a
+    failure has one thing to say — the caller's next move is to fix the call —
+    and advice about where the file belongs would read as part of the
+    diagnosis. ``edit`` of a file that does not exist is that branch: the
+    helper is never reached, and this pins it so a future edit that computes
+    the hint earlier cannot quietly append it to an error.
+    """
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, tools = _scratchpad_context(tmp_path)
+
+    result = await tools["edit"].execute(
+        "c",
+        {"path": str(temp_root / "absent.py"), "old_text": "a", "new_text": "b"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is True
+    assert "[scratch]" not in result.text
 
 
 # ---------------------------------------------------------------------------

@@ -243,32 +243,42 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #:
 #: RAISED 29,950 -> 30,025 for the scratchpad-salience change, stated here with
 #: the arithmetic because the guard exists to make this an explicit decision.
-#: The base (``origin/main`` 87a0cf70) measured by THIS script on this machine
-#: reads 83,185 chars = ~29,923 billed, i.e. 27 tokens of headroom — no room for
-#: any new surface — and the branch measures 83,331 = ~29,975:
+#: The base — THIS BRANCH'S base, ``origin/main`` 0bc5fb3a, the tree the PR
+#: diffs against — measured by THIS script on this machine reads 83,185 chars =
+#: ~29,923 billed, i.e. 27 tokens of headroom — no room for any new surface —
+#: and the head measures 83,336 = ~29,977:
 #:
 #:   + the tool schemas                49,043 vs 48,920 = +123 chars = +44
 #:     (``read`` names ``scratchpad://`` in its scheme list, which it already
 #:      serves; ``write`` and ``edit`` each add a clause saying where the
 #:      agent's OWN scratch goes)
-#:   + the ``system.md`` paragraph      33,942 vs 33,919 =   +23 chars =  +8
-#:     (it now names both traps — the working directory and ``/tmp``)
-#:   = measured on this head             83,331 chars = ~29,975 billed
+#:   + the ``system.md`` paragraph      33,947 vs 33,919 =   +28 chars = +10
+#:     (it now names both traps — the working directory and ``/tmp`` — and is
+#:      scoped to TEXT scratch, which is what the store actually holds)
+#:   = measured on this head             83,336 chars = ~29,977 billed
 #:
-#: The 23 is AFTER the offsetting rewrite, and that is the point: the paragraph
+#: The 28 is AFTER the offsetting rewrite, and that is the point: the paragraph
 #: was rewritten to pay for its own clause where it could, not appended to.
 #: "It is this session's own folder and is deleted with the session" became "it
 #: dies with the session" (-42 chars), so the second trap is named for 23 net
-#: characters rather than the ~65 the clause itself costs. Offsetting cuts
-#: elsewhere were NOT taken because the remaining candidates are not filler:
-#: the scheme list is what tells a model the scheme exists at all (``read``
-#: already serves it, so the omission was a bug, not a saving), and the two
-#: write/edit clauses are the only place the scratch convention reaches the
-#: moment of a tool call. Where the cost is in doubt the ladder says measure it
-#: and justify it, and all three clauses ride a prefix that already carries
-#: those three schemas. The ceiling is set 50 above the measured head, the same
-#: order as the ``secret`` (49), ``web_read`` (71) and ``scratchpad://`` (51)
-#: raises; the tighten band below (1,200) is nowhere near tripped.
+#: characters rather than the ~65 the clause itself costs; the review round's
+#: TEXT scoping added the other 5 ("Text "), and nothing else in the prompt or
+#: the schemas moved with it. Offsetting cuts elsewhere were NOT taken because
+#: the remaining candidates are not filler: the scheme list is what tells a
+#: model the scheme exists at all (``read`` already serves it, so the omission
+#: was a bug, not a saving), and the two write/edit clauses are the only place
+#: the scratch convention reaches the moment of a tool call. Where the cost is
+#: in doubt the ladder says measure it and justify it, and all three clauses
+#: ride a prefix that already carries those three schemas.
+#:
+#: The CEILING did not move in the remediation round, and that is a measurement
+#: rather than a stale figure left behind: the round-1 findings changed the
+#: nudge's runtime STRING (result text, which rides no request prefix) and added
+#: tests, so the only prefix bytes they touched are the 5 above. The
+#: re-measured head is 83,336 and the ceiling sits 48 above it — inside the
+#: 46-51 band this file's ``secret`` (49), ``web_read`` (71) and
+#: ``scratchpad://`` (51) raises hold to — so the ratchet stays as tight as it
+#: was, and the tighten band below (1,200) is nowhere near tripped.
 BUDGET_BILLED_TOKENS = 30_025
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.

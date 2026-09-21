@@ -52,6 +52,7 @@ import mimetypes
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -4733,6 +4734,19 @@ def _scratchpad_root(context: ToolContext | None) -> Path | None:
     return Path(raw)
 
 
+#: This module's view of the platform, a module-local copy for the same reason
+#: ``group_reaper`` keeps one: a test steers the macOS-only branch below by
+#: patching THIS name, not the global ``sys.platform``, which would tell every
+#: other thread in the process it is on macOS for the duration — and this suite
+#: runs with threads.
+_PLATFORM = sys.platform
+
+#: Whether ``/tmp`` is the directory macOS's daily cleaner prunes. Named rather
+#: than inlined so the reason a caller states and the gate that decides whether
+#: to state it cannot drift apart.
+_SYSTEM_TMP_IS_PRUNED = _PLATFORM == "darwin"
+
+
 def _temp_scratch_roots() -> tuple[tuple[Path, str], ...]:
     """``(resolved root, why it is a trap)`` for the temp dirs ``write``/``edit`` watch.
 
@@ -4744,18 +4758,35 @@ def _temp_scratch_roots() -> tuple[tuple[Path, str], ...]:
     the parent handed to the comparison is always the resolved one and the
     unresolved spelling of a root could never match it.
 
-    Two roots, with distinct reasons, because they are cleared by different
-    things: macOS ships ``/usr/libexec/tmp_cleaner`` (launchd
-    ``com.apple.tmp_cleaner``, daily) with ``daily_clean_tmps_dirs="/tmp"`` and
-    ``daily_clean_tmps_days="3"``, while ``$TMPDIR`` (``/var/folders/…``) is not
-    on that list. The reason is stated to the agent because the two differ in
-    kind: one prunes the file out from under a long session, the other is simply
-    not the session's own area. Duplicate resolved roots collapse, so on Linux —
-    where ``gettempdir()`` IS ``/tmp`` — the hint carries one reason, not two.
+    Two reasons, because the two dirs are cleared by different things: macOS
+    ships ``/usr/libexec/tmp_cleaner`` (launchd ``com.apple.tmp_cleaner``, daily)
+    with ``daily_clean_tmps_dirs="/tmp"`` and ``daily_clean_tmps_days="3"``,
+    while ``$TMPDIR`` (``/var/folders/…``) is not on that list. One prunes the
+    file out from under a long session, the other is simply not the session's own
+    area — and the prune is a fact about ONE host, so it is gated on that host.
+    Telling a Windows host, or a Linux host whose ``$TMPDIR`` is what it is told,
+    that its own temp directory is pruned after three days is a false statement
+    about the machine reading it; those hosts get the generic reason.
+
+    ``/tmp`` is FIRST deliberately. The two candidates can resolve to ONE
+    directory — macOS with ``$TMPDIR`` unset, or pointing somewhere that does not
+    exist, falls back to the same ``/private/tmp`` as ``/tmp`` — and the dedupe
+    below keeps the FIRST reason, so this order is what keeps the more specific
+    reason on the only host where it is true. On Linux, where ``gettempdir()`` IS
+    ``/tmp``, the candidates collapse the same way but the survivor is the
+    generic reason, because the gate above made the ``/tmp`` candidate generic on
+    that host. Either way the collapsed hint carries one reason, not two.
     """
+    generic_why = "it is not the session's own area, and not kept with it"
+    # Spelled on the host it is true of, and only there.
+    system_tmp_why = (
+        "macOS prunes it after three days, so a session can outlive its scratch"
+        if _SYSTEM_TMP_IS_PRUNED
+        else generic_why
+    )
     candidates = (
-        (tempfile.gettempdir(), "it is not the session's own area, and not kept with it"),
-        ("/tmp", "macOS prunes it after three days, so a session can outlive its scratch"),
+        ("/tmp", system_tmp_why),
+        (tempfile.gettempdir(), generic_why),
     )
     roots: list[tuple[Path, str]] = []
     seen: set[Path] = set()
@@ -4806,10 +4837,20 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
     resolved = path.resolve()
     for temp_root, why in _temp_scratch_roots():
         if resolved.parent == temp_root:
+            # WORD ORDER IS A CONSTRAINT HERE, not a preference. The tool card
+            # paints an output line into a lane (``width - 2 - OUTPUT_INDENT`` of
+            # the card's INNER width — 92 cells at a 100-column terminal, per the
+            # design round's own frames) and cuts anything longer TAIL-FIRST with
+            # no reflow, so whatever sits last is destroyed at EVERY width. The
+            # remedy therefore comes first, at a cell that does not move with the
+            # path after it; the two things the first draft also carried are gone
+            # — the resolved store root (already printed on every successful
+            # scratchpad write, and twice on this card) and the
+            # ``write(path=…)`` example (taught by ``system.md``, the guide and
+            # the tool description).
             return (
-                f"[scratch] {resolved} sits directly under a temp root — {why}. "
-                f"Your own scratch belongs in {SCRATCHPAD_SCHEME} ({root.resolve()}), e.g. "
-                f'write(path="{SCRATCHPAD_SCHEME}name.py", content="…").'
+                f"[scratch] Your own scratch belongs in {SCRATCHPAD_SCHEME} — {resolved} "
+                f"sits directly under a temp root: {why}."
             )
     return ""
 
