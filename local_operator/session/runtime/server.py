@@ -84,6 +84,7 @@ from local_operator.operator.trust import (
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
+from local_operator.session.runtime import stall_watchdog
 from local_operator.session.runtime.publication import PublicationGate
 from local_operator.session.runtime.registry import RecordPublisher
 from local_operator.session.runtime.types import (
@@ -2769,10 +2770,32 @@ class RuntimeServer:
                 logger.debug("runtime receipt reconciliation deferred", exc_info=True)
 
     async def _heartbeat_loop(self) -> None:
+        # THE TWO MEASURED FACTS THIS BEAT PUBLISHES, and the clock they are
+        # measured against: ``previous`` is (wall, this process's own CPU time)
+        # as of the last beat, so the pair below separates a runtime that burned
+        # its core from one the host descheduled. Both are read in-process — no
+        # ``ps``/``lsof`` fork per tick, which is the lesson
+        # ``control.py`` records at 201 forks per probe.
+        previous = (time.monotonic(), time.process_time())
         while not self._closed.is_set():
             await asyncio.sleep(HEARTBEAT_INTERVAL_S)
             if self._closed.is_set():
                 return
+            previous_wall, previous_cpu = previous
+            moment = (time.monotonic(), time.process_time())
+            lag_s, cpu_since_beat_s = moment[0] - previous_wall, moment[1] - previous_cpu
+            previous = moment
+            # PROGRESS, REPORTED TO THE STALL BOUND. This loop is the serving
+            # plane's own sign of life, and it carries ONE stamp — the workload's
+            # is its own (``process._beat_stall_watchdog``). The timer is
+            # re-armed for the earliest of the two deadlines, so a tick here
+            # cannot mask a parked workload loop; that is the whole point of
+            # tracking them apart (see ``stall_watchdog``). Deliberately before
+            # the record write below rather than after it: the bound must be
+            # restarted by THIS LOOP HAVING RUN, not by the write having
+            # succeeded — a failed write is self-healing and must not look like a
+            # stall.
+            stall_watchdog.beat(stall_watchdog.SERVING)
             try:
                 # The FLOOR for the record's ``busy`` bit, not its fix: the
                 # handle republishes at every turn boundary (the session's
@@ -2833,6 +2856,8 @@ class RuntimeServer:
                         # silently dropping the bit and making a working
                         # session broadcast-invisible.
                         started=self._started,
+                        beat_lag_s=lag_s,
+                        cpu_since_beat_s=cpu_since_beat_s,
                     )
             except Exception:  # noqa: BLE001 — a missed heartbeat is self-healing
                 logger.debug("runtime heartbeat failed", exc_info=True)
