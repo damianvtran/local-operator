@@ -48,6 +48,7 @@ guide and the system prompt.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import NamedTuple
@@ -184,6 +185,41 @@ def scratchpad_env_injection(scratchpad_dir: str | None) -> dict[str, str]:
     if SCRATCHPAD_PATH_ENV in os.environ:
         return {SCRATCHPAD_PATH_ENV: ""}
     return {}
+
+
+def ensure_scratchpad_dir(scratchpad_dir: str | None) -> str | None:
+    """``scratchpad_dir`` with its directory created, or ``None`` when there is none.
+
+    Called by the two places that HAND A PAD TO A CHILD — the ``bash`` tool and the
+    ``eval`` worker — so the path those processes are told is one they can write to
+    on the first try. It has to be created somewhere, and this is the only moment
+    that both needs it and can be sure the session directory exists: the tools that
+    take the scheme (``write``/``edit``) make their own parents, while a SHELL
+    cannot, so before this a fresh session's first ``> "$LOCAL_OPERATOR_SCRATCHPAD/
+    x.log"`` was ``No such file or directory`` and ``mktemp -d
+    "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXX"`` was ``mkdtemp failed`` — at exactly
+    the moment the export exists to keep the work out of ``/tmp``, so the recovery a
+    model reaches for under that error was the behaviour the export prevents.
+    Measured when this was found: 420 of this machine's 8,109 session directories
+    had no ``scratchpad/`` at all, and ``read scratchpad://`` answers ``(0 entries)``
+    for a missing root rather than an error, so nothing surfaced it.
+
+    Deliberately NOT done where the session derives the path
+    (``Session._scratchpad_dir``): that runs during construction, and
+    ``Transcript(defer_materialise=True)`` exists so a speculative runtime leaves
+    nothing on disk — a mkdir there breaks a pinned invariant
+    (``test_birth_selection_is_durable_only_when_work_is_admitted``).
+
+    Idempotent (``exist_ok=True`` is one ``mkdir`` syscall beside a spawn that is
+    orders of magnitude dearer), and a failure is SWALLOWED: a session whose
+    directory cannot be written to must still get its command run — the tool that
+    uses the path reports its own error — and a mkdir is not a reason to refuse.
+    """
+    if not scratchpad_dir:
+        return None
+    with contextlib.suppress(OSError):
+        Path(scratchpad_dir).mkdir(parents=True, exist_ok=True)
+    return scratchpad_dir
 
 
 def parse_scratchpad_url(url: str, root: Path) -> ScratchpadTarget:

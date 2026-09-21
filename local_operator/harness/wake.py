@@ -65,7 +65,7 @@ WAKE_PROMPT_MESSAGE_TYPE = "wake_prompt"
 #: human-surface stripper (``harness.rows.wake_receipt_headline``) has to drop the
 #: same bytes this formatter writes — a second literal copy is how those two
 #: silently stop agreeing and model-facing markup reaches a person.
-WAKE_SCRATCH_CLAUSE = "Its own files (logs, snapshots) belong in scratchpad://."
+WAKE_SCRATCH_CLAUSE = "Your own files (logs, snapshots) belong in scratchpad://."
 
 _DURATION_UNITS_MS = {
     "s": 1_000,

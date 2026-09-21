@@ -52,7 +52,11 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
-from local_operator.scratchpad import scratchpad_dir_of, scratchpad_env_injection
+from local_operator.scratchpad import (
+    ensure_scratchpad_dir,
+    scratchpad_dir_of,
+    scratchpad_env_injection,
+)
 from local_operator.tools import shell_env
 from local_operator.tools.builtin import (
     TOOL_OUTPUT_LIMIT_CHARS,
@@ -604,7 +608,7 @@ async def _spawn(cwd: str, session_key: str = "", scratchpad_dir: str | None = N
                 # has none, omitted otherwise. The worker is long-lived and
                 # inherits the environment for its whole life, so an inherited
                 # path would outlive the session that set it.
-                **scratchpad_env_injection(scratchpad_dir),
+                **scratchpad_env_injection(ensure_scratchpad_dir(scratchpad_dir)),
             },
         )
         spawn_options["env"] = env

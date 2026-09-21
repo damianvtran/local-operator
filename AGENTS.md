@@ -1129,9 +1129,9 @@ git -C ~/local-operator update-ref refs/heads/main origin/main
 # 4. Write the notes from the collected `Release:` lines, then tag + GitHub
 #    Release on the bump's merge commit. --target creates the tag on that
 #    exact SHA; the publish workflow triggers on the release.
-$EDITOR "$LOCAL_OPERATOR_SCRATCHPAD/lop-release-X.Y.Z-notes.md"   # headline, ## Major/Minor/Fixes, ## Install, compare link
+$EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # headline, ## Major/Minor/Fixes, ## Install, compare link
 gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
-  --title 'X.Y.Z: <theme>' --notes-file "$LOCAL_OPERATOR_SCRATCHPAD/lop-release-X.Y.Z-notes.md"
+  --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
 # 5. Install and verify — with the fleet DRAINED: wait until no session
 #    reports `busy`, install, then re-engage what the swap displaced.
@@ -1307,7 +1307,7 @@ Warnings that still hold, each of which has already cost a release:
 
   ```sh
   python scripts/shard_tests.py --shard <I> --total 5 \
-    --out "$LOCAL_OPERATOR_SCRATCHPAD/shard_<I>.txt"
+    --out "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shard_<I>.txt"
   ```
 
   Run it once at `origin/main` and once at your branch (a worktree each, or
@@ -1882,10 +1882,7 @@ For anything else, Textual can export exactly what it painted. Drive the app
 with `run_test`, put it in the state you care about, and save a frame:
 
 ```python
-# $LOCAL_OPERATOR_SCRATCHPAD/shot.py — the bash tool exports this session's own
-# scratchpad into every command it runs, so the capture script and the frames it
-# writes live together there instead of in /tmp (macOS prunes that after three
-# days; the scratchpad dies with the session, which is the same span).
+# $LOCAL_OPERATOR_SCRATCHPAD/shot.py — `guide://scratchpad` explains the variable;
 #   env -u NO_COLOR TERM=xterm-256color .venv/bin/python "$LOCAL_OPERATOR_SCRATCHPAD/shot.py" \
 #     "$LOCAL_OPERATOR_SCRATCHPAD/out.svg"
 import asyncio
@@ -1920,12 +1917,10 @@ stylesheet change at all.
 
 ### 2. Look at the image
 
-An SVG is not something to eyeball as markup, and the reader does NOT render one
-as an image (it decodes PNG/JPEG/GIF/WebP/HEIC, not vector formats). Render it
-and view it — open the `file://` URL of the path the script printed in a browser
-tool and screenshot it, or render it to a PNG in the scratchpad and read that
-back (for a raster frame, that second route needs no browser at all). The point
-is that a human or a vision-capable agent **sees the frame**.
+An SVG is not something to eyeball as markup, and the reader does not render one
+(it decodes raster images only). Render it and view it — open the `file://` URL of
+the printed path in a browser tool and screenshot it, or render it to a PNG in the
+scratchpad and read that back: a human or a vision-capable agent **sees the frame**.
 
 ### 3. Always capture before AND after
 
@@ -1934,11 +1929,11 @@ the cheapest artifact in this recipe and it only stays cheap while the tree is
 still clean — write the shot script, capture, then start editing:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python "$LOCAL_OPERATOR_SCRATCHPAD/shot.py" \
-  "$LOCAL_OPERATOR_SCRATCHPAD/before.svg"
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
 #   ... now make the change ...
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python "$LOCAL_OPERATOR_SCRATCHPAD/shot.py" \
-  "$LOCAL_OPERATOR_SCRATCHPAD/after.svg"
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/after.svg"
 ```
 
 **Never `git stash` to get a before-frame.** Assume you are not alone in this
@@ -1956,7 +1951,7 @@ but yours:
 git worktree add --detach /tmp/lo-before HEAD
 ln -s ~/local-operator/.venv /tmp/lo-before/.venv
 cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
-  "$LOCAL_OPERATOR_SCRATCHPAD/shot.py" "$LOCAL_OPERATOR_SCRATCHPAD/before.svg"
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
 git worktree remove --force /tmp/lo-before
 ```
 

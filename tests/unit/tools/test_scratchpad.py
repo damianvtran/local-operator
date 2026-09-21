@@ -21,6 +21,7 @@ from local_operator.scratchpad import (
     SCRATCHPAD_SCHEME,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadPathError,
+    ensure_scratchpad_dir,
     parse_scratchpad_url,
     scratchpad_dir_of,
     scratchpad_env_injection,
@@ -329,3 +330,39 @@ def test_the_context_read_rejects_anything_that_is_not_a_usable_path() -> None:
     assert scratchpad_dir_of(_Ctx(Path("/pad"))) is None
     assert scratchpad_dir_of(_Ctx()) is None
     assert scratchpad_dir_of(None) is None
+
+
+def test_the_ensure_helper_creates_a_missing_root(tmp_path: Path) -> None:
+    """Where a pad is HANDED OVER the path has to be usable, and for a shell that
+    means the directory must exist: unlike ``write``/``edit``, a redirect and a
+    ``mktemp`` template cannot create a missing parent. A fresh session is the
+    reported case — 420 of 8,109 of this machine's session directories had no
+    ``scratchpad/``, and the first ``> "$LOCAL_OPERATOR_SCRATCHPAD/x"`` in one of
+    them was ``No such file or directory``."""
+    root = tmp_path / "sessions" / "abc123" / "scratchpad"
+
+    assert ensure_scratchpad_dir(str(root)) == str(root)
+    assert root.is_dir()
+    # Idempotent, because a long-lived session hands the same path over per call.
+    assert ensure_scratchpad_dir(str(root)) == str(root)
+
+
+def test_the_ensure_helper_passes_absence_through(tmp_path: Path) -> None:
+    """A session with no pad exports nothing (``scratchpad_env_injection``), and
+    this helper must not turn that into a path. ``""`` is the cleared arm — a name
+    that is present and empty — so it is absence here too, never a directory."""
+    assert ensure_scratchpad_dir(None) is None
+    assert ensure_scratchpad_dir("") is None
+
+
+def test_the_ensure_helper_never_raises_on_an_impossible_root(tmp_path: Path) -> None:
+    """A mkdir that cannot succeed is not a reason to refuse the command: the path
+    is still this session's, the tool that uses it reports its own error, and a
+    turn must not die on housekeeping. (An unwritable parent is the realistic
+    shape — a read-only volume, a directory another process removed underneath
+    the session.)"""
+    blocked = tmp_path / "file-not-dir"
+    blocked.write_text("x", encoding="utf-8")
+
+    # ``file-not-dir/scratchpad`` cannot be created under a regular file.
+    assert ensure_scratchpad_dir(str(blocked / "scratchpad")) == str(blocked / "scratchpad")
