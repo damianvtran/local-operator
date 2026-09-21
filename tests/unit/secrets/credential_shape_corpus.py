@@ -852,11 +852,13 @@ DUMP_COMMAND_CASES: tuple[DumpCase, ...] = (
     # simple command, in a comment, or in a heredoc body than the reading verb —
     # ordinary work nagged for a token it merely MENTIONED (the operator's words:
     # "remove the redaction warning just from credentials being used in bash").
-    # The five below are those firings, masked where a path was private. The third
-    # had its credential FILENAME masked along with the path, which made it fire on
-    # neither ref — a case that passes vacuously while its reason claims a firing —
-    # so the token is restored to the harvest's other spelling and the reason now
-    # names what it pins: base fires, head does not (agent review R1, finding 3).
+    # The five below are those firings, masked where a path was private. The second
+    # is the case agent review R1 finding 3 named: as harvested it carried no `.env`
+    # at all, so it passed whatever the rule did. The fold kept main's spelling of
+    # that row — the token arrives after the command substitution CLOSES, in a later,
+    # unrelated command — over the `.root` / `cp .env /tmp/x` spelling our own
+    # remediation wrote, so the row is named here by its text, not by an ordinal;
+    # what it pins is that a `.env` past the `)` is not read.
     DumpCase(
         "head -30; echo ---; ls -la .env",
         False,
