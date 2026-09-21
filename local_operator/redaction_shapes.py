@@ -2100,6 +2100,14 @@ def _present_heads(text: str, values: Sequence[str]) -> set[str]:
     """
     by_width: dict[int, dict[str, list[str]]] = {}
     for value in values:
+        if not value:
+            # An empty value has no character to key on and no occurrence to find,
+            # and its own width-0 key would be indexed at 0 below. Both callers
+            # filter it out today (``_SurvivalIndex`` drops it, and
+            # ``_credential_fragments_survive`` returns before the index), so this
+            # keeps the helper total over its declared input rather than relying on
+            # both of them to stay that way.
+            continue
         width = min(len(value), _FRAGMENT_WINDOW)
         by_width.setdefault(width, {}).setdefault(value[:width], []).append(value)
     # First character -> the widths whose keys can start there, so the common
