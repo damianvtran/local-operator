@@ -206,6 +206,11 @@ def add_parser(subparsers: Any, parent_parser: Any = None) -> None:
     net_sessions.add_argument("--create", action="store_true", help="create a session on --peer")
     net_sessions.add_argument("--engage", metavar="SESSION", default="", help="warm that session")
     net_sessions.add_argument("--stop", metavar="SESSION", default="", help="stop that session")
+    net_sessions.add_argument(
+        "--force",
+        action="store_true",
+        help="with --stop: signal a target whose turn is in flight (as `lop stop --force`)",
+    )
     net_sessions.add_argument("--cwd", default="", help="with --create: where it should run")
     net_sessions.add_argument("--name", default="", help="with --create: its title")
     net_sessions.add_argument("--prompt", default="", help="with --create: its first turn")
@@ -1507,6 +1512,14 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
     session_id = str(getattr(args, "stop", "") or "")
     engage = str(getattr(args, "engage", "") or "")
 
+    if bool(getattr(args, "force", False)) and not session_id:
+        # A USAGE error, not a refusal (the guide's rc 2): ``--force`` means one
+        # thing only — the owner's ladder's way PAST a turn in flight — and a flag
+        # that is accepted and then quietly dropped is the same class of untruth as
+        # a sentence naming a flag that does not exist (Q-R5-2).
+        print("--force applies to --stop only", file=sys.stderr)
+        return 2
+
     if session_id:
         if not peer:
             raise MeshRefusal("peer_required", "--stop needs --peer: a session lives on one device")
@@ -1514,11 +1527,22 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         # rung waits out a drain only the owning machine can bound, and a CLI
         # that gave up at 5 s would report "nothing happened" about a stop that
         # was working.
+        #
+        # ``--force`` IS THE PEER'S OWN ``lop stop --force``, BY MODE. The ladder
+        # declines to signal a target that reports a turn in flight and names
+        # ``--force`` as the way past it; the flag is real on the owner's verb, so
+        # the VIEWER must accept it too — a surface that offers an action it cannot
+        # accept is the defect UX round 2 called U7, and the owner may be a machine
+        # the operator cannot sit down at. ``mode`` is the ladder's own wire
+        # spelling (relay._op_session_stop maps ``immediate`` to
+        # ``control.stop_session(force=True)``, whose meaning is documented at
+        # its busy rung: escalate past it, and admit the record-field identity
+        # proof when the socket cannot answer).
         detail = _relay_answer(
             "peer_session_stop",
             peer=peer,
             session_id=session_id,
-            mode="graceful",
+            mode="immediate" if bool(getattr(args, "force", False)) else "graceful",
             timeout=240.0,
         )
         outcome = str(_reported(detail, "outcome", verb="stop") or "")

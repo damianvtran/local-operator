@@ -230,6 +230,19 @@ def test_network_guide_names_the_human_step_and_the_real_commands() -> None:
     # direction (QA round 1, F-8).
     assert "lop network sessions --all-peers --json" in body
     assert "--create --name" in body
+    # THE SESSION PLANE'S REFUSALS AND ITS STOP CONTRACT (QA round 5, Q-R5-1 and
+    # Q-R5-2). The codes are what a `--json` consumer branches on, and they are
+    # documented in the family's own vocabulary — `relay_unavailable` is the SAME
+    # refusal `peers` ships, `peer_unreachable` is reserved for a peer the relay
+    # actually asked. A guide that taught an agent to read a busy stop's `skipped`
+    # as a success, or to retry a genuinely unreachable peer, would be the failure
+    # R19 exists to prevent.
+    assert "relay_unavailable" in body
+    assert "relay_refused" in body
+    assert "peer_unreachable" in body
+    assert "stop_unreported" in body
+    assert "A STOP THAT DID NOT ACT EXITS NON-ZERO" in body
+    assert "--stop <session> --force" in body
     # ...and what is still NOT built is named as unbuilt rather than implied.
     assert "IN THIS BUILD" in body
     assert "lop exec --peer" in body and "lop send --peer" in body
