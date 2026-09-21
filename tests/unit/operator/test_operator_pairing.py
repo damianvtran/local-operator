@@ -868,10 +868,7 @@ def test_the_authorise_preview_promises_exactly_what_its_own_run_does(
 
     import local_operator.operator as operator_pkg
     from local_operator.operator import handlers, trust
-    from local_operator.operator.pair_handlers import (
-        _stage_anchor_revocation,
-        describe_devices,
-    )
+    from local_operator.operator.pair_handlers import describe_devices
 
     root = _config()
     _, point = _phone_point()
