@@ -38980,8 +38980,11 @@ class OperatorApp(App[None]):
         if command == "compact":
             return self._compact_slash_result(SlashResult)
         if command == "approvals":
+            # This line is the live one and the ``may_loosen`` argument is the point:
+            # the plain form the fold left unreachable below it would drop the
+            # permission branch for connections that CAN loosen (#1310), and no gate
+            # catches the swap — see the twin in ``session/runtime/serving.py``.
             return self._approvals_slash_result(args, SlashResult, may_loosen=may_loosen)
-            return self._approvals_slash_result(args, SlashResult)
         if command == "archive":
             return self._archive_slash_result(True, SlashResult)
         if command == "unarchive":
