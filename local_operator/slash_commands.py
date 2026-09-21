@@ -718,7 +718,7 @@ SLASH_COMMANDS: list[SlashCommand] = [
         # next launch will use. `default` is the half a list cannot teach on its
         # own, because a user has to suspect it exists to go looking for it —
         # the same job `PERSIST_HINT` does on `/model`.
-        "Show or set tool approval mode; add default to keep it",
+        "Show or set tool approval mode for this session",
         arguments=ArgumentMode.OPTIONAL,
         # Trailing text is the mode name, a value this command owns.
         prefixes_text=True,

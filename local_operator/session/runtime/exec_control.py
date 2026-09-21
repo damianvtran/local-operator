@@ -164,6 +164,7 @@ async def start_exec_control(
     cwd: str,
     yolo: bool = False,
     supervised: bool = True,
+    supervisor_fd: int | None = None,
 ) -> ExecControl:
     """Publish a record and serve the control socket for ``session``.
 
@@ -202,6 +203,10 @@ async def start_exec_control(
     """
     import asyncio
 
+    from local_operator.harness.approval import (
+        deliver_operator_cap_to,
+        mint_operator_cap,
+    )
     from local_operator.paths import config_dir
     from local_operator.session.runtime.server import RuntimeServer
     from local_operator.session.runtime.serving import (
@@ -231,7 +236,24 @@ async def start_exec_control(
     # the turn, so the run returns through its own teardown and the surface is
     # closed and unpublished in the ordering :meth:`ExecControl.aclose` owns.
     handle.on_stop_requested = lambda: session.abort("stopped by supervisor")
-    runtime = RuntimeServer(handle, kind=EXEC_RECORD_KIND)
+    # THE SUPERVISOR CREDENTIAL (stage E, design §2.4 source 2). A supervised run
+    # MINTs its own capability and hands it UP the descriptor the supervisor
+    # opened, so a supervisor can answer the cards this run parks — the one thing
+    # it could not do before, while it could already deny them.
+    #
+    # MINTED HERE and not by the supervisor, deliberately: the capability is the
+    # RUNTIME's, and a value the supervisor chose would have to travel INTO this
+    # process on a channel the model can read (argv, the environment, a file) to
+    # be held here. Minting locally and writing upward means the only copy that
+    # exists on disk is this process's memory, and the supervisor's copy arrives
+    # over a descriptor that is gone before any tool subprocess exists.
+    #
+    # ``None`` when no descriptor was handed over — an unsupervised run, or a
+    # supervisor that only wants to deny — and the runtime then holds no
+    # capability at all, which is the fail-closed state ``admit_increasing``
+    # already documents.
+    capability = mint_operator_cap() if supervisor_fd is not None else None
+    runtime = RuntimeServer(handle, kind=EXEC_RECORD_KIND, operator_cap=capability)
     runtime.start()
     # THIS WAIT IS THE ONE C2 EXISTS FOR. The two fields read below — the
     # listener's port and the record path a supervisor is handed — are stamped
@@ -268,11 +290,32 @@ async def start_exec_control(
             await cast(Callable[[], Awaitable[None]], remote)()
         else:  # pragma: no cover - a reduced host answering only the owner-loop form
             await runtime.aclose()
+        if supervisor_fd is not None:
+            # The descriptor is closed even though nothing was written to it, for
+            # the reason the upward handoff closes on every path: a supervisor
+            # whose run failed must see its read END (an EOF) rather than wait out
+            # its own timeout on a descriptor this process still holds.
+            import os
+
+            try:
+                os.close(supervisor_fd)
+            except OSError:  # pragma: no cover — already closed
+                logger.debug("exec control: supervisor descriptor already closed")
         raise RuntimeError(
             "the exec control surface was asked for but the runtime never "
             "published its record; the run cannot be supervised"
         )
     record = runtime.record
+    if supervisor_fd is not None and capability is not None:
+        # THE WRITE IS THE LAST STEP, after the record is published, and the order
+        # is the contract rather than tidiness: a supervisor that receives the
+        # capability before it can read the endpoint line would hold a credential
+        # for a pid it does not know yet, and the endpoint line is what names the
+        # pid ``remember_operator_cap`` is keyed by. It also means the descriptor
+        # is closed here — before this function returns and therefore before the
+        # session runs a single tool — which is what keeps it out of every later
+        # child's table.
+        deliver_operator_cap_to(supervisor_fd, capability)
     return ExecControl(
         handle=handle,
         runtime=runtime,
@@ -297,6 +340,7 @@ async def maybe_start_exec_control(
     enabled: bool,
     cwd: str,
     yolo: bool = False,
+    supervisor_fd: int | None = None,
 ) -> ExecControl | None:
     """Start the surface when asked, disposing the session if it cannot start.
 
@@ -314,7 +358,7 @@ async def maybe_start_exec_control(
     if not enabled:
         return None
     try:
-        return await start_exec_control(session, cwd=cwd, yolo=yolo)
+        return await start_exec_control(session, cwd=cwd, yolo=yolo, supervisor_fd=supervisor_fd)
     except BaseException:
         try:
             await session.dispose()

@@ -433,6 +433,139 @@ async def test_the_list_marks_the_live_mode_and_the_saved_one_separately(
         assert marks["default ask"] == "every session"
 
 
+def test_the_option_list_marks_without_moving_a_column(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused row is marked by TINT, because words re-flow the list.
+
+    Design round 1 (D2) asked for the loosening rows to stop being offered as if
+    they would work on a surface that refuses them, and round 1's answer put a
+    suffix in the row's ``detail``. Round 2 (D7) measured what that cost: the
+    picker sizes its columns from the widest cell in the SET, so the mark took
+    the detail column from 22 cells to 47 — invisible at 44 columns, and at 60 it
+    dropped the scope column for ALL FOUR rows. ``alert`` paints the cell it
+    already has, so no width loses anything.
+
+    The property pinned here is exactly that: the two topologies offer
+    byte-identical rows, and only the mark moves. ``_may_loosen_gate_here`` is
+    the input the app reads for the decision, so staging it is staging the input
+    rather than the answer — the live topologies (owning pane, attached pane,
+    phone) are driven against real runtimes by
+    ``tests/unit/session/runtime/test_approval_authority_seam.py``.
+    """
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    owner = app._approval_choices()
+    monkeypatch.setattr(app, "_may_loosen_gate_here", lambda: False)
+    follower = app._approval_choices()
+
+    def shape(choices: list[ArgumentChoice]) -> list[tuple[str, str, str]]:
+        return [(choice.name, choice.description, choice.detail) for choice in choices]
+
+    # Nothing about the rows moves: not the names, not the descriptions, not the
+    # details, and therefore not the column widths the picker derives from them.
+    assert shape(follower) == shape(owner)
+    assert max(len(choice.detail) for choice in follower) == max(
+        len(choice.detail) for choice in owner
+    )
+
+    marks = {choice.name: choice.alert for choice in follower}
+    assert marks["auto"] is True, "the row that will be refused is not marked"
+    # `ask` is never marked: tightening works from every surface, and a warning
+    # tint on it would say the opposite.
+    assert marks["ask"] is False
+    assert {choice.name: choice.alert for choice in owner}["auto"] is False
+
+
+def _block_shape(block: NoticeBlock) -> str:
+    """What a height outlier needs in one line (design round 4b, D20).
+
+    A height reading alone says nothing about WHICH text produced it: at 44
+    columns a 5-row block is the card's sentence without the ``not applied —``
+    correction, or an ordinary receipt — another block entirely, not a settle
+    race. The opening characters and the width distinguish those in one line
+    instead of costing the next reader a round of re-measurement.
+    """
+    return f"h={block.size.height} w={block.content_size.width} text[:32]={block.text()[:32]!r}"
+
+
+@pytest.mark.asyncio
+async def test_the_refused_card_notice_reaches_the_screen(config_dir: Path) -> None:
+    """D9's host half, on the screen, at the narrowest width the product has.
+
+    Three findings meet here. The refusal has to REACH the operator at all
+    (design round 2 D9 left it swallowed, and the host half was rig-verified but
+    unpinned — agent round 3, R3-4); it has to carry the CARD's sentence rather
+    than the command's (UX U8); and the receipt the card's own keypress wrote
+    above it has to be corrected, because "✓ allowed" is the strongest "it
+    worked" affordance the transcript has and it is briefly wrong (UX U13).
+    """
+    from local_operator.harness.approval import CARD_APPROVAL_REFUSED_NOTICE
+    from local_operator.session.errors import OperatorAuthorityRequired
+
+    app = OperatorApp(lambda: _factory(GatedSession()))
+    async with app.run_test(size=(44, 20)) as pilot:
+        await _boot(pilot, app)
+        app._note_gate_refusal_on_app_loop(OperatorAuthorityRequired(trigger="approval_answer"))
+        await pilot.pause()
+
+        notices = _notices(app)
+        assert notices, "the refused card's notice never reached the transcript"
+        shown = notices[-1]
+        # The CARD's sentence, and the correction of the receipt above it.
+        assert CARD_APPROVAL_REFUSED_NOTICE in shown, shown
+        assert shown.startswith("not applied — "), shown
+
+        block = [
+            item for item in app.query_one(TranscriptView).blocks() if isinstance(item, NoticeBlock)
+        ][-1]
+        # The card's own sentence is EXACTLY 8 rows at 44 columns measured on this
+        # widget, in the revision-2 copy (228 characters of copy plus the
+        # "not applied — " receipt correction, at a 40-cell content width; the
+        # rendered block text is 242 characters). It was 6 rows at 176 rendered
+        # characters under the revision-1 copy, and the growth is the cost of the
+        # sentence naming the levers that actually work — re-measured and re-pinned
+        # rather than widened to a tolerant bound, because a one-row growth is the
+        # regression this pin exists for (agent review round 4, R4-2/R4-3: the
+        # previous `<= 8` and `<= 13` let a row slip through). Frames:
+        # ``before-card``/``after-card`` in the PR's evidence.
+        assert block.size.height == 8, _block_shape(block)
+
+        # The command's copy is NOT what a card reader is told.
+        from local_operator.harness.approval import OPERATOR_AUTHORITY_REQUIRED_NOTICE
+
+        assert OPERATOR_AUTHORITY_REQUIRED_NOTICE not in shown, shown
+
+        # AND THE LONG ONE, measured rather than computed (design round 3, D14;
+        # agent R3-5). The block wraps at its OWN content width — 40 cells at a
+        # 44-column terminal, not 44 — so the revision-2 copy's 288 characters
+        # render as 9 rows, against a transcript area that is 13 rows in this
+        # staging (`region [1,1,42,13] size [41,13] virtual [40,21] scroll_y=8`).
+        # It was 12 rows at 345 characters under the revision-1 copy, and the
+        # SHORTER block is not an accident: the retired remedy sentence was the
+        # longest clause in it. What stays on screen is the reason and the
+        # remedies, which is why the copy leads with them. A wrap-based pin once
+        # said "9 rows" and measured a wrapping the frame does not do; this one
+        # measures the widget. The transcript is given a row of its own first so
+        # the two areas are the same shape.
+        app._system_notice("a row of its own", "info")
+        app._note_gate_refusal_on_app_loop(OperatorAuthorityRequired())
+        await pilot.pause()
+        tall = [
+            item for item in app.query_one(TranscriptView).blocks() if isinstance(item, NoticeBlock)
+        ][-1]
+        # 9, measured: the command's 288 characters at the same 40-cell content
+        # width. The block is pinned; the AREA is not, because it is a property of
+        # what else is in the transcript — 13 rows in this staging, fewer with the
+        # re-armed card docked, where the painted rows are the notice's TAIL rather
+        # than a middle slice (design rounds 4b/5, D19: the claim that it fits at
+        # every height was wider than the frames, which is the class of defect this
+        # PR exists to fix). The ORDER of the copy is what carries the narrow
+        # frames: the reason and the remedies are what a reader reaches first, and
+        # the detail is recoverable once the card is answered.
+        assert tall.size.height == 9, _block_shape(tall)
+        assert OPERATOR_AUTHORITY_REQUIRED_NOTICE in tall._text
+
+
 @pytest.mark.asyncio
 async def test_choosing_a_row_runs_the_command_it_spells(config_dir: Path) -> None:
     """The list completes into the ARGUMENT and submits the same line a typist
@@ -803,3 +936,42 @@ async def test_a_stopped_session_settles_its_live_approval() -> None:
         await pilot.press("y")
         await _settle(pilot)
         assert len(app.query(ApprovalBlock)) == receipts_before
+
+
+@pytest.mark.asyncio
+async def test_the_signature_prompt_copy_is_painted_where_a_human_can_read_it(
+    config_dir: Path,
+) -> None:
+    """U3's PAINT half, DRIVEN — the seam a gutted handler left green (M-4).
+
+    Agent review round 7 mutated `OperatorApp._on_operator_prompt` into a no-op
+    and `test_the_prompt_copy_is_wired_at_the_surfaces_that_can_show_it` stayed
+    green: that cell is an AST fact about the arguments a constructor is CALLED
+    with, and the paint it feeds was exercised nowhere. The chain it did not cover
+    is the one that matters to the person answering a prompt — the sentence is
+    built, handed to the pane, and then either appended to the transcript or lost
+    silently, because a pane with a handler installed takes no fallback log.
+
+    Both directions are asserted, because the scoping is part of the claim: a copy
+    for a session the user is no longer in must NOT paint, and that branch is the
+    one an over-eager fix would delete.
+    """
+    session = GatedSession()
+    app = OperatorApp(lambda: _factory(session))
+    async with app.run_test(size=(100, 30)) as pilot:
+        await _boot(pilot, app)
+        assert app._session is session, "the app never adopted the session under test"
+
+        copy = "Authorise the operator key to LOOSEN the approval gate of sess-9"
+        app._on_operator_prompt(session, copy)
+        await pilot.pause()
+        notices = _notices(app)
+        assert notices, "the prompt copy reached no surface: the handler painted nothing"
+        assert copy in notices[-1], notices[-1]
+
+        # THE SCOPING: a copy raised for another conversation is dropped, not
+        # painted onto the one the user switched to.
+        before = len(_notices(app))
+        app._on_operator_prompt(object(), "a copy for a session that is no longer current")
+        await pilot.pause()
+        assert len(_notices(app)) == before, "a stale prompt copy was painted"

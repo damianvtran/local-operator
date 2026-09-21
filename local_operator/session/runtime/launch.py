@@ -68,6 +68,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union
 
+from local_operator.harness.approval import (
+    mint_operator_cap,
+    open_operator_cap_handoff,
+    remember_operator_cap,
+)
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import detached_popen_kwargs
 from local_operator.session.runtime.types import RUNTIME_MODULE
@@ -370,6 +375,22 @@ def _spawn_runtime(
     handle_fd, capture_path = tempfile.mkstemp(prefix="lop-runtime-", suffix=".log")
     capture = Path(capture_path)
     handle = os.fdopen(handle_fd, "wb")
+    # THE OPERATOR CAPABILITY'S ONE HANDOFF (issue #1310). MINTED HERE, in the
+    # process the operator's keyboard is attached to, and handed to the child on
+    # an inherited descriptor whose NUMBER — not value — rides in argv. The
+    # child needs it because an authority-INCREASING control request (`/approvals
+    # auto`, an approved card) must be refused to anything that merely read the
+    # session record, and the model's own `bash` tool runs as this uid and can
+    # read it. See ``harness/approval.py`` for why no file, no environment and
+    # no log may carry it, and ``session/runtime/process.main`` for the far end.
+    #
+    # The value is registered against the CHILD'S pid so that a later
+    # ``AttachClient`` in THIS process — the one that will route the console's
+    # typed commands — presents it, while every other process on the machine
+    # (a peer's terminal, the desktop app, the phone relay when it is not the
+    # one that engaged) has nothing to present and is refused.
+    handoff = open_operator_cap_handoff()
+    operator_cap = mint_operator_cap()
     # Name the detached runtime in the OS process listing. A machine has many of
     # these at once (one per live session), and until now every one of them was
     # an indistinguishable `python3.x` row in Activity Monitor. The session id is
@@ -429,7 +450,13 @@ def _spawn_runtime(
             # ``reclaim`` because this module must not import the sweep to write an
             # argv — ``reclaim`` pulls in ``registry`` and ``viewers``, and this is
             # the file the engage path loads.
-            [argv0, SAFE_PATH_FLAG, "-m", RUNTIME_MODULE],
+            #
+            # ``handoff.argv`` is APPENDED AFTER IT, so the interpreter still sees
+            # ``-m RUNTIME_MODULE`` in the position it always did (which is what
+            # the sweep matches) and the operator-descriptor flag lands in the
+            # child module's own ``sys.argv``. The two changes are orthogonal: one
+            # names the module, the other carries a descriptor number.
+            [argv0, SAFE_PATH_FLAG, "-m", RUNTIME_MODULE, *handoff.argv],
             executable=executable,
             env=env,
             stdin=subprocess.DEVNULL,
@@ -446,11 +473,43 @@ def _spawn_runtime(
             # or a console close — the opposite of the owned, attachable runtime
             # this function exists to leave behind. See
             # procstate.detached_popen_kwargs.
+            #
+            # KEPT BESIDE THE HANDOFF'S FILE-DESCRIPTOR KWARGS (merge of
+            # ``origin/main``): the two answer different questions and neither
+            # replaces the other — detachment is about which CONSOLE and process
+            # group the child joins, while ``pass_fds``/``close_fds`` are about
+            # which DESCRIPTOR it inherits. ``detached_popen_kwargs`` sets no
+            # ``close_fds`` (POSIX: ``start_new_session``; Windows:
+            # ``creationflags``), so there is no duplicate keyword here.
             **detached_popen_kwargs(),
+            # ``pass_fds``/``close_fds`` come from the handoff: POSIX passes
+            # exactly the one descriptor and keeps ``close_fds=True`` (the
+            # hardening this file already relied on); Windows cannot use
+            # ``pass_fds`` at all, so it passes an inheritable handle and turns
+            # ``close_fds`` off. The runtime reports which boundary it got.
+            pass_fds=handoff.pass_fds,
+            close_fds=handoff.close_fds,
         )
+        # AFTER the fork, and it cannot block: 32 bytes into an empty kernel
+        # buffer. ``deliver`` closes BOTH ends, so the descriptor is gone from
+        # this process before any turn can run — which is what keeps it out of
+        # every tool subprocess's table.
+        handoff.deliver(operator_cap)
+        pid = getattr(process, "pid", None)
+        if isinstance(pid, int):
+            # Keyed on the CHILD'S pid, which is the identity the console
+            # resolves later (``AttachClient.connect`` reads it off the record).
+            # A process object that cannot name its pid — a reduced double in a
+            # test — leaves the capability unkeyed, which is the fail-closed
+            # reading: a console with nothing to present is refused, and the
+            # child still holds the only copy that could have been matched.
+            remember_operator_cap(pid, operator_cap)
     finally:
         # The child holds its own duplicated descriptor; this one is ours to
-        # drop so the file is not kept open for the life of the server.
+        # drop so the file is not kept open for the life of the server. The
+        # handoff is closed here too, so a Popen that raised leaves no
+        # descriptor behind either.
+        handoff.close()
         handle.close()
     setattr(process, "lop_capture_path", capture)
     return process
@@ -600,6 +659,11 @@ async def _deliver(record: Any, session_id: str, work: Errand) -> tuple[str, boo
 
     from local_operator.mobile.attach_client import AttachClient
 
+    # NO `on_operator_prompt`: this client exists to deliver one dequeued errand and
+    # has no operator-facing surface at all — an errand that needed a signature
+    # would be answered by the runtime's own refusal, and `AttachClient`'s fallback
+    # logs the effect sentence rather than losing it (UX round 6, U3 = design round
+    # 6, D3, which is about the surfaces a human is actually looking at).
     client = AttachClient(lambda _projection: None, lambda _reason: None)
     try:
         await client.connect(record, session_id)

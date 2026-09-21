@@ -1,0 +1,135 @@
+// @vitest-environment happy-dom
+//
+// UX round 6 U2, tested where the reader is (agent review round 7, M-1).
+//
+// The round-6 remediation comment claimed `pair.tsx`'s branch "is covered by the
+// portal suite". It was not: no portal test rendered `PairScreen` at all, and the
+// reviewer proved it by grepping. The claim is the thing this round exists to
+// remove — evidence outrunning the suite — so the cell now exists, and it drives
+// the three states a relay can answer with.
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({
+	claimPairingCode: vi.fn(async () => ({ ok: true })),
+	pairingStatus: vi.fn(),
+}));
+
+vi.mock("./api", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("./api")>();
+	return {
+		...actual,
+		claimPairingCode: mocks.claimPairingCode,
+		pairingStatus: mocks.pairingStatus,
+	};
+});
+
+import { PairScreen } from "./screens/pair";
+
+async function pairAway(): Promise<void> {
+	render(<PairScreen />);
+	fireEvent.change(screen.getByPlaceholderText("paste the code"), {
+		target: { value: "code-123" },
+	});
+	fireEvent.click(screen.getByText("pair"));
+}
+
+afterEach(() => {
+	cleanup();
+	localStorage.clear();
+	vi.clearAllMocks();
+});
+
+describe("the pairing screen and the machine's own state", () => {
+	it("does not promise authority the machine cannot honour (U2)", async () => {
+		mocks.pairingStatus.mockResolvedValue({
+			paired: true,
+			device_id: "dev-1",
+			certificate: "cert",
+			operator_key_id: "kid",
+			name: "my phone",
+			authority_ready: false,
+		});
+		await pairAway();
+		// Found by the SENTENCE rather than by the `<code>` inside it: the default
+		// matcher returns the innermost element whose text matches, so a query on
+		// "lop operator install" answers with the code element and would leave the
+		// paragraph's own wording unasserted.
+		const said = await screen.findByText(/can sign already/, undefined, { timeout: 5000 });
+		expect(said.textContent).toContain("lop operator install");
+		expect(said.textContent).toContain("cannot check it yet");
+		expect(screen.queryByText(/can now approve parked tool calls/)).toBeNull();
+	});
+
+	it("makes the promise when the machine can honour it", async () => {
+		mocks.pairingStatus.mockResolvedValue({
+			paired: true,
+			device_id: "dev-1",
+			certificate: "cert",
+			operator_key_id: "kid",
+			name: "my phone",
+			authority_ready: true,
+		});
+		await pairAway();
+		const said = await screen.findByText(/can now approve parked tool calls/, undefined, {
+			timeout: 5000,
+		});
+		expect(said.textContent).toContain("loosen");
+		expect(screen.queryByText(/lop operator install/)).toBeNull();
+	});
+
+	it("treats an older relay's missing field as ready, not as unready", async () => {
+		mocks.pairingStatus.mockResolvedValue({
+			paired: true,
+			device_id: "dev-1",
+			certificate: "cert",
+			operator_key_id: "kid",
+			name: "my phone",
+		});
+		await pairAway();
+		await waitFor(
+			() => expect(screen.getByText(/can now approve parked tool calls/)).toBeTruthy(),
+			{ timeout: 5000 },
+		);
+	});
+});
+
+describe("the pairing screen's failure copy", () => {
+	it("routes a revoked device back to the machine with an operand it can act on (U1)", async () => {
+		/* The route, in the three states it has been through: "Pair it again from
+		   `lop pair`" (the step the machine refuses for ever — UX round 8, U8-1), then
+		   `lop operator init` + `install` (which the local revocation record defeated —
+		   round 9's Q9-1/R9-2, measured 403 either way), now the inverse verb — with
+		   THIS PHONE'S OWN ID in it rather than a `<this phone's device id>`
+		   placeholder (UX and design round 10, U1: the id is derived from this phone's
+		   key a few lines above and was discarded, so the command on screen could not be
+		   run by the person reading it). */
+		mocks.claimPairingCode.mockRejectedValueOnce(
+			new Error("this device has been revoked"),
+		);
+		await pairAway();
+		const said = await screen.findByText(/revoked on the machine/, undefined, { timeout: 5000 });
+		expect(said.textContent).toContain("only there");
+
+		/* The command is a COMMAND: `<code>`, like the neighbouring paragraph's
+		   `lop pair`, and it carries the real 32-hex id (D1). */
+		const command = await screen.findByText(/lop operator devices --authorise/);
+		expect(command.tagName.toLowerCase()).toBe("code");
+		expect(command.textContent).toMatch(/^lop operator devices --authorise [0-9a-f]{32}$/);
+		expect(screen.queryByText(/this phone's device id/)).toBeNull();
+		expect(screen.queryByText(/Pair it again/)).toBeNull();
+		expect(screen.queryByText(/create a new operator anchor/)).toBeNull();
+
+		/* D2: the machine-side condition the old parenthetical asked a phone reader to
+		   evaluate is now its own sentence, gated on a check they can run. */
+		expect(screen.getByText(/lop operator status/)).toBeTruthy();
+		expect(screen.getByText(/lop operator install/)).toBeTruthy();
+	});
+
+	it("turns a relay fault into a sentence rather than a status code (U8-4)", async () => {
+		mocks.claimPairingCode.mockRejectedValueOnce(new Error("500"));
+		await pairAway();
+		const said = await screen.findByText(/could not answer/, undefined, { timeout: 5000 });
+		expect(said.textContent).toContain("lop serve");
+	});
+});

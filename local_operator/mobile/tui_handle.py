@@ -794,6 +794,7 @@ class TuiSessionHandle(SessionHandle):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
+        may_loosen: bool | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome.
 
@@ -817,6 +818,13 @@ class TuiSessionHandle(SessionHandle):
         through to the app so the grant verbs can tell a terminal on this
         machine from a relayed remote device.
 
+        ``may_loosen`` is forwarded for the same reason and to the same end as on
+        ``ServingSessionHandle`` (issue #1310; design round 2 D10, UX round 2
+        U9): the app's reports name remedies, and a follower whose connection
+        cannot carry `/approvals auto` must not be offered it by the report the
+        app builds on its behalf. It comes from the registrant's seam, which is
+        the only place that knows what this connection may do.
+
         ``consumers`` is forwarded for the same reason and to the same end as
         on ``ServingSessionHandle``: a session can be hosted either by a detached
         runtime or by this app, and a follower must get the same answer from
@@ -835,6 +843,7 @@ class TuiSessionHandle(SessionHandle):
                     list(images or []),
                     locality=locality,
                     consumers=consumers,
+                    may_loosen=may_loosen,
                 )
             )
 

@@ -1,5 +1,5 @@
 /**
- * Hash-based routing, hand-rolled. Routes: `#/`, `#/new`, `#/past`,
+ * Hash-based routing, hand-rolled. Routes: `#/`, `#/new`, `#/past`, `#/pair`,
  * `#/s/:sessionId`, `#/s/:sessionId/a/:jobId`. A hash router is the right
  * shape here because the daemon
  * serves a single static bundle and no server-side route table exists.
@@ -10,12 +10,17 @@ export type Route =
 	| { name: "list" }
 	| { name: "new" }
 	| { name: "past" }
+	| { name: "pair" }
 	| { name: "session"; sessionId: string; jobId?: string };
 
 export function parseHash(hash: string): Route {
 	const path = hash.replace(/^#/, "") || "/";
 	if (path === "/new") return { name: "new" };
 	if (path === "/past") return { name: "past" };
+	/* Device pairing (stage D). A TOP-LEVEL route rather than a sheet, because the
+	   flow generates a key, claims a code and then waits for a human on ANOTHER
+	   device — a state that has to survive whatever the reader does in the meantime. */
+	if (path === "/pair") return { name: "pair" };
 	const agent = path.match(/^\/s\/([^/]+)\/a\/([^/]+)$/);
 	if (agent) {
 		return {

@@ -401,6 +401,26 @@ async def test_exec_live_tui_attachment_and_settled_frames(exec_server, tmp_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approve", [False, True])
 async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
+    """A supervisor answers a parked ``--control`` gate — DENYING it, not allowing it.
+
+    The supervisor here is an ``OperatorApp`` in the TEST process and the run
+    whose gate it answers was started by a SEPARATE ``lop exec --control
+    --background`` process. Under issue #1310 that distinction is load-bearing:
+    `/approvals auto` and an APPROVED card remove the gate that constrains the
+    caller, so they additionally require the per-session operator capability. The
+    supervisor did not start this one, so its ``y`` is refused — while its ``n``
+    (deny) is deliberately ordinary and must keep working, since a deny settles
+    the card in the safe direction.
+
+    WHAT THIS CELL IS *NOT* (UX round 6, U9). Its docstring used to state the
+    refusal as the general rule for supervisor approval — "a run that must be
+    approved interactively has to be started where the approver is" — and that is
+    the model revision 2 replaces, not the rule it ships. The rule now has a
+    stated exception with a flag: ``--supervisor-fd`` hands the run's capability UP
+    to the supervisor, which is exactly how a supervisor in another process DOES
+    approve. This cell keeps the ``--background`` shape (no such flag can be
+    passed to it) and the sibling below drives the exception.
+    """
     import asyncio
     from argparse import Namespace
 
@@ -456,12 +476,57 @@ async def test_exec_supervisor_approval_ui(exec_server, tmp_path, approve):
             await pilot.pause()
             if job_status(job_id)["status"] not in ("starting", "running"):
                 break
-        assert job_status(job_id)["status"] == "succeeded"
+        if approve:
+            # REFUSED, and the refusal is not silent at the wire: the run stays
+            # parked with its gate unanswered, so the tool never runs and the
+            # job stays running. Asserted in both directions because "the job is
+            # still running" would also be true of a supervisor that never saw
+            # the card at all — the parked prompt above is what rules that out.
+            assert (
+                job_status(job_id)["status"] == "running"
+            ), "a supervisor that did not start this run settled its gate by approval"
+            # AND THE OPERATOR IS TOLD, on this surface too (item 8 of the round-3
+            # remediation). "The job is still running" is also true of a refusal
+            # nobody ever saw — which is what the round-2 defect was, on the pane
+            # that pressed the key — so the notice is asserted rather than
+            # assumed, and it is the CARD's sentence rather than a command's.
+            from local_operator.tui.widgets.transcript import (
+                NoticeBlock,
+                TranscriptView,
+            )
+
+            # THE SENTENCE HAS TWO HOST FORMS NOW (agent review round 6, U1/U2):
+            # with an anchor installed the card refusal names the two surfaces that
+            # can sign, and on a host whose anchor is not installed it names
+            # `lop operator install` instead — because on that host neither surface
+            # can act. This cell is about the refusal REACHING an operator at all,
+            # which is the half both forms share, so it asserts the shared opening
+            # rather than pinning one host's form. The two forms are pinned
+            # individually in the seam suite, where the anchor state is controlled.
+            opening = "this approval is still waiting: only the operator can allow it"
+            notices: list[str] = []
+            for _ in range(60):
+                await pilot.pause()
+                notices = [
+                    block._text
+                    for block in app.query_one(TranscriptView).blocks()
+                    if isinstance(block, NoticeBlock)
+                ]
+                if any(opening in text for text in notices):
+                    break
+                await asyncio.sleep(0.05)
+            assert any(
+                opening in text for text in notices
+            ), f"the refusal never reached the operator: {notices}"
+        else:
+            assert job_status(job_id)["status"] == "succeeded"
         if destination:
             app.save_screenshot(
                 str(Path(destination) / f"supervised-{'allow' if approve else 'deny'}-settled.svg")
             )
-    assert (tmp_path / "written.txt").exists() is approve
+    # NEITHER direction lets the write tool run: a deny denies it, and an
+    # approval from a process that did not start the run is refused.
+    assert not (tmp_path / "written.txt").exists(), "the gated tool ran anyway"
     assert requests
 
 
@@ -743,3 +808,168 @@ def test_exec_background_receipt_and_durable_status(exec_server):
     assert Path(status["session_directory"]).is_dir()
     assert not Path(status["runtime_path"]).exists()
     assert len(requests) == 1
+
+
+def test_a_supervised_run_is_approved_through_the_handoff(exec_server, tmp_path):
+    """Stage E, driven through the REAL CLI: the supervisor's ``y`` is ACCEPTED.
+
+    WHY THIS CELL EXISTS (agent review round 6, R6-5). Stage E's positive path was
+    proven only in-process, and ``open_supervisor_cap_channel`` had no caller
+    outside tests — so the one thing the stage claims, that a supervisor in another
+    process can approve a card this run parks, was never exercised against the
+    shipped CLI. This drives it exactly as the helper documents it:
+
+    1. one channel, created before the child exists;
+    2. the run launched with ``channel.argv`` appended and ``pass_fds`` handed to the
+       spawn, so only the descriptor NUMBER rides in argv;
+    3. the run's endpoint line, read off stderr (where it belongs: stdout is the
+       machine-readable payload stream), which carries the pid;
+    4. ``remember_operator_cap(pid, channel.read())`` — after which the supervisor's
+       own attach presents the proof with no further work.
+
+    Then the operator-visible outcome: the TUI supervisor presses ``y``, the card
+    settles APPROVED, the gated ``write`` runs, and the run exits 0. The sibling cell
+    above asserts the opposite for the shape with no descriptor (a ``--background``
+    run, whose card nobody may approve), so the pair states the rule and its
+    exception rather than one of them.
+
+    The supervisor here is this test process, which is also where the TUI attaches
+    from — the same split the sibling uses, with the descriptor being the only
+    difference. No provider is reached but the fixture's, and every process runs
+    under the fixture's stripped environment (no ``CMUX_*``, notifications off).
+    """
+    import asyncio
+    import queue
+    import threading
+    from argparse import Namespace
+
+    from local_operator.agents import AgentRegistry
+    from local_operator.credentials import CredentialManager
+    from local_operator.exec_mode import ExecArgs
+    from local_operator.harness.approval import (
+        OPERATOR_CAP_BYTES,
+        open_supervisor_cap_channel,
+        operator_cap_for,
+        remember_operator_cap,
+    )
+    from local_operator.session_factory import create_session
+    from local_operator.tui.app import OperatorApp
+    from local_operator.tui.widgets.approval import ApprovalPrompt
+    from tests.e2e.harness import wait_for_adoption
+
+    run, _requests, root = exec_server
+    # THE DOCUMENTED ESCAPE HATCH, and the reason this cell needs it while its
+    # sibling does not: `subprocess.run` in the fixture inherits the test process's
+    # environment, and an agent's own shell carries `LOCAL_OPERATOR_AGENT_SHELL`,
+    # which refuses `lop exec` a session the operator did not open. That refusal is
+    # about SESSIONS, and the sibling cell dodges it by taking `--background`.
+    # A real-CLI e2e run from inside an agent's shell is exactly what
+    # `LOCAL_OPERATOR_ALLOW_NESTED_SESSION` exists for, so it is set here rather
+    # than the marker being scrubbed: scrubbing would run the CLI in an environment
+    # no operator has.
+    env = dict(run.env)
+    env["LOCAL_OPERATOR_ALLOW_NESTED_SESSION"] = "1"
+    channel = open_supervisor_cap_channel()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "local_operator.cli",
+            "exec",
+            "WRITE_FIXTURE",
+            "--control",
+            "--name",
+            "Supervised fixture",
+            *channel.argv,
+        ],
+        env=env,
+        cwd=run.cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        pass_fds=channel.pass_fds,
+        close_fds=channel.close_fds,
+    )
+    lines: queue.Queue[str] = queue.Queue()
+
+    def pump(stream: Any, label: str) -> None:
+        for line in stream:
+            lines.put(f"{label} {line}")
+
+    # BOTH streams drained, and both kept: the endpoint line belongs to stderr, but
+    # a run that fails before reaching it explains itself on either — and a cell
+    # that reads only one of them turns an early exit into a 90-second timeout with
+    # nothing to say about why.
+    for stream, label in ((process.stdout, "OUT"), (process.stderr, "ERR")):
+        threading.Thread(target=pump, args=(stream, label), daemon=True).start()
+    try:
+        # STEP 4's credential first, because a supervisor that attaches before it
+        # holds the capability is exactly the shape the sibling cell refuses: the
+        # run writes it up the descriptor at startup and then closes it.
+        capability = channel.read(timeout_s=90.0)
+        if capability is None:
+            captured = []
+            while not lines.empty():
+                captured.append(lines.get_nowait().rstrip())
+            raise AssertionError(
+                "the run did not write its capability upward; child said: "
+                + " | ".join(captured[-14:])
+            )
+        assert len(capability) == OPERATOR_CAP_BYTES
+
+        endpoint = ""
+        for _ in range(600):
+            try:
+                line = lines.get(timeout=30)
+            except queue.Empty:  # pragma: no cover — a run that never announced itself
+                break
+            print("RUN", line.rstrip())
+            if "lop exec control:" in line:
+                endpoint = line
+                break
+        assert "lop exec control:" in endpoint, endpoint
+        pid = int(endpoint.split("pid=", 1)[1].split()[0])
+        session_id = endpoint.split("session_id=", 1)[1].split()[0]
+
+        # THE SUPERVISOR'S HALF, asserted rather than assumed: the value is filed
+        # under the pid the endpoint line already printed, which is what makes an
+        # attached client's proof arrive without any wiring at the attach site.
+        remember_operator_cap(pid, capability)
+        assert operator_cap_for(pid) == capability
+
+        async def factory():
+            return await create_session(
+                Namespace(**vars(ExecArgs(resume=session_id))),
+                ConfigManager(root),
+                CredentialManager(root),
+                AgentRegistry(root),
+                has_ui=True,
+                cwd=str(tmp_path),
+            )
+
+        async def supervise() -> None:
+            app = OperatorApp(factory)
+            async with app.run_test(size=(110, 34)) as pilot:
+                await wait_for_adoption(app, pilot)
+                for _ in range(200):
+                    await pilot.pause()
+                    if app.query(ApprovalPrompt):
+                        break
+                assert app.query(ApprovalPrompt), "the supervised run must park its gate"
+                await pilot.press("y")
+                for _ in range(200):
+                    await asyncio.sleep(0.05)
+                    await pilot.pause()
+                    if process.poll() is not None:
+                        break
+
+        asyncio.run(supervise())
+        assert process.wait(timeout=90) == 0, process.returncode
+        # THE EFFECT, not a flag: the gated tool really ran.
+        assert (tmp_path / "written.txt").exists(), "the approved tool never ran"
+    finally:
+        channel.close()
+        if process.poll() is None:  # pragma: no cover — only on a failed cell
+            process.kill()
+            process.wait(timeout=30)

@@ -399,8 +399,15 @@ async def test_phone_callbacks_cannot_follow_rebind_or_overwrite_replacement(mon
     clients = []
 
     class CapturedClient:
-        def __init__(self, repaint, _disconnected, *, locality):
+        def __init__(self, repaint, _disconnected, *, locality, **extra):
             assert locality == "remote"
+            # ``**extra`` and not a named parameter: the daemon passes
+            # ``on_operator_prompt`` so a machine-side presence prompt names the
+            # session and the effect in its log (UX round 6, U3). This double stands
+            # in for the CLIENT, and the callback is the client's own plumbing —
+            # nothing in these cells asserts on it, so absorbing it keeps the double
+            # a double rather than a copy of the constructor's signature.
+            self.extra = extra
             self.repaint = repaint
             self.connected = False
             clients.append(self)

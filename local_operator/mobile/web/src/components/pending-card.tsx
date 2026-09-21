@@ -61,9 +61,17 @@
  * no per-field remount key here.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { sendCommand } from "../api";
+import {
+	HttpError,
+	isAuthorityRefusalCode,
+	requestOperatorChallenge,
+	sendCommand,
+	sendCommandWithProof,
+} from "../api";
 import { cn } from "../lib/cn";
 import { PENDING_CARD_FRACTION, columnCap } from "../lib/column";
+import { NotPairedError, operatorFieldsFor } from "../lib/operator-device";
+import { PairPromptSheet } from "../screens/pair";
 import type { PendingRequest } from "../types";
 
 /** Turn a raw command error into copy a phone user can act on. The daemon and
@@ -93,6 +101,33 @@ function humanizeError(message: string): string {
 	return message;
 }
 
+/** Whether this refusal is the AUTHORITY one — the runtime saying a signature is
+    needed — rather than a transport or staleness failure.
+
+    KEYED ON THE TYPED CODE, not on the sentence (UX round 6, U6). This used to
+    match substrings of the runtime's copy (`"only the operator can allow it"` /
+    `"needs the operator's own consent"`) because a 422 carried only prose. That
+    copy has already been rewritten twice between revisions, and the failure mode is
+    silent: after a third rewrite this returns false, so the phone shows the refusal
+    with no retry and no pair prompt — exactly the dead end UX round 2 (U8) was
+    raised to remove — and nothing would notice.
+
+    The CODE now rides beside the copy (`mobile/daemon.api_command`), and it is a
+    closed set rather than prose, so this cannot drift. The prose fallback stays for
+    one reason only: an older relay that predates the field. It is a fallback, not a
+    second implementation of the rule.
+    */
+export function isAuthorityRefusal(failure: unknown): boolean {
+	if (failure instanceof HttpError && failure.code) {
+		return isAuthorityRefusalCode(failure.code);
+	}
+	const message = String((failure as Error)?.message ?? failure).toLowerCase();
+	return (
+		message.includes("only the operator can allow it") ||
+		message.includes("needs the operator's own consent")
+	);
+}
+
 export function PendingCard({
 	pid,
 	pending,
@@ -110,6 +145,12 @@ export function PendingCard({
 	const [freeText, setFreeText] = useState("");
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState("");
+	/* The pairing prompt the AUTHORITY refusal raises on a phone that is not paired
+	   with the machine. Component-local, like the rest of this card's transient state,
+	   and keyed away with it by the render site's ``request_id`` key — a prompt that
+	   survived to the next question would offer a pairing for a card nobody is
+	   looking at any more. */
+	const [pairPrompt, setPairPrompt] = useState(false);
 
 	/* Whether the body has content below the fold, which drives the bottom fade
 	   (U4). Derived by measurement rather than from the content, because whether
@@ -160,15 +201,71 @@ export function PendingCard({
 		   within the current question. */
 	};
 
-	const approve = (approved: boolean) =>
-		answer(() =>
-			sendCommand(pid, {
-				op: "approval_answer",
+	const approve = (approved: boolean) => answer(() => submitApproval(approved));
+
+	/** An approval is authority-increasing, so it may need THIS PHONE's signature.
+
+	    THE ORDER MATTERS AND IT IS NOT AN OPTIMISATION. A session whose runtime this
+	    process (or this phone) already has authority over answers the plain frame and
+	    nothing is signed; only the refusal that says a signature is needed triggers the
+	    challenge. Signing first would put a runtime interaction in front of every
+	    approval — including the ones that never needed it — and would ask the phone for
+	    a challenge the runtime then never spends (a challenge map entry the reader paid
+	    for and no lock was opened by).
+
+	    A DENY never signs: settling a card the safe way is ordinary, and gating it
+	    behind a paired device would wall off the one answer a follower can give.
+
+	    ``fromHere`` is the point of the whole stage: before the redesign a phone could
+	    not approve a card in ANY session, because the authority was a spawn capability
+	    the relay never has. Now it is a device signature, and this is where the phone
+	    makes one. */
+	const submitApproval = async (approved: boolean) => {
+		const plain = {
+			op: "approval_answer" as const,
+			request_id: pending.request_id,
+			approved,
+			remember,
+		};
+		try {
+			await sendCommand(pid, plain);
+			return;
+		} catch (failure) {
+			if (!approved || !isAuthorityRefusal(failure)) throw failure;
+			await approveFromHere(plain);
+		}
+	};
+
+	const approveFromHere = async (plain: {
+		op: "approval_answer";
+		request_id: string;
+		approved: boolean;
+		remember: boolean;
+	}) => {
+		try {
+			const challenge = await requestOperatorChallenge(pid, {
+				action: "approve",
 				request_id: pending.request_id,
-				approved,
-				remember,
-			}),
-		);
+			});
+			const fields = await operatorFieldsFor({
+				action: "approve",
+				sessionId: pid,
+				requestId: pending.request_id,
+				challenge: challenge.challenge,
+			});
+			await sendCommandWithProof(pid, { ...plain, ...fields });
+		} catch (failure) {
+			if (failure instanceof NotPairedError) {
+				/* Offer the remedy instead of naming it. The refusal copy tells the
+				   reader to authorise from a paired phone or the machine; a phone that
+				   is not paired is therefore ONE TAP from being able to, rather than
+				   being told to go and find a terminal — the dead end UX round 2
+				   raised against the old copy. */
+				setPairPrompt(true);
+			}
+			throw failure;
+		}
+	};
 
 	const answerAsk = (value: string) =>
 		answer(() =>
@@ -195,18 +292,15 @@ export function PendingCard({
 	const optionCount = pending.kind === "approval" ? 0 : pending.options.length;
 
 	return (
-		/* `shrink-0` keeps the card at its content height (up to the cap) rather
-		   than letting the column squeeze it toward nothing when the transcript is
-		   long; the cap is what stops it taking the whole column. The padding
-		   stays on this element so the scrollbar rides the card's inner edge
-		   instead of overlapping the accent border.
-
-		   `data-testid` rather than the accent border class as the test handle:
-		   `border-accent` is also applied by the composer on drag-over and by the
-		   new-session screen on selection, so a class selector picks the wrong
-		   node the first time one of those states renders alongside a card (C5). */
-		<div
-			data-testid="pending-card"
+		<>
+			<PairPromptSheet open={pairPrompt} onClose={() => setPairPrompt(false)} />
+			{/* The fragment is what lets the prompt ride beside the card. The sheet
+			    renders into the same in-flow column as every other picker on this
+			    phone (see ``ui/sheet.tsx``), so nothing here duplicates its modal
+			    handling — and the prompt is a SIBLING rather than a child so the
+			    card's own capped layout cannot clip it. */}
+			<div
+				data-testid="pending-card"
 			style={columnCap(PENDING_CARD_FRACTION)}
 			className="border-accent bg-accent-wash mx-2 flex shrink-0 flex-col rounded-md border p-2.5"
 		>
@@ -413,6 +507,7 @@ export function PendingCard({
 			{error ? (
 				<p className="mt-1 shrink-0 pr-1.5 text-body-sm text-danger">{error}</p>
 			) : null}
-		</div>
+			</div>
+		</>
 	);
 }

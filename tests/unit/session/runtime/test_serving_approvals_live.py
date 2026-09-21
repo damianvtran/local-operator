@@ -383,7 +383,10 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     texts = [getattr(e, "text", "") for e in emitted]
     assert any("set with /approvals in this session" in t for t in texts), texts
 
-    reported = handle._approvals_slash(session, "", SlashResult)
+    # ``may_loosen=True`` explicitly: the DEFAULT is now "not said", which the
+    # sentence builders read conservatively (agent review round 4, R4-3), and
+    # every production caller passes the connection's own answer.
+    reported = handle._approvals_slash(session, "", SlashResult, may_loosen=True)
     text = getattr(reported, "text", "")
     assert "tool approvals: ask (this session)" in text, text
     assert "config.yml says auto" in text, text
@@ -391,7 +394,89 @@ async def test_a_bare_approvals_reports_a_divergence_against_the_file(
     # round 1, U3): the runtime's report used to stop at the divergence, leaving
     # the one surface whose job is "what is in effect and why" to describe a
     # problem without its answer.
-    assert "/approvals auto adopts it in this session" in text, text
+    #
+    # The default answers for a connection that COULD loosen: only a caller that
+    # does not know its connection omits the flag, and every production caller
+    # (``RuntimeServer``'s payload dispatch) passes it.
+    assert text.endswith("/approvals auto adopts it in this session"), text
+    assert "typed in the terminal" not in text, text
+
+    # ...AND WHEN THE CONNECTION MAY NOT LOOSEN, IT NAMES THE REMEDY THAT WORKS
+    # FROM WHERE THE READER IS (design round 1 D3, UX round 1 U1/U2; design round 2
+    # D10, UX round 2 U9; revision 2 §5).
+    #
+    # BOTH HALVES OF THE OLD SENTENCE ARE NOW PINNED ABSENT, and this assertion is
+    # the one that held the deleted remedy in place. It required "typed in the
+    # terminal or app window that started this session" AND "let this session's
+    # runtime retire and reopen the session here" to be PRESENT, while
+    # `test_approval_authority_seam.py` asserted the same clause absent from the
+    # refusal — the suite holding both ends of a contradiction one reader met as
+    # two rules (agent review round 6 R6-3 = design round 6 D1 = UX round 6 U4).
+    # The report now names the levers that exist under this model, and the clause
+    # it used to append is the missing-anchor state instead (UX round 6, U1/U2),
+    # which on a host WITH an anchor is the empty string — asserted below.
+    follower = handle._approvals_slash(session, "", SlashResult, may_loosen=False)
+    follower_text = getattr(follower, "text", "")
+    assert (
+        "/approvals auto adopts it with the operator's own consent — authorise it from this "
+        "machine (Touch ID) or from a paired phone" in follower_text
+    ), follower_text
+    assert "typed in the terminal" not in follower_text, follower_text
+    assert "started this session" not in follower_text, follower_text
+    assert "retire and reopen" not in follower_text, follower_text
+    assert "the window that opens a runtime owns its gate" not in follower_text, follower_text
+
+    # `/approvals default …` is the other report that offered a refused command:
+    # the persist half is machine-locality (refused from ANY control connection)
+    # and the second clause promised `auto` "now" on a connection that is refused
+    # it (design round 2, D10 = UX round 2, U7).
+    from local_operator.session.frontend_state import SlashResult as _SlashResult
+
+    capable = getattr(
+        handle._approvals_slash(session, "default auto", _SlashResult, may_loosen=True), "text", ""
+    )
+    assert "/approvals ask|auto switches this session now" in capable, capable
+    refused = getattr(
+        handle._approvals_slash(session, "default auto", _SlashResult, may_loosen=False), "text", ""
+    )
+    assert "/approvals ask switches this session now" in refused, refused
+    # THE SPAWNER REMEDY IS DELETED, and this is the pin that says so (revision 2
+    # §5 / stage F). The old clause named "the window that started it", which for a
+    # background-started runtime is a window that does not exist — the remedy the
+    # redesign exists to remove. What replaces it is the three levers that work
+    # from anywhere, in the order a reader can act on them.
+    assert "needs the operator's own consent" in refused, refused
+    assert "has to come from the window" not in refused, refused
+    assert "retire" not in refused, refused
+    # The unactionable half of the old sentence is gone: this is a FILE (or the
+    # desktop app's settings), not something to go and type in a terminal — the
+    # surface the operator was already sitting at (UX round 2, U7).
+    assert "run it on a terminal" not in refused, refused
+    # ...and it names the machine the SESSION runs on, because the reader can be
+    # a phone for which "this machine" means the phone (design round 3, D16). The
+    # two hosts build this from ONE function, so they cannot drift apart again.
+    assert "the machine this session runs on" in refused, refused
+    from local_operator.harness.approval import approvals_default_notice
+
+    # THE HOST STATE IS PART OF THE SENTENCE NOW, so the expected value is built the
+    # way production builds it (UX round 6, U1/U2): a host with no usable anchor is
+    # told the two levers cannot run yet and which command fixes that. Passing the
+    # same predicate the handle passes is what keeps this cell honest both on a
+    # developer machine that HAS an anchor and on CI, which does not.
+    from local_operator.operator import operator_authority_unusable
+
+    uninstalled = operator_authority_unusable()
+    assert refused == approvals_default_notice(
+        may_loosen=False, anchor_unusable=uninstalled
+    ), refused
+    assert capable == approvals_default_notice(may_loosen=True), capable
+    # ...and the OTHER host's sentence is pinned here rather than left to whichever
+    # machine runs the suite: the install step is named instead of the two levers
+    # being offered as if they worked.
+    both = approvals_default_notice(may_loosen=False, anchor_unusable=True)
+    assert "lop operator install" in both, both
+    assert "authority is not installed on this machine" in both, both
+    assert len(both) <= 400, len(both)
     await handle.dispose()
 
 
