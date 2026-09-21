@@ -33,10 +33,17 @@ not a path. The remaining argv elements are the module and its arguments.
 | `com.local-operator.wakes` | `<install env>/bin/Local Operator` | `Local Operator [wakes]` | `-m local_operator.wakes.supervisor` | `~/.local-operator/logs/wake-supervisor.log` |
 
 `<prefix>` is the install prefix of whichever CLI installed the job; `<install
-env>` is the environment the installing component runs from. On the machine
-measured here that distinction is visible in the live plists: the three
-CLI-installed jobs name the uv-tool prefix, while the app-installed `wakes` job
-names the desktop app's managed-python environment (see below).
+env>` is the environment the installing component runs from. That is the render
+shape for an installer that names the branded link — **not** what the live
+plists name on a machine with the generation layout. Measured here on
+2026-09-21, all four `com.local-operator.*` plists carry
+`Program = /Users/damian/.local/share/lop/bin/python3`: the shim
+`daemon_image_path()` returns (`<lop root>/bin/python3`, §2), which at exec
+hands over to the current generation's `<generation>/tools/local-operator/bin/Local
+Operator` — the branded image an EDR still sees. No live plist names a uv-tool
+prefix or an Application Support image; the uv-tool prefix survives only in the
+dated `…wakes.plist.bak-…` record below, in `ProgramArguments[0]`, with no
+`Program` key.
 
 The image/argv split is deliberate, not incidental. The four installers all
 spread `procname.launchd_job(...)` — callers `mobile/install.py`,
@@ -113,11 +120,14 @@ to the app bundle and its updater rather than to the CLI installer.
 
 `Program` is an absolute path to a binary named `Local Operator`. It lives in
 the install prefix, which depends on how the CLI was installed (`install_kind()`
-in `local_operator/update.py` distinguishes them):
+in `local_operator/update.py` sorts uv-tool, pipx and plain-pip installs; a
+generation install reports `UV_TOOL`, because its prefix carries its own
+`uv-receipt.toml` — which is why the layout has to be named here):
 
-- **a generation install (what `lop-update` produces)**: `~/.local/bin/lop` is a
-  symlink to `~/.local/share/lop/current/bin/lop`, and `current` names one
-  generation root, `~/.local/share/lop/generations/<stamp>-<sha-or-version>/`.
+- **a generation install (what `lop-update` and `lop update` both produce)**:
+  `~/.local/bin/lop` is a symlink to `~/.local/share/lop/current/bin/lop`, and
+  `current` names one generation root,
+  `~/.local/share/lop/generations/<stamp>-<sha-or-version>/`.
   The install prefix (`sys.prefix`) is that root's `tools/local-operator/`, so the
   branded image is `<generation>/tools/local-operator/bin/Local Operator`. Resolve
   the pointer (`readlink ~/.local/share/lop/current`) rather than quoting a
@@ -353,7 +363,7 @@ provenance. Its value here is narrower and still real: it is a genuine example
 of the pre-branding plist shape (the `ProgramArguments[0]`-is-the-image form
 described above), which is otherwise only reachable in the fallback branch.
 
-## 2. How the shipped code is signed today
+## 2. How the shipped code is signed today (two captures predate the generation layout)
 
 Measured on this machine, not assumed. There are **two artefact classes**, and
 they are signed differently. The distinction is load-bearing rather than
@@ -370,7 +380,15 @@ which class it names, and §3 and §5 both rest on it.
 ### Two artefacts sit on the `lop` command path, and only one is signed
 
 An admin who starts from the command they type (`lop …`) and runs `codesign` on
-it gets a different answer than the one below, so name both artefacts:
+it gets a different answer than the one below, so name both artefacts.
+
+Both this block and Class 1's below are the **pre-generation capture**, kept
+verbatim as the record: the uv-tool tree they name no longer exists on this
+machine (verified 2026-09-21), so re-running them fails — the `head -1` exits 1
+with `No such file or directory`, and the `ls -l` resolves to
+`~/.local/share/lop/current/bin/lop` instead. Substitute
+`$(readlink ~/.local/share/lop/current)/tools/local-operator` for that tree; the
+signing answers do not depend on the path.
 
 ```console
 $ ls -l "$HOME/.local/bin/lop"
@@ -394,6 +412,9 @@ the `lop` path itself "ad-hoc signed" describes a file that has no signature at
 all.
 
 ### Class 1: the CLI interpreter (the daemon artefact)
+
+Pre-generation capture as above — this tree is gone too; re-measured unchanged
+against the current generation's image on 2026-09-21.
 
 ```console
 $ codesign -dv --verbose=2 "$HOME/.local/share/uv/tools/local-operator/bin/Local Operator"
@@ -596,9 +617,11 @@ install:
    re-registers the job (§1), and this machine shows what that does to the
    supervised path: the stale `…wakes.plist.bak-…` (a leftover §1 flags as
    unknown provenance, but on this machine it is the old path) names the
-   uv-tool prefix while the live plist names the Application Support image, so
-   a tool that watches the plist sees a supervised program being repointed at a
-   directory that is itself the kind of place persistence hides.
+   uv-tool prefix, while the live plist names the generation **shim**
+   `~/.local/share/lop/bin/python3`, so a tool that watches the plist sees a
+   supervised program being repointed out of the toolchain and into the
+   product's own install root — a directory that is itself the kind of place
+   persistence hides.
 4. **A binary that is not what it is called.** The program the EDR sees is
    named `Local Operator` while its code signature's identity is CPython's,
    because it is a hardlink (§2). This is a genuine **name/identity
