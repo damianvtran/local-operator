@@ -978,12 +978,26 @@ def format_shape_incident_message(
     Everything else is CONTAINED. A value that reached `bash` (in a command's
     ``argv``, in a child's environment), that lived in this process's memory, or
     that was written to a file in plaintext is NOT compromised: the model never
-    saw it, so there is nothing to rotate. The event is still reported — a
-    credential in a tool's arguments is how it gets written to a file, and an
-    operator who is never told cannot tidy up — but what the notice asks for is
+    saw it, so there is nothing to rotate. What the contained wording asks for is
     cleanup, not rotation: delete any plaintext copy, and do it WITHOUT reading
     it, because reading it is what would turn the contained case into the
-    escalated one. The wording is deliberately SURFACE-NEUTRAL about where the
+    escalated one.
+
+    **That wording is not raised in-tree any more, and this docstring is where the
+    disposition is recorded rather than left implicit.** The operator asked for the
+    contained case to file nothing, and ``Session._queue_shape_incident`` is the
+    single gate that drops it, so today no caller reaches this branch (agent review
+    R1, finding 2). It is kept — not deleted — because it IS this formatter's
+    contract and because the obligation it carries has to exist somewhere:
+    *delete any plaintext copy a tool call may have written* is the only cleanup
+    instruction this system has ever stated, and with the contained case silenced
+    it now has no operator-facing surface anywhere in-tree. A caller that
+    deliberately has something to say about a contained hit (a write-side advisory,
+    say) can render the true words instead of inventing them; a reader looking for
+    where the cleanup obligation is surfaced will find this paragraph and know that
+    it is not.
+
+    The wording is deliberately SURFACE-NEUTRAL about where the
     masking happened: the same notice serves a credential in a tool's OUTPUT, one
     TYPED INTO a call's arguments — where the tool did run with the real value and
     the containment is in the copy this session stores and replays — and one found
