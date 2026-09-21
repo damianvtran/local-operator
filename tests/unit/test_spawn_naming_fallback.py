@@ -251,7 +251,11 @@ def test_spawn_runtime_leaves_the_interpreter_unlabelled(
 
     assert recorded["argv"][0] == sys.executable
     assert recorded["argv"][1] == SAFE_PATH_FLAG
-    assert recorded["argv"][2:] == ["-m", "local_operator.session.runtime.process"]
+    # The interpreter contract, then the capability handoff's argv flag
+    # (issue #1310) — the descriptor NUMBER only, never the value.
+    assert recorded["argv"][2:4] == ["-m", "local_operator.session.runtime.process"]
+    assert recorded["argv"][4] == "--operator-fd"
+    assert recorded["argv"][5].isdigit()
     assert recorded["executable"] is None
 
 
@@ -276,7 +280,9 @@ def test_spawn_runtime_labels_when_the_image_exists(
 
     assert recorded["argv"][0] == "Local Operator [session] id=sess-run"
     assert recorded["argv"][1] == SAFE_PATH_FLAG
-    assert recorded["argv"][2:] == ["-m", "local_operator.session.runtime.process"]
+    assert recorded["argv"][2:4] == ["-m", "local_operator.session.runtime.process"]
+    assert recorded["argv"][4] == "--operator-fd"
+    assert recorded["argv"][5].isdigit()
     assert recorded["executable"] == sys.executable
 
 

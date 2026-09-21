@@ -9550,6 +9550,18 @@ class OperatorApp(App[None]):
             set_recall_resolution = getattr(session, "set_recall_resolution", None)
             if callable(set_recall_resolution):
                 set_recall_resolution(partial(self._on_recall_rejected, session))
+            # THE PROMPT'S OWN COPY, on the surface that has a human at it (UX
+            # round 6, U3 = design round 6, D3). `AttachClient` fires `effect_copy`
+            # — "Authorise the operator key to LOOSEN the approval gate of
+            # <session>" — the instant before it signs, and nothing in production
+            # was listening, so the sentence that makes a presence prompt
+            # answerable existed only as a log line. Armed HERE, bound to this
+            # session for the same reason the recall handler is: the prompt can
+            # outlive an adopt, and a copy about one conversation must not paint on
+            # another the user has since opened.
+            set_operator_prompt_notice = getattr(session, "set_operator_prompt_notice", None)
+            if callable(set_operator_prompt_notice):
+                set_operator_prompt_notice(partial(self._on_operator_prompt, session))
             # THE THIRD ASYNCHRONOUS REFUSAL, and the one with no sender to
             # report it: a queued steer whose bind was refused after the give-up
             # released it. `steer_message` spawns a task nobody awaits, so before
@@ -9604,6 +9616,17 @@ class OperatorApp(App[None]):
         )
         # Installing this hook is what makes the ask tool exist for a UI host.
         session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
+        # A gate reply the OWNER refuses (issue #1310) is not a race and must not
+        # vanish: this pane pressed the key and is owed the reason (design round
+        # 2, D9). The copy is the owner's own sentence, rendered as a notice so
+        # it does not look like a command the user typed.
+        #
+        # Optional hook, like ``detach_viewer_gates`` above: the channel only
+        # exists on a session that can have a reply refused — an attached one —
+        # and a session that answers its own gates has no owner to be refused by.
+        _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
+        if callable(_watch_refusals):
+            _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
         if reuse_controller and source.controller is not None:
             self._controller = source.controller
         else:
@@ -9992,6 +10015,9 @@ class OperatorApp(App[None]):
             partial(self._request_tool_approval_on_app_loop, source=source)
         )
         session.set_ask_handler(partial(self._request_user_choice_on_app_loop, source=source))
+        _watch_refusals = getattr(session, "set_gate_refusal_handler", None)
+        if callable(_watch_refusals):
+            _watch_refusals(partial(self._note_gate_refusal_on_app_loop, source=source))
         source.controller = EventController(session, self)
         self._event_sources[source.controller] = source
         source.controller.subscribe()
@@ -10124,6 +10150,44 @@ class OperatorApp(App[None]):
                 )
             )
         )
+
+    def _note_gate_refusal_on_app_loop(
+        self, error: BaseException, *, source: SessionInteraction | None = None
+    ) -> None:
+        """Report an owner-refused gate reply to the operator (issue #1310).
+
+        Synchronous, and deliberately not a gate: this is the answer to a key
+        the operator already pressed, arriving after the widget has been
+        resolved. It goes through ``call_later`` like the gate paths do, so the
+        notice is composed inside Textual's active-app context rather than from
+        the socket task that delivered the refusal.
+
+        ``source`` is accepted for symmetry with the two handlers beside it and
+        guards against reporting a refusal that belongs to a session the user has
+        since left: a notice about another conversation's card is noise.
+        """
+        source = source or self._interaction
+
+        def show() -> None:
+            if not self._is_current(source):
+                return
+            # A REFUSED CARD'S OWN KEYSTROKE ALREADY WROTE A RECEIPT. The dock
+            # card resolves on the keypress, so "✓ allowed  bash  rm -rf build/"
+            # is on the row above this notice, and the tick is the strongest
+            # "it worked" affordance the transcript has (UX review round 3, U13).
+            # The correction belongs in the notice's first words, because the
+            # receipt cannot be revised once the widget has settled.
+            prefix = ""
+            if getattr(error, "trigger", "") in getattr(type(error), "CARD_OPS", frozenset()):
+                prefix = "not applied — "
+            self._system_notice(prefix + str(error), "warning")
+
+        try:
+            self.call_later(show)
+        except RuntimeError:
+            # No running app (a pilot's shutdown, an embed). The refusal is
+            # already logged by the session, which is the fallback channel.
+            logger.debug("gate refusal notice could not be scheduled", exc_info=True)
 
     async def _request_user_choice_on_app_loop(
         self, questions: list[AskQuestion], *, source: SessionInteraction | None = None
@@ -22025,8 +22089,72 @@ class OperatorApp(App[None]):
             return
         notice(
             f"tool approvals: {live} (this session) — {effect}; "
-            f"config.yml says {saved} — /approvals {saved} adopts it in this session",
+            f"config.yml says {saved} — "
+            f"{self._adopt_remedy(saved, may_loosen=self._may_loosen_gate_here())}",
             "warning" if self._approve_all else "info",
+        )
+
+    def _adopt_remedy(self, saved: str, *, may_loosen: bool | None = None) -> str:
+        """The command that matches ``config.yml``, and WHERE it has to be typed.
+
+        Every remedy printed has to work where it is printed (design round 1 D3,
+        UX round 1 U1/U2). ``config.yml`` is read by every window, but the two
+        directions do not have the same reach: a TIGHTENING word takes effect
+        from anywhere, while a loosening word is refused unless the window
+        typing it started this session's runtime (``harness.approval``,
+        issue #1310) — so naming ``/approvals auto`` without saying that sent a
+        user to a command that would answer with a refusal, from the very report
+        that recommended it.
+
+        The classification is the SAME predicate the refusals and the seam use,
+        read through one call rather than a second word list.
+
+        ``may_loosen`` is WHO THE SENTENCE IS FOR, and it is passed rather than
+        inferred when the sentence is built for a FOLLOWER: ``_may_loosen_gate_here``
+        describes THIS pane, and a routed report is rendered in someone else's
+        (issue #1310; design round 2 D10, UX round 2 U9). ``None`` is the ROUTED
+        "it did not prove it may loosen" (agent review round 3, R3-1) — the
+        conservative branch — and the local call sites pass their own answer
+        explicitly rather than letting that question and this one share a value.
+        """
+        from local_operator.harness.approval import transition_authority
+
+        here = may_loosen
+        remedy = f"/approvals {saved} adopts it in this session"
+        loosens = transition_authority("approvals", saved) == "authority-increasing"
+        if loosens and not here:
+            # THE SPAWNER CLAUSE IS GONE, and it is the same deletion the runtime's
+            # handle makes (revision 2 §5; agent review round 6 R6-3 = design round 6
+            # D1 = UX round 6 U4). "typed in the terminal or app window that started
+            # this session" described spawner authority; §3 instead gives this pane,
+            # the desktop app for any session, and the phone the same
+            # one-presence-gesture loosening, so the sentence withheld a capability
+            # the same build ships while naming a window a background-started
+            # runtime does not have.
+            return (
+                f"/approvals {saved} adopts it with the operator's own consent — authorise it "
+                "from this machine (Touch ID) or from a paired phone"
+            )
+        return remedy
+
+    @staticmethod
+    def _uninstalled_anchor_clause() -> str:
+        """The missing-anchor remedy, or ``""`` when this host has an anchor.
+
+        The mirror of ``ServingSessionHandle._uninstalled_anchor_clause``, in the
+        same words, for the reason the two reports are written to match: one
+        reader must not meet two rules. It replaces the deleted "retire and reopen
+        the session here" clause with the state that made that clause look
+        necessary — on a host with no usable anchor, the two levers the report
+        names cannot run yet (UX round 6, U1/U2).
+        """
+        from local_operator.operator import operator_authority_unusable
+
+        if not operator_authority_unusable():
+            return ""
+        return (
+            "; but operator authority is not installed on this machine yet: neither can run "
+            "until `lop operator install` has run there (one privileged step)"
         )
 
     def _configured_approvals_mode(self) -> str | None:
@@ -24465,7 +24593,25 @@ class OperatorApp(App[None]):
                 from local_operator.session.runtime.server import RuntimeServer
 
                 self._mobile_handle = TuiSessionHandle(self)
-                self._mobile_registrant = RuntimeServer(self._mobile_handle, kind="tui")
+                # THE APP OWNS THIS GATE, so the app mints the capability its
+                # own registered runtime demands and keeps it in this process's
+                # memory (issue #1310). Nothing presents it here: the app's own
+                # `/approvals auto` never crosses this socket — it calls
+                # `_set_approve_all` directly, which is the operator's own
+                # keyboard and is not routed — while a follower, the desktop
+                # app and the phone relay all arrive through this runtime and
+                # are therefore refused an authority-increasing op. That is the
+                # intended surface: a TUI-hosted session's gate can only be
+                # loosened at the terminal hosting it.
+                #
+                # Minted per registrant rather than per app, so a `takeover`
+                # that rebuilds the registrant does not leave the old value
+                # honoured anywhere.
+                from local_operator.harness.approval import mint_operator_cap
+
+                self._mobile_registrant = RuntimeServer(
+                    self._mobile_handle, kind="tui", operator_cap=mint_operator_cap()
+                )
                 self._mobile_registrant.start()
             except Exception:
                 logger.debug("mobile registrant failed to start", exc_info=True)
@@ -36660,6 +36806,45 @@ class OperatorApp(App[None]):
             for name, description in self._ANALYTICS_VIEWS.items()
         ]
 
+    def _slash_routes_to_owner(self, command: str) -> bool:
+        """Whether ``command`` typed here would be carried to the owner's runtime.
+
+        Mirrors the advertisement read in ``_run_slash_command``'s routing
+        branch (which is the authority for the decision): a remote route exists
+        only when this session HAS ``route_shared_slash`` and the owner's
+        frontend state advertises the command as shared. Kept beside the option
+        list rather than inline because the LIST needs the same answer before
+        the keystroke that would make the decision (design round 1 D2, UX round
+        1 U5).
+        """
+        if not callable(getattr(self._session, "route_shared_slash", None)):
+            return False
+        advertised = {
+            f"/{cap.command}"
+            for cap in getattr(
+                getattr(self._session, "frontend_state", None), "slash_capabilities", []
+            )
+        }
+        return command in advertised
+
+    def _may_loosen_gate_here(self) -> bool:
+        """Whether ``/approvals auto`` typed HERE will be accepted (issue #1310).
+
+        The pane resolves the capability per dial, so it can answer this before
+        offering the choice rather than after refusing it. Three cases:
+
+        * the command is handled in this process (the app owns the gate, or the
+          session is cold and the local worker drives it) — yes;
+        * it routes to a remote owner whose connection PROVED it holds the
+          session's capability (this pane started that runtime) — yes;
+        * it routes to a remote owner that proved nothing — no, and the copy
+          says where it has to be typed instead.
+        """
+        if not self._slash_routes_to_owner("/approvals"):
+            return True
+        client = getattr(self._session, "_client", None)
+        return bool(getattr(client, "_authority_bearing", False))
+
     def _approval_choices(self) -> list[ArgumentChoice]:
         """The four rows ``/approvals`` offers: two modes × two scopes.
 
@@ -36686,6 +36871,22 @@ class OperatorApp(App[None]):
         saved_auto = self._approvals_default_auto
         session_mark = " · current"
         saved_mark = " · saved"
+        # A ROW THAT WILL BE REFUSED IS MARKED — WITHOUT MOVING ANY COLUMN
+        # (design round 1 D2, UX round 1 U5; design round 2 D7). The loosening
+        # half of this list removes a gate, and only the window that started the
+        # session's runtime may do that, so on any other surface the row was
+        # offered, chosen, and refused afterwards.
+        #
+        # The first attempt said so in WORDS, appended to the row's ``detail``.
+        # That re-flowed the whole set: the picker sizes its columns from the
+        # widest cell, so the mark took the detail column from 22 cells to 47 —
+        # invisible at 44 columns, and at 60 it dropped the scope column for ALL
+        # FOUR rows. ``alert`` is the per-row mark that costs nothing: it paints
+        # the existing ``detail`` in the danger tint, so no width loses a column
+        # and the owner pane is unchanged. WHAT is refused is still said —
+        # in the refusal copy, which names the remedies, rather than in a list
+        # that has no room to explain (measured at 100/80/60/44 columns).
+        may_loosen = self._may_loosen_gate_here()
         return [
             ArgumentChoice(
                 "ask",
@@ -36698,6 +36899,9 @@ class OperatorApp(App[None]):
                 "Run every tool without asking",
                 aliases=("off", "yolo"),
                 detail="this session" + (session_mark if live_auto else ""),
+                # Not available from this pane: the same question the seam and
+                # ``_may_loosen_gate_here`` answer.
+                alert=not may_loosen,
             ),
             ArgumentChoice(
                 "default ask",
@@ -38627,6 +38831,10 @@ class OperatorApp(App[None]):
         *,
         locality: str = "local",
         consumers: Iterable[str] | None = None,
+        # ``None`` = "not said", read conservatively: only the LOCAL path omits
+        # it, and that path is a pane that owns its gate, whose answer the local
+        # call sites pass explicitly (agent review round 4, R4-3).
+        may_loosen: bool | None = None,
     ) -> dict[str, Any]:
         """Run one shared slash command and return its typed outcome as data.
 
@@ -38652,7 +38860,7 @@ class OperatorApp(App[None]):
         ``consumers`` is which action-carrying receipts the invoking client
         renders itself; see :meth:`_complete_unconsumed_action`.
         """
-        result = await self._slash_result(command, args, images, locality)
+        result = await self._slash_result(command, args, images, locality, may_loosen)
         result = self._complete_unconsumed_action(result, images, consumers)
         return result.model_dump(mode="json")
 
@@ -38724,7 +38932,12 @@ class OperatorApp(App[None]):
         return result
 
     async def _slash_result(
-        self, command: str, args: str, images: list[Any] | None, locality: str = "local"
+        self,
+        command: str,
+        args: str,
+        images: list[Any] | None,
+        locality: str = "local",
+        may_loosen: bool | None = None,
     ) -> Any:
         from local_operator.session.frontend_state import SlashResult
 
@@ -38767,7 +38980,11 @@ class OperatorApp(App[None]):
         if command == "compact":
             return self._compact_slash_result(SlashResult)
         if command == "approvals":
-            return self._approvals_slash_result(args, SlashResult)
+            # This line is the live one and the ``may_loosen`` argument is the point:
+            # the plain form the fold left unreachable below it would drop the
+            # permission branch for connections that CAN loosen (#1310), and no gate
+            # catches the swap — see the twin in ``session/runtime/serving.py``.
+            return self._approvals_slash_result(args, SlashResult, may_loosen=may_loosen)
         if command == "archive":
             return self._archive_slash_result(True, SlashResult)
         if command == "unarchive":
@@ -39682,7 +39899,9 @@ class OperatorApp(App[None]):
         )
         return SlashResult(kind="notice", text="compacting context…", style="info")
 
-    def _approvals_slash_result(self, arg: str, SlashResult: Any) -> Any:
+    def _approvals_slash_result(
+        self, arg: str, SlashResult: Any, *, may_loosen: bool | None = None
+    ) -> Any:
         """The routed ``/approvals``: report or switch the OWNER's gate.
 
         The approval gate the engine consults is the owner process's — a
@@ -39695,11 +39914,19 @@ class OperatorApp(App[None]):
         persist = argument == "default" or argument.startswith("default ")
         mode = argument[len("default ") :].strip() if persist else argument
         if persist:
+            # The same two-truths split the runtime makes, in the SAME WORDS:
+            # the sentence is shared so the two hosts cannot drift, and it names
+            # the machine the session runs on rather than "this machine", which
+            # reads as the reader's own filesystem from a phone (design round 2
+            # D10 = UX round 2 U7; design round 3, D16).
+            from local_operator.harness.approval import approvals_default_notice
+            from local_operator.operator import operator_authority_unusable
+
             return SlashResult(
                 kind="notice",
-                text="/approvals default persists to the local machine's config — run it "
-                "on the terminal whose launches it should govern; /approvals ask|auto "
-                "switches the shared session now",
+                text=approvals_default_notice(
+                    may_loosen=may_loosen, anchor_unusable=operator_authority_unusable()
+                ),
                 style="warning",
             )
         if mode in ("ask", "on", "prompt"):
@@ -39732,10 +39959,23 @@ class OperatorApp(App[None]):
                     text=f"tool approvals: {live} — {effect}; new sessions open the same way",
                     style="warning" if self._approve_all else "info",
                 )
+            from local_operator.harness.approval import transition_authority
+
+            here = may_loosen
+            remedy = self._adopt_remedy(saved, may_loosen=here)
+            if transition_authority("approvals", saved) == "authority-increasing" and not here:
+                # The route that DOES work belongs in the report too, not only in
+                # the refusal that arrives after the operator has tried and failed
+                # (UX round 2, U9). WHAT IT NAMES changed with the authority model
+                # (revision 2 §5; agent review round 6 R6-3 = design round 6 D1 =
+                # UX round 6 U4): the clause here was "or let this session's runtime
+                # retire and reopen the session here", which is the deleted remedy
+                # on the surface a reader consults BEFORE being refused.
+                remedy += self._uninstalled_anchor_clause()
             return SlashResult(
                 kind="notice",
                 text=f"tool approvals: {live} (this session) — {effect}; "
-                f"config.yml says {saved} — /approvals {saved} adopts it in this session",
+                f"config.yml says {saved} — {remedy}",
                 style="warning" if self._approve_all else "info",
             )
         if wanted_auto:
@@ -43000,6 +43240,26 @@ class OperatorApp(App[None]):
         logger.debug("session runtime refused the recall of steer %s", command_id)
         self._append_block(NoticeBlock(RECALL_UNCONFIRMED_NOTICE, "warning"))
 
+    def _on_operator_prompt(self, session: Any, copy: str) -> None:
+        """Paint what a signature is about to authorise, while the prompt is up.
+
+        A ``NoticeBlock`` in the transcript rather than a transient banner: the
+        prompt it accompanies is answered by a human some seconds later, and the
+        sentence has to survive the wait — the same reason the recall-refusal
+        warning is appended rather than slotted (see `_on_recall_rejected`).
+
+        Scoped to the session that asked, and dropped when it is no longer current:
+        the prompt is raised by THIS machine's key for THIS session, so a copy
+        landing on the conversation the user has since switched to would describe a
+        gesture they are not about to make.
+        """
+        if session is not self._session:
+            logger.debug(
+                "dropped an operator-prompt notice for a session that is no longer current"
+            )
+            return
+        self._append_block(NoticeBlock(copy, "warning"))
+
     def _on_steer_undeliverable(self, session: Any, command_id: str) -> None:
         """A queued steer's bind was refused, so give the text back and say so.
 
@@ -43463,7 +43723,7 @@ def _is_viewer(session: Any) -> TypeGuard[ViewerSessionProtocol]:
 
     **Why a predicate and not ``isinstance(session, ViewerSessionProtocol)``.**
     The obvious conversion is the honest-looking one and it costs three orders
-    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 124
+    of magnitude (~10^3x): that protocol is ``runtime_checkable`` with 126
     public members, and a positive ``isinstance`` walks every one of them.
     (The figure is RECOMPUTED with ``len(typing._get_protocol_attrs(...))`` at
     the time of measurement rather than adjusted by the size of one's own

@@ -58,8 +58,29 @@ if TYPE_CHECKING:
 
     from local_operator.harness.types import ImageContent
 
+from local_operator.harness.approval import (
+    AUTHORITY_OPS,
+    admit_increasing,
+    frame_authority,
+    handshake_proof,
+    handshake_proof_ok,
+    is_wire_hex,
+    operator_nonce,
+    request_proof_ok,
+    signature_target,
+)
 from local_operator.mobile.projection import ProjectionFold
 from local_operator.mobile.types import SessionProjection
+from local_operator.operator import report_operator_authority
+from local_operator.operator import verify as operator_verify
+from local_operator.operator.trust import (
+    ANCHOR_REFRESH_S,
+    AnchorCache,
+    AnchorLoad,
+    OperatorAnchor,
+    anchor_path,
+    device_is_revoked,
+)
 from local_operator.paths import config_dir
 from local_operator.session.attachments import AttachmentStore
 from local_operator.session.frontend_state import FRONTEND_CAPABILITY
@@ -73,6 +94,7 @@ from local_operator.session.runtime.types import (
     EVENT_MUTE_DROP_TYPES,
     EXCLUSIVE_MOVE_CAPABILITY,
     HEARTBEAT_INTERVAL_S,
+    OPERATOR_SIGNATURE_CAPABILITY,
     ClientKind,
     ClientLocality,
     SessionRecord,
@@ -906,6 +928,72 @@ async def _maybe_await(result: Any) -> Any:
     return result
 
 
+#: Every control op that can reach an authority-INCREASING sink (issue #1310).
+#:
+#: The set itself lives in ``harness/approval.py`` beside the class predicate,
+#: because the CONSOLE reads it too (it presents the capability on exactly these
+#: frames) and a set that drifted between the two ends would leave a route the
+#: client believes it authorised and the server believes is ordinary. What is
+#: asserted here is the correspondence with THIS module's dispatch: every op
+#: whose dispatch reaches ``SessionHandle.slash`` / ``slash_images`` /
+#: ``run_slash_authoritative`` / ``approval_answer`` — the only ways to
+#: ``_approvals_slash``, ``_set_approve_all`` or a card approval — must appear in
+#: the set, and ``test_approval_authority_seam.py`` re-derives that group from
+#: this file's source so a route added in a new op fails the suite instead of
+#: shipping an unguarded way to loosen a running gate.
+_AUTHORITY_OPS = AUTHORITY_OPS
+
+#: How long a minted challenge stays usable. Short on purpose (revision 2, §2.3
+#: spells 30 s): the window between a surface asking for a challenge and signing
+#: it is one human gesture, and a long window is a long time for a captured
+#: challenge to be spent by somebody else. Expiry is checked at USE, not at mint,
+#: so a challenge that outlives a slow prompt is refused rather than silently
+#: honoured — the surface asks again, which costs one more prompt only in the
+#: case where the first one took half a minute.
+_CHALLENGE_TTL_S = 30.0
+
+#: How many challenges one connection may hold. Bounded because minting is an
+#: ordinary op and therefore unauthenticated beyond the record key: without a
+#: cap, a same-uid child could mint challenges in a loop and grow this runtime's
+#: memory without limit. Eight is far more than a real surface needs (it asks for
+#: one per action, signs it, and consumes it).
+_MAX_CHALLENGES_PER_CONN = 8
+
+#: Bound on unspent challenges for the WHOLE runtime, not per connection.
+#:
+#: The per-connection cap alone is not a bound on a subject that can dial freely:
+#: the session record's ``control_key`` — which is what the very predicate this op
+#: exists for refuses to accept as authority — is readable by the subject, so it
+#: can open as many connections as it likes and hold the per-connection maximum on
+#: each (agent review round 6, R6-4). The design already accepts denial rather than
+#: escalation from that subject, so this is not an escalation either; it is the
+#: difference between a bounded and an unbounded one. Set well above any real
+#: surface's need — one human gesture is one challenge — and expired entries are
+#: pruned before it is consulted, so an idle runtime never refuses a real caller.
+_MAX_LIVE_CHALLENGES = 64
+
+#: How long a runtime may keep trusting the revocation list it read at first need.
+#:
+#: THE SAME OBJECT THE PRODUCT QUOTES, not a second literal that happens to agree
+#: (agent review round 7, M-2). ``trust.ANCHOR_REFRESH_S`` is what the design doc
+#: and `lop operator devices --revoke`'s receipt state to an operator, so a runtime
+#: enforcing its own copy could tell someone a window it does not honour — a
+#: security claim outrunning the code, which is the class this round exists to
+#: remove. Bound here as a module attribute as well, because a test shrinks the
+#: window to zero by patching ONE name and this is the name the cache is built from.
+_ANCHOR_REFRESH_S = ANCHOR_REFRESH_S
+
+#: How long a verified device certificate is remembered. The certificate is
+#: checked lazily and per certificate string; a TTL rather than a permanent cache
+#: because the anchor's revocation list can change under a long-running session.
+_DEVICE_CERT_TTL_S = 300.0
+
+#: Bound on the device-certificate cache. Keyed by an attacker-chosen string, so
+#: an uncapped map is a memory leak with an on-demand trigger; clearing wholesale
+#: on overflow is enough, because the entries are pure recomputable answers.
+_MAX_CACHED_DEVICE_CERTS = 32
+
+
 def _accepts_kw(fn: Any, name: str) -> bool:
     """Whether ``fn`` takes the keyword ``name``.
 
@@ -1044,6 +1132,35 @@ class _ClientConn:
     # v5 canonical state is attach-only and independently negotiated so daemon
     # projection bytes never gain frontend frames.
     wants_frontend: bool = False
+    #: The per-connection operator proof material (issue #1310). The client
+    #: offers a NONCE in its auth frame; this runtime answers with a random salt
+    #: and a proof over both, and later demands the same construction on an
+    #: authority-increasing request. Neither value is secret, and both die with
+    #: the connection, so a proof seen on the wire is worthless on another one.
+    #: Empty when the client offered no nonce — an old console, or one that
+    #: holds no capability for this runtime — which is the fail-closed state.
+    operator_nonce: str = ""
+    operator_salt: str = ""
+    #: The operator-signed device certificate this connection declared in its
+    #: auth frame, or "" when it declared none. NOT yet verified at the point it
+    #: is stored — ``_device_cert_point`` is what resolves it under the anchor,
+    #: with the TTL cache and the revocation check — and every reader goes
+    #: through that, so an unverified string here can only change an answer to
+    #: ``False``. Kept per connection rather than per frame because the report
+    #: needs it before a frame arrives; the SIGNATURE still arrives on the frame
+    #: that claims authority, and is judged there.
+    device_certificate: str = ""
+    #: The per-action challenges this connection has been minted and not yet
+    #: spent, keyed by ``(action, request_id)``. Per CONNECTION for the same
+    #: reason the nonce is: a challenge is authority-bearing material, and one
+    #: minted for a connection must not be spendable on another (a relay, or an
+    #: attacker that merely read the record, would otherwise be able to have a
+    #: challenge minted here and present the signature it harvested there).
+    #: Consumed by ``pop`` on the first frame that uses it, which is the replay
+    #: defence; expired entries are pruned on the next mint so a client that asks
+    #: and never signs cannot grow this map
+    #: (``_MAX_CHALLENGES_PER_CONN`` bounds it either way).
+    operator_challenges: dict[tuple[str, str], tuple[str, float]] = field(default_factory=dict)
     #: This viewer negotiated ``display-history-audit-v1`` and can therefore be
     #: sent the audit fields on a display page. A property of the CONNECTION,
     #: so it is read where the connection is known and never inferred from the
@@ -1249,7 +1366,60 @@ class RuntimeServer:
         *,
         kind: str = "tui",
         projection_sink: ProjectionSink | None = None,
+        operator_cap: bytes | None = None,
+        operator_anchor: OperatorAnchor | None = None,
     ) -> None:
+        #: The capability this runtime demands for an authority-INCREASING
+        #: control request, or ``None`` when nothing handed one over (issue
+        #: #1310). Minted by whichever process started this runtime — the
+        #: detached spawn hands it over on an inherited descriptor, the TUI
+        #: passes the one it minted for its own in-process gate — and held ONLY
+        #: here. It is deliberately not a ``SessionRecord`` field and not on the
+        #: handle's projection: everything published in the record is readable
+        #: under this same uid, which is the defect this exists to close.
+        #:
+        #: ``None`` is a supported, fail-closed state rather than a bug: a
+        #: runtime started by an older console, or by a background spawn with no
+        #: console at all, keeps serving every ordinary operation and refuses
+        #: every loosening (see ``_authority_admitted``).
+        self._operator_cap = operator_cap
+        #: The operator ANCHOR, read once and pinned in memory (revision 2).
+        #: ``AnchorCache`` caches the FAILED load as well as the successful one,
+        #: which is the point: re-reading per frame would let a same-uid subject
+        #: race the read, and an attacker who could make the anchor unreadable
+        #: could otherwise force a disk read on every frame it sends.
+        #:
+        #: ``operator_anchor`` is the INJECTION SEAM and mirrors ``operator_cap``:
+        #: a caller that has already resolved an anchor (or a test that must not
+        #: write to the root-owned path, which by construction it cannot) hands
+        #: one in. It is a CONSTRUCTOR ARGUMENT rather than an environment lookup
+        #: on purpose — an env-var anchor is the substitution attack this whole
+        #: design exists to prevent, so the seam is a value the caller passes and
+        #: never a name the process reads (see
+        #: ``test_the_anchor_path_cannot_be_redirected``).
+        self._anchor_cache = (
+            AnchorCache(
+                load=AnchorLoad(
+                    anchor=operator_anchor,
+                    path=anchor_path(),
+                    root_owned=True,
+                    reason="injected by the caller",
+                    exists=True,
+                )
+            )
+            if operator_anchor is not None
+            else AnchorCache(refresh_s=_ANCHOR_REFRESH_S)
+        )
+        #: Verified device certificates, by certificate string, with a TTL — see
+        #: ``_device_cert_point`` for why this is lazy, bounded and short-lived.
+        #: ``(point, deadline, device_id)``: the id is kept so REVOCATION can be
+        #: re-checked on a cache hit — see the method, and R6-1.
+        self._device_certs: dict[str, tuple[bytes | None, float, str]] = {}
+        #: Every unspent operator challenge in this runtime, by challenge string,
+        #: with its deadline — the AGGREGATE bound the per-connection maximum
+        #: cannot be (see ``_MAX_LIVE_CHALLENGES``). Pruned on mint and on
+        #: consume, so it never needs a timer and never outlives what it counts.
+        self._live_challenges: dict[str, float] = {}
         #: Live state mirrored into the discovery record. Held here rather
         #: than read off the record so the publish is one assignment and the
         #: fields have a defined value before the record exists.
@@ -1398,6 +1568,18 @@ class RuntimeServer:
                 # breaks the attach outright. See
                 # ``DISPLAY_HISTORY_AUDIT_CAPABILITY``.
                 + (["display-history-audit-v1"] if hasattr(handle, "history_page") else [])
+                # ADVERTISED UNCONDITIONALLY (revision 2, §2.3). The runtime can
+                # always VERIFY an operator or device signature: the anchor is a
+                # file it reads, and the public half is all verification needs.
+                # Deliberately NOT gated on the anchor being installed, which
+                # would make a host mid-onboarding look like a host that cannot
+                # accept a signature at all — a client that then declined to ask
+                # for a challenge would report "not supported" rather than "not
+                # yet installed", and the refusal copy tells the reader to
+                # install it. An uninstalled anchor fails the verification
+                # (``signature_verdict`` returns False for a signature with no
+                # anchor to place it against), which is the honest refusal.
+                + [OPERATOR_SIGNATURE_CAPABILITY]
             ),
             # A runtime is born with no terminal watching it. Stamped at
             # construction rather than left to the first transition, because
@@ -2282,6 +2464,14 @@ class RuntimeServer:
             loop.close()
 
     async def _serve(self) -> None:
+        # HOW STRONG THE CAPABILITY'S BOUNDARY IS ON THIS HOST, reported rather
+        # than assumed, and reported HERE so every host says it exactly once (the
+        # helper latches): on Linux with ``ptrace_scope=0`` and on Windows a
+        # same-uid process can read this one's memory, so there the capability
+        # raises the cost of the attack instead of closing it. See
+        # ``harness/approval.operator_cap_guarantee`` and the residual section of
+        # ``docs/design/approval-authority.md``.
+        report_operator_authority()
         try:
             # Port 0: the OS picks; the record carries the number. Binding
             # loopback only is the security invariant of the whole design.
@@ -3013,6 +3203,34 @@ class RuntimeServer:
             if isinstance(raw_consumers, (list, tuple))
             else None
         )
+        # The client's half of the handshake (issue #1310). Only the SHAPE is
+        # checked here — a nonce is not a credential, and an ill-shaped one
+        # degrades to "this client asked for no handshake", which refuses rather
+        # than admits. Nothing is remembered across connections.
+        raw_nonce = frame.get("operator_nonce")
+        client_nonce = raw_nonce if is_wire_hex(raw_nonce) else ""
+        # The salt is minted per connection and only when there is a nonce to
+        # bind it to: a connection that will never be offered a proof does not
+        # need one minted.
+        server_salt = operator_nonce() if client_nonce else ""
+        # THE PAIRED-DEVICE DECLARATION (stage D). A relay says here that a phone
+        # has been paired with THIS machine, and the runtime verifies the
+        # certificate under the pinned anchor before it means anything — an
+        # UNVERIFIED string changes no behaviour, so a forged one is refused
+        # rather than denied service. Nothing crosses on it: the certificate is
+        # public data, and the private half that could make it useful is on the
+        # phone.
+        #
+        # It is DECLARED rather than derived from the frames because one report
+        # needs the answer before any frame arrives: whether this connection can
+        # carry out a loosening, which decides whether `/approvals` tells the
+        # phone it may switch the gate or tells it to find another surface
+        # (``_connection_may_loosen``).
+        raw_device = frame.get("operator_device")
+        device_certificate = (
+            raw_device if isinstance(raw_device, str) and 0 < len(raw_device) <= 4096 else ""
+        )
+
         if wants_frontend and FRONTEND_CAPABILITY not in self._record.capabilities:
             writer.close()
             return
@@ -3054,6 +3272,9 @@ class RuntimeServer:
             slash_consumers=slash_consumers,
             wants_events=wants_events,
             wants_frontend=wants_frontend,
+            operator_nonce=client_nonce,
+            operator_salt=server_salt,
+            device_certificate=device_certificate,
         )
         self._clients[id(writer)] = conn
         # A terminal arriving flips ``detached`` (round 1, U2: it was computed
@@ -3854,6 +4075,303 @@ class RuntimeServer:
             watching.add("viewer")
         return frozenset(watching)
 
+    def _authority_admitted(self, frame: dict[str, Any], conn: _ClientConn) -> bool:
+        """Whether this frame may reach an authority-INCREASING sink.
+
+        True for every frame that is not in :data:`_AUTHORITY_OPS` — the
+        overwhelming majority of traffic, and the set whose authorization really
+        is the record key alone. For an increasing frame, the answer comes from
+        :func:`local_operator.harness.approval.admit_increasing`, which consults
+        BOTH sources: THIS CONNECTION's proof of the runtime's spawn capability,
+        and a verified OPERATOR or DEVICE signature (issue #1310 revision 2; the
+        run-scoped supervisor credential joins them in stage E).
+
+        The connection is taken rather than reached for because both sources are
+        bound to it: the client's nonce came in on the auth frame that created
+        ``conn`` and the salt was minted for it, so a capability proof is only
+        ever valid where it was produced — and a challenge is minted per
+        connection for the same reason, so a signature harvested on one socket
+        cannot be presented on another.
+
+        The classification is by OP plus the fields that op carries, and it is
+        deliberately NOT by the handle method or by the resulting value: a frame
+        is judged before anything is dispatched, so a refused request cannot
+        have had a partial effect on the way to being refused.
+        """
+        if frame.get("op") not in _AUTHORITY_OPS:
+            return True
+        authority = frame_authority(frame)
+        if authority is None or authority == "ordinary":
+            return True
+        # TWO SOURCES, COMBINED IN THE STDLIB-ONLY MODULE (revision 2). The
+        # runtime maps the frame to two facts and the PREDICATE answers: the
+        # spawn capability's per-connection proof (the interactive console, which
+        # must stay prompt-free), and a verdict on an operator/device signature
+        # (the attached pane, the desktop backend for a session it did not start,
+        # the CLI for a background-started run, and — stage D — the phone). The
+        # crypto that produces the verdict stays in ``local_operator.operator
+        # .verify``, which imports ``cryptography`` lazily; this method never
+        # learns how a signature is checked.
+        capability = request_proof_ok(
+            supplied=frame.get("operator_cap"),
+            held=self._operator_cap,
+            client_nonce=conn.operator_nonce,
+            server_salt=conn.operator_salt,
+        )
+        signature = self._operator_signature_verdict(frame, conn)
+        admitted = admit_increasing(capability=capability, signature=signature)
+        if not admitted:
+            # Logged because the two refusals have different causes and only
+            # one of them is an attack: a capability miss is a follower or a
+            # model-authored child, a FALSE signature verdict is somebody
+            # presenting a signature that did not hold.
+            logger.info(
+                "control: refused an authority-increasing %s (capability=%s signature=%s) on "
+                "session %s",
+                frame.get("op"),
+                capability,
+                signature,
+                self._record.session_id,
+            )
+        return admitted
+
+    def _operator_signature_verdict(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
+        """``True``/``False`` when a signature was offered, ``None`` when not.
+
+        THE CHALLENGE IS CONSUMED HERE, before verification, and that is the
+        replay defence rather than a detail: a popped challenge cannot be
+        presented a second time, so a captured signature (and the ``operator_sig``
+        that carries it) has exactly one use. Pop-then-fail also means a client
+        whose signature was refused must ask for a NEW challenge, which it does
+        on its next attempt — the alternative, verifying first and popping on
+        success, would let a flood of replays re-verify forever and would let a
+        race present one challenge twice.
+
+        A missing challenge is a refusal rather than "not offered": a frame that
+        CARRIES a signature is claiming authority, and a claim with no live
+        challenge behind it is exactly what a replay looks like.
+        """
+        target = signature_target(frame)
+        if target is None:
+            return None
+        supplied = frame.get("operator_sig")
+        if supplied is None:
+            return None
+        action, request_id = target
+        entry = conn.operator_challenges.pop((action, request_id), None)
+        if entry is None:
+            return False
+        challenge, expires_at = entry
+        if time.monotonic() > expires_at:
+            return False
+        # The runtime-wide count follows the CONSUME as well as the mint: a
+        # challenge handed back here is spent, and leaving it in the aggregate
+        # would let a subject that never signs slowly fill the runtime's budget
+        # with dead entries it minted itself.
+        self._live_challenges.pop(challenge, None)
+        loaded = self._anchor_cache.get()
+        anchor = loaded.anchor if loaded.usable else None
+        device_spki = self._device_cert_point(frame.get("operator_cert"), anchor)
+        return operator_verify.signature_verdict(
+            action=action,
+            session_id=self._record.session_id,
+            request_id=request_id,
+            challenge=challenge,
+            signature_hex=supplied,
+            operator_spki=anchor.spki if anchor is not None else None,
+            operator_key_id=frame.get("operator_key_id") or "",
+            operator_cert=frame.get("operator_cert"),
+            device_spki=device_spki,
+            now=int(time.time()),
+        )
+
+    def _device_cert_point(self, certificate: object, anchor: Any) -> bytes | None:
+        """The device point behind a certificate, verified once per TTL.
+
+        A SHORT TTL rather than a permanent cache, and lazily rather than at
+        startup, for the two facts the design names: most sessions never see a
+        device frame, and a certificate can be REVOKED (an edit to the root-owned
+        anchor) — an unlimited cache would keep honouring a revoked phone for the
+        lifetime of a session that can run for days. The cache is keyed by the
+        certificate string, so a different certificate is always verified rather
+        than matched against a stale answer.
+        """
+        if not isinstance(certificate, str) or not certificate:
+            return None
+        if anchor is None:
+            return None
+        cached = self._device_certs.get(certificate)
+        now = time.monotonic()
+        if cached is not None and cached[1] > now:
+            # REVOCATION IS RE-CHECKED ON EVERY USE, even on a cache hit (agent
+            # review round 6, R6-1 — the second half of it, and the half the
+            # certificate TTL alone does not cover). What is cached is the
+            # EXPENSIVE half: the signature and expiry verification, which cannot
+            # change. Whether the certificate's device is REVOKED can, and it is
+            # the operator's own action — so it is read from the anchor every time
+            # rather than frozen for `_DEVICE_CERT_TTL_S`. Without this, a device
+            # revoked while a runtime was running kept acting for up to five
+            # minutes after the anchor re-read that was meant to stop it.
+            point, _deadline, device_id = cached
+            if point is None:
+                return None
+            return None if device_is_revoked(anchor, device_id) else point
+        parsed = operator_verify.read_device_cert(certificate)
+        point = operator_verify.verify_device_cert(
+            certificate, operator_spki=anchor.spki, now=int(time.time()), parsed=parsed
+        )
+        device_id = parsed.device_id if parsed is not None else ""
+        if point is not None:
+            # A certificate that names a REVOKED device is refused here, at the
+            # point its identity is known: ``verify_device_cert`` deliberately
+            # knows nothing about revocation (it checks a signature and an
+            # expiry), and the revocation list is a property of the anchor.
+            if device_is_revoked(anchor, device_id):
+                point = None
+        self._device_certs[certificate] = (point, now + _DEVICE_CERT_TTL_S, device_id)
+        if len(self._device_certs) > _MAX_CACHED_DEVICE_CERTS:
+            # Bounded: a client can present a new certificate string on every
+            # frame, and an unbounded cache keyed by attacker-chosen strings is a
+            # memory leak with an on-demand trigger.
+            self._device_certs.clear()
+        return point
+
+    def _connection_may_loosen(self, frame: dict[str, Any], conn: _ClientConn) -> bool | None:
+        """Whether THIS connection has PROVEN it may loosen this session's gate.
+
+        ``True``, or ``None`` for "it has not said", which the sentence builders
+        read as the conservative branch. Never ``False``: a follower and a
+        capable console must not be indistinguishable by accident, and the
+        distinction that matters is "proved" vs "did not".
+
+        WHY NOT ``_authority_admitted`` ON A SYNTHETIC FRAME. That predicate
+        reads the proof off the ``frame`` it is handed, and a frame constructed
+        here has none — so it answered a constant ``False`` and told a console
+        that had just loosened the gate that loosening "has to come from the
+        window that started it" (agent review round 3, R3-1 = UX U10 = QA Q6:
+        measured on production objects, on both the desktop and the phone).
+        Passing the REQUEST frame instead is not a fix either: the request is
+        ordinary, so an ordinary op would answer "may loosen" for a follower.
+
+        What CAN be verified here is the HANDSHAKE proof: HMAC over THIS
+        connection's nonce and salt, computable only by a process holding the
+        capability. A client that spawned this runtime has both; a follower, an
+        impostor holding the rewritten record, and a relay forwarding someone
+        else's frames do not — the proof is bound to the connection's own nonce
+        and salt, so another connection's proof does not verify here.
+
+        AND THE OPERATOR SOURCE (revision 2). A LOCAL connection to a runtime with
+        a usable anchor may loosen too — it asks for a challenge, signs it, and
+        the signature costs one presence gesture. That is precisely the capability
+        this revision restores, so reporting ``None`` here would tell an attached
+        pane that loosening has to come from the window that started the session
+        while the pane is about to do it successfully.
+
+        ``local`` was once the whole of the condition, and the paragraph that said so
+        described stage D as unlanded (it was read by exactly the person reasoning
+        about a phone's refusal, so it is corrected rather than left: UX round 6,
+        U8). Stage D IS on this branch, and what widened is one call down: see
+        ``_local_operator_available``, which answers ``True`` for a REMOTE
+        connection whose device certificate verifies under the anchor — the phone,
+        whose authority does not depend on who spawned the runtime.
+        """
+        if self._local_operator_available(frame, conn):
+            return True
+        if self._operator_cap is None:
+            return None
+        supplied = frame.get("operator_handshake")
+        if not is_wire_hex(supplied) or not conn.operator_nonce or not conn.operator_salt:
+            # Not proved: an unchanged client (the field is optional and
+            # additive), a follower, or a relay. The conservative sentence is
+            # the right answer for all three, and for a capable client on an
+            # older build it is only cosmetically wrong until it updates.
+            return None
+        if not handshake_proof_ok(
+            supplied=supplied,
+            held=self._operator_cap,
+            client_nonce=conn.operator_nonce,
+            server_salt=conn.operator_salt,
+        ):
+            return None
+        return True
+
+    def _local_operator_available(self, frame: dict[str, Any], conn: _ClientConn) -> bool:
+        """Whether THIS connection could carry out a loosening by signing.
+
+        Reads the anchor through the runtime's own cache, so the answer is the
+        same anchor the seam will verify against and cannot drift from it. The
+        server's own capability is deliberately NOT consulted: it is the
+        SPAWNER's proof, and the point of the revision is that a connection
+        without it can still hold authority.
+
+        THREE ANSWERS, and the third is what stage D widened — this predicate is
+        the single line the earlier revision named as the one that would:
+
+        * LOCAL, on a host with a usable anchor: yes. One presence gesture, and
+          an attached pane or the desktop backend is precisely the capability
+          this revision restores.
+        * REMOTE without a paired device: no. The relay cannot mint a signature,
+          and answering yes would put ``/approvals auto`` in a report on a
+          surface that cannot carry it out — the dead end UX round 2 removed.
+        * REMOTE with a device certificate that VERIFIES under the anchor: yes.
+          That is the phone, and it is the whole point of the stage: its
+          authority does not depend on who spawned the runtime.
+        """
+        del frame
+        if conn.locality == "local":
+            return self._anchor_cache.get().usable
+        return self._paired_device_can_sign(conn)
+
+    def _paired_device_can_sign(self, conn: _ClientConn) -> bool:
+        """Whether this connection declared a device certificate the anchor vouches for.
+
+        Goes through ``_device_cert_point`` rather than a verification of its own,
+        and that is the load-bearing part: that helper is where the certificate is
+        checked under the anchored key, where the anchor's REVOCATION list is
+        consulted, and where the TTL cache lives. A second verification path here
+        could answer "yes" for a phone the seam would then refuse — the same class
+        of drift the refusal copy's single-sentence rule exists to prevent.
+        """
+        loaded = self._anchor_cache.get()
+        anchor = loaded.anchor if loaded.usable else None
+        if anchor is None or not conn.device_certificate:
+            return False
+        return self._device_cert_point(conn.device_certificate, anchor) is not None
+
+    def _expire_challenges(self, conn: _ClientConn, now: float) -> None:
+        """Drop this connection's spent-by-time challenges before minting another.
+
+        Pruning on MINT rather than on a timer: there is no background task here
+        on purpose (a runtime that woke on a timer to sweep a per-connection map
+        would be paying for every idle viewer), and the failure mode pruning
+        prevents — a client that asks and never signs — is bounded by
+        ``_MAX_CHALLENGES_PER_CONN`` in any case.
+
+        The runtime-wide map is pruned on the same two events (a mint and a
+        consume), and it needs no timer for the same reason: every entry it holds
+        is one of the entries in some connection's map, so anything it can forget
+        has already been forgotten here, and any VALUABLE entry has a deadline.
+
+        THE RE-INSERTION BELOW CANNOT GROW THAT MAP (agent review round 7, N-2),
+        which is worth the half-sentence because it reads as though it could: it
+        refreshes deadlines only for entries ALREADY COUNTED AT MINT — a challenge
+        in this connection's map was inserted into the runtime map by the mint that
+        created it, under the ``_MAX_LIVE_CHALLENGES`` check — and the second loop
+        drops the expired ones. So the map's size is what the bound says it is,
+        whether or not this runs.
+        """
+        stale = [key for key, (_, deadline) in conn.operator_challenges.items() if deadline < now]
+        for key in stale:
+            conn.operator_challenges.pop(key, None)
+        for challenge, deadline in [
+            (value[0], value[1]) for value in conn.operator_challenges.values()
+        ]:
+            self._live_challenges[challenge] = deadline
+        for challenge in [
+            challenge for challenge, deadline in self._live_challenges.items() if deadline < now
+        ]:
+            self._live_challenges.pop(challenge, None)
+
     async def _on_request(self, frame: dict[str, Any], conn: _ClientConn) -> None:
         # A FRAME THAT IS NOT AN OBJECT MUST NOT REACH `.get`, and the guard is
         # HERE rather than at the reader's parse because this is the line that
@@ -3921,6 +4439,83 @@ class RuntimeServer:
                 raise ValueError(
                     "this viewer is still connecting to the session; the request was not "
                     "run — retry once the interface has connected"
+                )
+
+            # THE TWO REFUSALS, AND WHY THE READINESS ONE RUNS FIRST (rebase onto
+            # main, 2026-09-19). Upstream added the sync-pending gate above at the
+            # same seam this branch added the authority check to. They answer
+            # different questions: that one is "is this connection authoritative
+            # yet at all?", this one is "may THIS caller remove the gate?". Running
+            # the readiness gate first keeps its semantics intact — a follower
+            # that has not received the sync gets the retryable connect copy
+            # rather than the authority copy, which would be wrong advice for an
+            # op it will be allowed to run a moment later. The authority check is
+            # NOT skipped for what the priority and connection-local sets admit:
+            # ``approval_answer`` is in neither today, and if a future base puts it
+            # there, the check below still sees it.
+            #
+            # THE ONE SEAM WHERE THE GATE'S AUTHORITY IS DECIDED (issue #1310).
+            #
+            # `control_key` — published 0600 in the session record — is the
+            # whole authorization story for ORDINARY operations and stays that
+            # way. An authority-INCREASING one additionally demands the
+            # per-session operator capability, which exists only in the memory
+            # of the process that started this runtime and in the console that
+            # typed the command. A model-authored `bash` call runs as this same
+            # uid, can read the record, and can dial this loopback port; it
+            # cannot hold a value that was never written anywhere it can read.
+            #
+            # HERE rather than at each sink, because every route in the tree —
+            # the daemon's HTTP command surface, the phone relay, a peer send,
+            # a follower terminal, the CLI — arrives at the handle through this
+            # method. A second dispatch route added later is covered by
+            # construction, and `tests/unit/session/runtime/
+            # test_approval_authority_seam.py` fails if one appears that reaches
+            # a sink without being classified below.
+            #
+            # The refusal is raised rather than answered inline so it reuses the
+            # existing `{"op": "error"}` reply the branches below already
+            # produce: one shape for the client to surface, and the copy names
+            # the one-step remedies (see OPERATOR_AUTHORITY_REQUIRED_NOTICE).
+            #
+            # A TYPED refusal, not a bare `ValueError`, and the code is what
+            # makes it survivable: every route that carries a control request
+            # (the desktop command surface, the desktop card route, the relay,
+            # the attach screen) can name this outcome instead of guessing from
+            # the message, and the copy reaches the operator verbatim rather
+            # than being reported as "the runtime is unreachable" or "the
+            # question expired" (agent review round 1 R1-2 = design D1 = UX U4 =
+            # QA Q1, from four independent rounds on the same defect).
+            if not self._authority_admitted(frame, conn):
+                logger.warning(
+                    "session runtime: refused an authority-increasing request "
+                    "(op %r) from %s at %s",
+                    op,
+                    conn.kind,
+                    conn.writer.get_extra_info("peername"),
+                )
+                from local_operator.session.errors import (
+                    OperatorAuthorityRequired,
+                    OperatorAuthorityUnconfigured,
+                )
+
+                # WHICH REFUSAL, from the op rather than from prose: a card
+                # answer is refused as a card (the question is still parked, and
+                # a deny works from here), a slash is refused as a command. The
+                # far side rebuilds the same sentence from this token, so the
+                # copy never travels as text (UX round 2, U8).
+                #
+                # AND WHICH HOST, from the anchor rather than from a guess (UX
+                # round 6, U1/U2): with no USABLE anchor the two named remedies
+                # cannot run, so the refusal has to name the command that lands
+                # one. ``usable`` is exactly the predicate the seam above used to
+                # decide this caller could not be admitted, read from the same
+                # cached load, so the sentence and the decision cannot disagree.
+                anchored = self._anchor_cache.get().usable
+                raise (
+                    OperatorAuthorityRequired(trigger=op)
+                    if anchored
+                    else OperatorAuthorityUnconfigured(trigger=op)
                 )
             # Attach clients are followers: rebinding the owner's conversation
             # from a follower terminal surprises the user AT THAT TERMINAL's
@@ -4180,6 +4775,69 @@ class RuntimeServer:
                     raise ValueError("event muting requires an attach connection")
                 conn.events_muted = op == "event_mute"
                 detail = "delta-grade events muted" if conn.events_muted else "events resumed"
+            elif op == "operator_challenge":
+                # THE ORDINARY OP THAT LETS A SURFACE THAT IS NOT THE SOCKET PEER
+                # SIGN (revision 2, §2.3). Ordinary by construction — it grants
+                # nothing on its own; the signature it is used to produce is what
+                # carries authority — so it needs no proof of its own and rides
+                # the record key like every other control op.
+                #
+                # Handled HERE rather than in ``_dispatch`` because the binding
+                # is per CONNECTION and the dispatcher deliberately has no
+                # ``conn`` (the same reason ``watch_job`` and ``event_mute`` are
+                # here). Two things are bound beyond that: the action, which
+                # chooses what the signature will be accepted FOR, and the
+                # request id, which for an ``approve`` is the card and for a
+                # loosening is whatever the client chose. All four are baked into
+                # the signed message, so a challenge cannot be moved between them.
+                action = str(frame.get("action") or "")
+                if action not in ("loosen", "approve"):
+                    raise ValueError("action must be 'loosen' or 'approve'")
+                request_id = frame.get("request_id", "")
+                if not isinstance(request_id, str):
+                    raise ValueError("request_id must be a string")
+                now = time.monotonic()
+                self._expire_challenges(conn, now)
+                if len(conn.operator_challenges) >= _MAX_CHALLENGES_PER_CONN:
+                    raise ValueError("too many unspent operator challenges on this connection")
+                if len(self._live_challenges) >= _MAX_LIVE_CHALLENGES:
+                    # THE AGGREGATE BOUND (agent review round 6, R6-4). The
+                    # per-connection maximum alone bounds a socket, and the
+                    # subject this predicate gates can dial as many as it likes;
+                    # this is the term that makes the volume bounded rather than
+                    # merely denied. A real surface raises one prompt per human
+                    # gesture, so reaching this is the abuse it exists for.
+                    raise ValueError("too many unspent operator challenges on this runtime")
+                challenge = secrets.token_hex(32)
+                conn.operator_challenges[(action, request_id)] = (
+                    challenge,
+                    now + _CHALLENGE_TTL_S,
+                )
+                self._live_challenges[challenge] = now + _CHALLENGE_TTL_S
+                await self._send_to(
+                    conn,
+                    {
+                        # AN ``ack`` FRAME, NOT AN ``operator_challenge`` ONE, and
+                        # that is a protocol requirement rather than a style
+                        # choice: ``AttachClient``'s reader routes replies by
+                        # ``req`` but only admits the op names ``ack``, ``error``
+                        # and ``result`` (``attach_client.py``), so a reply
+                        # carrying a NEW op would fall through every branch and
+                        # tear down the whole connection — taking the caller's
+                        # in-flight request with it, which is exactly the "old
+                        # front end must keep working" guarantee the additive
+                        # design exists to keep. The two fields are additive on
+                        # an existing frame shape, so a client built before the
+                        # op existed (which never asks for a challenge) is
+                        # unaffected, and a client that does ask reads them off
+                        # the ack.
+                        "op": "ack",
+                        "req": req,
+                        "challenge": challenge,
+                        "expires_s": int(_CHALLENGE_TTL_S),
+                    },
+                )
+                return
             elif op in _PAYLOAD_OPS:
                 # Structured-answer ops reply with a ``result`` frame whose
                 # ``data`` the invoker renders locally (a slash command's typed
@@ -4191,6 +4849,13 @@ class RuntimeServer:
                     conn.locality,
                     conn.slash_consumers,
                     audit_capable=conn.audit_history,
+                    # Whether THIS connection PROVED it may loosen the gate,
+                    # or ``None`` for "it has not said" (design round 2 D10, UX
+                    # round 2 U9; corrected in agent review round 3, R3-1): the
+                    # reports a routed command returns must not offer a command
+                    # this connection would be refused, and must not deny one it
+                    # could carry.
+                    may_loosen=self._connection_may_loosen(frame, conn),
                 )
                 await self._send_to(conn, {"op": "result", "req": req, "data": data})
                 await self._handle.refresh()
@@ -4270,17 +4935,29 @@ class RuntimeServer:
         except Exception as exc:  # noqa: BLE001 — the error IS the reply
             from local_operator.session.errors import (
                 AttachmentUnavailable,
+                OperatorAuthorityRequired,
                 ProfileRegistryUnavailable,
                 RuntimeRetiring,
             )
 
             frame = {"op": "error", "req": req, "message": str(exc)[:400]}
             if isinstance(
-                exc, (AttachmentUnavailable, ProfileRegistryUnavailable, RuntimeRetiring)
+                exc,
+                (
+                    AttachmentUnavailable,
+                    OperatorAuthorityRequired,
+                    ProfileRegistryUnavailable,
+                    RuntimeRetiring,
+                ),
             ):
                 # Category, not arbitrary prose, certifies this as a repairable
                 # admission rejection to older/newer attach clients alike.
                 frame["error_code"] = exc.code
+                if isinstance(exc, OperatorAuthorityRequired) and exc.trigger:
+                    # A token from a closed set, never text: the far side picks
+                    # the sentence that matches the frame it refused (a refused
+                    # command vs a refused card).
+                    frame["error_trigger"] = exc.trigger
             if isinstance(exc, RuntimeRetiring) and exc.trigger:
                 # WHICH DEPARTURE, as one of the enumerated tokens — the same
                 # shape as ``error_count`` below, and for the same reason: the
@@ -4837,6 +5514,7 @@ class RuntimeServer:
         locality: ClientLocality = "local",
         consumers: frozenset[str] | None = None,
         audit_capable: bool = False,
+        may_loosen: bool | None = None,
     ) -> Any:
         """Structured-answer ops: the return value becomes the ``result`` data.
 
@@ -4894,6 +5572,12 @@ class RuntimeServer:
                 kwargs["locality"] = locality
             if _accepts_kw(run, "consumers"):
                 kwargs["consumers"] = consumers
+            if _accepts_kw(run, "may_loosen"):
+                # The connection's own property, read where the connection is
+                # known — the same reason ``consumers`` is (design round 2 D10,
+                # UX round 2 U9).
+                kwargs["may_loosen"] = may_loosen
+
             result = run(*args, **kwargs)
             if inspect.isawaitable(result):
                 result = await result
@@ -5650,12 +6334,48 @@ class RuntimeServer:
         return ordinary
 
     async def _push_to(self, conn: _ClientConn) -> None:
-        """The welcome form of a push: one full projection to one connection."""
+        """The welcome form of a push: one full projection to one connection.
+
+        The ONE frame that may also carry the operator capability's handshake
+        proof (issue #1310) — deliberately here and not in ``_projection_frame``,
+        which every repaint goes through: the proof is per CONNECTION and belongs
+        to the frame that decides whether the client will present anything at
+        all. A client that sees no proof (this runtime holds no capability, or
+        the client offered no nonce) presents nothing, which is the fail-closed
+        reading of a runtime nobody handed one to.
+        """
         conn.sending_welcome = True
         try:
-            await self._send_to(conn, self._projection_frame(conn, self._projection_payload()))
+            frame = self._projection_frame(conn, self._projection_payload())
+            proof = self._welcome_operator_proof(conn)
+            if proof is not None:
+                # Salt alongside the proof, because the client needs both
+                # nonces to build its own proof and only the PROOF is
+                # credential-shaped: the salt is a value it just chose for a
+                # connection that will not outlive this list.
+                frame["operator_salt"] = conn.operator_salt
+                frame["operator_proof"] = proof
+            await self._send_to(conn, frame)
         finally:
             conn.sending_welcome = False
+
+    def _welcome_operator_proof(self, conn: _ClientConn) -> str | None:
+        """This connection's handshake proof, or ``None`` when there is none to give.
+
+        MUTUAL, and that direction is the point: the console must be able to
+        tell a real runtime from an endpoint that merely has the record's
+        ``control_port`` written into it. A rewritten record points the console
+        at an impostor, and an impostor cannot compute this proof — it does not
+        hold the capability — so the console presents nothing. See
+        ``harness/approval._proof`` for the attack this closes.
+        """
+        if not conn.operator_nonce or not conn.operator_salt:
+            return None
+        if self._operator_cap is None:
+            return None
+        return handshake_proof(
+            self._operator_cap, client_nonce=conn.operator_nonce, server_salt=conn.operator_salt
+        )
 
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         # Copy the registry: a send failure drops its own entry, and mutating

@@ -91,9 +91,30 @@ Defaults use the existing typed settings API; session model, effort and approval
 mutations do not silently persist. `/approvals default ...` opens the default
 editor for `tool_approval_mode` and explicitly leaves the current session alone:
 that editor writes the file, which is where every NEW session reads the mode, so
-a running session's gate is loosened only by `/approvals auto` in that session
-(route: `POST /v1/desktop/sessions/{id}/commands`). The file still tightens every
-running session at once, which is the safe direction.
+a running session's gate is loosened only with the OPERATOR'S own consent —
+`/approvals auto` typed in the console that owns the gate applies at once, and
+from any other surface (an attached pane, this backend, a paired phone) it needs
+a signature — see below. The file still tightens every running session at once,
+which is the safe direction.
+
+**The command route can tighten a running gate; loosening one needs the
+operator's consent** (issue #1310). `/approvals auto` over
+`POST /v1/desktop/sessions/{id}/commands` reaches the runtime through the same
+client an attached pane uses, so it applies for any session the operator can sign
+for — a presence gesture on this machine (Touch ID), or a paired phone's
+signature. Who started the runtime has nothing to do with it. The refusal, when no
+signature can be obtained at all, is **422** with
+`{"code": "operator_authority_required", "message": <copy>}`, and the copy names
+the levers the operator can actually use: the presence gesture on this machine
+(Touch ID), a paired phone, or `--yolo` / `tool_approval_mode: auto` for a NEW
+session. On a host whose anchor has not been installed yet the code is
+`operator_authority_unconfigured` (a subclass, so a client keying on the base
+code keeps working) and the copy names `lop operator install` instead of offering
+remedies that cannot run. `/approvals ask`, a bare `/approvals`, every other
+command and every non-approval op are unaffected. The CARD route answers the same 422 with `still_pending: true`,
+because the card is still parked — it is not `409 no longer pending`, which
+would say the question expired. The app must present the refusal as an ordinary
+command error rather than retrying, and must not imply the mode changed.
 The frontend must obtain explicit default scope and premium-pricing consent in
 its forms. Retain locally selected images while presenting an interactive action.
 
@@ -133,7 +154,7 @@ and rendered verification.
 | btw | Runtime completion, off-record panels, explicit adoption | Aside panel and adoption confirmation |
 | compact | Existing runtime compact control/events | Pending/completed/error from canonical events |
 | stop | Explicit target list/confirmation, canonical stop protocol | Current/selected/all picker; submit exact IDs |
-| approvals | Runtime mode; explicit default editor writes the file, which loosens no running session but tightens every one | Session/default scope and confirmation |
+| approvals | Runtime mode; explicit default editor writes the file, which loosens no running session but tightens every one. Loosening a RUNNING gate (`auto`) needs the operator's signature (Touch ID on this machine, or a paired phone) — not the spawner — and is refused 422 when none can be obtained; `/approvals ask` and the report always work | Session/default scope and confirmation; render the cell as-is, never as a failed command. Never surface the copy as "not supported" — it is a rule, not a gap |
 | skills | Effective discovered catalogue and closed skill:// detail resolver | Catalogue/details; distinguish discoverable from selected |
 | mcp | Effective source ownership, configuration, connections and grants | Server panel, forms, transport/downstream auth distinction |
 | login | Central provider/method action and existing auth operation | Browser/input/cancel flow without renderer secrets |

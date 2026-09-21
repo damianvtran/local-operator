@@ -936,8 +936,18 @@ def test_spawn_runtime_argv_isolates_the_import_and_names_the_process(
     assert argv.index(SAFE_PATH_FLAG) < argv.index(
         "-m"
     ), f"the flag must precede -m or the interpreter ignores it; argv={argv}"
-    assert argv[2:] == ["-m", RUNTIME_MODULE], argv
-    # AND THE OTHER HALF OF THE SAME CONTRACT: the residency sweep recognises a
+    assert argv[2:4] == ["-m", RUNTIME_MODULE], argv
+    # ...and the OPERATOR CAPABILITY HANDOFF (issue #1310) rides after the
+    # module, so the interpreter contract above is untouched. Pinned here
+    # because the whole mechanism rests on only the descriptor NUMBER being in
+    # argv: a change that put the VALUE on the command line would make the
+    # capability ps-readable and the boundary decorative, and this assertion is
+    # the one that fails first.
+    assert argv[4] == "--operator-fd", argv
+    assert argv[5].isdigit(), argv
+    assert len(argv) == 6, argv
+    # AND THE OTHER HALF OF THE SAME CONTRACT (main's, kept beside the handoff's
+    # because both are about this one argv): the residency sweep recognises a
     # runtime by exactly this ``-m <module>`` word in an argv (``reclaim``
     # .runtime_processes), so the census is fed THIS argv — the one the real spawn
     # just built — and must report it as a runtime. Before the constant had one home

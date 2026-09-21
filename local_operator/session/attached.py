@@ -19,6 +19,7 @@ this facade without clearing the painted transcript.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import time
@@ -87,7 +88,7 @@ from local_operator.session.cold_model import (
     resolve_context_metadata,
     synthesise_cold_state,
 )
-from local_operator.session.errors import MoveIndeterminate
+from local_operator.session.errors import MoveIndeterminate, OperatorAuthorityRequired
 from local_operator.session.frontend_state import (
     FRONTEND_CAPABILITY,
     FRONTEND_CHECKPOINT_CUSTOM_TYPE,
@@ -1164,6 +1165,9 @@ class AttachedSession:
         self._buffered_events: list[AgentEvent[Any]] = []
         self._ready_for_events = False
         self._approval_handler: ApprovalGate | None = None
+        #: Where a REFUSED gate reply goes when the host has a surface for it
+        #: (see ``set_gate_refusal_handler``): unset means "log it".
+        self._gate_refusal_handler: Callable[[BaseException], None] | None = None
         self._ask_handler: AskUserFn | None = None
         self._gate_task: asyncio.Task[None] | None = None
         self._gates_detached = False
@@ -1226,6 +1230,11 @@ class AttachedSession:
         # the authoritative op, and the owner's confirmed count replaces the
         # optimistic notice through this app-installed callback.
         self._cancel_resolution: Callable[[int], None] | None = None
+        # "What this signature is about to authorise", from ``effect_copy``, for the
+        # app to paint while the presence prompt is up — see
+        # ``set_operator_prompt_notice`` for why this pane is the surface that has
+        # to carry it and why nothing else can.
+        self._operator_prompt_notice: Callable[[str], None] | None = None
         self._cancel_task: asyncio.Task[None] | None = None
         # Esc-recall's twin of the pair above: the synchronous protocol method
         # answers optimistically from local state and the owner's REJECTION —
@@ -3979,6 +3988,15 @@ class AttachedSession:
             on_retiring=lambda frame: (
                 self._on_retiring_frame(frame) if self._client is client else None
             ),
+            # THE PRODUCTION WIRING FOR THE PROMPT COPY (UX round 6, U3 = design
+            # round 6, D3). This client is the pane a human is standing at when the
+            # machine's key raises its presence prompt, so it is the one surface
+            # where naming the session and the effect changes a decision. Scoped to
+            # THIS client for the same reason `on_retiring` is: a copy about one
+            # connection must not paint on a conversation another has adopted.
+            on_operator_prompt=lambda copy: (
+                self._on_operator_prompt(copy) if self._client is client else None
+            ),
         )
         try:
             await self._connect_client(client, record, deadline=deadline)
@@ -5656,6 +5674,11 @@ class AttachedSession:
         )
 
     async def _run_approval(self, pending: PendingRequest) -> None:
+        #: Whether this answer was produced WITHOUT a person (the background
+        #: branch below). Read by the refusal arm, which must not re-arm in that
+        #: case: an answer nobody waits on would be re-produced immediately and
+        #: the gate would spin (issue #1310, UX review round 3, U12).
+        answered_without_a_person = True
         try:
             handler = self._approval_handler
             client = self._client
@@ -5664,6 +5687,7 @@ class AttachedSession:
             if self._gates_detached and self._background_approval:
                 approved = True
             elif handler is not None:
+                answered_without_a_person = False
                 approved = await call_approval_gate(handler, pending.title, pending.detail)
             else:
                 return
@@ -5672,6 +5696,57 @@ class AttachedSession:
             self.preserve_viewer_gate_reply()
             await client.approval_answer(pending.request_id, approved)
             self._gate_answered_key = self._gate_identity(pending)
+        except OperatorAuthorityRequired as error:
+            # THE THIRD DOOR (design round 2, D9). This is NOT the
+            # first-valid-answer-wins race the arm below describes: the owner
+            # answered promptly and deliberately, refusing THIS pane's approval
+            # because the pane is not the window that started the session
+            # (issue #1310). Swallowing it as a race left the card parked with no
+            # message anywhere — measured with a real client on a real socket, no
+            # exception, no notice, the tool call still blocked. Surfaced through
+            # the host's own surface when it has one.
+            logger.warning("gate reply refused by the owner: %s", error)
+            notify = self._gate_refusal_handler
+            if notify is not None:
+                with contextlib.suppress(Exception):
+                    notify(error)
+            # PUT THE CARD BACK, or the sentence that names a deny names an
+            # action this surface cannot take (UX review round 3, U12). The dock
+            # card resolves on the keypress, so a refused Allow left the pane
+            # with no card, inert keys and a blocked tool call — and no repaint
+            # could re-deliver it, because ``_apply_pending_gate`` returns early
+            # while ``_gate_key`` still equals the identity of the card it
+            # already knows about. Clearing the key and asking for the gate
+            # again is what makes "deny it from here" true rather than a
+            # consolation; the operator who presses Allow twice gets the same
+            # refusal and the same notice, which is the honest outcome on a pane
+            # that cannot allow.
+            if not answered_without_a_person:
+                # THE KEY GOES BACK WITH THE ARM. ``_gate_reply_is_current``
+                # requires ``_gate_key`` to equal this pending's identity, so an
+                # arm that CLEARED it delivered a card whose every answer was
+                # discarded: the operator pressed DENY on the card that had just
+                # come back and nothing happened — no notice, the runtime's card
+                # still parked, the tool still blocked (agent review round 4,
+                # R4-1 = QA Q8 = design D17 = UX U12).
+                #
+                # Restored HERE rather than left to the next projection push,
+                # because no repaint is owed after a refusal and none arrives on
+                # its own: the fix only lands on the push after the one that
+                # happens to carry the same card. It is the same identity
+                # ``_apply_pending_gate`` compares, so a later update carrying
+                # this card returns early instead of replacing the task the
+                # operator is looking at.
+                #
+                # The card is the one that was REFUSED, not whatever the
+                # projection holds: the refusal is about this request, and a
+                # store that has not caught up (or a client whose pending gate
+                # never arrived) must not decide whether the operator can answer
+                # it.
+                self._gate_key = self._gate_identity(pending)
+                self._gate_task = None
+                self._keep_gate_reply = False
+                self._maybe_start_gate(pending)
         except (asyncio.CancelledError, RuntimeError, ConnectionError):
             # Cancellation means another front end settled it. RuntimeError is
             # the owner's stale-request answer to the losing race. Both are an
@@ -6951,6 +7026,38 @@ class AttachedSession:
         """
         self._cancel_resolution = resolver
 
+    def _on_operator_prompt(self, copy: str) -> None:
+        """Hand the effect sentence to the app, or log it when the app has no slot.
+
+        The fallback is not silence: ``logger.info`` is exactly what
+        ``AttachClient`` did before any production site passed a callback, so a
+        host that installs nothing loses nothing it had — and every host that DOES
+        install one (the TUI, today) gains the sentence on screen while the prompt
+        is up.
+        """
+        if self._operator_prompt_notice is None:
+            logger.info("attach: %s", copy)
+            return
+        self._operator_prompt_notice(copy)
+
+    def set_operator_prompt_notice(self, handler: Callable[[str], None] | None) -> None:
+        """Install the app's handler for "what this signature is about to authorise".
+
+        WHY THIS EXISTS (UX round 6, U3 = design round 6, D3). ``effect_copy`` builds
+        the one sentence that names the session and the effect, and ``AttachClient``
+        fires it through ``on_operator_prompt`` — which no production construction
+        site passed, so the sentence took the fallback branch and became a log line.
+        The mitigation the design names for its prompt-misread residual ("make the
+        copy name session + effect") therefore reached no human on any surface. The
+        OS sheet cannot carry it either (`SecKeyCreateSignature` takes no parameters
+        dictionary; ``kSecUseOperationPrompt`` was deprecated in macOS 11), so the
+        product's own surfaces are the whole of it — and this is the pane's.
+
+        Called with the operator-facing sentence from the connection's reader thread;
+        an app that installs nothing keeps the log line rather than silence.
+        """
+        self._operator_prompt_notice = handler
+
     # -- SessionProtocol runtime role --------------------------------------
     # This facade owns no loop: turns execute in the runtime process on the
     # other end of the attach socket. See ``SessionProtocol.owns_runtime`` for
@@ -8166,6 +8273,19 @@ class AttachedSession:
         the picker must offer the owner's rows (D3, review round 2).
         """
         return [dict(row) for row in self.frontend_state.model_catalogue]
+
+    def set_gate_refusal_handler(self, handler: Callable[[BaseException], None] | None) -> None:
+        """Where a REFUSED gate reply goes, for a host that has somewhere to say it.
+
+        Separate from the approval handler because it answers a question that
+        arises AFTER that handler returned: the pane pressed the key, and the
+        owner refused the answer. Without a channel the refusal was swallowed by
+        the race arm below and the operator watched a card do nothing (design
+        round 2, D9 — the third door round 1's D1 named, verified with a real
+        client on a real socket). A host with no surface for it leaves this unset
+        and the refusal is logged.
+        """
+        self._gate_refusal_handler = handler
 
     def set_approval_handler(self, handler: ApprovalGate | None) -> None:
         self._approval_handler = handler
