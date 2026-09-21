@@ -431,3 +431,35 @@ async def test_execute_bash_runs_small_commands_unguarded() -> None:
     result = await execute_bash("mem-2", {"command": "echo alive"}, None, None, None)
     assert result.is_error is False
     assert "alive" in result.text
+
+
+def test_a_config_edit_is_read_on_the_next_command(tmp_path: object) -> None:
+    """The keys are LIVE: ``_configured_memory_budget`` reads a FRESH
+    ``ConfigManager`` per call, so a write lands on the very next command with no
+    session rebuild.
+
+    This is the live-apply proof the ``memory_guard`` section is exempted from the
+    session fanout for (it is host-owned, read in the tool layer): the reader is
+    exercised directly against a written config, and the resolved ceiling moves.
+    """
+    from pathlib import Path
+
+    from local_operator import settings_io
+    from local_operator.config import ConfigManager
+    from local_operator.tools.builtin import _configured_memory_budget
+
+    config_dir = Path(str(tmp_path))
+    manager = ConfigManager(config_dir)
+    settings_io.write_setting(manager, settings_io.BY_KEY["bash.memory.mode"], "manual")
+    settings_io.write_setting(manager, settings_io.BY_KEY["bash.memory.limit_mb"], 777)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(config_dir))
+        budget = _configured_memory_budget(None)
+        assert budget.source == "manual"
+        assert budget.ceiling_mb == 777
+        assert budget.soft_mb == int(777 * 0.8)
+        # A per-call override still wins over the stored manual ceiling.
+        override = _configured_memory_budget(123)
+        assert override.source == "override"
+        assert override.ceiling_mb == 123
