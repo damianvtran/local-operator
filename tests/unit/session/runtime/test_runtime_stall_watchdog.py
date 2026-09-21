@@ -964,3 +964,73 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
         signal_module.signal(signal_module.SIGUSR1, previous_usr1)
         if child is not None:
             _reap(child, config_dir)
+
+# -- the per-pid reader: WHOSE bound fired ---------------------------------------
+#
+# ``fired_pids`` answers "which pids in this store tripped their bound", which is
+# what a fleet listing wants. A post-mortem wants the other shape — ONE pid's
+# evidence, with the bound it ran under — and that is ``fired_bound``, the reader
+# ``journal.death_verdict`` consults before it calls a death unattributed.
+
+
+def _dump(dirpath: Path, pid: int, *, armed_at: float, fired: bool = True, bound: float = 300.0,
+          header_pid: int | None = None) -> Path:
+    path = stall_watchdog.dump_path(pid, dirpath)
+    body = (
+        f"{stall_watchdog.ARM_MARKER}pid {pid if header_pid is None else header_pid} armed for "
+        f"{bound:g}s at {armed_at:.0f} (2026-09-21 18:11:40); the runtime's own loops re-arm "
+        f"this timer.\n"
+    )
+    if fired:
+        body += f"{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_fired_bound_parses_the_bound_the_process_ran_under(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _dump(logs, 4242, armed_at=1_700_000_000.0, bound=45.0)
+
+    fired = stall_watchdog.fired_bound(4242, logs)
+
+    assert fired is not None
+    assert fired.pid == 4242
+    assert fired.seconds == 45.0, "the bound belongs to the process, not to this build"
+    assert fired.armed_at == 1_700_000_000.0
+    assert fired.path == stall_watchdog.dump_path(4242, logs)
+    assert fired.fired_at > 0
+
+
+def test_fired_bound_refuses_a_header_only_file(tmp_path: Path) -> None:
+    """Armed and taken away is a HARD death, not this bound (the module's own rule)."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _dump(logs, 7, armed_at=1_700_000_000.0, fired=False)
+
+    assert stall_watchdog.fired_bound(7, logs) is None
+
+
+def test_fired_bound_refuses_a_file_naming_another_pid(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _dump(logs, 8, armed_at=1_700_000_000.0, header_pid=9)
+
+    assert stall_watchdog.fired_bound(8, logs) is None
+
+
+def test_fired_bound_is_none_without_a_file(tmp_path: Path) -> None:
+    assert stall_watchdog.fired_bound(10, tmp_path / "logs") is None
+
+
+def test_fired_bound_covers_only_a_run_that_armed_before_its_last_write(tmp_path: Path) -> None:
+    """The recycled-pid bound, stated where the reader lives."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    _dump(logs, 11, armed_at=500.0)
+    fired = stall_watchdog.fired_bound(11, logs)
+    assert fired is not None
+
+    assert fired.covers(600.0) is True, "armed at boot, last written later: this run's bound"
+    assert fired.covers(400.0) is False, "armed after the last write: a later process's bound"
+    assert fired.covers(None) is False, "no ordering evidence is not evidence of a cover"

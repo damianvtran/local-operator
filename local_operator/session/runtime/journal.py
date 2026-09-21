@@ -889,13 +889,24 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
        way. Rung 2 keeps no lead for the tokens it DOES answer:
        ``runtime-overdue`` already names its own mechanism and bound, and that
        sentence is pinned by ``test_a_recorded_bound_outranks_the_install_inference``.
-    3. **an install that moved since the row's build** → ``install-mid-update``
+    3. **the runtime's own stall bound, when its dump says it fired for this
+       run** → ``runtime-stalled`` (:data:`incidents.STALL_CAUSE`, see
+       :func:`_stalled_bound_reason`). First-hand by the rung-2 test — the artifact
+       was written by the dying process's own C thread, from inside the stall — and
+       therefore placed above rung 4's disk inference for the same reason rung 2 is.
+       WITHOUT THIS RUNG the shape is recorded as ``unattributed``: the runtime never
+       reaches ``note_exit`` (``_exit(1)`` runs no Python), no stop marker exists
+       (nobody asked it to stop), and ``install_moved`` deliberately refuses the tear
+       inference for a row whose last write predates the install (measured 2026-09-21
+       on pids 57975, 4698 and 79757 — each with a fired dump on disk and each
+       recorded as an unattributed ``runtime-killed``).
+    4. **an install that moved since the row's build** → ``install-mid-update``
        — the install-window tear.
-    4. **nothing else** → ``runtime-killed``, now carried by positive evidence
+    5. **nothing else** → ``runtime-killed``, now carried by positive evidence
        (this turn was in flight and never ended) instead of by the absence of a
        record.
 
-    RUNG 4 IS EXPLICITLY UNATTRIBUTED, and the word is part of the answer rather
+    RUNG 5 IS EXPLICITLY UNATTRIBUTED, and the word is part of the answer rather
     than a decoration. Nothing that reads this arm has seen a marker — a marker
     covering this run is consumed by ``attention._classify_orphaned_run`` before
     the row is ever consulted — so "this turn died and no act was recorded" is
@@ -917,6 +928,7 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         CUT_OFF_CAUSES,
         KILL_CAUSE,
         KILL_UNATTRIBUTED,
+        STALL_CAUSE,
         render_cut_off_reason,
     )
 
@@ -944,6 +956,9 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
             recorded,
             render_cut_off_reason(recorded, detail=row_detail(row)),
         )
+    stalled = _stalled_bound_reason(row)
+    if stalled is not None:
+        return ("error", STALL_CAUSE, stalled)
     if install_moved(row):
         detail = f" ({row.build_label()} → {_current_build_label()})"
         return (
@@ -955,6 +970,49 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         "error",
         KILL_CAUSE,
         render_cut_off_reason(KILL_CAUSE, detail=row_detail(row, lead=KILL_UNATTRIBUTED)),
+    )
+
+
+def _stalled_bound_reason(row: TurnJournalRow) -> str | None:
+    """The reason for a death this runtime's own stall bound caused, or ``None``.
+
+    THE READER ``stall_watchdog``'s OWN CONTRACT ASKS FOR. That module's docstring
+    already promises the shape: "Its EXISTENCE carries one signal ... a file
+    carrying :data:`FIRED_MARKER` means this bound actually fired". What was
+    missing was a reader on the DEATH path — ``fired_pids`` feeds a live fleet
+    listing (``lop sessions --json``), where the runtime that tripped the bound is
+    gone by definition and the row it left reads ``unattributed``.
+
+    THREE CONDITIONS, and the third is the one that keeps this honest: a dump
+    exists for this row's pid; it carries the fired marker AND a parseable header
+    (``fired_bound`` enforces both); and the bound was ARMED no later than this
+    run's last write (``FiredBound.covers``), which is what refuses a pid-keyed
+    file a LATER runtime truncated and rewrote. Nothing here decides whether the
+    stall was the runtime's fault or the host's — the artifact cannot know, and
+    the sentence does not claim it; what it names is which bound fired and where
+    the dump is.
+
+    NEVER RAISES, and never guesses. The dump is read off a log directory that may
+    be unreadable or absent (a reduced host, a test double), and a reader that
+    failed here would take the whole successor boot down with it; every failure is
+    ``None``, which falls through to the rungs below — including the unattributed
+    one, which is the correct answer for "no usable evidence".
+    """
+    from local_operator.incidents import STALL_CAUSE as _STALL_CAUSE
+    from local_operator.incidents import render_cut_off_reason
+
+    try:
+        from local_operator.session.runtime import stall_watchdog
+
+        fired = stall_watchdog.fired_bound(row.pid)
+    except Exception:  # noqa: BLE001 — an unreadable artifact is not a dead session
+        logger.debug("stall dump unreadable for pid %s", row.pid, exc_info=True)
+        return None
+    if fired is None or not fired.covers(row.updated_at or row.started_at):
+        return None
+    return render_cut_off_reason(
+        _STALL_CAUSE,
+        detail=row_detail(row, lead=f"its own {fired.seconds:g}s bound fired, dump {fired.path}"),
     )
 
 

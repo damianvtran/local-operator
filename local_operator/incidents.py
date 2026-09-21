@@ -441,6 +441,24 @@ def _update_failed_cause_sentence() -> str:
 #: harness-caused death on the arm that cannot name its actor.
 KILL_CAUSE = "runtime-killed"
 
+#: The token for a death the runtime inflicted on ITSELF at its own stall bound.
+#:
+#: WHY IT IS NOT ``runtime-killed``: that token's own sentence ends "and no stop was
+#: asked for", and its parenthetical is the one place an operator reads WHO acted.
+#: A runtime that hits ``session.runtime.stall_watchdog``'s bound is not a
+#: disappearance — its own C timer wrote a dump naming the bound it ran under and
+#: then called ``_exit(1)`` — so recording it beside the un-attributed deaths mixed
+#: a NAMED act into the one class whose whole meaning is that no act was named. The
+#: 2026-09-21 incident is the measurement: three of that day's ``unattributed``
+#: verdicts (pids 57975, 4698, 79757) carry a fired dump that already named the act,
+#: and no reader consulted it (``journal.death_verdict`` had no rung for it).
+#:
+#: IT IS AN INFERENCE FROM AN ARTIFACT, like ``install-mid-update`` and unlike the
+#: tokens a runtime writes about itself: the reader matches the dump's own header to
+#: the dead run (``stall_watchdog.FiredBound.covers``), so this token is only ever
+#: used where the evidence is pid- and time-consistent with the row it narrates.
+STALL_CAUSE = "runtime-stalled"
+
 CUT_OFF_CAUSES: dict[str, str] = {
     DELIBERATE_CUT_OFF_CAUSE: "the session was stopped by the user",
     "runtime-retired": "the runtime retired so the next engage would run a newer build",
@@ -485,6 +503,15 @@ CUT_OFF_CAUSES: dict[str, str] = {
         # was asked for. The attribution parenthetical says who acted instead.
         "the runtime disappeared without exiting cleanly while this turn was running, "
         "and no stop was asked for"
+    ),
+    STALL_CAUSE: (
+        # The runtime's own bound, on the artifact the bound itself wrote. The
+        # sentence carries no number: the bound is per-process (an operator or a
+        # test may set ``LOP_RUNTIME_STALL_SECONDS``) and the reader hands the
+        # recorded one in as detail, so a second copy of "300" here would be a copy
+        # that drifts from the process that actually ran it.
+        "the runtime made no progress for its own stall bound, so it left mid-turn "
+        "after dumping every thread it was running"
     ),
     "install-mid-update": (
         "a local-operator install was being replaced on disk while this turn was running"

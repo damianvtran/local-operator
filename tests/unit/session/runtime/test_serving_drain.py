@@ -1059,3 +1059,86 @@ async def test_a_steer_during_the_drain_is_still_admitted(tmp_path: Path) -> Non
     assert detail == "steering queued", detail
     assert session.steered == ["actually, the other way"], "the session never saw it"
     assert peek_inbox(session.transcript.directory) == [], "a steer is not deferred"
+
+# -- the promise a spooled row carries, and who keeps it -------------------------
+#
+# THE CIRCUIT, and these cells are the writer half of it. The receipt a spooling
+# runtime hands back says the NEXT runtime runs the message, and this process
+# cannot start one: it holds the transcript lease until it exits. Measured
+# 2026-09-21: a session retired for a newer build with rows in its spool and no
+# successor came for them. So the writer records the turn as owed
+# (``wakes.spooled``), which is what makes the wake supervisor — the one
+# always-on process whose job is "make a runtime exist" — raise one.
+
+
+def _spooled_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the owed-turn store at this test's own config dir.
+
+    ``_spool_for_successor`` reads ``paths.config_dir()``, the same seam every
+    other store on this path uses, so the redirect is that one function and the
+    test never touches a real store.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
+    return config_dir
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_peer_wake_records_the_turn_the_successor_owes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    receipt = await host.receive_peer_message("run the census", wake=True)
+
+    assert receipt == SPOOL_RECEIPT_WAKE, receipt
+    record = read_spooled_turn(config_dir, session.transcript.directory.name)
+    assert record is not None, "the receipt promised a turn; nothing recorded it"
+    assert record["rows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_quiet_note_records_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``wake=False`` asked for a deferral, not for a runtime to be raised.
+
+    The receipt says so ("read when it next opens"), and raising a 283 MB process
+    for a note nobody is waiting on is the trade ``deliver_peer_message`` argues
+    against. This cell pins that the obligation follows the SAME line as the
+    receipt, so the two can never disagree about what the sender bought.
+    """
+    from local_operator.wakes.spooled import read_spooled
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    receipt = await host.receive_peer_message("no rush", wake=False)
+
+    assert receipt != SPOOL_RECEIPT_WAKE
+    assert read_spooled(config_dir) == {}, "a quiet note owes no turn"
+
+
+@pytest.mark.asyncio
+async def test_the_owners_own_prompt_records_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's words are the strongest form of the claim: the receipt RUNS it."""
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    receipt = await host.prompt("deploy the fix", command_id="q" * 8)
+
+    assert receipt == SPOOL_RECEIPT_PROMPT, receipt
+    record = read_spooled_turn(config_dir, session.transcript.directory.name)
+    assert record is not None, "the receipt says the next runtime will run it"
+    assert record["rows"] == 1

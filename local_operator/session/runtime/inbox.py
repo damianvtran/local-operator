@@ -79,6 +79,15 @@ INBOX_NAME = "inbox.jsonl"
 #: at its call site in ``session._run_turn_pipeline``); the string is left as the
 #: boot drain's promise rather than stretched to describe both, because the
 #: over-claim needs a row no send can write.
+#:
+#: AND THE BOOT DRAIN HAS TO EXIST FOR THE PROMISE TO HOLD, which is the half
+#: that was missing until 0.61.19: a row spooled by a DRAINING runtime named no
+#: one who would raise a successor, so a headless session could retire with the
+#: message held and no runtime ever coming for it (measured 2026-09-21 — three
+#: rows, no successor, no owner). ``serving._spool_for_successor`` therefore
+#: records the turn as OWED (``local_operator.wakes.spooled``) and the wake
+#: supervisor, whose whole job is to make a runtime exist for a session, raises
+#: one for it. The promise is unchanged; what changed is that a process keeps it.
 SPOOL_RECEIPT_WAKE = "held for the next runtime — it runs it"
 SPOOL_RECEIPT_NOTE = "held for the next runtime — read when it next opens"
 
@@ -334,6 +343,34 @@ def _parse(raw: bytes) -> list[InboxLine]:
         if isinstance(payload, dict):
             lines.append(InboxLine.from_json(payload))
     return lines
+
+
+def settle_owed_turn(session_dir: Path) -> None:
+    """Clear this session's owed-turn record once its spool no longer owes one.
+
+    The discharge half of :mod:`local_operator.wakes.spooled`, called by every drain
+    that consumes the spool. It is written as a PREDICATE rather than as "clear
+    it, we just drained" because the two callers can both leave rows behind on
+    purpose: the boot drain re-spools peer rows for a session with no durable
+    history (and stops), and the first-turn drain runs once per lifetime. Asking
+    the spool itself is the only reading that cannot clear an obligation whose
+    message is still sitting there.
+
+    Best-effort: the drain's own delivery has already happened by the time this
+    runs, and a store that cannot be written (or a config dir this process cannot
+    see) must not turn a delivered message into a failed turn. The cost of
+    leaving the record is one engage the supervisor should not have made; the cost
+    of raising here is the turn.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.wakes.spooled import clear_spooled_turn, spool_owes_turn
+
+    try:
+        if spool_owes_turn(session_dir):
+            return
+        clear_spooled_turn(config_dir(), session_dir.name)
+    except Exception:  # noqa: BLE001 — a bookkeeping failure is not a delivery failure
+        logger.debug("could not settle the owed turn for %s", session_dir, exc_info=True)
 
 
 def peek_inbox(session_dir: Path) -> list[InboxLine]:
