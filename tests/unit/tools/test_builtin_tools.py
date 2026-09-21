@@ -1996,10 +1996,12 @@ def _point_the_nudge_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
 def _nudge_line(target: Path) -> str:
     """The exact one line the nudge appends, so the assertion cannot drift.
 
-    Takes the TARGET only: the store's own root is deliberately not in the
-    sentence any more (D3 — the card had already printed it twice, and every
-    successful scratchpad write prints it), so a helper that took it would be
-    pinning a value the line no longer carries.
+    Takes the TARGET only, because the TARGET is the path the line carries —
+    named once, as the subject the reason clauses hang off. The store's own root
+    is deliberately not in the sentence: D3 dropped it as redundant with the
+    ``where`` receipt a successful scratchpad write already prints and with the
+    ``write``/``edit`` descriptions, so a helper that took it would be pinning a
+    value the line no longer carries.
     """
     return (
         f"[scratch] Your own scratch belongs in scratchpad:// — {target.resolve()} "
@@ -2071,6 +2073,11 @@ def test_the_temp_roots_are_resolved_and_name_the_three_day_prune(monkeypatch, t
     is pinned to a distinct dir because on Linux it IS ``/tmp`` — that is the
     dedupe case below, not this one.
     """
+    # R8: the gate's DERIVATION is pinned here, before the patch below replaces
+    # the value — every other test in this group sets the constant it wants, so a
+    # wrong platform literal would keep this host's suite and the ubuntu CI
+    # shards green while re-introducing R4's false platform claim.
+    assert builtin._SYSTEM_TMP_IS_PRUNED == (builtin._PLATFORM == "darwin")
     monkeypatch.setattr(builtin, "_SYSTEM_TMP_IS_PRUNED", True)
     system_tmp = tmp_path / "sys-tmp"
     system_tmp.mkdir()

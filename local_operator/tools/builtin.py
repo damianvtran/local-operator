@@ -4843,11 +4843,13 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
             # design round's own frames) and cuts anything longer TAIL-FIRST with
             # no reflow, so whatever sits last is destroyed at EVERY width. The
             # remedy therefore comes first, at a cell that does not move with the
-            # path after it; the two things the first draft also carried are gone
-            # — the resolved store root (already printed on every successful
-            # scratchpad write, and twice on this card) and the
-            # ``write(path=…)`` example (taught by ``system.md``, the guide and
-            # the tool description).
+            # path after it. The first draft's resolved STORE root is gone,
+            # dropped as redundant: a successful scratchpad write already prints
+            # it once, in the ``where`` receipt (``{url} -> {path}``), and both
+            # writers' descriptions carry it. The path THIS line carries is the
+            # TARGET — named once, as the subject the reason clauses hang off.
+            # The ``write(path=…)`` example is gone too: taught by
+            # ``system.md``, the guide and the tool description.
             return (
                 f"[scratch] Your own scratch belongs in {SCRATCHPAD_SCHEME} — {resolved} "
                 f"sits directly under a temp root: {why}."
