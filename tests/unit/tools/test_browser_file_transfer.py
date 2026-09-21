@@ -52,6 +52,8 @@ class FakeHost:
         methods: tuple[str, ...] = ("upload",),
         version: str = "0.1.18",
         capabilities_known: bool = True,
+        disabled: tuple[str, ...] = (),
+        switches_known: bool = False,
         result: dict[str, Any] | None = None,
         on_call: Any = None,
     ) -> None:
@@ -59,12 +61,20 @@ class FakeHost:
         self._methods = methods
         self._version = version
         self._capabilities_known = capabilities_known
+        self._disabled = disabled
+        self._switches_known = switches_known
         self.result = result or {}
         self.on_call = on_call
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     def capabilities(self) -> HostCapabilities:
-        return HostCapabilities(self._methods, self._version, self._capabilities_known)
+        return HostCapabilities(
+            methods=self._methods,
+            version=self._version,
+            capabilities_known=self._capabilities_known,
+            disabled=self._disabled,
+            switches_known=self._switches_known,
+        )
 
     async def call(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self.calls.append((method, params))
@@ -182,11 +192,17 @@ def test_upload_escalates_to_exec_and_everything_else_stays_write(monkeypatch) -
 # --- the capability refusal --------------------------------------------------
 
 
-def test_download_on_the_extension_host_is_refused_without_a_socket_call() -> None:
-    """No extension build can serve it, so the copy must not send the user to an
-    update that cannot help (measured: Chrome refuses the browser-level download
-    commands to an extension's debugger session)."""
-    host = FakeHost(methods=("upload",))
+def test_download_on_an_older_extension_sends_the_reader_to_the_update_and_the_switch() -> None:
+    """A build that predates the capability: update it, then turn the switch on.
+
+    This is state (a) of the three the record can now express. It used to be the
+    only answer for `download` — the old copy said no build could serve it — which
+    is why the assertion that the remedy is an UPDATE is paired here with the
+    warning that the update alone is not enough: the capability is opt-in, and a
+    reader sent to the update without the switch would meet the same refusal for a
+    different reason and conclude the update failed.
+    """
+    host = FakeHost(methods=("upload",), version="0.1.18")
     result = _flow(
         "download",
         host,
@@ -197,10 +213,96 @@ def test_download_on_the_extension_host_is_refused_without_a_socket_call() -> No
     )
     assert result.is_error
     assert host.calls == [], "the refusal must come from the record, not the wire"
-    assert "browser extension cannot serve 'download'" in result.text
-    assert "desktop app" in result.text
-    assert "bash + curl" in result.text
+    assert "does not provide 'download'" in result.text
+    assert "first version that does is 0.1.19" in result.text
+    assert "Allow downloads" in result.text
     assert (result.details or {}).get("error_code") == "capability_unsupported"
+
+
+def test_download_with_the_operators_switch_off_names_the_switch_not_an_update() -> None:
+    """State (b): the build CAN serve it and the operator has not enabled it.
+
+    The distinction is the whole point of the `capability_switches` event. Sending
+    this user to an update would be a remedy that cannot work (their build is
+    current), and the copy must not offer it — asserted here as the ABSENCE of the
+    update sentence, not only as the presence of the switch one.
+    """
+    host = FakeHost(methods=(), version="0.1.19", disabled=("download",), switches_known=True)
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+    assert result.is_error
+    assert host.calls == [], "a switched-off capability costs no socket call"
+    assert "'download' is switched off" in result.text
+    assert "Allow downloads" in result.text
+    assert "chrome://extensions" in result.text
+    assert "No update is involved" in result.text
+    assert "first version that does is" not in result.text
+
+
+def test_upload_with_the_operators_switch_off_names_the_upload_switch() -> None:
+    """The same state for the other capability, worded by ITS OWN label.
+
+    A single shared sentence would tell a user looking for "Allow downloads" to
+    flip the wrong control, so the labels come from `CAPABILITY_SWITCH_LABEL` and
+    this test pins that the mapping is per-method rather than one string.
+    """
+    host = FakeHost(
+        methods=("download",), version="0.1.19", disabled=("upload",), switches_known=True
+    )
+    result = _flow(
+        "upload",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="upload", selector="#f", paths=["/tmp/x.pdf"]),
+        context=_ctx(),
+    )
+    assert result.is_error
+    assert host.calls == []
+    assert "'upload' is switched off" in result.text
+    assert "Allow uploads" in result.text
+    assert "Allow downloads" not in result.text
+
+
+def test_a_switched_on_extension_downloads_over_the_wire() -> None:
+    """State (c): the switch is on, the method is advertised, the call is SENT.
+
+    The inverse of the two refusals above, and the one that would silently rot:
+    a gating change that never lets anything through still passes every
+    "refused" assertion in this file.
+    """
+
+    def write_it(method: str, params: dict[str, Any]) -> None:
+        # The app host's shape: bytes in the directory the harness composed. The
+        # extension's shape (a file in the user's Downloads plus a reported path)
+        # is exercised by the intake tests below.
+        Path(params["dir"], "receipt.pdf").write_bytes(b"%PDF-1.4" + b"\x00" * 32)
+
+    host = FakeHost(
+        methods=("download", "upload"),
+        version="0.1.19",
+        disabled=(),
+        switches_known=True,
+        result={"armed": True, "url": "https://example.test/export"},
+        on_call=write_it,
+    )
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+    assert not result.is_error
+    assert [call[0] for call in host.calls] == ["download"]
+    assert "receipt.pdf" in result.text
 
 
 def test_upload_on_a_pre_feature_extension_names_the_first_version_that_has_it() -> None:
@@ -283,6 +385,11 @@ def test_download_fails_when_the_host_reports_a_file_that_never_landed() -> None
     host = FakeHost(
         methods=("download",),
         result={
+            # The url is what the item is attributed to, and the real extension
+            # always reports one: without it the harness cannot tell whose download
+            # an item is and refuses for THAT reason (round-1 R3), which would mask
+            # the sentence this test exists to pin.
+            "url": "http://127.0.0.1:9/page",
             "files": [{"name": "receipt.pdf", "path": "/nowhere/receipt.pdf", "bytes": 10}],
             "armed": True,
             "reason": "",
@@ -297,8 +404,258 @@ def test_download_fails_when_the_host_reports_a_file_that_never_landed() -> None
         context=_ctx(),
     )
     assert result.is_error
-    assert "no download started" in result.text
-    assert "receipt.pdf" not in result.text
+    # The intake refuses it, and the sentence has to say the right thing about the
+    # right file: nothing was saved (the check this design rests on), the path the
+    # host named was not there, and the entry is reported as NOTHING TO REMOVE —
+    # not as "left in place" and not as "could not be removed — still on disk".
+    # A path we cannot corroborate might be the user's own file, so the report must
+    # neither claim we cleaned it up nor claim we failed to (R2/N7, round-1 Q2).
+    assert "nothing was saved" in result.text
+    assert "not there" in result.text
+    # The words matter as much as the sentence (round-1 Q2): an entry that was never
+    # there must not be reported as one this call failed to remove.
+    assert "nothing to remove" in result.text
+    assert "NOT deleted" not in result.text
+
+
+# --- the three states an `armed` answer can be in ----------------------------
+#
+# The record promises these stay APART: the host refused before arming, the host
+# armed and then refused, and nothing happened at all. The second state arrives as
+# `armed: true` with no files AND a reason (§6.2 — a refusal is a result, not an
+# error), and it used to be read as the third: the model was told no download had
+# started and sent to click a Download control the host had already refused.
+#
+# A fourth shape needs its own answer rather than being folded into either: an
+# armed answer whose `reason` is NOT the refusal shape (the app host's own no-op
+# sentence, or a refusal whose wording changed). It is relayed in the host's own
+# words and recorded as `armed_reason`, so neither reader is told a call was a
+# no-op when the host had something to say about it.
+
+#: The app host's own refusal sentence, verbatim (`downloads.ts`'s `refuse`).
+_APP_HOST_REFUSAL = "refused: `evil.exe` is an executable/script type; nothing was saved"
+#: The app host's own no-op sentence, verbatim (`downloads.ts`'s `resultOf`). It
+#: arrives on the SAME shape as the refusal above, which is why the harness has to
+#: tell them apart rather than treating "a reason is present" as "refused".
+_APP_HOST_NO_OP = (
+    "no download started within 120s; if the page needs a click first, pass a "
+    "selector, or `click` it and retry"
+)
+
+
+#: The app host's own account of a call it refused for a reason the harness's
+#: refusal shape does not match — the false-negative case, and the one whose copy
+#: must never be replaced by the harness's canned click remedy (§6.2, review R1).
+_UNRECOGNISED_HOST_REASON = "download blocked by the host's executable policy"
+
+
+def _download_rows() -> list[dict[str, Any]]:
+    path = bf.downloads_root() / bf.AUDIT_FILENAME
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _download(host: FakeHost, **kwargs: Any) -> builtin.ToolResult:
+    return _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+        **kwargs,
+    )
+
+
+def test_a_refusal_the_host_made_after_arming_is_reported_as_a_refusal() -> None:
+    """State (b): the host armed, then refused — its reason is what the model reads.
+
+    BOTH halves are asserted, because the defect had two: the model got the
+    generic "no download started …" sentence with a remedy that would never have
+    worked, and the trail got `no_download` / "nothing started" about a call a
+    policy had decided. A row that says nothing started about a refusal is what a
+    later reader answers "how often did the policy stop a download?" from.
+    """
+    host = FakeHost(
+        methods=("download",),
+        result={"files": [], "armed": True, "reason": _APP_HOST_REFUSAL},
+    )
+    result = _download(host)
+    assert result.is_error
+    # The refusal, prefix included exactly once: the host wrote it and the tool
+    # layer composes with the same one, so the sentence a user reads is the same
+    # shape wherever the host stopped.
+    assert result.text == _APP_HOST_REFUSAL, result.text
+    assert "no download started" not in result.text
+    rows = _download_rows()
+    assert [row["verdict"] for row in rows] == ["armed_refused"]
+    # The row carries what was said, without the copy's prefix: the prefix is the
+    # sentence's, the clause is the record's, and the equality asserted just above
+    # pins that the two compose to the host's own words.
+    assert rows[0]["reason"] == "`evil.exe` is an executable/script type; nothing was saved"
+    assert rows[0]["name"] == "" and rows[0]["action"] == "download"
+
+
+def test_the_hosts_own_no_op_sentence_is_relayed_rather_than_replaced() -> None:
+    """A non-refusal `reason` on the armed path is the host's account, RELAYED.
+
+    This is the case a "a reason is present, so it was a refusal" reading gets
+    wrong, and it is not hypothetical: the app host always reports `armed: true`
+    and pushes its own no-op sentence into the same `reason` field. It must not
+    be labelled a refusal — and it must not be thrown away and answered with the
+    harness's canned sentence either, because that is how a host's own words get
+    replaced by a remedy that may not apply (§6.2, review R1).
+    """
+    host = FakeHost(
+        methods=("download",),
+        result={"files": [], "armed": True, "reason": _APP_HOST_NO_OP},
+    )
+    result = _download(host)
+    assert result.is_error
+    assert result.text == _APP_HOST_NO_OP, result.text
+    rows = _download_rows()
+    assert [(row["verdict"], row["reason"]) for row in rows] == [("armed_reason", _APP_HOST_NO_OP)]
+
+
+def test_an_unrecognised_refusal_is_relayed_not_answered_with_the_click_remedy() -> None:
+    """The false-negative half: a reworded refusal must not read as a timeout.
+
+    The harness decides "refusal" from the mark the design composes refusals
+    with, so a host that rewords them is not recognised. Before this branch that
+    meant the model got "no download started within N s … click its Download
+    control and retry" — the exact answer this feature's work exists to remove —
+    about a call the host had already refused. The answer is to relay what the
+    host said and to record that it was not classified.
+    """
+    host = FakeHost(
+        methods=("download",),
+        result={"files": [], "armed": True, "reason": _UNRECOGNISED_HOST_REASON},
+    )
+    result = _download(host)
+    assert result.is_error
+    assert result.text == _UNRECOGNISED_HOST_REASON, result.text
+    assert "no download started" not in result.text
+    rows = _download_rows()
+    # NOT a refusal claim (`armed_refused`) and not the no-op claim either: the
+    # verdict says the host accounted for the call and the harness did not
+    # classify its words, so both readers see what the host actually said.
+    assert [(row["verdict"], row["reason"]) for row in rows] == [
+        ("armed_reason", _UNRECOGNISED_HOST_REASON)
+    ]
+
+
+def test_two_refusals_joined_by_the_host_keep_one_prefix_and_no_mark_in_the_row() -> None:
+    """R3: the app host joins every refusal of one armed call with `"; "`.
+
+    Each joined clause carries the mark, so stripping only the head left a
+    `refused:` inside the field §10.5 calls the clause. The sentence the model
+    reads carries the mark once, at its head, and the row carries the clauses
+    without it.
+    """
+    two = (
+        "refused: `a.exe` is an executable/script type; nothing was saved; "
+        "refused: `b.exe` is an executable/script type; nothing was saved"
+    )
+    host = FakeHost(methods=("download",), result={"files": [], "armed": True, "reason": two})
+    result = _download(host)
+    assert result.is_error
+    assert result.text.count("refused:") == 1, result.text
+    assert result.text == (
+        "refused: `a.exe` is an executable/script type; nothing was saved; "
+        "`b.exe` is an executable/script type; nothing was saved"
+    ), result.text
+    rows = _download_rows()
+    assert rows[0]["verdict"] == "armed_refused"
+    assert "refused:" not in rows[0]["reason"]
+
+
+def test_a_no_op_with_no_reason_keeps_todays_answer_exactly() -> None:
+    """State (c) with the host saying nothing: the answer must not have moved.
+
+    Pinned byte for byte because it is the only one of the three states the fix
+    was NOT allowed to touch, and "the reason is absent" has to keep meaning "the
+    host told us nothing" rather than becoming a third refusal shape.
+    """
+    host = FakeHost(methods=("download",), result={"files": [], "armed": True, "reason": ""})
+    result = _download(host)
+    assert result.is_error
+    assert result.text == (
+        "no download started within 120 s. If the page needs a click first, "
+        "call 'click' on its Download control and retry with selector=..., or the "
+        "file may be behind a login — ask the user to sign in, then retry."
+    )
+    rows = _download_rows()
+    assert [(row["verdict"], row["reason"]) for row in rows] == [("no_download", "nothing started")]
+
+
+def test_a_bare_refusal_prefix_is_not_an_empty_sentence() -> None:
+    """A prefix with no clause renders the no-op answer, never nothing at all.
+
+    Neither host composes a bare `refused:`, and this is the guard that keeps that
+    true from mattering: the branch that renders a host refusal needs a clause to
+    render, so a host answer that carries none cannot produce a message with
+    nothing in it.
+    """
+    host = FakeHost(
+        methods=("download",), result={"files": [], "armed": True, "reason": "refused:"}
+    )
+    result = _download(host)
+    assert result.is_error
+    assert result.text.startswith("no download started within 120 s.")
+    rows = _download_rows()
+    assert [(row["verdict"], row["reason"]) for row in rows] == [("no_download", "nothing started")]
+
+
+def test_a_pre_arm_refusal_reads_the_same_whether_the_host_prefixed_it() -> None:
+    """State (a): one composer, so the prefix cannot be doubled or dropped.
+
+    The pre-arm path was already right for the reasons the extension sends (a
+    bare clause), and it is the composer both refusal paths now share — a second
+    spelling of the same sentence is how the two drift apart.
+    """
+    for reason, expected in (
+        (
+            "that download was started by a page this session is not driving",
+            "that download was started by a page this session is not driving",
+        ),
+        (
+            "refused: that download was started by a page this session is not driving",
+            "that download was started by a page this session is not driving",
+        ),
+    ):
+        host = FakeHost(
+            methods=("download",),
+            result={"files": [], "armed": False, "reason": reason},
+        )
+        result = _download(host)
+        assert result.is_error
+        assert result.text == f"refused: {expected}", result.text
+        rows = _download_rows()
+        assert rows[-1]["verdict"] == "armed_false"
+        assert rows[-1]["reason"] == expected
+
+
+def test_a_pre_arm_refusal_with_no_clause_renders_the_default_sentence() -> None:
+    """R2: the armed arm's empty-clause guard, one arm up.
+
+    The pre-arm arm had no guard at all, so `refused:` (a mark with nothing after
+    it) rendered "refused: " with an empty row, and a whitespace-only reason
+    rendered its spaces — the same defect the armed arm's guard exists to
+    prevent, on the older copy. Both now fall back to the sentence this arm has
+    always used for a host that said nothing: a `reason` that is absent.
+    """
+    for reason in ("refused:", "   ", ""):
+        host = FakeHost(
+            methods=("download",),
+            result={"files": [], "armed": False, "reason": reason},
+        )
+        result = _download(host)
+        assert result.is_error
+        assert result.text == "refused: the host refused to arm a download", result.text
+        rows = _download_rows()
+        assert rows[-1]["verdict"] == "armed_false"
+        assert rows[-1]["reason"] == "the host refused to arm a download"
 
 
 def test_download_deletes_executable_content_even_when_the_host_calls_it_a_pdf(
@@ -1283,4 +1640,105 @@ def test_an_absent_client_is_a_typed_refusal_not_an_attribute_error() -> None:
         )
     )
     assert result.is_error
-    assert "cannot serve" in result.text
+    # "No browser is attached" is the right answer for an absent client even on a
+    # method no host ever advertised: there is no peer, so no version and no switch
+    # answer exists to attribute. The N3 point is the TYPE — a `capability_refusal`
+    # built from an empty record, never an AttributeError out of the one function
+    # that must answer before touching a socket.
+    assert "no browser is attached" in result.text
+    assert (result.details or {}).get("error_code") == "capability_unsupported"
+
+
+# --- the extension's shape, driven through the tool (round-1 R8) -------------
+
+
+def _extension_download(
+    tmp_path: Path, *, referrer: str, origin: str = "https://example.test"
+) -> tuple[FakeHost, Path, bytes]:
+    """A host that behaves like the EXTENSION: it writes OUTSIDE the directory and
+    reports the absolute path Chrome chose (the app host's shape, bytes in the
+    composed directory, is covered above)."""
+    landing = tmp_path / "Downloads"
+    landing.mkdir(exist_ok=True)
+    payload = b"%PDF-1.4\n" + b"y" * 40
+    landed = landing / "receipt.pdf"
+
+    def write_it(method: str, params: dict[str, Any]) -> None:
+        landed.write_bytes(payload)
+
+    host = FakeHost(
+        methods=("download",),
+        version="0.1.19",
+        switches_known=True,
+        result={
+            "armed": True,
+            "url": f"{origin}/export",
+            "files": [
+                {
+                    "name": "receipt.pdf",
+                    "path": str(landed),
+                    "bytes": len(payload),
+                    "state": "complete",
+                    "cancelled": "",
+                    "referrer": referrer,
+                }
+            ],
+        },
+        on_call=write_it,
+    )
+    return host, landed, payload
+
+
+def test_download_relocates_the_file_the_extension_landed(tmp_path: Path) -> None:
+    """The architecture the operator's decision actually ships, at the tool level.
+
+    Every other test in this file drives the APP host's shape (bytes in the directory
+    the harness composed). Nothing drove the extension's: a host that cannot write
+    into the session directory, reports the absolute path Chrome chose, and leaves
+    Python to move the file in, chmod it and delete the original. A regression in
+    that wiring would leave every other assertion here green while the feature saved
+    nothing.
+    """
+    host, landed, payload = _extension_download(tmp_path, referrer="https://example.test/export")
+
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+
+    assert not result.is_error, result.text
+    facts = (result.details or {}).get("files") or []
+    assert [fact["name"] for fact in facts] == ["receipt.pdf"]
+    assert facts[0]["bytes"] == len(payload)
+    # The directory is STAMPED per call (`<stamp>-<session8>`), so the assertion
+    # finds the file the tool actually wrote rather than recomposing the name and
+    # comparing against a second, differently-stamped directory.
+    saved = list(bf.downloads_root().glob("*-sess0001*/receipt.pdf"))
+    assert len(saved) == 1, saved
+    assert saved[0].read_bytes() == payload
+    assert stat.S_IMODE(saved[0].stat().st_mode) == 0o600
+    assert not landed.exists(), "the original must be gone from the user's Downloads"
+
+
+def test_download_leaves_another_pages_download_where_it_is(tmp_path: Path) -> None:
+    """A file this call did not cause is refused, and NOT removed (round-1 R2)."""
+    host, landed, _ = _extension_download(tmp_path, referrer="https://elsewhere.example/account")
+
+    result = _flow(
+        "download",
+        host,
+        tool_call_id="t1",
+        state=_surface(),
+        params=_params(action="download"),
+        context=_ctx(),
+    )
+
+    assert landed.exists(), "a download another page started is not ours to remove"
+    assert result.is_error
+    assert "a page this session is not driving" in result.text
+    assert "left in place" in result.text
+    assert "still on disk" not in result.text

@@ -420,6 +420,36 @@ refusal genuinely is a decision with a payload (what was refused, why, what is o
 disk), and returning it as a result lets the extension say more than
 `{code, message}` permits.
 
+**The refusal mark is a CONTRACT, and the tool layer reads it.** Nothing on the
+wire says "this is a refusal": a refusal is a `reason` like any other account, and
+the *copy* is what tells the two apart. Every refusal this feature composes starts
+with `refused:` — `browser_files` composes its name refusals that way, the
+extension its upload refusals, and the app host its own download refusals
+(`downloads.ts`'s `refuse`/`refuseLive`: "refused: `x` is an executable/script
+type; nothing was saved"). `builtin.py`'s `REFUSAL_PREFIX` is that mark, and the
+three rules that follow from keying on it are the whole of the contract:
+
+* **Both hosts must keep composing it** for the refusals they send. Reword
+  `refuse()`/`refuseLive()` away from it and the harness has no other signal — but
+  the degradation is SAFE rather than silent, because of the next rule.
+* **The app host is the host that reaches it today.** Its `download` action always
+  arms and reports `armed: true`, so its refusals arrive as `reason`, which makes
+  the armed-then-refused state app-host-only. The extension's `download` command
+  sends **no `reason` at all** (`{armed: true, url, files}`; the cancellation
+  account beside it is a top-level `note` the harness does not read), so an
+  extension download refusal cannot reach the mark. The extension's *upload*
+  refusals are the ones that carry it, on a different result payload.
+* **An unrecognised non-empty `reason` is RELAYED, never replaced.** On the armed
+  path, with nothing landed and a reason that is not the refusal shape — the app
+  host's own no-op sentence ("no download started within 120s; if the page needs a
+  click first, pass a selector, or `click` it and retry") is one of these — the
+  model gets the host's sentence in the host's own words, audited as
+  `armed_reason`. That is the false-negative half of keying on copy, and the
+  answer is to make it visible to both readers rather than to widen the parse: the
+  canned "no download started … click its Download control" sentence is exactly
+  what a reworded refusal must never be answered with again, since a remedy that
+  cannot work reads as fact.
+
 Exactly **one** new `ErrorCode` is added, emitted only by the **daemon**
 (daemon→session is the safe direction per `protocol.py:327-332`):
 
@@ -484,9 +514,10 @@ the table the tests in §12.2 assert.
 
 | peer pair | direction of the new thing | behaviour | answer |
 |---|---|---|---|
-| new extension + old daemon | extension advertises `capabilities` | old daemon drops the unknown event; never sends `download` | unaffected; neither new action works, and `lop browser status` reports `bridge: predates the file-transfer actions` (the record's `capabilities_known` stamp is absent, which is what names the WRITER rather than the extension) |
-| old extension + new daemon | daemon would send `download` | **refused before sending** — extension advertises nothing | typed `capability_unsupported`; ordinary actions unaffected |
-| new extension + new daemon | full path | works | `download`/`upload` available |
+| new extension + old daemon | extension advertises `capabilities` + `capability_switches` | old daemon drops both unknown events; never sends an unadvertised method | a capability the operator has ENABLED works (its method is in `capabilities`, which the old daemon does read); a switched-off one is simply not advertised, so the old daemon refuses it with its own copy, which names an extension toggle and cannot name the switch. The switch answer is lost, not the gate |
+| old extension + new daemon | daemon reads a record with no `disabled` and `switches_known: false` | the peer advertises `upload` only (that is what 0.1.18 serves) and never reports switches | `download` refused with the UPDATE copy (`first version that does is 0.1.19`, plus the switch to turn on afterwards); `upload` works, because a pre-switch build serves it unconditionally and the daemon must not invent a consent it was never told about |
+| new extension + new daemon, switch OFF | full path | the method is absent from `capabilities` AND listed in `disabled` | typed `capability_unsupported` naming the switch and where it lives; no socket call, and this is the default state for both capabilities |
+| new extension + new daemon | full path | works | `download`/`upload` available (`download` needs the optional permission grant as well)|
 | new app host + old harness | host advertises `capabilities` in `host.json` + `/health` | old harness has no such action in its schema; never calls it | unaffected |
 | old app host + new harness | tool reads a record with no `capabilities` | `download`/`upload` refused | typed `capability_unsupported`, remedy "update the desktop app" |
 | new harness + old daemon | tool reads an old record | refused at the record check, no socket call | typed `capability_unsupported` naming `lop browser restart` — the record carries no `capabilities_known` stamp, so the copy attributes the empty list to the bridge and NOT to the extension (an extension toggle here would be advice that cannot help) |
@@ -596,6 +627,8 @@ told to use the browser and was not told why reached for playwright anyway
 | host predates the feature | typed `capability_unsupported` + version + "update the extension / the app" |
 | host is current but wedged | the existing wedge copy, naming the extension toggle (`guide://browser`) |
 | no download started | "no download started within N s; if the page needs a click first, `click` it and retry, or the file may be behind a login" |
+| the host ARMED, then refused (the shape the app host uses, §6.2) | the host's own refusal, under the mark the design composes refusals with: "refused: …", the prefix once |
+| the host armed, nothing landed, and its `reason` is not a refusal (§6.2) | the host's own sentence, RELAYED verbatim, never the "no download started …" remedy above; the audit row reads `armed_reason` |
 | cancelled by the name policy | "refused and deleted — `<name>` is an executable/script type (`<why>`); nothing was saved" |
 | sniff disagrees with the name | kept, renamed, and said so: "saved as `x.pdf` (the name said `zip`; the server said `application/zip`; the content is a PDF document)" — the declared type is quoted only when there is one to quote, and it never changes the verdict |
 | executable content | "refused and deleted — the file at `<path>` is a `<type>`; nothing executable is ever kept" |
@@ -952,6 +985,21 @@ line are separate records sharing a `call_id`, so a liar is visible). Fields:
 (redacted for refusals, §9.4), `bytes`, `sha256`, `declared_mime`, `sniffed`,
 `verdict`, `reason`, `path`.
 
+The **`verdict` values this path writes**, and what each one claims — the list is
+documentation rather than a schema (`verdict` is a free-form string and no reader
+parses it today: `lop browser status` prints the directory and names
+`audit.jsonl`), which is also why the values are named here rather than left to
+the diff that introduced them:
+
+| value | what it claims |
+|---|---|
+| `armed_false` | the host refused to ARM the capture: state (a). Its `reason` is the host's clause |
+| `armed_refused` | the host armed and then refused the transfer: state (b). Its `reason` is the host's clause, with the copy's mark (`§6.2`) removed — every occurrence of it |
+| `armed_reason` | the host armed and accounted for the call in words the harness did not classify (§6.2). Its `reason` is that sentence; the verdict claims nothing about policy |
+| `no_download` | nothing landed and the host said nothing: state (c). `reason` is `nothing started` |
+| `deny` | a candidate LANDED and the harness refused it (containment, the per-call cap, the content policy). The row names the entry and what became of it |
+| `allow`, and `classify_download`'s kinds | per-file verdicts for files that exist on disk |
+
 **Why not `analytics.db`.** The ledger exists for token/cost accounting and its
 readers aggregate columns for that purpose; a file audit has different
 granularity, a different retention argument (see its own `_SCHEMA` notes on
@@ -1051,6 +1099,20 @@ takes seriously:
    redirected. This is the one place in the design where a page-derived string
    could have become a directory, and it is deleted by construction.
 
+**AMENDED 2026-09-19 (§17.13), and this paragraph is the one §17.1 overtook.** E1x
+measured that a tab-scoped `chrome.debugger` session may not use
+`Page.setDownloadBehavior` at all on current stable Chrome, so the primitive this
+section is about is unavailable to the extension and both of its consequences
+above are moot for that host: the extension can no longer reach a destination of
+its own choosing, and the danger the paragraph names is replaced by a DULLER one
+it never had — the file lands in the user's real download directory first, under
+the page's own name, because `chrome.downloads` refuses an absolute `filename`
+(§17.5, measured). What survives from this section is the rule that a path is
+never composed from page input: the harness still composes the quarantine
+directory, and now the harness is also the only side that MOVES the file into it.
+The mechanism is additionally behind the operator's own switch (§17.13), so on
+the extension host the capability does not exist until a human turns it on.
+
 ### 11.4 What is deliberately NOT done
 
 - **No extraction, ever.** A ZIP is stored, reported as a ZIP, and left alone.
@@ -1102,6 +1164,58 @@ takes seriously:
 - **R6** The DeepSeek end-to-end scenario needs a logged-in session in the
   operator's browser. If QA cannot get one, that scenario is BLOCKED and reported
   as such rather than substituted with a fixture (§12.1, E1).
+- **R7 (new with §17.13 — the operator's own decision names it)** A downloaded
+  file exists in the user's REAL download directory (`~/Downloads` by default)
+  under the page's own name for the length of the transfer, until the harness
+  moves it into the session quarantine directory. On the extension host there is
+  no way to avoid it: Chrome refuses an extension any `filename` that escapes the
+  default download directory (measured, §17.5 — `"../../x"` and `"/tmp/x"` both
+  answer `Invalid filename`), and the CDP primitive that could have chosen a path
+  is refused outright (§17.1). **What covers the window:** the capability is OFF
+  until the operator turns the switch on, and that switch is the only thing that
+  makes a download happen at all; the page cannot choose the path (§17.5); the
+  name is sanitised on both sides before it is used or reported; and the file is
+  deleted rather than left when it is refused, cancelled, or past the ceiling — so
+  the window ends with nothing on disk either way. **What does NOT cover it:** a
+  user or another program watching that directory sees the file appear, and a
+  scanner (or the user) can open it in that window. The alternative — no
+  extension download at all — is what PR A shipped, and the operator has now
+  chosen the other side of that trade with the cost stated here.
+- **R8 (new with §17.13)** The download appears in the user's browser download
+  history (`chrome://downloads`) even after the harness has moved the file away,
+  so the entry points at a path that no longer holds it. The extension
+deliberately does NOT call `chrome.downloads.erase`: the history row is the only
+  durable record the user has that this browser fetched that file, and deleting
+  our own writes from the owner's history is a worse default than a row that says
+  "this file is gone". Accepted, and named here so nobody "tidies" it later
+  without deciding to.
+- **R9 (new with §17.14 — round 1's R3)** A save can DECLINE because the session
+  could not confirm which page started the transfer. `browser_files.intake_landed`
+  refuses (and leaves alone) every reported path when it has no driven origin to
+  compare against, which is the state the tool passes when the extension could not
+  read the driven tab's URL. The alternative was measured and is worse: with the
+  guard skipped, a completed download from ANOTHER origin was moved into the
+  session directory and removed from the user's folder, with a success result and
+  no refusal row. A refusal the model can explain ("this session could not confirm
+  which page started the download") is the exchange taken here.
+- **R10 (new with §17.14 — round 1's R2/R7)** The harness never cancels or deletes
+  a transfer it does not own, and THAT is not conditional: an item whose referrer
+  names another origin is refused and left where it is, a cancelled one included.
+  Two consequences are accepted rather than hidden: (a) the per-call ceiling and
+  the byte ceiling at the EXTENSION end now apply only to transfers the extension
+  can attribute to the driven page, so a transfer with NO referrer is neither
+  cancelled nor counted against the per-call limit — it is reported, and the harness
+  judges it on its own checks: size, mtime window and content policy. **A
+  no-referrer transfer that corroborates on those IS accepted** (round-2 N3 — the
+  earlier wording here said the harness "refuses it", which is not what the code
+  does and not what the design wants: a redirect chain or a blob download reports no
+  referrer, and refusing those would break the feature to close a window the
+  ownership check can only narrow); (b) for an own transfer the extension
+  cannot attribute, the byte ceiling is enforced where it always was for the
+  harness's purposes: after it lands, by removing the file. The ceilings are
+  defence in depth around a policy the harness applies to the landed bytes, so
+  what changes here is how much can land, not whether a refused file survives —
+  it does not.
 
 ---
 
@@ -1219,7 +1333,24 @@ These are the things I could not settle by reading.
   invented in the dark. This is the single highest-risk unknown in the design.
 - **E2x — does adding the `downloads` permission to the published item re-prompt
   or disable the extension for existing users?** Only needed if E1x fails, but it
-  decides whether that fallback is even acceptable.
+  decides whether that fallback is even acceptable. **ANSWERED AS FAR AS A LOCAL
+  RIG CAN (2026-09-19): the question the store would ask is gone, and what is
+  measurable is the shape of the grant.** The permission is now declared in
+  `optional_permissions`, so an INSTALL OR UPDATE cannot re-prompt or disable
+  anything: the manifest that Chrome checks for a permission change has the same
+  install-time set as 0.1.18 (`debugger, tabs, tabGroups, scripting, storage,
+  alarms, webNavigation, notifications` + `<all_urls>`), verified on the built
+  artifact (`dist/manifest.json`: `downloads` under `optional_permissions`, not
+  under `permissions`). The user sees Chrome's own optional-permission dialog at
+  the moment they turn the switch on, and never before. **What is still NOT
+  measured, and must not be asserted:** whether the store treats a NEW
+  `optional_permissions` entry as a permission change requiring re-review of the
+  already-published item — that needs a published item and a reviewer (§17.5
+  says the same, and the 0.1.8 review took ~4.5 days). A local rig can measure
+  neither. The related reading this rig WOULD have taken — whether
+  `chrome.permissions.request` resolves true in headless Chrome from a real user
+  gesture — is BLOCKED in this window: Chrome aborts at launch on this host
+  (§17.13's evidence section), so the grant path is QA's to exercise.
 - **E3x — is `Page.setDownloadBehavior` per-tab or browser-wide in practice, and
   is the default state restorable?** Probe by setting it on a tab, downloading
   manually from another tab, and restoring with `{behavior: 'default'}`. The
@@ -1239,7 +1370,7 @@ These are the things I could not settle by reading.
 
 ## 13. Split, sequencing and release
 
-### 13.1 Exactly two PRs
+### 13.1 Exactly two PRs, then the consent amendment (a third)
 
 **PR A — `damianvtran/local-operator`, branch `feat/browser-file-transfer`** (this
 branch, whose first commit is this document). Harness + extension, one PR,
@@ -1370,11 +1501,16 @@ recommended (two locations for one file, and the mirror becomes the place a
 hostile file gets double-clicked). Evidence that would change my mind: the
 operator saying they actually look in `~/Downloads` for agent files.
 
-**16.2 `url` mode and the `downloads` permission.** Recommend: no, in v1 (the
-selector path covers the real case, and `bash` + `curl` covers the rest). Evidence
-that would change it: a real task where the download URL is known but the page
-offers no clickable control — which would then be solved by a *new* permission
-deliberately taken, not by accident.
+**16.2 `url` mode and the `downloads` permission.** **CLOSED 2026-09-19 by the
+OPERATOR (§17.13) — the recommendation above was not taken, and the reason is a
+fact the recommendation did not have.** The extension now takes the `downloads`
+permission, as an **optional** permission requested at runtime, so the sentence
+"solved by a *new* permission deliberately taken, not by accident" is exactly
+what happened: it was taken deliberately, it is gated by a switch the operator
+owns and that is OFF by default, and it exists because E1x (§17.1) left the
+extension no other way to serve a download at all. `url` mode itself is still not
+implemented — the page's own control is still the trigger — so the permission is
+the only part of this decision that moved.
 
 **16.3 Caps as constants or settings.** Recommend: constants now (C7 and
 `AGENTS.md:2180`'s per-key cost), a settings follow-up only if the operator
@@ -1704,3 +1840,655 @@ per-finding answer and the real gate output.
 | **`test (3.12, 1)`** — `tests/unit/session/test_no_session_deletion.py` flagged `<path>.unlink` in `_unlink_quietly` and `<path>.rename` in `_browser_download` | allow-listed, with the reason the guard asks for: both paths are composed by `browser_files.session_dir()` as `<config_dir>/browser/downloads/<stamp>-<session8>/` — a SIBLING of `sessions/`, never a descendant — the candidate names come from listing THAT directory, the unlink removes one direct child ENTRY (never a resolved target, R1), and the rename has both sides inside it |
 | **`test (3.12, 4)` (Linux only)** — `chmod_private` returns False for a symlink entry where `os.lchmod` does not exist, so the entry keeps `0o120777` and the test's `== 0o600` failed | the behaviour is unchanged (falling back to `chmod` would tighten the link's TARGET — the N8 bug) and the fact is now VISIBLE: the download result carries `could not tighten the mode of <name> to 0600 …`, so a mode the harness did not set is never implied. The test is platform-shaped — the target untouched is asserted everywhere, the entry's 0600 only where `lchmod` exists — and the Linux branch is EXECUTED rather than reasoned about, by `monkeypatch.delattr(os, "lchmod")` |
 | **round-4 minor** — `_host_byte_count` was `isdigit()`-then-`int()` without a guard, so `"--12"`, `"++5"`, `"+-3"`, `"²"` and any digit string past CPython's ~4300-digit `int()` limit still escaped as `Tool raised:` in both marker shapes | the guard is `isascii()` + `isdigit()` + a `try/except` around `int()`: `isascii()` rejects the Unicode digits `isdigit()` accepts and `int()` refuses, and the `try` absorbs the digit-count limit. Ten shapes × two marker shapes now answer typed, and all ten fail against the pre-fix sources |
+
+---
+
+### 17.13 The consent amendment: both capabilities are OFF until the operator turns them on
+
+Written by the implementing agent on branch `feat/browser-extension-downloads` (PR C),
+cut from `origin/main` at `4e2899cc`, after the operator amended the requirement. **This
+section supersedes §17.3's "no extension download" half, amends §11.3, closes §16.2, and
+adds §11.5's R7/R8.** §17.1–17.12 stay as written: they record what was measured in that
+window, and measurements do not expire.
+
+**The decision, recorded as the operator's, 2026-09-19:**
+
+> "Download can be a requested permission but make it a permission that the user needs
+> to turn on in the extension configuration to allow downloads, and to allow uploads
+> (separate permissions that need to be enabled, default off)."
+
+So the extension does serve downloads, and **both directions are gated by an operator
+switch that is off by default**. The brief this implements said "take the Chrome
+`downloads` permission so the Chromium extension can serve downloads too"; the operator
+narrowed that permission to one that must be *requested and enabled*, and extended the
+same shape to uploads, which previously ran unconditionally.
+
+#### What the extension serves now, and how
+
+The extension's `download` handler triggers the page's own download (the existing
+click/link path when a selector is given, and nothing at all when the page starts it
+itself), then watches `chrome.downloads` — `onChanged` as the wake-up, `search` as the
+source of truth — to learn the ABSOLUTE path Chrome wrote. It cannot choose that path:
+`chrome.downloads` resolves `filename` against the user's default download directory and
+refuses anything that escapes it (`Invalid filename`, §17.5), and the CDP primitive that
+could have chosen one is refused to a tab-scoped session entirely (§17.1).
+
+**The harness is still the judge, and the extension never claims otherwise.** The
+handler reports the path, the byte count, the state, the declared MIME, Chrome's `danger`
+verdict and whether it cancelled the transfer; `browser_files.intake_landed` then
+corroborates the file on disk before touching it (absolute, a REGULAR FILE by `lstat`,
+outside the config root and the session directory, size equal to what the peer reported,
+mtime inside this call's window), moves it into the session quarantine directory, and
+the existing pipeline does the rest — `classify_download`, the content-earned rename,
+`chmod 0600`, the audit rows. **The original in the user's Downloads is gone afterwards
+in every branch**, including the ones where nothing is kept: a file the content check
+refuses, a transfer the handler cancelled (over the ceiling, over the per-call file
+count, or past the deadline) and a name the session already holds are all deleted on the
+strength of the same corroboration. A file that FAILS corroboration is refused and left
+alone — it is probably the user's own file, and removing something we cannot show we
+watched arrive is worse than a stray file. That asymmetry is the control this section
+should be read with.
+
+#### The switches, and the optional permission
+
+- `downloads` is declared in **`optional_permissions`**, not `permissions`. Whatever else
+  is true of a store update, it cannot silently widen what the installed extension may
+  do; the grant is requested by `chrome.permissions.request` from the options page, on
+  the click that turns **Allow downloads** on, and turning the switch off hands the grant
+  back (`chrome.permissions.remove`). Verified on the built artifact: `dist/manifest.json`
+  has `version 0.1.19`, the same eight install-time permissions as 0.1.18, and `downloads`
+  under `optional_permissions`.
+- **Allow uploads** is the same switch for the direction that needs no permission at all
+  (it rides the `debugger` grant). Its switch is the only control that direction has.
+- **The stored flag is not the truth.** The effective answer is `flag AND permission`,
+  recomputed on every read and never cached, so revoking `downloads` in
+  `chrome://extensions` — or an enterprise policy removing it — makes the switch read OFF
+  (and `chrome.permissions.onRemoved` repairs the stored flag too). A switch that reads ON
+  while the API is unavailable is the failure mode this rule exists to design out, and
+  the extension's own suite pins it.
+- **The operator is the only writer.** The options page writes `allowDownloads` /
+  `allowUploads`; no daemon frame, tool call, page or pairing path can reach them, and the
+  worker only READS. The engine can still refuse one by flipping a switch, and it will —
+  which is the point.
+
+#### The three states, and why the answer is a SECOND event
+
+`methods` alone says a capability is unavailable. Three causes need three remedies: (a)
+this build cannot serve it — update the extension; (b) the build can and the operator has
+not enabled it — open the switch, and no update will help; (c) available, and the command
+failed for its own reason. The extension therefore sends `capability_switches
+{disabled: [..], version}` **in addition to** `capabilities`, and the daemon publishes
+`disabled_capabilities` plus its own `switches_known` stamp beside `capabilities` and
+`capabilities_known`.
+
+A second EVENT rather than a field on `capabilities` is forced, not stylistic: every
+envelope in `protocol.py` is `extra="forbid"`, so a new key on an existing event is
+closed by every already-released daemon, while an unknown event is dropped harmlessly —
+the same reasoning that made `capabilities` an event and kept `Hello` free of new fields.
+`PROTO_VERSION` stays **1**, `Hello` gains nothing, and PR B's vendored pin (`90992a61`)
+stays valid.
+
+The switch labels are not prose in two languages: `CAPABILITY_SWITCH_LABEL` and
+`CAPABILITY_SWITCH_PERMISSION` are generated into the extension
+(`CAPABILITY_SWITCHES`), so the refusal a model reads and the words on the options page
+name the same control. The retired `EXTENSION_CANNOT_SERVE` set is DELETED rather than
+emptied: its only member is servable now, and a constant claiming "no build can" is a lie
+the refusal copy acts on (it would send the user away from the update that fixes them).
+
+#### Residuals this decision accepts
+
+Named in §11.5 as **R7** (the file exists in the user's real download directory for the
+length of the transfer, with what covers that window and what does not) and **R8** (the
+browser's download history keeps a row for a file the harness has moved away, because we
+deliberately do not call `chrome.downloads.erase`). Both are the cost of serving downloads
+from the extension at all, and both are stated where a reviewer will meet them.
+
+#### Evidence in this amendment
+
+| what | result |
+|---|---|
+| extension suite (`node --test tests/*.test.mjs`) | **294 pass, 0 fail** — 11 new: 6 consent tests (off by default, flag+permission AND, revoked grant, missing API is "not held", the storage key, the generated labels) and 5 handler tests against a scripted `chrome.downloads` |
+| the handler suite found a real defect | the report omitted `name` (Chrome's `DownloadItem` has `filename`, not `name`), which is the key the harness looks its declared MIME up by. Fixed here: the name is `safeName(filename)` — the same function Python applies, so the report and the quarantine file cannot disagree |
+| Python: `tests/unit/browser_bridge`, `test_browser_files.py`, `tests/unit/tools/test_browser_file_*`, `tests/unit/ui_browser` | **709 pass**; the new coverage is 10 intake tests (move + original gone, cancelled partial deleted, uncorroborated NOT deleted, stale mtime, symlink entry unlinked and target kept, relative path, config-root path, duplicate name, already-in-directory, app-host item) and the three-state refusal copy plus the wire gate |
+| `gen_ts --check`, whole-tree `flake8`, `black --check`, `isort --check-only` | clean (`gen_ts --check` is what pins the regenerated `protocol.gen.ts` + `ui-vendor/` bundle) |
+| `pyright` | 0 errors on every file this PR touches; the whole-tree run reports 17 errors, all inside the `session/`+`tui/` area this worktree could not materialise (below) |
+| the headless-Chrome E2E (`/tmp/lo-dl-e2e/rig.py`: the real daemon, the real BUILT extension, Chrome 153.0.8010.53) | **RAN CLEAN, rc=0.** CASES: **(1) switches off** — the record carries `disabled_capabilities: ['download','upload']` with `switches_known: True`, `download`/`upload` are absent from `capabilities`, and both calls are refused with the switch copy (`'download' is switched off … the operator has not turned on "Allow downloads" … (No update is involved: this build can already serve it.)`), with nothing placed in the download directory; **(2) switch on** — the record gains `download`, and the page-initiated download lands: `downloaded 1 file(s) into <config>/browser/downloads/<stamp>-dl-e2e: …/receipt.pdf — 69 bytes, pdf`, the quarantine copy is `0o600`, the download directory is EMPTY afterwards (`download_dir_after: []`, so the original is gone), and the audit row reads `allow`; **(3) the executable wearing a `.pdf` name** — `nothing was saved. invoice.pdf: refused and deleted — the file at invoice.pdf is a Linux executable (ELF); nothing executable is ever kept`, download directory empty, audit row `deny`; **(4) a transfer the page never finishes** — the deadline cancels it and the report reads `the transfer was stopped (…) and the partial file is already gone`; **(5) the switches are independent** — with uploads on and downloads off the record reads `['download']`, the download is refused and the upload attaches. `leftover_chrome_processes: 0` |
+| two rig-only edits, reported in the run's own output | (i) a throwaway identity key, so this Chrome cannot share an identity with the operator's own unpacked build; (ii) `DEFAULT_PORT` rewritten to the rig's daemon, because the worker dials on startup and would otherwise reach the operator's real daemon on 4099; (iii) **`downloads` moved from `optional_permissions` to install-time `permissions`** — forced by a measurement, below: headless Chrome has no UI to answer an optional-permission prompt, so without it the ON path cannot be exercised at all. The switches themselves are still set the REAL way (`chrome.storage.local`, exactly what the options page writes), so what the edit removes is the browser's prompt, never the extension's consent gate |
+
+**What is deferred to QA, explicitly:** the over-cap cancel (it needs a real >256 MiB
+stream, which is the heaviest case and the wrong thing to run on a fleet-loaded host),
+the options-page design/UX rounds on the rendered frames the rig produced
+(`/tmp/lo-dl-shots/options-{off,on}.png`), and the whole-tree Python gates: two of the
+files this change touches need `tests/unit/tools/test_browser_file_transfer.py` and
+`tests/unit/test_browser_files.py`, and on this host's memory pressure (as low as ~60 MB
+free with ~25 sessions running suites) pytest was SIGKILLed outright on every attempt,
+including single-file runs — the last end-to-end run of those files, before this
+amendment, was 709 passing, and the amendment's own logic is verified directly and by
+the E2E above.
+
+#### Still unverified
+
+* Whether Chrome's store review treats a new `optional_permissions` entry as a permission
+  change for an already-published item (§12.4 E2x, answered as far as a local rig can).
+* **`chrome.permissions.request` in headless Chrome: MEASURED, and it does not
+  grant.** Called from the service worker with `userGesture: true`, the promise did
+  not settle within the rig's wait at all (a 120 s CDP `awaitPromise` returned with
+  no value), and what it eventually handed back carried no grant:
+  `chrome.permissions.contains({permissions: ['downloads']})` stayed `false`. **The
+  first wording here said the promise "resolves to an object", and that was this
+  instrument's reading of an UNSETTLED promise — corrected in round 1 (R5)**, which
+  is why the page's own code now treats an unanswered request as a refusal, bounds
+  the wait, and verifies with `contains` instead of trusting the resolved value.
+  **The options page's own request flow — the real gesture, the real prompt, and the
+  refusal branch — is therefore NOT covered by this rig** and is QA's/design's to
+  exercise in a real browser.
+* **A rig hazard, recorded because it makes a MISSING extension look like a broken
+  one**: branded Chrome 137+ silently IGNORES `--load-extension`. The extension's
+  PAGES still resolve under their `chrome-extension://<id>/…` URL, so the failure
+  presents as a manifest problem — measured on Chrome 153.0.8010.53, an options page
+  whose `chrome.runtime` and `chrome.storage` were both `undefined`, with no load
+  error in Chrome's log. The supported path is CDP `Extensions.loadUnpacked` on the
+  browser-level endpoint (what this repo's own `extension/scripts/popup-states-shot.mjs`
+  already does, and what this round's frames used).
+* The app host's half is untouched by this amendment: `local-operator-ui` PR B keeps its
+  gate, and the switches are the EXTENSION's configuration, as the brief says.
+* The `~/Downloads` window (R7) as a user sees it — the rig redirects the download
+  directory, so the residual is stated from Chrome's documented behaviour and §17.5's
+  measurement rather than from a screen recording. One artifact remains unattributed:
+  two runs found a `downloads.html (1).crdownload` file in the redirected download
+  directory that no part of the extension names (grep: no such string) and that never
+  appears in `chrome.downloads.search`, so the harness never saw or moved it. Recorded
+  because an unexplained file in a download directory is exactly the kind of thing this
+  feature must not cause — and the evidence says it is not ours.
+
+---
+
+### 17.14 Round-1 remediation: what the review, QA and design rounds changed
+
+Written by the implementing agent on `feat/browser-extension-downloads`, in ONE
+remediation commit against the head the round-1 reports were written on
+(`cca88046`). Every item below is a change in that commit; the evidence is the
+output of the run that produced it, and anything NOT re-run is named as such at
+the end rather than implied.
+
+**Two blockers — both "the tree cannot be green as it stands":**
+
+1. **The absent-state regression (review B1).** The new "the transfer was stopped"
+   branch tested `state != "complete"`, so an item reporting NO state at all fell
+   into it: the sentence the existing assertion expects became unreachable, and the
+   copy emitted instead nested one parenthesis in another — *"the transfer was
+   stopped (the transfer did not complete (state unknown))"*. The gate is now
+   `bool(cancelled) or (bool(state) and state != "complete")`, and the shared
+   `_stop_clause` produces a clause that reads inside both sentences.
+   *Direct check, real output: an item with no `state` whose file is absent →
+   `the file the host named is not there`, disposition `absent`; a cancelled item whose
+   partial is gone → `the transfer was stopped — its time ran out — and the partial
+   file is already gone`, disposition `absent`.*
+2. **The session-deletion guard (CI red).** `_unlink_entry::os.unlink` and
+   `intake_landed::shutil.move` are allow-listed WITH their proof rather than
+   silenced: `intake_landed` refuses every source that is inside the config root
+   before any of them runs, and the destination is composed by `session_dir()` as
+   `<config>/browser/downloads/<stamp>-<session8>/` — a SIBLING of `sessions/`, never
+   a descendant. *`tests/unit/session/test_no_session_deletion.py`: 224 passed.*
+
+**Four majors, two of them destructive paths, fixed first:**
+
+3. **R2 — ownership now precedes every destructive branch.** The referrer test moved
+   above the cancelled/duplicate/content branches, so a transfer from another origin
+   is refused and LEFT WHERE IT IS, a cancelled one included, and the extension no
+   longer cancels a transfer it cannot attribute (`download.ts` gained the same
+   ownership test on all three cancel paths: the ceiling, the per-call count, and
+   the deadline). *Direct check: a cancelled foreign item → `kept`, file survives;
+   extension suite: a new test proves a foreign download is reported and never
+   cancelled — 295 pass / 0 fail.*
+4. **R3 — an unknown origin refuses instead of skipping the check.** A page origin
+   that cannot be determined (the tool passes `""` when the extension could not read
+   the driven tab's URL) refuses every reported path and removes nothing.
+   *Direct check: two items, one foreign and one plausible, with
+   `page_origin=""` → `moved: ()`, both files still on disk, both refusals `kept`.*
+5. **R4 — the peer's own refusal is no longer rendered as a connection problem.**
+   `requireConsent` throws with `{method, disabled_by_operator}`, and
+   `_capability_message` renders that as the consent sentence before its
+   "no browser is attached" fallback. *New test in
+   `tests/unit/browser_bridge/test_capability_gate.py` asserts the copy names the
+   method, the switch and its location, and does NOT say "no browser is attached".*
+6. **R5 — the page verifies the grant and bounds the wait.** `enableDownloads`
+   passes the request through the API deadline (a new
+   `PERMISSION_REQUEST_DEADLINE_MS = 120_000`), treats a non-settling or refused
+   request as a refusal, and confirms the grant with `chrome.permissions.contains`
+   before storing the flag — so an unanswered prompt can no longer record consent
+   for a permission that was never granted (see the corrected measurement above).
+
+**Design stream (frames re-taken on the new head, real built extension, real headless
+Chrome, `Extensions.loadUnpacked`):**
+
+7. **D1 — the permission now has a representation on the page.** With the flag set
+   AND no grant (the state a revocation while the page was closed leaves behind),
+   the page used to render an untouched default: both switches off, empty note,
+   byte-identical `innerText` to a fresh install. It now repairs the flag and paints
+   the reason. *Measured in the rendered page:*
+   `{"state":"Downloads and uploads are both off, …","notice":"Chrome does not hold
+   the downloads permission for this extension, so downloads are off. Turn the switch
+   on again to ask for it once more.","checked":false,"attention":true}` — against
+   the default state's `{"… ","notice":"","checked":false,"attention":false}`.
+8. **D2/D3/D4** — the attention note is now a different treatment from the quiet one
+   (border and ink, never the danger colour, which is reserved for the all-sites
+   banner); the off toggle's outline moved from `--hairline-strong` to `--ink-dim`
+   (**1.50:1 → 5.43:1** on the light ramp, **1.42:1 → 5.11:1** on the dark one,
+   against WCAG 1.4.11's 3:1), with a prose state line added beneath the switches;
+   and both notices moved BELOW the two rows so toggling one capability no longer
+   shifts the other row (45.5 px).
+9. **D5/U1/U2/U3** — the model-facing refusal now carries the permission clause
+   ("Turning it on asks Chrome for the 'downloads' permission; if the user refuses
+   that, the switch stays off") and names the toolbar → Settings route the popup's own
+   footer already offers; while a prompt is unanswered the switch paints the
+   EFFECTIVE state and says the page is waiting.
+
+**Minors, all in the same commit:** R6 (the worker re-announces on
+`chrome.permissions.onRemoved`/`onAdded`, so a revoked grant stops being advertised
+without waiting for the socket to drop); R7 (only attributed transfers consume the
+per-call slots); R8 (the extension's shape — a file outside the directory plus a
+reported path — is now driven through `_browser_download` at the tool level, with a
+second test proving a foreign one is left in place); Q2 (four dispositions rather
+than a boolean: `deleted`, `kept`, `failed`, `absent` — a path the host named that is
+not there is now `absent`, so "could NOT be removed — it is still on disk" can no
+longer describe an entry that never existed, and "left in place" is reserved for an
+entry that IS there and that we chose not to touch); Q3
+(`capabilities` is sent before `capability_switches`, so the ~15 ms window can no
+longer show a just-enabled method absent from both frames).
+
+**What was NOT re-run, and why — the honest half.** The assembly E2E
+(daemon + built extension + real Chrome, driven through the tool) was **re-attempted
+and did not complete this round**: the rig that produced §17.13's run was in `/tmp`
+and did not survive the host's reboots, and the re-authored rig now reaches the point
+of loading the built extension into branded Chrome over CDP and obtaining its worker,
+but the extension's dial to the isolated daemon does not complete (`paired: false`,
+`extension_id: ""` in the published record) — measured, not assumed. So this round's
+E2E-grade evidence is: the direct Python checks above, the extension suite (295
+pass / 0 fail), the guard test, `gen_ts --check` (clean after regenerating the
+vendored tables, whose input hash moved with these edits), `tsc --noEmit` (clean), and
+the three rendered frames. The rig, its two rig-only edits (install-time `downloads`
+grant, throwaway identity key) and its `--load-extension` finding are handed to the
+QA round at `~/workspace/lo-dl-e2e/rig.py` (`shots.py` beside it produced the frames);
+the round-1 review's own repro of the failing test is the second independent
+instrument this round leans on.
+
+---
+
+### 17.15 Round-2 remediation: the viewport defect, and the narrowed predicates
+
+One commit against `6ffe5a96`, the head round 2 read. CI was green there; this
+section records what changed on top of it and what was measured.
+
+* **U1 (major) — the explaining sentence was below the fold.** Measured before the
+  fix, at the sizes the UX stream named: **760x520** — download row at y=549, notice
+  at y=849–925 in a 520 px viewport; **420x700** — row at y=610, notice at
+  y=988–1085. A user who had scrolled far enough to press the switch got the knob
+  flicking back with nothing readable saying why: round 1's U1 returning through
+  layout rather than state. The fix is **placement without reflow**: `notice()` in
+  `options.ts` REVEALS the sentence with `scrollIntoView({ block: "nearest" })` (see
+  `revealNotice`), which changes the scroll offset only — the two rows above keep
+  their document positions in every state, which is what D4 measured and what a
+  reserved-height slot, an absolute overlay or a notice between the rows would each
+  have broken. After the fix, in every state and at every size, the notice's viewport
+  box is inside the viewport, and the rows' document positions are byte-identical
+  across off / on / missing / pending.
+
+  **A `position: sticky; bottom: 12px` block was tried FIRST and is NOT what ships.**
+  It pinned at 900x620 (543–620) and 420x700 (604–700) but left the notice at y=530
+  in a 520 px viewport — i.e. it did not fix the case the finding is about — and it
+  would not recover from the two cases the reveal does: a notice painted while the
+  window is taller than its position (nothing scrolls, correctly) followed by a
+  resize to a short window, and a tab-away that scrolls focus into view and abandons
+  it again. Round 3 (M1/D4) caught this document and `options.html` describing the
+  rejected variant as the shipped one, while `options.ts` recorded it as rejected —
+  three accounts of one fix, two of them wrong. `options.ts`'s comment was the
+  accurate one, and the other two now match it.
+* **U2 == D6 (one defect, two streams).** The pending-permission notice was painted
+  in the quiet weight: its ring measured `rgb(59,53,39)` — identical to the success
+  note's — against `rgb(181,175,162)` for the denial and revocation notes, although
+  this file's own rule classes an unanswered dialog as attention-worthy. It now
+  carries the attention treatment at its call site.
+* **U3 — the keyboard user had no way out.** Space on the switch set
+  `disabled = true` for a wait of up to 120 s, dropped focus to `BODY`, and left the
+  switch unreachable by an 8-step Tab walk, with no cancel. The switch is now never
+  disabled: a second press is the cancel, which supersedes the wait and stores
+  nothing (a withdrawn question is not consent), and a grant Chrome makes afterwards
+  is still honoured through `onAdded` rather than inferred from the stale promise.
+* **U4 / D7 / D8.** The refusal copy no longer promises "Chrome will ask once more"
+  (a dialog this build cannot put on screen); the `.consent-state` comment now
+  describes the token it actually uses — deliberately easier to read than the hints,
+  7.93:1 against 5.11:1 — instead of claiming to be quieter than them; and the state
+  line defers to whichever notice is already explaining a capability, so the
+  eight-pixel-apart pair no longer both say "downloads are off".
+* **M4 — an unhandled rejection re-introduced.** `worker.ts`'s two
+  `chrome.permissions` listeners used a bare `void announceCapabilities()`; the
+  function awaits `storedSwitch`, which goes through the API deadline, so a
+  deadline rejection escaped a Chrome event handler as `Uncaught (in promise)` —
+  the exact defect the file's own `fireAndForget` docstring records. Both now use
+  the helper.
+* **M1 — narrowed, not deferred.** An item with NO reported state and a file that
+  IS present is refused and removed again, as the base commit did: the absent-state
+  sentence round 1 fixed belongs to the case where no file is there, and accepting a
+  state-less item was a widening rather than a fix.
+* **M2 — closed at the source, and the guard's rows now say why.** The two
+  allow-list rows proved *lexical* containment only, and round 2 measured the
+  consequence: with a symlinked parent (`<downloads>/link -> <config>/sessions/<id>`)
+  `shutil.move` relocated `<config>/sessions/<id>/session.json` into quarantine and
+  `os.unlink` deleted it. `intake_landed` now also compares the RESOLVED path against
+  both spellings of the config root (macOS makes `/var/...` a symlink to
+  `/private/var/...`, so one spelling is not enough — that is what the first attempt
+  at this fix missed, measured). Verified against both shapes: the exposed
+  `~/Downloads` spelling and the `/private` one. The rows reference this proof.
+* **M3 — the two ownership predicates now share a written contract** (scheme and
+  host lowercased, userinfo dropped, default port dropped, `""` for anything with no
+  origin), because they cannot be the same CODE — Python has no URL parser here — and
+  the TS comment claiming sameness was the newly wrong part.
+* **M5 — the refusal copy no longer claims Chrome refused.** A request that resolves
+  without a grant, and one that resolves with a grant Chrome does not hold, are one
+  outcome as far as the page can tell, and the sentence says what the page can see
+  rather than attributing a decision to Chrome.
+* **N2 — the directory this call creates is 0700**, like every other directory the
+  feature owns; **N3 — R10's sentence about a no-referrer transfer is corrected** (the
+  harness accepts one that corroborates on size and mtime; it does not refuse it).
+
+**Measured after the fix** (real built extension, real headless Chrome, one Chrome
+per frame, `Extensions.loadUnpacked`, processes reaped): at **900x620, 760x520,
+420x700 and 760x1080**, in all four states, the notice's viewport box is inside the
+viewport and the two rows' document y is identical across states. Frames are
+attached to the PR comment; the geometry probe is
+`~/workspace/lo-dl-e2e/geom.py` beside the assembly rig.
+
+**Handed over from QA's round-2 finding, recorded here because it is not mine to
+absorb silently:** the assembly gap I deferred was rig-side — `BridgeService.startup()`
+never binds a socket, `chrome.runtime.reload()` does not revive an MV3 worker, the
+reconnect alarm only dials while disconnected — and on Chrome 153 every download
+after the first from an origin is silently refused unless `automatic_downloads` is
+allowed, which is why this rig's later cases could not produce a reading. The
+`--load-extension` finding above is theirs, re-confirmed and now in `AGENTS.md`.
+
+---
+
+### 17.16 Round-3 remediation: the identical account, the intent-bound cancel, and the rebase
+
+One commit on top of a rebase onto `origin/main` (`d031cc49`), the base CI requires.
+Every measurement below is from this round's runs.
+
+**M3 — the rebase, and why CI had never run.** The branch was `CONFLICTING` on 12
+paths (the vendored driver set, `extension/src/driver/file-transfer.tables.gen.ts`,
+`extension/ui-vendor/protocol.gen.ts`), all of them generated, because main had moved
+the same files' input stamps. GitHub runs no `pull_request` workflow while the merge
+ref cannot be created, so the **zero** check runs on `6ffe5a96` and `dc41dcd9` were
+never API flapping — there was no run to read, and round 2's report was wrong to
+attribute that to the network. Resolution: take main's generated files, then
+regenerate with `gen_ts` from the rebased sources (which keeps main's own additions
+and restamps the input hash). **Proof the rebase carried no content of its own**, run
+per file over the 40 paths the branch touches: **5 commits paired 1:1** by
+`git range-diff 4e2899cc..dc41dcd9 d031cc49..HEAD`; **28 files byte-identical ± line
+sets**; **11 differ ONLY in the generated `Inputs sha256` stamp**; **1**
+(`protocol.gen.ts`) additionally carries main's own **11** added `ErrorCode` values
+(the enum is 19 members at this branch's pre-rebase head and 30 at `d031cc49`, and our
+head matches 30 exactly — all 11 are main's), inherited rather than authored.
+
+**M1 == D4 — three accounts of one fix, two of them wrong.** `options.html` and this
+document described the notices as a `position: sticky; bottom: 12px` block that ships;
+`options.ts` recorded sticky as tried and rejected. Measured: sticky pinned at
+900x620 and 420x700 but left the notice at **y=530 in a 520 px viewport**, so it did
+not fix the case the finding is about, and it cannot recover from a resize or a
+tab-away that scrolls focus into view. The shipped mechanism is the reveal. All three
+accounts now say that, and `options.ts`'s `notice()` comment carries the rejected
+variant with the measurement that rejected it.
+
+**U1 (major) — the cancel now exists for a real gesture.** The round-2 guard was
+`downloadRequestPending && !allowDownloads.checked`, and it could not fire: the first
+press awaits `renderConsent()`, which repaints the knob to the capability's real (off)
+state, so a human's second press found the switch off, toggled it ON, and fell through
+to a second request — measured with trusted events as **1 → 2 → 3 requests** with the
+notice, knob and scroll byte-identical. The cancel is now bound to the **intent**: a
+`click` listener runs before the checkbox's default action and `preventDefault()`s it,
+which is what stops both the toggle and the second request (Space on a focused switch
+fires a click, so the keyboard path is the same code). Measured with real clicks at
+900x620, 760x520, 420x700, 760x1080 and 380x440 — after the second press,
+`{disabled: false, checked: false, focus: "allow-downloads", notice: "Stopped waiting.
+Downloads stay off."}`. Focus and reachability were already fixed in round 2 and are
+unchanged.
+
+**D1 (major) — the state line contradicted the switches.** `paintState()` read "a
+notice is on screen" as "this capability is off", so uploads-ON with a downloads
+notice showing landed in the both-explained branch and printed *"Neither the agent's
+saving nor its attaching is available on this browser"* while the uploads switch sat
+ON above it — reachable in one pass (turn uploads on, then press downloads). A notice
+now counts as explaining only when it carries the **attention** weight, which is the
+test that separates "this is off, and here is why" from "this is on".
+
+**D2 — the reveal survives the layout moving under it.** The page's own `#confirm`
+flash banner (20 px plus margins, raised by the same gesture) shifts the layout ~31 px
+after the paint, and a scroll computed once left the notice 7 px of 38 visible for
+about four seconds. The reveal is now applied and then **re-applied on the next
+frame**, and the re-check reads live geometry.
+
+**U3 / U4 — the reveal's edges.** `scroll-margin-bottom: 12px` on the notice (measured
+`notice.bottom − innerHeight` was **0 px** at 900x620, 760x520 and 420x700 before it,
+and is **12 px** at all three now) and `scroll-margin-top: 12px` on the switch row.
+The control also wins when both cannot fit: at 380x440 the reveal used to put the
+pressed row at **viewport y = −53** (the answer readable, the knob and its state line
+gone, the pair round-1 D3 exists to keep together); the row now holds its 12 px floor
+and the notice clips instead. **The threshold, recorded rather than hidden:** at 380 px
+width the row and a full notice are 455 px apart, and with the row at that floor the
+notice's tail clips below roughly **505 px** of viewport height — measured, and
+corrected from round 3's 460 px (round-4 U2). **What stays visible differs by notice,
+and round 5 (R5-2) is right that the earlier wording claimed it for both:** for the
+SHORT notice (uploads, ~57 px) the knob, its state line and the notice's first lines are
+on screen at every probed size; for the LONGER pending notice (~96 px) below its own
+threshold, **nothing of the notice is visible at all** — at nominal 380x300 (actual
+viewport 500x213) the reveal puts the pressed row at its 12 px floor and the notice at
+332–428, entirely below the fold. What is true in both cases is the part that matters:
+the pressed row and its state line are on screen, so the user sees what they pressed and
+where the answer is, rather than a bare knob.
+
+**U5 — one statement about the load-time reveal, not two.** `notice()`'s docstring
+said a page must not scroll itself as it opens while the repair's call site argued for
+exactly that. The behaviour is kept (it points at the one state that needs the user)
+and the docstring now describes it: it fires once per page. **Corrected in round 4
+(design D1):** an earlier version of this paragraph claimed the DOM write and the
+scroll happen in one task so the page "opens already scrolled rather than jumping".
+That was true of the `scrollIntoView` this delta replaced and is false of the shipped
+rAF reveal — the notice is painted, ONE unscrolled frame is shown (measured 17 ms, with
+the notice below the fold at 900x620, 760x520 and 420x700), and the scroll lands on the
+next frame. It is a 17 ms flash of the unscrolled page, stated here because §17.16's
+M1 paragraph six lines above depends on the reveal being rAF-driven.
+
+**U6 — the cancel copy is one clause** (*"Stopped waiting. Downloads stay off."*)
+instead of 236 characters and three clauses for a pause the user just created.
+
+**M2 — `blob:` closed by narrowing BOTH sides.** `new URL('blob:https://h/uuid').origin`
+is the inner URL's origin (`https://h`) while `urlsplit` sees a scheme with no host, so
+the round-2 contract comment claimed an agreement the code did not have. Both
+predicates now name an origin only for the four schemes a driven page can be — `http`,
+`https`, `ws`, `wss` — and answer `""` for everything else. Verified case by case on
+both sides: `http://User@Host:80/x → http://host`, `https://Example.test/y →
+https://example.test`, `https://h:8443/z → https://h:8443`, `ws://h:80/a → ws://h`, and
+`blob:`, `data:`, `/relative`, `ftp://h/p` all `→ ""` on both.
+
+**m4/m5 — both majors pinned by tests that were proved to fail.** The symlinked-parent
+repro is now a test (`kept`, the record intact, the quarantine empty), and the
+rejection containment is one too: a storage failure inside the announce must not reach
+the runtime as `unhandledRejection`. Writing that test **found a second site of the
+same defect** — `wire.onopen` was an `async` event handler whose `announceCapabilities`
+rejection escaped the same way — so the handshake is now a named function passed
+through `fireAndForget`, and with all three call sites bare the test goes red while the
+rest of the suite stays green (296 → 296), which is what makes it a pin rather than a
+decoration.
+
+---
+
+### 17.17 Round-4 remediation: the pressed row, the escape's copy, and one honest threshold
+
+One commit on `594db769`. The measurements are from `/tmp/lo-r4.json` (7 sizes × 4
+states, one Chrome each, 20 stills re-taken in `/tmp/lo-dl-shots/r4-*.png`).
+
+**R1 (major) — the reveal corrected a row nobody had pressed.** `revealNotice` took
+its row from a hard-coded `label[for="allow-downloads"]` and ran that correction
+*after* the target's own scroll, so for the uploads notice it scrolled back UP — at
+380x300 the uploads row landed at y=194 and the uploads notice at **410–467 in a
+300 px viewport, entirely below the fold**, where the same reveal without that step put
+it at 231–288. The downloads notice was hidden by the same step (409–505 against a
+counterfactual 192–288), which is why §17.16's threshold read low.
+
+The row now comes from the target (`rowFor`), and — more to the point — the two
+constraints are solved **together, in one offset**, rather than by two scrolls that
+fight: scroll down by whatever the notice needs, then pull back up if that would carry
+the pressed row off the top (the row wins when both cannot be satisfied). Re-measured,
+uploads press, this rig's viewport heights:
+
+The table's first column is the NOMINAL window size, as the probes were invoked; the
+viewport is what the page actually got, and the width is clamped — every "380" and
+"420" row above is a **500 px** viewport, which is why the two labels are the same
+measurement (round-5 R5-1/D2 caught the labels, not the numbers). Re-measured with the
+width recorded:
+
+| size | actual viewport h | uploads row | uploads notice | clipped |
+|---|---|---|---|---|
+| 380x300 | 213 | 12 | 189–246 | 33 px (round 3: **all** of it) |
+| 420x400 | 313 | 67 | 244–301 | **0** (round 3: clipped) |
+| 380x440 | 353 | 107 | 284–341 | **0** (round 3: clipped) |
+| 380x500 | 413 | 167 | 344–401 | 0 |
+| 380x520 | 433 | 187 | 364–421 | 0 |
+| 380x560 | 473 | 226 | 403–460 | 0 |
+| 900x620 | 533 | 255 | 413–450 | 0 |
+
+The frame at the worst size shows the shape: the pressed row at the top with its focus
+ring, its state line, and the notice's first line readable — where round 3 showed none
+of it.
+
+**D4 still holds, measured across the states the reveal touches:** row *document*
+positions are byte-identical between the uploads-press and two-notice states (600/742
+at 380x500; 580/703 at 900x620). Only the scroll offset moves.
+
+**U2 — the threshold, stated as the rule it is.** With the pressed row at its 12 px
+floor, the notice is clipped until the viewport can hold *row floor + row→notice
+distance + notice height*, and that distance depends on how much prose sits between the
+row and the notice — which is why one absolute number was always going to be wrong.
+Measured in this rig, with the pressed row at its 12 px floor: the **uploads** notice
+overflows by 33 px at a 213 px viewport, so it fits from **~246 px**; the **longer pending
+downloads** notice overflows by 215 / 75 / 15 px at viewport heights 213 / 353 / 413 and
+fits from **~428 px**. In the streams' rig, where the reported viewport height equals the
+nominal window height, the same measurement is the ≈505 px round 4 reports; round 3's
+460 px was that number read without the downloads notice's extra length.
+
+**The threshold is a property of the surrounding copy, which is why round 5 (R5-1/D2/Q5-1)
+is right to press on it and why no single number will hold.** The distance between the
+pressed row and its notice includes the STATE LINE — the sentence between them — and that
+sentence's own length changes with the page's state (up to ~39 px more when it carries the
+full both-off clause than when it says the one short clause the referenced state shows).
+A copy edit anywhere on that path moves the threshold. So the rule is the durable
+statement, and the numbers above are this head's readings of it.
+
+**U1 — the escape now says itself.** The pending sentence is: *"Waiting for Chrome's
+permission prompt. Press the switch again to stop waiting — downloads stay off until
+the prompt is answered. If you do not see a dialog, look for a Chrome window behind
+this one."* A second press is the cancel (round-4 U1's own structural fix), and the one
+place that could have taught a user this was a sentence that did not mention it.
+
+**R2 and U3 — the state line no longer restates a notice, by construction.** The
+branches are derived from the **switches**, not from the notices: the line speaks only
+for the capability no visible notice covers, and **hides when both are covered**. So
+the latent "Neither the agent's saving nor its attaching is available on this browser"
+cells R2 identified do not exist to be reached — there is no summary sentence left that
+can contradict an ON switch. Measured: uploads ON + a downloads notice → the line is
+empty, with the uploads notice reading *"Uploads are on. Turn this off…"* and the
+downloads notice naming the wait. One-notice states say only the other capability
+(*"Downloads are off as well."* / *"Uploads are off as well."*), which is U3's
+`info`-weight duplicate gone rather than special-cased.
+
+**N2 — the dead `change` branch is gone.** The click listener's `preventDefault()`
+means the `change` event never fires while a request is in flight, so the second guard
+was unreachable for any human gesture and read like a live one. The comment says what
+replaced it, and names the synthetic `change` shape it used to answer to.
+
+---
+
+### 17.18 Round-5 remediation: two sentences, two labels, and one inert declaration
+
+Minors only, one commit on `5300a59b`, and none of it behaviour:
+
+**D1 == UX U2 — "as well" needed an antecedent, and the broadened predicate took it
+away.** Widening "is this capability accounted for" from attention notices to any notice
+was right (round 4), but "as well" asserts a RELATION to the capability the covering
+notice is about, and that relation only holds when the covering notice is reporting that
+capability OFF. Under *"Uploads are on. Turn this off…"* — a quiet notice reporting an
+action — *"Downloads are off as well."* claimed a relation that was not there. The phrase
+now appears only when the covering notice carries the attention weight, which is the same
+test the rest of this file uses for "this capability is off". Measured, this head:
+uploads notice reporting ON → state line **"Downloads are off."**; the pending attention
+notice → **"Uploads are off as well."**; the quiet cancel notice → **"Uploads are off."**
+Both directions of the mirror checked.
+
+**UX U1 — the way out leads the sentence.** Round 4 named the escape; round 5 measured
+that naming it in second position was not enough at short heights, because the reveal
+clips the notice's tail and the way out was the part that disappeared. The pending copy is
+now *"Press the switch again to stop waiting. Chrome is waiting for your answer to its
+permission prompt — downloads stay off until it is answered, and if you do not see a
+dialog, look for a Chrome window behind this one."* — same three facts, order changed, so
+the clause that survives a clip is the actionable one. The notice's height is unchanged
+(96 px at 500 px width).
+
+**R5-1 / D2 / Q5-1 — the labels were wrong; here is what they actually were.** The probes
+were invoked as *nominal* window sizes, and the page's rendered width is clamped: every
+"380"- and "420"-wide run is a **500 px** viewport, so those two labels were the same
+measurement, and the actual heights are 213 / 313 / 353 / 413 / 433 / 473 for the nominal
+300 / 400 / 440 / 500 / 520 / 560. Both tables now carry the nominal size with the actual
+viewport beside it.
+
+The thresholds are re-stated on this head, with the row at its 12 px floor: the uploads
+notice fits from **~246 px**, the longer pending notice from **~428 px**, and the section
+says plainly that a single number cannot hold, because the distance the reveal has to
+cover includes the **state line** whose own length changes with the page's state — up to
+~39 px more when it carries the full both-off clause. That is the property R5-1/D2/Q5-1
+is pointing at, and it is now stated rather than implied by one figure.
+
+**R5-2 — "the notice's first lines stay visible" is true for one notice and false for the
+other.** Corrected in §17.16: the short uploads notice keeps its opening lines on screen
+at every probed size; the longer pending notice below its threshold is **entirely**
+invisible (at a 500x213 viewport the pressed row is at its floor and the notice sits at
+332–428). What holds in both cases is the part that matters — the pressed row and its
+state line are on screen.
+
+**R5-4 — the CSS `scroll-margin-*` are removed rather than duplicated.** They are honoured
+only by `scrollIntoView`, which the reveal no longer calls, so they had become a second
+and inert source of truth for the same 12 px; `FLOOR` in `revealNotice` supplies it. The
+comment where each was removed records the round-3 measurement that produced the number,
+and `revealNotice` now notes that near the threshold the gap is **best-effort** — measured
+3.9 px rather than 12 px in one compressed case, because the row constraint is applied
+after the notice's and can claw part of it back. Below the threshold something has to give
+and it is the gap, not the control.
+
+
+### 17.19 The armed-refusal seam: what PR #1359 changed, and what its round 1 found
+
+The follow-up PR (`damianvtran/local-operator#1359`) fixed a seam §6.2 always
+implied and the tool layer never implemented: the app host answers a refusal it
+makes *after arming* as `{armed: true, files: [], reason: "refused: …"}`, and
+`_browser_download` read only its own landing diff — so a policy refusal reached
+the model as *"no download started within N s … click its Download control and
+retry"*, a remedy that could never have worked, and the audit row said
+`no_download` / `nothing started` about a call a policy had already decided. Only
+the pre-arm arm (`armed: false`) rendered refusals. §6.2 now carries the contract
+that came out of the review, §7.4 the two rows this state adds to the copy table,
+and §10.5 names the verdict values.
+
+| finding | what changed |
+|---|---|
+| **R1 (major)** — the discriminator parses another repository's prose, and nothing recorded the coupling or the failure mode | §6.2 states the contract: which host composes the mark, that the extension's armed download answers carry no `reason` at all so state (b) is app-host-only, and what happens when a host is reworded. The unrecognised case is no longer silent: a non-empty `reason` that is not the refusal shape is RELAYED in the host's own words and audited as `armed_reason`, so neither the model nor the trail can read a reworded refusal as a no-op |
+| **R2** — the pre-arm arm had no empty-clause guard, so a bare `refused:` rendered `"refused: "` with an empty row reason (and a whitespace-only reason rendered its spaces) | both arms now compose through one guard: an empty clause falls back to the sentence this arm already used for a host that said nothing. The disclosed behaviour change is that a whitespace-only pre-arm `reason` renders the default sentence rather than the spaces |
+| **R3** — a host sentence joining two refusals with `"; "` kept its inner `refused:`, so the row's `reason` was not the bare clause the code and tests define | `_refusal_clause` removes the mark at every clause boundary, not only at the head: the sentence the model reads carries it once, at its head, and the row carries no mark at all |
+| **R4 (nit)** — the `REFUSAL_PREFIX` comment named a host that cannot reach the branch | the comment now names the app host as the one that reaches it and states why the extension's download answers cannot (no `reason`; its cancellation account is a `note` the harness never reads) |
+
+QA's round 1 was a PASS on 13 matrix items with three findings, none a
+regression (each byte-identical on the base revision): Q2 — a refusal without the
+mark on the armed path read as a no-op — is closed by R1's relay; Q1 (a refusal
+arriving *alongside* landed files is dropped, not merely unlabelled) and Q3 (its
+variant, where the intake branch wins over the host's refusal when anything at all
+was reported) remain open and are recorded as deferred on the PR: both need a
+per-call account of the host's refusals rather than the single `reason` field, and
+Q3 is a second consumer of it.

@@ -17,13 +17,13 @@ the texts come from every provider's error envelope and no taxonomy covers
 them all. Unknown is a valid answer — the raw text always rides along.
 
 It also carries the formatters for the other model-visible session records
-that are NOT classified failures — a credential change, a model switch, and
-an MCP recovery. Each has its own custom type and its own formatter for the
-same reason: running them through :func:`classify_incident` would attach a
-failure category and a "this is why the previous turn ended" tail to a
-message that is not about a failure at all.
+that are NOT classified failures — a credential change, a model switch, an MCP
+recovery, and an MCP server becoming unavailable. Each has its own custom type
+and its own formatter for the same reason: running them through
+:func:`classify_incident` would attach a failure category and a "this is why the
+previous turn ended" tail to a message that is not about a failure at all.
 
-The MARKERS those four records carry are no longer defined here. They moved to
+The MARKERS those five records carry are no longer defined here. They moved to
 :mod:`local_operator.harness.message_types`, the one neutral home that a
 surface barred from importing this module can reach: the shared renderer
 (``harness/render.py``) has to recognise a ``session_incident`` to replay it,
@@ -259,7 +259,26 @@ _RULES: list[tuple[str, tuple[Marker, ...]]] = [
             "protocolerror",  # covers RemoteProtocolError and LocalProtocolError
         ),
     ),
-    ("mcp", ("mcp", "model context protocol", "tool bridge", "circuit breaker")),
+    # NO ``mcp`` RULE, deliberately, and its absence is the fix rather than an
+    # omission. An MCP server going unavailable is not a FAILURE of the turn —
+    # it is a missing capability — and the rule that used to sit here matched the
+    # bare substring "mcp", so it caught every MCP-mentioning failure and gave
+    # it ``_HINTS["mcp"]`` plus ``Incident.render``'s "This is why the previous
+    # turn ended." That last line was false: an MCP server failing to connect
+    # (or its OAuth grant expiring) never ends a turn. Measured live on
+    # 2026-09-20 against ``minerva-qa``, where the operator's session was told a
+    # turn had died that had not.
+    #
+    # Deleted rather than narrowed. A future rule for whatever MCP text really
+    # does describe a dead turn is welcome; what must not come back is a rule
+    # keyed on the substring shared by BOTH halves of the MCP story, which is
+    # also why removing the hint matters as much as removing the rule — a rule
+    # without a hint still stamps a failure category, and a hint without a rule
+    # is unreachable text the next reader has to check twice.
+    #
+    # The MCP-unavailable text lives in
+    # :func:`format_mcp_unavailable_message` instead, on the same dedicated-
+    # formatter argument as :func:`format_mcp_recovery_message`.
     ("content-filter", ("content policy", "content filter", "safety system", "flagged")),
 ]
 
@@ -310,8 +329,6 @@ _HINTS: dict[str, str] = {
     "answer — retrying or switching target is reasonable. If this machine could "
     "not reach the network at all, retrying is usually right, and a repeat means "
     "checking this machine's connectivity rather than switching provider.",
-    "mcp": "An MCP server is unavailable: its tools are gone until it reconnects. "
-    "Do not call its tools in a tight loop; say which server is down.",
     "content-filter": "The provider refused the content: change the approach "
     "rather than resending the same request.",
     # A cut-off is the harness's own verdict, not a provider's, and its advice is
@@ -929,66 +946,185 @@ def format_credential_message(
     )
 
 
-def format_shape_incident_message(tool: str, labels: "list[str]", summary: str = "") -> str:
+def format_shape_incident_message(
+    tool: str,
+    labels: "list[str]",
+    summary: str = "",
+    *,
+    reached_model: bool = True,
+) -> str:
     """Render the credential-SHAPE notice injected into the model's context.
 
     The counterpart to the shape pass in :mod:`local_operator.redaction_shapes`,
     and the reason it is its own formatter rather than a
-    :func:`classify_incident` category: nothing FAILED. A tool returned a
-    credential in a shape the table recognises, the harness masked it before the
-    model could read it, and the only jobs this text has are to say so (so the
-    model does not reason about a value it cannot see, or re-run the command
-    hoping for a different result) and to make the event visible to the operator.
+    :func:`classify_incident` category: nothing FAILED. A tool carried a
+    credential in a shape the table recognises, the harness handled it, and the
+    jobs this text has are to say what happened (so the model does not reason
+    about a value it cannot see, or re-run the command hoping for a different
+    result) and to make the event visible to the operator.
+
+    **Two classifications, and only one of them is an emergency.**
+
+    A credential is COMPROMISED when a value reaches the model's context window:
+    that text is journaled in plaintext, replays into later requests, and may end
+    up in training data, and none of that can be undone by anyone here — so the
+    operator has to rotate the credential, and that is the escalated text. That
+    case is the one where readable credential material survives in the text the
+    model reads — which is NOT always a mask that fell short, because a rule can
+    preserve a run by design (the DSN rule keeps its userinfo username, so
+    ``amqp://guest:guest@…`` reads back the password as the username) — and it is
+    carried in by ``reached_model``.
+
+    Everything else is CONTAINED. A value that reached `bash` (in a command's
+    ``argv``, in a child's environment), that lived in this process's memory, or
+    that was written to a file in plaintext is NOT compromised: the model never
+    saw it, so there is nothing to rotate. The event is still reported — a
+    credential in a tool's arguments is how it gets written to a file, and an
+    operator who is never told cannot tidy up — but what the notice asks for is
+    cleanup, not rotation: delete any plaintext copy, and do it WITHOUT reading
+    it, because reading it is what would turn the contained case into the
+    escalated one. The wording is deliberately SURFACE-NEUTRAL about where the
+    masking happened: the same notice serves a credential in a tool's OUTPUT, one
+    TYPED INTO a call's arguments — where the tool did run with the real value and
+    the containment is in the copy this session stores and replays — and one found
+    by the history-scrub path, and a claim that named the wrong surface would be
+    false in two of the three (agent review R1, finding 2).
+
+    Whether a plaintext copy exists at all is not knowable from here — the value can
+    reach this notice from a command's own text, which the history-scrub path masks
+    through the same formatter — so the cleanup obligation is stated conditionally
+    rather than dropped: it is the one action this path has.
 
     ``labels`` are shape NAMES, never values — a notice that carried the
     credential would be the leak it exists to report. The summary is the one the
     harness built, already scrubbed and bounded.
 
-    The last sentence is the point of the whole path: the operator has to rotate
-    the credential. Today a miss is discovered by accident, from a transcript,
-    weeks later; this row is what turns it into a ticket.
+    ``reached_model`` defaults to True — the escalated reading — because a caller
+    that cannot classify must not make the quieter claim.
     """
     shapes = ", ".join(labels) if labels else "credential-shaped content"
     tool_name = tool or "a tool"
     where = f" The call was: {summary}." if summary else ""
-    # "was about to reach you ... and was masked" rather than "the result
-    # carried": the same notice serves a credential in a tool's OUTPUT and one
-    # TYPED INTO a call's arguments, and only the first of those is a result.
-    # A notice that misnamed the surface would send an operator looking in the
-    # wrong place.
-    # The FIRST row carries the action. The row is six lines in the card and the
-    # head is all most readers take: it used to open with the mechanism (``a
-    # credential in a shape the harness recognises (dsn-password)``), which put
-    # "rotate it" in the fourth line. The bracketed head stays — the harness's
-    # notice-row rules key on it, and a row that paints as the user's own words
-    # would be worse than a jargon-first one.
+    # "reached you ... and was masked" rather than "the result carried": the same
+    # notice serves a credential in a tool's OUTPUT and one TYPED INTO a call's
+    # arguments, and only the first of those is a result. A notice that misnamed
+    # the surface would send an operator looking in the wrong place.
+    # The bracketed head stays in both texts — the harness's notice-row rules key
+    # on "[credential redaction] " (``harness/rows.py``), and a row that painted as
+    # the user's own words would be worse than a jargon-first one.
+    if reached_model:
+        # The CAUSE has to be true in both directions the escalation covers. The
+        # `amqp` DSN case masks its password whole and still escalates, because the
+        # DSN rule keeps the userinfo username by design and an operator who used
+        # one string for both leaves the value readable there — so "could not be
+        # fully masked" named a mechanism this notice cannot prove, and this
+        # module's doctrine is that an unprovable claim is worse than silence
+        # (agent review R2, finding 1). What the check measured is stated instead:
+        # the value is readable in the text the model gets, by either route, and
+        # the notice does not pick one it cannot distinguish. The rotate
+        # instruction is untouched — it is the reason the wording exists.
+        return (
+            f"[credential redaction] rotate it — a credential ({shapes}) reached "
+            f"{tool_name} and its value is readable in this session's context: "
+            f"either the mask did not cover it fully, or it survives in the text "
+            f"another way.{where} A value that reached the model may be in "
+            "training data, so treat it as compromised: the operator has to rotate "
+            "it. Do not re-run the command to read the value."
+        )
     return (
-        f"[credential redaction] rotate it — a credential ({shapes}) reached "
-        f"{tool_name} and was masked before you saw it.{where} Treat it as "
-        "compromised: the operator has to rotate it. Do not re-run the command to "
-        "read the value; it is contained for the rest of this session."
+        f"[credential redaction] a credential ({shapes}) reached {tool_name} and "
+        f"was masked before you saw it.{where} Nothing entered your context — the "
+        "value was masked before it reached you, so there is no exposure. If the "
+        "call wrote it to a file in plaintext, delete that file without reading it "
+        "(rm -f): reading it is not needed and is not to be done."
     )
+
+
+def format_mcp_unavailable_message(server: str, reason: str) -> str:
+    """Render the MCP-unavailability text injected into the model's context.
+
+    The counterpart to :func:`format_mcp_recovery_message`, and a dedicated
+    formatter for the same reason: neither row is about a FAILED turn, so
+    neither may go through :func:`classify_incident`. The classifier used to
+    catch this text on its ``mcp`` rule — the bare substring "mcp" — and hand
+    it ``_HINTS["mcp"]`` plus ``Incident.render``'s "This is why the previous
+    turn ended", the last of which was simply false: an MCP server going away
+    never ends a turn. Measured live on 2026-09-20 against ``minerva-qa``, whose
+    expired grant told the operator a turn had died that had not.
+
+    Present-tense STATE, like :func:`format_model_switch_message`, so the model
+    treats it as context for the turns that follow rather than an instruction
+    to acknowledge. The three lines carry three different jobs:
+
+    * the head states the CAPABILITY change — the server is unavailable and its
+      tools are gone — because that is what stops the model calling them;
+    * ``Reason:`` carries the operator's own remedy (``/mcp reauth <server>``,
+      a breaker that suspended auto-reconnect), which is what lets the model
+      tell the user what to do rather than only that something is wrong;
+    * the last line states the manual-recovery fact and keeps the model's
+      instruction not to hammer the tools.
+
+    **"for now", never "until it reconnects".** The first draft promised a
+    self-heal, and there is none for either family this row is written for: an
+    expired grant never heals by retrying (auto-reconnect is non-interactive by
+    design, so only ``/mcp reauth`` restores it) and a tripped breaker has
+    auto-reconnect SUSPENDED at the moment this row is written. "Until it
+    reconnects" also implied an action nobody had taken. Design review round 1
+    (D2): the promise has to be true for both families, which is why the head is
+    reason-agnostic and the last line says the user has to restore it.
+
+    The last line is read by TWO audiences — it rides the model's context and
+    the transcript row the operator sees — so it is phrased as a fact about the
+    agent rather than as an imperative addressed to whoever is reading (design
+    review round 1, D5). An imperative with no label in front of it reads, to
+    the human, as an instruction to them; the incident shape carried the same
+    instruction, but under a ``suggested action:`` label that marked whose it
+    was.
+
+    No failure category and no ``suggested action:`` line, both of which belong
+    to the incident shape this record is deliberately not. The reason is bounded
+    at 200 characters exactly as :func:`format_model_switch_message` bounds its
+    own, and is OMITTED when blank rather than printed empty: a dangling
+    ``Reason:`` reads as a truncation. It is shaped COMMAND-FIRST at the two
+    auth call sites (``mcp/manager.py``), so the one part a reader must not lose
+    lands at the front of the line rather than mid-line after a restatement
+    (design review round 1, D3). The breaker site is the third caller and names
+    no verb: its remedy is a reconnect rather than a typed command, so its reason
+    states the condition (``auto-reconnect suspended after >N attempts``) and the
+    row's last line defers the recovery to the user without naming one.
+    """
+    lines = [f"[session warning] MCP server '{server}' is unavailable: its tools are gone for now."]
+    if reason.strip():
+        lines.append(f"Reason: {reason.strip()[:200]}")
+    lines.append(
+        "Its tools are not callable until the user restores it, and the agent "
+        "should not retry them in a loop."
+    )
+    return "\n".join(lines)
 
 
 def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     """Render the MCP-recovery text injected into the model's context.
 
-    The counterpart to the ``mcp`` incident category, and the reason it is a
-    dedicated formatter rather than another :func:`classify_incident` category:
-    the classifier matches the substring "mcp" and would append
-    ``_HINTS["mcp"]`` — "its tools are gone until it reconnects. Do not call
-    its tools in a tight loop" — plus ``Incident.render``'s "This is why the
-    previous turn ended", to a message announcing the exact opposite.
+    The counterpart to :func:`format_mcp_unavailable_message`, and the reason
+    it is a dedicated formatter rather than a :func:`classify_incident`
+    category: the recovery announces the exact opposite of a failure, so
+    classifying it would have appended a failure category plus
+    ``Incident.render``'s "This is why the previous turn ended". The ``mcp``
+    rule that used to be the live example of that mismatch — it matched the bare
+    substring "mcp", so it took both halves of this pair — is deleted; both
+    halves now have their own formatter instead.
 
     Present-tense STATE, like :func:`format_model_switch_message`, so the model
     treats it as context for the turns that follow rather than an instruction
     to acknowledge.
 
     The SUPERSEDE sentence is load-bearing and must not be trimmed to a bare
-    "reconnected": the model is holding an earlier ``session_incident`` for
-    this server whose hint explicitly says "do not call its tools", and two
-    live claims leave it free to defer to the older, more emphatic one. It must
-    be told the earlier notice no longer applies.
+    "reconnected": the model is holding an earlier
+    :func:`format_mcp_unavailable_message` row for this server that says its
+    tools are gone and not to call them, and two live claims leave it free to
+    defer to the older, more emphatic one. It must be told the earlier notice
+    no longer applies.
 
     ``tool_count`` is the REGISTERED tool count
     (``len(McpManager.get_server_tools(server))``), not ``len(conn.tools)``:
@@ -1001,18 +1137,18 @@ def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     the model its tools "are usable now, so call them normally" against an
     empty inventory is false in the one direction that costs a wasted turn:
     the model goes looking for tools that are not there. The connection is
-    still worth announcing, because it is what supersedes the incident and
+    still worth announcing, because it is what supersedes the warning and
     stops the model reporting the server as down.
     """
     if not tool_count:
         # Honest about the CONNECTION and silent about callable tools: no
         # "available again", no "call them normally". The supersede clause is
-        # still required — the model is holding an incident that says the
+        # still required — the model is holding a warning that says the
         # server is unreachable, which is no longer true.
         return (
             f"[mcp recovery] MCP server '{server}' is connected again, but it "
             "currently exposes no enabled tools. This supersedes the earlier "
-            "session incident about this server: the server itself is no "
+            "warning about this server: the server itself is no "
             "longer failing, so stop reporting it as unavailable — but do not "
             "expect callable tools from it until some are enabled."
         )
@@ -1022,7 +1158,7 @@ def format_mcp_recovery_message(server: str, tool_count: int) -> str:
     tools = "1 tool is" if tool_count == 1 else f"{tool_count} tools are"
     return (
         f"[mcp recovery] MCP server '{server}' is connected again and {tools} "
-        "available again. This supersedes the earlier session incident about "
+        "available again. This supersedes the earlier warning about "
         "this server: its tools are usable now, so call them normally and stop "
         "reporting it as unavailable."
     )

@@ -51,6 +51,7 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Sequence
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+from local_operator import launchd
 from local_operator.helpers import retention_label
 from local_operator.interpreter import SAFE_PATH_FLAG
 from local_operator.procstate import PLATFORM_LABEL
@@ -100,6 +101,28 @@ _MOBILE_RESTART_TIMEOUT_S = 30.0
 #: bootout/bootstrap pair; still bounded so a hung ``launchctl`` cannot stall a
 #: successful upgrade.
 _DAEMON_REFRESH_TIMEOUT_S = 60.0
+
+#: The line the refresh CHILD prints before it repairs each daemon, and the prefix
+#: the parent drops from a healthy run's output.
+#:
+#: WHY IT EXISTS. The bound above KILLS that child wherever it happens to be, and a
+#: ``bootout`` the child had already issued is not undone by the kill: the daemon is
+#: then STOPPED with a plist that already says it is current, which no later upgrade
+#: repairs (the plist compares equal, so the repair is skipped). Measured 2026-09-20
+#: against a real launchd job on macOS (``gui/501``, scratch label): the job left the
+#: domain, the plist was rewritten to the new shape, and the upgrade's ONLY line was
+#: *"warning: daemon refresh timed out"* — no daemon, no state, no recovery.
+#:
+#: The child is the only side that knows which daemon it had reached, so it says so
+#: BEFORE each repair, on the stream the parent already captures (flushed, because a
+#: killed child's pipe buffer is lost). The parent reads the LAST announcement out of
+#: the killed child's output and names that daemon's state and that daemon's own
+#: installer. It names no daemon of its own: a fifth supervised daemon must not go
+#: unmentioned, and the parent cannot know where a killed child had got to.
+_PROGRESS_PREFIX = "refreshing: "
+
+#: Separates the daemon from its recovery command in an announcement.
+_PROGRESS_SEPARATOR = " :: "
 
 #: The supervised daemons a combined release must leave branded, as the plist
 #: filenames that prove each one is installed. Labels are repeated here rather
@@ -4659,6 +4682,14 @@ def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], st
 
     ``None`` — the caller reports "no interpreter to run it with" — only when
     neither a pointer nor a usable ``sys.executable`` exists.
+
+    THE LABEL RIDES WITH THE IMAGE ON BOTH BRANCHES. The cross-tree branch names
+    ``current_interpreter()``, so its image must be branded BESIDE THAT
+    INTERPRETER — ``spawn_identity`` can only brand this process's venv, and
+    pairing its link with the generation's interpreter is literally the row an
+    EDR killed 1079 times on 2026-09-19 (a labelled ``argv[0]`` on a
+    ``python3.x`` image). ``spawn_identity_for_interpreter`` returns the label
+    and the link together, or rung 2 (the bare target path, no label at all).
     """
     from local_operator import procname
 
@@ -4668,16 +4699,8 @@ def _post_upgrade_invocation(label: str, tail: list[str]) -> tuple[list[str], st
             return None
         argv0, image = procname.spawn_identity(label)
         return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", *tail], image
-    # The branded link is planted per venv on first use, so the new tree may not
-    # have one yet; the label rides on the argv either way, which is the axis a
-    # ``ps`` reader sees.
-    return [
-        procname.branded_argv0(label),
-        SAFE_PATH_FLAG,
-        "-m",
-        "local_operator.cli",
-        *tail,
-    ], str(interpreter)
+    argv0, image = procname.spawn_identity_for_interpreter(label, str(interpreter))
+    return [argv0, SAFE_PATH_FLAG, "-m", "local_operator.cli", *tail], image
 
 
 def _installed_daemon_plists() -> list[Path]:
@@ -4777,18 +4800,22 @@ def refresh_service_daemons_after_upgrade() -> DaemonRefresh:
             text=True,
             timeout=_DAEMON_REFRESH_TIMEOUT_S,
         )
-    except subprocess.TimeoutExpired:
-        return DaemonRefresh(name, warnings=("warning: daemon refresh timed out",))
+    except subprocess.TimeoutExpired as exc:
+        # The kill is the bound working as designed; what must not happen is that it
+        # is reported as an anonymous timeout. The killed child's captured output is
+        # read for the daemon it had announced it was repairing, so the line can name
+        # the daemon that may now be STOPPED and the command that brings it back.
+        return DaemonRefresh(name, warnings=(_bound_fired_sentence(exc.stdout, exc.stderr),))
     except Exception as exc:  # noqa: BLE001 — a failed repair must not fail the update
         warning = f"warning: could not refresh installed daemons: {exc}"
         return DaemonRefresh(name, warnings=(warning,))
-    lines = tuple(line for line in (completed.stdout or "").splitlines() if line.strip())
+    lines = _result_lines(completed.stdout)
     if completed.returncode != 0:
-        tail = (completed.stderr or completed.stdout or "").strip()
+        tail = "\n".join(_result_lines(completed.stderr or completed.stdout))
         detail = tail.splitlines()[-1][:200] if tail else f"exit {completed.returncode}"
         warning = f"warning: could not refresh installed daemons: {detail}"
         return DaemonRefresh(name, warnings=(warning,))
-    warnings = tuple(line for line in (completed.stderr or "").splitlines() if line.strip())
+    warnings = _result_lines(completed.stderr)
     return DaemonRefresh(name, lines=lines, warnings=warnings)
 
 
@@ -4893,7 +4920,6 @@ def _repair_refusal() -> str | None:
         )
     if kind in (InstallKind.UV_TOOL, InstallKind.PIPX):
         return None
-    from local_operator import launchd
 
     mine = Path(sys.prefix).resolve()
     others: list[str] = []
@@ -4910,6 +4936,137 @@ def _repair_refusal() -> str | None:
     return None
 
 
+def _refresh_steps() -> tuple[tuple[str, str, Callable[[], launchd.PlistRefresh]], ...]:
+    """Every supervised daemon this build knows, in the order the repair walks them.
+
+    Each entry carries the daemon's name as its own repair sentence prints it, the
+    command that restores it, and the repair itself. The two words exist for ONE
+    reader — :func:`_bound_fired_sentence`, which has to describe a daemon the
+    process it describes is dead (see :data:`_PROGRESS_PREFIX`) — and they live
+    here, beside the child that announces them, because the parent cannot know
+    which daemon a killed child had reached and must not enumerate what a fifth
+    daemon would make stale.
+
+    THE RECOVERY COMMANDS ARE THE INSTALLERS' OWN SPELLINGS, not new ones:
+    ``launchd.reload_failure`` is handed each of them at that daemon's repair site,
+    and `tests/unit/test_daemon_plist_refresh.py` pins this table against the same
+    four strings it holds for the failure sentences, so a moved verb has to be a
+    decision in both.
+
+    The imports are function-local for the reason this module repeats everywhere it
+    touches an installer: ``mobile.install`` pulls the Starlette daemon in, and this
+    module is imported by the TUI. In THIS process the cost is the point — it is a
+    short-lived child whose whole job is the repair — but the module-level import is
+    still paid by every session that never refreshes anything.
+    """
+    from local_operator.browser_bridge import install as browser_install
+    from local_operator.mobile import install as mobile_install
+    from local_operator.tunnels import install as tunnel_install
+    from local_operator.wakes import install as wakes_install
+
+    return (
+        ("mobile", "lop mobile install", mobile_install.refresh_plist_if_stale),
+        ("browser bridge", "lop browser install", browser_install.refresh_plist_if_stale),
+        ("tunnel", "lop tunnel install", tunnel_install.refresh_plist_if_stale),
+        ("wakes supervisor", "lop wake install", wakes_install.refresh_plist_if_stale),
+    )
+
+
+def _refresh_announcement(name: str, recovery: str) -> str:
+    """The line that makes a killed child's position knowable (see the constant)."""
+    return f"{_PROGRESS_PREFIX}{name}{_PROGRESS_SEPARATOR}{recovery}"
+
+
+def _text(value: object) -> str:
+    """``str`` from whatever the child's captured stream handed over.
+
+    BYTES, measured rather than assumed: ``subprocess.run`` re-raises
+    ``TimeoutExpired`` with the killed child's output even under ``text=True``, and
+    that output arrives as bytes (CPython 3.14, macOS). One adapter here rather
+    than a shape every reader has to remember — the same reason
+    ``launchd._text`` exists on the other side of this call.
+    """
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value if isinstance(value, str) else ""
+
+
+def _result_lines(value: object) -> tuple[str, ...]:
+    """A stream's real output, with the per-daemon announcements dropped.
+
+    A healthy upgrade must print exactly what it printed before announcements
+    existed: they are how a KILLED child is attributed, not lines the operator
+    asked to read on every upgrade. Dropping our own progress marker is not
+    swallowing a warning — the daemon's own ``warning:`` lines are untouched.
+    """
+    return tuple(
+        line
+        for line in _text(value).splitlines()
+        if line.strip() and not line.startswith(_PROGRESS_PREFIX)
+    )
+
+
+def _in_flight_daemon(
+    *streams: object,
+) -> tuple[str, str] | None:
+    """``(name, recovery)`` of the last daemon the child announced, or ``None``.
+
+    THE LAST ONE WINS: an announcement precedes each daemon's repair, so the newest
+    is the one being repaired when the bound fired. Both streams are read because
+    the marker is written to stdout and a wedged child may have been killed
+    mid-write; a half-written marker is rejected rather than reported (a partial
+    daemon name would be a sentence about the wrong thing).
+    """
+    found: tuple[str, str] | None = None
+    for stream in streams:
+        for line in _text(stream).splitlines():
+            if not line.startswith(_PROGRESS_PREFIX):
+                continue
+            daemon, separator, recovery = line[len(_PROGRESS_PREFIX) :].partition(
+                _PROGRESS_SEPARATOR
+            )
+            if separator and daemon.strip() and recovery.strip():
+                found = (daemon.strip(), recovery.strip())
+    return found
+
+
+def _bound_fired_sentence(*streams: object) -> str:
+    """The upgrade's line for a refresh the bound had to kill.
+
+    Takes the killed child's captured STREAMS rather than the exception, the way
+    :func:`_in_flight_daemon` does: this module imports ``subprocess`` inside the
+    functions that use it, so an annotation naming the exception type would be a
+    name this module does not carry (and flake8 says so).
+
+    TWO SENTENCES, because the two states are different jobs for the operator and
+    neither may claim more than is known. A child that had announced a daemon was
+    mid-repair when it died is the one worth naming: a ``bootout`` that already
+    landed is not undone by the kill, so THAT daemon may be down, and it may not
+    (its own repair may have been the no-op kind) — which is the difference the
+    sentence has to carry, because its reader is deciding whether to touch anything.
+
+    The recovery command is the child's, carried in the announcement, so this
+    sentence stays true when a fifth daemon exists. Both sentences name a command
+    rather than leaving the operator to find one: the whole point of the failure is
+    that a daemon is STOPPED, and 0.61.4's own reload failure already names one.
+    """
+    bound = f"{_DAEMON_REFRESH_TIMEOUT_S:.0f}s"
+    in_flight = _in_flight_daemon(*streams)
+    if in_flight is None:
+        return (
+            f"warning: the daemon refresh did not finish within {bound} and was stopped; "
+            "a daemon whose LaunchAgent had to be rewritten may now be STOPPED — run "
+            "each daemon's installer (`lop mobile install`, `lop browser install`, "
+            "`lop tunnel install`, `lop wake install`) to bring it back"
+        )
+    daemon, recovery = in_flight
+    return (
+        f"warning: the daemon refresh did not finish within {bound} and was stopped "
+        f"while the {daemon} daemon was being repaired; if that daemon's LaunchAgent "
+        f"had to be rewritten it is now STOPPED — run `{recovery}` to bring it back"
+    )
+
+
 def daemons_refresh_command() -> int:
     """``lop update --refresh-daemons``: the repair, run under the NEW wheel.
 
@@ -4918,7 +5075,10 @@ def daemons_refresh_command() -> int:
     upgrade predates this fix). Prints one line per daemon that CHANGED and one
     warning per daemon that could not be repaired; silent when everything is
     already current, because that is the normal state of a machine and this runs
-    on every upgrade.
+    on every upgrade. It also ANNOUNCES each daemon before it repairs it: the
+    parent drops that line from a healthy run's summary and reads the last one out
+    of a killed child's output — see :data:`_PROGRESS_PREFIX` for why the child has
+    to be the one to say it.
 
     The installer imports are function-local: ``mobile.install`` imports the
     Starlette daemon, and this module is imported by the TUI, so a module-level
@@ -4942,18 +5102,12 @@ def daemons_refresh_command() -> int:
         # "nothing needed repairing" and "this process is not allowed to".
         print(f"warning: {refusal}", file=sys.stderr)
         return 0
-    from local_operator.browser_bridge import install as browser_install
-    from local_operator.mobile import install as mobile_install
-    from local_operator.tunnels import install as tunnel_install
-    from local_operator.wakes import install as wakes_install
-
-    refreshers = (
-        mobile_install.refresh_plist_if_stale,
-        browser_install.refresh_plist_if_stale,
-        tunnel_install.refresh_plist_if_stale,
-        wakes_install.refresh_plist_if_stale,
-    )
-    for refresh in refreshers:
+    for name, recovery, refresh in _refresh_steps():
+        # BEFORE the repair, and FLUSHED: this process can be killed at the parent's
+        # bound with a bootout already issued, and this line is the only record of
+        # which daemon that was (see `_PROGRESS_PREFIX`). Unflushed it would sit in
+        # a pipe buffer that dies with us.
+        print(_refresh_announcement(name, recovery), flush=True)
         # Every one of these is no-raise by contract, so no guard is needed here
         # and a failure in one daemon cannot stop the next.
         outcome = refresh()

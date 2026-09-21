@@ -3070,28 +3070,37 @@ async def amain(operator_cap: bytes | None = None) -> int:
             logger.warning("wake scheduler did not arm at boot", exc_info=True)
 
     runtime = RuntimeServer(handle, kind="daemon", operator_cap=operator_cap)
-    # THE SERVING PLANE GETS ITS OWN LOOP. ``start()`` rather than
-    # ``start_in_process()``, and the whole of the operator-visible defect is
-    # that one word: in process, the listener, the welcome, ``ping`` and the
-    # heartbeat share an event loop with the turn, so ANY synchronous step of a
-    # turn parks all four together. Measured on the audit's rig (50 s block, no
-    # client attached): the record crossed into ``wedged`` at t=46.2 s, and a
-    # fresh dial connected in 0.01 s and then received NO welcome within 15 s.
-    # The same rig with ``start()``: welcome immediate, ``ping`` -> ``pong`` in
-    # 0.00 s, and the heartbeat never past 14.2 s. A fresh beat now means the
-    # SERVING PLANE ran, which is the claim the surfaces already make.
-    runtime.start()
-    # WAIT FOR PUBLICATION BEFORE ANYTHING READS THE RECORD. ``start()`` returns
-    # while ``_serve`` is still binding on its thread, so ``control_port`` is the
-    # constructor's 0 and the record file does not exist yet. The parent polls
-    # for the record (``launch.py``'s wait-for-record loop) and so does the wake
-    # supervisor, but the boot record's withdrawal and the exit ordering below
-    # both read the runtime's own state, so the wait is taken here too rather
-    # than left to a caller's convention. A bind that failed releases this latch
-    # as well; the answer would be "no control surface", and this path's
-    # behaviour on a dead socket is what it always was.
-    await runtime.wait_until_published()
-
+    # EVERY WAY THIS RUNTIME CAN BE ASKED TO LEAVE IS ARMED HERE, BEFORE THE
+    # SERVING PLANE CAN MAKE IT ADDRESSABLE. That order is the fix for a
+    # measured race, not tidiness.
+    #
+    # ``runtime.start()`` hands ``_serve`` to a thread, and the first thing
+    # ``_serve`` does once it holds a bound socket is publish the record
+    # (``RecordPublisher.__init__``). The record is what every sender reads to
+    # find this process: ``launch.py``'s wait-for-record loop, the wake
+    # supervisor, and the stop ladder's rungs all address a target through it.
+    # With the handlers installed after the wait for that publication — where
+    # they used to sit — a runtime was ADDRESSABLE WHILE A SIGTERM STILL KILLED
+    # IT with the default disposition. Measured on CI, twice, on two platforms
+    # (``test_signal_drain_e2e``'s idle cell: exit ``-15`` with an empty
+    # runtime-log tail, i.e. no ``exiting (SIGTERM`` line), which is the whole
+    # symptom: the record is not unpublished, the lease is not released and the
+    # documented drain never runs, because the process simply stops).
+    #
+    # WAITING ON PUBLICATION IS NOT A WAY AROUND THAT, which is what made the
+    # window reachable at all: ``wait_until_published`` settles at the END of
+    # ``_serve``'s boot prologue, so the record is already readable for as long
+    # as those two boot registrations take to come back from the session's loop.
+    #
+    # AND NOT EARLIER THAN THIS EITHER, which is a bound rather than a
+    # preference. The drain decision this handler takes announces through the
+    # serving plane and waits on the handle (``_drain_for_signal``), so above
+    # ``RuntimeServer`` there is nothing to decide WITH — and the prologue above
+    # can already have a turn in flight (``_drain_inbox_into`` and the wake
+    # scheduler's catch-up both open turns), so a handler armed there could only
+    # either cut the turn this drain exists to protect or need a deferral
+    # machine whose one possible trigger is a sender that signals a pid the
+    # record does not yet name. Nothing in this process does that.
     stop = asyncio.Event()
     # What ASKED this runtime to leave. Named because the exit itself is the one
     # event the reference investigation could not attribute: a refresh, a
@@ -3173,6 +3182,10 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # helper branches (see procstate.install_loop_signal_handlers). NOTHING IS
     # LOST where it degrades: the socket `stop` op below already converges on
     # the same event, and it is the rung the kill switch uses first.
+    #
+    # THE ORDER IS PINNED IN SOURCE: see
+    # tests/unit/session/runtime/test_signal_drain.py, which fails if this call
+    # ever moves back below ``start()``.
     install_loop_signal_handlers(
         loop,
         {
@@ -3180,6 +3193,37 @@ async def amain(operator_cap: bytes | None = None) -> int:
             signal.SIGINT: lambda: _on_signal(signal.SIGINT),
         },
     )
+    # The socket ``stop`` op (the kill switch's graceful rung) and SIGTERM
+    # converge on the same event, so the deny → dispose → aclose ordering
+    # below runs once, identically, for both triggers. Armed HERE, with the
+    # handlers, for their reason: an uninstalled hook is not an error but a
+    # FALLBACK — ``request_stop`` disposes the session in place when no trigger
+    # is set (``serving.py``), and that sets no stop event — so a ``stop`` op
+    # landing in the window would have left a process that never exits, behind
+    # a record that still reads as live.
+    handle.on_stop_requested = _on_socket_stop
+    # THE SERVING PLANE GETS ITS OWN LOOP. ``start()`` rather than
+    # ``start_in_process()``, and the whole of the operator-visible defect is
+    # that one word: in process, the listener, the welcome, ``ping`` and the
+    # heartbeat share an event loop with the turn, so ANY synchronous step of a
+    # turn parks all four together. Measured on the audit's rig (50 s block, no
+    # client attached): the record crossed into ``wedged`` at t=46.2 s, and a
+    # fresh dial connected in 0.01 s and then received NO welcome within 15 s.
+    # The same rig with ``start()``: welcome immediate, ``ping`` -> ``pong`` in
+    # 0.00 s, and the heartbeat never past 14.2 s. A fresh beat now means the
+    # SERVING PLANE ran, which is the claim the surfaces already make.
+    runtime.start()
+    # WAIT FOR PUBLICATION BEFORE ANYTHING READS THE RECORD. ``start()`` returns
+    # while ``_serve`` is still binding on its thread, so ``control_port`` is the
+    # constructor's 0 and the record file does not exist yet. The parent polls
+    # for the record (``launch.py``'s wait-for-record loop) and so does the wake
+    # supervisor, but the boot record's withdrawal and the exit ordering below
+    # both read the runtime's own state, so the wait is taken here too rather
+    # than left to a caller's convention. A bind that failed releases this latch
+    # as well; the answer would be "no control surface", and this path's
+    # behaviour on a dead socket is what it always was.
+    await runtime.wait_until_published()
+
     # `SIGUSR1` is POSIX-only, so the debug dump is installed only where the
     # constant exists — an unguarded `signal.SIGUSR1` is an AttributeError that
     # would take the whole boot down over an opt-in diagnostic. `is_windows()`
@@ -3244,10 +3288,6 @@ async def amain(operator_cap: bytes | None = None) -> int:
                 logger.info("task %r await-chain:\n%s", task.get_name(), "\n".join(lines))
 
         loop.add_signal_handler(debug_stacks, _dump_task_stacks)
-    # The socket ``stop`` op (the kill switch's graceful rung) and SIGTERM
-    # converge on the same event, so the deny → dispose → aclose ordering
-    # below runs once, identically, for both triggers.
-    handle.on_stop_requested = _on_socket_stop
     # The self-reaper: a phone session nobody watches and nothing runs is a
     # live process doing nothing, and before this it idled FOREVER. Runs
     # beside the signal wait; whichever fires first wins.
