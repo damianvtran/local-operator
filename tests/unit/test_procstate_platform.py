@@ -336,12 +336,47 @@ def test_detached_popen_kwargs_are_accepted_by_popen(
 # ---------------------------------------------------------------------------
 
 
+# How long a killed group's descendant may still answer `os.kill(pid, 0)` after
+# the kill. A severed orphan stays reachable for as long as it is a zombie —
+# nothing reaps it but the system — so "gone" has to be a bounded poll rather
+# than a single probe. 10 s is bounded from BOTH sides:
+#
+# * ABOVE the measured settling window. Over 30 raw iterations of this exact
+#   spawn the descendant was unreachable within 0.25 ms of the kill, and it was
+#   always already gone by the time the leader was reaped. 10 s leaves ~4
+#   orders of magnitude of headroom over that window for a loaded runner's
+#   reaper.
+# * BELOW the descendant's own lifetime. The descendant is a `sleep 30`: a bound
+#   at or above 30 s would let a descendant that was never signalled exit on its
+#   own and turn the poll green — i.e. the bound would stop the test
+#   discriminating. The only thing a generous bound costs is how long a real
+#   failure takes to redden.
+_GROUP_GONE_BOUND_S = 10.0
+
+
 def test_terminate_process_tree_kills_the_group_and_descendants(tmp_path: Path) -> None:
     """A shell command's children die with it — the group IS the point.
 
     Written as a real spawn rather than a mock: on POSIX the whole value of
     routing through this helper is that it still signals the GROUP
     (``killpg``), so a descendant of the shell must be gone too.
+
+    Asserts on the SETTLED group, never on which process the kernel charges
+    with the leader's death. All three sources of intermittent red here are the
+    same mistake — reading one instant and calling it the outcome:
+
+    * the leader's wait status is a race between "the shell was killed" and
+      "the shell outlived the signal by a hair and reported its child's death"
+      (measured on this exact spawn over 30 raw iterations: 20 ended -9, 10
+      ended 137 — both the group dying by SIGKILL);
+    * the marker file EXISTS (the subshell's redirection creates it) before the
+      pid is written into it, so an existence check can hand the read an empty
+      file — measured at 1 in 30 runs of this test on a loaded host;
+    * a killed descendant is reachable until it is reaped.
+
+    None of them weakens the test: a group that was never signalled, or
+    signalled with the wrong signal, still fails here — see the two bounds
+    below.
     """
     marker = tmp_path / "child.pid"
     child = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
@@ -352,15 +387,56 @@ def test_terminate_process_tree_kills_the_group_and_descendants(tmp_path: Path) 
         start_new_session=True,
     )
     try:
+        # Wait for the marker's CONTENT, not its existence: ``> {marker}``
+        # creates the file (truncated) and the ``echo`` builtin fills it in a
+        # second step, so under load an existence check reads ''. Nothing
+        # truncates the file again after that, so one parse covers it.
         deadline = time.monotonic() + 20.0
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert marker.exists(), "the command never started its descendant"
+        descendant: int | None = None
+        while time.monotonic() < deadline:
+            try:
+                descendant = int(marker.read_text().strip())
+            except (OSError, ValueError):
+                time.sleep(0.02)
+                continue
+            break
+        assert descendant is not None, "the command never started its descendant"
         assert procstate.terminate_process_tree(child.pid, force=True) is True
-        assert child.wait(timeout=10) == -signal.SIGKILL
-        descendant = int(marker.read_text().strip())
-        with pytest.raises(ProcessLookupError):
-            os.kill(descendant, 0)
+
+        # WHICH PROCESS DIED BY THE SIGNAL IS NOT OURS TO ASSERT. The shell is
+        # either killed by the group's SIGKILL (-SIGKILL) or escapes it by a
+        # hair and exits reporting that same death (128 + SIGKILL, the POSIX
+        # shell convention for "my last command was killed"). Escaping it is
+        # not hypothetical: a variant of this spawn with one command after the
+        # trailing sleep ran that command after the kill in 4 of 15 runs, so the
+        # leader really can outlive the signal. Both outcomes below mean the
+        # group died by SIGKILL, which is the claim — and the set is exactly
+        # these two, so a mechanism that sent SIGTERM instead still reddens
+        # (-SIGTERM, or 128 + SIGTERM).
+        leader_rc = child.wait(timeout=10)
+        assert leader_rc in (-signal.SIGKILL, 128 + signal.SIGKILL), (
+            f"the group leader ended with {leader_rc!r}, which is not a SIGKILL "
+            f"outcome (-{signal.SIGKILL} killed by it, {128 + signal.SIGKILL} "
+            "reporting it after outliving it)"
+        )
+
+        # The descendant is what the group kill BUYS: aimed at the leader alone,
+        # it would survive. Poll until it settles instead of reading one
+        # instant; see _GROUP_GONE_BOUND_S for why the bound is between these
+        # values rather than merely large.
+        gone_deadline = time.monotonic() + _GROUP_GONE_BOUND_S
+        while True:
+            try:
+                os.kill(descendant, 0)
+            except ProcessLookupError:
+                break
+            if time.monotonic() >= gone_deadline:
+                pytest.fail(
+                    f"descendant {descendant} was still reachable "
+                    f"{_GROUP_GONE_BOUND_S:.0f}s after the group kill: the helper "
+                    "did not signal the group"
+                )
+            time.sleep(0.01)
     finally:
         if child.poll() is None:
             child.kill()
