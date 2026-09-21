@@ -75,6 +75,7 @@ from local_operator.providers.registry import (
     RefreshFn,
     credential_provider_id,
     get_provider_definition,
+    provider_env_key,
     resolve_env_key,
 )
 
@@ -3158,33 +3159,17 @@ class AuthStore:
         return None, None
 
     def _env_api_key(self, provider: str) -> str | None:
-        # The env leg is the SAME reader every other surface uses —
-        # ``registry.resolve_env_key`` is alias-aware (a flavour authenticates
-        # with its base provider's var), so the cascade, ``is_usable`` and the
-        # catalogue enrichment cannot disagree about whether an env key runs a
-        # flavour. The store adds only the legacy ``credentials.env`` tier on
-        # top, which predates the store and no other reader sees.
-        definition = get_provider_definition(provider)
-        if definition is None or definition.env_keys is None:
-            definition = get_provider_definition(credential_provider_id(provider))
-        value = resolve_env_key(provider)
-        if value:
-            return value
-        # Legacy credentials.env tier via CredentialManager (lazy import so a
-        # missing legacy module degrades to env-only).
-        if self._credential_manager is None:
-            self._credential_manager = _load_legacy_credential_manager()
-        manager = self._credential_manager
-        if manager is not None and definition is not None and isinstance(definition.env_keys, str):
-            try:
-                secret = manager.get_credentials().get(definition.env_keys)
-            except Exception:
-                secret = None
-            if secret is not None:
-                value = secret.get_secret_value()
-                if value:
-                    return value
-        return None
+        # The env leg resolves through the SHARED store-first reader
+        # (``registry.provider_env_key``), which is alias-aware (a flavour
+        # authenticates with its base provider's var) so the cascade,
+        # ``is_usable`` and the catalogue enrichment cannot disagree about
+        # whether a key runs a flavour. It reads the provider-class store row
+        # first, the process environment second and the legacy ``credentials.env``
+        # file last — the file leg exists only until every writer is repointed.
+        #
+        # The cascade ORDER is untouched: this is still step 5, still one value,
+        # still before the stored-api_key and fallback-resolver rungs.
+        return provider_env_key(provider)
 
     # -- failover support --------------------------------------------------------
 
@@ -3331,16 +3316,3 @@ class AuthStore:
             if self._row_matches_key(row, api_key):
                 return row.id
         return None
-
-
-def _load_legacy_credential_manager() -> "CredentialManager | None":
-    """Best-effort legacy ``credentials.env`` reader (import-guarded)."""
-    try:
-        from local_operator.credentials import CredentialManager
-
-        base = config_dir()
-        if (base / "credentials.env").exists():
-            return CredentialManager(base)
-    except Exception:
-        pass
-    return None
