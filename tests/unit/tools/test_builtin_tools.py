@@ -2571,6 +2571,41 @@ async def test_a_heredoc_body_is_not_read_as_a_second_creation(tmp_path, monkeyp
 @pytest.mark.parametrize(
     ("command", "created"),
     [
+        # `time` is a shell KEYWORD, so it can stand in front of any command and its
+        # only option is `-p`. It was in `_COMMAND_PREFIXES` as a frozenset and was
+        # dropped when that became the table, which made all three of these silent at
+        # the reviewed head after they had nudged before — the regression both gates
+        # found, and neither side's rows covered it because no row used `time`.
+        ("time mkdir {root}/timed", "timed"),
+        ("time -p touch {root}/timed-p", "timed-p"),
+        ("time cp report.md {root}/timed-cp", "timed-cp"),
+        # ...and the same prefix still leaves a READ alone.
+        ("time cat {root}/in.txt", None),
+        ("time -p rm -rf {root}/x", None),
+    ],
+)
+def test_the_time_prefix_does_not_hide_the_command(tmp_path, monkeypatch, command, created) -> None:
+    """Scanner-level, like the prefix-operand rows next door: `time` is a bash
+    keyword and the shapes are the ones this fleet writes, so what is asserted is
+    the contract (which words count as a command position) rather than a host's
+    shell."""
+    temp_root = tmp_path / "shared-tmp"
+    temp_root.mkdir()
+    (temp_root / "in.txt").write_text("x\n", encoding="utf-8")
+    _point_the_nudge_at(monkeypatch, temp_root)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    line = builtin._bash_scratch_hint(command.format(root=temp_root), context)
+
+    if created is None:
+        assert line == "", line
+    else:
+        assert line == _bash_nudge_line(temp_root / created), line
+
+
+@pytest.mark.parametrize(
+    ("command", "created"),
+    [
         # The prefix's OWN operand sits in command position, so a walk that does not
         # step over it reads that operand as the command name and never sees the
         # creation: `sudo -u <user> mkdir` (the value of `-u`), `timeout 60 mkdir`
@@ -2582,6 +2617,12 @@ async def test_a_heredoc_body_is_not_read_as_a_second_creation(tmp_path, monkeyp
         ("sudo -u root mkdir {root}/sudoed", "sudoed"),
         ("timeout 60 mkdir {root}/timed", "timed"),
         ("nice -n 10 cp report.md {root}/nixed", "nixed"),
+        # GNU's LEGACY bare increment, kept on purpose even though this host's BSD
+        # ``nice`` rejects it (``nice 10 true`` → rc=127). It is the only shape that
+        # puts a bare operand in command position for ``nice``, which is exactly the
+        # skip being pinned, and these rows never execute: the assertion is about
+        # which words the SCAN treats as a command, not about what a host's ``nice``
+        # accepts. The ``timeout 60`` row is GNU-only for the same reason.
         ("nice 10 touch {root}/niced", "niced"),
     ],
 )

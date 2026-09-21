@@ -5056,6 +5056,12 @@ _COMMAND_PREFIXES: dict[str, tuple[frozenset[str], bool]] = {
     "nice": (frozenset({"-n", "--adjustment"}), True),
     "env": (frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}), False),
     "command": (frozenset(), False),
+    # ``time`` is a shell KEYWORD rather than a program, so it can stand in front of
+    # anything and its only option is ``-p``; no operand of its own. It was in the
+    # original frozenset and was dropped when that became this table, which made
+    # ``time mkdir /tmp/x`` silent at a head where it had nudged before — a
+    # regression nothing caught, because no row used ``time``.
+    "time": (frozenset(), False),
     "nohup": (frozenset(), False),
     "exec": (frozenset(), False),
     "do": (frozenset(), False),
