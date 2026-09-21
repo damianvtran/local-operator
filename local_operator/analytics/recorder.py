@@ -135,21 +135,25 @@ class AnalyticsRecorder:
         self._dropped = 0
         self._last_prune = 0.0
         self._closed = False
-        #: Fail-soft write observability, read ONLY by ``flush_for_test``: each
-        #: kind of store call the writer SWALLOWS is counted here, with the repr
-        #: of the last exception. An item whose write raised still settles, so
-        #: the completion count alone cannot tell a test that its row landed;
-        #: these are how the barrier reports the difference instead of letting a
-        #: test read a missing row and fail on a bare ``None``. The swallow-and-
-        #: log policy itself is unchanged and deliberate — a bad sample must
-        #: never kill the writer or stall a session — and production never reads
-        #: these: the increments happen only on the error path.
+        #: Fail-soft write observability, read ONLY by ``flush_for_test``: every
+        #: write the store did not make is counted here with a one-line detail.
+        #: Two shapes reach it and they are the same event to a caller — the
+        #: call RAISED (a bad sample, which must never kill the writer), or it
+        #: RETURNED a drop, which is what the real store does on a lost lock: it
+        #: retries, gives up, and returns 0 rows / ``False`` rather than raising.
+        #: An item whose write was lost still settles, so the completion count
+        #: alone cannot tell a test that its row landed; this is how the barrier
+        #: reports the difference instead of letting a test read a missing row
+        #: and fail on a bare ``None``. The swallow-and-log policy itself is
+        #: unchanged and deliberate, and production never reads these: the
+        #: increments happen only on the failure path.
         self._write_failures: dict[str, int] = {}
-        self._write_error_repr: dict[str, str] = {}
-        #: How many of those failures a ``flush_for_test`` has already reported,
-        #: so one failure is surfaced by exactly one barrier instead of by every
-        #: barrier for the rest of the process.
-        self._reported_write_failures = 0
+        self._write_failure_detail: dict[str, str] = {}
+        #: How many failures per kind a ``flush_for_test`` has already reported,
+        #: so a report names only what is NEW since the last one (and one
+        #: failure is surfaced by exactly one barrier rather than by every
+        #: barrier for the rest of the process).
+        self._reported_write_failures: dict[str, int] = {}
 
     # -- lifecycle -----------------------------------------------------------
     def _ensure_thread(self) -> None:
@@ -252,34 +256,61 @@ class AnalyticsRecorder:
             # Its own transaction, not joined to the ledger insert below: tool
             # calls are produced DURING a turn and the ledger row at the end of
             # it, so the two never share a batch anyway.
+            rows = [task.as_row() for task in tools]
             try:
-                self._store.record_tool_calls([task.as_row() for task in tools])
+                written = self._store.record_tool_calls(rows)
             except Exception as exc:  # noqa: BLE001 — a bad sample must not kill the writer
                 logger.debug("analytics: tool-call flush failed", exc_info=True)
-                self._note_write_failure("tool call", exc)
+                self._note_write_failure("tool call", repr(exc))
+            else:
+                if written != len(rows):
+                    self._note_write_failure(
+                        "tool call", f"the store wrote {written} of {len(rows)} rows"
+                    )
         if names:
             for task in names:
                 try:
-                    self._store.upsert_session_name(task.session_id, task.name, rank=task.rank)
+                    landed = self._store.upsert_session_name(
+                        task.session_id, task.name, rank=task.rank
+                    )
                 except Exception as exc:  # noqa: BLE001 — a bad name must not kill the writer
                     logger.debug("analytics: name upsert failed", exc_info=True)
-                    self._note_write_failure("session name", exc)
+                    self._note_write_failure("session name", repr(exc))
+                else:
+                    if not landed:
+                        # ``False`` is the store's DROP signal, not a rank-gated
+                        # refusal: a refusal still ran the statement and returns
+                        # True, so only a write the database never saw lands here.
+                        self._note_write_failure("session name", "the store dropped the upsert")
         if not batch:
             return
         try:
-            self._store.record_batch(batch)
+            written = self._store.record_batch(batch)
         except Exception as exc:  # noqa: BLE001 — writer must never die on a bad batch
             logger.debug("analytics: flush failed", exc_info=True)
-            self._note_write_failure("ledger batch", exc)
+            self._note_write_failure("ledger batch", repr(exc))
+        else:
+            if written != len(batch):
+                self._note_write_failure(
+                    "ledger batch", f"the store wrote {written} of {len(batch)} rows"
+                )
 
-    def _note_write_failure(self, kind: str, exc: BaseException) -> None:
-        """Count a swallowed write failure for ``flush_for_test`` to report.
+    def _note_write_failure(self, kind: str, detail: str) -> None:
+        """Count a write the store did not make, for ``flush_for_test`` to report.
+
+        Called on BOTH shapes of a lost write — the store raising, and the real
+        store's silent drop, which it reports by returning 0 rows / ``False``
+        rather than by raising (``AnalyticsStore.record_batch`` retries a lost
+        lock ``_WRITE_RETRIES`` times and then gives up). The store's return
+        values are the source of truth here: a store that drops a write by
+        swallowing it internally would otherwise be indistinguishable from one
+        that wrote it.
 
         Only the writer thread writes, so the read-modify-write below needs no
         lock; the barrier reads a snapshot after the queue has settled.
         """
         self._write_failures[kind] = self._write_failures.get(kind, 0) + 1
-        self._write_error_repr[kind] = repr(exc)
+        self._write_failure_detail[kind] = detail
 
     def _maybe_prune(self) -> None:
         now = time.monotonic()
@@ -419,14 +450,19 @@ class AnalyticsRecorder:
         through ``_flush``, names and tool calls included. That is a statement
         about the write PATH, not about the row: the writer's store calls are
         fail-soft (a bad sample must never kill the writer or stall a session),
-        so an item whose write RAISED settles like any other. Those swallowed
-        failures are counted, and this method raises on them too — otherwise it
-        would return clean while the row a caller is about to read is missing,
-        which is the failure mode this whole method exists to remove.
+        so an item whose write was LOST settles like any other. A lost write is
+        reported two ways — the store raised, or it returned a drop (the real
+        ``AnalyticsStore`` never raises on a lost lock: it retries, gives up and
+        returns 0 rows / ``False``) — and the writer counts both. This method
+        raises on any it has not already reported, so it cannot return clean
+        while the row a caller is about to read is missing, which is the failure
+        mode this whole method exists to remove.
 
-        ON EXPIRY OR A FAILED WRITE THIS RAISES rather than returning. A caller
+        ON EXPIRY OR A LOST WRITE THIS RAISES rather than returning. A caller
         that asked for a guarantee must get either the guarantee or a failure
-        naming what went wrong.
+        naming what went wrong. The write-loss report names only the failures
+        since the previous report, so its counts are new losses rather than a
+        running total.
         """
         self._ensure_thread()
         deadline = time.monotonic() + timeout
@@ -452,20 +488,28 @@ class AnalyticsRecorder:
                     )
                 queued.all_tasks_done.wait(remaining)
         # The items are settled; the rows are a separate question, because a
-        # failed store call is swallowed rather than propagated. Report the
-        # writes the writer could not make, once each.
-        failures = sum(self._write_failures.values())
-        if failures > self._reported_write_failures:
-            self._reported_write_failures = failures
+        # dropped write is not an exception here — the real store reports one by
+        # RETURNING 0 rows / ``False`` (``record_batch`` gives up after
+        # ``_WRITE_RETRIES`` lost lock races), and the recorder counts that shape
+        # and a raising store alike. Report only what is NEW since the last
+        # report, so the counts name this barrier's losses rather than a running
+        # total that reads like fresh damage.
+        new = {
+            kind: count - self._reported_write_failures.get(kind, 0)
+            for kind, count in self._write_failures.items()
+            if count > self._reported_write_failures.get(kind, 0)
+        }
+        if new:
+            self._reported_write_failures = dict(self._write_failures)
             detail = ", ".join(
-                f"{kind} ×{count} ({self._write_error_repr.get(kind, 'no repr')})"
-                for kind, count in sorted(self._write_failures.items())
+                f"{kind} ×{count} ({self._write_failure_detail.get(kind, 'no detail')})"
+                for kind, count in sorted(new.items())
             )
             raise RuntimeError(
-                f"flush_for_test: {failures} analytics write(s) raised and were "
-                f"swallowed by the writer — {detail}. The items are settled but "
-                f"their rows are missing (the writer logs them as 'analytics: …' "
-                f"at debug level)."
+                f"flush_for_test: {sum(new.values())} analytics write(s) were lost "
+                f"since the last report — {detail}. The items are settled but their "
+                f"rows are missing; the writer has already logged each one as "
+                f"'analytics: …' at debug level."
             )
 
     def close(self, timeout: float = 2.0) -> None:

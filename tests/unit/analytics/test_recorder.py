@@ -9,11 +9,11 @@ free of disk I/O.
 
 The barrier those writes are observed through is ``flush_for_test``: a plain
 ``record`` is asynchronous by design, so every test here that reads the store
-is really asserting something about that barrier as well. Three of the tests
-below exist only to pin the barrier itself — two deliberately slow stores make
-the dequeued-but-unwritten window wide enough to be a fact rather than a race,
-and a third pins the two ways the barrier is allowed to fail (a deadline, and a
-write the writer swallowed).
+is really asserting something about that barrier as well. A group of tests
+below exists only to pin the barrier itself — deliberately slow stores widen the
+dequeued-but-unwritten window into a fact rather than a race, and the rest pin
+the ways it is allowed to fail (a deadline, a write that RAISED, and a write the
+store RETURNED as dropped, which is how the shipped store loses one).
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from local_operator.analytics import store as store_module
 from local_operator.analytics.model import CallSnapshot
 from local_operator.analytics.recorder import AnalyticsRecorder, reset_recorder_for_test
 from local_operator.analytics.store import SESSION_NAME_RANK_TITLE, AnalyticsStore
@@ -124,10 +125,10 @@ class _SlowNameStore(AnalyticsStore):
 
     def upsert_session_name(
         self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
-    ) -> None:
+    ) -> bool:
         self.entered.set()
         time.sleep(_HOLD_S)
-        super().upsert_session_name(session_id, name, rank=rank)
+        return super().upsert_session_name(session_id, name, rank=rank)
 
 
 class _SlowToolCallStore(AnalyticsStore):
@@ -229,7 +230,7 @@ class _FailingWriteStore(AnalyticsStore):
 
     def upsert_session_name(
         self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
-    ) -> None:
+    ) -> bool:
         self.attempts += 1
         raise sqlite3.OperationalError("disk I/O error")
 
@@ -253,9 +254,93 @@ def test_flush_for_test_reports_a_write_the_writer_swallowed(tmp_path):
         # barrier for the rest of the process, so a test that reads its store
         # after a deliberate failure is not fighting the barrier forever.
         rec.flush_for_test()
+        # And a report counts what is NEW since the previous one, not a running
+        # total: the second loss is one loss, not two.
+        rec.note_session_name("never-made-it-either", "also never lands")
+        with pytest.raises(RuntimeError, match=r"1 analytics write\(s\).*session name ×1"):
+            rec.flush_for_test()
     finally:
         rec.close()
-    assert store.attempts == 1, "the writer retried a name the store refused"
+    assert store.attempts == 2, "the writer retried a name the store refused"
+
+
+class _DroppingStore(AnalyticsStore):
+    """A store that reports a DROPPED write the way the shipped one does.
+
+    The real ``AnalyticsStore`` never raises on a lost lock: ``record_batch``
+    and ``record_tool_calls`` give up after their retries and return 0 rows,
+    and ``upsert_session_name`` returns False. Holding a real lock long enough
+    to exhaust the real retry budget costs ~5 s per call at a shortened budget
+    and ~21 s at the shipped one, so the cells for the two kinds the locked
+    real-store test below does not cover use this double; that test pins the
+    same contract against the shipped store itself.
+    """
+
+    def record_tool_calls(self, rows: Sequence[tuple[int, str, str, str, str, float]]) -> int:
+        return 0
+
+    def upsert_session_name(
+        self, session_id: str, name: str, *, rank: int = SESSION_NAME_RANK_TITLE
+    ) -> bool:
+        return False
+
+
+def test_flush_for_test_reports_writes_the_store_returned_as_dropped(tmp_path):
+    """A store reporting a drop by RETURNING must not read as success.
+
+    The shipped store's failure mode is silence rather than an exception, so a
+    barrier that only watched for raises would report clean on the shape that
+    actually happens in production — and the caller's next read would get the
+    bare ``None`` this PR exists to remove.
+    """
+    store = _DroppingStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    try:
+        rec.record_tool_call("tool-session", "bash", "model", "")
+        rec.note_session_name("name-session", "never lands")
+        with pytest.raises(RuntimeError, match=r"session name ×1.*tool call ×1"):
+            rec.flush_for_test()
+    finally:
+        rec.close()
+
+
+def test_flush_for_test_reports_a_batch_the_real_store_dropped(tmp_path, monkeypatch):
+    """The same loss against the SHIPPED store, with no mock in the way.
+
+    ``AnalyticsStore.record_batch`` retries a lost lock (``busy_timeout`` is 5 s
+    per attempt) and then returns 0 rows — silently, with no exception — so with
+    a second connection holding the write lock the row never lands while
+    ``flush_for_test`` used to return cleanly (review round 2 measured 21.5 s to
+    exhaustion and ``aggregate().calls == 0``). The retry budget is shortened to
+    ONE attempt here: the drop being pinned is the same drop at any budget, and
+    what this cell asserts is that the store RETURNED 0 instead of raising.
+    Four attempts would add ~16 s to this file for no extra coverage. The
+    writer's connection is warmed first, so the lock is taken against the INSERT
+    rather than against the schema-creation path, which is a different branch.
+    """
+    store = AnalyticsStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    holder: sqlite3.Connection | None = None
+    try:
+        rec.record(_snap(session_id="before"))
+        rec.flush_for_test(timeout=30)
+        assert store.aggregate().calls == 1
+
+        monkeypatch.setattr(store_module, "_WRITE_RETRIES", 1)
+        holder = sqlite3.connect(str(tmp_path / "a.db"))
+        holder.execute("BEGIN IMMEDIATE")  # hold the write lock
+
+        rec.record(_snap(session_id="dropped"))
+        with pytest.raises(RuntimeError, match="ledger batch"):
+            rec.flush_for_test(timeout=60)
+        # The row really is gone: this is a LOST write, not a slow one, so a
+        # barrier that reported success would be reporting it wrongly.
+        assert store.aggregate().calls == 1
+    finally:
+        if holder is not None:
+            holder.rollback()
+            holder.close()
+        rec.close()
 
 
 def test_flush_for_test_raises_at_its_deadline_instead_of_returning(tmp_path):
