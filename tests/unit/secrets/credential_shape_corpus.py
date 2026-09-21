@@ -675,9 +675,10 @@ DUMP_COMMAND_CASES: tuple[DumpCase, ...] = (
         "the read is of something else; `.env` is a later, unrelated command",
     ),
     DumpCase(
-        'cat /tmp/qa/.root); cd "$QA/tree" && grep -n "VITE_" src/app.ts',
+        'cat /tmp/qa/app.log); cd "$QA/tree" && grep -n "VITE_" src/app.ts; ls .env',
         False,
-        "the command substitution closes before the `.env` the harvest showed",
+        "the command substitution closes before the `.env`, which belongs to a "
+        "later, unrelated command",
     ),
     DumpCase(
         "tail -f app.log # writes .env",

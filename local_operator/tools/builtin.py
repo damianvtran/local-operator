@@ -129,6 +129,7 @@ from local_operator.redaction_shapes import (
     PEM_END_LINE_RE,
     PEM_HEADER_LINE_RE,
     REDACTION_MARKER,
+    ShapeHit,
     ShapeReport,
     credential_dump_notice,
     scrub_secrets_with_hits,
@@ -2188,9 +2189,28 @@ class _PipeRedactor:
     painted live is unrecoverable, while a partial line's bytes arrive as soon
     as its newline does — or at the cap, or at end-of-stream, whichever comes
     first.
+
+    **It also CONTAINS what it masks, and that half cannot be done later.** This
+    filter removes a credential's bytes BEFORE any tool result exists, so the
+    store's own pass over the finished result is handed this filter's marker
+    rather than the credential and matches nothing: without a registration from
+    here, the pipe was the one masking surface whose match left the value
+    unprotected for the rest of the session. Measured on the shape this feature
+    exists for (``kubectl exec … env``, credential in the OUTPUT and nowhere in
+    the command): ``registered values: 0``, and a later ``cat`` of the bare value
+    — no shape around it, which is the form the table cannot know — returned it
+    in the clear. ``contain`` is the store's registration entry point, handed the
+    hits this filter is already holding. Absent (a third-party embedder's store,
+    a bare tool test) the filter masks and registers nothing, which is the
+    behaviour every caller had before.
     """
 
-    def __init__(self, credentials: dict[str, str] | Sequence[str]) -> None:
+    def __init__(
+        self,
+        credentials: dict[str, str] | Sequence[str],
+        *,
+        contain: Callable[[Sequence[ShapeHit]], None] | None = None,
+    ) -> None:
         #: An open PEM block, whether its marker is already out, and how many
         #: lines it has covered (the bound that keeps a stream from holding the
         #: state forever).
@@ -2199,6 +2219,11 @@ class _PipeRedactor:
         self._key_block_lines = 0
         #: Whether this filter has withheld its output after a fault.
         self._withheld = False
+        #: The store's containment entry point, or ``None`` for a caller that has
+        #: none (see the class docstring). Called from ``_feed_scrubbed``, which is
+        #: the only place that holds the hits — and the value it removed is exactly
+        #: what a later bare reuse of the same secret has to be caught by.
+        self._contain = contain
         values = credentials.values() if isinstance(credentials, dict) else list(credentials)
         self._set(values)
         self.pending = ""
@@ -2253,6 +2278,17 @@ class _PipeRedactor:
         # whole change is: zero notices, zero rotation tickets.
         report = shape_report(hits)
         report_shape_hits(list(report.labels), reached_model=report.reached_model)
+        # CONTAIN FROM HERE too, and it is a different job from reporting: the
+        # report decides whether an operator is told, this keeps the value caught
+        # in every later result of the session. Skipped for an empty hit list so a
+        # clean chunk costs nothing, and never allowed to break the mask — the
+        # store's own registration is best-effort by contract, and a fault here
+        # would lose the command's output for a bookkeeping failure.
+        if hits and self._contain is not None:
+            try:
+                self._contain(hits)
+            except Exception:  # noqa: BLE001 — see above: a mask must never break
+                logger.warning("pipe containment registration failed", exc_info=True)
         return scrubbed.encode("utf-8")
 
     def _mask_open_key_block(self, ready: str) -> str:
@@ -2438,6 +2474,32 @@ def _stream_redaction_values(store: Any, credential_env: dict[str, str]) -> list
 #: empty list, because an empty list is the legitimate "nothing to scrub yet"
 #: answer and must keep streaming; this one stops it.
 _REDACTION_SEAM_BROKEN: list[str] = ["\x00redaction-seam-broken\x00"]
+
+
+def _shape_containment_sink(
+    store: Any,
+) -> Callable[[Sequence[ShapeHit]], None] | None:
+    """The store's containment entry point, for a layer that masked the text itself.
+
+    The pipe filter is the one masking layer that runs BEFORE a tool result
+    exists, so the store never sees the credential it removed and the store's own
+    registration pass (:meth:`VariableStore.redact_with_report`, which the result
+    path and the live-text path both reach) finds nothing. Handing the filter the
+    registration entry point keeps the value caught in every later result of the
+    session — the form the shape table has no rule for is exactly the one an
+    operator's later ``cat`` prints.
+
+    ``None`` for a store that does not offer the method — a third-party
+    embedder's minimal store, or a bare tool test — which degrades to the
+    masking-only behaviour those callers had before rather than failing the
+    command.
+    """
+    register = getattr(store, "register_shape_hits_for_containment", None)
+    if not callable(register):
+        return None
+    # Cast for the same reason the sibling lookups above cast: ``getattr`` yields
+    # ``object``, and this is the store's own public surface.
+    return cast(Callable[[Sequence[ShapeHit]], None], register)
 
 
 def _redact_tool_text(text: str, context: ToolContext | None) -> str:
@@ -2865,7 +2927,10 @@ async def execute_bash(
         # read" and must never be treated as an ordinary list of secrets; the
         # loop checks it before every feed, and so must the construction site.
         initial = _stream_redaction_values(store, injected)
-        redactor = _PipeRedactor([] if initial is _REDACTION_SEAM_BROKEN else initial)
+        redactor = _PipeRedactor(
+            [] if initial is _REDACTION_SEAM_BROKEN else initial,
+            contain=_shape_containment_sink(store),
+        )
         withheld = False
         try:
             while True:

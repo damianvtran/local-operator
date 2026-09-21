@@ -9391,9 +9391,16 @@ class Session:
         (``set_shape_hit_reporter``) and the pipe filter and live-text path reach it
         via :func:`~local_operator.harness.redaction.report_shape_hits` — so one
         predicate here covers all three and a fourth added later cannot forget it.
-        The PROTECTION is not here and must not become conditional:
-        ``VariableStore.redact_with_report`` registers every hit for containment
-        before any of this runs.
+        The PROTECTION is not here and must not become conditional, and it now
+        reaches every masking surface: ``VariableStore.redact_with_report``
+        registers each hit for containment before any of this runs, and the bash
+        pipe filter — which masks bytes before a result exists, so no later pass
+        over that result can match the value — registers the hits it holds through
+        ``VariableStore.register_shape_hits_for_containment`` as it masks them.
+        Agent review R1/E1: without that second registration path a credential the
+        pipe removed was left unregistered for the rest of the session, and a
+        later bare reuse of it printed it in the clear while this gate correctly
+        said nothing.
         """
         if not reached_model:
             return

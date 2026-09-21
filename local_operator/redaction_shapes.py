@@ -2617,6 +2617,18 @@ class DumpShape:
 #: the longest path token 79, so both bounds clear the real work with headroom.
 #: They are also what makes the rule's cost independent of the line's length — see
 #: the rule's own comment for the measurement that forced them.
+#:
+#: THE CUT IS DELIBERATE, and these are the measured edges of it (agent review
+#: R1/E3, reproduced here so the next reader does not have to re-derive them):
+#: ``cat `` + N×``x`` + `` .env`` fires at N=94 — a 96-character gap, the two
+#: spaces included, which is the whole of :data:`_FILE_GAP_CHARS` — and is silent
+#: at N=95 (97). ``cat /`` + N×``d`` + ``.pem`` fires at N=222 — 224 characters
+#: between the verb and the suffix, i.e. the two windows summed — and is silent
+#: at N=223 (225). Both are a shade INSIDE the nominal windows (a real read whose
+#: path is longer than that gets no advisory where the unbounded rule advised),
+#: and that is the trade for turning a quadratic scan linear — a deep path is
+#: rare, a 140 KB line cost 142 s. The residual is named here rather than left to
+#: be discovered.
 _FILE_GAP_CHARS = 96
 _FILE_PATH_CHARS = 128
 
