@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
 
+import pytest
 from rich.cells import cell_len
 
 from local_operator.model.configure import build_model_spec
@@ -338,3 +339,59 @@ def test_a_name_shaped_object_that_is_not_a_string_is_no_name() -> None:
     # in build_model_spec, which must survive anything whose `.name` is not a
     # str (a MagicMock reaches it in the wild). Typed as Any to say so.
     assert build_model_spec("anthropic", "claude-opus-5", cast(Any, stub)).display_name == ""
+
+
+# ---------------------------------------------------------------------------
+# the router ids — a meta-model with a name of its own
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("provider", ["radient", "openrouter"])
+def test_the_auto_router_prints_a_human_name_and_keeps_its_selector(provider: str) -> None:
+    """``auto`` is the synthetic ROUTER an aggregator serves, not a resold
+    model. Every other aggregator id is refused a listing name because two
+    aggregators share the same 398 names and no name can say which route is
+    answering — but the router IS the route, so it has a name of its own.
+
+    The name is TITLE CASE (``Auto``, not ``auto``): it heads the band's model
+    segment beside other human names, and a lowercase keyword there reads as
+    the raw id. The SELECTOR is unchanged, so anything that identifies or
+    matches on the model still sees ``radient/auto``.
+    """
+    from local_operator.model.naming import resolved_a_name
+
+    label = model_label(provider, "auto")
+    assert label.full == "Auto"
+    # The selector the rest of the app identifies the model by is untouched,
+    # and `resolved_a_name` still reports this render as a NAME rather than as
+    # the echo of its own selector.
+    assert resolved_a_name(provider, "auto") is True
+
+    # The qualified sibling spelling (``openrouter/auto``) is the same router.
+    assert model_label(provider, "openrouter/auto").full == "Auto"
+
+
+def test_a_plain_id_with_no_curated_name_is_unaffected() -> None:
+    """The rule is scoped to the router ids alone: an unknown resold model still
+    falls back to its own selector, never to a title-cased guess."""
+    label = model_label("openrouter", "somevendor/unlisted-model")
+    assert label.full == "openrouter/somevendor/unlisted-model"
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai", "anthropic", "deepseek"])
+def test_the_router_name_is_gated_on_the_aggregator_hosting(provider: str) -> None:
+    """``auto`` is a router id ONLY behind an aggregator.
+
+    On a local or direct provider the same word is an ordinary model —
+    ``ollama/auto`` is the case ``discovery.is_meta_route_id`` names — so an
+    id-only lookup would rename a model the user happened to call ``auto``.
+    Measured before this gate: ``ollama/auto`` rendered ``Auto`` where it had
+    rendered ``Ollama``, and ``resolved_a_name`` flipped with it (a decision
+    input to ``attached._restored_model_specs``' display-name adoption). The
+    render must NOT change for these hostings.
+    """
+    label = model_label(provider, "auto")
+    assert label.full != "Auto", f"{provider}/auto must not take the router name"
+    # Whatever these rendered before, they are not the router's NAME: the
+    # fallback is the selector, exactly as an unlisted id.
+    assert label.full == f"{provider}/auto"
