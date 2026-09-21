@@ -150,10 +150,10 @@ export function extensionOf(raw: string): string {
  * It is a NAME check and never a verdict: a `.txt` whose bytes are a PE is
  * Python's to catch (content wins), and a `.exe` over PDF bytes is allowed as a
  * PDF. The desktop app's download path uses this to refuse an obviously-unwanted
- * file BEFORE it lands, where the platform lets it; the extension cannot serve
- * downloads at all (see `EXTENSION_CANNOT_SERVE` in
- * `local_operator/browser_bridge/protocol.py`), so this function's caller lives
- * in the other host.
+ * file BEFORE it lands, where the platform lets it; the extension's download path
+ * cannot (Chrome reports a download only once the transfer exists, and a name
+ * alone must never be a verdict — a `.exe` over PDF bytes is allowed as a PDF),
+ * so this function's callers live in the other host and in Python.
  */
 export function executableName(raw: string): boolean {
   const ext = extensionOf(raw);

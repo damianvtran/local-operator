@@ -1277,3 +1277,109 @@ def test_a_quiet_owner_line_names_the_age_and_the_ladders_first_rung(
     # The claims that were withdrawn.
     assert "ends it" not in flat, flat
     assert "recover on its own" not in flat, flat
+
+
+# ---------------------------------------------------------------------------
+# D4: the supervisor named on these two lines must be the one on THIS host.
+# ---------------------------------------------------------------------------
+
+#: The state word and the supervisor's own vocabulary, per host. macOS is first
+#: and byte-identical to the wording this branch inherited, because making
+#: Windows and Linux work is not a reason to rewrite the platform that did.
+_SUPERVISOR_WORDING = [
+    ("launchctl", "loaded but NOT running (launchd has the job; it has exited)"),
+    ("systemctl", "loaded but NOT running (systemd has the unit; it has exited)"),
+    ("schtasks", "loaded but NOT running (Task Scheduler has the task; it has exited)"),
+]
+_UNLOADED_WORDING = [
+    ("launchctl", "not loaded (a plist exists but launchd has no job)"),
+    ("systemctl", "not loaded (a unit file exists but systemd has not loaded it)"),
+    ("schtasks", "not loaded (a task definition exists but Task Scheduler has not registered it)"),
+]
+
+
+@pytest.mark.parametrize(("kind", "expected"), _SUPERVISOR_WORDING)
+def test_a_stopped_supervisor_is_named_in_its_own_words(
+    kind: str,
+    expected: str,
+    stopped_supervisor,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D4: both of these lines became REACHABLE off macOS in this same PR.
+
+    Before it, the wake installer was the probe-documented ``FAIL wake.install``
+    ("no supervisor installer for this platform") on Linux and Windows, so no
+    unit could exist for ``wake status`` to report on and neither parenthetical
+    could print. This PR gives both platforms a real installer, which makes
+    "loaded but NOT running" the ordinary state a Linux or Windows operator
+    reaches right after ``lop wake install`` — and they were being told
+    "launchd has the job", a daemon that does not exist on their machine.
+    """
+    from local_operator.cli import wake_command
+
+    monkeypatch.setattr("local_operator.supervisors.supervisor", lambda: kind)
+
+    assert wake_command(_args()) == 0
+    line = _status_block(capsys.readouterr().out, "supervisor:")
+
+    assert expected in line, line
+    if kind != "launchctl":
+        # The leak, stated as its own assertion so a future edit cannot bring
+        # one platform's vocabulary back into another's line.
+        assert "launchd" not in line and "plist" not in line, line
+
+
+@pytest.mark.parametrize(("kind", "expected"), _UNLOADED_WORDING)
+def test_a_registration_file_with_no_job_is_named_in_its_own_words(
+    kind: str,
+    expected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The sibling line, whose flag comes from ``plist_path()``.
+
+    That function already answered per platform — the systemd unit path on
+    Linux, our own copy of the Task Scheduler definition on Windows — so the
+    word "plist" was the only part of this line still spelling a macOS file
+    type at a Linux or Windows reader (D4).
+
+    ``plist_path`` is patched to a scratch file rather than created through the
+    installer: the real function answers under the REAL home on macOS, and the
+    one thing an isolated test must never do is write there.
+    """
+    from local_operator.cli import wake_command
+
+    registration = tmp_path / "registration"
+    registration.write_text("", encoding="utf-8")
+    monkeypatch.setattr("local_operator.wakes.install.is_supported", lambda: True)
+    monkeypatch.setattr("local_operator.wakes.install.supervisor_state", lambda _config: None)
+    monkeypatch.setattr("local_operator.wakes.install.plist_path", lambda: registration)
+    monkeypatch.setattr("local_operator.supervisors.supervisor", lambda: kind)
+
+    assert wake_command(_args()) == 0
+    line = _status_block(capsys.readouterr().out, "supervisor:")
+
+    assert expected in line, line
+    if kind != "launchctl":
+        assert "launchd" not in line and "plist" not in line, line
+
+
+def test_no_supervisor_falls_back_to_no_platforms_vocabulary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``supervisor()`` can answer ``None``; the fallback must not guess a platform.
+
+    Neither of the two lines is reachable in that state — ``is_supported()``
+    gates both, and the honest rendering there is "not installed" — so this pins
+    the helper against a future caller, not against the status command.
+    """
+    from local_operator.cli import _supervisor_parentheticals
+
+    monkeypatch.setattr("local_operator.supervisors.supervisor", lambda: None)
+
+    loaded, unloaded = _supervisor_parentheticals()
+    for phrase in (loaded, unloaded):
+        for platform_word in ("launchd", "plist", "systemd", "Task Scheduler", "schtasks"):
+            assert platform_word not in phrase, phrase

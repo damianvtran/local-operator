@@ -17,6 +17,7 @@ from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from local_operator import procstate
 from local_operator.paths import config_dir
 
 RUN_DIRNAME = "run/browser"
@@ -118,6 +119,24 @@ class BridgeState(HeartbeatState):
     #: this, so its ABSENCE names the writer. Defaults false, so a record written
     #: by an older daemon (and every fixture) reads as "an old writer".
     capabilities_known: bool = False
+    #: The servable methods the OPERATOR has switched off in the extension's own
+    #: options, as the extension last reported them (protocol.CapabilitySwitches).
+    #:
+    #: Published for the same reason `capabilities` is: the session-side decision it
+    #: drives — WHICH remedy the refusal names — must not cost a socket round-trip.
+    #: It is a separate list rather than "absent from capabilities" because the two
+    #: absences have opposite remedies: a method the build cannot serve needs an
+    #: UPDATE, and one the operator has not enabled needs the switch. Blanked when
+    #: no link is proven, like every other proven-only fact here.
+    disabled_capabilities: list[str] = []
+    #: Whether the DAEMON that wrote this file speaks the switch advertisement at
+    #: all — its own build stamp, NOT the extension's, exactly like
+    #: `capabilities_known` and for the same reason: an empty `disabled` list has
+    #: two causes (the operator enabled everything / nobody told us about switches)
+    #: and only the writer can say which. Absent (false) means a daemon that
+    #: predates the switches, whose records must keep reading as "no switch answer",
+    #: never as "the operator enabled it".
+    switches_known: bool = False
     #: Whether a KNOWN extension version is strictly below the one this runtime
     #: ships with (`protocol.EXPECTED_EXTENSION_VERSION`). The predicate lives
     #: in the daemon (see `BridgeService.publish`) and is published rather than
@@ -220,17 +239,14 @@ def read(
 
 
 def pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-    return True
+    """Whether some process still holds this pid.
+
+    Delegates to :func:`local_operator.procstate.pid_alive`, which asks the
+    right question per platform: `os.kill(pid, 0)` here would TERMINATE the
+    bridge daemon it is probing on Windows (signal 0 is `TerminateProcess`
+    there), and this decides whether the daemon's state file is trusted.
+    """
+    return procstate.pid_alive(pid)
 
 
 def heartbeat_age(current: HeartbeatStamp, *, now: float | None = None) -> float:

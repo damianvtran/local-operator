@@ -126,6 +126,15 @@ lint: ## Run linting with flake8
 # `.venv/bin/python ...` goes through the interpreter, and every gate the module
 # then runs is spelled `python -m` or `uvx` for the #423 reason above: a bare
 # `.venv/bin/flake8` can exit 126 and be swallowed by a pipeline.
+# File-level narrowing happens inside that module (its fourth section), and it
+# narrows ONLY where the selection can be proven complete: `lint` over the changed
+# files, `type-check` over the changed files plus their reverse dependents. The two
+# pytest jobs run whole-tree on this tree — the graph carries hundreds of references
+# it cannot place (any one of them stops a selection), and a change inside the app
+# boot closure always does. `--no-scope` runs the whole-tree commands anyway and
+# `--dry-run` prints the plan without running it; falling back is printed with the
+# trigger that caused it, and CI's full matrix stays the authoritative gate.
+# AGENTS.md, "Scoping the inner loop", has the rule, the trigger list and the costs.
 check-changed: ## Run the CI gates this branch's diff can affect
 	@base="$$(git merge-base origin/main HEAD 2>/dev/null || git rev-parse origin/main)"; \
 	echo "checking changes since $$base"; \

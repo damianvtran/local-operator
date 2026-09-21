@@ -26,9 +26,24 @@ def _force_browser_available(monkeypatch):
     desktop app running would otherwise flip every host-diagnosis assertion in
     this file from a probe that has nothing to do with the test. Tests that
     need it ON say so themselves.
+
+    ``console`` is the same story one capability over, with the OPPOSITE polarity
+    and for a reason of its own: it is forced ON here, not OFF. The default surface
+    this file asserts the order of
+    (``test_inventory_block_matches_default_tool_order``, against
+    ``DEFAULT_TOOL_NAMES``) CONTAINS ``console`` — the tool is absent rather than
+    hidden where the app cannot serve it, so what the gate decides is whether that
+    assertion sees the full 27-tool default surface or a 26-tool subset that
+    depends on whether the developer happens to be running the desktop app.
+    Nothing console-specific is asserted in THIS file: the note's three states
+    (host has the app, host has no app, role not given the tool) belong to
+    ``test_prompts_console_flags.py``, which sets the gate itself in both
+    directions. A reader who "fixed" this line to ``False`` would break the
+    ordering assertion, which is why the comment now says which way it is forced.
     """
     monkeypatch.setattr(builtin, "cmux_browser_available", lambda: True)
     monkeypatch.setattr(builtin, "ui_browser_advertisable", lambda: False)
+    monkeypatch.setattr(builtin, "ui_console_advertisable", lambda: True)
 
 
 if TYPE_CHECKING:

@@ -62,6 +62,26 @@ _AMBIENT_VARS = (
     # trail. Inherited from the operator's own runtime it would write their
     # real session id into a sandboxed store's audit rows.
     "LOCAL_OPERATOR_SESSION_ID",
+    # The update window's bounds (``buildwatch.UPDATE_LOCK_S`` and its
+    # heartbeat). They are read through ``buildwatch.update_lock_seconds()`` so
+    # the e2e stage can fail a window inside its budget, which makes them an
+    # ESCAPE HATCH over a rule the suite asserts — the same class as
+    # ``ALLOW_NESTED_SESSION``. Inheriting either from an operator's shell would
+    # move the bound the cells on the update window and its failure arm assert,
+    # and the cells would keep passing while testing a window nothing ships.
+    "LOP_UPDATE_LOCK_S",
+    "LOP_UPDATE_LOCK_HEARTBEAT_S",
+    # The marker the desktop app injects into a console surface's environment
+    # (design ui-console-tab §6.5), read by ``local_operator/terminals.py``'s
+    # ``is_local_operator_console`` and therefore by
+    # ``tui/glyphs._nerd_capable_terminal`` — the clause that tells a `lop` TUI
+    # running inside one of those surfaces that the app renders PUA glyphs.
+    # Agents DO run test suites from inside a console surface, and an inherited
+    # value would hand every glyph/host-diagnosis assertion the app's answer
+    # instead of the developer's terminal: a test asserting the plain table
+    # would silently measure the Nerd one. It names a real machine resource (a
+    # surface handle), so it is scrubbed rather than explained.
+    "LOCAL_OPERATOR_CONSOLE_SURFACE",
     # The marker the harness's `bash` tool sets on every command it runs. It
     # now decides whether a `lop` invocation may open a session at all
     # (`local_operator/agent_shell.py`), so an inherited value would refuse the
@@ -81,6 +101,16 @@ _AMBIENT_VARS = (
     # suite would take the allow path while looking like it tested the refusal.
     # Tests that need it set it explicitly.
     "LOCAL_OPERATOR_AGENT_MAY_DELEGATE",
+    # The escape that waives the test-hosting rule, so a suite whose subject is a
+    # notification frame can observe one (it answers "not a test session", and
+    # the process kill switch still wins). An inherited value is the
+    # ALLOW_NESTED_SESSION failure again, one layer down: every cell that asserts
+    # the RULE — that a mock session is never announced by the TUI observer, the
+    # feed or the bridge — would silently take the allow path while looking like
+    # it tested the refusal, and the operator's own shell would be deciding what
+    # the suite observes. Tests that need it set it through
+    # `tests/notification_opt_in.notification_path_opt_in`.
+    "LOCAL_OPERATOR_NOTIFY_TEST_HOSTING",
     # Tests launched from a detached operator inherit these runtime-only flags.
     # They turn strict --resume validation into adoption of a brand-new id.
     "LOP_RUNTIME_ADOPT_SESSION",
@@ -177,6 +207,59 @@ _AMBIENT_VARS = (
     "ZAI_API_KEY",
     "HF_TOKEN",
 )
+
+#: The two escape hatches that keep a test from reaching the developer's real
+#: DESKTOP, set in the PROCESS environment at import time as well as per test by
+#: ``isolate_environment``.
+#:
+#: WHY BOTH. ``monkeypatch.setenv`` in the autouse fixture is enough for the test
+#: process itself and enough for a child that copies ``os.environ`` wholesale —
+#: but the e2e and rig builders deliberately hand a child a FILTERED environment
+#: (dropping ``CMUX_*``/``LOP_*``), and a builder that constructs its mapping
+#: from scratch never sees a fixture's value at all. Those children are real
+#: ``lop`` runtimes started against a scratch store, and a runtime with neither
+#: switch announces a parked gate through ``detached_notify`` — a genuine
+#: ``osascript display notification`` on this machine. Setting them here, at
+#: import, means every child built from any spelling of the environment inherits
+#: them, which is the only version of this gate a spawned process can honour.
+#:
+#: The fixture still sets them per test: a test that wants to exercise the
+#: notification path unsets or monkeypatches around that (the visible, deliberate
+#: opt-in), and that must keep working — a test that cleared the variable could
+#: otherwise leave the suite's later tests un-gated in the same xdist worker.
+_PROCESS_DESKTOP_GATES: tuple[tuple[str, str], ...] = (
+    ("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1"),
+    ("LOCAL_OPERATOR_NO_DESKTOP_LAUNCH", "1"),
+)
+
+
+def arm_process_desktop_gates() -> None:
+    """Set every process-wide desktop escape hatch, before anything else runs.
+
+    Idempotent and safe to call twice (import time and ``pytest_configure``),
+    which it deliberately is: conftest import order differs between a plain run
+    and an xdist worker's, and a gate that depends on which of the two happened
+    first is a gate that fails open on the path nobody tested.
+    """
+    for name, value in _PROCESS_DESKTOP_GATES:
+        os.environ[name] = value
+
+
+# At IMPORT, not only in a hook: a collection-time import (a module-scope helper,
+# a fixture that builds a child env) runs before ``pytest_configure`` in a worker
+# that receives already-collected items, and the whole point of setting it here
+# is that no child can be spawned before it is in the environment.
+arm_process_desktop_gates()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Re-assert the desktop gates once pytest owns the process.
+
+    Cheap, and it covers the one case import-time cannot: a plugin or an earlier
+    conftest that cleared the environment between this module's import and the
+    session's first test.
+    """
+    arm_process_desktop_gates()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -284,6 +367,12 @@ def isolate_environment(tmp_path_factory, monkeypatch):
     # and it gets the same answer: gate it centrally, once, for every test.
     # A test that specifically exercises the notification path unsets or
     # monkeypatches around this, which is the visible, deliberate opt-in.
+    #
+    # BOTH lines are also set at module import (`arm_process_desktop_gates`),
+    # because a child spawned with a hand-built environment never sees a
+    # fixture's value; what the fixture adds is the RESTORE — monkeypatch puts
+    # these back after each test, so a test that cleared one cannot leave the
+    # rest of the worker un-gated.
     monkeypatch.setenv("LOCAL_OPERATOR_NO_NOTIFICATIONS", "1")
     # ...and the same gate for the OTHER way a test can reach the real desktop:
     # `lop resume-click` launches the desktop app when one is installed, and

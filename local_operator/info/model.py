@@ -163,6 +163,22 @@ class SessionLine:
     #: working and otherwise indistinguishable from an ordinary busy one, which
     #: is what made a plain ``lop stop`` on it destructive (U1/U2, PR #1141).
     leaving: str = ""
+    #: An UPDATE WINDOW is open — this IDLE runtime is moving to the build on disk
+    #: and QUEUEING admissions for the successor — and this is the build pair it is
+    #: moving to (``SessionRecord.updating``), or ``""``. The drain's sibling field
+    #: one line up, and the reason it is a second field rather than another value of
+    #: ``leaving``: the two states promise opposite things to the person reading the
+    #: row. A drain will not take a message; a window already has it and will run it
+    #: one second later, which is the difference between "send it again" and "wait".
+    updating: str = ""
+    #: A window that FAILED — the pair it could not move to (``SessionRecord.update_failed``),
+    #: or ``""``. Its own field rather than a value of the one above, because the two
+    #: are opposite facts about the SAME move and a reader must be able to tell
+    #: "still moving" from "gave up and stayed": one promises the message runs on the
+    #: new build, the other that it runs on the old one. Precedence between the three
+    #: update fields, and which one a surface should render, is
+    #: ``types.update_phase``'s decision — not a reader's.
+    update_failed: str = ""
     detached: bool = False
     version: str = ""
     source_ref: str = ""

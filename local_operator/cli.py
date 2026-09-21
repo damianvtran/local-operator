@@ -66,6 +66,8 @@ from local_operator.paths import config_dir
 from local_operator.resume import RESUME_LATEST
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from local_operator.agents import AgentRegistry
 
 from local_operator.helpers import setup_cross_platform_environment
@@ -669,7 +671,8 @@ def build_cli_parser() -> argparse.ArgumentParser:
         "sessions",
         help=(
             "List active lop sessions and their resource usage; "
-            "`sessions cleanup` previews or runs the session cleanup policy"
+            "`sessions cleanup` previews or runs the session cleanup policy; "
+            "`sessions reclaim` previews or ends runtimes nothing can reach"
         ),
         parents=[parent_parser],
     )
@@ -768,6 +771,56 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="remove directories that never got a transcript (overrides config)",
     )
     cleanup_parser.add_argument("--json", action="store_true", help="machine-readable output")
+
+    # `lop sessions reclaim`: the external door to the residency sweep — the
+    # same pass the wake supervisor runs on its own cadence, for the case where
+    # the thing an operator wants ended is not one session but the RESIDENCY
+    # itself. A runtime that published no record cannot be listed here, cannot
+    # be stopped with `lop stop`, and cannot be reached by any client; before
+    # this command the only way to find one was `ps`. A sub-subcommand of
+    # `sessions` rather than a top-level verb because it is the third question
+    # about the fleet (`sessions` lists it, `send` talks to it, `reclaim`
+    # bounds it) and it reads the same discovery namespaces.
+    #
+    # IT IS A DRY RUN UNLESS THE CALLER SAYS OTHERWISE, and the confirmation
+    # that a real run asks for is not a formality: it is the same process-
+    # table question the sweep asks twice before it signals anything.
+    reclaim_parser = sessions_subparsers.add_parser(
+        "reclaim",
+        help="End session runtimes nothing can reach (dry run; --yes to act)",
+        description=(
+            "Find live session runtimes that no discovery record, no viewer, no "
+            "attach and no existing config root can reach, and ask them to leave "
+            "with SIGTERM. The runtime finishes any turn in flight first (its own "
+            "signal drain, bounded by SIGNAL_DRAIN_S) — this command never sends "
+            "SIGKILL. Any runtime with a record, an attached interface, a live root "
+            "it does not own, or CPU spent inside the confirm window is refused."
+        ),
+        parents=[parent_parser],
+    )
+    reclaim_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="list what would be reclaimed, without signalling anything",
+    )
+    reclaim_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="do not ask for confirmation before signalling",
+    )
+    reclaim_parser.add_argument(
+        "--confirm-s",
+        type=_confirm_window,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "how long to watch before signalling (default: 60, minimum: 50). The "
+            "window is the safety property: a runtime that gains a record, an attach "
+            "or CPU inside it is dropped from the pass, and a window too short to "
+            "measure CPU would drop one of the four refusals"
+        ),
+    )
+    reclaim_parser.add_argument("--json", action="store_true", help="machine-readable output")
 
     # The kill switch (design §12): end a session from outside it. Top-level
     # like `lop sessions` and `lop send` — the coherence triple is "what is
@@ -2852,9 +2905,14 @@ def browser_command(args: argparse.Namespace) -> int:
         command_line = browser_install.logs_command(args.lines, follow=args.follow)
         # A log file that was never created means the daemon has not run under
         # a supervisor here, which is a different thing from "it ran and said
-        # nothing". Say which, instead of leaving the user with `tail`'s
-        # "No such file or directory" on a path they never chose.
-        if command_line[0] == "tail" and not browser_install.log_path().exists():
+        # nothing". Say which, instead of leaving the user with the log
+        # reader's "No such file or directory" on a path they never chose.
+        # Asked of the install ("does this platform's command read the log
+        # file?") rather than of the argv's first token: only the installer
+        # knows which platforms redirect into that file and which read the
+        # journal instead, and the Windows arm's command is PowerShell's
+        # Get-Content, not a tail.
+        if browser_install.logs_read_the_log_file() and not browser_install.log_path().exists():
             print(
                 f"no daemon log at {browser_install.log_path()}.\n"
                 "The bridge has not run under a service supervisor on this machine. "
@@ -3329,6 +3387,32 @@ def _non_negative_int(text: str) -> int:
     return value
 
 
+def _confirm_window(text: str) -> int:
+    """argparse type for ``sessions reclaim --confirm-s``: seconds, with a floor.
+
+    A SHORTER WINDOW IS A SWEEP WITH NO CPU RUNG, not a faster sweep: the CPU
+    budget is ``max(BUSY_CPU_FLOOR_S, BUSY_CPU_FRACTION * elapsed)``, so below
+    ``MIN_ACTIONABLE_CONFIRM_S`` the floor dominates and no measurement can
+    exceed it. ``0`` was the worst case and it was reachable — ``--confirm-s 0``
+    parsed (the type was a non-negative int) and skipped the watch entirely, and
+    QA round 1 (Q2) measured a process with 90.4 s of cumulative CPU being
+    admitted and SIGTERMed at that window, having been correctly refused at the
+    default one (6.30 s spent per 60 s against a 1.2 s budget). The floor is
+    derived from those two constants rather than restated, so it moves with them.
+    ``--dry-run`` remains available for looking without a window at all.
+    """
+    from local_operator.session.runtime.reclaim import MIN_ACTIONABLE_CONFIRM_S
+
+    value = int(text)
+    if value < MIN_ACTIONABLE_CONFIRM_S:
+        raise argparse.ArgumentTypeError(
+            f"the confirm window must be at least {MIN_ACTIONABLE_CONFIRM_S:.0f}s, "
+            f"got {value}: a shorter window cannot measure CPU, so the sweep would "
+            "act on two sightings with no separation and no CPU refusal in between"
+        )
+    return value
+
+
 def _cleanup_row(candidate: Any, verb: str) -> str:
     """One decision, with what a user needs to judge it: name, age, size."""
     # Budgeted to 100 columns with a 12-hex id, the origin column and the
@@ -3520,6 +3604,117 @@ def sessions_cleanup_command(args: argparse.Namespace) -> int:
         print(f"  {result.errors} error(s); see the log", file=sys.stderr)
     print(f"record: {record_path}")
     return 3 if result.errors else 0
+
+
+def sessions_reclaim_command(args: argparse.Namespace) -> int:
+    """``lop sessions reclaim [--dry-run] [--yes] [--confirm-s N]``.
+
+    The operator's door to the external residency sweep
+    (:mod:`local_operator.session.runtime.reclaim`) — the same pass the wake
+    supervisor runs on its own cadence, exposed because the supervisor retires
+    when nothing is fireable and because a person asking "what is still holding
+    memory" should not have to wait for a wake to be due.
+
+    Order of operations is LIST, WAIT, CONFIRM, SIGNAL. The wait is the point: the
+    sweep's decision is taken from TWO sightings of the process table, so this
+    command watches for ``--confirm-s`` seconds (default ``reclaim.CONFIRM_S``)
+    between them and drops anything that gained a record, an attach or CPU in
+    between. A runtime whose record appears while the operator is reading the
+    listing is therefore never signalled.
+
+    Exit codes: 0 looked (dry run, or nothing to reclaim) or reclaimed; 2 refused
+    (confirmation declined, or no terminal and no ``--yes``); 3 signalled but at
+    least one runtime had not gone within the wait.
+    """
+    import json as _json
+
+    from local_operator.session.runtime.reclaim import (
+        CONFIRM_S,
+        EXIT_WAIT_S,
+        Sightings,
+        reclaim_runtimes,
+    )
+
+    root = config_dir()
+    confirm_s = CONFIRM_S if args.confirm_s is None else float(args.confirm_s)
+    sightings = Sightings()
+
+    # PASS 1 — the listing. Same call, same rule, nothing signalled: what the
+    # operator reads here is produced by the code that later acts, so the two
+    # cannot disagree about which runtimes are candidates.
+    preview = reclaim_runtimes(root, apply=False, sightings=sightings, confirm_s=confirm_s)
+    candidates = preview.reclaimed + preview.pending
+
+    def row(item: Any, verb: str) -> str:
+        return (
+            f"  {verb} pid {item.process.pid:<7} session {item.session_id or '<unknown>':<24} "
+            f"root {item.config_root or '<unknown>':<40} "
+            f"alive {item.process.age_s / 3600.0:.1f}h cpu {item.process.cpu_s:.1f}s"
+        )
+
+    if args.json:
+        print(_json.dumps(preview.to_json(), indent=2))
+        return 0
+
+    print(preview.summary())
+    if args.dry_run:
+        for item in candidates:
+            print(row(item, "would reclaim"))
+        print(
+            f"nothing was signalled (dry run); a real run watches {confirm_s:.0f}s before it acts, "
+            "and drops anything that gains a record, an attach or CPU in that window"
+        )
+        return 0
+
+    if not candidates:
+        print("nothing to reclaim: every live session runtime is either recorded or refused")
+        return 0
+
+    for item in candidates:
+        print(row(item, "will reclaim"))
+    confirmed: bool | None = None
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print(
+                "refusing: not a terminal and --yes was not given, so nothing was signalled",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            answer = input(f"end {len(candidates)} unreachable runtime(s)? type 'yes' to confirm: ")
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        confirmed = answer.strip().lower() == "yes"
+        if not confirmed:
+            print("not confirmed; nothing was signalled")
+            return 2
+
+    # PASS 2 — the confirm window elapses, then the SAME memory is asked to act.
+    # The decision is not re-derived from this listing: the second pass re-censuses
+    # and re-reads the records, so a runtime that became reachable in between is
+    # refused by the same rungs that refused the others, and the CPU delta the pass
+    # measures is over the window the operator just waited out.
+    if confirm_s > 0:
+        print(f"watching {confirm_s:.0f}s for a record, an attach or CPU before signalling...")
+        time.sleep(confirm_s)
+    report = reclaim_runtimes(
+        root, apply=True, sightings=sightings, confirm_s=confirm_s, wait_s=EXIT_WAIT_S
+    )
+    print(
+        f"signalled {len(report.signalled)} runtime(s); {len(report.exited)} gone within "
+        f"{EXIT_WAIT_S:.0f}s"
+    )
+    for item in report.exited:
+        print(row(item, "gone    "))
+    for item in report.signalled:
+        if item in report.exited:
+            continue
+        # A signalled runtime that is still there is NOT a failure: its own drain is
+        # bounded by SIGNAL_DRAIN_S and finishing a turn can take that long. Reported
+        # as still-leaving rather than as an error, because "it did not die" is what
+        # the drain is for.
+        print(row(item, "leaving "))
+    return 3 if len(report.exited) < len(report.signalled) else 0
 
 
 def _positive_int(value: str) -> int:
@@ -3769,6 +3964,9 @@ def sessions_command(args: argparse.Namespace) -> int:
     if getattr(args, "sessions_command", None) == "cleanup":
         return sessions_cleanup_command(args)
 
+    if getattr(args, "sessions_command", None) == "reclaim":
+        return sessions_reclaim_command(args)
+
     # The row shape lives in ``info.collect`` and is shared with ``/info``,
     # which needs the same "which sessions exist and what do they cost" answer
     # plus an ``is_self`` mark and roll-up counters. It was EXTRACTED rather
@@ -3900,6 +4098,17 @@ def sessions_command(args: argparse.Namespace) -> int:
         for row in rows
     }
     show_peer = any(str(row.get("locality") or "") == "remote" for row in rows)
+    # The same rule as LEAVING and WHY above, and the same reason it must be a
+    # SEPARATE column rather than part of that one: a session mid-update is alive,
+    # accepting messages, and about to run them (``types.UPDATING``) — the operator
+    # reading that row must not be told to re-send what is already queued.
+    updating = {row["session_id"]: (row.get("updating") or "") for row in rows}
+    failed = {row["session_id"]: (row.get("update_failed") or "") for row in rows}
+    # THE COLUMN PRINTS WHENEVER ANY ROW HAS SOMETHING TO SAY ABOUT A MOVE, and a
+    # FAILED one counts. A fleet whose only news is an abandoned update used to drop
+    # the column entirely and list that session exactly as an ordinary idle one — the
+    # defect design review round 1 (D1) measured against this renderer.
+    show_updating = any(updating.values()) or any(failed.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3914,6 +4123,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
     if show_peer:
         header += f" {'DEVICE':<{PEER_COLUMN_WIDTH}}"
+    if show_updating:
+        header += f" {'UPDATING':<{UPDATING_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3978,11 +4189,47 @@ def sessions_command(args: argparse.Namespace) -> int:
             # this line rather than sliced by characters.
             held = _fit_cell(peers.get(row["session_id"]) or "?", PEER_COLUMN_WIDTH)
             line += f" {_pad_cell(held, PEER_COLUMN_WIDTH)}"
+        if show_updating:
+            # The cell is RENDERED from the row's pair through the ONE phase reader
+            # (``types.update_phase``/``update_short``), so the copy here, the info
+            # panel and the phone cannot drift into three vocabularies for one state —
+            # and so the FAILED phase reaches this surface at all (design review round
+            # 1, D1, where the row rendered blank).
+            cell = _updating_cell(
+                updating.get(row["session_id"]) or "", failed.get(row["session_id"]) or ""
+            )
+            # MARKED, unlike the cells above: the value here is a BUILD LABEL, so a
+            # silent cut hands the reader a plausible version for a session that is on
+            # a different one (design review round 1, D3 — ``updating →
+            # 0.59.11.dev3+g1`` cut to a real-looking ``0.59.11``). ``_clamp_reason_cell``
+            # already carries that argument for WHY; this is the same mark applied to
+            # the one column whose text is an identifier rather than prose.
+            said = _clamp_reason_cell(cell, UPDATING_COLUMN_WIDTH)
+            line += f" {_pad_cell(said, UPDATING_COLUMN_WIDTH)}"
         print(line)
     return 0
 
 
-def _clamp_reason_cell(summary: str) -> str:
+def _updating_cell(updating: str, failed: str = "") -> str:
+    """The fleet cell for a row's update fields. ``""`` when it carries no move.
+
+    The IMPORT IS FUNCTION-LOCAL on purpose, for the reason the column widths are
+    not imported at all: this module keeps session internals out of its module
+    scope so ``lop``'s CLI can start without paying for the runtime (see the
+    header). One string formatter reached only on the arm that has a moving session
+    is the whole cost of that here.
+
+    THE PHASE IS READ, NOT ASSUMED. Both fields go through ``types.update_phase``, so
+    a FAILED window renders its own cell instead of a blank one and the precedence
+    between an open window, a failed one and an applied one lives in one place.
+    """
+    from local_operator.session.runtime.types import update_phase, update_short
+
+    phase, pair = update_phase(updating, "", failed)
+    return update_short(phase, pair) if phase else ""
+
+
+def _clamp_reason_cell(summary: str, width: int | None = None) -> str:
     """A WHY cell inside :data:`WHY_COLUMN_WIDTH` CELLS, cut with the marker.
 
     A silent slice is indistinguishable from a complete sentence, and this
@@ -4030,13 +4277,23 @@ def _clamp_reason_cell(summary: str) -> str:
     and a value nothing had to cut is not edited at all (review round 2, N2 —
     recorded as the rule, not changed, because trimming it would be a second,
     invisible edit on a cell that is already correct).
+
+    ``width`` IS A PARAMETER because a second column needs the same mark (design
+    review round 1, D3): the UPDATING cell is a BUILD LABEL, and a silent cut of
+    ``updating → 0.59.11.dev3+g1`` hands the reader a real-looking ``0.59.11`` for a
+    session that is on a different build. Everything above is about the WHY column,
+    which is where the mark was first argued; the arithmetic is the same one, which
+    is why this is a parameter rather than a second function. It defaults to
+    ``WHY_COLUMN_WIDTH`` at CALL time rather than in the signature, because this
+    function is defined above that constant.
     """
-    if _cell_len(summary) <= WHY_COLUMN_WIDTH:
+    if _cell_len(summary) <= (WHY_COLUMN_WIDTH if width is None else width):
         return summary
     # The marker's OWN measured width, not a hard-coded 1: the budget is
     # arithmetic, so a future marker must not be able to push the cell over.
     marker = "…"
-    return _cut_to_cells(summary, WHY_COLUMN_WIDTH - _cell_len(marker)) + marker
+    budget = WHY_COLUMN_WIDTH if width is None else width
+    return _cut_to_cells(summary, budget - _cell_len(marker)) + marker
 
 
 def _cut_to_cells(text: str, budget: int) -> str:
@@ -4436,6 +4693,56 @@ def _wake_rows() -> "list[dict[str, Any]]":
     return rows
 
 
+def _supervisor_parentheticals() -> tuple[str, str]:
+    """The two ``supervisor:`` parentheticals in THIS host's supervisor's words.
+
+    The two lines they belong to — "loaded but NOT running" and "not loaded" —
+    were unreachable off macOS before this branch: the wake installer was the
+    probe-documented ``FAIL wake.install`` ("no supervisor installer for this
+    platform") on Linux and Windows, so no unit could exist to be reported on.
+    Both platforms now have a real installer, which makes these the NORMAL
+    states there after ``lop wake install`` — and a Linux user was being told
+    "launchd has the job" and shown "a plist exists", neither of which names
+    anything on their machine (design round 1, D4). ``plist_path()`` was already
+    platform-shaped (it answers with the systemd unit path or the Task Scheduler
+    definition file); the sentence around it is now too, because a status line
+    that names another platform's supervisor reads as a bug in the install.
+
+    THE macOS ENTRY IS BYTE-IDENTICAL to what it replaced, deliberately: this
+    branch exists to make Windows and Linux work, not to rewrite the copy of the
+    one platform that already worked.
+
+    Returns ``(loaded_but_stopped, file_but_not_loaded)``. A function rather
+    than a module constant so the ``supervisors`` import stays inside it — the
+    CLI is the package's hottest import path and only this subcommand needs it.
+    """
+    from local_operator import supervisors
+
+    kind = supervisors.supervisor()
+    if kind == supervisors.SYSTEMCTL:
+        return (
+            "systemd has the unit; it has exited",
+            "a unit file exists but systemd has not loaded it",
+        )
+    if kind == supervisors.SCHTASKS:
+        return (
+            "Task Scheduler has the task; it has exited",
+            "a task definition exists but Task Scheduler has not registered it",
+        )
+    if kind == supervisors.LAUNCHCTL:
+        return (
+            "launchd has the job; it has exited",
+            "a plist exists but launchd has no job",
+        )
+    # ``supervisor()`` answered ``None``: no supervisor exists on this host, so
+    # neither line below can print (``is_supported()`` gates both). Answer in
+    # nouns that name no platform rather than guessing one.
+    return (
+        "a supervisor has the job; it has exited",
+        "a job definition exists but no supervisor has it",
+    )
+
+
 def wake_command(args: argparse.Namespace) -> int:
     """``lop wake status|list|serve`` — scheduled wakes and their supervisor.
 
@@ -4764,7 +5071,12 @@ def wake_command(args: argparse.Namespace) -> int:
 
     if getattr(args, "uninstall", False):
         outcome = uninstall()
-        print(f"supervisor: {outcome.reason}")
+        # `_wrap_status`, not a bare f-string: an unwrapped reason that runs
+        # past the terminal width continues at column 0 and reads as a new
+        # line of output rather than as the rest of this one, and it sits a
+        # cell out of line with the wrapped status lines below it (design
+        # round 2, D12). Every reason here can be long: they name a path.
+        print(_wrap_status(f"supervisor: {outcome.reason}"))
         return 0
 
     # NOT `harness.wake.format_duration` here: the status lines use this
@@ -4781,7 +5093,7 @@ def wake_command(args: argparse.Namespace) -> int:
     wants_install = command == "install" or getattr(args, "install", False)
     if wants_install:
         outcome = ensure_supervisor_installed(config_dir())
-        print(f"supervisor: {outcome.reason}")
+        print(_wrap_status(f"supervisor: {outcome.reason}"))
 
     # RUNNING, not merely present. `plist_path().exists()` was an even weaker
     # test than the install hook's `_is_loaded()` — it reported "installed"
@@ -5032,17 +5344,16 @@ def wake_command(args: argparse.Namespace) -> int:
             detail += f", up {_format_duration(uptime_s)}"
         print(_wrap_status(detail, "supervisor:"))
     elif state and state.loaded:
-        # The exact state that produced the permanent misses: launchd knows
-        # the job, `launchctl print` returns 0, and nothing is running. The
-        # parenthetical carries the LAUNCHD fact rather than repeating the
-        # state word it was meant to disambiguate (round 1, D9).
-        print(
-            _wrap_status(
-                "loaded but NOT running (launchd has the job; it has exited)", "supervisor:"
-            )
-        )
+        # The exact state that produced the permanent misses: the supervisor
+        # knows the job, its own query returns 0, and nothing is running. The
+        # parenthetical carries the SUPERVISOR'S OWN fact rather than repeating
+        # the state word it was meant to disambiguate (round 1, D9), and it is
+        # spelled for the supervisor answering here (round 1, D4).
+        _loaded_but_stopped, _ = _supervisor_parentheticals()
+        print(_wrap_status(f"loaded but NOT running ({_loaded_but_stopped})", "supervisor:"))
     elif plist_present:
-        print(_wrap_status("not loaded (a plist exists but launchd has no job)", "supervisor:"))
+        _, _file_but_unloaded = _supervisor_parentheticals()
+        print(_wrap_status(f"not loaded ({_file_but_unloaded})", "supervisor:"))
     else:
         print(_wrap_status("not installed", "supervisor:"))
     # ONE remedy line, not two (round 1, Q3/D7). Both the per-state hint and
@@ -5251,7 +5562,7 @@ def _state_cell(state: str) -> str:
 #: Width of `lop sessions`' trailing WHY column, in display CELLS.
 #:
 #: Bounded because a reason is a SENTENCE — ``the runtime disappeared without
-#: exiting cleanly while this turn was running, and nothing recorded a stop``
+#: exiting cleanly while this turn was running, and no stop was asked for``
 #: is 104 cells — and an unbounded column re-flows the whole table on a normal
 #: terminal. The full text is one flag away in ``--json``'s
 #: ``completion_reason`` and is what a script should read.
@@ -5283,6 +5594,31 @@ WHY_COLUMN_WIDTH = 48
 #: header) — so a reword of the phrase fails loudly there instead of silently
 #: cutting the new clause off the row.
 LEAVING_COLUMN_WIDTH = 51
+
+#: Width of `lop sessions`' trailing UPDATING column, in display CELLS.
+#:
+#: A SECOND COLUMN RATHER THAN A WORD IN ``LEAVING``, and that is the feature rather
+#: than a layout choice: the two fields are opposite promises. A ``leaving`` row says
+#: this runtime will not take a message ("send it again once the new build is up");
+#: an ``updating`` row says it ALREADY HAS it and runs it when the successor
+#: boots. Folding them into one cell would make the operator re-send a message that
+#: is queued — the exact harm the window exists to prevent (``types.UPDATING``).
+#:
+#: Sized from ``types.update_short``, whose pair is the wide part and which is why
+#: the cell names only the NEW build: 26 is ``"updating → "`` (11 cells) plus the
+#: longest label ``BuildStamp.label()`` can produce — ``0.59.11`` and ``@`` and the
+#: 7-character ref git itself abbreviates to, so 15. The failed phase's cell is
+#: shorter and carries no pair on purpose (see that function): its move did not
+#: happen, so naming a build there would read as one that did.
+#:
+#: Like ``LEAVING_COLUMN_WIDTH`` the number is written out rather than imported
+#: (this module keeps session internals out of its module scope on purpose, see the
+#: header) and is pinned against the vocabulary by
+#: ``tests/unit/session/runtime/test_updating_vocabulary.py``.
+#:
+#: Appears only when some row carries one, exactly like LEAVING and WHY: a listing
+#: with no runtime mid-update is byte-for-byte what it was before.
+UPDATING_COLUMN_WIDTH = 26
 
 
 #: Widths of `lop sessions`' three TEXT columns, in display CELLS.
@@ -5734,6 +6070,124 @@ def _format_duration(seconds: float) -> str:
     return format_age(seconds)
 
 
+def _tail_last_lines(text: str, count: int) -> list[str]:
+    """The last ``count`` lines of ``text``, newline-terminated for printing.
+
+    Split on ``\n`` alone, not ``str.splitlines``: the latter also breaks on
+    ``\v``, ``\f`` and the Unicode line separators, so it would report line
+    numbers ``tail`` does not (a log line carrying a form feed would count as
+    two). A trailing newline does not open a further empty line.
+    """
+    if count <= 0:
+        return []
+    parts = text.split("\n")
+    if parts and parts[-1] == "":
+        parts.pop()
+    return [part + "\n" for part in parts[-count:]]
+
+
+def _python_tail(paths: Sequence[Path], lines: int, *, follow: bool) -> int:
+    """Print log tails in-process, for hosts whose userland has no ``tail``.
+
+    Windows ships no ``tail``, and it has no ``/bin/sh`` to borrow one from, so
+    this is the *whole* implementation there rather than a second behaviour
+    beside ``tail`` on the platforms that have it — the caller only reaches here
+    after ``subprocess.call`` has already raised ``FileNotFoundError``.
+
+    ``follow`` is the ``-F`` shape for the reasons in the caller's comment: a
+    runtime log created after the follow started must still be picked up, and
+    rotation (a RENAME here, because the handler bounds the file by renaming)
+    must not leave the reader watching a dead inode. Both fall out of re-stat'ing
+    the PATH every poll and comparing identity, which is what ``-F`` does.
+    """
+    offsets: dict[Path, int] = {}
+    keys: dict[Path, tuple[int, int] | None] = {}
+    if not follow:
+        for index, path in enumerate(paths):
+            if index:
+                print()
+            print(f"==> {path} <==")
+            for line in _tail_last_lines(_read_text(path), lines):
+                sys.stdout.write(line)
+        return 0
+    try:
+        while True:
+            for path in paths:
+                try:
+                    stat = path.stat()
+                except OSError:
+                    # Not created yet, or mid-rotation and the replacement has
+                    # not been renamed into place. ``-F`` retries a missing file
+                    # quietly; so does this.
+                    continue
+                identity = (stat.st_ino, stat.st_dev)
+                if keys.get(path) != identity:
+                    # First sight, or the file was replaced under us: header and
+                    # the tail, exactly as ``tail`` prints on opening a file.
+                    keys[path] = identity
+                    print(f"==> {path} <==")
+                    try:
+                        with path.open("r", encoding="utf-8", errors="replace") as handle:
+                            text = handle.read()
+                            offsets[path] = handle.tell()
+                    except OSError:
+                        continue
+                    for line in _tail_last_lines(text, lines):
+                        sys.stdout.write(line)
+                    sys.stdout.flush()
+                    continue
+                offset = offsets.get(path, 0)
+                if stat.st_size < offset:
+                    # Truncated in place (a copytruncate-style rotation): what is
+                    # there now is all there is.
+                    offsets[path] = 0
+                    continue
+                if stat.st_size == offset:
+                    continue
+                try:
+                    with path.open("r", encoding="utf-8", errors="replace") as handle:
+                        handle.seek(offset)
+                        chunk = handle.read()
+                        offsets[path] = handle.tell()
+                except OSError:
+                    continue
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        return 0
+
+
+def _read_text(path: Path) -> str:
+    """Read a log file for the no-``tail`` path, tolerating a missing one.
+
+    ``errors="replace"`` because a daemon's stdout and a runtime's records can
+    interleave a partial multi-byte sequence; losing one line's glyphs beats
+    failing the command the operator ran to read the log.
+    """
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _run_tail(argv: Sequence[str], paths: Sequence[Path], lines: int, *, follow: bool) -> int:
+    """Run ``tail``, or read the tails in-process on a host that has none.
+
+    ``tail`` stays the only path taken on POSIX: the comments at the call site
+    record measurements against the system ``tail`` (``-F`` follows by NAME,
+    where ``-f`` does not), and reimplementing that for hosts which already have
+    it would be a second behaviour to keep in step. Windows has no ``tail``, so
+    ``subprocess.call`` raised ``FileNotFoundError`` straight out of ``lop mobile
+    logs`` — a traceback instead of the log. Catching exactly that exception and
+    falling back keeps the POSIX path byte-identical.
+    """
+    try:
+        return subprocess.call(list(argv))
+    except FileNotFoundError:
+        return _python_tail(paths, lines, follow=follow)
+
+
 def mobile_command(args: argparse.Namespace) -> int:
     """Dispatch ``lop mobile …``. Imports are lazy: the mobile package pulls
     starlette/uvicorn only on commands that serve, and the CLI startup path
@@ -5748,6 +6202,8 @@ def mobile_command(args: argparse.Namespace) -> int:
     from local_operator.mobile import install as mobile_install
 
     if command == "install":
+        from local_operator.mobile.auth import store_description
+
         result = mobile_install.install()
         steps = result.get("steps", [])
         assert isinstance(steps, list)
@@ -5756,7 +6212,10 @@ def mobile_command(args: argparse.Namespace) -> int:
         if result.get("ok"):
             print("\nmobile daemon installed and healthy.")
             print("  open http://127.0.0.1:4098 and sign in with your portal password")
-            print("  the password is in the login Keychain (service lop-mobile).")
+            # The store is per-platform now (Keychain, Secret Service, DPAPI), so
+            # the sentence is built from the one function that answers where this
+            # machine keeps it — the same answer install's own steps print.
+            print(f"  the password is in {store_description()}.")
             print("  retrieve it yourself with `lop mobile password` at a TTY —")
             print("  it is never printed here, so it cannot leak into a transcript.")
             return 0
@@ -5792,8 +6251,6 @@ def mobile_command(args: argparse.Namespace) -> int:
         return 0
 
     if command == "logs":
-        import subprocess
-
         from local_operator.paths import runtime_log_path
 
         log = mobile_install.log_path()
@@ -5817,7 +6274,7 @@ def mobile_command(args: argparse.Namespace) -> int:
             # for a header.
             tail.append("-F")
             tail.extend([str(log), str(runtime_log)])
-            return subprocess.call(tail)
+            return _run_tail(tail, [log, runtime_log], args.lines, follow=True)
         existing = [path for path in (log, runtime_log) if path.exists()]
         if not existing:
             # `tail` with no operand reads STDIN and would hang the command on a
@@ -5825,12 +6282,13 @@ def mobile_command(args: argparse.Namespace) -> int:
             print(f"no log files yet: {log} (and {runtime_log})")
             return 0
         tail.extend(str(path) for path in existing)
-        return subprocess.call(tail)
+        return _run_tail(tail, existing, args.lines, follow=False)
 
     if command == "password":
         from local_operator.mobile.auth import (
             generate_password,
             load_password,
+            store_description,
             store_password,
         )
 
@@ -5839,7 +6297,11 @@ def mobile_command(args: argparse.Namespace) -> int:
         # TTY. Rotation still works non-interactively via --rotate once we
         # have a TTY confirmation; without a TTY we only say where it lives.
         if not sys.stdout.isatty():
-            print("portal password is in the login Keychain (service lop-mobile).")
+            # Built from the store question rather than written out: the password
+            # is in the login Keychain on macOS and nowhere else, and naming the
+            # Keychain on Linux or Windows sends the user looking for a store
+            # their OS does not have.
+            print(f"portal password is in {store_description()}.")
             print("run `lop mobile password` in a terminal to view or rotate it.")
             return 0
 
@@ -5880,8 +6342,9 @@ def _bind_serve_socket(host: str, port: int) -> socket.socket:
     daemons cannot collide on a fixed one.
 
     Mirrors ``uvicorn.Config.bind_socket()``: the address family follows a host
-    with a colon in it (an IPv6 literal), ``SO_REUSEADDR`` is set, and the
-    socket is bound WITHOUT listening — ``loop.create_server`` calls ``listen``
+    with a colon in it (an IPv6 literal), ``SO_REUSEADDR`` is set (see the
+    platform note below for Windows, where a different option is required), and
+    the socket is bound WITHOUT listening — ``loop.create_server`` calls ``listen``
     on the socket it is handed, which is the same sequence uvicorn uses on its
     own path. Raising is deliberate: the caller reports a bind failure through
     :func:`_refuse_serve_bind`, rather than letting it surface as a traceback.
@@ -5898,10 +6361,32 @@ def _bind_serve_socket(host: str, port: int) -> socket.socket:
     was refused. So the friendly refusal below is guaranteed against a LISTENING
     holder; against a merely-bound one on Linux the collision instead surfaces
     from uvicorn's own ``listen``, as its own error.
+
+    On Windows the option is ``SO_EXCLUSIVEADDRUSE`` instead, and that is a
+    correctness fix rather than a preference: there ``SO_REUSEADDR`` does let a
+    second bind succeed over a LISTENING holder (Microsoft, "Using SO_REUSEADDR
+    and SO_EXCLUSIVEADDRUSE"), so the refusal above would be silent on the one
+    platform where a port collision is easiest to create.
     """
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     sock = socket.socket(family=family)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # ``getattr`` rather than ``socket.SO_EXCLUSIVEADDRUSE``: the constant exists
+    # only in CPython's Windows build (``socketmodule.c`` guards it with
+    # ``#ifdef SO_EXCLUSIVEADDRUSE``), so naming it directly is an attribute the
+    # type checker and every POSIX run would have to be told to ignore.
+    exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+    if exclusive is not None:
+        # Windows only, and the choice is not cosmetic: the two options are
+        # mutually EXCLUSIVE, and on Windows SO_REUSEADDR lets a second socket
+        # bind an address a first, LISTENING socket already holds — the
+        # documented hijack vector — so the friendly "a daemon already holds
+        # 1111" refusal below would never fire and two `lop serve` processes
+        # would split the port in silence. On Linux/macOS the same bind over a
+        # listening holder is refused, which is why SO_REUSEADDR was (correctly)
+        # kept there for fast crash restarts.
+        sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind((host, port))
     except OSError:

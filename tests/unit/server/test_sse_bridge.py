@@ -25,6 +25,7 @@ from local_operator.harness.types import (
     MessageStartEvent,
     MessageUpdateEvent,
     ProviderTurnStartEvent,
+    ReasoningDeltaEvent,
     SteeringDeliveredEvent,
 )
 from local_operator.jobs import JobStatus
@@ -273,11 +274,42 @@ def test_steering_delivered_reaches_the_wire_with_its_count() -> None:
     assert events[0].data["count"] == 3
 
 
+def test_reasoning_delta_reaches_the_wire_as_its_own_event() -> None:
+    """The model's thinking gets a name of its own, and carries NO snapshot.
+
+    Two decisions are asserted here, both of them ones a rename would undo:
+
+    * it is ``reasoning.delta`` and not a flag on ``message.delta``, because a
+      consumer that already knows ``message.delta`` would otherwise append the
+      model's private thinking to the answer it is painting;
+    * it carries no cumulative ``snapshot``, unlike ``message.delta``. That
+      snapshot exists so a late or lossy consumer can repaint from one frame,
+      and reasoning has nothing to repaint FROM -- it is never persisted, so a
+      snapshot would be a payload built, serialized and shipped every frame to
+      rebuild a block that no client keeps.
+    """
+    broker = EventBroker()
+    session = _FakeSession()
+    attach_broker(session, broker, "job-1")
+
+    session.emit(ReasoningDeltaEvent(message_id="m1", delta="weighing"))
+
+    events = broker.retained(job_channel("job-1"))
+    assert [e.name for e in events] == [EventName.REASONING_DELTA]
+    # The inner discriminator mirrors the ``event:`` name (``sse.py``: a client
+    # may switch on either), so both read ``reasoning.delta``.
+    assert events[0].data["type"] == EventName.REASONING_DELTA
+    assert events[0].data["delta"] == "weighing"
+    assert events[0].data["message_id"] == "m1"
+    assert "snapshot" not in events[0].data
+
+
 @pytest.mark.parametrize(
     "raw_type, expected",
     [
         ("provider_turn_start", EventName.PROVIDER_START),
         ("steering_delivered", EventName.STEERING_DELIVERED),
+        ("reasoning_delta", EventName.REASONING_DELTA),
     ],
 )
 def test_new_event_types_are_no_longer_dropped(raw_type: str, expected: str) -> None:

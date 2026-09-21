@@ -37,6 +37,7 @@ from local_operator.harness.types import (
     MessageUpdateEvent,
     ModelSpec,
     NoticeEvent,
+    ReasoningDeltaEvent,
     TextContent,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -554,6 +555,57 @@ def test_printable_event_message_update_carries_message_id() -> None:
     assert out["type"] == "message_update"
 
 
+def test_printable_event_reasoning_delta_carries_the_fragment() -> None:
+    """CL-15's sibling: a supervisor filters reasoning lines by NAME.
+
+    The reasoning channel is the one a script watches to see the model working
+    before it answers, so its JSON line is shaped explicitly rather than left to
+    the generic dump: exactly the fragment and the message it belongs to.
+    """
+    out = printable_event(ReasoningDeltaEvent(message_id="m1", delta="weighing"))
+    assert out == {"type": "reasoning_delta", "message_id": "m1", "delta": "weighing"}
+
+
+def test_reasoning_is_announced_once_on_stderr_and_never_on_stdout(capsys) -> None:
+    """Exec announces the phase; it does not stream the model's thoughts.
+
+    stdout is the run's payload — the answer in text mode — so reasoning must
+    never touch it: a caller piping the answer into a file would get the model's
+    private thoughts concatenated to it. stderr is progress chrome read by a
+    human, where a line per TOKEN would bury every tool row; so it gets ONE line
+    per phase, which is what tells a user the model is working during the wait
+    the operator reported as 3-5 s of nothing.
+    """
+    renderer = PrintRenderer(json_mode=False)
+    for fragment in ("weigh", "ing", " the", " options"):
+        renderer.handle(ReasoningDeltaEvent(message_id="m1", delta=fragment))
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("thinking") == 1
+    # Model-authored text never reaches the terminal as markup.
+    renderer.handle(ReasoningDeltaEvent(message_id="m1", delta="[red]boom[/red]"))
+    assert capsys.readouterr().err.count("thinking") == 0
+
+
+def test_each_model_call_announces_its_own_reasoning_phase(capsys) -> None:
+    """A tool-loop turn reasons before every call, once each.
+
+    The latch is per phase, not per turn: a turn that reasons, calls a tool and
+    reasons again would otherwise show its second wait as though nothing were
+    happening — the exact complaint, one call later.
+    """
+    renderer = PrintRenderer(json_mode=False)
+    message = Message.assistant("")
+    renderer.handle(MessageStartEvent(message=message))
+    renderer.handle(ReasoningDeltaEvent(message_id=message.id, delta="first"))
+    renderer.handle(MessageEndEvent(message=message))
+    renderer.handle(MessageStartEvent(message=Message.assistant("")))
+    renderer.handle(ReasoningDeltaEvent(message_id="m2", delta="second"))
+
+    assert capsys.readouterr().err.count("thinking") == 2
+
+
 def test_run_exec_prompt_raising_exits_one(fake_factory, capsys) -> None:
     """CL-19: a prompt() that RAISES maps to exit 1 with the error on
     stderr — never the interactive red banner."""
@@ -875,6 +927,36 @@ def test_run_exec_background_spawn(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert records[1]["prompt"] == "second task"
     lines = (logs_dir / exec_mode.JOBS_FILE).read_text().splitlines()
     assert len(lines) == 2
+
+
+def test_the_background_worker_detaches_through_the_shared_helper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A7: this spawn spelled its own ``os.name == \"posix\"`` branch.
+
+    ``start_new_session`` is documented "(POSIX only)" and Windows SILENTLY
+    ignores it, so the hand-rolled branch left a "detached" worker sharing this
+    console on the one platform where the flag is a no-op — a Ctrl-C and a
+    console close both reached it, which is the property the call exists to get.
+    What this pins is the ROUTING: with the platform seam flipped to Windows the
+    spawn carries Windows detachment and no ``start_new_session`` at all, which
+    can only have come from ``procstate.detached_popen_kwargs``.
+    """
+    from local_operator import procstate
+
+    _redirect_logs_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(exec_mode, "resolve_hosting_model_dry", lambda args: ("test", "m"))
+    monkeypatch.setattr(procstate, "is_windows", lambda: True)
+    popen_mock = MagicMock()
+    popen_mock.return_value.pid = 4321
+    monkeypatch.setattr("local_operator.exec_mode.subprocess.Popen", popen_mock)
+    monkeypatch.setattr(exec_mode, "_process_generation", lambda pid: None)
+
+    exec_mode.run_exec("go", ExecArgs(background=True, json_mode=True, yolo=True, hosting="openai"))
+
+    kwargs = popen_mock.call_args[1]
+    assert "start_new_session" not in kwargs, "the POSIX flag is a documented no-op on Windows"
+    assert kwargs["creationflags"] == 0x00000200 | 0x00000008
 
 
 def test_spawn_background_unconfigured_hosting_returns_one(

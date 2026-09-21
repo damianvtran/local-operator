@@ -173,7 +173,74 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: costs nothing extra — the guide body is progressive disclosure and never
 #: rides the start context, and its description only rides a turn that selects
 #: it.
-BUDGET_BILLED_TOKENS = 28_000
+#:
+#: RAISED 28,000 -> 29,950 for the ``console`` tool (design ui-console-tab §17.1
+#: row C), stated here with the arithmetic rather than a wave of the hand,
+#: because the guard exists to make this an explicit decision and because the
+#: delta is large enough that a reader deserves to see where it went. Both
+#: sides are this script, this machine, and the deterministic char arithmetic;
+#: the base was measured by running THIS script against the console-less tree
+#: (``origin/main`` a8fe0c1d, which is what ``~/local-operator-worktrees/
+#: console-tab-design`` carries besides the design doc itself) rather than
+#: derived from the branch, so the two numbers cannot share a mistake:
+#:
+#:   base, ``origin/main`` a8fe0c1d          27,912   (88 tokens under the old
+#:                                                     ceiling: no room for a
+#:                                                     10-method tool at all)
+#:   + the tool's schema                     48,841 chars of tool_schemas vs
+#:                                           44,124 = +4,717 chars = +1,697
+#:   + its ``system.md`` section             33,947 chars of instructions vs
+#:                                           33,136  =   +811 chars =   +292
+#:   + its one inventory line                +10 chars = +4
+#:   = measured on this head                  83,134 chars = ~29,904 billed
+#:
+#: Two reviews later the head moved by ONE more edit, and it is recorded here for
+#: the same reason: QA round 2 found the shipped `keys` field and the guide
+#: documenting `ctrl-c`/`shift-tab` — spellings the app's encoder refuses, since it
+#: spells them `ctrl+c`/`shift+tab` — so the field names the canonical spelling and
+#: its synonyms in +79 characters (+28 tokens): 83,213 chars, ~29,933 billed, 17
+#: tokens of headroom. The full synonym list lives in `guide://console`, which is
+#: progressive disclosure and never rides the start context, so only the pointer to
+#: the canonical spelling is paid for here.
+#:
+#: (components rounded; the total is taken from the char counts, so the three
+#: component figures are floors — 4,717/2.78, 811/2.78 and 10/2.78 are 1,696.8,
+#: 291.7 and 3.6, and a reader who adds the printed integers gets 1,993 rather
+#: than the 1,992 the endpoints give. The total is the measured one; the parts
+#: are reported to the nearest token so a reader can see where it went.)
+#:
+#: The schema is 85% of it, and the schema is the capability: ten methods with
+#: one method parameter is ONE tool, where ten tools would be ten schemas of
+#: permanent tax (the ladder's rung 1). It was measured and then CUT once — the
+#: parameter descriptions were shortened and the class docstring dropped, since
+#: pydantic copies a docstring into the emitted schema's ``description`` —
+#: taking the schema from 5,673 to 4,717 characters, i.e. -344 billed tokens
+#: before this raise was written. What remains is the irreducible part of
+#: "describe ten methods' arguments so a model can call them correctly", and the
+#: per-method playbook lives in ``guide://console`` where it costs nothing until
+#: it is read.
+#:
+#: And it is paid only where it is usable: ``build_console_tool`` is a createIf
+#: factory that returns ``None`` unless the desktop app publishes a
+#: console-capable record, so a session on a machine without the app carries no
+#: console schema at all — this benchmark forces the gate ON precisely so the
+#: figure reported is the worst case rather than the common one.
+#:
+#: The OTHER path is outside this arithmetic and is stated rather than hidden: with
+#: no record at all, the tool is absent but the inventory carries its one-line
+#: prohibition (``_NO_CONSOLE_NOTE``), so the inventory block goes 211 -> 727 chars
+#: (+516 chars, ~+186 billed at 2.78 chars/token) for every session on a machine
+#: without the desktop app. It is not in the figure above because the gate is forced
+#: ON here; it is smaller than the tool-present case it trades against, and §14.5
+#: chose the prohibition deliberately — an agent that does not know the capability
+#: exists cannot ask for it — but a reader comparing this number to a session's real
+#: start context should know which side of the gate they are reading.
+#:
+#: The ceiling is set 46 above the measured head, the same order of headroom as
+#: the ``secret`` (49), ``web_read`` (71) and ``scratchpad://`` (51) raises, so
+#: the ratchet stays tight; the tighten band below (1,200) is nowhere near
+#: tripped and the next context reduction tightens it.
+BUDGET_BILLED_TOKENS = 29_950
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:

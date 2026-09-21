@@ -388,6 +388,17 @@ def collect_sessions(
                 # mid-table — `lop sessions` is the surface a host mid-upgrade
                 # is inspected WITH.
                 leaving=getattr(rec, "leaving", "") or "",
+                # The same getattr defaulting, for the same mid-upgrade reason: a
+                # record written by an OLDER runtime has no window field, and
+                # ``lop sessions`` is the surface a host mid-upgrade is inspected
+                # WITH. The pair is printed in the row's own column and is what a
+                # rotation script reads to tell "which of these is moving".
+                updating=getattr(rec, "updating", "") or "",
+                # The failed half of the same window, defaulted identically. A record
+                # written by a runtime that stayed after its bound expired carries it,
+                # and the reader must be able to see that the session is still on the
+                # build it loaded (design review round 1, D1).
+                update_failed=getattr(rec, "update_failed", "") or "",
                 detached=bool(getattr(rec, "detached", False)),
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
@@ -700,6 +711,22 @@ def session_rows(
             # device that owns the session, which is why it is ``None`` here —
             # this listing is the store's own rows.
             "last_synced_at": None,
+            # WHETHER THIS RUNTIME IS MOVING TO THE BUILD ON DISK RIGHT NOW, and to
+            # which one: appended at the END for the same reason the two keys above
+            # are — the established key order is a published contract and this
+            # EXTENDS it. Empty string, never ``None``, matching its neighbours so
+            # no consumer branches on key existence per row.
+            #
+            # It rides here rather than only on the record for the reason the
+            # ``leaving`` key spells out: the record is the runtime's own file, and
+            # a consumer diagnosing a fleet reads this table or its JSON.
+            "updating": line.updating,
+            # THE FAILED WINDOW, appended after the field above for the same
+            # append-only reason. ``lop sessions`` renders the cell from the pair of
+            # these two through ``types.update_phase``, so a row whose only news is a
+            # failed update lists as such instead of as an ordinary idle session — the
+            # gap design review round 1 (D1) measured against the real renderer.
+            "update_failed": line.update_failed,
         }
         for line, stamp in zip(info.lines, _stamps(info.lines, root), strict=True)
     ]

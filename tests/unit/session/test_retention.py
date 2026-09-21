@@ -103,6 +103,27 @@ def test_an_unparseable_or_impossible_marker_is_not_a_claim(tmp_path: Path, raw:
     assert not _is_claimed(session, time.time())
 
 
+def _unverifiable_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Model a host whose liveness probe cannot answer either way (A7).
+
+    Patched on the SHARED probe (``procstate``) rather than on this module's own
+    ``_PLATFORM``: ``_process_alive`` routes through ``procstate.pid_liveness``
+    now, so a local constant would leave the real probe running and these tests
+    would silently assert against macOS's answer. ``None`` is that probe's "could
+    not prove either answer", which is the state these tests are about — a claim
+    bounded by its own age because liveness cannot be established.
+
+    ``_LIVENESS_IS_VERIFIABLE`` is still patched: it is the switch ``_is_claimed``
+    reads for that bound (derived at import from the platform this process
+    really runs on), and it is deliberately left conservative on Windows.
+    """
+    from local_operator import procstate
+
+    monkeypatch.setattr(procstate, "is_windows", lambda: True)
+    monkeypatch.setattr(procstate, "_windows_liveness", lambda _pid: None)
+    monkeypatch.setattr(retention, "_LIVENESS_IS_VERIFIABLE", False)
+
+
 def test_process_alive_probe() -> None:
     assert _process_alive(os.getpid())
     assert not _process_alive(999999999)
@@ -115,8 +136,7 @@ def test_on_an_unverifiable_platform_a_stale_claim_expires(
 ) -> None:
     """Where liveness cannot be probed (Windows) a claim is bounded by
     ``CLAIM_TRUST_S`` from the later of the marker and the last write."""
-    monkeypatch.setattr(retention, "_PLATFORM", "win32")
-    monkeypatch.setattr(retention, "_LIVENESS_IS_VERIFIABLE", False)
+    _unverifiable_platform(monkeypatch)
     session = tmp_path / "sessions" / "stale"
     session.mkdir(parents=True)
     marker = session / LIVE_MARKER_NAME
@@ -129,8 +149,7 @@ def test_on_an_unverifiable_platform_a_stale_claim_expires(
 def test_on_an_unverifiable_platform_a_fresh_claim_is_kept(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(retention, "_PLATFORM", "win32")
-    monkeypatch.setattr(retention, "_LIVENESS_IS_VERIFIABLE", False)
+    _unverifiable_platform(monkeypatch)
     session = tmp_path / "sessions" / "fresh"
     session.mkdir(parents=True)
     (session / LIVE_MARKER_NAME).write_text("12345")
@@ -142,8 +161,7 @@ def test_on_an_unverifiable_platform_activity_extends_a_claim(
 ) -> None:
     """A long quiet session whose marker is old but whose transcript was
     written recently is still claimed: the bound is on activity, not age."""
-    monkeypatch.setattr(retention, "_PLATFORM", "win32")
-    monkeypatch.setattr(retention, "_LIVENESS_IS_VERIFIABLE", False)
+    _unverifiable_platform(monkeypatch)
     session = tmp_path / "sessions" / "busy"
     session.mkdir(parents=True)
     marker = session / LIVE_MARKER_NAME

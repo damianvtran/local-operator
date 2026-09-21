@@ -31,7 +31,9 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from local_operator import procstate
 from local_operator.interpreter import python_argv
+from local_operator.procstate import O_BINARY
 
 
 def logs_dir() -> Path:
@@ -214,7 +216,8 @@ def _ensure_logs_dir() -> Path:
 
 def _open_log_file(log_path: Path) -> Any:
     """Open a job log for append, forcing 0600 regardless of umask (CL-10)."""
-    return os.fdopen(os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
+    descriptor = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
+    return os.fdopen(descriptor, "ab")
 
 
 def _append_job_record(
@@ -250,7 +253,7 @@ def _append_job_record(
     }
     line = json.dumps(record, ensure_ascii=False) + "\n"
     try:
-        fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
         try:
             os.write(fd, line.encode("utf-8"))
         finally:
@@ -303,7 +306,7 @@ def update_job_exit(job_id: str, exit_code: int) -> None:
         ),
     }
     try:
-        fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(str(jobs_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
         try:
             os.write(fd, (json.dumps(update, ensure_ascii=False) + "\n").encode("utf-8"))
         finally:
@@ -338,7 +341,7 @@ def update_job_running(job_id: str, session: Any) -> None:
 
 def _append_job_update(update: dict[str, Any]) -> None:
     path = _ensure_logs_dir() / JOBS_FILE
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND | O_BINARY, 0o600)
     try:
         os.write(fd, (json.dumps(update, ensure_ascii=False) + "\n").encode())
     finally:
@@ -479,8 +482,15 @@ def _spawn_background(command: str, exec_args: ExecArgs) -> int:
         stdin=subprocess.DEVNULL,
         close_fds=True,
     )
-    if os.name == "posix":
-        popen_kwargs["start_new_session"] = True
+    # ``start_new_session`` is documented "(POSIX only)" and Windows SILENTLY
+    # ignores it — its ``_execute_child`` parameter is literally named
+    # ``unused_start_new_session`` — so a hand-rolled POSIX branch here looked
+    # like a detached worker on Windows while the child kept this console: a
+    # Ctrl-C and a console close both reached it, which is the property this
+    # call exists to get. ``procstate.detached_popen_kwargs`` owns the
+    # per-platform answer and the reasoning; this is the last call site that
+    # spelled its own.
+    popen_kwargs.update(procstate.detached_popen_kwargs())
 
     # Name the detached worker in the OS process listing, keyed by the job id
     # this call already prints to the user, so `ps` and `lop`'s own job output

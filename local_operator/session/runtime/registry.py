@@ -47,12 +47,14 @@ Stdlib-only and import-light: the runtime sits on the CLI startup path.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import time
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple, TypeVar
 
+from local_operator import procstate
 from local_operator.paths import config_dir
 from local_operator.procstate import is_zombie, zombie_states
 from local_operator.session.runtime.types import (
@@ -95,6 +97,8 @@ REAPED_DIRNAME = "reaped"
 #: (the incident was twelve) and a day is past any plausible reading delay.
 REAPED_MAX_FILES = 200
 REAPED_MAX_AGE_S = 24 * 60 * 60.0
+
+logger = logging.getLogger(__name__)
 
 
 def run_dir(root: Path | None = None, dirname: str = RUN_DIRNAME) -> Path:
@@ -348,16 +352,20 @@ def pid_alive(pid: int, *, check_zombie: bool = False) -> bool:
     is the one implementation the lease and the resume path share: a holder
     that is a zombie must be reported dead by all three, or discovery reaps the
     record while the claim that keeps the session un-attachable survives it.
+
+    The cheap existence probe is likewise shared — :func:`procstate.pid_alive`
+    — because signal 0 is a KILL on Windows and a probe on POSIX, and this one
+    runs on every `lop` invocation.
     """
     if pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
+    # THE PROBE IS NOT `os.kill(pid, 0)` HERE, AND MUST NOT BECOME IT AGAIN.
+    # On Windows signal 0 is not a signal: CPython's `os.kill` falls through to
+    # `TerminateProcess`, so the liveness probe every `scan()` calls — this one
+    # runs on every `lop` invocation — would KILL the session it was asked
+    # about and then report it alive. `procstate.pid_alive` asks the kernel the
+    # right question per platform (see it for the CPython citation).
+    if not procstate.pid_alive(pid):
         return False
     return not check_zombie or not is_zombie(pid)
 
@@ -468,6 +476,7 @@ def scan(
     *,
     check_zombie: bool | None = None,
     reap: bool = True,
+    unreadable_ttl_s: float = 0.0,
 ) -> list[tuple[T, str]]:
     """Read every record in one namespace, classifying each as ``live`` /
     ``wedged`` / ``stale``.
@@ -482,6 +491,19 @@ def scan(
     Unparseable records are deleted, not moved, when this call sweeps: a torn
     file has no pid to key a sidecar on and nothing an "why did this die"
     reader could use. ``reap=False`` leaves it alone too (see below).
+
+    THE RESCUE IS ``except Exception``, PER ENTRY, and the list it replaced was a
+    latent version of the round-1 BLOCKER one layer down (review round 2, MINOR 3).
+    ``(OSError, ValueError, TypeError)`` covers every ``from_json`` in the tree
+    today, but the contract this function offers is per record — one entry costs
+    itself — and a parser that raised ``KeyError`` (the exact shape
+    ``update._entries_in_directory`` was widened for) would walk out of here and be
+    swallowed by the caller's outer handler, losing the WHOLE namespace's records
+    rather than one. Measured with such a parser: the reader reported
+    ``complete=False`` AND ``roots=[]``. The direction was safe — nothing was
+    deleted that the missing roots had protected — but "held by a live session"
+    went silent for every session, and the asymmetry with the other reader had no
+    reason behind it.
 
     It stays the one implementation of the state rule — the tuple shape is
     deliberate, because ~15 call sites read it positionally and most want
@@ -527,9 +549,22 @@ def scan(
       proven-dead record — whose verdict comes back either way, because
       reaping is a SIDE EFFECT of the classification and never an input to it
       — and the unparseable file above, which is deleted only when this
-      function was called to sweep. A record that is skipped is simply absent
+      function was called to sweep, and only once it has outlived
+      ``unreadable_ttl_s`` (see below). A record that is skipped is simply absent
       from the return value; the caller sees the same state it would have seen
       one sweep later, with nothing removed in between.
+    * ``unreadable_ttl_s`` is the RETENTION WINDOW FOR A FILE THAT WILL NOT PARSE,
+      and it defaults to ``0.0`` — delete on sight, which is what this function
+      has always done and what ``run/mobile``'s discovery callers still want
+      (review round 3, MINOR 2). ``run/serve``'s reaper passes
+      :data:`REAPED_MAX_AGE_S` instead, so the SAME shape is treated the SAME way
+      in both namespaces that have a reaper: ``run/host``'s torn boot record is
+      kept for a day because "evidence is worth one look soon after it lands", and
+      until this parameter existed the serve half of that finding deleted a
+      seconds-old torn record at the first daemon boot, losing the one artifact an
+      explanation would have started from. The other direction is not the smaller
+      one either: the record this KEEPS pins the generation prune to
+      "incomplete", and the same reaper clears it once the window is out.
     """
     directory = run_dir(root, dirname)
     out: list[tuple[T, str]] = []
@@ -543,12 +578,20 @@ def scan(
     for path in sorted(directory.glob("*.json")):
         try:
             record = parse(json.loads(path.read_text()))
-        except (OSError, ValueError, TypeError):
+        except Exception as exc:  # noqa: BLE001 — one entry costs itself, never its neighbours
             # READER MODE REMOVES NOTHING (see ``reap`` below), including a file
             # it could not parse: a reader that deleted what it could not read
             # would be the only mutator on this path, and the record is the one
             # artifact a later "why did this die" question is answered from.
-            if reap:
+            if reap and _unreadable_expired(path, now, unreadable_ttl_s):
+                # THE FILE IS NAMED, and the exception type with it: this used to be
+                # a silent unlink, so a record that failed to parse — including one
+                # whose failure was OUR bug, now that the rescue above is
+                # ``except Exception`` — left no trace of what went (review round 3,
+                # MINOR 5). ``debug`` rather than ``warning`` because the boot path's
+                # readers already WARN about the condition they can see; this is the
+                # sweep's own record of what it took.
+                logger.debug("removed unparseable record %s (%s)", path, type(exc).__name__)
                 try:
                     path.unlink()
                 except OSError:
@@ -624,6 +667,26 @@ def _unlink_quietly(path: Path) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+def _unreadable_expired(path: Path, now: float, ttl_s: float) -> bool:
+    """Whether an unparseable record has outlived its retention window.
+
+    The mtime IS the age, because a file that will not parse has no heartbeat and no
+    start stamp to read one from — the same reasoning :func:`_prune_reaped` applies to
+    the sidecar. A stamp in the FUTURE is expired rather than immortal (review round
+    3, MINOR 1): ``os.utime``, a restore and clock skew produce one, and the count
+    bound cannot catch it either, because it keeps the newest entries. An unreadable
+    stat (the file went away under this sweep) is not expired — there is nothing to
+    delete and nothing to age.
+    """
+    if ttl_s <= 0:
+        return True
+    try:
+        age = now - path.stat().st_mtime
+    except OSError:
+        return False
+    return age > ttl_s or age < 0
 
 
 def _reap_dead_record(directory: Path, path: Path, pid: int) -> None:

@@ -65,3 +65,9 @@ def add_parser(subparsers: Any) -> None:
         child = actions.add_parser(name)
         if name == "list":
             child.add_argument("--credential-id", type=int)
+        if name == "status":
+            child.add_argument(
+                "--json",
+                action="store_true",
+                help="Machine-readable connector, cloud and login state as JSON",
+            )

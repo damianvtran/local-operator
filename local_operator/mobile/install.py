@@ -1,24 +1,30 @@
-"""Install, supervise and introspect the mobile daemon (macOS launchd).
+"""Install, supervise and introspect the mobile daemon.
 
-One LaunchAgent re-runs THIS interpreter's package as ``python -m
+One supervised unit re-runs THIS interpreter's package as ``python -m
 local_operator.mobile.service`` — re-entering the installed code rather than
 a hardcoded binary path means an upgrade (``lop-update``) changes what the
 agent runs with no reinstall, and ``restart`` picks it up. That is the omp
 mobile lesson applied to a Python entry point.
 
-The LaunchAgent label is fixed (``com.local-operator.mobile``): the label owns
-the port, so a second daemon cannot split-brain the control plane — it fails
-to bind and exits loudly.
+THREE SUPERVISORS, ONE SHAPE PER PLATFORM (see :mod:`local_operator.supervisors`):
+a LaunchAgent plist on macOS, a ``systemd --user`` unit on Linux, and a Task
+Scheduler task on Windows. The launchd half is unchanged and is the shape every
+other arm is modelled on; the Linux and Windows arms exist because "the daemon
+is portable, only the supervisor is macOS-specific" used to mean the relay could
+not be installed AT ALL on two of the three platforms, and the CLI crashed
+rather than saying so (``FileNotFoundError: launchctl``, ``AttributeError: os.getuid``).
 
-Linux/Windows: the daemon itself is portable and foreground-runnable; only
-the supervisor is macOS-specific, and the CLI says so rather than writing a
-broken unit file.
+The unit name is fixed (``com.local-operator.mobile`` / ``local-operator-mobile``
+/ ``Local Operator Mobile``): it owns the port, so a second daemon cannot
+split-brain the control plane — it fails to bind and exits loudly.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -27,81 +33,395 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from local_operator import launchd, procname
-from local_operator.mobile.auth import generate_password, load_password, store_password
+from local_operator import launchd, procname, procstate, supervisors
+from local_operator.mobile.auth import (
+    generate_password,
+    load_password,
+    store_description,
+    store_password,
+)
 from local_operator.mobile.daemon import DEFAULT_PORT
-from local_operator.paths import log_dir
+from local_operator.paths import CONFIG_DIR_ENV, config_dir, log_dir
 
 LABEL = "com.local-operator.mobile"
+
+#: Linux user unit for this daemon. Deliberately NOT suffixed per config root:
+#: the label owns the port on every platform, and a per-root unit name would let
+#: two units fight over 4098 instead of one failing to bind loudly.
+SYSTEMD_UNIT = "local-operator-mobile.service"
+
+#: Task Scheduler task name for this daemon (Windows), same reasoning.
+TASK_NAME = "Local Operator Mobile"
+
+#: The refusal every entry point shares when no supervisor exists at all.
+NO_SUPERVISOR_ERROR = supervisors.no_supervisor_error("lop mobile serve")
 
 #: The SPA the daemon serves. ``web/dist`` is gitignored, so a source
 #: checkout has no bundle until something builds it; a pip/uv wheel ships it
 #: via package-data but an in-place source install never does. Install must
 #: be able to make it, or every such machine shows "bundle not built".
+#: Functions below take an optional ``web_dir`` for a tree that is not this
+#: one — the snapshot updater builds the tree it is about to install.
 _WEB_DIR = Path(__file__).parent / "web"
-_DIST_INDEX = _WEB_DIR / "dist" / "index.html"
+
+#: What a failed build's output is scanned for, and how much of it is quoted
+#: back. A bound rather than a formality: the string lands in `lop mobile
+#: install`'s step list and in whatever bug report copies it.
+_BUILD_ERROR_HINT = re.compile(r"error|ERR_|cannot|not found|failed", re.IGNORECASE)
+#: pnpm's own wrapper lines — the `$ <script>` echo it writes to stderr before
+#: running a script, and the lifecycle/exit-code summary it writes after one
+#: fails. "The last line of stderr" WAS one of these, which is how the operator
+#: and every bug report saw `pnpm build failed: $ tsc -b && vite build` while
+#: the compiler's actual reason sat unread one stream away.
+_BUILD_WRAPPER_NOISE = re.compile(
+    r"^(\$ |Progress: |WARN )|\[ELIFECYCLE\]|Command failed with exit code", re.IGNORECASE
+)
+_BUILD_DETAIL_LINES = 3
+_BUILD_DETAIL_CHARS = 500
 
 
-def _bundle_state() -> str:
+def _failure_detail(result: subprocess.CompletedProcess[str]) -> str:
+    """The actionable part of a failed command's output, on one bounded line.
+
+    BOTH streams, because the reason is not always on stderr: `tsc -b` writes
+    `error TS2307: …` to ITS stdout while pnpm writes the script echo to
+    stderr, so reading ``stderr or stdout`` and keeping the final line reported
+    the echo and nothing an operator could act on. Prefer lines that name an
+    error, fall back to the tail when the tool failed without printing one, and
+    never raise — a diagnostic must not become the failure.
+    """
+    lines = [
+        line.strip()
+        for stream in (result.stdout, result.stderr)
+        for line in (stream or "").splitlines()
+        if line.strip()
+    ]
+    errors = [
+        line
+        for line in lines
+        if _BUILD_ERROR_HINT.search(line) and not _BUILD_WRAPPER_NOISE.match(line)
+    ]
+    detail = " | ".join((errors or lines)[-_BUILD_DETAIL_LINES:])
+    return detail[:_BUILD_DETAIL_CHARS] if detail else "no output"
+
+
+def _bundle_state(web_dir: Path | None = None) -> str:
     """built / buildable / missing-sources — what install can do about dist."""
-    if _DIST_INDEX.exists():
+    web_dir = _WEB_DIR if web_dir is None else web_dir
+    if _dist_index(web_dir).exists():
         return "built"
-    if (_WEB_DIR / "package.json").exists():
+    if (web_dir / "package.json").exists():
         return "buildable"
     return "missing-sources"
 
 
-def _build_bundle() -> str | None:
+def _windows_shim_argv(resolved: str) -> list[str]:
+    """The argv prefix that runs an npm shim on Windows, given its PATH.
+
+    Split out from :func:`_shim_argv` so the Windows SPELLING is reachable from
+    a test on any host — the alternative is patching ``os.name`` process-wide,
+    which ``pathlib`` reads at call time.
+    """
+    # ``cmd.exe`` from ``COMSPEC`` rather than the literal: that variable is how
+    # the console says where its interpreter is, and a host that has moved it
+    # means it. The fallback is the one path the platform guarantees.
+    return [os.environ.get("COMSPEC") or "cmd.exe", "/c", "call", resolved]
+
+
+def _shim_argv(name: str) -> list[str] | None:
+    """The argv PREFIX that launches the npm shim ``name``, or ``None`` if absent.
+
+    POSIX: the name itself. ``shutil.which`` has already proved it is on PATH,
+    and ``execve`` runs the ``#!/bin/sh`` wrapper directly.
+
+    WINDOWS: through the command interpreter, because a bare name CANNOT work
+    there and that is invisible from the POSIX path (audit C10). npm installs
+    ``pnpm`` as a ``.CMD`` batch file, and
+
+      * ``CreateProcess`` appends only ``.exe`` when a name carries no
+        extension, so ``subprocess.run(["pnpm", ...])`` never finds the shim at
+        all: it raises ``FileNotFoundError``, which this module turns into a
+        bundle that "failed to build" with no stated reason;
+      * handing it the resolved ``.CMD`` path is not the supported route either.
+        MSDN's ``CreateProcess``: "To run a batch file, you must start the
+        command interpreter; set lpApplicationName to cmd.exe and set
+        lpCommandLine to the following arguments: /c plus the name of the batch
+        file." It does sometimes work anyway — the JDK's ``ProcessImpl`` leans
+        on that undocumented behaviour — which is a reason to use the documented
+        form rather than to depend on the other.
+
+    Hence ``<comspec> /c call <resolved shim>``: ``call`` rather than a bare
+    ``/c``, because cmd strips the outer quotes of a command line it cannot
+    disambiguate and the default install location,
+    ``C:\\Program Files\\nodejs\\pnpm.CMD``, is exactly such a line.
+    """
+    found = shutil.which(name)
+    if found is None:
+        return None
+    if os.name == "nt":  # pragma: no cover - exercised on Windows hosts
+        return _windows_shim_argv(found)
+    return [name]
+
+
+def _dist_index(web_dir: Path) -> Path:
+    """The file whose presence means "there is a UI to serve"."""
+    return _dist_dir(web_dir) / "index.html"
+
+
+def _dist_dir(web_dir: Path) -> Path:
+    return web_dir / "dist"
+
+
+def _discard_bundle(web_dir: Path) -> None:
+    """Drop a ``dist/`` the bundle guard refused.
+
+    ``_bundle_state`` reads ANY ``index.html`` as "built" and vite writes
+    ``dist/`` before npm's ``postbuild`` judges it, so a refused build leaves a
+    directory that reports as servable and would be served — unstyled, with no
+    error — on every later install. One owner for that removal, so the three
+    callers cannot drift in how they do it and the session-deletion guard has
+    one call site to argue for. The path is always this tree's ``dist``: this
+    install's ``_WEB_DIR`` or the snapshot the updater is about to install.
+    """
+    shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
+
+
+def _package_runner(web_dir: Path) -> tuple[list[str] | None, str | None]:
+    """pnpm (or corepack's pnpm) for this tree, or the tool that is missing.
+
+    ``(runner, None)`` when a build can run, else ``(None, "node"|"pnpm")``.
+    The missing TOOL rather than a sentence, because two callers word the same
+    absence differently — an install step explains what to do, an updater
+    status line has to stay one line — and one shared sentence reads wrong in
+    one of them. Both arms go through :func:`_shim_argv`, so the Windows
+    spelling of each launcher comes from the ONE place that owns it (audit
+    C10); ``corepack enable`` runs against ``web_dir`` because the snapshot
+    updater prepares a tree that is not this install's.
+    """
+    if shutil.which("node") is None:
+        return None, "node"
+    runner = _shim_argv("pnpm")
+    if runner is not None:
+        return runner, None
+    corepack = _shim_argv("corepack")
+    if corepack is None:
+        return None, "pnpm"
+    subprocess.run([*corepack, "enable"], cwd=web_dir, capture_output=True, timeout=30)
+    return [*corepack, "pnpm"], None
+
+
+def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) -> str | None:
     """Build the SPA in place. Returns an error string, or None on success.
 
     pnpm only — the lockfile and packageManager pin are pnpm's, and mixing
     npm here would write a second, unreviewed lockfile. Corepack is tried
     first so a machine with only Node (no global pnpm) still self-heals;
     the packageManager field pins the exact pnpm corepack fetches.
+
+    Both candidates are launched through :func:`_shim_argv` (see
+    :func:`_package_runner`), which is what makes this work on Windows at all:
+    there the resolvable ``pnpm`` is a ``.CMD`` batch file that a bare argv
+    never reaches (audit C10).
+
+    ``web_dir`` defaults to this install's tree; the snapshot updater passes
+    the tree it is about to install (see :func:`snapshot_bundle`), so both
+    paths share this one builder rather than carrying a second copy of the
+    pnpm invocation. ``runner`` is passed by a caller that already resolved it
+    (so ``corepack enable`` runs once, not twice).
     """
-    if shutil.which("node") is None:
-        return "node is not installed; the bundle needs a one-time `pnpm build`"
+    web_dir = _WEB_DIR if web_dir is None else web_dir
     try:
-        if shutil.which("pnpm") is not None:
-            runner = ["pnpm"]
-        elif shutil.which("corepack") is not None:
-            subprocess.run(
-                ["corepack", "enable"],
-                cwd=_WEB_DIR,
-                capture_output=True,
-                timeout=30,
-            )
-            runner = ["corepack", "pnpm"]
-        else:
-            return "neither pnpm nor corepack found; run `pnpm build` in local_operator/mobile/web"
+        if runner is None:
+            runner, missing = _package_runner(web_dir)
+            if missing == "node":
+                # Named with its REMEDY rather than with its mechanism. This is the one
+                # refusal an operator meets on a fresh Linux or Windows box, and the
+                # previous text ("the bundle needs a one-time `pnpm build`") named a
+                # command that cannot be run without the thing that is missing —
+                # measured in the Ubuntu and Mint containers, where `mobile.install`
+                # failed with exactly that and the container reading could not say what
+                # to install. The wheel ships the built bundle, so this is a source
+                # checkout (a container, a dev machine), and Node is a one-time cost
+                # there rather than a runtime dependency of the daemon.
+                # THE REMEDY HAS TO BE ONE THE READER CAN ACTUALLY RUN (design round 2,
+                # D7). This sentence used to lead with `apt install nodejs`, which was
+                # measured wrong on the very host this branch's own leg runs on: Ubuntu
+                # 24.04's archive package is `nodejs 18.19.1`, and Debian freezes it at
+                # the distro release, so the operator runs the remedy and gets this
+                # identical refusal back. What the reader needs is the version check and
+                # the routes that give them a current Node.
+                return (
+                    # The remedy leads, because the reader's premise is that they have
+                    # no node: telling them to run `node --version` first is telling
+                    # them to run a command this arm exists because it is missing
+                    # (design round 4, D18). The version requirement follows the
+                    # instruction it constrains rather than preceding it.
+                    "node is not installed, and the portal bundle is built once with "
+                    "it: install a current Node from https://nodejs.org (or, if you "
+                    "use nvm, `nvm install 22`), then re-run `lop mobile install`. "
+                    "Node >=22 is required -- a distro package is often older, and "
+                    "Ubuntu 24.04 ships 18"
+                )
+            if runner is None:
+                # SAME DEFECT AS THE NODE ARM ABOVE (design round 2, D8), and this
+                # sentence then repeated it in its own replacement (design round
+                # 3, D14). The old text offered only `pnpm build` -- the command
+                # that cannot run BECAUSE pnpm is missing -- and the first fix
+                # named `corepack enable` with the assurance "it ships with
+                # Node". That assurance is FALSE from Node 25 on: Corepack is no
+                # longer distributed with it (the v26.9.0 tarball ships no
+                # corepack file at all, while v24.21.0 ships bin/corepack
+                # 0.36.0), so a reader on Current would run the remedy and get a
+                # different refusal back -- exactly the class D8 was raised for.
+                #
+                # So the sentence names the ONE route that works on every Node:
+                # pnpm's own install page. Corepack stays in the CODE below,
+                # where it is genuinely useful -- `_shim_argv` found it, so the
+                # self-heal runs -- but it is no longer promised in copy.
+                return (
+                    "neither pnpm nor corepack is on PATH, and the portal bundle "
+                    "is built with pnpm: install pnpm "
+                    "(https://pnpm.io/installation), then re-run "
+                    "`lop mobile install`"
+                )
         for args in (["install", "--frozen-lockfile"], ["build"]):
             result = subprocess.run(
-                [*runner, *args], cwd=_WEB_DIR, capture_output=True, text=True, timeout=600
+                [*runner, *args], cwd=web_dir, capture_output=True, text=True, timeout=600
             )
             if result.returncode != 0:
-                tail = (result.stderr or result.stdout).strip().splitlines()
-                return f"pnpm {' '.join(args)} failed: {tail[-1][:200] if tail else 'unknown'}"
+                # A failed `build` can leave a dist/ behind: vite writes it
+                # before npm's `postbuild` guard judges it, and the guard
+                # failing is the common case here. Any index.html is enough
+                # for `_bundle_state` to call the install "built" and serve an
+                # unstyled phone with no error, so a bundle that does not pass
+                # the guard is removed rather than left reading as servable.
+                # Only one that FAILS the guard is removed, though: a failure
+                # in `tsc -b` happens before vite writes anything, and the
+                # previous dist is still a good bundle.
+                if _dist_index(web_dir).exists() and _verify_bundle(web_dir) is not None:
+                    _discard_bundle(web_dir)
+                return f"pnpm {' '.join(args)} failed: {_failure_detail(result)}"
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"bundle build failed: {exc}"
-    return None if _DIST_INDEX.exists() else "build ran but dist/index.html is still missing"
+    if not _dist_index(web_dir).exists():
+        return "build ran but dist/index.html is still missing"
+    # Exit 0 is not proof the bundle is servable — see ``_verify_bundle``.
+    error = _verify_bundle(web_dir)
+    if error is not None:
+        _discard_bundle(web_dir)
+        return error
+    return None
 
 
-def ensure_bundle(*, build: bool = True) -> tuple[bool, str]:
+def _verify_bundle(web_dir: Path | None = None) -> str | None:
+    """Run the bundle's own guard over a freshly built ``dist``.
+
+    The guard ships with the web tree (``scripts/check-bundle.mjs``) and runs
+    as npm's ``postbuild``, so ``pnpm build`` already fails on a degenerate
+    bundle. The installer runs it AGAIN because it cannot assume the
+    package.json it just used carries that hook: a source snapshot taken
+    before the hook existed builds green and installs a stylesheet carrying no
+    utilities at all — the silent half of this defect, where the phone renders
+    unstyled, vite exits 0, and nothing in any log says why.
+
+    No node, or an older tree without the script, is not an error here: there
+    is nothing to run, and refusing to install would be worse than the blind
+    spot. Returns an error string, or None.
+    """
+    web_dir = _WEB_DIR if web_dir is None else web_dir
+    script = web_dir / "scripts" / "check-bundle.mjs"
+    if not script.exists() or shutil.which("node") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["node", str(script)],
+            cwd=web_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"bundle check failed: {exc}"
+    if result.returncode == 0:
+        return None
+    return f"bundle check failed: {_failure_detail(result)}"
+
+
+def snapshot_bundle(web_dir: Path) -> str:
+    """Build a snapshot's web bundle in place, before it is installed.
+
+    Returns the one-line status both updaters print. The host script
+    ``~/.local/bin/lop-update`` has always done this for the trees it prepares;
+    the in-package updater (``lop update --from-snapshot``) did NOT, so the
+    snapshot it installed carried the web SOURCES and no ``dist/`` — the
+    bundle globs matched nothing, every authed GET answered 503 "bundle not
+    built", and the only repair was ``lop mobile install`` on that machine.
+
+    Never raises and never fails the update. No Node is a documented skip:
+    the daemon self-heals at ``lop mobile install`` on a host that has it, and
+    the wording matches the host script's so the two paths read as one log.
+
+    A snapshot that ARRIVES with a ``dist/`` is not thereby a snapshot with a
+    usable one: the present bundle is put through the same guard
+    ``ensure_bundle`` applies, and a refused one is dropped and rebuilt. The
+    alternative — trusting the file's existence — installs a tree packed with
+    a pre-fix (utility-less) stylesheet and reports success, which is the
+    silent half of the defect this whole path exists to close.
+    """
+    state = _bundle_state(web_dir)
+    if state == "built":
+        rejected = _verify_bundle(web_dir)
+        if rejected is None:
+            return "already built"
+        _discard_bundle(web_dir)
+    if state == "missing-sources":
+        return "skipped (no web sources in snapshot)"
+    try:
+        runner, missing = _package_runner(web_dir)
+    except (OSError, subprocess.TimeoutExpired):
+        return "skipped (pnpm could not be prepared; build at `lop mobile install`)"
+    if missing == "node":
+        return "skipped (node not installed; build at `lop mobile install`)"
+    if runner is None:
+        return "skipped (neither pnpm nor corepack; build at `lop mobile install`)"
+    error = _build_bundle(web_dir, runner)
+    return "built" if error is None else f"FAILED ({error})"
+
+
+def ensure_bundle(*, build: bool = True, web_dir: Path | None = None) -> tuple[bool, str]:
     """Guarantee the daemon has a UI to serve. (ok, detail-for-status).
 
     The three states, in the order a fresh machine hits them: a wheel ships
     dist and this is a no-op; a source checkout is buildable and we build
     it; a broken install has neither and we say so rather than serving the
     503 the daemon would show every authed GET.
+
+    A dist that is PRESENT and fails the guard is not one of those three: it
+    is what a failed build leaves behind (vite writes dist/ before npm's
+    postbuild judges it), and ``_bundle_state`` reads any index.html as
+    "built" — so trusting it here would report "bundle present" on every later
+    install while the phone rendered unstyled. It is dropped and rebuilt
+    instead.
     """
-    state = _bundle_state()
+    state = _bundle_state(web_dir)
+    # Defaulted HERE rather than in each helper: the helpers below take a real
+    # path, and one that silently tolerates None is one that crashes on the
+    # default install path instead — measured on the real CLI (TypeError on
+    # ``_dist_dir(None)``), which only a run through `lop mobile install` sees.
+    web_dir = _WEB_DIR if web_dir is None else web_dir
     if state == "built":
-        return True, "bundle present"
+        rejected = _verify_bundle(web_dir)
+        if rejected is None:
+            return True, "bundle present"
+        if not build:
+            return False, rejected
+        _discard_bundle(web_dir)
+        state = "buildable"
     if state == "missing-sources":
         return False, "bundle and web sources both missing from the install"
     if not build:
         return False, "bundle missing (web sources present; build skipped)"
-    error = _build_bundle()
+    error = _build_bundle(web_dir)
     if error is not None:
         return False, error
     return True, "built the web bundle"
@@ -109,6 +429,23 @@ def ensure_bundle(*, build: bool = True) -> tuple[bool, str]:
 
 def plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
+
+
+def systemd_path() -> Path:
+    """The Linux user unit this daemon is registered as."""
+    return supervisors.systemd_unit_path(SYSTEMD_UNIT)
+
+
+def task_record_path() -> Path:
+    """On Windows, our own copy of the task definition we registered.
+
+    Task Scheduler keeps its registration in its own store (the registry), not
+    in a file we own, so this is a RECORD rather than the registration itself:
+    it is what ``create_task`` was handed, written where a user can read it, and
+    it is what makes "did an install ever run here?" answerable without a
+    subprocess. The authoritative question is still asked of ``schtasks``.
+    """
+    return config_dir() / "supervisor" / "mobile-task.xml"
 
 
 def log_path() -> Path:
@@ -132,6 +469,18 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
     ``Program`` is the STABLE shim on a machine with the generation layout, and
     the role label does not move with it — see ``procname.supervised_image`` for
     why a path inside this venv is unsafe for a unit launchd may restart.
+
+    ``EnvironmentVariables`` CARRIES THE STORE, and its absence was a bug on all
+    three platforms rather than a Windows one. ``install`` stores the portal
+    password under ``config_dir()`` and the daemon reads it back with the same
+    function, but a supervised process does NOT inherit the installer's
+    environment: with ``LOCAL_OPERATOR_CONFIG_DIR`` set, the installer wrote a
+    password into that store and the daemon looked in the default one, then
+    refused to start with "no mobile password set. Run `lop mobile install`" —
+    naming the store it had just written to. The Windows probe battery found it
+    (`mobile.install`, PASS=20/FAIL=1) and it is the same latent bug on macOS and
+    Linux. ``wakes`` and ``tunnels`` have always passed the store this way; this
+    daemon is the one that did not.
     """
     return {
         "Label": LABEL,
@@ -151,6 +500,7 @@ def render_plist(port: int = DEFAULT_PORT) -> dict[str, object]:
         "StandardErrorPath": str(log_path()),
         # SSE-holding daemons must not be App Nap'd into suspending timers.
         "ProcessType": "Interactive",
+        "EnvironmentVariables": {CONFIG_DIR_ENV: str(config_dir())},
     }
 
 
@@ -176,7 +526,11 @@ def refresh_plist_if_stale() -> launchd.PlistRefresh:
     """
     name = "mobile"
     try:
-        if not is_supported():
+        if supervisors.supervisor() != supervisors.LAUNCHCTL:
+            # NOT "not-addressable": there is no plist on this platform to
+            # repair at all. `is_supported()` was the wrong gate once it began
+            # answering True on Linux and Windows, where this function would
+            # otherwise have gone looking for a LaunchAgent that cannot exist.
             return launchd.PlistRefresh(name=name, kind="unsupported")
         path = plist_path()
         if not launchd.is_own_plist(path, LABEL):
@@ -205,39 +559,209 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["launchctl", *args], capture_output=True, text=True, timeout=15)
 
 
+def _supervised_pid() -> int | None:
+    """The pid this daemon's supervisor currently runs, or ``None``.
+
+    launchd prints ``pid = <n>`` only while a process is alive behind the label;
+    systemd answers ``MainPID`` (``0`` when the unit is not running). Task
+    Scheduler publishes no pid through ``schtasks`` at all, which is why the
+    Windows answer below is "the task reports Running" rather than a pid.
+
+    ASKS NOTHING ABOUT A JOB THIS RUN DOES NOT OWN. The label is a fixed module
+    constant while the plist path moves with ``$HOME``, so
+    ``launchctl print gui/<uid>/<label>`` from a redirected home is a question
+    about the OPERATOR's daemon — read-only, but it is still their job being
+    inspected, and ``_our_daemon_listening`` is the path a sandboxed install
+    takes to decide whether to skip its reload (QA round 2, Q-1: the last
+    unguarded call left on this axis). The identity test lives HERE rather than
+    in the caller so no future caller of this probe can reintroduce the read.
+    """
+    kind = supervisors.supervisor()
+    if kind == supervisors.LAUNCHCTL:
+        if not launchd.is_own_plist(plist_path(), LABEL):
+            return None
+        printed = _launchctl("print", f"{_domain()}/{LABEL}")
+        if printed.returncode != 0:
+            return None
+        match = re.search(r"pid = (\d+)", printed.stdout)
+        return int(match.group(1)) if match else None
+    if kind == supervisors.SYSTEMCTL:
+        shown = supervisors.systemctl_user("show", "-p", "MainPID", "--value", SYSTEMD_UNIT)
+        value = shown.stdout.strip() if shown.returncode == 0 else ""
+        return int(value) if value.isdigit() and value != "0" else None
+    return None
+
+
+def _listening_pids(port: int) -> set[str] | None:
+    """The pids listening on ``port``, or ``None`` when this box cannot be asked.
+
+    ``lsof`` is the mechanism this repo already uses for exactly this question
+    (``session/runtime/control.py``); a machine without it — a slim container —
+    answers ``None``, and the caller says what it could not check instead of
+    pretending it did.
+    """
+    binary = shutil.which("lsof")
+    if binary is None:
+        return None
+    try:
+        listeners = subprocess.run(  # noqa: S603 — fixed argv, no shell
+            [binary, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return set(listeners.stdout.split())
+
+
 def _our_daemon_listening(port: int) -> bool:
-    """True when the process bound to ``port`` is the one this plist starts.
+    """True when the process bound to ``port`` is the one this unit starts.
 
     Health alone cannot answer this: a stale foreground daemon on the same
-    port passes every check while the supervised one fails to bind. Ask
-    launchd which pid it is running, then ask lsof who owns the port.
-    """
-    import re
+    port passes every check while the supervised one fails to bind. Ask the
+    supervisor which pid it is running, then ask lsof who owns the port.
 
-    printed = _launchctl("print", f"{_domain()}/{LABEL}")
-    if printed.returncode != 0:
+    macOS behaviour is unchanged — this is the same ``launchctl print`` + lsof
+    pair it always was, and the same False when either says no. The two
+    additions are the systemd arm (same question, ``MainPID``) and the
+    no-lsof case, which used to escape as an uncaught ``FileNotFoundError`` out
+    of ``install()`` and now falls back to the supervisor's own word, with the
+    gap named in the install steps.
+    """
+    kind = supervisors.supervisor()
+    if kind == supervisors.SCHTASKS:
+        # No pid to cross-check: Task Scheduler's own Running status is the
+        # strongest signal schtasks gives, and health + the auth gate below
+        # still have to pass before an install reports success.
+        #
+        # ``running is not False`` rather than a truth test, because the status
+        # word is localized: an unrecognised spelling comes back as ``None``
+        # rather than as a definite "not running", and treating that as a
+        # refusal made this loop unable to ever pass on such a host — a daemon
+        # that was up and serving was reported as "daemon did not come up
+        # healthy". Where the state cannot be read, the two signals that CAN be
+        # — the unauth health endpoint and the auth gate — are what decide.
+        registered, running, _detail = supervisors.task_state(TASK_NAME)
+        return registered and running is not False
+    pid = _supervised_pid()
+    if pid is None:
         return False
-    match = re.search(r"pid = (\d+)", printed.stdout)
-    if not match:
-        return False
-    pid = match.group(1)
-    listeners = subprocess.run(
-        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    return pid in listeners.stdout.split()
+    owners = _listening_pids(port)
+    if owners is None:
+        return True
+    return str(pid) in owners
 
 
 def _domain() -> str:
-    import os
+    """``gui/<uid>`` — the launchd domain every caller feeds to ``launchctl``.
 
+    The platform guard is INSIDE this function rather than at its call sites,
+    each of which is behind ``if kind == supervisors.LAUNCHCTL``: ``os.getuid``
+    does not exist off POSIX, so an unguarded call was an ``AttributeError``
+    waiting for any arm that forgot the check, and a guard at the call site is
+    invisible to a reader — and to the static scan that grades this branch —
+    which cannot see that the arm is unreachable. Guarded here, the function is
+    safe to call anywhere on its own merits.
+    """
+    if procstate.is_windows():
+        raise RuntimeError("launchd domains exist only on macOS")
     return f"gui/{os.getuid()}"
 
 
 def is_supported() -> bool:
-    return sys.platform == "darwin" and shutil.which("launchctl") is not None
+    """Whether this machine has a user-level supervisor this installer can drive.
+
+    Binary-guarded rather than platform-guarded (see
+    :mod:`local_operator.supervisors`): on a Linux without systemd — Devuan,
+    Alpine, most containers, WSL2 without systemd — the answer is False, which
+    the entry points turn into a sentence naming the foreground command. Before
+    this, that machine got ``FileNotFoundError: 'launchctl'`` out of the CLI and
+    a Windows one got ``AttributeError: module 'os' has no attribute 'getuid'``,
+    because only ``install()`` was guarded and ``uninstall``/``service_action``
+    were not.
+    """
+    return supervisors.supervisor() is not None
+
+
+def registration_present() -> bool:
+    """Whether this platform's supervisor has a registration for this daemon.
+
+    The unit FILE for launchd/systemd; a ``schtasks /Query`` for Windows, whose
+    registration lives in Task Scheduler's own store. The subprocess is why this
+    is a status-time call and not something any hot path may use.
+    """
+    kind = supervisors.supervisor()
+    if kind == supervisors.LAUNCHCTL:
+        return plist_path().exists()
+    if kind == supervisors.SYSTEMCTL:
+        return systemd_path().exists()
+    if kind == supervisors.SCHTASKS:
+        registered, _running, _detail = supervisors.task_state(TASK_NAME)
+        return registered
+    return False
+
+
+def render_systemd(port: int = DEFAULT_PORT) -> str:
+    """The Linux user unit, in the shape all four daemons' units share.
+
+    ``procname.supervised_image`` when this machine has the generation layout,
+    else this interpreter: a unit is re-executed on every restart, and a path
+    inside a tree a flip or a prune replaced is a daemon that dies at load
+    (see that function for the 2026-09-15 incident).
+    """
+    image = procname.supervised_image() or Path(sys.executable)
+    return supervisors.render_systemd_unit(
+        description="Local Operator mobile daemon",
+        # The image is quoted for systemd's own grammar, not shell quoting: this
+        # is the same rule ``tunnels.install`` uses, hoisted into
+        # ``supervisors.quoted``. Measured on systemd 255: an interpreter under
+        # a path with a space produced a unit that could never start ("Command
+        # /home/a is not executable").
+        exec_start=(
+            f"{supervisors.quoted(str(image))} -m local_operator.mobile.service --port {port}"
+        ),
+        # ``Restart=on-failure``: an exit-code-2 (no password) stays down so a
+        # refused start does not flap, exactly what the plist's
+        # KeepAlive{SuccessfulExit: false} buys on macOS.
+        #
+        # ``Environment=`` carries the STORE, the ``EnvironmentVariables``
+        # analogue in the plist above and the same two reasons its siblings
+        # document: the store is part of the contract, and an UNQUOTED
+        # assignment truncates it at the first space — silently, so the daemon
+        # would read a different store than the installer wrote to and refuse to
+        # start.
+        post_lines=[
+            f"Environment={supervisors.quoted(f'{CONFIG_DIR_ENV}={config_dir()}')}",
+            *supervisors.output_redirect_lines(log_path()),
+        ],
+    )
+
+
+def render_task_xml(port: int = DEFAULT_PORT) -> str:
+    """The Windows Task Scheduler task for this daemon.
+
+    ``environment=`` CARRIES THE STORE. It used to say that this daemon's plist
+    recorded no config dir either and the store was the default one — which was
+    true of the plist and wrong about the consequence: no supervised process
+    inherits the installer's environment, so an install from a store override
+    registered a task whose daemon read the DEFAULT store, found no password
+    there, and exited 2. The Windows battery reported exactly that
+    ("no mobile password set. Run `lop mobile install`" naming the store the
+    installer had just written to), and it is the same omission the plist and the
+    unit had. Task Scheduler has no native environment element, so
+    ``supervisors.render_task_xml`` expresses it through the launcher; see that
+    function for the shape.
+    """
+    image = procname.supervised_image() or Path(sys.executable)
+    return supervisors.render_task_xml(
+        description="Local Operator mobile daemon (serve the phone portal)",
+        image=str(image),
+        argv=["-m", "local_operator.mobile.service", "--port", str(port)],
+        environment={CONFIG_DIR_ENV: str(config_dir())},
+        log=log_path(),
+        user_id=supervisors.current_user_id(),
+    )
 
 
 def health(port: int = DEFAULT_PORT, timeout: float = 3.0) -> dict[str, object] | None:
@@ -264,94 +788,345 @@ def gate_closed(port: int = DEFAULT_PORT, timeout: float = 3.0) -> bool:
         return False
 
 
+def _serving(port: int) -> bool:
+    """The supervised daemon is up, answering, and still gating the API.
+
+    The triple rather than ``health`` alone, because a leftover FOREGROUND
+    daemon on the same port passes a health probe while the supervised one
+    fails to bind — see :func:`_our_daemon_listening`. Spelled once so the
+    install's skip decision and its verification loop cannot drift apart.
+    """
+    return _our_daemon_listening(port) and health(port) is not None and gate_closed(port)
+
+
+def _plist_is_current(path: Path, wanted: dict[str, object]) -> bool:
+    """Whether the file already says exactly what ``wanted`` says.
+
+    Content, not existence: a plist from an older build names a different
+    interpreter and must still be replaced. An unreadable or unparseable file
+    answers ``False``, which is the rewrite direction — see
+    :func:`local_operator.wakes.install.ensure_supervisor_installed`, which
+    repairs by content for the same reason.
+    """
+    try:
+        return plistlib.loads(path.read_bytes()) == wanted
+    except (OSError, ValueError):
+        return False
+
+
 def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, object]:
-    """Idempotent one-shot: password (kept if present), plist, load, verify."""
+    """Idempotent one-shot: bundle, password (kept if present), unit, load, verify.
+
+    One shared prefix — guarantee the UI bundle, generate/keep the password —
+    then one arm per supervisor. The arms differ only in HOW the daemon is made
+    to run at login; the verification at the end is shared, because "a unit file
+    exists" was never the question.
+
+    The BUNDLE comes first, before anything is written. It is the only step that
+    can fail for a reason the operator has to go and fix (no Node on a source
+    checkout), and running it after the password left a store mutated by an
+    install that then reported failure — visible in the Ubuntu/Mint container
+    readings, whose FAIL detail was the password progress line rather than the
+    reason. A preflight that refuses changes nothing on disk.
+    """
     steps: list[str] = []
-    if not is_supported():
-        return {
-            "ok": False,
-            "steps": [],
-            "error": (
-                "install needs macOS launchd; " "run `lop mobile serve` in the foreground elsewhere"
-            ),
-        }
+    kind = supervisors.supervisor()
+    if kind is None:
+        return {"ok": False, "steps": [], "error": NO_SUPERVISOR_ERROR}
+
+    # The UI is half the product. A missing bundle means every authed GET
+    # 503s, so install builds it rather than leaving the phone on a dead
+    # page — the wheel normally ships it, a source checkout does not.
+    bundle_ok, bundle_detail = ensure_bundle(build=not dry_run)
+    if not bundle_ok:
+        # THE FAILURE TEXT IS THE ERROR, NOT ALSO A STEP (design round 2, D11).
+        # Appending it here and repeating it in `error` printed the same
+        # multi-line sentence twice -- once as progress, once as the red
+        # failure -- so a reader saw one problem scroll past and then read the
+        # second copy as a second one. Steps are what SUCCEEDED.
+        return {"ok": False, "steps": steps, "error": bundle_detail}
+    steps.append(bundle_detail)
 
     password = load_password()
     if password is None:
         password = generate_password()
         if not dry_run:
             store_password(password)
-        steps.append("generated a new portal password (Keychain: lop-mobile)")
+        steps.append(f"generated a new portal password ({store_description()})")
     else:
-        steps.append("kept the existing portal password")
+        steps.append(f"kept the existing portal password ({store_description()})")
 
-    # The UI is half the product. A missing bundle means every authed GET
-    # 503s, so install builds it rather than leaving the phone on a dead
-    # page — the wheel normally ships it, a source checkout does not.
-    bundle_ok, bundle_detail = ensure_bundle(build=not dry_run)
-    steps.append(bundle_detail)
-    if not bundle_ok:
-        return {"ok": False, "steps": steps, "error": f"web bundle unavailable: {bundle_detail}"}
+    if kind == supervisors.LAUNCHCTL:
+        plist_path().parent.mkdir(parents=True, exist_ok=True)
+        # WRITE ONLY WHEN IT WOULD SAY SOMETHING NEW, and reload only when the
+        # file changed or the daemon is not serving. `wakes.install` has
+        # compared-then-skipped since it shipped; this is the same shape.
+        #
+        # WHAT THIS DOES AND DOES NOT CLAIM (review round 1, R-3 — an earlier
+        # revision of this comment overclaimed): an install that would change
+        # nothing no longer writes the plist or bounces the job, so the two
+        # signals an EDR reads as "Persistence: launchd job / plist file
+        # modification" (MITRE T1543.001) no longer come from THIS path. It is
+        # NOT an explanation of the 2026-09-19 incident's plist modification:
+        # that child was `[daemons] refresh`, whose repair goes through
+        # `launchd.rewrite_if_stale` — which already returned "current" without
+        # writing, pre-existing and not in this diff — and the plist it did
+        # rewrite was genuinely stale (the pre-branding shape). A real repair,
+        # not an identical-bytes rewrite.
+        current = _plist_is_current(plist_path(), render_plist(port))
+        if not dry_run and not current:
+            plist_path().write_bytes(plistlib.dumps(render_plist(port)))
+        steps.append(f"wrote {plist_path()}" if not current else "LaunchAgent already current")
+        if not dry_run:
+            # The reload, not a bare pair: it tolerates an absent job, waits for
+            # launchd to release the label, retries the bootstrap past the
+            # measured teardown race, and verifies the job is registered
+            # afterwards — so the steps below are reporting a daemon that really
+            # is loaded. See :mod:`local_operator.launchd`.
+            #
+            # SKIPPED WHEN THERE IS NOTHING TO LOAD: the file is already current
+            # AND the supervised daemon is serving, which is the common case for
+            # a re-run (see the write above for why that churn is an EDR signal,
+            # not tidiness). A loaded-but-DEAD job is the state the old
+            # unconditional reload used to repair, and it is still repaired
+            # here: `kickstart` is the narrower operation, and it does not
+            # briefly unregister the label — the precedent is
+            # `wakes.install.ensure_supervisor_installed`. If the label is not
+            # registered at all, kickstart fails and the full reload below runs,
+            # which is exactly today's behaviour.
+            reload_needed = True
+            if current and _serving(port):
+                reload_needed = False
+                steps.append("LaunchAgent already current and serving; left it loaded")
+            elif current and launchd.kickstart(label=LABEL, path=plist_path(), run=_launchctl):
+                reload_needed = False
+                steps.append("restarted the loaded LaunchAgent (its file was already current)")
+            if reload_needed:
+                reloaded = launchd.reload_job(label=LABEL, path=plist_path(), runner=_launchctl)
+                if not reloaded.ok:
+                    return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
+                steps.append("loaded the LaunchAgent")
+    elif kind == supervisors.SYSTEMCTL:
+        loaded, detail = _install_systemd(port, dry_run=dry_run, steps=steps)
+        if not loaded:
+            return {"ok": False, "steps": steps, "error": detail}
+    else:  # schtasks
+        registered, detail = _install_task(port, dry_run=dry_run, steps=steps)
+        if not registered:
+            return {"ok": False, "steps": steps, "error": detail}
 
-    plist_path().parent.mkdir(parents=True, exist_ok=True)
+    if dry_run:
+        steps.append("dry run: skipped load and verification")
+        return {"ok": True, "steps": steps}
+
+    # Shared verification: the supervisor must own the port (a stale foreground
+    # daemon passes a bare health check while the supervised one fails to bind)
+    # AND the auth gate must be closed — never installed-but-unauthenticated.
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if _serving(port):
+            steps.append("health check passed and the auth gate is closed")
+            return {"ok": True, "steps": steps}
+        time.sleep(0.5)
+    return {
+        "ok": False,
+        "steps": steps,
+        "error": f"daemon did not come up healthy; see {log_path()}",
+    }
+
+
+def _install_systemd(port: int, *, dry_run: bool, steps: list[str]) -> tuple[bool, str]:
+    """Write and enable the Linux user unit. ``(ok, error)``.
+
+    The unit file is written wherever ``systemd_path()`` says — that half is
+    fully testable under a redirected home — while the user manager is only
+    ADDRESSED when that is the path the real home owns. ``systemctl --user``
+    has no sandbox: it reaches the calling user's live instance whatever
+    ``$HOME`` says, so without the guard an isolated run would enable a real
+    unit pointed at a store that vanishes when the sandbox ends. Same guard, and
+    same incident, as the plist half in :mod:`local_operator.launchd`.
+    """
+    unit = systemd_path()
+    unit.parent.mkdir(parents=True, exist_ok=True)
     if not dry_run:
-        plist_path().write_bytes(plistlib.dumps(render_plist(port)))
-    steps.append(f"wrote {plist_path()}")
+        unit.write_text(render_systemd(port), encoding="utf-8")
+    steps.append(f"wrote {unit}")
+    if dry_run:
+        return True, ""
+    if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+        return False, (
+            f"{unit} is not the unit the real home owns; refusing to enable it "
+            "from a redirected home"
+        )
+    # Lingering BEFORE enable --now: without a user manager the enable itself
+    # fails with the bus error, and enabling linger is what spawns one.
+    # Best-effort, so a refusal does not fail the install.
+    if supervisors.enable_linger():
+        steps.append("enabled lingering so the daemon survives logout and reboot")
+    else:
+        steps.append(
+            "could not enable lingering; the daemon may not survive logout "
+            f"(run: loginctl enable-linger {os.environ.get('USER', '$USER')})"
+        )
+    supervisors.systemctl_user("daemon-reload")
+    loaded = supervisors.systemctl_user("enable", "--now", SYSTEMD_UNIT)
+    if loaded.returncode:
+        return False, supervisors.translate_systemctl_error(loaded.stderr)
+    steps.append(f"enabled the systemd user service ({SYSTEMD_UNIT})")
+    return True, ""
 
+
+def _install_task(port: int, *, dry_run: bool, steps: list[str]) -> tuple[bool, str]:
+    """Register and start the Windows scheduled task. ``(ok, error)``.
+
+    The XML is written under the config root first and kept: Task Scheduler
+    stores its copy in the registry, so this is the only readable record of what
+    was registered, and it is what makes a later diff possible.
+    """
+    xml = render_task_xml(port)
+    record = task_record_path()
     if not dry_run:
-        # The reload, not a bare pair: it tolerates an absent job, waits for
-        # launchd to release the label, retries the bootstrap past the measured
-        # teardown race, and verifies the job is registered afterwards — so the
-        # steps below are reporting a daemon that really is loaded. See
-        # :mod:`local_operator.launchd`.
-        reloaded = launchd.reload_job(label=LABEL, path=plist_path(), runner=_launchctl)
-        if not reloaded.ok:
-            return {"ok": False, "steps": steps, "error": reloaded.detail[:300]}
-        steps.append("loaded the LaunchAgent")
-
-        # The daemon we just bootstrapped owns the port now; a health check
-        # that passed on a leftover foreground process would lie about the
-        # supervised one. Wait for OUR pid to be the listener before probing.
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            if _our_daemon_listening(port) and health(port) and gate_closed(port):
-                steps.append("health check passed and the auth gate is closed")
-                # Never return the password: a `--json` dump or an agent
-                # capturing stdout would put it in the transcript.
-                return {"ok": True, "steps": steps}
-            time.sleep(0.5)
-        return {
-            "ok": False,
-            "steps": steps,
-            "error": f"daemon did not come up healthy; see {log_path()}",
-        }
-    steps.append("dry run: skipped load and verification")
-    return {"ok": True, "steps": steps}
+        record.parent.mkdir(parents=True, exist_ok=True)
+        # Task Scheduler has no stdout redirection, so the log the other two
+        # platforms' supervisors create comes from the task's own command line
+        # (see supervisors.render_task_xml): this is what keeps log_path() the
+        # one place every log surface points at on every platform.
+        log_path().parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(xml, encoding="utf-8")
+    steps.append(f"wrote the task definition to {record}")
+    if dry_run:
+        return True, ""
+    ok, detail = supervisors.create_task(TASK_NAME, xml)
+    if not ok:
+        return False, f"schtasks could not register the task: {detail}"
+    steps.append(f"registered the scheduled task ({TASK_NAME})")
+    started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
+    if started.returncode:
+        return False, (started.stderr or started.stdout or "").strip()[:300] or (
+            "schtasks could not start the task"
+        )
+    steps.append("started the task")
+    return True, ""
 
 
 def uninstall(*, purge: bool = False, dry_run: bool = False) -> dict[str, object]:
+    """Stop and deregister this daemon on whichever platform it was installed.
+
+    EVERY verb is guarded here, not only ``install``: ``uninstall`` used to
+    call ``launchctl`` (and ``_domain()``, which needs ``os.getuid``) with no
+    platform check, so on Linux it raised ``FileNotFoundError: 'launchctl'``
+    and on Windows ``AttributeError: module 'os' has no attribute 'getuid'`` —
+    a stack trace where the user asked to remove something. An unsupported
+    platform now removes what this installer could have written and says so.
+    """
     steps: list[str] = []
+    kind = supervisors.supervisor()
     if not dry_run:
-        _launchctl("bootout", _domain(), str(plist_path()))
-        plist_path().unlink(missing_ok=True)
-    steps.append("removed the LaunchAgent")
+        if kind == supervisors.LAUNCHCTL:
+            _launchctl("bootout", _domain(), str(plist_path()))
+            plist_path().unlink(missing_ok=True)
+            steps.append("removed the LaunchAgent")
+        elif kind == supervisors.SYSTEMCTL:
+            if supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+                supervisors.systemctl_user("disable", "--now", SYSTEMD_UNIT)
+                steps.append("disabled the systemd user service")
+            else:
+                steps.append("left the unit loaded: not addressable from a redirected home")
+            systemd_path().unlink(missing_ok=True)
+            steps.append(f"removed {systemd_path()}")
+        elif kind == supervisors.SCHTASKS:
+            # ``/Delete`` deregisters the task WITHOUT interrupting a running
+            # program — Microsoft's own wording for the verb is "This command
+            # doesn't delete the program that the task runs or interrupt a
+            # running program" — so an uninstall that only deletes leaves the
+            # portal daemon serving on its port with the password still loaded.
+            # ``/End`` first is the Windows spelling of the ``bootout`` the
+            # launchd arm issues and of Linux's ``disable --now``; it is the
+            # shape ``service_action`` already uses for ``stop``.
+            supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
+            deleted, detail = supervisors.delete_task(TASK_NAME)
+            if not deleted:
+                # REFUSED rather than quietly successful: the daemon is still
+                # registered, so reporting ``ok: True`` told a caller the
+                # opposite of the state it left behind.
+                steps.append(detail)
+                return {"ok": False, "steps": steps, "error": detail}
+            steps.append(f"removed the scheduled task ({detail})")
+            task_record_path().unlink(missing_ok=True)
+        else:
+            # REFUSED rather than quietly successful: nothing here could have
+            # registered this daemon, so there is nothing to remove, and the
+            # step line carries the same sentence `install` gives. (The CLI's
+            # uninstall prints `steps` and not `error`, which is why the refusal
+            # is in both.)
+            steps.append(NO_SUPERVISOR_ERROR)
+            return {"ok": False, "steps": steps, "error": NO_SUPERVISOR_ERROR}
     if purge:
         if not dry_run:
             from local_operator.mobile.auth import delete_password
 
             delete_password()
-        steps.append("deleted the Keychain password")
+        steps.append(f"deleted the portal password ({store_description()})")
     return {"ok": True, "steps": steps}
 
 
 def service_action(action: str) -> dict[str, object]:
-    """start|stop|restart via launchctl.
+    """start|stop|restart, in each platform's own vocabulary.
 
-    The kickstart family fails with "Could not find service" when the plist
-    exists but the agent was never bootstrapped (or was booted out and not
-    re-loaded). Bootstrap it on demand so the control commands work from
+    The launchd arm's kickstart family fails with "Could not find service" when
+    the plist exists but the agent was never bootstrapped (or was booted out and
+    not re-loaded). Bootstrap it on demand so the control commands work from
     whatever state launchd is in, not just the state `install` left behind.
+    systemd has the same class of gap and closes it differently —
+    ``systemctl --user start`` on an unloaded unit fails with "Unit not found",
+    which is true and actionable, so no repair is invented here.
     """
+    kind = supervisors.supervisor()
+    if kind is None:
+        return {"ok": False, "error": NO_SUPERVISOR_ERROR}
+    if kind == supervisors.SYSTEMCTL:
+        if not supervisors.systemd_unit_is_addressable(SYSTEMD_UNIT):
+            return {
+                "ok": False,
+                "error": (
+                    f"{systemd_path()} is not the unit the real home owns; not "
+                    "addressing the user manager from a redirected home"
+                ),
+            }
+        result = supervisors.systemctl_user(action, SYSTEMD_UNIT)
+        ok = result.returncode == 0
+        return {
+            "ok": ok,
+            "error": "" if ok else supervisors.translate_systemctl_error(result.stderr)[:300],
+        }
+    if kind == supervisors.SCHTASKS:
+        if action in ("stop", "restart"):
+            # `/End` on a task that is not running exits non-zero, which for a
+            # stop is the state the caller asked for; only a task that is not
+            # REGISTERED is a real failure, and its stderr says so.
+            ended = supervisors.schtasks(*supervisors.task_end_args(TASK_NAME))
+            if ended.returncode:
+                detail = (ended.stderr or ended.stdout or "").strip()
+                if "running" not in detail.lower():
+                    return {"ok": False, "error": detail[:300] or "schtasks could not stop it"}
+        if action in ("start", "restart"):
+            started = supervisors.schtasks(*supervisors.task_run_args(TASK_NAME))
+            ok = started.returncode == 0
+            return {
+                "ok": ok,
+                "error": "" if ok else ((started.stderr or started.stdout or "").strip()[:300]),
+            }
+        return {"ok": True, "error": ""}
+    # THE LAUNCHD ARM BEGINS HERE (every arm above returned). `bootstrap
+    # <domain> <plist>` is resolved by launchd to the Label INSIDE the file, so a
+    # redirected home's `lop mobile restart` EVICTS and replaces the operator's
+    # daemon rather than merely restarting it — the measurement
+    # `browser_bridge._root_suffix` records — and `LABEL` is a fixed constant
+    # here while `plist_path()` moves with `$HOME` (review round 2, R-8). The
+    # same guard `reload_job` applies to this installer's install path, applied
+    # to the verbs; the launchd counterpart of the systemd refusal above.
+    if not launchd.is_own_plist(plist_path(), LABEL):
+        return {"ok": False, "error": launchd.not_our_job_error(plist_path(), LABEL)}
     if action in ("start", "restart") and plist_path().exists():
         printed = _launchctl("print", f"{_domain()}/{LABEL}")
         if printed.returncode != 0:
@@ -375,9 +1150,16 @@ def status(port: int = DEFAULT_PORT) -> dict[str, object]:
 
     probe = health(port)
     records = registry.scan()
+    kind = supervisors.supervisor()
     return {
-        "installed": plist_path().exists(),
+        "installed": registration_present(),
+        # Which supervisor that answer came FROM, and where its registration
+        # lives on this platform: "installed: yes" with no way to see whether it
+        # is launchd, systemd or Task Scheduler is not a diagnosable state.
+        "supervisor": kind or "none",
+        "registration": str(_registration_path()) if _registration_path() else "",
         "password_set": load_password() is not None,
+        "password_store": store_description(),
         "bundle": _bundle_state(),
         "healthy": probe is not None,
         "gate_closed": gate_closed(port),
@@ -396,3 +1178,19 @@ def status(port: int = DEFAULT_PORT) -> dict[str, object]:
             for record, state in records
         ],
     }
+
+
+def _registration_path() -> Path | None:
+    """Where this platform's registration lives, for status output.
+
+    ``None`` on a platform with no supervisor; on Windows it is the record this
+    installer wrote, because Task Scheduler keeps its own copy in the registry.
+    """
+    kind = supervisors.supervisor()
+    if kind == supervisors.LAUNCHCTL:
+        return plist_path()
+    if kind == supervisors.SYSTEMCTL:
+        return systemd_path()
+    if kind == supervisors.SCHTASKS:
+        return task_record_path()
+    return None

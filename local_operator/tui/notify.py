@@ -72,6 +72,17 @@ systems rather than defensiveness:
   the user is already staring at is pure interruption; Textual reports focus
   through ``AppFocus``/``AppBlur``, which every terminal here supports.
 - **Only for the parent's own edges** — see below.
+- **Never for a session on the test hosting** (``--hosting test``, the
+  deterministic mock in ``providers/clients.py``). A mock stream answers
+  "Hello from the mock provider!", and a notification's body is a snippet of
+  the session's last assistant line (``notifications/compose.py``) — so any
+  notification about a mock session carries that sentence onto the user's lock
+  screen, from a test or a drive-by rig, which is what the operator kept
+  seeing. The gate is a PROCESS one
+  (:func:`suppress_notifications_for_process`) rather than a per-session flag
+  because the mock is only ever a test surface: whichever process adopts a
+  mock spec is a test process, so the whole process — and every child it
+  spawns, which inherits the environment — goes quiet.
 
 Whose events count
 ------------------
@@ -112,7 +123,19 @@ logger = logging.getLogger(__name__)
 #: the shimmer/nerd-icon gates. Wanted by anything that records raw terminal
 #: output (a demo capture, CI, ``script(1)``) and by a user who simply does not
 #: want to be interrupted, without editing config.
-_ENV_DISABLE = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
+#:
+#: PUBLIC, and paired with the value that turns it on, because the NAME is also
+#: what a harness hands its CHILDREN
+#: (:func:`local_operator.agent_shell.harness_child_env`): a script driving the
+#: real CLI has to silence the sessions it starts, the child is the process that
+#: decides, and a second spelling of the name at that call site is the drift
+#: that leaves a child un-gated. One definition here, used by the reader, the
+#: in-process setter and the harness env.
+ENV_DISABLE = "LOCAL_OPERATOR_NO_NOTIFICATIONS"
+
+#: The value that turns :data:`ENV_DISABLE` ON. Every reader tests truthiness,
+#: so the pair is spelled once here rather than guessed at each call site.
+ENV_DISABLE_VALUE = "1"
 
 #: The app name every backend attributes the toast to. The window title spends
 #: its budget on `lo` because a sidebar row clips at ~24 cells; a notification
@@ -394,16 +417,84 @@ MAX_TITLE_CHARS = 80
 EnvMap = Mapping[str, str]
 
 
-def notifications_enabled() -> bool:
+def notifications_enabled(env: EnvMap | None = None) -> bool:
     """Whether notifications may be emitted at all (env gate + config flag).
 
     Same two-tier shape as ``terminal_title_enabled``/``nerd_icons_enabled``:
     an environment kill switch for a capture or a CI run, and a
     ``display.notifications`` config flag for a persistent preference.
+
+    ``env`` defaults to ``os.environ``, which is what every process-level
+    caller wants, and is read FRESH on each call — a kill switch turned on
+    mid-process (see :func:`suppress_notifications_for_process`) must take
+    effect on the next send, not on the next boot. :class:`Notifier` passes the
+    mapping it was constructed with instead, so its own live re-check reads the
+    same environment as every other decision it makes (``detect_protocol``,
+    ``cmux_surface_id``) and an injected mapping stays deterministic in tests.
     """
-    if os.environ.get(_ENV_DISABLE):
+    source = os.environ if env is None else env
+    if source.get(ENV_DISABLE):
         return False
     return bool(settings_get("display.notifications", True))
+
+
+def suppress_notifications_for_process(reason: str = "") -> None:
+    """Turn this process's notification kill switch ON, and keep it on.
+
+    WHY THIS EXISTS, and why it is not a per-session flag. A session on the
+    test hosting (``--hosting test``, the mock wire) answers "Hello from the
+    mock provider!", and a composed notification body is a snippet of the
+    session's last assistant line — so every notification about a mock session
+    shouts that sentence onto the operator's lock screen. The mock exists only
+    for tests, so the honest rule is "a process running the mock never
+    notifies", and a process-wide environment switch is the only form of that
+    rule a SPAWNED CHILD also respects: a runtime born from a mock session
+    inherits the environment, so it starts silent rather than deciding again.
+
+    STICKY AND ONE-WAY, deliberately. It is never cleared, and there is no
+    un-suppress: the flag records that this process ADOPTED a test surface at
+    some point in its life, and is never re-evaluated afterwards. Idempotent, so
+    the several call sites on one boot path log once rather than four times.
+
+    THE PRICE OF THAT, stated here because this is where a reader looks for it.
+    A session that switches OFF the test hosting mid-run (``/model
+    openai/gpt-5``) stays silenced in THIS process, while the store-side reader
+    the machine-wide legs carry
+    (``session.model_selection.session_uses_test_hosting``) reads the session's
+    LATEST spec and would let them announce. The two can disagree, and the
+    direction is the safe one — every leg asks this switch FIRST, so a silenced
+    process stays silent — but the honest statement is that such a completion is
+    announced by ANOTHER surface on the machine (the operator's own TUI, the
+    desktop app) IF one is running, and otherwise not announced at all. Nothing
+    is lost by that, and nothing says so at the time: every switch site returns
+    silently — the ONE debug record is written when the switch is SET (see the
+    `logger.debug` below), never when a banner is skipped — and the durable
+    unseen mark SURVIVES, so a surface started later still reads the same
+    completion as unread and raises its own banner for it
+    (``session/runtime/serving.py::_announce_completion``, the SETTLED arm).
+    Making the two agree was considered and rejected: it would mean re-reading a
+    session's spec in the process that decides and clearing the switch when the
+    spec left the mock — and a spawned child inherits the switch, so clearing it
+    re-arms banners for children started after the switch, which is the very
+    failure this rule exists to stop. A process that just ran a mock is the last
+    one that should un-silence itself.
+
+    WHO MAY CALL IT. The two choke points where a process adopts a mock model —
+    ``providers/clients.py::client_for_spec`` (every mock stream passes it,
+    including a mid-session switch to the mock) and
+    ``model/configure.py::configure_model`` (so an app that BOOTS on the mock
+    never constructs a notifier at all) — plus a test's own setup. Nothing may
+    call it on behalf of a user preference: a user who does not want
+    notifications sets ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` in their own shell or
+    turns ``display.notifications`` off.
+    """
+    if os.environ.get(ENV_DISABLE):
+        return  # Already suppressed; keep the FIRST reason rather than relabelling.
+    os.environ[ENV_DISABLE] = ENV_DISABLE_VALUE
+    logger.debug(
+        "notifications suppressed for this process%s",
+        f": {reason}" if reason else " (no reason given)",
+    )
 
 
 def session_names_in_notifications() -> bool:
@@ -1034,8 +1125,17 @@ class Notifier:
 
     @property
     def enabled(self) -> bool:
-        """Whether this instance delivers anything at all."""
-        return self._enabled
+        """Whether this instance delivers anything at all.
+
+        The construction-time value AND the LIVE gate, read per call rather
+        than cached in ``__init__``. A notifier resolved once at boot would
+        keep delivering after a session switched onto the test hosting mid-run
+        (``/model test/test-model``, which is how a user or a rig turns a real
+        session into a mock one) — and the in-band OSC leg below is a real
+        interruption, not chrome, so "suppressed" has to mean this process is
+        silent on every wire and not merely on the OS one.
+        """
+        return self._enabled and notifications_enabled(self._env)
 
     @property
     def protocol(self) -> NotifyProtocol:
@@ -1109,7 +1209,7 @@ class Notifier:
         transcript snippet, so a user got a richer banner for a session they
         were not in than for the one they were.
         """
-        if not self._enabled:
+        if not self.enabled:
             return False
         if self._focused:
             return False

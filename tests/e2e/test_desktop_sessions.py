@@ -15,6 +15,7 @@ import secrets
 import socket
 import sqlite3
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +28,62 @@ from local_operator.server.app import app
 from local_operator.session.attention import AttentionStore
 from local_operator.session.runtime.server import RuntimeServer
 from local_operator.session.runtime.serving import ServingSessionHandle
-from tests.e2e.harness import ScriptedStream, build_session, text_turn, tool_call_turn
+from tests.e2e.harness import (
+    E2E_ORACLE_MODEL,
+    ScriptedStream,
+    build_session,
+    text_turn,
+    tool_call_turn,
+)
+from tests.notification_opt_in import notification_path_opt_in
 
 pytestmark = pytest.mark.e2e
+
+
+@pytest.fixture
+def notifications_on(headless_tui_env: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Let these cells HEAR the notification path, deliberately.
+
+    ``tests/e2e/conftest.py`` arms ``LOCAL_OPERATOR_NO_NOTIFICATIONS`` for every
+    e2e test (a composed frame must not reach the developer's machine while
+    fifty sessions are open), and the runtime and the desktop bridge now skip an
+    announced completion while that switch is on — which is the subject of every
+    cell that asks for this fixture: one asserts exactly one ``notification``
+    frame after N turn ends, one asserts the runtime speaks once the desktop
+    lease is withdrawn.
+
+    Ordering is why this fixture TAKES ``headless_tui_env``: pytest builds an
+    autouse fixture before a same-scope one that does not depend on it, so a
+    bare fixture would clear the switch and be re-armed by the autouse one a
+    moment later. Set and restored BY HAND rather than through ``monkeypatch``,
+    which is function-scoped and shared with the test: a test that calls
+    ``monkeypatch.undo()`` would otherwise re-arm the gate mid-cell.
+
+    THE BODY IS THE SHARED OPT-IN (``tests/notification_opt_in``), which clears
+    that switch AND waives the test-hosting rule — the sessions these cells
+    drive carry a real selection row, so the per-session rule would suppress the
+    very frame they assert without it.
+
+    Opening the gate is safe ONLY because the fixture also doubles
+    ``tui.notify.detached_notify`` — the detached banner is a real ``osascript``
+    call on this host, and a cell that opens the gate without the double is a
+    cell that can put a banner on the developer's screen. Every cell that asks
+    for this fixture asserts on an in-process frame (or on its own recorder,
+    which it installs over this one) instead.
+
+    The double answers FALSE ("no banner was raised"), which is the production
+    answer for a silenced process and the one these cells depend on: the
+    runtime's rung-4 arm releases the delivery claim it took when the raise
+    does not land, and ``test_a_real_turn_emits_exactly_one_notification...``
+    ends by asserting the RENDERER can still claim the same completion. A
+    double answering True leaves the watermark spent and that claim fails —
+    which is what this fixture did before the answer mattered.
+    """
+    from local_operator.tui import notify as notify_module
+
+    monkeypatch.setattr(notify_module, "detached_notify", lambda *args, **kwargs: False)
+    with notification_path_opt_in():
+        yield
 
 
 async def next_frame(lines, predicate):
@@ -778,7 +832,7 @@ async def serve_app(listener, token: str):
 
 @pytest.mark.asyncio
 async def test_a_real_turn_emits_exactly_one_notification_after_many_turn_ends(
-    headless_tui_env: Path, workspace: Path, monkeypatch
+    headless_tui_env: Path, notifications_on: None, workspace: Path, monkeypatch
 ):
     """The reported defect, proven fixed at the real transport.
 
@@ -835,7 +889,15 @@ async def test_a_real_turn_emits_exactly_one_notification_after_many_turn_ends(
                 ]
             )
             session = build_session(
-                root / "sessions" / sid, stream, tools=[build_write_tool()], cwd=workspace
+                root / "sessions" / sid,
+                stream,
+                tools=[build_write_tool()],
+                cwd=workspace,
+                # The bridge SKIPS a session recorded on the test hosting (a test
+                # session is not news), and this cell's subject is the bridge's
+                # frame contract — one notification after many turn ends — so the
+                # session it drives has to be one the bridge does not skip.
+                model=E2E_ORACLE_MODEL,
             )
             # NAMED UP FRONT, and not for cosmetics: an unnamed session fires
             # the runtime's one-shot auto-naming errand, which is a real
@@ -936,7 +998,7 @@ async def test_a_real_turn_emits_exactly_one_notification_after_many_turn_ends(
 
 @pytest.mark.asyncio
 async def test_a_delegating_turn_stays_silent_until_its_child_settles(
-    headless_tui_env: Path, workspace: Path, monkeypatch
+    headless_tui_env: Path, notifications_on: None, workspace: Path, monkeypatch
 ):
     """The other half of the defect: `agent_end` while children still work.
 
@@ -982,7 +1044,11 @@ async def test_a_delegating_turn_stays_silent_until_its_child_settles(
                     text_turn("The subagent finished; the audit is clean."),
                 ]
             )
-            session = build_session(root / "sessions" / sid, stream, cwd=workspace)
+            # Same reason as the cell above: the bridge skips a test-hosted
+            # session, and this cell measures WHEN the bridge speaks.
+            session = build_session(
+                root / "sessions" / sid, stream, cwd=workspace, model=E2E_ORACLE_MODEL
+            )
             # See the note in the test above: an unnamed session spends a
             # scripted turn on the auto-naming errand, which here would leave
             # the delegating turn with no script and end it as an `error`
@@ -1251,7 +1317,7 @@ async def test_a_real_child_transcript_is_readable_through_the_parent_route(
 
 @pytest.mark.asyncio
 async def test_the_desktop_presence_decides_whether_the_runtime_speaks(
-    headless_tui_env: Path, workspace: Path, monkeypatch
+    headless_tui_env: Path, notifications_on: None, workspace: Path, monkeypatch
 ):
     """RUNG 2, over real loopback HTTP and the production runtime handle.
 
