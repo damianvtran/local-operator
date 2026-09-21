@@ -3086,6 +3086,33 @@ def _laddered_model() -> ModelSpec:
     )
 
 
+def test_lower_effort_declines_to_retreat_from_the_auto_sentinel():
+    """The Radient router's ``auto`` sits at index 0 of its ladder, so the
+    reader-safe retreat has nothing below it and returns ``None`` — the turn
+    ends with the loop's own notice rather than dropping to a real rung.
+
+    This is the DELIBERATE half of the unrankable-member audit (the ``auto``
+    sentinel is not in ``EFFORT_ORDER``): ``auto`` delegates the level to the
+    server, so inventing a rung below it would put a depth on the wire the user
+    never chose while the band still read ``auto``. Pinned on the DERIVED spec,
+    so it states the ladder production builds, and paired with the real-rung
+    retreat so a later edit that reorders the ladder fails here rather than
+    silently switching the behaviour.
+    """
+    from local_operator.harness.loop import _lower_effort
+    from local_operator.model.configure import build_model_spec
+
+    router = build_model_spec("radient", "auto")
+    assert router.reasoning_efforts == ("auto", "low", "medium", "high")
+    assert router.reasoning_efforts[0] == "auto"
+    assert _lower_effort(router) is None, "no rung below the sentinel: decline"
+
+    # Control: from a REAL rung on the same ladder the retreat still works, so
+    # the ``None`` above is the sentinel's placement and not a broken helper.
+    on_high = router.model_copy(update={"reasoning_effort": "high"})
+    assert _lower_effort(on_high) == "medium"
+
+
 @pytest.mark.asyncio
 async def test_empty_length_truncation_retries_at_lower_effort():
     """A length stop with NO text and NO calls is a silent turn: the loop

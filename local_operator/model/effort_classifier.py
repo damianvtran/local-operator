@@ -111,8 +111,17 @@ def map_tier_to_effort(
         return None
     ladder = list(efforts)
     if tier == "lo":
-        # Never underthink at provider-specific "minimal" when low exists.
-        return ladder[1] if ladder[0] == "minimal" and len(ladder) > 1 else ladder[0]
+        # Never underthink at provider-specific "minimal" when low exists, and
+        # never answer the `auto` SENTINEL either: `auto` is not a depth, it
+        # delegates the level to the server, so a `lo` classification must land
+        # on the cheapest REAL rung. Radient's router ladder (
+        # `configure.ROUTER_EFFORT_LADDERS`) leads with `auto`, so without this
+        # arm a simple prompt would be classified `lo` and then sent `auto` --
+        # letting the server pick a depth the classifier just judged to be too
+        # much, which is the opposite of what the tier asked for.
+        if ladder[0] in ("minimal", "auto") and len(ladder) > 1:
+            return ladder[1]
+        return ladder[0]
     if tier == "med":
         return ladder[len(ladder) // 2]
     # hi: protect spend/latency by stopping one rung below max by default.

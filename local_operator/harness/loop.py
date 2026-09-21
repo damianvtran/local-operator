@@ -488,7 +488,17 @@ def _lower_effort(model: "ModelSpec") -> str | None:
     ``None`` when the model has no ladder or already runs at its bottom rung:
     there is no cheaper setting to retry at, and a retry at the SAME effort
     would reproduce the same silent truncation, so the caller ends the turn
-    instead."""
+    instead.
+
+    The ``auto`` SENTINEL sits at index 0 of the Radient router ladder
+    (``configure.ROUTER_EFFORT_LADDERS``), so from ``auto`` this returns ``None``
+    -- a DELIBERATE choice, not an accident of placement. ``auto`` is not a
+    depth: it delegates the level to the server, so there is no rung below it to
+    retreat to, and inventing one (dropping to ``low``) would put a level on the
+    wire the user never chose while the band still read ``auto``. Declining the
+    retreat ends the truncated turn with the loop's own notice, which is the
+    honest frame. A caller that wants a cheaper retry from ``auto`` must first
+    pick a real rung with ``/effort``."""
     ladder = list(model.reasoning_efforts)
     current = model.reasoning_effort
     if not ladder or current is None or current not in ladder:

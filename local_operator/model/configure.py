@@ -557,10 +557,12 @@ _DEEPSEEK_DIRECT_MODELS = frozenset(
 #:
 #: WHY THIS VOCABULARY. The router's product is dispatching to a frontier model
 #: chosen per request, so the honest ladder is the one the AGGREGATOR documents
-#: for the ``reasoning_effort`` parameter it fronts -- low/medium/high, which is
-#: both OpenAI's canonical value set and the set Radient's own OpenAI-compatible
-#: request schema names for the field (``internal/requests/openai.go``:
-#: "Constrains reasoning effort (low, medium, high)"). The alternative -- the
+#: for the ``reasoning_effort`` parameter it fronts -- the three real depths
+#: low/medium/high, which is both OpenAI's canonical value set and the set
+#: Radient's own OpenAI-compatible request schema names for the field
+#: (``internal/requests/openai.go``: "Constrains reasoning effort (low, medium,
+#: high)"), PLUS the ``auto`` sentinel on the aggregators whose server resolves
+#: it (see the provider split below). The alternative -- the
 #: rungs of whichever model the router selects today (``deepseek/deepseek-v4.1-flash``
 #: takes none/low/high/max) -- would pin this table to a selection that is random
 #: by design and would offer rungs a future route rejects. A level the selected
@@ -569,17 +571,46 @@ _DEEPSEEK_DIRECT_MODELS = frozenset(
 #: top rung, ``high``, is on both sets, which is what the operator requires the
 #: wire to carry.
 #:
-#: WHY IT SEEDS ``high``. An arbitrary aggregator id must NOT seed: the
-#: aggregator's own default is not knowable from here, and sending a level is
-#: measurably not the same request as omitting one (see ``build_model_spec``).
-#: The router is the exception because it is ONE endpoint this module ships a
-#: row for and the operator selects as a route whose whole purpose is frontier
-#: dispatch, so the level the harness emits is a recorded intent for that route
-#: rather than a guess about a model behind it. ``high`` is the level the
-#: current route's own model documents as its default, so the emitted body
-#: states the depth already in force rather than switching reasoning on.
-ROUTER_EFFORT_LADDER: tuple[str, ...] = ("low", "medium", "high")
-ROUTER_EFFORT_DEFAULT: str = "high"
+#: WHY THE LADDER IS SPLIT BY AGGREGATOR, and why the split is load-bearing
+#: rather than cosmetic. The two routers front different request schemas.
+#: Radient's own OpenAI-compatible schema is now readonly for an explicit
+#: ``auto`` sentinel -- the SERVER interprets ``"auto"`` and resolves it to a
+#: real depth (see the agent-server ``resolveEffort`` seam) -- so the ladder
+#: the harness offers on ``radient``/``radient-key`` carries ``auto`` as its
+#: floor AND its default. OpenRouter does NOT: it validates ``reasoning_effort``
+#: against an enum it defines and rejects values outside it (measured: openclaw
+#: issue #77350; it 400s on an unknown enum member), and it documents no
+#: ``auto`` member, so its ladder stays the three canonical rungs and its
+#: default stays ``high`` -- the level the route's current model documents.
+#: One shared ladder would either 400 every OpenRouter router turn on ``auto``
+#: or leave Radient's sentinel unreachable; keyed on the PROVIDER is the only
+#: spelling that keeps both routes legal.
+#:
+#: WHY A ROUTE-KEYED RULE AT ALL, not an id-keyed ``model.effort`` table row:
+#: see ``aggregator_router_effort_ladder``.
+ROUTER_EFFORT_LADDERS: dict[str, tuple[str, ...]] = {
+    "radient": ("auto", "low", "medium", "high"),
+    "radient-key": ("auto", "low", "medium", "high"),
+    "openrouter": ("low", "medium", "high"),
+}
+
+#: The level each router seeds when the user has set none. Radient seeds
+#: ``auto`` -- the sentinel the server resolves, so the harness states the
+#: route's own default dispatch intent rather than a depth it chose. OpenRouter
+#: seeds ``high``: it has no ``auto`` member, and ``high`` is the level the
+#: route's current model documents as its default, so the emitted body states
+#: the depth already in force rather than switching reasoning on.
+ROUTER_EFFORT_DEFAULTS: dict[str, str] = {
+    "radient": "auto",
+    "radient-key": "auto",
+    "openrouter": "high",
+}
+
+#: The fallback for an aggregator router route this table has no provider entry
+#: for. ``high`` rather than ``auto`` because an unknown router's schema is not
+#: known to accept the sentinel -- failing back to a real rung cannot 400.
+ROUTER_EFFORT_FALLBACK: tuple[str, ...] = ("low", "medium", "high")
+ROUTER_EFFORT_FALLBACK_DEFAULT: str = "high"
 
 
 def aggregator_router_effort_ladder(provider: str, model_id: str) -> tuple[str, ...]:
@@ -592,6 +623,9 @@ def aggregator_router_effort_ladder(provider: str, model_id: str) -> tuple[str, 
     enough: the id avoids ``ollama/auto`` and the provider avoids a vendor that
     happens to serve a model literally named ``auto``.
 
+    The ladder is keyed on the PROVIDER too -- see :data:`ROUTER_EFFORT_LADDERS`
+    for why Radient's carries the ``auto`` sentinel and OpenRouter's must not.
+
     ``model_id`` is the CANONICAL id ``build_model_spec`` has already stripped
     its own ``<hosting>/`` prefix from, which is why ``openrouter/auto`` arrives
     intact (the strip deliberately skips aggregator hostings, whose ids
@@ -601,8 +635,25 @@ def aggregator_router_effort_ladder(provider: str, model_id: str) -> tuple[str, 
     from local_operator.providers.registry import AGGREGATOR_PROVIDERS
 
     if provider in AGGREGATOR_PROVIDERS and model_id in AGGREGATOR_ROUTER_MODEL_IDS:
-        return ROUTER_EFFORT_LADDER
+        return ROUTER_EFFORT_LADDERS.get(provider, ROUTER_EFFORT_FALLBACK)
     return ()
+
+
+def aggregator_router_effort_default(provider: str, model_id: str) -> str | None:
+    """The level an aggregator ROUTER route seeds, or ``None`` when not a router.
+
+    The sibling of :func:`aggregator_router_effort_ladder`, split out so the seed
+    is asked for the same way the ladder is rather than read from a constant the
+    builder has to remember to key on the provider itself. ``None`` for every
+    non-router route, which is what keeps the ``if router_levels`` branch in
+    ``build_model_spec`` the only place a seed is applied on an aggregator.
+    """
+    from local_operator.model.registry import AGGREGATOR_ROUTER_MODEL_IDS
+    from local_operator.providers.registry import AGGREGATOR_PROVIDERS
+
+    if provider in AGGREGATOR_PROVIDERS and model_id in AGGREGATOR_ROUTER_MODEL_IDS:
+        return ROUTER_EFFORT_DEFAULTS.get(provider, ROUTER_EFFORT_FALLBACK_DEFAULT)
+    return None
 
 
 def reasoning_echo_required(provider: str, model_id: str) -> bool:
@@ -983,20 +1034,22 @@ def build_model_spec(hosting: str, model_name: str, info: ModelInfo | None = Non
         # ...except the ROUTER, which is the one aggregator route this module
         # ships a row for and selects as a route. Its default is a recorded
         # intent rather than a guess about a model behind it (see
-        # ``aggregator_router_effort_ladder``), so it seeds `high` where an
-        # arbitrary aggregator id must seed nothing. The router branch is the
-        # consequence of the operator's decision to have the harness EMIT an
-        # effort level on this route; the no-seed rule stands for every other
-        # aggregator id, which is what this branch and the tests around it
-        # still pin.
+        # ``aggregator_router_effort_ladder``), so it seeds a level where an
+        # arbitrary aggregator id must seed nothing. The seed is asked of
+        # ``aggregator_router_effort_default`` rather than read from a constant,
+        # so the ladder and the seed are keyed on the provider in ONE place and
+        # cannot disagree: Radient seeds its ``auto`` sentinel, OpenRouter seeds
+        # ``high``. The router branch is the consequence of the operator's
+        # decision to have the harness EMIT an effort level on this route; the
+        # no-seed rule stands for every other aggregator id, which is what this
+        # branch and the tests around it still pin.
         if router_levels:
             # Guarded by membership for the same reason the direct branch is: a
             # listing that ever NARROWS the router's ladder must not be sent a
             # level it stopped offering, so seed nothing rather than a rung the
             # resolved ladder no longer carries.
-            reasoning_effort = (
-                ROUTER_EFFORT_DEFAULT if ROUTER_EFFORT_DEFAULT in effort_levels else None
-            )
+            router_default = aggregator_router_effort_default(canonical, model_name)
+            reasoning_effort = router_default if router_default in effort_levels else None
         else:
             reasoning_effort = None
     else:
