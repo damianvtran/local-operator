@@ -135,6 +135,21 @@ class AnalyticsRecorder:
         self._dropped = 0
         self._last_prune = 0.0
         self._closed = False
+        #: Fail-soft write observability, read ONLY by ``flush_for_test``: each
+        #: kind of store call the writer SWALLOWS is counted here, with the repr
+        #: of the last exception. An item whose write raised still settles, so
+        #: the completion count alone cannot tell a test that its row landed;
+        #: these are how the barrier reports the difference instead of letting a
+        #: test read a missing row and fail on a bare ``None``. The swallow-and-
+        #: log policy itself is unchanged and deliberate — a bad sample must
+        #: never kill the writer or stall a session — and production never reads
+        #: these: the increments happen only on the error path.
+        self._write_failures: dict[str, int] = {}
+        self._write_error_repr: dict[str, str] = {}
+        #: How many of those failures a ``flush_for_test`` has already reported,
+        #: so one failure is surfaced by exactly one barrier instead of by every
+        #: barrier for the rest of the process.
+        self._reported_write_failures = 0
 
     # -- lifecycle -----------------------------------------------------------
     def _ensure_thread(self) -> None:
@@ -239,20 +254,32 @@ class AnalyticsRecorder:
             # it, so the two never share a batch anyway.
             try:
                 self._store.record_tool_calls([task.as_row() for task in tools])
-            except Exception:  # noqa: BLE001 — a bad sample must not kill the writer
+            except Exception as exc:  # noqa: BLE001 — a bad sample must not kill the writer
                 logger.debug("analytics: tool-call flush failed", exc_info=True)
+                self._note_write_failure("tool call", exc)
         if names:
             for task in names:
                 try:
                     self._store.upsert_session_name(task.session_id, task.name, rank=task.rank)
-                except Exception:  # noqa: BLE001 — a bad name must not kill the writer
+                except Exception as exc:  # noqa: BLE001 — a bad name must not kill the writer
                     logger.debug("analytics: name upsert failed", exc_info=True)
+                    self._note_write_failure("session name", exc)
         if not batch:
             return
         try:
             self._store.record_batch(batch)
-        except Exception:  # noqa: BLE001 — writer must never die on a bad batch
+        except Exception as exc:  # noqa: BLE001 — writer must never die on a bad batch
             logger.debug("analytics: flush failed", exc_info=True)
+            self._note_write_failure("ledger batch", exc)
+
+    def _note_write_failure(self, kind: str, exc: BaseException) -> None:
+        """Count a swallowed write failure for ``flush_for_test`` to report.
+
+        Only the writer thread writes, so the read-modify-write below needs no
+        lock; the barrier reads a snapshot after the queue has settled.
+        """
+        self._write_failures[kind] = self._write_failures.get(kind, 0) + 1
+        self._write_error_repr[kind] = repr(exc)
 
     def _maybe_prune(self) -> None:
         now = time.monotonic()
@@ -365,7 +392,7 @@ class AnalyticsRecorder:
         return self._dropped
 
     def flush_for_test(self, timeout: float = 5.0) -> None:
-        """Block until every queued item has been WRITTEN. TEST ONLY.
+        """Block until every queued item has been through the write path. TEST ONLY.
 
         Never called on a session: real sessions do not wait for the writer.
         It exists so a test can assert that a recorded sample reached the store
@@ -388,12 +415,18 @@ class AnalyticsRecorder:
 
         The barrier is the queue's own completion count: the writer calls
         ``task_done()`` for an item only after the ``_flush`` carrying it has
-        returned, so this returning means the store saw every item enqueued
-        before now — names and tool calls included.
+        returned, so returning means every item enqueued before now has been
+        through ``_flush``, names and tool calls included. That is a statement
+        about the write PATH, not about the row: the writer's store calls are
+        fail-soft (a bad sample must never kill the writer or stall a session),
+        so an item whose write RAISED settles like any other. Those swallowed
+        failures are counted, and this method raises on them too — otherwise it
+        would return clean while the row a caller is about to read is missing,
+        which is the failure mode this whole method exists to remove.
 
-        ON EXPIRY THIS RAISES rather than returning. A caller that asked for a
-        guarantee must get either the guarantee or a failure naming what was
-        still outstanding.
+        ON EXPIRY OR A FAILED WRITE THIS RAISES rather than returning. A caller
+        that asked for a guarantee must get either the guarantee or a failure
+        naming what went wrong.
         """
         self._ensure_thread()
         deadline = time.monotonic() + timeout
@@ -411,13 +444,29 @@ class AnalyticsRecorder:
                 if remaining <= 0:
                     writer = self._thread
                     raise TimeoutError(
-                        f"flush_for_test: {queued.unfinished_tasks} queued item(s) "
-                        f"still unwritten {timeout:.2f}s after the call — the "
-                        f"analytics writer thread has not settled them "
+                        f"flush_for_test: {queued.unfinished_tasks} unsettled item(s) "
+                        f"still pending {timeout:.2f}s after the call — the "
+                        f"analytics writer thread has not written them "
                         f"(writer alive: {writer is not None and writer.is_alive()}, "
                         f"recorder closed: {self._closed})"
                     )
                 queued.all_tasks_done.wait(remaining)
+        # The items are settled; the rows are a separate question, because a
+        # failed store call is swallowed rather than propagated. Report the
+        # writes the writer could not make, once each.
+        failures = sum(self._write_failures.values())
+        if failures > self._reported_write_failures:
+            self._reported_write_failures = failures
+            detail = ", ".join(
+                f"{kind} ×{count} ({self._write_error_repr.get(kind, 'no repr')})"
+                for kind, count in sorted(self._write_failures.items())
+            )
+            raise RuntimeError(
+                f"flush_for_test: {failures} analytics write(s) raised and were "
+                f"swallowed by the writer — {detail}. The items are settled but "
+                f"their rows are missing (the writer logs them as 'analytics: …' "
+                f"at debug level)."
+            )
 
     def close(self, timeout: float = 2.0) -> None:
         """Stop the writer and close the store (process teardown / tests)."""
