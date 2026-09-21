@@ -1185,11 +1185,11 @@ merged change as a local modification — use
 current `lop-update` does not compare the ref against a remote at all: it takes
 its ref from its argument (defaulting to the local `main`) and delegates to
 `lop update --from-snapshot "$REF"`. The compare-and-refuse body that this step
-used to contain was retired with the legacy installer — it survives only in
-`~/.local/bin/lop-update.legacy-uvtool.bak` **as history** — its `REFUSING to
-release a stale ref` message lives there (`:154-170`), and nothing runs the
-script — and the `--skip-remote-check` flag went with
-it. So nothing refuses a stale local `main`: measured on 2026-09-21,
+used to contain was retired with the legacy installer. It survives only in
+`~/.local/bin/lop-update.legacy-uvtool.bak` **as history**; its `REFUSING to
+release a stale ref` message lives there (`:154-170`), nothing runs the script,
+and the `--skip-remote-check` flag went with it. So nothing refuses a stale
+local `main`: measured on 2026-09-21,
 `lop-update` built **0.61.6 from `f6eaea3d`** while `origin/main` was several
 releases ahead, and the wrong build was installed before anyone noticed. The
 BEFORE-install check is therefore not a fallback to a gate; it is the only
