@@ -235,6 +235,64 @@ class _FailingWriteStore(AnalyticsStore):
         raise sqlite3.OperationalError("disk I/O error")
 
 
+class _InjectingWatermark(dict[str, int]):
+    """The barrier's own watermark, with one loss counted during the report.
+
+    R3-1's window — a loss counted after the barrier snapshots its counters but
+    before it advances the watermark — is microseconds wide and needs a
+    concurrent producer, so it is simulated at the one point the two spellings
+    differ: ``get``, which both the ``new`` computation and the watermark
+    advance call. The injected loss updates an EXISTING kind, so the live dict
+    never changes size and the previous implementation's iteration over it
+    cannot raise instead of showing the bug.
+    """
+
+    def __init__(self, recorder: AnalyticsRecorder, reported: dict[str, int]) -> None:
+        super().__init__(reported)
+        self._recorder = recorder
+        self._fired = False
+
+    # The hook only needs to be a valid ``dict.get`` for the calls the barrier
+    # makes, so the override is deliberately not a full re-declaration of
+    # typeshed's three overloads.
+    def get(  # pyright: ignore[reportIncompatibleMethodOverride]
+        self, key: str, default: int | None = None
+    ) -> int | None:
+        if not self._fired:
+            self._fired = True
+            self._recorder._note_write_failure("session name", "counted mid-report")
+        return super().get(key, default)
+
+
+def test_a_loss_counted_mid_report_is_still_reported_by_the_next_barrier(tmp_path):
+    """R3-1: the watermark advances by what was REPORTED, not by live totals.
+
+    Marking the live dict reported means a loss counted in the window between
+    the snapshot and the advance is recorded as reported and never printed —
+    the silent success this whole PR is about, one line further in. The third
+    barrier below is the discriminating assertion: the injected loss was never
+    named by the second report, so only a watermark advanced by the delta still
+    holds it as unreported.
+    """
+    store = _FailingWriteStore(tmp_path / "a.db")
+    rec = AnalyticsRecorder(store=store)
+    try:
+        rec.note_session_name("first", "never lands")
+        with pytest.raises(RuntimeError, match="session name ×1"):
+            rec.flush_for_test()
+
+        rec.note_session_name("second", "never lands either")
+        rec._reported_write_failures = _InjectingWatermark(rec, rec._reported_write_failures)
+        with pytest.raises(RuntimeError, match="session name ×1"):
+            rec.flush_for_test()
+
+        with pytest.raises(RuntimeError, match="session name ×1"):
+            rec.flush_for_test()
+    finally:
+        rec.close()
+    assert store.attempts == 2, "the writer retried a name the store refused"
+
+
 def test_flush_for_test_reports_a_write_the_writer_swallowed(tmp_path):
     """A settled item is not a written row, and the barrier has to say so.
 

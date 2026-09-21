@@ -256,8 +256,13 @@ class AnalyticsRecorder:
             # Its own transaction, not joined to the ledger insert below: tool
             # calls are produced DURING a turn and the ledger row at the end of
             # it, so the two never share a batch anyway.
-            rows = [task.as_row() for task in tools]
             try:
+                # ``as_row()`` belongs INSIDE the guard with the call it feeds:
+                # the guard's contract is that no bad sample can kill the writer
+                # thread, and an expression outside it is one edit away from
+                # doing exactly that (a dead writer turns every later barrier
+                # into a ``TimeoutError``).
+                rows = [task.as_row() for task in tools]
                 written = self._store.record_tool_calls(rows)
             except Exception as exc:  # noqa: BLE001 — a bad sample must not kill the writer
                 logger.debug("analytics: tool-call flush failed", exc_info=True)
@@ -494,13 +499,29 @@ class AnalyticsRecorder:
         # and a raising store alike. Report only what is NEW since the last
         # report, so the counts name this barrier's losses rather than a running
         # total that reads like fresh damage.
+        #
+        # The snapshot is taken first and it is a COPY: a producer can keep
+        # enqueuing while this runs (every session records without waiting), so
+        # the writer may be counting a loss at this instant, and iterating a dict
+        # it is mutating is asking for "dictionary changed size during
+        # iteration".
+        current = self._write_failures.copy()
         new = {
             kind: count - self._reported_write_failures.get(kind, 0)
-            for kind, count in self._write_failures.items()
+            for kind, count in current.items()
             if count > self._reported_write_failures.get(kind, 0)
         }
         if new:
-            self._reported_write_failures = dict(self._write_failures)
+            # Advance the watermark by the deltas actually REPORTED, never to the
+            # live totals: a loss counted between the snapshot above and this line
+            # would otherwise be marked reported without ever appearing in a
+            # message, which is the same silent-success bug this method fixes.
+            # Advancing by the delta leaves it greater than the watermark, so the
+            # next barrier reports it.
+            for kind, count in new.items():
+                self._reported_write_failures[kind] = (
+                    self._reported_write_failures.get(kind, 0) + count
+                )
             detail = ", ".join(
                 f"{kind} ×{count} ({self._write_failure_detail.get(kind, 'no detail')})"
                 for kind, count in sorted(new.items())
