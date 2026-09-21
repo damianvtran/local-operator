@@ -819,23 +819,37 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     #     asserts the pass left it alone in every OBSERVABLE way — the hit list is the
     #     observable that moves.
     #
-    #     The corrected boundary, measured 2026-09-21 — every spelling below is
-    #     byte-stable on all seven surfaces with an empty ``reached_model``:
-    #     ``_authToken=[redacted]`` and the registry-path spelling
-    #     ``//registry.npmjs.org/:_authToken=[redacted]`` file ``npmrc-auth-token``;
-    #     ``machine api.example.com login robot password [redacted]`` files
-    #     ``netrc-password``; ``Cookie: [redacted]`` and ``Set-Cookie: [redacted]`` file
-    #     ``cookie-header``; ``mysql -u root -p[redacted]`` and
-    #     ``psql -U postgres -p [redacted]`` file ``client-inline-password``;
-    #     ``docker login -u robot -p [redacted]`` files ``docker-login-password``;
-    #     ``openssl enc -passin [redacted]`` files ``openssl-pass-phrase``; and
-    #     ``curl -u user:[redacted] https://example.invalid`` files
-    #     ``curl-user-credential``. Seven labels over ten spellings: agent review R1-2
-    #     measured four of those labels over six of those spellings, and the
-    #     enumeration is open BY CONSTRUCTION rather than by oversight — a rule added
-    #     tomorrow joins the list without anyone editing this comment. The class is
-    #     already driven through the shipped path by
-    #     ``test_a_marker_valued_hit_no_longer_escalates``.
+    #     The corrected boundary, measured 2026-09-21 by taking every POSITIVE row's
+    #     masked form (``scrub_shapes_with_hits(text)[0]``) and driving THAT back
+    #     through ``match_shape_names``: 23 rows re-fire, over EIGHT labels, and every
+    #     one of the 23 is byte-stable on all seven surfaces with ``reached_model``
+    #     False. Agent review R2-1 counted the first version of this list and it was
+    #     short on BOTH halves — seven labels over ten spellings against its own
+    #     nine-item enumeration — so what follows is the measurement rather than a
+    #     recollection. Each family is spelled with the marker in its VALUE position,
+    #     which is what this class IS: the rule matches, files a hit, labels the text
+    #     and then rewrites the marker back to itself. By label, with the row count
+    #     each accounts for:
+    #     ``npmrc-auth-token`` (3): ``_authToken=[redacted]``,
+    #     ``//registry.npmjs.org/:_authToken=[redacted]`` and the base64 ``_auth=[redacted]``
+    #     ``netrc-password`` (2): ``machine api.github.com login robot password [redacted]``
+    #     ``machine example.com login bob password [redacted]``
+    #     ``cookie-header`` (3): ``Cookie: [redacted]``, ``Set-Cookie: [redacted]``
+    #     and a cookie header inside a curl invocation
+    #     ``client-inline-password`` (3): ``redis-cli -a [redacted]``, ``mongosh -p[redacted]``
+    #     ``mysql -u root -p[redacted]``
+    #     ``docker-login-password`` (1): ``docker login -u robot -p [redacted]``
+    #     ``openssl-pass-phrase`` (3): the bare ``-pass [redacted]``, ``-passin [redacted]``
+    #     and the ``pass: [redacted]`` form
+    #     ``curl-user-credential`` (1): ``curl -u user:[redacted]``
+    #     ``credential-query-param`` (7): ``api_key=[redacted]``, ``token=[redacted]``,
+    #     ``access_token=[redacted]``, ``secret=[redacted]``, ``password=[redacted]``,
+    #     ``signature=[redacted]`` and a JSON ``apikey`` spelling
+    #     That is eight labels over 23 spellings, every row carrying exactly one.
+    #     The ROWS are a closed set, because they are the corpus rows that re-fire
+    #     today; the LABELS are not, because a rule added tomorrow claims a row
+    #     without anyone editing this comment. The class is already driven through
+    #     the shipped path by ``test_a_marker_valued_hit_no_longer_escalates``.
     #
     #     DEFERRED, and PRE-EXISTING rather than introduced here: the marker spelled
     #     as the VALUE of a lower-case assignment does NOT survive.
@@ -848,8 +862,9 @@ NEGATIVE_CASES: tuple[Case, ...] = (
     #     path never learns the text was rewritten. A rewrite with no label is exactly
     #     the "blinding the agent to the text it is reading" case this half exists to
     #     prevent, which is why it is recorded rather than left implicit; it is NOT
-    #     fixed here because the production diff of this commit against ``origin/main``
-    #     is empty (tests only) and the fix is a production change, so the rows below
+    #     fixed here because the production diff of this commit against the PR's merge
+    #     base ``2a9a737a`` is empty (tests only) and the fix is a production change, so
+    #     the rows below
     #     are narrowed to what they measure rather than widened to answer for it.
     Case(
         "[redacted]",

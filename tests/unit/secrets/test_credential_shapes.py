@@ -248,8 +248,8 @@ def test_the_mask_marker_neither_masks_nor_labels_nor_escalates() -> None:
     what keeps the escalation half from being vacuously true — a rule that matched
     would file a hit, and the ``.npmrc`` ``_authToken=`` spelling is one of this
     table's own measured examples of a hit that files, labels, and still does not
-    escalate — seven labels over ten spellings, all enumerated where the marker rows
-    argue their own boundary in ``credential_shape_corpus``.
+    escalate — eight labels over the 23 corpus rows that re-fire, enumerated where
+    the marker rows argue their own boundary in ``credential_shape_corpus``.
     """
     cases = [case for case in NEGATIVE_CASES if case.reason in MASK_MARKER_NEGATIVE_REASONS]
     missing = set(MASK_MARKER_NEGATIVE_REASONS) - {case.reason for case in cases}
@@ -2479,7 +2479,8 @@ def _corpus_grading() -> str:
 #: Moved on 2026-09-21 a FIFTH time, by the commit answering agent review R1-1/R1-3 on the
 #: marker pin, and the argument is the same measurement rather than a claim:
 #: ``redaction_shapes.py`` is untouched in this commit as well (its diff against
-#: ``origin/main`` is empty — this is a tests-and-comments change), so nothing could move,
+#: the merge base ``2a9a737a`` is empty — this is a tests-and-comments change), so
+#: nothing could move,
 #: and the digest delta is exactly the ONE added row. Measured the same way: recomputing the
 #: grading over the 345 rows the constant above covered, i.e. this corpus minus
 #: ``npm-config-manage-package-manager-versions=false``, reproduces that constant byte for
