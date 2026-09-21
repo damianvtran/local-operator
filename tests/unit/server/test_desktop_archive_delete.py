@@ -28,8 +28,10 @@ ladder, the real response models and the real ``DesktopSessions`` adapter.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -525,13 +527,29 @@ _READS = (
     "/v1/desktop/sessions/{id}",
     "/v1/desktop/sessions/{id}/history",
     "/v1/desktop/sessions/{id}/mcp",
+    "/v1/desktop/sessions/{id}/report",
+    "/v1/desktop/sessions/{id}/failovers",
 )
-# The subset a RESIDENT bridge answers 200 for without a live runtime: the MCP
-# read needs an owner to hand the status back from, so a seeded conversation
-# answers 404 there for its own reason and cannot be the failing cell here. The
-# 200 the QA report measured on `/mcp` came from a running app; the mechanism
-# under test — residency — is the same bridge for all three.
+# The subset a RESIDENT bridge answers 200 for without a live runtime: the MCP,
+# report and failover reads need an owner to hand an answer back from, so a
+# seeded conversation answers 404 there for its own reason and they cannot be the
+# failing cell before a delete. The 200 the QA report measured on `/mcp` came
+# from a running app; the mechanism under test — residency — is the same bridge
+# for all of them, and every one of them must be 404 AFTER the delete, which is
+# what the docstring on the route claims (review round 3, R3-4).
 _SERVED_READS = _READS[:2]
+
+# The session-scoped WRITES the route docstring also claims: desired-state
+# writes and the receipt clear all resolve the session through the same door.
+_WRITES = (
+    ("/v1/desktop/sessions/{id}/pin", {"pinned": True}),
+    ("/v1/desktop/sessions/{id}/archive", {"archived": True}),
+    # A durable completion token is the only admission this route takes.
+    (
+        "/v1/desktop/sessions/{id}/seen",
+        {"completion_token": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"},
+    ),
+)
 
 
 @pytest.mark.asyncio
@@ -570,6 +588,12 @@ async def test_a_deleted_session_is_not_served_by_the_daemon_that_deleted_it(
     for path in _READS:
         observed = (await client.get(path.format(id=MINE))).status_code
         assert observed == 404, f"{path} still answers {observed} on the deleting daemon"
+    for path, body in _WRITES:
+        observed = (await client.post(path.format(id=MINE), json=body)).status_code
+        assert observed == 404, f"POST {path} still answers {observed}"
+    # The tuples ARE the pin of what the route docstring claims was probed;
+    # trimming one un-pins a claim, so the length is asserted rather than implied.
+    assert len(_READS) == 5, "the route docstring names five session-scoped reads"
 
     # CONTROLS: a blanket refusal cannot pass this, and the two daemons must
     # agree about the same store — the session the delete did not address still
@@ -596,3 +620,90 @@ async def test_a_deleted_session_is_not_served_by_the_daemon_that_deleted_it(
                 assert ours == theirs == 404, f"{path}: deleting {ours}, fresh {theirs}"
     finally:
         await fresh.close()
+
+
+@pytest.mark.asyncio
+async def test_a_delete_during_a_cold_open_is_not_served_either(
+    archive_api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R3-1: the reader that arrived BEFORE the delete, and the insert re-check.
+
+    ``forget`` drops the resident bridge and the shared lookup flight, which is
+    enough for every caller that arrives after the delete. It cannot retract a
+    lookup already in flight: a caller parked on that flight resumes with a
+    result that PREDATES the delete, finds no bridge, and would build one for a
+    directory that is gone — the removed conversation resident and served again,
+    for the whole cold-open window (seconds on a large journal, per
+    ``docs/evidence/session-load-central-cache``). The delay below is that window
+    made deterministic, and the fix is the directory re-check at INSERT time.
+
+    Driven against a real pool rather than through the routes, because the race is
+    inside ``DesktopSessions`` and a second HTTP client cannot hold the caller
+    parked on the flight.
+    """
+    client, root = archive_api
+    _session(root, MINE)
+    await _speak(root, MINE, "delete me while you are opening me")
+    pool = DesktopSessions(root)
+
+    original = DesktopSessions._locate_flight
+
+    def slow_locate_flight(self, session_id, locate):
+        def delayed():
+            # THE ORDER IS THE WINDOW: the lookup reads the directory FIRST (it
+            # exists, so it answers), and only then is the answer held — which is
+            # what a slow journal read does in production and what a delete can
+            # land inside. Sleeping before the lookup would instead make
+            # ``locate``'s own directory check do the work, and the test would
+            # pass without the fix.
+            answer = locate()
+            time.sleep(0.4)
+            return answer
+
+        return original(self, session_id, delayed)
+
+    monkeypatch.setattr(DesktopSessions, "_locate_flight", slow_locate_flight)
+
+    async def read_once() -> None:
+        async with pool.session(MINE, read=True):
+            return None
+
+    try:
+        reader = asyncio.create_task(read_once())
+        await asyncio.sleep(0.1)  # the reader is parked on the cold lookup
+        assert (await pool.delete(MINE))["deleted"] is True
+        assert not (root / "sessions" / MINE).exists()
+
+        with pytest.raises(KeyError):
+            await reader
+        assert MINE not in pool.bridges, "the pool went resident again for a deleted id"
+        with pytest.raises(KeyError):
+            async with pool.session(MINE, read=True):
+                pass
+    finally:
+        await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_the_insert_check_is_a_directory_and_not_a_tombstone(archive_api) -> None:
+    """The re-check asks about the DIRECTORY, so a re-created id still opens.
+
+    A tombstone list would pass the case above and fail this one: the id is
+    reachable again as soon as a conversation exists under it, which is what
+    ``/resume`` of a re-created id and the desktop's own adopt path rely on.
+    """
+    client, root = archive_api
+    _session(root, MINE)
+    pool = DesktopSessions(root)
+
+    assert (await pool.delete(MINE))["deleted"] is True
+    with pytest.raises(KeyError):
+        async with pool.session(MINE, read=True):
+            pass
+
+    recreated = _session(root, MINE)
+    assert recreated.is_dir()
+    async with pool.session(MINE, read=True) as bridge:
+        assert bridge.session_id == MINE
+
+    await pool.close()

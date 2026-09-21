@@ -465,12 +465,93 @@ def test_an_armed_wake_still_refuses_and_names_a_remedy_that_exists(tmp_path: Pa
 
     assert outcome.deleted is False
     assert "has a wake armed for it" in outcome.refusal
-    assert "wakes/<session-id>.json" in outcome.refusal, outcome.refusal
+    # THE DOOR IS ADDRESSABLE (design round 2, D8): the id is known here and the
+    # sentence is printed on a screen where the app holds it, so a literal
+    # ``<session-id>`` template told the user to go and find a filename. The
+    # resolved path is what a user can act on, and it is relative to the store
+    # this delete is running against — not to wherever the notice is read.
+    wake_file = str(tmp_path / "wakes" / f"{A}.json")
+    assert wake_file in outcome.refusal, outcome.refusal
+    assert "<session-id>" not in outcome.refusal, outcome.refusal
     assert "Cancel the wake" not in outcome.refusal, (
         "that action has no surface reachable from the terminal that printed the "
         "sentence: " + outcome.refusal
     )
     assert (tmp_path / "sessions" / A).is_dir()
+
+
+def test_the_rehearsal_sentence_has_exactly_one_source() -> None:
+    """R3-2: the sentence cannot drift host by host any more.
+
+    It was retyped verbatim in ``tui/app.py`` twice and in
+    ``session/runtime/serving.py`` once — ``label`` was shared, the sentence
+    around it was not — so a wording edit in one host would have given the
+    terminal and the detached runtime different confirmations for the same
+    irreversible act, and only the local host had a test that would have noticed.
+    It lives on ``DeleteOutcome.rehearsal`` now, and this walk is the half of the
+    pin that keeps it there.
+
+    HONEST ABOUT ITS REACH: the local host's execution is covered by
+    ``tests/unit/tui/test_session_archive_commands.py`` (the real composer); the
+    other two hosts are pinned structurally — they must ASK for the sentence and
+    must not carry it — because driving the detached runtime end to end costs a
+    process and this class of drift is a copy-paste, which is what a walk sees.
+    """
+    import local_operator
+    from local_operator.session.cleanup import DeleteOutcome
+
+    package = Path(local_operator.__file__).parent
+    for phrase in (
+        "/delete removes",
+        "and its transcript — it cannot be",
+        "it started are kept.",
+    ):
+        holders = [
+            path.relative_to(package).as_posix()
+            for path in package.rglob("*.py")
+            if phrase in path.read_text(encoding="utf-8", errors="ignore")
+        ]
+        assert holders == ["session/cleanup.py"], f"{phrase!r} is retyped in {holders}"
+
+    app = (package / "tui" / "app.py").read_text(encoding="utf-8")
+    serving = (package / "session" / "runtime" / "serving.py").read_text(encoding="utf-8")
+    assert app.count("outcome.rehearsal()") == 2, "both TUI hosts must ask the outcome"
+    assert serving.count("outcome.rehearsal()") == 1, "the runtime must ask the outcome"
+    assert isinstance(DeleteOutcome(session_id="a", found=True, deleted=False), DeleteOutcome)
+
+
+def test_the_rehearsal_states_permanence_once_and_names_the_children() -> None:
+    """D10 and the children clause, both of which are now this one sentence's.
+
+    "for good — it cannot be undone" said the same thing twice in one breath and
+    wrapped ``for good`` across lines at the standard width (design round 2,
+    D10); irreversibility is the part a user must take away, so it is the part
+    that stays. The children clause is the fact that says what the deletion does
+    NOT touch, and it has to be part of the same sentence rather than a
+    separately-built tail in each host.
+    """
+    from local_operator.session.cleanup import DeleteOutcome
+
+    plain = DeleteOutcome(
+        session_id="a" * 12, found=True, deleted=False, label="“Retention sweep” (aaaaaaaaaaaa)"
+    ).rehearsal()
+    assert "it cannot be undone" in plain
+    assert "for good" not in plain, "permanence is stated once"
+    assert "are kept." not in plain, "no children, no clause"
+
+    with_kids = DeleteOutcome(
+        session_id="a" * 12,
+        found=True,
+        deleted=False,
+        label="“Retention sweep” (aaaaaaaaaaaa)",
+        children=2,
+    ).rehearsal()
+    # The clause sits INSIDE the sentence, between the act and the confirmation,
+    # so a host cannot append it in a different place or forget it.
+    assert (
+        "it cannot be undone. 2 subagent run(s) it started are kept. "
+        "Run /delete yes to confirm." in with_kids
+    )
 
 
 def test_an_unreadable_wake_entry_keeps_the_session(tmp_path: Path) -> None:

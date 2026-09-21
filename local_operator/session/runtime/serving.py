@@ -5039,22 +5039,10 @@ class ServingSessionHandle(SessionHandle):
         if outcome.refusal:
             return SlashResult(kind="notice", text=outcome.refusal, style="warning")
         if not confirmed:
-            kept = (
-                f" {outcome.children} subagent run(s) it started are kept."
-                if outcome.children
-                else ""
-            )
-            return SlashResult(
-                kind="notice",
-                text=(
-                    # The TARGET, named the way the lists name it — title first,
-                    # id in parentheses (design round 1, D2). The outcome carries
-                    # the label so this arm and the serving host cannot drift.
-                    f"/delete removes {outcome.label} and its transcript for good — it "
-                    f"cannot be undone.{kept} Run /delete yes to confirm."
-                ),
-                style="warning",
-            )
+            # The sentence comes off the outcome (review round 3, R3-2), so this
+            # runtime and the two TUI hosts cannot drift on the wording of a
+            # confirmation for an irreversible act.
+            return SlashResult(kind="notice", text=outcome.rehearsal(), style="warning")
         return SlashResult(
             kind="notice",
             text=f"deleted {session_id}",

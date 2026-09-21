@@ -423,9 +423,16 @@ _GUARD_REFUSALS: dict[str, str] = {
         # D20). The two doors that do exist are the conversation itself — the
         # model-facing `wake` tool cancels by schedule id, so asking is an action
         # a user can take — and the index entry, which is the same file remedy
-        # the CLI's ghost row already names, in the same relative form.
+        # the CLI's ghost row already names.
+        #
+        # ``{wake_file}`` IS RESOLVED, not a template (design round 2, D8): the
+        # sentence used to print a literal ``<session-id>`` on a screen where the
+        # app holds the id and prints it elsewhere (the rehearsal one keystroke
+        # earlier says ``(c3d4e5f6a1b2)``), so a user was told to delete a file
+        # whose name they had to go and find, under a directory the sentence
+        # never named. ``_guard_refusal`` substitutes the real path.
         "That conversation has a wake armed for it. Reopen it and ask it to cancel "
-        "the wake, or delete its wakes/<session-id>.json entry, before deleting it."
+        "the wake, or delete {wake_file}, before deleting it."
     ),
     "has unread spooled mail": (
         # "Read them" named no way to read them (UX round 1, U4). The spool
@@ -484,6 +491,29 @@ class DeleteOutcome:
     refusal: str = ""
     children: int = 0
     label: str = ""
+
+    def rehearsal(self) -> str:
+        """The sentence a two-step delete shows BEFORE the confirmed one runs.
+
+        ON THE OUTCOME rather than retyped in the three hosts that ask for it
+        (review round 3, R3-2): ``label`` was shared but the sentence around it
+        was copied verbatim into ``tui/app.py`` twice and
+        ``session/runtime/serving.py`` once, so a wording edit in one host would
+        silently give the terminal and the detached runtime different
+        confirmations for the same irreversible act — and only the local host had
+        a test. The children clause belongs here with it: it is the fact that says
+        what the deletion does NOT touch, and it was duplicated on the same terms.
+
+        PERMANENCE IS STATED ONCE. "for good — it cannot be undone" said the same
+        thing twice in one breath and wrapped ``for good`` across lines at the
+        standard width (design round 2, D10); the irreversibility is the part a
+        user must take away, so it is the part that stays.
+        """
+        kept = f" {self.children} subagent run(s) it started are kept." if self.children else ""
+        return (
+            f"/delete removes {self.label} and its transcript — it cannot be "
+            f"undone.{kept} Run /delete yes to confirm."
+        )
 
 
 def session_label(directory: Path) -> str:
@@ -622,7 +652,7 @@ def delete_session(
             session_id=session_id,
             found=True,
             deleted=False,
-            refusal=_GUARD_REFUSALS.get(reason, _GUARD_REFUSAL_FALLBACK),
+            refusal=_guard_refusal(reason, session_id, config_dir),
             children=children,
             label=session_label(directory),
         )
@@ -802,6 +832,21 @@ def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
 # ---------------------------------------------------------------------------
 # The policy
 # ---------------------------------------------------------------------------
+
+
+def _guard_refusal(reason: str, session_id: str, config_dir: Path) -> str:
+    """The refusal sentence for ``reason``, with its remedy RESOLVED.
+
+    The armed-wake door is a file, and a file the user has to go and find is not a
+    door (design round 2, D8): the sentence now carries the real path —
+    ``<config root>/wakes/<id>.json`` — instead of a ``<session-id>`` template on
+    a screen where the id is already known. Substituted rather than ``.format``
+    because the sentences are prose that may legitimately contain braces.
+    """
+    template = _GUARD_REFUSALS.get(reason)
+    if template is None:
+        return _GUARD_REFUSAL_FALLBACK
+    return template.replace("{wake_file}", str(config_dir / "wakes" / f"{session_id}.json"))
 
 
 def _has_transcript(directory: Path) -> bool:

@@ -2915,7 +2915,16 @@ class DesktopSessions:
             return {"session_id": session_id, "deleted": True}
 
         result = await asyncio.to_thread(apply)
-        await self.forget(session_id)
+        # BEST-EFFORT, and it cannot be anything else: the directory is already
+        # gone, so letting a failure out of here would answer 500 for a deletion
+        # that HAPPENED — telling the client the act failed when the conversation
+        # is destroyed, and inviting a retry the docstring two paragraphs up says
+        # must find the id gone. What a close that fails costs is one resident
+        # bridge until the next delete or restart, which the log line names.
+        try:
+            await self.forget(session_id)
+        except Exception:
+            logger.exception("desktop pool could not drop the deleted session %s", session_id)
         return result
 
     async def acknowledge_attention_many(self, items: Sequence[tuple[str, str]]) -> dict[str, Any]:
@@ -3876,6 +3885,21 @@ class DesktopSessions:
                         # single flight rather than a single LOOKUP.
                         bridge = self.bridges.get(session_id)
                         if bridge is None:
+                            # THE DIRECTORY IS RE-CHECKED HERE, at INSERT time, not
+                            # at lookup time (round 3, R3-1). ``forget`` drops the
+                            # resident bridge and the shared flight, but a caller
+                            # already parked on that flight resumes with a result
+                            # that PREDATES the delete — so without this read it
+                            # re-inserts a bridge for a directory that is gone, and
+                            # the removed conversation is served (and resident)
+                            # again for the whole cold-open window, which this
+                            # module's own evidence file puts at seconds on a large
+                            # journal. One stat, inside a lock already held for
+                            # bookkeeping frames only, and it asks the same question
+                            # ``locate()`` asks — so a conversation RE-CREATED under
+                            # the same id passes it exactly as it did the first time.
+                            if not (self.root / "sessions" / session_id).is_dir():
+                                raise KeyError("Unknown session")
                             if len(self.bridges) >= BRIDGE_COUNT:
                                 idle = [b for b in self.bridges.values() if self._evictable(b)]
                                 if not idle:
