@@ -561,11 +561,12 @@ def _dev_engines_pin(manifest: dict[str, Any]) -> str | None:
     than hypothetical: a range gets NO protection from this guard. ``^11.5.1`` is
     not a version, so equality cannot judge it, and whatever pnpm the host has is
     used as-is — measured on this host, a pnpm 10.30.3 that does not satisfy
-    ``^11.5.1`` passes straight through and the build proceeds. Judging a range
-    needs a semver implementation, which is not what this fix is, so an
-    unjudgeable range stays unenforced rather than being refused wholesale;
-    ``packageManager``'s exact pins are what these trees carry and what is
-    decidable here.
+    ``^11.5.1`` is let through by this guard. (What pnpm then does with the
+    mismatch is pnpm's behaviour, not this guard's, and no pnpm was run to learn
+    it.) Judging a range needs a semver implementation, which is not what this fix
+    is, so an unjudgeable range stays unenforced rather than being refused
+    wholesale; ``packageManager``'s exact pins are what these trees carry and what
+    is decidable here.
     """
     dev = manifest.get("devEngines")
     entry = dev.get("packageManager") if isinstance(dev, dict) else None
@@ -694,18 +695,40 @@ def _pin_mismatch(runner: Sequence[str], web_dir: Path) -> str | None:
     # offered `corepack enable` unconditionally, and Corepack stopped shipping
     # with Node at v25 — this host runs Node v26.5.0, whose install has no
     # corepack file and no `corepack` on PATH, so a reader here would run the
-    # remedy, get "command not found", and read a second refusal back. `npm
-    # install -g` is the route that exists wherever pnpm itself was installed
-    # from, so it leads; the Corepack clause is added only when a corepack shim
-    # actually resolves, through the ONE place that owns each launcher's argv
-    # (see :func:`_shim_argv`).
-    corepack_route = ""
+    # remedy, get "command not found", and read a second refusal back.
+    #
+    # NO SINGLE ROUTE IS UNIVERSAL, and an earlier attempt at this fix simply
+    # promoted the next candidate: `npm install -g pnpm@<pin>` cannot land where
+    # another manager owns the `pnpm` on PATH either — measured here, npm
+    # 11.17.0's global prefix is `/opt/homebrew`, exactly the directory Homebrew's
+    # own pnpm symlink lives in, and npm refuses to clobber a shim it does not own
+    # (reproduced offline on a scratch prefix: `npm error code EEXIST … Remove the
+    # existing file and try again, or run npm with --force`; `--force` then
+    # succeeds and repoints the link). So the copy states the CONDITION that has
+    # to hold, names the routes that exist, and carries each route's obstacle with
+    # it instead of promising that one of them will just work. Which routes exist
+    # is asked of the host, through the ONE place that owns each launcher's argv
+    # (see :func:`_shim_argv`), because a route named where it is absent is the
+    # same defect one step along.
+    routes: list[str] = []
+    if _shim_argv("npm") is not None:
+        routes.append(
+            f"`npm install -g pnpm@{pinned}` (add `--force`, or remove the existing "
+            "shim first, if another manager owns it)"
+        )
     if _shim_argv("corepack") is not None:
-        corepack_route = ", or use Corepack (`corepack enable`, which makes `pnpm` resolve the pin)"
+        routes.append("`corepack enable`")
+    routes.append("whatever manager installed the pnpm already on PATH")
+    if len(routes) == 1:
+        how = routes[0]
+    elif len(routes) == 2:
+        how = f"{routes[0]} or {routes[1]}"
+    else:
+        how = ", ".join(routes[:-1]) + f", or {routes[-1]}"
     return (
         f"the pnpm on PATH is {reported} but {web_dir / 'package.json'} pins "
-        f"pnpm@{pinned}: install the pinned version "
-        f"(`npm install -g pnpm@{pinned}`){corepack_route}, then re-run "
+        f"pnpm@{pinned}: PATH's pnpm has to report {pinned} before this build can "
+        f"start -- install that version with {how}, then re-run "
         "`lop mobile install`. A pnpm that does not match its own pin resolves it "
         "by installing pnpm WITH pnpm, which fans out until the machine dies"
     )
