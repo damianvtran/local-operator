@@ -1129,9 +1129,9 @@ git -C ~/local-operator update-ref refs/heads/main origin/main
 # 4. Write the notes from the collected `Release:` lines, then tag + GitHub
 #    Release on the bump's merge commit. --target creates the tag on that
 #    exact SHA; the publish workflow triggers on the release.
-$EDITOR /tmp/lop-release-X.Y.Z-notes.md   # headline, ## Major/Minor/Fixes, ## Install, compare link
+$EDITOR "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"   # headline, ## Major/Minor/Fixes, ## Install, compare link
 gh release create vX.Y.Z --target "$(git -C ~/local-operator rev-parse origin/main)" \
-  --title 'X.Y.Z: <theme>' --notes-file /tmp/lop-release-X.Y.Z-notes.md
+  --title 'X.Y.Z: <theme>' --notes-file "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/lop-release-X.Y.Z-notes.md"
 
 # 5. Install and verify — with the fleet DRAINED: wait until no session
 #    reports `busy`, install, then re-engage what the swap displaced.
@@ -1306,7 +1306,8 @@ Warnings that still hold, each of which has already cost a release:
   rather than a stale local checkout — run it, do not read it:
 
   ```sh
-  python scripts/shard_tests.py --shard <I> --total 5 --out /tmp/shard_<I>.txt
+  python scripts/shard_tests.py --shard <I> --total 5 \
+    --out "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shard_<I>.txt"
   ```
 
   Run it once at `origin/main` and once at your branch (a worktree each, or
@@ -1926,7 +1927,9 @@ For anything else, Textual can export exactly what it painted. Drive the app
 with `run_test`, put it in the state you care about, and save a frame:
 
 ```python
-# /tmp/shot.py — env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py out.svg
+# ${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py — `guide://scratchpad` explains the variable;
+#   env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+#     "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/out.svg"
 import asyncio
 import sys
 
@@ -1959,10 +1962,10 @@ stylesheet change at all.
 
 ### 2. Look at the image
 
-An SVG is not something to eyeball as markup. Render it and view it — e.g.
-open `file:///tmp/out.svg` in a browser tool and screenshot it, or open it in
-any image viewer. The point is that a human or a vision-capable agent
-**sees the frame**.
+An SVG is not something to eyeball as markup, and the reader does not render one
+(it decodes raster images only). Render it and view it — open the `file://` URL of
+the printed path in a browser tool and screenshot it, or render it to a PNG in the
+scratchpad and read that back: a human or a vision-capable agent **sees the frame**.
 
 ### 3. Always capture before AND after
 
@@ -1971,9 +1974,11 @@ the cheapest artifact in this recipe and it only stays cheap while the tree is
 still clean — write the shot script, capture, then start editing:
 
 ```sh
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/before.svg
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
 #   ... now make the change ...
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/after.svg
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/after.svg"
 ```
 
 **Never `git stash` to get a before-frame.** Assume you are not alone in this
@@ -1990,7 +1995,8 @@ but yours:
 ```sh
 git worktree add --detach /tmp/lo-before HEAD
 ln -s ~/local-operator/.venv /tmp/lo-before/.venv
-cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python /tmp/shot.py /tmp/before.svg
+cd /tmp/lo-before && env -u NO_COLOR TERM=xterm-256color .venv/bin/python \
+  "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/shot.py" "${LOCAL_OPERATOR_SCRATCHPAD:-/tmp}/before.svg"
 git worktree remove --force /tmp/lo-before
 ```
 

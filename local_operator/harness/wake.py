@@ -55,6 +55,18 @@ LOAD_GRACE_MS = 2_000  # an overdue wake adopted at resume fires shortly AFTER l
 WAKE_SCHEDULES_CUSTOM_TYPE = "wake_schedules"
 WAKE_PROMPT_MESSAGE_TYPE = "wake_prompt"
 
+#: The scratchpad clause carried by every wake envelope. A wake is the turn with
+#: the LEAST context around it — no user message, no recent tool result naming a
+#: path — so it is the turn where the standing scratchpad rule is least likely to
+#: be in front of the model at all, while a scheduled run's own files (logs,
+#: snapshots, bookkeeping) are exactly the shape of scratch that otherwise lands
+#: in ``/tmp``. Named rather than inlined for two reasons: it repeats in EVERY
+#: delivery, which is the one place a per-turn token cost multiplies, and the
+#: human-surface stripper (``harness.rows.wake_receipt_headline``) has to drop the
+#: same bytes this formatter writes — a second literal copy is how those two
+#: silently stop agreeing and model-facing markup reaches a person.
+WAKE_SCRATCH_CLAUSE = "Your own files (logs, snapshots) belong in scratchpad://."
+
 _DURATION_UNITS_MS = {
     "s": 1_000,
     "m": 60_000,
@@ -649,7 +661,10 @@ def format_wake_delivery_text(due: DueWake) -> str:
             f"(alarm) Scheduled wake {schedule.id} ({meta}) — "
             f'cancel with wake({{op:"cancel",id:"{schedule.id}"}}) once its goal is met.'
         )
-    return f"{envelope}\n\n{schedule.message}"
+    # Inside the ENVELOPE rather than the message: the message is the user's own
+    # words and is rendered verbatim, while the envelope is the model-facing part
+    # the human surfaces already strip.
+    return f"{envelope} {WAKE_SCRATCH_CLAUSE}\n\n{schedule.message}"
 
 
 # ---------------------------------------------------------------------------
