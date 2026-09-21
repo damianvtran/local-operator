@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
+import textwrap
 import time
 
 import pytest
@@ -240,6 +243,121 @@ async def test_the_skip_is_earned_only_by_a_clean_exit_return() -> None:
         running.cancel()
         with pytest.raises(asyncio.CancelledError):
             await running
+
+
+def _own_body(node: ast.AST) -> list[ast.AST]:
+    """Every node in a function's OWN body — nested scopes excluded.
+
+    The idiom is ``test_inbox.test_the_drain_is_wired_before_the_socket_starts_
+    listening``'s, and for its reason: a call inside a nested ``def`` is not part
+    of the statement order an assertion about ``amain``'s own body is about, so
+    it must not be able to satisfy one.
+    """
+    out: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        child = stack.pop()
+        out.append(child)
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(child))
+    return out
+
+
+def test_the_exit_block_is_gated_on_the_reapers_own_return() -> None:
+    """THE WIRING, asserted against the source that provides it (#1250, R1-1).
+
+    ``amain`` must ask whether the reaper ran the clean exit ordering by reading
+    the reaper's RETURN VALUE. Its predecessor asked ``reaper.exception() is
+    None``, and BOTH of ``_reaper``'s normal returns are exception-free, so that
+    read credited the skip to a reaper that had disposed nothing and the whole
+    exit block below it was skipped — the defect this PR fixes.
+
+    WHY A SOURCE ASSERTION. Nothing cheap executes that branch: CI's ``tui-e2e``
+    job is the only one that runs ``tests/e2e`` and it is skipped on a diff that
+    reaches no e2e file, and the one cell that does reach the branch fails only
+    ~6% of runs on the parent — so a revert to ``reaper.exception() is None``
+    would pass that cell ~94% of the time and every behavioural test in this
+    file. The other tests here pin the pieces (``_reaper``'s return value, and
+    ``_clean_ordering_already_ran``'s contract against stand-in futures); this
+    pins the call site that joins them, which is the line whose absence caused
+    the defect.
+
+    PARSED, NOT SUBSTRING-MATCHED, for the reason ``test_inbox`` spells out: a
+    substring match can be satisfied by prose, and this module's own comments
+    necessarily name ``reaper.exception()`` while explaining why it is gone.
+    """
+    source = textwrap.dedent(inspect.getsource(child_mod.amain))
+    tree = ast.parse(source)
+    body = _own_body(tree.body[0])
+
+    def starts_a_reaper(value: ast.AST) -> bool:
+        """Does this expression start ``_reaper``? ``ensure_future`` is one wrapper of many."""
+        return any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "_reaper"
+            for inner in ast.walk(value)
+        )
+
+    def reaper_local() -> str:
+        """The local ``_reaper``'s task is bound to — ``reaper`` today, whatever after.
+
+        Resolved from the construction rather than hard-coded, so renaming the
+        local cannot fail a valid classification (the convention
+        ``test_inbox``'s ``runtime_name`` sets).
+        """
+        for node in body:
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and starts_a_reaper(node.value)
+            ):
+                return node.targets[0].id
+        raise AssertionError("amain no longer starts a _reaper task")
+
+    name = reaper_local()
+
+    asks = [
+        node
+        for node in body
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_clean_ordering_already_ran"
+        and any(isinstance(arg, ast.Name) and arg.id == name for arg in node.args)
+    ]
+    assert asks, f"amain must gate the exit block on _clean_ordering_already_ran({name})"
+
+    def assigns_ran_clean(node: ast.AST) -> bool:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            return False
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return any(
+            isinstance(target, ast.Name) and target.id == "reaper_ran_clean_exit"
+            for target in targets
+        )
+
+    assert any(
+        isinstance(node, ast.If)
+        and node.test is asks[0]
+        and any(assigns_ran_clean(stmt) for stmt in node.body)
+        for node in body
+    ), "the reaper's answer must be what sets reaper_ran_clean_exit"
+
+    offenders = [
+        node
+        for node in body
+        if isinstance(node, ast.Attribute)
+        and node.attr == "exception"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == name
+    ]
+    assert not offenders, (
+        f"amain must not read {name}.exception() itself: BOTH of _reaper's normal "
+        "returns are exception-free, so that read credits the skip to a reaper that "
+        "ran no exit ordering and drops the exit note entirely (issue #1250, R1-1)"
+    )
 
 
 @pytest.mark.asyncio
