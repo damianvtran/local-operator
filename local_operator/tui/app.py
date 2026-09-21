@@ -15003,22 +15003,12 @@ class OperatorApp(App[None]):
             notice(outcome.refusal, "warning")
             return
         if not confirmed:
-            kept = (
-                f" {outcome.children} subagent run(s) it started are kept."
-                if outcome.children
-                else ""
-            )
-            notice(
-                # THE TARGET, named the way the lists name it — title first, id in
-                # parentheses (design round 1, D2). The id alone was not on the
-                # screen the rehearsal is typed into, so the one check a
-                # rehearsal exists for ("is this the conversation I mean?") had
-                # nothing to check against. The label comes from the outcome so
-                # this host and the two others cannot drift.
-                f"/delete removes {outcome.label} and its transcript for good — it "
-                f"cannot be undone.{kept} Run /delete yes to confirm.",
-                "warning",
-            )
+            # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on the
+            # outcome, so this host, the attached/slash host below and the
+            # detached runtime cannot drift apart on the wording of a
+            # confirmation for an irreversible act. The target is named the way
+            # the lists name it (design round 1, D2) for the same reason.
+            notice(outcome.rehearsal(), "warning")
             return
         # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the session
         # it was standing in no longer exists, so leaving the user on it strands
@@ -38894,22 +38884,8 @@ class OperatorApp(App[None]):
         if outcome.refusal:
             return SlashResult(kind="notice", text=outcome.refusal, style="warning")
         if not confirmed:
-            kept = (
-                f" {outcome.children} subagent run(s) it started are kept."
-                if outcome.children
-                else ""
-            )
-            return SlashResult(
-                kind="notice",
-                text=(
-                    # The TARGET, named the way the lists name it — title first,
-                    # id in parentheses (design round 1, D2). The outcome carries
-                    # the label so this arm and the serving host cannot drift.
-                    f"/delete removes {outcome.label} and its transcript for good — it "
-                    f"cannot be undone.{kept} Run /delete yes to confirm."
-                ),
-                style="warning",
-            )
+            # Same single source as the local host above (review round 3, R3-2).
+            return SlashResult(kind="notice", text=outcome.rehearsal(), style="warning")
         self._cmd_new(self._notice)
         return SlashResult(
             kind="notice",
