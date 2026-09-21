@@ -25,6 +25,7 @@ from local_operator.network import cli as net_cli
 from local_operator.network import tool as net_tool
 from local_operator.network.tool import NetworkParams
 from local_operator.tools.registry import DEFAULT_TOOL_NAMES, TOOL_BUILDERS
+from tests.unit.network import conftest as net_fixtures
 
 pytestmark = pytest.mark.usefixtures("isolated_network_config")
 
@@ -66,9 +67,19 @@ def isolated_network_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     return root
 
 
+async def _run_call(args: dict[str, Any]) -> Any:
+    """Await the guarded tool from inside a coroutine.
+
+    The guarded tool's published type is ``Callable[..., Awaitable[ToolResult]]``
+    rather than a coroutine function, so ``asyncio.run`` cannot take its call
+    directly; awaiting it is exactly what the harness does with it.
+    """
+    return await net_tool.execute_network("call-1", args, None, None, ToolContext(cwd="."))
+
+
 def _call(action: str, **fields: Any) -> Any:
     args = {"action": action, **fields}
-    return asyncio.run(net_tool.execute_network("call-1", args, context=ToolContext(cwd=".")))
+    return asyncio.run(_run_call(args))
 
 
 def _text(result: Any) -> str:
@@ -84,14 +95,8 @@ def _verbs() -> set[str]:
     parser = argparse.ArgumentParser(prog="lop")
     subparsers = parser.add_subparsers(dest="subcommand")
     net_cli.add_parser(subparsers)
-    groups = [
-        action for action in parser._actions if isinstance(getattr(action, "choices", None), dict)
-    ]
-    group = groups[0].choices["network"]
-    leaves = [
-        action for action in group._actions if isinstance(getattr(action, "choices", None), dict)
-    ]
-    return set(leaves[0].choices)
+    group = net_fixtures.subcommands_of(parser)["network"]
+    return set(net_fixtures.subcommands_of(group))
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +136,10 @@ def test_reads_never_prompt_and_every_mutating_action_does() -> None:
 
 def test_every_action_maps_to_a_real_cli_verb() -> None:
     verbs = _verbs()
-    samples = {
+    # Keyed by the tool's own action vocabulary (``NetworkParams.action``'s alias)
+    # rather than by ``str``: the mapping is asserted against ``_ALL_ACTIONS`` below,
+    # and typing it as ``str`` is what let a typo pass the checker and fail the model.
+    samples: dict[net_tool.NetworkAction, dict[str, Any]] = {
         "status": {},
         "ls": {},
         "show": {"network": "devmesh"},
@@ -303,7 +311,14 @@ def test_join_cannot_be_completed_by_the_tool_and_says_why() -> None:
     joined = _call("join", token=f"@{token_path}")
     assert joined.is_error
     text = _text(joined)
-    assert "no endpoint" in text
+    # WHICH FIRST CLAUSE APPEARS IS AN ENVIRONMENT FACT, not this test's subject: a
+    # token minted where nothing is advertised is refused locally with "no endpoint",
+    # while a token naming a detected address gets the dial's own refusal instead
+    # ("nothing was listening at …"). Asserting only the first made this test pass on
+    # the author's machine and fail on CI, where `init` advertised the runner's own
+    # address — so both the local refusal and the dial refusal are accepted here, and
+    # the teeth are the two sentences below, which are the same either way.
+    assert "no endpoint" in text or "nothing was listening at" in text, text
     assert "needs a person at a terminal" in text
     assert "No flag completes this for them" in text
 

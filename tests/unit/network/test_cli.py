@@ -11,6 +11,7 @@ import pytest
 
 from local_operator.network import cli as net_cli
 from local_operator.network import store, types, wire
+from tests.unit.network import conftest as net_fixtures
 
 NETWORK = "n_0123456789abcdef01234567"
 
@@ -52,21 +53,12 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _group_parser() -> argparse.ArgumentParser:
-    parser = _parser()
-    choices = [
-        action.choices
-        for action in parser._actions
-        if isinstance(getattr(action, "choices", None), dict) and "network" in action.choices
-    ][0]
-    return choices["network"]
+    return net_fixtures.subcommands_of(_parser())["network"]
 
 
 def test_every_action_from_the_design_is_registered() -> None:
     group = _group_parser()
-    subcommands = [
-        action for action in group._actions if isinstance(getattr(action, "choices", None), dict)
-    ][0]
-    assert set(subcommands.choices) == set(ACTIONS)
+    assert set(net_fixtures.subcommands_of(group)) == set(ACTIONS)
 
 
 def test_the_stop_verb_accepts_the_force_the_ladder_names() -> None:
@@ -90,19 +82,11 @@ def test_every_leaf_action_accepts_json() -> None:
     """The agent path drives this CLI and parses it, so ``--json`` is a contract on
     every action that produces output."""
     group = _group_parser()
-    subcommands = [
-        action for action in group._actions if isinstance(getattr(action, "choices", None), dict)
-    ][0]
     missing: list[str] = []
-    for name, subparser in subcommands.choices.items():
+    for name, subparser in net_fixtures.subcommands_of(group).items():
         flags = {option for action in subparser._actions for option in action.option_strings}
         if name in ("member", "identity"):
-            nested = [
-                action
-                for action in subparser._actions
-                if isinstance(getattr(action, "choices", None), dict)
-            ][0]
-            for nested_name, nested_parser in nested.choices.items():
+            for nested_name, nested_parser in net_fixtures.subcommands_of(subparser).items():
                 nested_flags = {
                     option for action in nested_parser._actions for option in action.option_strings
                 }

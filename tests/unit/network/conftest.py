@@ -8,11 +8,28 @@ would be a defect wearing a green tick.
 
 from __future__ import annotations
 
+import argparse
 import socket
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+def subcommands_of(parser: argparse.ArgumentParser) -> dict[str, Any]:
+    """``{verb: subparser}`` for ``parser``, proven to be the dict argparse built.
+
+    argparse types an action's ``choices`` as ``Iterable[Any] | None``, so a reader
+    that KNOWS this mapping is the one ``add_subparsers`` created has to prove it:
+    a re-derived ``getattr`` per use is not something a checker can narrow, and
+    subscripting the union blind is the error this replaces. Shared because three
+    of this package's test modules ask the same question of the real parser.
+    """
+    for action in parser._actions:
+        choices = getattr(action, "choices", None)
+        if isinstance(choices, dict):
+            return choices
+    raise AssertionError(f"{parser.prog}: no subcommands registered")
 
 
 @pytest.fixture()

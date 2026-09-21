@@ -12,6 +12,7 @@ from __future__ import annotations
 import threading
 import time
 from argparse import Namespace
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -36,7 +37,7 @@ NETWORK_NAME = "home-net"
 @pytest.fixture()
 def devices(
     root: Path, monkeypatch: pytest.MonkeyPatch
-) -> tuple[relay.RelayServer, relay.RelayServer, str, int]:
+) -> Iterator[tuple[relay.RelayServer, relay.RelayServer, str, int]]:
     """Two relays on loopback: A listening, B able to dial it."""
     root_a = root / "a"
     root_b = root / "b"
@@ -478,9 +479,7 @@ def test_silent_connections_are_capped_before_authentication(root: Path) -> None
     root_a = root / "cap"
     server = relay.RelayServer(
         root=root_a,
-        settings=relay.NetworkSettings(
-            port=0, listen_address="127.0.0.1", max_handshakes=2
-        ),
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1", max_handshakes=2),
         identity=identity.mint(root_a, name="cap-device"),
         audit=audit_mod.AuditLog(root_a),
     )
@@ -500,6 +499,57 @@ def test_silent_connections_are_capped_before_authentication(root: Path) -> None
             busy.settimeout(1.0)
             with pytest.raises(TimeoutError):
                 busy.recv(1)
+    finally:
+        for sock in held:
+            sock.close()
+        server.stop()
+
+
+def test_a_cap_drop_names_itself_in_the_local_audit(root: Path) -> None:
+    """The cap's refusal is SILENT to the peer, so the operator's log is where it has
+    to be named.
+
+    A dropped connection gets no reply and no frame — that is what keeps the port
+    from being a probe oracle (`_accept_loop`) — so a saturated relay used to leave
+    no trace at all on the device that was saturated: the symptom was a peer that
+    could not connect while this device reported nothing. ONE record per window, not
+    one per connection: the flood below drops four connections and must produce
+    exactly one record, because an unauthenticated stranger may not churn the log an
+    incident is reconstructed from.
+    """
+    import socket
+
+    root_a = root / "cap-audit"
+    server = relay.RelayServer(
+        root=root_a,
+        settings=relay.NetworkSettings(port=0, listen_address="127.0.0.1", max_handshakes=2),
+        identity=identity.mint(root_a, name="cap-audit-device"),
+        audit=audit_mod.AuditLog(root_a),
+    )
+    host, port = server.bind()
+    server.bind_control()
+    server.start()
+    held: list[socket.socket] = []
+    try:
+        for _ in range(6):
+            held.append(socket.create_connection((host, port), timeout=5))
+        # Polled rather than slept on: the audit writer batches, so the record can
+        # land a moment after the fourth refusal.
+        deadline = time.time() + 5.0
+        rows: list[dict[str, Any]] = []
+        while time.time() < deadline:
+            rows = [
+                row
+                for row in server.audit.tail(limit=200)
+                if row.get("event") == "handshake_refused"
+            ]
+            if rows:
+                break
+            time.sleep(0.05)
+        assert len(rows) == 1, rows
+        assert rows[0]["cause"] == "handshake_cap", rows[0]
+        assert rows[0]["outcome"] == "refused", rows[0]
+        assert rows[0]["detail"] == {"cause": "handshake_cap", "mode": "unauthenticated"}, rows[0]
     finally:
         for sock in held:
             sock.close()

@@ -6,6 +6,7 @@ import gzip
 import json
 import stat
 from pathlib import Path
+from typing import Any
 
 from local_operator.network import audit as audit_mod
 from local_operator.network.audit import AuditEvent, AuditLog
@@ -14,7 +15,11 @@ from local_operator.network.store import audit_path
 NETWORK = "n_0123456789abcdef01234567"
 
 
-def _lines(root: Path) -> list[dict[str, object]]:
+#: One parsed record. ``Any`` and not ``object``: this is ``json.loads`` output, so the
+#: values demonstrably have the shape the assertions read (``record["ts_iso"].endswith``,
+#: ``record["detail"].get``) -- ``object`` was the annotation that made every reader of
+#: this helper a checker error while saying nothing about the data.
+def _lines(root: Path) -> list[dict[str, Any]]:
     path = audit_path(root)
     if not path.exists():
         return []

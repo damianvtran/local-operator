@@ -80,24 +80,31 @@ _SECRET_KEY_MARKERS = ("secret", "token", "password", "key", "material")
 
 _ROW_CAP = 40
 
+#: The tool's action vocabulary, named ONCE. ``NetworkParams.action`` and the argv
+#: builder both read it, and a caller that wants to hold a map of actions (the
+#: tests, and any future dispatcher) can annotate that map with this rather than
+#: restating the list — a second spelling of it is how a valid action stops being
+#: type-checked while still working.
+NetworkAction = Literal[
+    "status",
+    "init",
+    "invite",
+    "join",
+    "ls",
+    "show",
+    "peers",
+    "member_rm",
+    "disconnect",
+    "panic",
+    "log",
+    "doctor",
+]
+
 
 class NetworkParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal[
-        "status",
-        "init",
-        "invite",
-        "join",
-        "ls",
-        "show",
-        "peers",
-        "member_rm",
-        "disconnect",
-        "panic",
-        "log",
-        "doctor",
-    ] = Field(
+    action: NetworkAction = Field(
         description=(
             "Which network operation to run. init/invite/join/member_rm/"
             "disconnect/panic all need a human or change what other devices "

@@ -167,17 +167,25 @@ def test_local_owner_engage_forwards_the_callers_budgets(  # noqa: ANN001
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``LocalOwner.engage`` is the SAME call the facade made before the seam."""
+    from local_operator.session.runtime.launch import WarmErrand
+
     seen: dict[str, object] = {}
 
     async def fake_engage(session_id: str, cwd: str, work: object, **kwargs: object) -> object:
-        seen.update({"session_id": session_id, "cwd": cwd, "kwargs": kwargs})
+        seen.update({"session_id": session_id, "cwd": cwd, "work": work, "kwargs": kwargs})
         return None
 
     monkeypatch.setattr("local_operator.session.runtime.launch.engage_runtime", fake_engage)
     owner = LocalOwner(tmp_path, SESSION)
-    asyncio.run(owner.engage(cwd="/tmp/work", warm="errand", preempt="evt", preempt_budget_s=1.5))
+    # A REAL ``WarmErrand``, because that is the type ``engage`` takes and the one the
+    # facade passes: the placeholder string this used to carry reached the fake
+    # unexamined, so it proved the kwargs crossed the seam while saying nothing about
+    # the errand itself.
+    warm = WarmErrand()
+    asyncio.run(owner.engage(cwd="/tmp/work", warm=warm, preempt="evt", preempt_budget_s=1.5))
     assert seen["session_id"] == SESSION
     assert seen["cwd"] == "/tmp/work"
+    assert seen["work"] is warm
     assert seen["kwargs"] == {
         "config_dir": tmp_path,
         "preempt": "evt",
