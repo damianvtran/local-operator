@@ -161,7 +161,13 @@ a copy edit:
   there is no cancel (the CLI's ghost row names the entry FILE for the same
   reason, round 3 D20). It now names the two doors that exist: ask the
   conversation (the model-facing `wake` tool cancels by schedule id) or delete
-  `wakes/<session-id>.json`, in the relative form the CLI already uses.
+  `wakes/<id>.json`, in the relative form the CLI already uses. **The id is
+  resolved and the path stays relative** (design round 2, D8 and desktop QA round
+  4, Q14): a literal `<session-id>` asked a user to go and find a filename, and
+  resolving it to a machine-ABSOLUTE path fixed that while leaking the layout of
+  the host inside a dialog for a conversation the user is looking at. Every
+  sentence in the refusal set names the conversation the user has, and none
+  carries an absolute path.
 * The UNREAD-MAIL sentence said "read them" without saying where. The spool drains
   once, at open (`inbox.drain_inbox`), and no command reads another conversation's
   inbox, so reopening that conversation IS the action and the sentence says so.

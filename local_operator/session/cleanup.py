@@ -425,14 +425,20 @@ _GUARD_REFUSALS: dict[str, str] = {
         # a user can take — and the index entry, which is the same file remedy
         # the CLI's ghost row already names.
         #
-        # ``{wake_file}`` IS RESOLVED, not a template (design round 2, D8): the
-        # sentence used to print a literal ``<session-id>`` on a screen where the
-        # app holds the id and prints it elsewhere (the rehearsal one keystroke
-        # earlier says ``(c3d4e5f6a1b2)``), so a user was told to delete a file
-        # whose name they had to go and find, under a directory the sentence
-        # never named. ``_guard_refusal`` substitutes the real path.
+        # ``{wake_file}`` IS RESOLVED AND STORE-RELATIVE (design round 2, D8;
+        # desktop QA round 4, Q14). The sentence first printed a literal
+        # ``<session-id>`` template on a screen where the app holds the id and
+        # prints it elsewhere (the rehearsal one keystroke earlier says
+        # ``(c3d4e5f6a1b2)``), so a user was told to delete a file whose name they
+        # had to go and find. Resolving it to a machine-ABSOLUTE path fixed that
+        # finding and broke a different rule: this sentence is read inside a
+        # confirmation dialog for a conversation the user is looking at, and an
+        # absolute path leaks the layout of the host and reads as an internal
+        # detail. ``wakes/<id>.json`` is the form the CLI's own ghost row uses, so
+        # the family reads in one register, and the id stays resolved so the door
+        # is addressable without a template.
         "That conversation has a wake armed for it. Reopen it and ask it to cancel "
-        "the wake, or delete {wake_file}, before deleting it."
+        "the wake, or delete its {wake_file} entry, before deleting it."
     ),
     "has unread spooled mail": (
         # "Read them" named no way to read them (UX round 1, U4). The spool
@@ -652,7 +658,7 @@ def delete_session(
             session_id=session_id,
             found=True,
             deleted=False,
-            refusal=_guard_refusal(reason, session_id, config_dir),
+            refusal=_guard_refusal(reason, session_id),
             children=children,
             label=session_label(directory),
         )
@@ -834,19 +840,22 @@ def _guard(directory: Path, config_dir: Path, now: float) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _guard_refusal(reason: str, session_id: str, config_dir: Path) -> str:
+def _guard_refusal(reason: str, session_id: str) -> str:
     """The refusal sentence for ``reason``, with its remedy RESOLVED.
 
     The armed-wake door is a file, and a file the user has to go and find is not a
-    door (design round 2, D8): the sentence now carries the real path —
-    ``<config root>/wakes/<id>.json`` — instead of a ``<session-id>`` template on
-    a screen where the id is already known. Substituted rather than ``.format``
-    because the sentences are prose that may legitimately contain braces.
+    door (design round 2, D8): the sentence carries ``wakes/<id>.json`` — the id
+    resolved, no template — RELATIVE to the config directory, which is the form
+    the CLI's own ghost row uses. A machine-absolute path was tried and rejected
+    (desktop QA round 4, Q14): this is a sentence in a confirmation dialog for a
+    conversation the user is looking at, and the host's layout is not part of it.
+    Substituted rather than ``.format`` because the sentences are prose that may
+    legitimately contain braces.
     """
     template = _GUARD_REFUSALS.get(reason)
     if template is None:
         return _GUARD_REFUSAL_FALLBACK
-    return template.replace("{wake_file}", str(config_dir / "wakes" / f"{session_id}.json"))
+    return template.replace("{wake_file}", f"wakes/{session_id}.json")
 
 
 def _has_transcript(directory: Path) -> bool:
