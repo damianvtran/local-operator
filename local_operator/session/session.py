@@ -167,7 +167,7 @@ from local_operator.incidents import (
     format_cut_off_raw,
     render_cut_off_reason,
 )
-from local_operator.model.effort import is_effort_sentinel
+from local_operator.model.effort import cheapest_real_rung
 from local_operator.prompts_api import (
     TOOL_INVENTORY_HEADING,
     render_tool_inventory_block,
@@ -12081,10 +12081,10 @@ class Session:
         the "lowest" rung is the cheapest member that names a real level.
         """
         efforts = spec.reasoning_efforts
-        real = [r for r in efforts if not is_effort_sentinel(r)]
-        if not real or spec.reasoning_effort == real[0]:
+        lowest = cheapest_real_rung(efforts)
+        if lowest is None or spec.reasoning_effort == lowest:
             return spec
-        return spec.model_copy(update={"reasoning_effort": real[0]})
+        return spec.model_copy(update={"reasoning_effort": lowest})
 
     async def _one_shot_complete(self, system: str, prompt: str) -> str:
         """One non-tool provider call used to produce the compaction summary.

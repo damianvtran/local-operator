@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import dataclasses
 import re
+from typing import Sequence
 
 #: The shared vocabulary, ASCENDING. Not the cycle order — ``next_effort``
 #: indexes the PER-MODEL ladder, which is what ``shift+tab`` walks and what
@@ -79,6 +80,31 @@ def is_effort_sentinel(level: str) -> bool:
     reading it as a depth.
     """
     return level not in EFFORT_ORDER
+
+
+def real_rungs(levels: "Sequence[str]") -> list[str]:
+    """``levels`` with sentinels removed, preserving order.
+
+    THE one place that answers "what does this ladder actually rank", so the
+    three spellings of the cheapest-rung walk (harness ``_lower_effort``,
+    session ``_lowest_effort``, and the eval runner's ``_one_rung_lower``) say
+    the same thing rather than each re-deriving the rule. ``auto`` leads
+    Radient's router ladder but names no depth, so a helper that reads
+    ``ladder[0]`` as "the cheapest rung" picks the delegation instead of the
+    cheapest level.
+    """
+    return [level for level in levels if not is_effort_sentinel(level)]
+
+
+def cheapest_real_rung(levels: "Sequence[str]") -> str | None:
+    """The cheapest RANKABLE rung of ``levels``, or ``None`` when it has none.
+
+    ``None`` here is a real answer, not a failure: a ladder of only sentinels
+    (or an empty one) ranks nothing, and every caller wants to omit the level
+    rather than invent one.
+    """
+    ranked = real_rungs(levels)
+    return ranked[0] if ranked else None
 
 
 #: What a bare cycle starts on when the model documents no default of its own.

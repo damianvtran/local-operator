@@ -29,6 +29,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from local_operator.model.effort import real_rungs
+
 _WORD_RE = re.compile(r"[a-z0-9_]+", re.IGNORECASE)
 _CODE_MARKERS = ("```", "def ", "class ", "function ", "=>", "traceback", "stack trace")
 _COMPLEX_VERBS = {
@@ -110,24 +112,29 @@ def map_tier_to_effort(
     if not efforts:
         return None
     ladder = list(efforts)
+    # Rank through the shared helper so a sentinel never stands in for a depth
+    # (round-2 review R2-2): `real_rungs` owns the rule, and the previous
+    # hand-rolled `ladder[0] in ("minimal", "auto")` check missed a ladder
+    # that leads with a sentinel other than `auto`.
+    real = real_rungs(ladder) or ladder
     if tier == "lo":
-        # Never underthink at provider-specific "minimal" when low exists, and
-        # never answer the `auto` SENTINEL either: `auto` is not a depth, it
-        # delegates the level to the server, so a `lo` classification must land
-        # on the cheapest REAL rung. Radient's router ladder (
-        # `configure.ROUTER_EFFORT_LADDERS`) leads with `auto`, so without this
-        # arm a simple prompt would be classified `lo` and then sent `auto` --
-        # letting the server pick a depth the classifier just judged to be too
-        # much, which is the opposite of what the tier asked for.
-        if ladder[0] in ("minimal", "auto") and len(ladder) > 1:
-            return ladder[1]
-        return ladder[0]
+        # Never underthink at the provider-specific "minimal" when a genuine
+        # low exists, and never answer the `auto` SENTINEL either: `auto` is
+        # not a depth, it delegates the level to the server, so a `lo`
+        # classification must land on the cheapest REAL rung. Radient's router
+        # ladder (`configure.ROUTER_EFFORT_LADDERS`) leads with `auto`, so
+        # without this arm a simple prompt would be classified `lo` and then
+        # sent `auto` -- letting the server pick a depth the classifier just
+        # judged to be too much.
+        if real[0] == "minimal" and len(real) > 1:
+            return real[1]
+        return real[0]
     if tier == "med":
-        return ladder[len(ladder) // 2]
+        return real[len(real) // 2]
     # hi: protect spend/latency by stopping one rung below max by default.
-    if not allow_max and ladder[-1] == "max" and len(ladder) > 1:
-        return ladder[-2]
-    return ladder[-1]
+    if not allow_max and real[-1] == "max" and len(real) > 1:
+        return real[-2]
+    return real[-1]
 
 
 def auto_effort_for(

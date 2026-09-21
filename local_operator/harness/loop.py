@@ -96,7 +96,7 @@ from local_operator.harness.types import (
     Usage,
 )
 from local_operator.incidents import REASONING_ECHO_MARKERS
-from local_operator.model.effort import is_effort_sentinel
+from local_operator.model.effort import real_rungs
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
 #: the byte counter visibly moves (so the row reads as progress rather than as a
@@ -504,9 +504,14 @@ def _lower_effort(model: "ModelSpec") -> str | None:
     current = model.reasoning_effort
     if not ladder or current is None or current not in ladder:
         return None
-    index = ladder.index(current)
-    below = [r for r in ladder[:index] if not is_effort_sentinel(r)]
-    return below[-1] if below else None
+    # The cheapest REAL rung strictly below the current one. `real_rungs` owns
+    # the "what does this ladder rank" rule so this and the eval runner's
+    # `_one_rung_lower` cannot drift (round-2 review R2-1/R2-4).
+    rungs = real_rungs(ladder)
+    if current not in rungs:
+        return None
+    index = rungs.index(current)
+    return rungs[index - 1] if index > 0 else None
 
 
 # How long the batch waits for tools to unwind after an ABORT before it stops

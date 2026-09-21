@@ -1952,22 +1952,36 @@ class _StreamOutcome:
 def _one_rung_lower(ladder: Sequence[str], current: str | None) -> str | None:
     """The rung directly below ``current`` on ``ladder``, or ``None``.
 
-    The evaluation-side spelling of ``harness/loop.py``'s ``_lower_effort``,
-    which cannot be imported here: the runner may not reach into
+    The evaluation-side spelling of ``harness/loop.py``'s ``_lower_effort``.
+    It cannot call that function: the runner may not reach into
     ``local_operator.harness``'s LOOP (it imports the wire vocabulary and the
     provider stack behind it), while ``harness.types`` is the shared contract
-    both sides read. ``None`` when there is no ladder, when the current level is
-    unset or is not a level this model lists (a host that set an effort the
-    route rejects -- the wire clients drop it, so stepping from it would be
-    guesswork), or when the current level is already the bottom rung. A retry
-    at the SAME effort reproduces the same silent truncation, so refusing is
-    the honest answer rather than a second identical call.
+    both sides read. It DOES share the rule that decides which ladder members
+    are ranks rather than sentinels, by importing ``model.effort.real_rungs``
+    (a deferred import, pinned in the isolation gate) so the two spellings
+    cannot drift on the ``auto`` delegation. ``None`` when there is no ladder,
+    when the current level is unset or is not a level this model lists (a host
+    that set an effort the route rejects -- the wire clients drop it, so
+    stepping from it would be guesswork), or when the current level is already
+    the bottom REAL rung. A retry at the SAME effort reproduces the same silent
+    truncation, so refusing is the honest answer rather than a second identical
+    call.
     """
 
     if not ladder or current is None or current not in ladder:
         return None
-    index = list(ladder).index(current)
-    return ladder[index - 1] if index > 0 else None
+    # SKIP the sentinel (``auto``): it is a delegation, not a depth, so the
+    # rung "below" a real level is the cheapest REAL rung below it -- never
+    # the sentinel, which would put a delegation on the wire while the band
+    # still read the level the user chose. See ``model.effort.real_rungs``,
+    # the one owner of "what does this ladder rank" (round-2 review R2-1).
+    from local_operator.model.effort import real_rungs
+
+    rungs = real_rungs(ladder)
+    if current not in rungs:
+        return None
+    index = rungs.index(current)
+    return rungs[index - 1] if index > 0 else None
 
 
 class ProviderModelClient:
