@@ -887,6 +887,38 @@ def provider_env_key(provider_id: str) -> str | None:
     return None
 
 
+def stored_provider_env_keys() -> set[str]:
+    """ENV KEY names that have a provider-class row in the store.
+
+    The name-source reader the controller's ``persisted_providers`` rung uses in
+    place of enumerating the plaintext file: it returns the env-key spelling
+    (``OPENROUTER_API_KEY``), stripped of the reserved ``LOP_PROVIDER_`` prefix,
+    so a caller can match it against :func:`credential_file_names` exactly as it
+    matched the legacy file's keys.
+
+    An absent, locked or damaged store yields an EMPTY set — "no provider rows I
+    can see" — never an error, for the same availability reason
+    :func:`provider_secret_value` documents. Enumeration must not become the one
+    path that takes down the provider picker, which is precisely the failure the
+    store's ``list`` verb was reworked to avoid.
+    """
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.keys import store_path
+    from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
+
+    try:
+        if not store_path().exists():
+            return set()
+        return {
+            record.name[len(PROVIDER_SECRET_PREFIX) :]
+            for record in open_store().list()
+            if record.name.startswith(PROVIDER_SECRET_PREFIX)
+        }
+    except (SecretStoreError, OSError, ValueError):
+        return set()
+
+
 def env_key_names(provider_id: str) -> tuple[str, ...]:
     """Every env var NAME ``provider_id`` reads, primary first.
 
