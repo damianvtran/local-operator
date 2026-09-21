@@ -23,6 +23,14 @@ runtime** — so the tool result can say "your command exceeded the memory budge
 and the model can revise to something that fits. On a 32 GB device that stopgap
 is the difference between a slow command and a dead session.
 
+**The OS gives no signal to wait on.** Measured while building this (2026-09-21):
+the machine death that motivated the guard left **no jetsam event** in the unified
+log — the newest entries `log show` returns are from the day before. So nothing at
+the OS layer announces memory trouble a process could react to, which is why the
+guard **measures RSS itself** every tick rather than waiting for a kernel
+notification that never comes. The design below is built on that measurement, not
+on an assumed OS signal.
+
 What already exists, and is reused rather than rebuilt:
 
 - Every bash command is spawned into its **own session and process group**
