@@ -787,6 +787,33 @@ def test_a_missing_dump_leaves_the_verdict_unattributed(
     assert KILL_UNATTRIBUTED in reason, reason
 
 
+def test_a_fire_that_predates_the_run_is_not_its_cause_of_death(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R1-3: the dump must fall INSIDE the run, not merely after its arm.
+
+    A fired dump is only overwritten by the next owner of that pid, and only if
+    that owner manages to arm — ``LOP_RUNTIME_STALL_SECONDS=0/off`` disables
+    arming, and ``arm``'s header write can fail. A later run inheriting the stale
+    file would otherwise be told it died of a bound that fired BEFORE IT STARTED.
+    """
+    from local_operator.incidents import KILL_CAUSE, KILL_UNATTRIBUTED
+
+    directory = _session_directory(tmp_path, "sess-stale-dump")
+    row = _write_open_row(directory, 4711, alive_until=time.time() - 5)
+    stale = _write_stall_dump(monkeypatch, tmp_path, 4711, armed_at=row.started_at - 7_200)
+    # The FIRE is the file's mtime, so that is what has to be old: this run
+    # inherited a dump written an hour before it started.
+    fired_at = row.started_at - 3_600
+    os.utime(stale, (fired_at, fired_at))
+    assert stale.stat().st_mtime < row.started_at, "the fixture must predate the run"
+
+    _kind, cause, reason = journal.death_verdict(row)
+
+    assert cause == KILL_CAUSE, cause
+    assert KILL_UNATTRIBUTED in reason, reason
+
+
 # NOTE ON ISOLATION. ``LOP_BUILD_PREFIX`` points the install stamp at a fake
 # tree, so a developer who has it exported would have every cell here compare a
 # row's build against a different root from the one it was stamped with — the

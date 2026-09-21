@@ -983,11 +983,14 @@ def _stalled_bound_reason(row: TurnJournalRow) -> str | None:
     listing (``lop sessions --json``), where the runtime that tripped the bound is
     gone by definition and the row it left reads ``unattributed``.
 
-    THREE CONDITIONS, and the third is the one that keeps this honest: a dump
-    exists for this row's pid; it carries the fired marker AND a parseable header
-    (``fired_bound`` enforces both); and the bound was ARMED no later than this
-    run's last write (``FiredBound.covers``), which is what refuses a pid-keyed
-    file a LATER runtime truncated and rewrote. Nothing here decides whether the
+    FOUR CONDITIONS, and the last two are what keep this honest: a dump exists for
+    this row's pid; it carries the fired marker AND a parseable header
+    (``fired_bound`` enforces both); the bound was ARMED no later than this run's
+    last write; and it FIRED no earlier than this run started (``FiredBound.covers``
+    bounds both sides — see its docstring for the disabled-watchdog path that made
+    the one-sided version attributable to a run that had not begun).
+
+    NOTHING HERE DECIDES WHETHER THE
     stall was the runtime's fault or the host's — the artifact cannot know, and
     the sentence does not claim it; what it names is which bound fired and where
     the dump is.
@@ -1008,7 +1011,9 @@ def _stalled_bound_reason(row: TurnJournalRow) -> str | None:
     except Exception:  # noqa: BLE001 — an unreadable artifact is not a dead session
         logger.debug("stall dump unreadable for pid %s", row.pid, exc_info=True)
         return None
-    if fired is None or not fired.covers(row.updated_at or row.started_at):
+    if fired is None or not fired.covers(
+        row.updated_at or row.started_at, started_at=row.started_at
+    ):
         return None
     return render_cut_off_reason(
         _STALL_CAUSE,

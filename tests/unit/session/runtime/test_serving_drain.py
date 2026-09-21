@@ -1113,16 +1113,26 @@ async def test_a_spooled_quiet_note_records_nothing(
     for a note nobody is waiting on is the trade ``deliver_peer_message`` argues
     against. This cell pins that the obligation follows the SAME line as the
     receipt, so the two can never disagree about what the sender bought.
+
+    IT MUST GO THROUGH THE SPOOLING WRITER, and the first revision of this cell
+    did not (QA round 1, Q-1): ``receive_peer_message(wake=False)`` in the default
+    ``mailbox`` mode delivers to the session rather than spooling, so the empty
+    store it asserted was empty for the wrong reason — a raising stub in
+    ``_spool_for_successor`` left it passing. ``mode="steer"`` is the reachable
+    shape that DOES reach the writer with ``wake=False``, which is what makes this
+    a test of the writer's condition rather than of the caller's.
     """
+    from local_operator.session.runtime.inbox import peek_inbox
     from local_operator.wakes.spooled import read_spooled
 
     host, session = _prompt_host(tmp_path)
     config_dir = _spooled_store(monkeypatch, tmp_path)
     assert host.begin_drain("runtime-retired", "declined 3x") is True
 
-    receipt = await host.receive_peer_message("no rush", wake=False)
+    receipt = await host.receive_peer_message("no rush", mode="steer", wake=False)
 
     assert receipt != SPOOL_RECEIPT_WAKE
+    assert len(peek_inbox(session.transcript.directory)) == 1, "the row really was spooled"
     assert read_spooled(config_dir) == {}, "a quiet note owes no turn"
 
 
@@ -1142,4 +1152,27 @@ async def test_the_owners_own_prompt_records_the_turn(
     assert receipt == SPOOL_RECEIPT_PROMPT, receipt
     record = read_spooled_turn(config_dir, session.transcript.directory.name)
     assert record is not None, "the receipt says the next runtime will run it"
+    assert record["rows"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_spooled_user_prompt_records_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The owner's own prompt owes a turn even though it carries no ``wake``.
+
+    ``SPOOL_RECEIPT_PROMPT`` promises the successor RUNS it, so the obligation
+    cannot follow ``wake`` alone: a ``SOURCE_USER`` row is turn-asking by its own
+    source, which is the second half of the writer's condition.
+    """
+    from local_operator.wakes.spooled import read_spooled_turn
+
+    host, session = _prompt_host(tmp_path)
+    config_dir = _spooled_store(monkeypatch, tmp_path)
+    assert host.begin_drain("runtime-retired", "declined 3x") is True
+
+    await host.prompt("deploy the fix", command_id="r" * 8)
+
+    record = read_spooled_turn(config_dir, session.transcript.directory.name)
+    assert record is not None
     assert record["rows"] == 1

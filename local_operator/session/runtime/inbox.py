@@ -345,32 +345,71 @@ def _parse(raw: bytes) -> list[InboxLine]:
     return lines
 
 
-def settle_owed_turn(session_dir: Path) -> None:
-    """Clear this session's owed-turn record once its spool no longer owes one.
+def settle_owed_turn(session_dir: Path, *, cwd: str = "") -> None:
+    """Make the owed-turn record agree with this session's spool, after a drain.
 
-    The discharge half of :mod:`local_operator.wakes.spooled`, called by every drain
-    that consumes the spool. It is written as a PREDICATE rather than as "clear
-    it, we just drained" because the two callers can both leave rows behind on
-    purpose: the boot drain re-spools peer rows for a session with no durable
-    history (and stops), and the first-turn drain runs once per lifetime. Asking
-    the spool itself is the only reading that cannot clear an obligation whose
-    message is still sitting there.
+    Called by both drains once they have finished with the spool, and it settles
+    in BOTH directions because the spool is the authority and the record is a
+    claim about it:
+
+    * the spool still holds a row that asks for a turn → the record must EXIST
+      (a raise is still owed). It usually does — the writer put it there — but a
+      supervisor that read the file while ``drain_inbox`` had it emptied (the
+      deferral path re-appends what it will not deliver) can have cleared it in
+      that window, and re-noting here is what closes that hole (review round 1,
+      R1-4).
+    * the spool no longer holds one → drop the record, judged against the value
+      this call read so a row that lands meanwhile re-arms it instead of being
+      deleted under (``clear_spooled_turn``'s compare-and-delete guard).
 
     Best-effort: the drain's own delivery has already happened by the time this
     runs, and a store that cannot be written (or a config dir this process cannot
     see) must not turn a delivered message into a failed turn. The cost of
-    leaving the record is one engage the supervisor should not have made; the cost
-    of raising here is the turn.
+    leaving a record behind is one engage the supervisor should not have made; the
+    cost of raising here is the turn.
     """
     from local_operator.paths import config_dir
-    from local_operator.wakes.spooled import clear_spooled_turn, spool_owes_turn
+    from local_operator.wakes.spooled import (
+        clear_spooled_turn,
+        note_spooled_turn,
+        read_spooled_turn,
+        spool_owes_turn,
+    )
 
     try:
+        root = config_dir()
+        session_id = session_dir.name
         if spool_owes_turn(session_dir):
+            if read_spooled_turn(root, session_id) is None:
+                note_spooled_turn(root, session_id, cwd=cwd)
             return
-        clear_spooled_turn(config_dir(), session_dir.name)
+        record = read_spooled_turn(root, session_id)
+        if record is not None:
+            clear_spooled_turn(root, session_id, expected_updated_at_ms=record.get("updated_at_ms"))
     except Exception:  # noqa: BLE001 — a bookkeeping failure is not a delivery failure
         logger.debug("could not settle the owed turn for %s", session_dir, exc_info=True)
+
+
+def drop_owed_turn(session_dir: Path) -> None:
+    """Drop this session's owed-turn record because NO raise can discharge it.
+
+    The one case that calls it is the boot drain's deferral: a session with no
+    durable history keeps its peer rows until the owner's first turn
+    (``process._drain_inbox_into``'s ``requires_engagement`` branch), so every
+    runtime raised for that record would boot, defer the same rows and exit —
+    real work, hourly, that delivers nothing (review round 1, R1-10). The spool
+    row is untouched and the owner's first turn still drains it, which is the
+    deferral the sender's receipt actually describes.
+
+    Best-effort, like every other write on this path.
+    """
+    from local_operator.paths import config_dir
+    from local_operator.wakes.spooled import clear_spooled_turn
+
+    try:
+        clear_spooled_turn(config_dir(), session_dir.name)
+    except Exception:  # noqa: BLE001 — see settle_owed_turn
+        logger.debug("could not drop the owed turn for %s", session_dir, exc_info=True)
 
 
 def peek_inbox(session_dir: Path) -> list[InboxLine]:

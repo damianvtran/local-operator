@@ -609,10 +609,10 @@ class FiredBound:
     armed_at: float
     fired_at: float
 
-    def covers(self, alive_until: float | None) -> bool:
-        """Whether this dump can be the one THIS run left.
+    def covers(self, alive_until: float | None, *, started_at: float | None = None) -> bool:
+        """Whether this dump can be the one THIS run left. Bounded on BOTH sides.
 
-        THE BOUND IS THE ROW'S OWN LAST WRITE, and it is what separates "the
+        THE LOWER BOUND IS THE ROW'S OWN LAST WRITE, and it is what separates "the
         process that wrote this row tripped the bound" from "a LATER runtime was
         given the same pid". A pid-keyed file has no session in it, so the only
         ordering available is time: the dump is this run's only when the bound was
@@ -621,11 +621,23 @@ class FiredBound:
         its first write). A recycled pid arms AFTER the earlier row's last write
         and is refused.
 
-        No bound on the other side on purpose: a run that armed at boot and then
-        made no progress for hours is exactly the shape this rung exists to name,
-        so requiring the fire to be near the last write would hide the slow freeze.
+        THE UPPER BOUND IS ``fired_at >= started_at``, and it is here because the
+        LOWER BOUND ALONE IS NOT ENOUGH (review round 1, R1-3). A fired dump is
+        only overwritten by the NEXT owner of that pid — and only if that owner
+        manages to arm: ``LOP_RUNTIME_STALL_SECONDS=0/off`` disables arming
+        entirely, and ``arm``'s own header write can fail on an unwritable log
+        directory. A later run that gets the pid through either of those paths
+        inherits a stale fired dump whose arm time is older than its own last
+        write, and would be narrated with a cause of death that happened BEFORE IT
+        STARTED. Requiring the fire to fall inside the run (start ≤ fire) refuses
+        that while admitting the hours-long freeze this rung exists to name: a
+        freeze means the fire is AFTER the turn began, which is the same
+        direction ``journal.install_moved`` bounds its own inference in, and for
+        the same reason.
         """
         if alive_until is None:
+            return False
+        if started_at is not None and self.fired_at < float(started_at):
             return False
         return self.armed_at <= float(alive_until)
 

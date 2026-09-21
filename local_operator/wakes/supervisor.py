@@ -67,7 +67,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 #: A STABLE name, not ``__name__``. This module is the LaunchAgent's
 #: ``python -m`` target, so ``__name__`` is ``__main__`` in the one process
@@ -378,7 +378,7 @@ def _due_sessions(
     a DORMANT one is skipped exactly as its schedules are: the kill switch is
     the user's, and a spooled turn is not an exception to it.
     """
-    from local_operator.wakes.spooled import next_fireable_ms
+    from local_operator.wakes.spooled import next_attempt_at_ms
     from local_operator.wakes.store import next_due_at
 
     due: list[tuple[str, str, int]] = []
@@ -498,8 +498,7 @@ def _due_sessions(
     for session_id, record in (spooled or {}).items():
         if not isinstance(record, dict) or session_id in scheduled or session_id in dormant:
             continue
-        when = next_fireable_ms(record)
-        if when is None or when > now_ms:
+        if next_attempt_at_ms(record) > now_ms:
             continue
         cwd = record.get("cwd")
         noted = record.get("noted_at_ms")
@@ -587,10 +586,21 @@ def _reconcile_spooled(config_dir: Path, spooled: dict[str, dict[str, Any]]) -> 
     from local_operator.wakes.spooled import clear_spooled_turn, spool_owes_turn
 
     sessions = Path(config_dir) / "sessions"
-    for session_id in list(spooled):
+    for session_id, record in list(spooled.items()):
         if spool_owes_turn(sessions / session_id):
             continue
-        clear_spooled_turn(config_dir, session_id)
+        # COMPARE-AND-DELETE: the writer is in another process, and a row it
+        # spools in the window between this read and that unlink re-arms the
+        # record — deleting it unconditionally would strand that message with no
+        # owner, which is defect (B) again (review round 1, R1-4). The guard
+        # narrows the window to the unlink itself; the drain-side half of the same
+        # finding is closed in ``inbox.settle_owed_turn``, which re-notes an
+        # obligation its own spool still owes.
+        clear_spooled_turn(
+            config_dir,
+            session_id,
+            expected_updated_at_ms=record.get("updated_at_ms"),
+        )
         del spooled[session_id]
 
 
@@ -720,12 +730,26 @@ async def _engage_one(
     due_ms: int,
     moment: int,
     semaphore: asyncio.Semaphore,
+    *,
+    on_outcome: Callable[[str], None] | None = None,
 ) -> bool:
     """Engage one due session. Returns whether a runtime was started.
 
     Split out so the sweep can run these concurrently; every skip and failure
     is contained here so one session can never fail the pass.
+
+    ``on_outcome`` IS THE ONLY WAY THE CALLER LEARNS WHY, and the reason it
+    exists is that this function's ``False`` covers four different situations the
+    spooled-turn walk has to tell apart (review round 1, R1-1): a session that is
+    SERVED (``live`` — nothing was tried, the handover has not begun), one whose
+    directory is gone (``ghost``), one whose owner holds the lease without
+    answering (``wedged``), and one whose engage could not start a runtime
+    (``failed``). The one caller that needs the distinction passes a callback;
+    every other caller, and every existing test, is unchanged by its absence.
+    ``started`` is the success word. The callback is called from the sweep's own
+    task, so it must not block or raise — ``_note_spooled_attempt`` neither does.
     """
+    outcome: Callable[[str], None] = on_outcome or (lambda _reason: None)
     from local_operator.session.runtime.launch import WakeErrand, engage_runtime
 
     overdue_s = (moment - due_ms) / 1000.0
@@ -744,6 +768,7 @@ async def _engage_one(
                     session_id,
                     overdue_s,
                 )
+            outcome("live")
             return False
         if not await asyncio.to_thread(_session_exists, config_dir, session_id):
             if _skip_log.should_log(session_id, "ghost"):
@@ -753,6 +778,7 @@ async def _engage_one(
                     session_id,
                     overdue_s,
                 )
+            outcome("ghost")
             return False
         # Probed BEFORE the engage, not after it fails, because the engage
         # would otherwise burn its whole deadline against a lease this process
@@ -786,6 +812,7 @@ async def _engage_one(
                     pid,
                     pid,
                 )
+            outcome("wedged")
             return False
         # Only the conditions we just cleared: reaching here means the session
         # is no longer skipped for a live/ghost/wedged/stale reason. Whether
@@ -860,6 +887,7 @@ async def _engage_one(
             await asyncio.to_thread(
                 _note_failure, config_dir, session_id, due_ms, str(exc), overdue_s
             )
+            outcome("failed")
             return False
         # RECOVERED: the failure keys are cleared only once an engage actually
         # succeeds, so the next failure after a working run is announced at
@@ -885,6 +913,7 @@ async def _engage_one(
             overdue_s,
             time.monotonic() - started,
         )
+        outcome("started")
         return True
 
 
@@ -1128,12 +1157,6 @@ class _Sweeper:
                 self._in_flight.pop(key, None)
             if started:
                 self.started += 1
-            # AN ENGAGEMENT IS AN ATTEMPT, in both directions: a started runtime
-            # may still fail to discharge the obligation (its drain is best-effort
-            # per row), and the walk's backoff is what stops an obligation that
-            # cannot be satisfied from being raised on every pass. The record is
-            # cleared by the drain that discharges it, never here.
-            _note_spooled_attempt(config_dir, session_id, error="" if started else "engage failed")
             return started
 
         self._in_flight[key] = asyncio.create_task(_run())
@@ -1248,20 +1271,27 @@ def _has_fireable_wakes(
     ``spooled`` is the second kind of work this process can do, and it is checked
     FIRST because it does not depend on the index at all: a session owing a turn
     has no schedules, so every rule below would retire the process that is the
-    only thing that will ever raise the runtime its spool is waiting for. An
-    obligation past its attempt cap is NOT fireable (``next_fireable_ms`` returns
-    ``None``), which keeps a delivery that can never succeed from making the
-    process immortal — the same direction, for the same reason, as the stale and
-    ghost cases below.
+    only thing that will ever raise the runtime its spool is waiting for.
+
+    THE DORMANT SKIP APPLIES HERE TOO (review round 1, R1-6). ``_due_sessions``
+    honours the kill switch for a spooled turn — a stopped session's work must not
+    fire — and this predicate has to agree with it, or a stopped session with an
+    owed turn keeps the supervisor resident forever waiting to fire something it
+    will never fire. That is the exact leak this function's own docstring says it
+    was written to close for the index's dormant entries, reached through the new
+    door.
+
+    A record IS fireable work otherwise, at whatever cadence its backoff has
+    walked to (≤ :data:`spooled.RETRY_CAP_S`): "still owed a turn" is still work,
+    which is why there is no attempt cap to end it.
     """
     moment = now_ms if now_ms is not None else int(time.time() * 1000)
     if spooled:
-        from local_operator.wakes.spooled import next_fireable_ms
-
         for session_id, record in spooled.items():
             if not isinstance(record, dict):
                 continue
-            if next_fireable_ms(record) is None:
+            entry = index.get(session_id)
+            if isinstance(entry, dict) and entry.get("stopped_at"):
                 continue
             if config_dir is not None and not _session_exists(config_dir, session_id):
                 continue
@@ -1293,7 +1323,32 @@ def _has_fireable_wakes(
     return False
 
 
-def _note_spooled_attempt(config_dir: Path, session_id: str, *, error: str = "") -> None:
+#: Which engagement outcomes COUNT against a spooled turn's attempt walk.
+#:
+#: The rule is "an attempt is a raise that was TRIED and could not happen", and
+#: the two members are the shapes that qualify:
+#:
+#: * ``wedged`` — a runtime holds the transcript lease and is not answering, so
+#:   this process cannot raise its successor no matter how often it tries.
+#:   Repeating it every slice would be pure churn, and the backoff is what makes
+#:   the retry cost bounded.
+#: * ``failed`` — the engage itself could not start a runtime (a cold-start
+#:   failure, a refusal).
+#:
+#: ``live`` IS DELIBERATELY ABSENT (review round 1, R1-1, major). A live record
+#: means the session is SERVED — the handover has not begun, nothing was tried,
+#: and the passes before a draining owner exits are not this walk's failures.
+#: Counting them ended the walk ≈7.75 min after the record was written (six
+#: refusals at 15/30/60/120/240 s), so a handover whose owner took longer than
+#: that — a clean exit measured in minutes, or exactly the wedged owner above —
+#: was left with no successor at all: requirement (4) failing on the path this
+#: change exists to close. ``ghost`` is absent for a different reason: the
+#: reconciler drops a record whose session directory is gone, so there is
+#: nothing to walk.
+_SPOOLED_ATTEMPT_REASONS = frozenset({"wedged", "failed"})
+
+
+def _note_spooled_attempt(config_dir: Path, session_id: str, *, reason: str) -> None:
     """Record an attempt on ``session_id``'s spooled turn, when it has one.
 
     Never raises, and a no-op for the overwhelmingly common case (a session with
@@ -1301,13 +1356,21 @@ def _note_spooled_attempt(config_dir: Path, session_id: str, *, error: str = "")
     record first is cheaper than writing one, and it keeps the attempt walk
     scoped to spooled turns — an ordinary wake's bookkeeping is the ledger's job,
     not this one's (see :mod:`local_operator.wakes.deliveries`).
+
+    ``reason`` is ``_engage_one``'s own outcome word, and only
+    :data:`_SPOOLED_ATTEMPT_REASONS` move the walk. A ``started`` engage is the
+    success case: the record is then cleared by the drain that discharges it
+    (``inbox.settle_owed_turn``), never here — the supervisor must not decide that
+    a message it did not deliver has been delivered.
     """
+    if reason not in _SPOOLED_ATTEMPT_REASONS:
+        return
     try:
         from local_operator.wakes.spooled import note_attempt, read_spooled_turn
 
         if read_spooled_turn(config_dir, session_id) is None:
             return
-        note_attempt(config_dir, session_id, error=error)
+        note_attempt(config_dir, session_id, error=reason)
     except Exception:  # noqa: BLE001 — bookkeeping must never stop an engagement
         logger.warning(
             "could not record the spooled-turn attempt for %s", session_id, exc_info=True
