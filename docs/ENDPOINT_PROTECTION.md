@@ -49,8 +49,9 @@ The `<prefix>`/`<install env>` distinction belongs to the **pre-generation
 render**, not to the live plists. `launchd_job` names the branded link
 `<prefix>/bin/Local Operator` where no shim can be planted — `<prefix>` is the
 install prefix of whichever CLI installed the job, `<install env>` the
-environment the installing component runs from (the desktop app's Application
-Support tree, below) — and, with no branded link either, drops `Program`
+environment the installing component ran from (the desktop app's Application
+Support tree, below) — that render's fallback image, not the stable one the
+live layout names — and, with no branded link either, drops `Program`
 entirely and puts the image in `ProgramArguments[0]`. The uv-tool prefix of that
 older shape survives in the dated `…wakes.plist.bak-…` record below, in
 `ProgramArguments[0]`, with no `Program` key.
@@ -692,10 +693,10 @@ install:
 
 An install that persists itself, fetches new code, runs a temp-directory
 installer, writes an executable environment into Application Support — a data
-root, not an execution origin — and supervises daemons out of its own install
-tree is, to a heuristic, indistinguishable from the pattern those heuristics
-are designed to catch. That is the finding, and it is why the fix in §4 is an
-allow-list rather than an argument.
+root, not the origin the supervised daemons run from — and supervises daemons
+out of its own install tree is, to a heuristic, indistinguishable from the
+pattern those heuristics are designed to catch. That is the finding, and it is
+why the fix in §4 is an allow-list rather than an argument.
 
 ## 4. The admin recipe
 
@@ -849,8 +850,8 @@ Report it as a behavioural false positive with the evidence attached:
   analyst can see in one step why the name and the signature disagree;
 - the paths in `~/Library/Application Support/Local Operator` for a
   desktop-app install, including the fact that the directory is the app's data
-  root and what it provisions, not an execution origin — the helper processes
-  run from the app bundle and the generation tree;
+  root — what it provisions — and not the origin the supervised daemons run
+  from: the helper processes run from the app bundle and the generation tree;
 - **per-release file hashes**, so the vendor can distinguish our releases from
   anything else using the same names.
 
