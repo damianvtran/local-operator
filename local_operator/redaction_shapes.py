@@ -224,6 +224,42 @@ _ASSIGNED_VALUE_GROUP = (
     r"([^\s]{7,}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
 )
 
+#: The value of an assignment whose value is QUOTED, sharing the grammar above
+#: with one addition: the run may not cross a quote that TERMINATES it.
+#:
+#: **Why a second value grammar rather than a smarter class in the one above.**
+#: The greedy run above is bounded by a LENGTH and a terminating delimiter, and
+#: a delimiter is exactly what a quote looks like in compact JSON — so on the
+#: surface JSON actually travels on (no whitespace anywhere) the run walked
+#: straight through the closing quote and into the NEXT FIELD. Measured on the
+#: operator's own transcripts (2026-09-20):
+#:
+#:   \{"access_token":"…","refresh_token":"…"\}
+#:
+#: matched the value `access_token`s value PLUS `","refresh_token":"…`, so the
+#: mask destroyed the neighbouring KEY (over-masking, the defect the negative
+#: corpus exists to prevent) and the grader — correctly, given that match — found
+#: a six-character window of the swallowed text inside the unmasked first key and
+#: filed a rotation demand for a credential that had been masked whole.
+#:
+#: The rule added here is the bound the greedy class cannot express: the run stops
+#: at the opening quote when that quote is followed by a delimiter or the end,
+#: because that is where the value ENDS. It is the last-character rule of the
+#: class above, applied recursively to the char that delimits the spelling, and it
+#: keeps every case the greedy form handled correctly — `"abc,defghij"`, an
+#: escaped quote (`"abc\"def"`) and an inner quote followed by a value
+#: character (`"abc"def"`, which is today's behaviour: the value runs to the last
+#: quote) all take the same span as before, while the field-crossing match does
+#: not exist any more.
+#:
+#: The unquoted spelling deliberately keeps the grammar above: an unquoted value
+#: has NO delimiter to stop at, and narrowing it would publish the tail of a
+#: credential containing a quote (the case the negative corpus already carries as
+#: `DB_PASSWORD=abc"defghij"`).
+_QUOTED_ASSIGNED_VALUE_GROUP = (
+    r"((?:(?!\3(?=[\s,;)\]}\"']|$))[^\s]){7,}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
+)
+
 #: A guard for the two rules that consume a WHOLE value: skip when that value
 #: already carries the marker.
 #:
@@ -489,9 +525,26 @@ def is_count_shaped(name: str) -> bool:
     Plural token COUNTS (``max_tokens``, ``context_tokens``) and cache handles
     (``cache_key``) end in a credential word and carry no secret. Masking them
     would hide numbers the agent needs while protecting nothing.
+
+    **Every segment is consulted, not just the first.** The first-segment-only
+    form is right for the vocabulary above and wrong for the Anthropic usage
+    counters the Bedrock cost-tracking work is full of:
+    ``ephemeral_5m_input_tokens`` and ``ephemeral_1h_input_tokens`` are counts,
+    but their first segment is a MODE, so the tail ``tokens`` won the judgement,
+    the counter was masked, and the grader then found a fragment inside the
+    swallowed next field and filed a rotation demand for a number (the operator's
+    ``write`` of ``idv-bedrock-ca-pin/EVIDENCE.md``, 2026-09-20). The count word
+    is the QUALIFIER, and the qualifier is not always first.
+
+    The tail is swept along with the rest rather than excluded: no
+    ``_COUNT_WORDS`` member is also a credential word, so the sweep is the same
+    judgement as "any qualifier segment", and it stays correct for a caller that
+    has not checked the name's shape first. Measured over the whole corpus when
+    this widened — every identifier it carries, both halves — with zero positive
+    cases losing a mask and zero negatives gaining one.
     """
     segments = _name_segments(name)
-    return len(segments) > 1 and segments[0] in _COUNT_WORDS
+    return len(segments) > 1 and any(seg in _COUNT_WORDS for seg in segments)
 
 
 #: Issuer prefixes whose separator is one of ``-``/``_`` (so the gate needs both
@@ -998,8 +1051,8 @@ def _BARE_SCHEME_REPLACEMENT(match: Match[str]) -> str:
     return match.group(0)[: match.start(2) - match.start(0)] + REDACTION_MARKER
 
 
-def _assignment_guard(match: Match[str]) -> bool:
-    """The name half of the named-assignment rule, checked on the match.
+def _assignment_value_guard(match: Match[str]) -> bool:
+    """The checks both spellings of the named-assignment rule share.
 
     The marker check is the "do not mask twice" half: rules run in order, so a
     DSN inside ``MONGO_DSN=`` is masked by the DSN rule first — password gone,
@@ -1008,20 +1061,59 @@ def _assignment_guard(match: Match[str]) -> bool:
     preserved and splitting the marker on the ``]`` the value class stops at.
     Measured while building the table: the unguarded pair produced
     ``MONGO_DSN=[redacted]]@host``.
+
+    The rest is the name/value judgement, and none of it depends on which
+    spelling matched: a credential NAME that is not a count, a value that looks
+    like a credential rather than an expression, and not a keyword argument.
+    Everything below the name check is a false positive that rewrites ordinary
+    code (see ``_looks_like_an_expression`` for the census that forced it).
     """
     if REDACTION_MARKER in match.group(4):
         return False
     name = match.group(1)
     if not is_credential_name(name) or is_count_shaped(name):
         return False
-    # The value has to look like a credential. Everything below this line is a
-    # false positive that rewrites ordinary code (see
-    # ``_looks_like_an_expression`` for the census that forced it).
     if _value_is_not_a_credential(
         match.group(4), name=name, strong=is_strong_credential_name(name)
     ):
         return False
     return not _is_keyword_argument(match)
+
+
+def _assignment_guard(match: Match[str]) -> bool:
+    """The guard of the UNQUOTED spelling: a quoted value is never this rule's.
+
+    The delegation is the fix for the over-masking measured on the operator's own
+    transcripts (2026-09-20). This grammar's value class is greedy to a delimiter
+    and a quote IS a delimiter, so on compact JSON the run crossed the closing
+    quote into the NEXT FIELD: an ``access_token``/``refresh_token`` pair in one
+    object matched the first value PLUS the neighbouring key and value, which
+    masked the neighbour's KEY (over-masking, the defect the negative half of the
+    corpus exists to prevent) and then, quite correctly for that match, graded a
+    fragment of the swallowed text as exposed and filed a rotation demand for a
+    credential that had been covered whole.
+
+    A quoted value therefore belongs to ``credential-assignment-quoted``, which
+    is the only rule of the two that can find where a quoted value ENDS. The
+    unquoted spelling keeps this grammar unchanged: a value with no delimiter to
+    stop at must keep the length bound and the terminating-delimiter rule, and
+    narrowing it would publish the tail of a credential containing a quote — the
+    corpus case whose reason is "a quote inside an unquoted value".
+    """
+    if match.group(3):
+        return False
+    return _assignment_value_guard(match)
+
+
+def _assignment_guard_quoted(match: Match[str]) -> bool:
+    """The guard of the QUOTED spelling: group 3 is the delimiter, not a refusal.
+
+    Written out rather than aliased to ``_assignment_guard`` because the
+    delegation there is exactly what must not happen here — every match of this
+    rule has a non-empty group 3 by construction, so the shared body is the whole
+    of the judgement.
+    """
+    return _assignment_value_guard(match)
 
 
 def _url_value_guard(match: Match[str]) -> bool:
@@ -1379,6 +1471,18 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
             # ``"api_key": "…"`` is how JSON spells every one of them, and a
             # pattern that only accepts the bare ``name: value`` form misses the
             # whole shape on the most common surface there is.
+            # Group 3 is the opening quote when the value is quoted, and this rule
+            # must not match such a value at all: the guard below refuses it and
+            # hands it to ``credential-assignment-quoted``, which is the only rule
+            # that can find where a quoted value ENDS (see
+            # :data:`_QUOTED_ASSIGNED_VALUE_GROUP` for the over-masking that cost
+            # the operator a neighbouring KEY). The refusal is in the guard rather
+            # than in this pattern because that is where every other rule in this
+            # table states its refusals, and because a pattern-level lookahead
+            # buys nothing measurable here: interleaved best-of-7 ``process_time``
+            # on credential-dense text (4000 compact lines) put the guard form and
+            # the lookahead form at 1.637x and 1.636x of the previous rule's cost,
+            # so the second mechanism would be cost with no benefit.
             r"([\"']?\s*[:=]\s*)([\"']?)"
             rf"{_ASSIGNED_VALUE_GROUP}"
         ),
@@ -1387,6 +1491,26 @@ CREDENTIAL_SHAPES: tuple[Shape, ...] = (
         None,
         4,
         guard=_assignment_guard,
+    ),
+    # The QUOTED spelling of the same assignment — `"api_key": "…"` — which is
+    # how JSON, Python reprs and every provider's token response spell one. A
+    # separate rule rather than a branch in the one above because the value's END
+    # is knowable only when the opening quote is part of the match: see
+    # :data:`_QUOTED_ASSIGNED_VALUE_GROUP` for the measured defect the greedy run
+    # produced on compact JSON, and `_assignment_guard` for the delegation that
+    # keeps the two from fighting (a quoted match is this rule's, never the
+    # unquoted rule's).
+    Shape(
+        "credential-assignment-quoted",
+        re.compile(
+            r"(?<![A-Za-z0-9_.\-])([A-Za-z0-9_.\-]{2,48})"
+            r"([\"']?\s*[:=]\s*)"
+            r"([\"'])"
+            rf"{_QUOTED_ASSIGNED_VALUE_GROUP}"
+        ),
+        None,
+        4,
+        guard=_assignment_guard_quoted,
     ),
     # ``.netrc``: ``machine api.example.com login robot password …``. A
     # whitespace-separated assignment, so the ``[:=]`` rules above never see it.

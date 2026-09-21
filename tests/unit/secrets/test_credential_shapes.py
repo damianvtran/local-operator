@@ -364,6 +364,7 @@ def test_every_guard_rendered_shape_masks_its_credential_and_keeps_the_rest() ->
     guarded = [shape for shape in CREDENTIAL_SHAPES if shape.guard is not None]
     assert {shape.label for shape in guarded} == {
         "credential-assignment",
+        "credential-assignment-quoted",
         "credential-url-value",
         "cli-credential-flag",
         "vendor-prefixed-token",
@@ -2232,7 +2233,21 @@ def _corpus_grading() -> str:
 #: What the whole corpus produces TODAY, values included: every masked text, every
 #: hit and every grading. Regenerate by printing ``_corpus_grading()`` — and only in
 #: the commit that argues why the behaviour moved.
-_CORPUS_GRADING_DIGEST = "8895d033a508776b8f2822477eded754315af15ea85db4a496233f4539f79316"
+#:
+#: Moved on 2026-09-21 by the false-positive fix, and here is the argument, case by
+#: case. **No masked text moved anywhere in the corpus.** Nine cases moved only their
+#: hit LABEL, because a quoted value is now matched by ``credential-assignment-quoted``
+#: rather than ``credential-assignment``: the JSON comma value, the quoted password
+#: values (single and double), ``export`` with quotes, the tab-indented refresh token,
+#: the terraform output, the AWS secret payload, the compact ``client_secret`` and the
+#: single-quoted dict secret. Measured by diffing the whole corpus against the module
+#: at the branch head: 9 of 308 cases differ, every difference is ``credential-
+#: assignment`` -> ``credential-assignment-quoted`` with an identical mask, and the
+#: remaining 299 are byte-identical (values and gradings included). The corpus also
+#: GREW in this commit — 5 compact-JSON cases and 4 counter cases — which moves the
+#: digest for a second, independent reason: those cases are the specification for the
+#: fix, not a re-baselining of the old behaviour.
+_CORPUS_GRADING_DIGEST = "dfc997df9f1f1b0c69a980b73c7f248e8d4b0299e3a00fdb1fdbe52d794065bb"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
@@ -2276,6 +2291,118 @@ def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
             assert hit.exposed is exposed, (case.reason, hit.label)
             checked += 1
     assert checked > 150, f"the corpus graded only {checked} hits: it is not evidence"
+
+
+def _compact_pair() -> str:
+    """The corpus's compact token pair, found by reason.
+
+    Derived rather than written out, like ``_exposed_text``: this file spells no
+    credential-shaped literal of its own, and the day the corpus changes its mind
+    the tests follow it instead of disagreeing with it.
+    """
+    return next(
+        case.text for case in POSITIVE_CASES if case.reason.startswith("a compact JSON token pair")
+    )
+
+
+def _counter_line() -> str:
+    """The corpus's Bedrock evidence line, found by reason (see ``_compact_pair``)."""
+    return next(
+        case.text
+        for case in NEGATIVE_CASES
+        if case.reason.startswith("the evidence file's own line")
+    )
+
+
+def test_the_count_judgement_sees_every_segment_of_a_name() -> None:
+    """The name half of the assignment rule, at the segment level.
+
+    A count word is the QUALIFIER, and it is not always the first segment:
+    ``ephemeral_5m_input_tokens`` is a counter whose first segment is a MODE. The
+    judgement read ``segments[0]`` only, so the tail ``tokens`` won it, a counter
+    was masked, and on the compact spelling — where the next field's key sits
+    inside the match — the grader then found a fragment of the swallowed text in
+    the unmasked first key and demanded a rotation for a NUMBER.
+
+    Both halves: the counters must be counts, and a real credential name must not
+    become one. The credential names asserted here are the ones whose SECOND
+    segment is a credential word, which is what a rule reading the wrong segment
+    would have decided.
+    """
+    for counter in (
+        "ephemeral_5m_input_tokens",
+        "ephemeral_1h_input_tokens",
+        "max_tokens",
+        "context_tokens",
+        "num_tokens",
+    ):
+        assert redaction_shapes.is_credential_name(counter), counter
+        assert redaction_shapes.is_count_shaped(counter), counter
+    for credential in ("access_token", "refresh_token", "client_secret", "api_key"):
+        assert redaction_shapes.is_credential_name(credential), credential
+        assert not redaction_shapes.is_count_shaped(credential), credential
+
+
+def test_a_compact_json_pair_keeps_its_neighbouring_key_and_files_nothing() -> None:
+    """The measured over-mask, pinned in both directions.
+
+    On a compact pair the greedy value crossed the closing quote into the NEXT
+    field: the mask replaced the neighbour's key and value, and the grader —
+    correctly, for that match — found a fragment of the swallowed text inside the
+    UNMASKED first key and filed a rotation demand for a credential that had been
+    covered whole. So this asserts the shape of the right answer, not a count:
+    both keys stay readable, both values go, and nothing escalates.
+    """
+    text = _compact_pair()
+    masked, hits = scrub_shapes_with_hits(text)
+    assert "access_token" in masked, "the credential's own key was masked away"
+    assert "refresh_token" in masked, "the neighbouring KEY was masked away"
+    assert masked.count(REDACTION_MARKER) == 2, masked
+    report = redaction_shapes.shape_report(hits)
+    assert not report.reached_model, report
+
+
+def test_a_genuinely_exposed_compact_credential_still_files_an_incident() -> None:
+    """The OVER-REACH direction: narrowing the value grammar may not stop filing.
+
+    The fix stops a fragment of a SWALLOWED neighbouring field grading as exposed.
+    It must not stop the other case, which is the one the whole control exists for:
+    a credential whose own characters are readable in the text the model gets.
+
+    Built from the corpus's compact pair — the same value echoed back in the clear
+    beside it, which is the spelling a response that quotes its own token has — and
+    asserted in BOTH directions: the pair is masked, and the hit is graded as having
+    reached the model BECAUSE the echo is still readable (the echo is not under a
+    credential name, so the pass leaves it alone; that survivor is the exposure).
+    Kept out of the corpus rather than added to it because it legitimately
+    ESCALATES, and the corpus holds exactly one escalating case by construction
+    (``_ESCALATING_POSITIVE_CASES``); this is the test that pins the direction
+    without widening that set.
+    """
+    obj = json.loads(_compact_pair())
+    value = obj["access_token"]
+    text = _compact_pair()[:-1] + f',"echo":"{value}"' + "}"
+    masked, hits = scrub_shapes_with_hits(text)
+    assert masked.count(REDACTION_MARKER) == 2, masked
+    assert f'"echo":"{value}"' in masked, "the readable copy is the exposure"
+    assert redaction_shapes.shape_report(hits).reached_model, hits
+
+
+def test_the_measured_counter_line_is_not_an_incident() -> None:
+    """The operator's Bedrock evidence line, driven end to end.
+
+    The false positive was a rotation demand for a usage COUNTER, filed from a
+    ``write`` of the Bedrock cost-tracking evidence file. The line is in the
+    negative corpus; this drives it through the pass and asserts the two things
+    the notice depends on — the text is untouched, and nothing is graded as
+    exposed — so a future widening that re-classifies a counter reds here even if
+    the corpus row is edited away.
+    """
+    text = _counter_line()
+    masked, hits = scrub_shapes_with_hits(text)
+    assert masked == text, masked
+    assert hits == [], hits
+    assert not redaction_shapes.shape_report(hits).reached_model
 
 
 def test_the_contained_notice_names_the_tool_and_carries_no_value() -> None:

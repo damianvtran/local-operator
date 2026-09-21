@@ -34,6 +34,25 @@ class Case:
     reason: str
 
 
+def _compact(*fields: tuple[str, str], quote: str = '"') -> str:
+    """A compact JSON object — no whitespace, which is how a wire response arrives.
+
+    Built from ``(name, value)`` PAIRS rather than spelled out, following the
+    convention this file already uses for its own fixtures: it is read by agents
+    through the very pass it describes, and a literal ``"name":"value"`` in its
+    source is a credential-shaped spelling in THEIR transcript. The ``quote``
+    parameter exists for the Python-repr spelling of the same object.
+
+    The shape matters as much as the values: with no whitespace between fields
+    nothing in the object bounds a greedy value match, so a rule that assumed a
+    delimiter would stop it crossed the field boundary — see the compact cases in
+    the POSITIVE block, and the counters in the NEGATIVE block for what that
+    judgement was catching instead.
+    """
+    q = quote
+    return "{" + ",".join(f"{q}{name}{q}:{q}{value}{q}" for name, value in fields) + "}"
+
+
 #: A credential spelled the way something spells one. Every one of these must
 #: come back with at least one shape masked.
 POSITIVE_CASES: tuple[Case, ...] = (
@@ -367,6 +386,39 @@ POSITIVE_CASES: tuple[Case, ...] = (
     Case("ENCRYPTION_KEY=abcdefghijklmnop", "an ENCRYPTION_KEY assignment"),
     Case("MASTER_KEY=abcdefghijklmnop", "a MASTER_KEY assignment"),
     Case("bearer abcdefghijklmnopqrst", "a bare bearer keyword and value with no header name"),
+    # --- compact JSON: the spelling the corpus could not see ------------------
+    # Nothing above carried two fields in the SAME object with no whitespace
+    # between them, so no case measured the boundary the greedy assignment value
+    # crossed: on a compact pair it consumed the closing quote and the NEXT
+    # FIELD'S KEY, which masked the neighbour and then graded a fragment of the
+    # swallowed text as exposed (the operator's `hub` notice, 2026-09-20). These
+    # are the wire spellings — an OAuth token response, a client-credentials
+    # response, the Python repr of the same — and the last one is the
+    # OVER-REACH direction: a real key id in the same compact shape, which the
+    # narrowed value grammar may not release.
+    Case(
+        _compact(("access_token", "abc123def456"), ("refresh_token", "zzz999yyy888")),
+        "a compact JSON token pair: the mask may not cross the field boundary",
+    ),
+    Case(
+        _compact(
+            ("client_secret", "s3cr3t-value-here"),
+            ("client_id", "public-identifier-x"),
+        ),
+        "a compact client-credentials response, the neighbour a public id",
+    ),
+    Case(
+        _compact(("client_secret", "s3cr3t-value-here"), ("scope", "read"), quote="'"),
+        "the Python repr spelling of the same, single-quoted and compact",
+    ),
+    Case(
+        _compact(("api_key", "realAccessKeyId1234"), ("region", "ca-central-1")),
+        "a real key id in compact JSON: the over-reach direction",
+    ),
+    Case(
+        _compact(("password", "hunter2hunter2"), ("user", "svc")),
+        "a compact password whose neighbouring field must survive",
+    ),
 )
 
 
@@ -559,6 +611,32 @@ NEGATIVE_CASES: tuple[Case, ...] = (
         "a k8s env entry that REFERENCES a secret instead of carrying one",
     ),
     Case("The DSN is configured in the environment.", "prose about a DSN"),
+    # --- the counts a widened name judgement has to keep releasing ------------
+    # The measured false positive, from the Bedrock cost-tracking work: the count
+    # word is the QUALIFIER and it is not always the first segment, so a judgement
+    # that read ``segments[0]`` only treated ``ephemeral_5m_input_tokens`` as a
+    # credential NAME, masked a counter, and — on the compact spelling, where the
+    # next field's key lies inside the match — filed a rotation demand for a
+    # NUMBER (the operator's write of the Bedrock evidence file, 2026-09-20).
+    # Every spelling here must come back byte-identical: the pair that fired, the
+    # evidence file's own line, and the ordinary companions of a usage object.
+    Case(
+        '{"cache_creation":{"ephemeral_5m_input_tokens":3536,' '"ephemeral_1h_input_tokens":0}}',
+        "an Anthropic usage counter pair in compact JSON: a COUNT, not a name",
+    ),
+    Case(
+        '{"ephemeral_5m_input_tokens":3536,"ephemeral_1h_input_tokens":0}',
+        "the same pair at the top level of a usage object",
+    ),
+    Case(
+        'usage: {"input_tokens": 16, "cache_creation_input_tokens": 0, '
+        '"cache_creation": {"ephemeral_5m_input_tokens": 3536}}',
+        "the evidence file's own line: a counter under a qualified name",
+    ),
+    Case(
+        '{"cache_read_input_tokens":10,"cache_creation_input_tokens":20}',
+        "the ordinary usage companions of the counter",
+    ),
 )
 
 
