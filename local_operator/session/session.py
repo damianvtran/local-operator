@@ -7201,6 +7201,7 @@ class Session:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
             AttentionStore,
+            AttentionWriteDeferred,
             conversation_identity,
         )
 
@@ -7213,15 +7214,44 @@ class Session:
                 and saved.get("conversation_id") == identity
                 and saved.get("eligible", True)
             ):
-                await asyncio.to_thread(
-                    store.publish,
-                    identity,
-                    saved["token"],
-                    saved["anchor"],
-                    saved["kind"],
-                    reason=str(saved.get("reason") or ""),
-                    cause=str(saved.get("cause") or ""),
-                )
+                try:
+                    await asyncio.to_thread(
+                        store.publish,
+                        identity,
+                        saved["token"],
+                        saved["anchor"],
+                        saved["kind"],
+                        reason=str(saved.get("reason") or ""),
+                        cause=str(saved.get("cause") or ""),
+                    )
+                except AttentionWriteDeferred as deferred:
+                    logger.warning(
+                        "attention: restoring the journalled outcome for %s is deferred; "
+                        "the journal still holds it: %s",
+                        identity,
+                        deferred,
+                    )
+                except Exception:  # noqa: BLE001 — attention is an observability nicety
+                    # THE SAME RULE THE BOOT PATH STATES (see `bootstrap_transcript`),
+                    # for the same reason: this runs on request paths (the runtime's
+                    # refresh op, the mobile handle, the desktop poll), and the
+                    # caller asked for a RECEIPT, not for a store write. A raise here
+                    # failed the whole call -- `snapshot` already suppresses
+                    # `sqlite3.Error` around exactly this call for exactly that
+                    # reason. Logged rather than silent: the store row is what the
+                    # sidebar reads, so a failure to write it is real.
+                    logger.warning(
+                        "attention: could not restore the journalled outcome for %s",
+                        identity,
+                        exc_info=True,
+                    )
+            # MARKED RESTORED EVEN WHEN THE PUBLISH FAILED (review: the one-shot
+            # import is not retried per tick). The outcome is durable in the
+            # transcript, and the next boot's `bootstrap_transcript` re-imports it,
+            # so leaving the flag unset would buy nothing but a warning per poll --
+            # precisely the spam the desktop poll documents against ("log the
+            # TRANSITION, not the tick"). `publish` is idempotent by token, so the
+            # boot path doing it again is free.
             self._attention_restored = True
         # The in-process TUI never calls ``async_init``, so this is its only
         # route to the restored cut-off notice. Deduped on the token, so the
@@ -7258,6 +7288,7 @@ class Session:
         from local_operator.session.attention import (
             ATTENTION_CUSTOM_TYPE,
             AttentionStore,
+            AttentionWriteDeferred,
             conversation_identity,
             provisional_anchor,
         )
@@ -7338,15 +7369,42 @@ class Session:
                 "reason": reason,
             },
         )
-        self._attention = await asyncio.to_thread(
-            AttentionStore().publish,
-            conversation_identity(self._transcript.directory),
-            token,
-            anchor,
-            kind,
-            reason=reason,
-            cause=cause,
-        )
+        try:
+            self._attention = await asyncio.to_thread(
+                AttentionStore().publish,
+                conversation_identity(self._transcript.directory),
+                token,
+                anchor,
+                kind,
+                reason=reason,
+                cause=cause,
+            )
+        except AttentionWriteDeferred as deferred:
+            # CONTENTION OUTLASTED THE STORE'S BOUNDED RETRY, and the completion
+            # is still not lost: the durable journal marker was appended just
+            # above, and the next boot's `bootstrap_transcript` re-imports it.
+            # That ordering is what makes deferring honest here rather than a
+            # quiet drop -- and it is why this arm does not re-raise.
+            logger.warning(
+                "attention: completion outcome for %s deferred to the next boot's import: %s",
+                conversation_identity(self._transcript.directory),
+                deferred,
+            )
+        except Exception:  # noqa: BLE001 — attention is an observability nicety
+            # THE OUTAGE PATH. This runs in the turn's `finally`, on the runtime
+            # an ASGI request handler drives, so a raise here did not merely lose
+            # a receipt: it ended the response with "ASGI callable returned
+            # without completing response" and skipped the rest of the teardown
+            # with it (2026-09-20). Attention bookkeeping outranks a receipt, not
+            # the work the caller asked for -- the same rule, and the same broad
+            # guard, as `bootstrap_transcript` and `_journal_witnessed_cut_off`.
+            # `self._attention` keeps its previous value rather than being set to
+            # a state nothing wrote.
+            logger.warning(
+                "attention: could not publish the outcome for %s",
+                conversation_identity(self._transcript.directory),
+                exc_info=True,
+            )
         # The model has to learn WHY even when this process survives the
         # cut-off (a graceful termination signal aborts the turn and then exits,
         # but a retirement that caught a live turn does not). Deduped on the

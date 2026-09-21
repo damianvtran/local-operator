@@ -33,10 +33,10 @@ import os
 import sqlite3
 import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from contextlib import closing
 from pathlib import Path
-from typing import Any, TypeGuard
+from typing import Any, TypeGuard, TypeVar
 
 from local_operator.paths import config_dir
 
@@ -44,6 +44,54 @@ logger = logging.getLogger(__name__)
 
 ATTENTION_CAPABILITY = "completion-ack-v1"
 ATTENTION_CUSTOM_TYPE = "completion_attention"
+
+#: How long SQLite itself waits for a competing writer before answering
+#: ``SQLITE_BUSY``, in milliseconds, and the driver's matching window.
+#:
+#: THE HOUSE RANGE, AND THIS STORE WAS THE OUTLIER. Every sibling store sets a
+#: busy timeout with a written rationale -- ``secrets/store.py`` 10000 ("covers
+#: the brief writer-lock contention concurrent sessions do still produce"),
+#: ``providers/usage_cache.py`` 5000, ``providers/auth_store.py`` 5000 -- and
+#: ``attention.db`` shipped a bare ``connect(timeout=2.0)`` with no PRAGMA at
+#: all, from when one process at a time wrote it. It is now the MOST contended
+#: store on the machine: ~25 concurrent ``lop`` sessions plus the mobile daemon,
+#: the tunnel connector and the browser bridge all publish completions into the
+#: one file, and every publish is a ``BEGIN IMMEDIATE`` that also runs the
+#: additive schema check. Two seconds expires first, the completion is lost, and
+#: the caller is handed ``OperationalError`` -- which for a daemon request
+#: handler is an outage rather than a late notification (2026-09-20,
+#: ``~/Library/Logs/local-operator/mobile.log``).
+_BUSY_TIMEOUT_MS = 5000
+
+#: The driver's own busy handler, set alongside the PRAGMA for the reason
+#: ``auth_store`` sets both: ``timeout`` covers the connection before the PRAGMA
+#: has run, and the PRAGMA is what a reader of this file looks for.
+_CONNECT_TIMEOUT_S = 5.0
+
+#: How many times a contended write is re-attempted, and the wait before the
+#: retry (seconds). The store owns the connection and the transaction, so it is
+#: where riding out a lock belongs -- see :meth:`AttentionStore._retry_write`.
+#:
+#: ONE retry, and the bound is MEASURED rather than derived. SQLite's default
+#: busy handler sleeps in increments and re-checks the elapsed time after each
+#: one, so a configured window costs about 1.8x it in practice here (probed on
+#: this host, sqlite 3.53.4: 50 ms -> 0.27 s, 2 s -> 3.8 s, 5 s -> 9.3 s). Two
+#: attempts are therefore up to ~19 s measured (three attempts measured 29.75 s
+#: in the PR's repro before the budget was tightened to two) -- and 19 s is
+#: already the most a turn's ``finally`` should spend before answering, which is
+#: what bounds this at two rather than three.
+#: A second window absorbs a burst that outlasts the first; a lock that outlasts
+#: both is what the journal beside the store is for (the outcome is durable in
+#: the transcript before it is published, so the next boot re-imports it).
+_WRITE_ATTEMPTS = 2
+_WRITE_BACKOFF_S = (0.2,)
+
+#: SQLite's two contended-verdict codes. ``SQLITE_BUSY`` is the busy-timeout
+#: expiry ("database is locked"); ``SQLITE_LOCKED`` is the same verdict from the
+#: other lock family ("database table is locked").
+_CONTENTION_ERRONAMES = frozenset({"SQLITE_BUSY", "SQLITE_LOCKED"})
+
+_T = TypeVar("_T")
 
 #: The machine token a surface reads to tell "your token is stale, re-arm from
 #: your own state" apart from a failure worth backing off on. Part of the wire
@@ -85,6 +133,74 @@ class SupersededCompletionToken(ValueError):
             "completion token superseded by a newer completion; "
             "acknowledge the conversation's current token"
         )
+
+
+class AttentionWriteDeferred(sqlite3.OperationalError):
+    """A write gave up: SQLite called the store busy through every attempt.
+
+    SUBCLASSES ``sqlite3.OperationalError``, AND CARRIES ITS ``sqlite_errorname``,
+    for the reason :class:`SupersededCompletionToken` subclasses ``ValueError``:
+    every surface that already classifies a store failure keeps its mapping with
+    no per-surface change. That is load-bearing here rather than tidy --
+    ``session/store_failures.py`` chooses between 503-busy, 507-out-of-space and
+    500-unavailable from the certified ``sqlite_errorname``, so a NEW type that
+    dropped the code would downgrade a correctly-classified contention to
+    "the store is broken" and tell the operator to check the machine.
+
+    What the separate TYPE buys is the distinction the caller could not make
+    before: *contended, come back later* versus *broken, stop retrying*. A
+    caller that treats a store failure as fatal can now defer instead of
+    failing -- see ``Session._publish_attention_outcome``, which is the caller
+    whose raise took the mobile daemon's request handler down with it.
+
+    RAISED ONLY AFTER THE BOUNDED RETRY in :meth:`AttentionStore._retry_write`
+    is exhausted, so reaching it means contention outlasted ``_BUSY_TIMEOUT_MS``
+    times ``_WRITE_ATTEMPTS`` -- never SQLite's first refusal.
+
+    The name says DEFERRED rather than LOST because for the publish path it is:
+    the outcome is journalled to the transcript *before* it is published, so the
+    next boot's ``bootstrap_transcript`` re-imports it (see
+    ``Session._publish_attention_outcome``). Callers that swallow this must say
+    so out loud, because a completion missing from the store until the next boot
+    is a real, user-visible delay.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
+def _is_contention(error: sqlite3.OperationalError) -> bool:
+    """Whether SQLite refused a statement for CONTENTION rather than for a cause.
+
+    The discriminator is the certified code, exactly as ``store_failures``
+    reasons: the message is localized prose that changes between releases. The
+    text is consulted only when there is no code at all -- an error re-wrapped by
+    an intermediate layer -- and even then only for SQLite's two lock verdicts,
+    so a full disk or an unopenable store is never retried.
+    """
+    errorname = str(getattr(error, "sqlite_errorname", "") or "")
+    if errorname:
+        return errorname in _CONTENTION_ERRONAMES
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
+
+
+def _deferred(error: sqlite3.OperationalError) -> AttentionWriteDeferred:
+    """Name a contended write's final refusal, keeping SQLite's own verdict.
+
+    The code is copied rather than re-derived so the surface ladders keep
+    classifying this as contention; when the original had none (the re-wrapped
+    case ``_is_contention`` accepts on its text), the busy code is asserted
+    explicitly, because this function is only ever called for a lock.
+    """
+    deferred = AttentionWriteDeferred(
+        f"attention store stayed busy through {_WRITE_ATTEMPTS} attempts: {error}"
+    )
+    errorcode = getattr(error, "sqlite_errorcode", None)
+    deferred.sqlite_errorcode = errorcode if errorcode is not None else sqlite3.SQLITE_BUSY
+    errorname = str(getattr(error, "sqlite_errorname", "") or "")
+    deferred.sqlite_errorname = errorname or "SQLITE_BUSY"
+    return deferred
 
 
 #: Named once because BOTH the minting side (`provisional_anchor`) and the
@@ -960,8 +1076,14 @@ class AttentionStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # A new placeholder must be private before SQLite writes any contents.
         self.path.touch(mode=0o600, exist_ok=True)
-        conn = sqlite3.connect(self.path, timeout=2.0)
+        conn = sqlite3.connect(self.path, timeout=_CONNECT_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
+        # The busy handler spelled where the lock policy is read from, next to
+        # the driver timeout for the reason the sibling stores set both. See
+        # `_BUSY_TIMEOUT_MS`: this store's write path is the one ~25 concurrent
+        # sessions, the mobile daemon, the tunnel connector and the browser
+        # bridge all reach, and the 2 s it used to allow is what expired first.
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         try:
             # Publish the complete schema in one transaction. Concurrent readers
             # can see the positively identified empty database or both tables,
@@ -1076,6 +1198,31 @@ class AttentionStore:
             conn.close()
             raise
 
+    def _connect_read_only(self) -> sqlite3.Connection:
+        """A ``mode=ro`` connection that waits as long as the write path does.
+
+        READS CONTEND FOR THE SAME LOCK, and this store's reads are on the hot
+        paths: the mobile daemon's scan (``revision``), every frontend list
+        (``state_many``), and the sidebar's deltas. This store keeps SQLite's
+        default rollback journal, so a writer holding the lock blocks a reader
+        at ``BEGIN`` exactly as it blocks another writer -- and the operator's
+        log shows the daemon's own scan losing that race 36 times
+        (`AttentionStore().revision` raising `database is locked` out of
+        `_uninitialized`). A read that raises costs the caller its whole tick,
+        so it gets the same 5 s window rather than 2.
+
+        Deliberately NOT ``_connect``: the read paths must stay unable to create
+        the file or migrate the schema (``mode=ro`` is the mechanism, and
+        ``test_reads_do_not_create_or_mutate_storage`` pins it). Only the wait
+        is shared.
+        """
+        conn = sqlite3.connect(
+            f"{self.path.as_uri()}?mode=ro", uri=True, timeout=_CONNECT_TIMEOUT_S
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        return conn
+
     @staticmethod
     def _uninitialized(conn: sqlite3.Connection) -> bool:
         # A first publisher's private 0600 placeholder is a valid zero-schema
@@ -1134,10 +1281,7 @@ class AttentionStore:
         }
         if not identities or not self.path.exists():
             return states
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
-            conn.row_factory = sqlite3.Row
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return states
@@ -1193,10 +1337,7 @@ class AttentionStore:
         """
         if not self.path.exists():
             return []
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
-            conn.row_factory = sqlite3.Row
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return []
@@ -1234,10 +1375,7 @@ class AttentionStore:
         """
         if not self.path.exists():
             return []
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
-            conn.row_factory = sqlite3.Row
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return []
@@ -1270,9 +1408,7 @@ class AttentionStore:
         """
         if not self.path.exists():
             return {}
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return {}
@@ -1282,6 +1418,55 @@ class AttentionStore:
                     "SELECT conversation, MAX(acknowledged) FROM receipts GROUP BY conversation"
                 )
             }
+
+    def _retry_write(self, operation: Callable[[], _T]) -> _T:
+        """Run one write, riding out a contended lock before giving it a name.
+
+        WHY THE RETRY IS IN THE STORE AND NOT AT THE CALL SITES. A lock is a
+        statement about OTHER writers, not about the caller's request, so a
+        transient one must not become the caller's failure. The store owns the
+        connection and the transaction, so this is where the second attempt --
+        and the eventual classification -- belongs; a caller cannot retry a
+        transaction it cannot see.
+
+        WHY IT EXISTS AT ALL. Publish sits on paths with no failure ladder to
+        catch it: the turn's own ``finally`` (``Session._publish_attention_outcome``,
+        which is what a runtime's ASGI request handler runs) and the mobile
+        daemon's boot sweep. A raise there is not a late notification, it is a
+        request that never completes -- the operator's 2026-09-20 outage, where
+        one expiring lock answered the phone with an ASGI abort.
+
+        BOUNDED, and stated: ``_WRITE_ATTEMPTS`` attempts, each with SQLite's own
+        ``_BUSY_TIMEOUT_MS`` window, plus ``_WRITE_BACKOFF_S`` between them. A
+        pathological wait is the price of not dropping a completion on the
+        floor, and it is paid on a worker thread, never on the loop (about 19 s
+        measured worst case -- see the constants).
+
+        ONLY CONTENTION IS RETRIED (:func:`_is_contention`, on SQLite's certified
+        code). A full disk, an unopenable store and a corrupt schema are not
+        races; re-running those would only delay the report, and the surface
+        ladders have different, better sentences for each.
+
+        The failure that does escape is :class:`AttentionWriteDeferred`, which
+        keeps SQLite's own code so the existing ladders classify it as
+        contention rather than as a broken store.
+        """
+        for attempt in range(_WRITE_ATTEMPTS):
+            try:
+                return operation()
+            except sqlite3.OperationalError as error:
+                if not _is_contention(error):
+                    raise
+                if attempt + 1 >= _WRITE_ATTEMPTS:
+                    raise _deferred(error) from error
+                logger.debug(
+                    "attention: write attempt %d/%d met a locked store; retrying in %s s",
+                    attempt + 1,
+                    _WRITE_ATTEMPTS,
+                    _WRITE_BACKOFF_S[attempt],
+                )
+                time.sleep(_WRITE_BACKOFF_S[attempt])
+        raise AssertionError("unreachable: _WRITE_ATTEMPTS >= 1")
 
     def publish(
         self,
@@ -1348,12 +1533,48 @@ class AttentionStore:
         detector WITHOUT moving the watermark, and an acknowledged turn stays
         read. Detectable and flood-free are not in tension once they are
         separate counters.
+
+        CONTENTION IS RIDDEN OUT HERE, NOT HANDED TO THE CALLER. The transaction
+        runs under the bounded retry below (:meth:`_retry_write`), and only if
+        every attempt meets SQLite's busy verdict does it raise
+        :class:`AttentionWriteDeferred` -- never the bare ``OperationalError``
+        this method used to give a daemon request handler, which answered the
+        phone with an ASGI abort (2026-09-20, see ``_BUSY_TIMEOUT_MS``).
         """
         if kind not in {"complete", "error", "interrupted"} or not anchor:
             raise ValueError("invalid completion")
         reason = str(reason or "")[:REASON_WIRE_CHARS]
         if str(uuid.UUID(token)) != token:
             raise ValueError("invalid completion token")
+        # Split from the transaction so the retry has something to call: the
+        # statements below are unchanged, and re-running them is safe because a
+        # replay is idempotent by token (``INSERT OR IGNORE``, plus a supersede an
+        # identical replay cannot re-apply) and every attempt builds its own
+        # connection, so no half-finished transaction is ever resumed.
+        return self._retry_write(
+            lambda: self._publish_outcome(
+                conversation,
+                token,
+                anchor,
+                kind,
+                baseline_seen=baseline_seen,
+                reason=reason,
+                cause=cause,
+            )
+        )
+
+    def _publish_outcome(
+        self,
+        conversation: str,
+        token: str,
+        anchor: str,
+        kind: str,
+        *,
+        baseline_seen: bool | None,
+        reason: str,
+        cause: str,
+    ) -> dict[str, Any]:
+        """One attempt at :meth:`publish`'s transaction, on its own connection."""
         with closing(self._connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             if (
@@ -1413,9 +1634,7 @@ class AttentionStore:
         """
         if not self.path.exists():
             return (0, 0, 0)
-        with closing(
-            sqlite3.connect(f"{self.path.as_uri()}?mode=ro", uri=True, timeout=2.0)
-        ) as conn:
+        with closing(self._connect_read_only()) as conn:
             conn.execute("BEGIN")
             if self._uninitialized(conn):
                 return (0, 0, 0)
