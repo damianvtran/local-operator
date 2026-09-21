@@ -32,7 +32,7 @@ from local_operator.procstate import O_BINARY
 from local_operator.secrets.access import open_store, retrieve_secret, session_id
 from local_operator.secrets.errors import BrokerIncompatible, SecretStoreError
 from local_operator.secrets.keys import DIR_MODE, FILE_MODE, key_mode, secrets_dir
-from local_operator.secrets.store import SecretRecord
+from local_operator.secrets.store import SecretRecord, secret_class
 
 #: How long `broker stop`/`restart` waits for the daemon's socket to go away.
 #: Generous: the broker drains in-flight requests before exiting (§13), and a
@@ -226,6 +226,10 @@ def _record_dict(record: SecretRecord) -> dict[str, Any]:
         "name": record.name,
         "description": record.description,
         "kind": record.kind,
+        # Derived from the name, never stored: see store.secret_class. Carried in
+        # the JSON too so a scripted consumer sees the same provider/agent split
+        # the human listing prints, rather than having to re-derive the rule.
+        "class": secret_class(record.name),
         "key_generation": record.key_generation,
         "created_at": record.created_at,
         "updated_at": record.updated_at,
@@ -310,7 +314,13 @@ def _list(args: argparse.Namespace) -> int:
     width = max(len(record.name) for record in records)
     for record in records:
         suffix = f"  {record.description}" if record.description else ""
-        print(f"{record.name:<{width}}  {record.kind:<6}{suffix}")
+        # The CLASS is derived from the name (store.secret_class), not from the
+        # stored kind: a ``LOP_PROVIDER_*`` row is a built-in API key the
+        # harness manages, an unprefixed one is the operator's own secret, and
+        # that distinction is what tells an operator which rows they can safely
+        # delete. Printed beside ``kind`` (the plaintext's shape) because both
+        # matter and neither replaces the other.
+        print(f"{record.name:<{width}}  {record.kind:<6} {secret_class(record.name):<9}{suffix}")
     _warn_damaged(damaged)
     return 0
 
