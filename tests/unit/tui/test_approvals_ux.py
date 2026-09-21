@@ -752,6 +752,14 @@ def test_the_registry_states_which_commands_offer_values() -> None:
         # unreachable from the completion path, which is the `/login` line this
         # sits on the other side of.
         "notifications": ArgumentMode.OPTIONAL,
+        # OPTIONAL for `/notifications`' reason: bare `/delete` already answers
+        # — it is the REHEARSAL, and it is the more useful of the two answers
+        # because it reports what would go and any refusal the guards would
+        # give. The space is an offer of the one confirming word (`yes`), not a
+        # gate in front of it. REQUIRED would make the rehearsal unreachable
+        # from the completion path, which is the `/login` line this sits on the
+        # other side of.
+        "delete": ArgumentMode.OPTIONAL,
     }
     # `/provider` was the third candidate and is deliberately not here: it takes
     # no argument at all — `_cmd_providers` ignores what follows it — so a list

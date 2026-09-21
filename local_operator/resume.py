@@ -26,6 +26,13 @@ from typing import Any, NamedTuple
 
 from local_operator.procstate import is_zombie, pid_liveness
 
+# The archive index is imported at module scope deliberately: it is stdlib-only
+# at ITS module scope (its one local import, of ``session.catalog``, is made
+# inside the function that needs it precisely because ``catalog`` imports this
+# module), so it costs this module's import budget nothing and the scan can read
+# it without a per-poll import.
+from local_operator.session.archived import archived_ids
+
 #: Module level, not lazy, and deliberately so: this module sits on the CLI
 #: startup path, and ``session.errors`` is the one importable that costs
 #: nothing there -- the package ``__init__`` is empty and the module itself
@@ -1274,9 +1281,22 @@ def _save_origin_cache(path: Path, entries: dict[str, Any]) -> None:
 
 
 def recent_sessions(
-    config_dir: Path, limit: int | None = None, *, revalidate: bool = False
+    config_dir: Path,
+    limit: int | None = None,
+    *,
+    revalidate: bool = False,
+    include_archived: bool = False,
 ) -> list[tuple[str, float]]:
     """``(id, mtime)`` for the USER's resumable sessions, newest first.
+
+    ``include_archived=False`` is the DEFAULT because every caller of this
+    function is a LISTING, and an archived conversation is exactly what a
+    listing is not supposed to offer. The one caller that must say otherwise is
+    ``session.cleanup``'s retention policy, which ranks this listing to decide
+    what to KEEP: an archived session dropped from that ranking would stop
+    being protected by the recent-N rule and be swept as if it were work nobody
+    kept. See :func:`recent_session_rows` for the picker's version of the same
+    question.
 
     ``limit=None`` means NO TRUNCATION and is the default, so a caller that says
     nothing gets the whole store. That direction is deliberate and was learned
@@ -1380,8 +1400,8 @@ def recent_sessions(
     """
     return [
         (name, mtime)
-        for name, mtime, _origin in _recent_sessions_with_origin(
-            config_dir, limit, revalidate=revalidate
+        for name, mtime, _origin, _archived in _recent_sessions_with_origin(
+            config_dir, limit, revalidate=revalidate, include_archived=include_archived
         )
     ]
 
@@ -1408,7 +1428,8 @@ def _recent_sessions_with_origin(
     *,
     revalidate: bool = False,
     strict: bool = False,
-) -> list[tuple[str, float, str]]:
+    include_archived: bool = False,
+) -> list[tuple[str, float, str, bool]]:
     """:func:`recent_sessions`, plus the ``origin`` this scan already parsed.
 
     The scan reads and parses every marker that exists in order to decide
@@ -1427,8 +1448,23 @@ def _recent_sessions_with_origin(
     MEMBERSHIP listing through :func:`recent_session_rows` (the phone's
     history) can declare that for itself rather than only through the
     catalogue; see that function.
+
+    ``include_archived`` is forwarded too, and the row's fourth element is the
+    session's archive state AS THIS SCAN READ IT. It travels on the row rather
+    than being re-derived by the caller for two reasons: the scan has already
+    read the index it filtered against, so a second read is a second answer that
+    can disagree; and ``catalog.cached_session_rows`` serves rows out of a cache
+    keyed on the transcript's own stat, under which an id archived between two
+    polls would keep serving ``archived=False`` from a row built before it was
+    archived.
     """
-    return _scan_sessions(config_dir, limit, revalidate=revalidate, strict=strict)[0]
+    return _scan_sessions(
+        config_dir,
+        limit,
+        revalidate=revalidate,
+        strict=strict,
+        include_archived=include_archived,
+    )[0]
 
 
 def _store_error_detail(error: OSError) -> str:
@@ -1493,7 +1529,8 @@ def _scan_sessions(
     *,
     revalidate: bool = False,
     strict: bool = False,
-) -> tuple[list[tuple[str, float, str]], set[str]]:
+    include_archived: bool = False,
+) -> tuple[list[tuple[str, float, str, bool]], set[str]]:
     """The one store scan: ``(rows, hidden_names)``.
 
     ``revalidate=True`` forces this scan to re-read every marker instead of
@@ -1532,6 +1569,34 @@ def _scan_sessions(
     Split from :func:`_recent_sessions_with_origin` rather than widening its
     return type because that shape is pinned by the CLI's recovery listing and
     by every other caller, none of which has any use for the second value.
+
+    ``include_archived`` is THE archive predicate for every listing in this
+    codebase, and that is the whole design: the picker, the sidebar catalogue,
+    the desktop catalogue and the search digests all reach their rows through
+    this function, so ONE filter here is what makes those four surfaces agree
+    about which conversations exist to be offered. A second filter at a second
+    call site is exactly how the sidebar and the phone came to disagree about
+    subagent visibility before this scan owned that question too.
+
+    With it off (the default) an archived directory is dropped from ``rows``
+    and NOT added to ``hidden_names``: hidden means "not the user's own
+    session" and carries a second meaning at ``load_catalog``, where a hidden
+    name is one the desktop-marker probe may skip. An archived session is the
+    user's own; it is simply not being OFFERED.
+
+    The flag therefore NARROWS WHAT IS OFFERED AND NEVER WHAT EXISTS. An
+    archived session still resolves by explicit id (``lop resume <id>``, the
+    desktop's ``GET /v1/desktop/sessions/{id}``), exactly as a subagent run
+    stays resolvable while the listing hides it — the rule
+    ``_recent_sessions_with_origin``'s docstring already states for the other
+    axis of visibility.
+
+    The archive index is read AT MOST once per scan and LAZILY: only a
+    candidate that has already passed the hidden-origin gate and the
+    directory checks reaches the archive decision, so a store whose entries
+    are all hidden pays no stat and no read for an answer none of them can
+    use, and a store with nothing archived pays one stat and no read (the
+    index is stat-ed before it is opened — see ``session.archived``).
     """
     # Lazy and stdlib-only on the other side: ``retention`` imports nothing
     # heavier than ``logging``, and the CLI startup guard measures this
@@ -1557,7 +1622,17 @@ def _scan_sessions(
         _SCAN_COUNT[str(config_dir)] = scans_so_far + 1
         revalidate = scans_so_far % REVALIDATE_EVERY == 0
 
-    rows: list[tuple[str, float, str]] = []
+    rows: list[tuple[str, float, str, bool]] = []
+    # THE ARCHIVE INDEX, READ LAZILY AND MEMOISED, on the first candidate that
+    # reaches the archive decision below. Not read up front, and that is a
+    # syscall budget rather than a style choice: the poll's per-directory cost
+    # is asserted in syscalls (``tests/unit/session/test_catalog_scan_cost.py``),
+    # and a store whose entries are all hidden — a machine between turns, with
+    # every directory a delegated run — must cost ONE ``scandir`` and nothing
+    # else. Reading the index eagerly added a stat (plus a read when a file is
+    # there) to exactly that scan, for an answer no hidden directory can use.
+    # ``None`` means "not read yet"; an empty store reads nothing at all.
+    archived: frozenset[str] | None = None
     # Every directory this scan established is not the user's own session. See
     # the docstring: ``load_catalog`` uses it to skip a second per-directory
     # stat.
@@ -1776,10 +1851,22 @@ def _scan_sessions(
             #
             # ``session_activity_path`` over ``session_activity``: same clock,
             # same answer, without building a ``Path`` per candidate.
+            #
+            # AN ARCHIVED DIRECTORY IS NOT OFFERED, and this is the one place
+            # that decides it for every listing in this codebase (see the
+            # docstring). Checked BEFORE the activity stat because the answer is
+            # a set lookup: an archived directory then costs no filesystem call
+            # at all on the 2-second poll, which is the poll this branch is
+            # walked by.
+            if archived is None:
+                archived = archived_ids(config_dir)
+            is_archived = entry.name in archived
+            if is_archived and not include_archived:
+                continue
             activity = session_activity_path(entry.path)
             if activity is None:
                 continue
-            rows.append((entry.name, activity, origin))
+            rows.append((entry.name, activity, origin, is_archived))
     merged = {
         name: entry for name, entry in cached.items() if name in seen and isinstance(entry, dict)
     }
@@ -1841,6 +1928,20 @@ class SessionRow(NamedTuple):
     #: Defaulted so every existing construction site keeps working; only the
     #: picker's row builder sets it.
     forked: bool = False
+
+    #: Whether this conversation is ARCHIVED: hidden from every default listing
+    #: and from search, still resumable by explicit id.
+    #:
+    #: Present on the row rather than looked up per render because a renderer
+    #: paints a whole page at once and the archive index is one small file read
+    #: per SCAN (``resume._scan_sessions``), not per row. The picker's reveal
+    #: toggle reads it to decide which rows it is revealing, and every other
+    #: surface simply never receives a row with it set — the flag is the honest
+    #: statement of what the listing did, in both directions.
+    #:
+    #: Defaulted so every existing construction site keeps working, exactly as
+    #: ``forked`` above is: only the scan and the row builders set it.
+    archived: bool = False
 
     # -- live state, supplied by the CALLER -------------------------------
     # This module stays stdlib-only and never scans the registry itself: it
@@ -2297,7 +2398,11 @@ def _condense(text: str, max_chars: int) -> str:
 
 
 def recent_session_rows(
-    config_dir: Path, limit: int | None = None, *, strict: bool = False
+    config_dir: Path,
+    limit: int | None = None,
+    *,
+    strict: bool = False,
+    include_archived: bool = False,
 ) -> list[SessionRow]:
     """:class:`SessionRow` per resumable session, newest first.
 
@@ -2350,9 +2455,19 @@ def recent_session_rows(
     the same confidently-wrong membership this whole change removes from the
     desktop and TUI sidebars, one surface out. That caller passes
     ``strict=True`` and keeps the last listing it did read.
+
+    ``include_archived=False`` keeps archived conversations out of the rows, and
+    that is the default every listing wants. The ``/resume`` picker is the one
+    caller that passes ``True``: it has a toggle that REVEALS them, so it needs
+    the rows in hand and the ``archived`` flag on each one to know which rows the
+    toggle is revealing. A caller that only lists (the CLI's recovery listing,
+    the phone's history, the search) leaves it off and so cannot offer an
+    archived conversation at all.
     """
     rows: list[SessionRow] = []
-    for session_id, mtime, origin in _recent_sessions_with_origin(config_dir, limit, strict=strict):
+    for session_id, mtime, origin, archived in _recent_sessions_with_origin(
+        config_dir, limit, strict=strict, include_archived=include_archived
+    ):
         session_dir = config_dir / "sessions" / session_id
         rows.append(
             SessionRow(
@@ -2363,6 +2478,12 @@ def recent_session_rows(
                 # ordinary conversation — short-circuit here without touching
                 # the disk again.
                 forked=origin == ORIGIN_FORK and wears_inherited_title(session_dir),
+                # Taken from the scan's own read rather than re-derived here; see
+                # ``_recent_sessions_with_origin``. With the flag off this is
+                # ``False`` for every row by construction, and it is still
+                # stamped rather than left to the field's default so a caller
+                # never has to ask which mode produced the list.
+                archived=archived,
             )
         )
     return rows

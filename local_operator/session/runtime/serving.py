@@ -4714,6 +4714,13 @@ class ServingSessionHandle(SessionHandle):
             # round is fixing — so the report is TOLD rather than guessing, and a
             # handle that serves every connection alike cannot guess.
             return self._approvals_slash(session, args, SlashResult, may_loosen=may_loosen)
+            return self._approvals_slash(session, args, SlashResult)
+        if command == "archive":
+            return self._archive_slash(session, True, SlashResult)
+        if command == "unarchive":
+            return self._archive_slash(session, False, SlashResult)
+        if command == "delete":
+            return await self._delete_slash(session, args, SlashResult)
         if command == "compact":
             return self._compact_slash(session, SlashResult)
         if command == "wake":
@@ -4957,6 +4964,117 @@ class ServingSessionHandle(SessionHandle):
         """One shape for every refusal this command produces, so the route can
         map a code to a status without reading prose."""
         return SlashResult(kind="error", text=text, data={"code": code})
+
+    def _archive_slash(self, session: Any, archived: bool, SlashResult: Any) -> Any:
+        """``/archive`` and ``/unarchive`` on a DETACHED runtime.
+
+        The state is a config-root file, so this is a local mutation and not a
+        shared-session one — but it is implemented HERE rather than left to the
+        invoking viewer because a command in the registry with no branch in this
+        host answers "this owner cannot run …" on the detached path, which reads
+        as a broken product for a command the picker just offered. The viewer's
+        own copy of the same handler exists for the same reason and says the same
+        sentence (``OperatorApp._archive_slash_result``), so a receipt reads
+        identically whether the session is local or detached.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.archived import (
+            archive_change,
+            archived_ids,
+            eviction_clause,
+        )
+
+        session_id = getattr(session, "session_id", "") or ""
+        if not session_id:
+            return SlashResult(
+                kind="notice",
+                text="this conversation has nothing saved yet — nothing to archive",
+                style="warning",
+            )
+        current = archived_ids(config_dir())
+        if archived and session_id in current:
+            return SlashResult(
+                kind="notice",
+                text=f"{session_id} is already archived — /unarchive brings it back",
+                style="info",
+            )
+        if not archived and session_id not in current:
+            return SlashResult(
+                kind="notice",
+                text="this conversation is not archived — /archive hides it from the lists",
+                style="info",
+            )
+        _, evicted = archive_change(config_dir(), session_id, archived)
+        if archived:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    f"archived {session_id} — hidden from /resume, the sidebar and search; "
+                    "/unarchive brings it back, and the picker's Archived toggle (ctrl+a) "
+                    "still opens it."
+                    # The cap's consequence, named at the moment it happens and
+                    # spelled once for both hosts (session.archived owns it).
+                    + eviction_clause(evicted)
+                ),
+                style="info",
+            )
+        return SlashResult(
+            kind="notice", text=f"unarchived {session_id} — it is listed again", style="info"
+        )
+
+    async def _delete_slash(self, session: Any, args: str, SlashResult: Any) -> Any:
+        """``/delete`` on a DETACHED runtime.
+
+        The same two steps the TUI's own handler takes — an unconfirmed call is
+        a REHEARSAL that reports what the real one would do, including any
+        refusal — and the same sentence either way.
+
+        It answers the guard's refusal on every ordinary call, and that is the
+        design rather than an oversight: this runtime IS the live session, a live
+        session is a hard guard, and the refusal names the remedy. The success
+        branch is kept for the case where the runtime no longer holds a claim
+        (a session between turns whose lease expired) and because a command that
+        can only ever refuse belongs in the registry as a refusal, not as a
+        missing branch.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.cleanup import delete_session
+
+        session_id = getattr(session, "session_id", "") or ""
+        if not session_id:
+            return SlashResult(
+                kind="notice",
+                text="this conversation has nothing saved yet — there is nothing to delete",
+                style="warning",
+            )
+        confirmed = args.strip().casefold() == "yes"
+        outcome = await asyncio.to_thread(
+            delete_session, config_dir(), session_id, actor="runtime", dry_run=not confirmed
+        )
+        if not outcome.found:
+            return SlashResult(
+                kind="notice",
+                text=f"{session_id} is not on disk — nothing to delete",
+                style="warning",
+            )
+        if outcome.refusal:
+            return SlashResult(kind="notice", text=outcome.refusal, style="warning")
+        if not confirmed:
+            # The sentence comes off the outcome (review round 3, R3-2), so this
+            # runtime and the two TUI hosts cannot drift on the wording of a
+            # confirmation for an irreversible act.
+            return SlashResult(kind="notice", text=outcome.rehearsal(), style="warning")
+        return SlashResult(
+            kind="notice",
+            text=f"deleted {session_id}",
+            # A NOTICE rather than its own `block` payload type, so this and the
+            # app's local arm answer the SAME shape: a routed payload type is a
+            # renderer contract, and a pair the viewer has no arm for is a
+            # command that runs on the owner and then evaporates on screen. The
+            # receipt is the whole answer, so it rides as text; the
+            # machine-readable half is a plain data key.
+            data={"deleted": True, "session_id": session_id},
+        )
 
     async def _rename_slash(self, session: Any, arg: str, SlashResult: Any) -> Any:
         """``/title`` on a detached runtime: report, set, or refresh.
