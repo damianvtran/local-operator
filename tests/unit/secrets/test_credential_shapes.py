@@ -1649,7 +1649,9 @@ def test_a_marker_inside_the_credentials_own_value_is_a_recorded_limit() -> None
     assert rs._only_fully_masked([partial], f"PASSWORD=tok{REDACTION_MARKER}")[0].exposed is False
 
 
-def test_a_mask_that_stopped_inside_a_credential_is_an_exposure() -> None:
+def test_a_mask_that_stopped_inside_a_credential_is_an_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A partial mask is an EXPOSURE, and only the window half can see it.
 
     The shape this grading exists for is a mask that stopped INSIDE a credential:
@@ -1665,6 +1667,12 @@ def test_a_mask_that_stopped_inside_a_credential_is_an_exposure() -> None:
     escalates on any mask at all.
     """
     import local_operator.redaction_shapes as rs
+
+    # Both window arms must answer this case, so pin the OTHER one here: at this
+    # value's 15 windows the crossover picks the per-window search arm, which left
+    # `_present_windows` (the gated pass, and the arm the incident itself took)
+    # pinned by no test at all (agent review R2, C2).
+    monkeypatch.setattr(rs, "_searches_are_cheaper", lambda keys: False)
 
     value = "p@ssw0rd-at-the-tail"
     hit = rs.ShapeHit(label="dsn-password", value=value, window=value)
@@ -1796,6 +1804,11 @@ class _CountingText(str):
     counter on the copy would be read by nobody, which is exactly how the window
     half's searches went unmeasured (agent review R1, F2).
     """
+
+    #: Declared on the CLASS, not set only per instance: the derived copies built in
+    #: ``__new__`` are typed from this annotation, and without it pyright reports
+    #: three errors on the sink reads below (agent review R2, C1).
+    _sink: list[int]
 
     def __new__(cls, value: str, sink: list[int] | None = None) -> "_CountingText":
         text = super().__new__(cls, value)
@@ -1991,9 +2004,9 @@ def test_a_long_credential_is_measured_where_its_cost_is(
     )
     # And it is still bounded by the windows, the whole-value search and the marker
     # probe: the 400 hit rows do not appear in it.
-    assert searched <= (windows + 4) * len(text), (
-        f"{searched} bytes walked for {windows} windows over {len(text)} bytes of text"
-    )
+    assert searched <= (windows + 4) * len(
+        text
+    ), f"{searched} bytes walked for {windows} windows over {len(text)} bytes of text"
 
 
 def test_the_single_pass_arm_verifies_the_whole_value_it_claims() -> None:
