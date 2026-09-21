@@ -38,6 +38,7 @@ The seeded prose is a fixture, not a subject: it is mounted without
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -48,7 +49,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from textual.pilot import Pilot  # noqa: E402
 
-from scripts.visual_capture import isolate_capture, save_capture  # noqa: E402
+from scripts.visual_capture import (  # noqa: E402
+    isolate_capture,
+    refuse_flag_shaped_argument,
+    save_capture,
+)
 
 isolate_capture()
 
@@ -143,6 +148,48 @@ SUBAGENT_ROWS = [
 #: Pinned in the capture. One ACTIVE row, to show that a pin LIFTS a row out of
 #: the section it ranked into, and one SUBAGENT row, to show a pinned agent run
 #: staying visible in ★ Pinned while the layer itself is off.
+#: The mesh (R6) rows: one live peer's two sessions and one UNREACHABLE peer's
+#: session. Hand-stamped with the mobility fields rather than loaded, exactly as
+#: every other row in this fixture is — the projection that will produce them is
+#: not in this tree yet (``docs/design/mesh-ui.md`` §2.8.1 records why), so the
+#: capture drives the surface through the contract the producer must satisfy.
+#:
+#: Two devices, not one, because the pair is what the section rule is about: each
+#: peer is its own contiguous section with its own heading, and a single-device
+#: fixture cannot tell that apart from "one peer rank sorted alphabetically".
+PEER_ROWS = [
+    (
+        "bbbbbbbbbbb1",
+        "Mesh transport identity design",
+        3,
+        "busy",
+        "d_1a2b3c4d",
+        "radiant-m4",
+        True,
+        "",
+    ),
+    (
+        "bbbbbbbbbbb2",
+        "Federated catalogue fan-out",
+        26,
+        "idle",
+        "d_1a2b3c4d",
+        "radiant-m4",
+        True,
+        "",
+    ),
+    (
+        "ccccccccccc1",
+        "Phone portal deploy check",
+        58,
+        "idle",
+        "d_77aa88bb",
+        "pixel-8",
+        False,
+        "connect_failed:ConnectionRefusedError",
+    ),
+]
+
 PINNED_IDS = ("aaaaaaaaaaa3", "aaaaaaaaaad2")
 
 #: What the footer chip reports. Larger than the seeded rows on purpose: the
@@ -234,7 +281,7 @@ class _AttachedFixtureSession(FakeSession):
         return CURRENT_ID
 
 
-def _entries(show_subagents: bool = SHOW_SUBAGENTS) -> list[CatalogEntry]:
+def _entries(show_subagents: bool = SHOW_SUBAGENTS, peers: bool = False) -> list[CatalogEntry]:
     entries = [
         CatalogEntry(
             SessionRow(
@@ -273,6 +320,23 @@ def _entries(show_subagents: bool = SHOW_SUBAGENTS) -> list[CatalogEntry]:
         )
         for session_id, label, agent, age in subagent_rows
     ]
+    if peers:
+        entries += [
+            CatalogEntry(
+                SessionRow(
+                    session_id,
+                    NOW - age * 60,
+                    name,
+                    live_state=state,
+                    locality="remote",
+                    owner_device=device,
+                    owner_device_name=label,
+                    reachable=reachable,
+                    unreachable_reason=reason,
+                )
+            )
+            for session_id, name, age, state, device, label, reachable, reason in PEER_ROWS
+        ]
     return entries
 
 
@@ -408,11 +472,44 @@ def _widget_state(sidebar: SessionSidebar) -> tuple[object, ...]:
 
 
 async def main() -> None:
+    global CURSOR_ID, FOCUS_LIST
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: sidebar_shot.py OUT.svg [COLSxROWS] [peers|peers-focus]")
+    # Before it is used as a path: a mistyped flag here writes a file called
+    # ``--help.svg`` into the working directory (see the helper's docstring).
+    refuse_flag_shaped_argument(sys.argv[1], what="OUT")
     out = sys.argv[1]
     size = (100, 30)
-    if len(sys.argv) > 2:
-        cols, rows = sys.argv[2].split("x")
-        size = (int(cols), int(rows))
+    # ``peers`` is the VARIANT and the size is positional, in either order: the
+    # gallery passes `out peers 100x30`, a person types `out 100x30`. A token
+    # containing an `x` is a size; anything else names the variant.
+    peers = False
+    focus = FOCUS_LIST
+    for arg in sys.argv[2:]:
+        refuse_flag_shaped_argument(arg, what="argument")
+        if "x" in arg:
+            cols, rows = arg.split("x")
+            size = (int(cols), int(rows))
+        elif arg == "peers":
+            peers = True
+        elif arg == "peers-focus":
+            # THE SETTLING FRAME design round 1's D4 asked for: the peers variant
+            # with the list FOCUSED and the cursor ON a remote row, which is the
+            # only state that shows the caret and the locality mark on one row.
+            # Both knobs already existed (`LO_SIDEBAR_SHOT_FOCUS`,
+            # `LO_SIDEBAR_SHOT_CURSOR`) and were never combined into a CASE, which
+            # is exactly why every frame of that round was unfocused and the
+            # interaction went unverified — a knob the gallery cannot reach is not
+            # evidence.
+            peers = True
+            focus = True
+        else:
+            raise SystemExit(
+                f"unknown argument {arg!r}: expected a WxH size, 'peers' or 'peers-focus'"
+            )
+    FOCUS_LIST = focus
+    if focus and peers:
+        CURSOR_ID = PEER_ROWS[0][0]
 
     if NEUTRAL_CWD:
         os.environ["HOME"] = str(Path(os.environ["HOME"]).resolve())
@@ -452,7 +549,7 @@ async def main() -> None:
         sidebar.show_subagents = SHOW_SUBAGENTS
         sidebar.set_pins(PINS)
         sidebar.set_subagent_total(SUBAGENT_TOTAL)
-        sidebar.set_entries(_entries())
+        sidebar.set_entries(_entries(peers=peers))
         sidebar.current_id = CURRENT_ID
         sidebar.cursor_id = CURSOR_ID
         # Pin the animation: a capture is only comparable frame-to-frame if the
@@ -531,6 +628,24 @@ async def main() -> None:
 
         save_capture(app, out)
         conversation = app.query_one("#session-conversation")
+        # THE LIST STATE, as a number rather than something to infer from pixels
+        # (design round 1, D5b). A frame that paints nine of twenty-four rows and
+        # stops halfway down the list cannot be read without knowing WHERE in the
+        # order the window sits and WHY it is that tall — the earlier frame's
+        # report said only the painted range, so "the store grew and the list got
+        # shorter" and "the window is a page of a taller list" were
+        # indistinguishable. All four numbers are already computed here for the
+        # chord assertion; this is them, on the artifact.
+        list_state = {
+            "entries": len(sidebar.entries),
+            "offset": sidebar._offset,
+            "page_size": sidebar.page_size,
+            "visible": len(sidebar.visible_entries),
+            "sections": len({sidebar._section_key(e) for e in sidebar.entries}),
+            "cursor_id": sidebar.cursor_id,
+            "has_focus": sidebar.has_focus,
+        }
+        Path(f"{out}.list-state.json").write_text(json.dumps(list_state, indent=2) + "\n")
         print(
             f"terminal={size[0]}x{size[1]} "
             f"sidebar_outer={sidebar.region.width} "
@@ -539,6 +654,7 @@ async def main() -> None:
             f"virtual={app.screen.virtual_size} actual={app.screen.size} "
             f"scrollbar={app.screen.show_vertical_scrollbar}"
         )
+        print("list_state=" + json.dumps(list_state, sort_keys=True))
 
 
 asyncio.run(main())

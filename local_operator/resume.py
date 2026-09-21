@@ -2023,6 +2023,71 @@ class SessionRow(NamedTuple):
     #: Unknown legacy dates tie at zero and are ordered by session id.
     created_at: float = 0.0
 
+    # -- where the session LIVES (the mesh's half of R6) --------------------
+    # The five fields below are ``docs/design/mesh-ui.md`` §1.3's, named there
+    # after ``mesh-session-mobility.md`` §9.2's row vocabulary rather than
+    # invented locally: one wire shape, one spelling, so a client that groups by
+    # ``owner_device_name`` cannot disagree with the feed about what a device is
+    # called. Every one is DEFAULTED, exactly like the live-state fields above,
+    # because there are ~40 construction sites and a store with no mesh must keep
+    # constructing the identical row it does today.
+
+    #: ``""`` (unknown), ``"local"`` or ``"remote"``. **Unknown renders as
+    #: local**: a row read from THIS machine's store is a session on this machine
+    #: by construction, and a mark for the ordinary case would be a glyph on
+    #: every row that says nothing (design D6/D9 — the ``⇄`` is painted only on
+    #: remote rows). The empty string is therefore the honest default for the
+    #: sites that never learned about the mesh, not a claim that a session is
+    #: local-and-verified.
+    locality: str = ""
+    #: The owning device's member id. Empty for a local session.
+    owner_device: str = ""
+    #: The owning device's human NAME — the heading and the tooltip read this,
+    #: never the id, because a 32-hex device id is not something a user
+    #: recognises their own laptop by.
+    owner_device_name: str = ""
+    #: Whether the owning device answered on the last projection read. ``True``
+    #: for local rows, and the default for remote ones — a remote row is only
+    #: ever stamped by a reader that just answered (§8.3: a peer that does not
+    #: answer contributes no row at all unless the row came from a cache, and the
+    #: cached case sets this False).
+    reachable: bool = True
+    #: Why the owning device is unreachable, in the reading client's words
+    #: (``relay.py``'s unavailability vocabulary). Empty whenever ``reachable``.
+    unreachable_reason: str = ""
+    #: The projection behind these fields is CACHE-only — the row was remembered
+    #: rather than just confirmed. Distinct from ``reachable=False``: a peer can
+    #: be unreachable with a fresh cache or reachable with a stale one, and the
+    #: section heading only claims what this flag plus ``reachable`` prove.
+    placement_stale: bool = False
+
+    @property
+    def is_remote(self) -> bool:
+        """Whether this row is provably a session on ANOTHER device.
+
+        The one predicate every surface asks, rather than each comparing
+        ``locality`` to a string it spells itself: ``"remote"`` is the only
+        value that earns a mark, so a typo in a comparison is a mark that never
+        appears (or one that appears on every local row) rather than an error.
+        """
+        return self.locality == "remote"
+
+    @property
+    def owner_label(self) -> str:
+        """What to call the owning device: its name, else its id's tail."""
+        if self.owner_device_name:
+            return self.owner_device_name
+        return self.owner_device[:8] if self.owner_device else ""
+
+
+#: What a DEVICE with no name is called, on every surface that has to name one.
+#:
+#: One string, exported, because the alternative was measured: the sidebar said
+#: ``another device`` for a peer whose member record carries no name while the
+#: network panel painted a bare id in the same condition, so one missing fact read
+#: two ways on two surfaces of the same screen (design round 1, D8).
+UNNAMED_DEVICE = "unnamed device"
+
 
 #: The fork tag's text as a FILTER sees it. The mark itself is drawn per
 #: surface (``session_picker.FORK_MARKER`` in the TUI, the phone's list

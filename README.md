@@ -47,6 +47,7 @@ pooled, load-balanced, and used with the prompt cache in mind.
 - [🪟 Desktop App (local-operator-ui)](#-desktop-app-local-operator-ui)
 - [🏢 Agent Organizations](#-agent-organizations)
 - [🔁 Cross-Agent Communication](#-cross-agent-communication)
+- [🛰️ Agent Mesh (your own devices)](#️-agent-mesh-your-own-devices)
 - [🌙 Always On](#-always-on)
 - [💳 Subscriptions](#-subscriptions)
 - [🧮 Built for Token and Cache Efficiency](#-built-for-token-and-cache-efficiency)
@@ -310,6 +311,88 @@ answers on an authenticated loopback server, so there is no remote or
 cross-user path. The full targeting and refusal rules, the receipt strings,
 and the limits (256 KB bodies; headless `exec` sessions may not receive) are
 in the packaged [peer-messaging guide](./local_operator/guides/peer-messaging/GUIDE.md).
+
+## 🛰️ Agent Mesh (your own devices)
+
+`lop network` pairs your machines into a **mesh**: a group of devices that trust
+each other by a shared secret, each with a keypair of its own. Pair once, and
+the sessions running on those devices become one list you can read and act on
+from any of them — the desktop you work at, the laptop upstairs, the small box
+in the cupboard. Another device's sessions appear in the sidebar under their own
+heading, marked `⇄`, and you can start, list, warm or stop a session on a peer
+without leaving the machine you are sitting at.
+
+The mesh is peer-to-peer: your devices dial each other directly, with no service
+in the middle, and the relay that coordinates them runs on your own machine
+(under a LaunchAgent on macOS). The trust boundary is the network itself — a
+device you paired — and pairing is a single-use token plus a code two people
+compare on two screens.
+
+<p align="center">
+  <img src="./static/tui-mesh-sidebar.png" alt="The Local Operator sidebar: another device's two sessions grouped under a heading that names it, each row carrying the locality mark beside its state glyph; the cursor row shows both its caret and the mark. Above them sit the pinned and active sections of this device's own sessions." width="720">
+</p>
+
+<p align="center"><i>A device in a mesh: another machine's sessions carry the <code>⇄</code> mark and group under it, beside this device's own pinned, active and previous sessions.</i></p>
+
+<p align="center">
+  <img src="./static/tui-mesh-network.png" alt="The /network screen: this device's name and abbreviated id, the networks it is in with their role and member count, its peers with reachability and the reason for any that did not answer, and the relay's install and running state" width="620">
+</p>
+
+<p align="center"><i><code>/network</code>: this device, the networks it is in, which peers answer, and whether the relay is running.</i></p>
+
+**Getting started.** On the device that should own the network:
+
+```bash
+lop network init devmesh                 # create the network, mint this device's identity, start the relay
+lop network invite --role drive          # a single-use token, written to a file, never printed into a pipe
+```
+
+It prints where the token went; hand that file to the other device out of band
+and, there:
+
+```bash
+lop network join @/path/to/token         # both devices show a code; a person compares them, then confirms
+lop network status                       # installed, identity, relay, and this device's links
+lop network ls                           # devmesh  n_2bf6b70bd36b1cca228daa9f  epoch 1  admin  1 member(s)  active
+```
+
+`invite --print` reads the token straight off a terminal when you would rather
+copy it than move a file. Roles are `read`, `drive` and `admin`; a token can be
+bound to one device and given a shorter life. The full walk-through — including
+what to do when a device is unreachable, and the incident verbs (`panic`,
+`disconnect`) — is in the packaged
+[network guide](./local_operator/guides/network/GUIDE.md).
+
+**From inside a session.** The mesh is a slash-command family, so you never
+leave the composer:
+
+```text
+/network               this device's networks, peers and relay state, as a screen
+/network peers         which devices answer right now
+/network sessions      what other devices are running: list, engage, stop
+/network status        relay health and the log path
+/network log           the recent mesh event trail
+```
+
+**Running a session on another device.** `/new remote` creates the session on
+the peer, with a trailing sentence as its first prompt:
+
+```text
+/new remote radiant-m4 rebase the auth branch and run the test suite
+```
+
+The session is minted, spawned and admitted by that device, and the receipt in
+your transcript names it. `/network sessions --peer radiant-m4` then lists what
+that peer is holding, and `--engage <session>` warms one or `--stop <session>`
+ends it — so a session started this way is visible and controllable from the
+machine you are sitting at, without a second terminal.
+
+**A note on what is not here yet.** A session stays where it runs. Creating,
+listing, warming and stopping a session on a peer all work; *moving* a running
+session from one device to another, and recalling a remote session back onto
+this machine, are still being built —
+[`docs/design/mesh-session-mobility.md`](./docs/design/mesh-session-mobility.md)
+is that design. Nothing above documents a command that does not run today.
 
 ## 🌙 Always On
 

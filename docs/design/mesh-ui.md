@@ -306,15 +306,29 @@ Why this shape and not the alternatives:
   is a testable invariant and the *before* frame of the visual pair (§4.1).
 
 **Decision 2 — the locality mark goes in the CURSOR-PREFIX slot (columns 0-1),
-not the mark column.** Precedence, in order: `»`/`›` (requested/cursor) → `★`
-(pinned) → `⇄` (remote) → two spaces (local). So:
+not the mark column.** The slot holds **two facts**: cell 0 is the caret or the
+pin, cell 1 is ALWAYS the locality mark. So:
 
 ```
-› ⇄ ⬤ Fix the sidebar reflow…        2m      ← remote, cursor here
-  ⇄ ● Review the mesh brief          1h      ← remote, idle
-★   ● Draft the RFC                  3d      ← local, pinned
+›⇄ ⬤ Fix the sidebar reflow…        2m      ← remote, cursor here
+ ⇄ ● Review the mesh brief          1h      ← remote, idle
+★⇄ ● Draft the RFC                  3d      ← remote, pinned
     ● Article-search-svc sweep       5m      ← local
 ```
+
+**Why both cells, and not the precedence this section first drew** (design
+round 1, D4 — settled here, with the frame `sidebar_shot-peers-focus` in §4.1).
+The first cut gave cell 0 *and* cell 1 to whichever mark won:
+`»`/`›` → `★` → `⇄` → two blanks. That is right about which fact leads — the
+caret says "here"/"opening", the pin says "kept", and both outrank a durable
+property — and wrong about the cost: the `⇄` then vanished on the **one row the
+user is deciding about**, and the peer heading that carries the same fact
+independently sat two lines above it on a list being scrolled. The precedence is
+kept for CELL 0; cell 1 is the mark's unconditionally. Nothing grows: the slot
+was reserved and its second cell was blank on these rows anyway, so the title
+starts at column 4 in every one of the four states above. This also replaces the
+`› ⇄ ⬤ …` example this section carried — four lead cells that a 2-cell slot
+cannot hold, and which the review correctly called unrenderable.
 
 **This diverges from one *mechanism* in the spine** (§8: "a per-row locality
 mark, reusing the existing status-glyph slot") **and keeps its requirement** (a
@@ -496,6 +510,12 @@ Collected so a designer reviews copy in one place rather than hunting the doc.
 | `/help` row | `/network` — `Networks, peers, and this device's mesh state` |
 | picker rows | §1.1.1 table, `Picker row` column |
 | sidebar headings | `⇄ <label>` · `⇄ <label> (unreachable)` |
+| device with no name (both surfaces, one string) | `unnamed device` (`resume.UNNAMED_DEVICE`) |
+| `/network` panel, section subtitles | `checking with the relay…` · `found by the relay` · `from this device's records` |
+| `/network` panel, a peer that did not answer | `did not answer` · `no address of it answered` · `no address published for it` · `it is not a member of this network` · `it was removed from this network` (`network_panel.peer_reason_words` — the relay's protocol token, in words) |
+| `/network` panel, no relay | `relay: not running on this device` |
+| `/network sessions` help row | `Sessions on other devices: list, engage, stop` |
+| a remote session picked from the list | `<id> is running on <device> — /network sessions --peer <device> lists it, --engage warms it, --stop ends it` |
 | sidebar tooltip clause | `on <label>` · `on <label> — unreachable: <reason>` |
 | `/new` refusals | `Use /new remote <peer> <prompt> to create it on a peer.` · `No peer named <x>. /network peers lists them.` · `<label> is unreachable (<reason>). /network doctor <label> diagnoses the link.` · `<label> is draining; it will not accept new sessions.` |
 | move refusals | §1.7 |
@@ -868,6 +888,157 @@ guess, so S6 and S7 are two ends of one mechanism rather than two invented state
 
 ---
 
+### 2.8 The networks-and-devices tab (added 2026-09-21, R6's second surface)
+
+**The requirement, as the operator stated it:** networks *and* devices must be
+listable, and the desktop gets **a tab showing networks and devices with an
+infrastructure-style view** — a Grafana-like node graph where the nodes of each
+network are visible, **hovering a node shows its details and status**, a device
+can be **removed from a network**, and a device can be **moved into one or more
+networks**. `§2.1-§2.7` above are the chat sidebar's brief; this section is the
+second surface R6 owns, and it is recorded here — not in a new document — because
+R6's detail lives here and a requirement split across two files is a requirement
+one of them will lose.
+
+**Decision 1 — a TAB, not a section of the chat sidebar.** The node graph answers
+a question the sidebar cannot ("what is the shape of my mesh"), it needs a canvas
+the 240-360 px rail does not have (§2.1), and its natural gesture is a POINTER
+hover — a sidebar row's hover is a tooltip over a list that already owns the
+vertical space. One tab, one canvas, no change to `§2.1`'s measured budget.
+
+**Decision 2 — the graph's nodes are networks and devices; an edge is a
+membership.** So a device in two networks is ONE node with TWO edges, which is
+exactly the "one or more networks" the operator asked for and the reason the
+model question below is not academic.
+
+| Node | Identity (React key) | Label | Detail card on hover |
+|---|---|---|---|
+| network | `network_id` | `name`, else the id's tail | epoch, trust, member count, `membership.table.sentence` (the table's provenance, as `lop network show` prints it) |
+| device | `device_id` | `name`, else the id's tail | role, capabilities, `active`, `suspect`, `endpoints` and `last_seen_at` (from `net_show`'s per-network `members_detail`), plus `reachable` and its `reason` (from `net_peer_ls`) |
+
+**What the hover card CANNOT show today, stated so nobody designs around a
+field that is not there.** A latency figure (`rtt_ms`) and a per-device session
+count are the two obvious candidates a Grafana-shaped view invites, and neither
+is published: `PeerFacts` (``network/projection.py``) carries
+``device_id|name|network_id|reachable|reason|age_s`` and nothing else, and the
+member row adds endpoints and the last-seen stamp. Both are additions to the
+transport's answer rather than to this tab, so the card is designed around what
+`net_show`/`net_peer_ls` already return and the two extras ride the same
+follow-up as the per-device `networks: [...]` list of §2.8.1.
+
+**Decision 3 — removal is `member rm`, and it is destructive.** "Remove a device
+from a network" is the CLI's `lop network member rm <network> <device>`, which
+revokes the member, tombstones it and **rotates the network secret** (bumping the
+epoch). It is the one act in this tab that changes other devices' state, so it
+takes the typed confirmation §1.5 specifies for `panic` and never a one-click
+button; and D11 stands unchanged — `panic`/`disconnect` stay off the desktop
+entirely.
+
+**Decision 4 — "move a device into a network" is an INVITE, not an add.** The
+model has no unilateral "add a member" operation, and that is deliberate (R2/R5):
+admission is two-sided, and the joining device is the one that proves the SAS
+(§1.4.3). The tab's gesture is therefore **"invite this device to &lt;network&gt;"**
+— `lop network invite --network <n> [--device <id>]` — which yields a single-use
+token that must be delivered out of band and redeemed on the device. A tab that
+offered "move" as a drag would promise an act the protocol refuses; the affordance
+is a token, the copy says so, and the hover card for the target device shows
+whether it is already a member of the network under the cursor.
+
+#### 2.8.1 Can a device be in several networks? Yes — but the catalogue cannot say so
+
+**The membership model expresses it.** A network is one `NetworkRecord`, and
+membership is a `MemberRecord` **inside** it (`network/types.py:588`, `:402`;
+`store.list_networks` returns one record per membership). Two networks on one
+device are two records, each with its own member list, so the same `device_id`
+appearing in both lists is the ordinary case — that is what "in one or more
+networks" means here, and no migration or schema change is needed for it.
+
+**The peer catalogue cannot report it, and this is the fact a UI implementer will
+otherwise discover at render time.** The route the graph would read is
+`net_peer_ls`/`federated_rows` (`relay.py`, `_fan_out_catalog`), whose peer block
+map is keyed by a flat string:
+
+```python
+# relay.py, _fan_out_catalog — iterating networks × active_members()
+peers.setdefault(member.device_id, block)      # unreachable path
+peers[member.device_id] = block                # answered path
+```
+
+so a device in two networks is reported **once**, carrying whichever network's
+block won the iteration, and the second membership is silent. `PeerFacts`
+(`network/projection.py:136`) inherits the same collapse: one `network_id` per
+device.
+
+**What has to change, and the two routes to it.** For the *read* path — which is
+all this tab needs — the graph should build its edges from `net_show --json`,
+whose `members_detail` is already per-network (`{device_id, name, role,
+capabilities, active, endpoints, suspect}`) and whose provenance sentence is the
+one the tab's network node shows. That is one call per network, needs no wire
+change, and cannot mis-file a membership. The alternative — a per-(device,
+network) pairing or a `networks: [...]` list on the peer block — is what a later
+surface needs if it wants **per-network reachability and rtt for one device** in
+a single call; that is a transport-slice change and a route of its own
+(`net_topology` is the shape), so it is recorded here as the follow-up rather
+than attempted in this pass. The tab ships on N calls first and the collapse is
+named in the code beside the join.
+
+#### 2.8.2 Where this tab's data comes from, and what the tree does not have yet
+
+| Need | Owner today | Note |
+|---|---|---|
+| networks on this device | `lop network ls --json` | `networks[]` with `name`/`network_id`/`epoch`/`role`/`members`/`trust`/`stale` |
+| one network's members | `lop network show <net> --json` | `members_detail` is already per-device (see §2.8.1) |
+| a device's live status | `lop network peers --json` | flat, collapsed by device — usable for the hover card's `reachable`/`reason`, not for the edges |
+| invite / remove | `lop network invite`, `lop network member rm` | both already exist; removal takes the typed confirmation |
+
+**Two assumptions of §1.1/§1.4 that this tree does not satisfy, recorded so they
+are not re-invented per implementer.** (1) `peers.known_peer_names()`
+(§1.1.2, §1.4.1) **does not exist**; the offline vocabulary the TUI's `/new`
+autofill reads is `network/peers.py`'s `known_peer_names()`, a disk-only read of
+the member lists (it must not dial: the picker opens on a keystroke, and §1.4.2
+requires a STALE list to still be usable). (2) The `pool` row in §1.1.1 has no
+CLI parser behind it — `mesh-compute-pool.md` is not implemented — so it is not in
+`NETWORK_SUBCOMMANDS`; a picker row for a verb the CLI lacks is the
+offered-but-broken defect `/mobile` records.
+
+#### 2.8.3 The two predicate corrections this document needed
+
+Both were found while implementing §1.1.2/§1.4.1, and both are corrections to a
+rule this document had written down, not new decisions:
+
+1. **`/new`'s shape must still accept the single word.** §1.1.2's `_is_remote_peer`
+   is stated as "exactly two tokens", which would drop `/new <word>` — §1.4.1's
+   own first grammar row, "today's behaviour", and the desktop picker's
+   `selected=args` — out of `command_argument_is_used`, i.e. plan `/new foo` as
+   PROSE. The predicate is a superset: one token (the legacy selection, exactly
+   `WORD`'s rule) **or** two tokens with the first `remote` case-folded.
+
+   **The second token is NOT resolved, and this sentence used to say it was**
+   ("the second a name in the vocabulary" — corrected in review round 4, MINOR
+   4). `_is_remote_peer` deliberately never asks whether the name exists: a name
+   this device has not paired with is the HANDLER's refusal, with its own
+   sentence naming `/network peers`, while a predicate that demanded vocabulary
+   membership would put a disk read of every member list on the admission path —
+   the path every slash command crosses. A later reader reconciling the code with
+   the old sentence would add that check and turn a good refusal into prose.
+2. **A declared subcommand vocabulary keeps `SUBCOMMAND`'s own token rule, and
+   that rule's boundary is worth stating exactly.** `command_argument_words`
+   returns `NETWORK_SUBCOMMANDS` when a row declares one (falling back to
+   `MCP_SUBCOMMANDS` when it does not, so `/mcp` is unchanged by one byte), and
+   `_is_mcp_invocation` still decides. Its boundary is NOT "one token": it is
+   **at most two, the second name-shaped** (`SERVER_NAME_RE`), so
+   `/network ls` and `/network doctor devon-laptop` are the command's argument
+   while `/network disconnect please` also is — the second token is a plausible
+   server name, and this shape reuses that predicate rather than growing a second
+   one for one family. **The prose boundary is therefore the THIRD token** (or a
+   punctuation-shaped second one): `/network member rm <network> <device>` is
+   PROSE to the desktop's admission rule, which is harmless while the desktop has
+   no `/network` query behind `/v1/desktop` (§2.7) and is the thing to revisit in
+   the same PR that gives this family a destination — with the choice stated
+   there: one shape of its own, or a vocabulary that publishes its arity.
+
+---
+
 ## 3. The agent-facing half of R19
 
 ### 3.1 `local_operator/guides/network/GUIDE.md`
@@ -1083,24 +1254,44 @@ env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/sidebar_shot.py bef
 env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/sidebar_shot.py after.svg  100x30
 
 # S2/S3/S4 — the peer cases. `sidebar_shot.py` seeds a fixed catalog of
-# SessionRows; the change adds three rows carrying locality/peer_* (one live
-# peer's rows, one unreachable peer's rows) so the sections, the `⇄` slot and
-# the heading suffix are all in one frame.
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/sidebar_shot.py peers.svg 100x30
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/sidebar_shot.py peers-44.svg 120x30
+# SessionRows; the change adds three rows carrying locality/owner_* (one live
+# peer's two rows, one unreachable peer's row) so the sections, the `⇄` slot and
+# the heading suffix are all in one frame. `peers` is the VARIANT argument, and
+# 100x30 is the size the gallery runs it at.
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/sidebar_shot.py peers.svg peers 100x30
 
-# the network panel (new script, or a `--case network` arm on the gallery):
-# an SVG still of the LOADING state and one of the LOADED state — the panel's
-# two-phase capture is the reason both are needed, and consecutive frames
-# (`await pilot.pause()` between) must be identical once settled.
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/network_shot.py net-loading.svg 100x30
-env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/network_shot.py net-loaded.svg  100x30
+# S5 — the SETTLING frame for the caret/locality interaction (round 1, D4) and
+# the only size at which the UNREACHABLE peer's section is on screen at all: the
+# peer tier costs three chrome lines per device, so at 100x30 the window stops
+# before `⇄ pixel-8 (unreachable)` and that heading was in no artifact of the
+# round (review round 4, MINOR 5). `peers-focus` is the variant; it sets the
+# list focused and seeds the cursor on a remote row, which is the pair the
+# design asked for. It is a GALLERY CASE (`sidebar_shot-peers-focus`), not a
+# one-off with two environment variables, because a knob the gallery cannot
+# reach is not evidence.
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/sidebar_shot.py peers-focus.svg peers-focus 100x45
+
+# the network panel: BOTH phases from ONE boot, so the pair differs by nothing
+# but the relay's answer. The script takes a directory and writes
+# network-loading.svg and network-loaded.svg (plus their .geometry.json). The
+# first frame is captured while the CLI stub is parked, so it is the real first
+# paint (`checking…` rows) rather than a fast worker's result.
+env -u NO_COLOR TERM=xterm-256color .venv/bin/python scripts/network_shot.py net-panel 100x30
 ```
 
 Each capture writes `<name>.svg` **plus** `<name>.geometry.json`
 (`scripts/visual_capture.py`'s `save_capture`), which is where the numbers come
-from. The checks each frame must pass, from the repo's own list:
+from; the sidebar cases also write `<name>.list-state.json` (``entries``,
+``offset``, ``page_size``, ``visible``, ``sections``), because a frame that
+paints part of a list cannot be read without them (round 1, D5b). The checks
+each frame must pass, from the repo's own list:
 
+* **the geometry describes the screen the SVG shows.** `save_capture` records
+  `screen.class` and walks the ACTIVE screen, because `App.query` resolves to the
+  DEFAULT one while `export_screenshot()` composites the active one — which is
+  how two panel frames shipped beside the geometry of the transcript underneath
+  them (round 1, D1). A modal case's geometry must name `NetworkScreen` and
+  carry the modal's own widgets;
 * `app.screen.virtual_size == app.screen.size` (a virtual size larger than the
   actual is always a bug on this app);
 * `show_vertical_scrollbar` is **False** in both before and after — a scrollbar
@@ -1108,8 +1299,8 @@ from. The checks each frame must pass, from the repo's own list:
   the thing it would eat;
 * the sidebar's own `size.width` is identical before/after at the same terminal
   size (the row must not grow: that is the whole point of decision 2 in §1.3);
-* in the peer frame, the `⇄` mark is at column 0-1 for a non-cursor row and the
-  title's first cell is column 4 — i.e. `render_lines_for_test()`-style string
+* in the peer frame, the `⇄` mark is in the prefix slot (cell 1) and the title's
+  first cell is column 4 — i.e. `render_lines_for_test()`-style string
   assertions plus the frame.
 
 And the four tests a reviewer should expect on the PR, because the pixels cannot
@@ -1174,6 +1365,7 @@ isolated config dir), never the stills.
 | D10 | `features.peers` (mobility §9.3's) + `features.session_transfer` (this document's addition, for the route mobility names without a key) | bumping `session_catalogue`; gating transfer on `peers` alone |
 | D11 | No panic/disconnect on the desktop | a one-click irreversible control in an Electron window |
 | D12 | `network` is unconditional and shells the CLI with `--json` (transport §12.5), with the dangerous completions left to the CLI's own guards (never `--confirm`, never `--yes`) and no token in any result | a `createIf` tool gated on relay reachability (which could never create the first network); a tool that synthesises `--confirm` or `--yes` |
+| D13 | The networks-and-devices surface is a desktop TAB with a node graph (§2.8), driven by `net_show`'s per-network `members_detail`; removal is `member rm` behind a typed confirmation and "move into a network" is an INVITE | a section of the chat sidebar (no canvas, and a hover already spent on the tooltip); a drag-to-move gesture the protocol cannot honour either direction |
 
 ## 6. Open questions, each with my recommendation
 
@@ -1208,6 +1400,16 @@ isolated config dir), never the stills.
    and it should be the real store path* — a story that fakes the dimming proves
    nothing about the store's optimistic update, and the repo's review process
    explicitly judges stories built from fixtures against the live path.
+8. **Does the node graph need a fan-out of its own?** *Recommend no for this
+   pass, and one next.* §2.8.1 gives the two routes to a device's memberships,
+   and the read path (`net_show` per network) needs no wire change: N networks
+   is N calls, each on the relay's own listing budget, and the graph's node set
+   is small by construction (a network is a device group, not a fleet). The
+   single-call route (`net_topology`, or a `networks: [...]` list on the peer
+   block) is what per-network reachability in the hover card would need — it is
+   a transport-slice change, so it is the follow-up rather than a v1
+   dependency. Evidence that would promote it: a measured graph whose first
+   paint waits on the Nth call at a member count the operator actually runs.
 
 ---
 

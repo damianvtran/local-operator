@@ -2935,8 +2935,11 @@ async def test_the_four_sections_are_contiguous():
         rows = sidebar._display_rows()
         sections = [sidebar._section_of(entry) for _kind, entry in rows if entry is not None]
         assert sections == sorted(sections), f"sections interleaved: {sections}"
-        # Every section present, each appearing as ONE run.
-        assert [key for key, _ in itertools.groupby(sections)] == [0, 1, 2, 3]
+        # Every section present, each appearing as ONE run. `[0, 1, 2, 4]` and not
+        # `[0, 1, 2, 3]`: rank 3 is the PEER tier's, which a device with no peers
+        # never paints — the ranks are an order, so the tier below the new axis
+        # moved rather than sharing its number (`session_sidebar._section_of`).
+        assert [key for key, _ in itertools.groupby(sections)] == [0, 1, 2, 4]
         # Stable within a section: pin1 ranked before pin2 and stays there.
         pinned = [
             entry.id for _k, entry in rows if entry is not None and entry.id.startswith("pin")

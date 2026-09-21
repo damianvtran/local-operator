@@ -4,7 +4,6 @@
     "eager_boot_shot.py --live": "Explicit opt-in real provider/MCP bootstrap; not run against user credentials. --isolated exercises its export path with real unconfigured boot."
   },
   "capture_scripts": {
-    "eager_boot_shot.py": ["isolated-unconfigured"],
     "approval_shot.py": [
       "default",
       "focus"
@@ -51,7 +50,10 @@
       "failed",
       "connecting"
     ],
-  "fallback_shot.py": [
+    "eager_boot_shot.py": [
+      "isolated-unconfigured"
+    ],
+    "fallback_shot.py": [
       "before",
       "after"
     ],
@@ -78,6 +80,9 @@
     "nerd_glyph_shot.py": [
       "nerd",
       "plain"
+    ],
+    "network_shot.py": [
+      "both"
     ],
     "org_chart_shot.py": [
       "one-agent",
@@ -133,10 +138,6 @@
       "custom",
       "provider-windowed"
     ],
-    "sidebar_shot.py": [
-      "base",
-      "wide"
-    ],
     "shot_login.py": [
       "prompt",
       "empty-submit",
@@ -146,6 +147,12 @@
     "sibling_shot.py": [
       "subagent",
       "org-chart"
+    ],
+    "sidebar_shot.py": [
+      "base",
+      "wide",
+      "peers",
+      "peers-focus"
     ],
     "steer_fold_shot.py": [
       "default"

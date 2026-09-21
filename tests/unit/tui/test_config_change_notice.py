@@ -509,7 +509,7 @@ async def test_new_reloads_the_launch_config_so_the_notice_promise_is_true(
         await _adopted(app, pilot)
         _write_elsewhere(tmp_path, "hosting", "openrouter")
 
-        app._cmd_new(lambda body, kind="info": None)
+        app._cmd_new("", lambda body, kind="info": None)
         for _ in range(400):
             if built:
                 break
@@ -574,7 +574,7 @@ async def test_new_survives_a_malformed_config_without_touching_the_file(
         body = _MALFORMED_CONFIGS[shape]
         (tmp_path / "config.yml").write_text(body)
 
-        app._cmd_new(lambda body, kind="info": None)  # must not raise
+        app._cmd_new("", lambda body, kind="info": None)  # must not raise
         for _ in range(400):
             if built:
                 break
