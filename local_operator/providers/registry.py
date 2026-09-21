@@ -801,6 +801,92 @@ def resolve_env_key(provider_id: str) -> str | None:
     return None
 
 
+def provider_secret_value(env_key: str) -> str | None:
+    """The VALUE of the provider-owned store row for ``env_key``, else ``None``.
+
+    The store reader every provider-key resolution leg shares, so the cascade
+    (``auth_store._env_api_key``), the static-key readers and the search
+    transports cannot disagree about whether a key the operator stored runs a
+    provider. ``env_key`` is the ENV VAR NAME (``OPENROUTER_API_KEY``); the row
+    lives under ``LOP_PROVIDER_<env_key>`` and is read with ``role="provider"``,
+    the only namespace that may touch the reserved prefix.
+
+    **Never raises, and never imports the crypto stack at module scope.** The
+    store is reached lazily inside the function: this module is imported on the
+    CLI startup path, and ``tests/unit/test_import_graph.py`` pins that the CLI
+    import must not pull the store's crypto machinery. A store that is absent,
+    locked, corrupted or served by an incompatible broker degrades to ``None``
+    — a MISSING credential, which the caller resolves by falling through to its
+    next leg — rather than turning a resolution into an error. That trade is
+    deliberate: the store is an optional capability (design §13), and a
+    credential lookup that raised would take down the provider picker on any
+    host whose store has not been created.
+    """
+    if not env_key:
+        return None
+    from local_operator.secrets.access import retrieve_secret
+    from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.store import provider_secret_name
+
+    try:
+        raw = retrieve_secret(provider_secret_name(env_key), role="provider")
+    except (SecretStoreError, OSError, ValueError):
+        return None
+    value = raw.decode("utf-8", "replace").strip()
+    return value or None
+
+
+def provider_env_key(provider_id: str) -> str | None:
+    """Resolve ``provider_id``'s API key value, STORE FIRST then environment.
+
+    Returns the same VALUE :func:`resolve_env_key` does, but its resolution order
+    is the one the credential consolidation introduces: a provider-class store
+    row wins, the process environment is the second leg, and — transition only —
+    the plaintext ``credentials.env`` file is the last.
+
+    Why store-first: the store is the sanctioned home for a key the harness now
+    writes (``lop credential update``, ``lop search setup``), and a stale export
+    left in a shell profile must not outrank the value the operator deliberately
+    saved. The env leg stays AHEAD of the legacy file for the opposite reason it
+    always did — an explicit ``ANTHROPIC_API_KEY`` export is still a real
+    instruction — and the file leg remains only until every writer is repointed
+    (PR2 deletes it), so an install that has not yet run ``lop secret
+    migrate-env`` keeps working exactly as before.
+
+    Alias-aware like :func:`resolve_env_key`: a login flavour resolves through
+    the name of the provider it stores under.
+    """
+    definition = get_provider_definition(provider_id)
+    if definition is None or definition.env_keys is None:
+        definition = get_provider_definition(credential_provider_id(provider_id))
+    if definition is None or definition.env_keys is None:
+        return None
+    names = env_key_names(provider_id) or credential_file_names(provider_id)
+    for name in names:
+        stored = provider_secret_value(name)
+        if stored:
+            return stored
+    value = resolve_env_key(provider_id)
+    if value:
+        return value
+    # Transition leg: the plaintext file, read WITHOUT creating it. Goes away in
+    # PR2 once every writer writes store rows.
+    from local_operator.credentials import CredentialManager
+    from local_operator.paths import config_dir
+
+    try:
+        plaintext = CredentialManager.read_credentials(config_dir(), non_empty=True)
+    except OSError:
+        return None
+    for name in names:
+        secret = plaintext.get(name)
+        if secret is not None:
+            value = secret.get_secret_value().strip()
+            if value:
+                return value
+    return None
+
+
 def env_key_names(provider_id: str) -> tuple[str, ...]:
     """Every env var NAME ``provider_id`` reads, primary first.
 
