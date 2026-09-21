@@ -6774,9 +6774,21 @@ class AttachedSession:
                         # legacy ``.session.pid`` mirror raises merely because a
                         # pid is NOT DEAD, and an unreadable claim raises with
                         # ``pid=None``. None of those implies a process that will
-                        # ever publish a record — a recycled pid or a candidate
-                        # publishing an unattachable one (protocol < 5, no
-                        # ``FRONTEND_CAPABILITY``) reaches this raise forever.
+                        # ever publish a record — a LEGACY claim (no birth fields,
+                        # written by an older build), or a candidate publishing an
+                        # unattachable one (protocol < 5, no
+                        # ``FRONTEND_CAPABILITY``), reaches this raise forever.
+                        #
+                        # A RECYCLED PID USED TO BE ON THAT LIST AND IS NOT ANY
+                        # MORE (2026-09-21). The claim now records the birth token
+                        # of the process that wrote it
+                        # (``procstate.same_birth``), so a pid the kernel has
+                        # handed to a stranger proves the WRITER gone: the raise
+                        # is not reached, the claim is recoverable, and the engage
+                        # path spawns instead of waiting out its deadline. What
+                        # remains here is the cell above — a claim carrying no
+                        # identity, where this build cannot tell and so must not
+                        # take the claim.
                         #
                         # That shape used to latch the facade indefinitely,
                         # because this raise was counted as PROGRESS and

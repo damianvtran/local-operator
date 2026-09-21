@@ -235,32 +235,55 @@ def _session_dir(config_dir: Path, session_id: str) -> Path:
 
 
 def _lease_holder(config_dir: Path, session_id: str, *, check_zombie: bool = True) -> int | None:
-    """Pid currently holding the transcript lease, if it is alive.
+    """Pid currently holding the transcript lease, if it is alive AND still its writer.
 
     Read directly rather than through ``acquire_session_lease``: this is a
     PROBE, and acquiring in order to find out would take the very lease the
     runtime needs. Uses the lease's own claim reader so both agree on the
-    format.
+    format — including the claim's BIRTH fields, which is the difference between
+    "a process holds this pid" and "the process that wrote this claim holds this
+    pid".
 
-    ``check_zombie=False`` is for the engage loop's dense grid. That probe costs
-    a ``ps`` fork (2.4-4.6 ms across runs on an M-series box, against the
-    23-30 µs budget published for one dense poll iteration at ``_poll_delay``),
-    so paying it every 10 ms pass would stretch that period by 24-46% and eat the
-    dead time the grid exists to remove. The loop therefore passes False only
-    while that grid is in force and True on every coarser pass — see the cadence
-    note at the top of the loop. A wrong "live" there costs waiting, never
-    arbitration: a zombie's claim is still only ever taken over by the
-    acquisition path, which always requires the proof.
+    **WHY THE BIRTH FIELDS MATTER HERE, at the user's expense.** A claim whose
+    pid was recycled by an unrelated live process used to read as a live holder,
+    so this function returned that stranger and the engage loop took its
+    "a contender holds the transcript but has not published yet" branch — for the
+    full ``DEFAULT_DEADLINE_S``, spawning NOTHING, and the operator was shown
+    ``the runtime is reconnecting`` (session bfbc971ef537, 2026-09-21). With the
+    identity test this returns ``None`` for a recycled pid, so the loop spawns.
+
+    ``check_zombie=False`` is for the engage loop's dense grid, and it skips the
+    IDENTITY proof with the corpse proof, for the same reason and with the same
+    bound. That proof costs a ``ps`` fork (2.4-4.6 ms across runs on an M-series
+    box, against the 23-30 µs budget published for one dense poll iteration at
+    ``_poll_delay``), so paying it every 10 ms pass would stretch that period by
+    24-46% and eat the dead time the grid exists to remove. The loop therefore
+    passes False only while that grid is in force and True on every coarser
+    pass — see the cadence note at the top of the loop.
+
+    **A wrong "live" in the grid costs waiting, never arbitration, and cannot
+    reintroduce the wedge.** The grid is only reachable on the strength of a
+    holder this probe already reported (``constructing_since`` is set from
+    ``holder is not None``, and the first pass of every engage has it ``None``,
+    so pass one is coarse). A recycled pid therefore cannot *create* the grid: on
+    pass one the full proof runs, the token mismatch proves the owner gone, this
+    returns ``None``, and the loop spawns. Inside a grid the cheap answer can
+    only delay by the remainder of ``_CONSTRUCTING_WINDOW_S``, after which the
+    loop is coarse again and the proof lands. Keep the flag symmetric across
+    platforms too — Linux samples identity for free, and a safety property that
+    differs by platform is worse than a few milliseconds.
     """
     from local_operator.session_lease import LEASE_NAME, _pid_state, _read_claim
 
     path = _session_dir(config_dir, session_id) / LEASE_NAME
     if not path.exists():
         return None
-    _generation, pid = _read_claim(path)
-    if pid is None:
+    claim = _read_claim(path)
+    if claim.pid is None:
         return None
-    return pid if _pid_state(pid, check_zombie=check_zombie) == "live" else None
+    if _pid_state(claim.pid, check_zombie=check_zombie, expected_birth=claim.birth) != "live":
+        return None
+    return claim.pid
 
 
 def _spawn_interpreter() -> str:

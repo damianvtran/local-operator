@@ -616,6 +616,71 @@ async def test_an_owner_holding_the_session_is_refused_without_needing_a_record(
 
 
 @pytest.mark.asyncio
+async def test_a_recycled_pid_does_not_block_a_wake(root: Path) -> None:
+    """A marker naming a REUSED pid must not refuse a legitimate write.
+
+    This guard's own docstring used to admit the case as unfixable: "a marker left
+    by a crash keeps naming a number the OS may since have recycled onto an
+    unrelated process, and that stranger answers this guard forever". The stranger
+    is not the owner any more (``find_runtime_record`` resolves its owner through
+    ``resume.live_runtime_pid``, which requires the live process to be the one that
+    WROTE the session's claim), so the write lands — which is the honest answer,
+    since nothing is holding this session.
+
+    Nothing is weakened for a genuine owner: the test above still refuses one, and
+    the recycled-pid state staged here is built from real pieces — the token is
+    read off a real process which is then reaped, and the pid belongs to a
+    different real live process, exactly the shape pid reuse produces.
+    """
+    import subprocess
+    import sys
+    import time
+
+    from local_operator import procstate
+    from local_operator.session_lease import LEASE_NAME
+
+    session_dir = _session(root, "recycled01", [_row("w1")])
+    owner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        # A token tick: the macOS token is whole seconds, so an owner killed
+        # inside its birth second would stage a collision rather than a reuse.
+        time.sleep(1.2)
+        scheme = procstate.birth_scheme()
+        token = procstate.birth_token(owner.pid)
+        assert scheme is not None and token is not None
+    finally:
+        owner.kill()
+        owner.wait(timeout=10)
+
+    stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        assert procstate.birth_token(stranger.pid) != token
+        (session_dir / LEASE_NAME).write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "session_id": "recycled01",
+                    "generation": "forged",
+                    "pid": stranger.pid,
+                    "birth_scheme": scheme,
+                    "birth_token": token,
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        (session_dir / ".session.pid").write_text(str(stranger.pid), encoding="utf-8")
+
+        outcome = await arm_wake(root, "recycled01", {"message": "lands", "in": "30m"})
+
+        assert outcome.wake_id == "w2"
+        assert [row["id"] for row in _rows_from_transcript(session_dir)] == ["w1", "w2"]
+    finally:
+        stranger.kill()
+        stranger.wait(timeout=10)
+
+
+@pytest.mark.asyncio
 async def test_a_wedged_owner_is_refused_by_the_writer_too(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
