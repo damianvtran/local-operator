@@ -66,6 +66,22 @@ class SessionRow(BaseModel):
     #: R22's visible half: when this device last pulled a ``--keep`` copy it does
     #: not own. ``None`` on a row this device holds.
     last_synced_at: float | None = None
+    #: Whether this conversation is archived: ALWAYS PRESENT, with both values,
+    #: on every row — `pinned`'s rule and `pinned`'s reason.
+    #:
+    #: ARCHIVE AND PIN ARE INDEPENDENT FACTS ABOUT ONE ROW, which is why this is
+    #: a second key rather than a state of the first. A conversation can be both
+    #: (archived while pinned) and the two mean different things: pinned says
+    #: where the row SORTS, archived says whether the row is OFFERED at all. A
+    #: renderer that folded them into one field could not represent the case a
+    #: user creates in two presses, and would have to invent an answer for it.
+    #:
+    #: An archived row reaches a client ONLY from a listing that asked for it
+    #: (``include_archived=true``). The key is required rather than defaulted for
+    #: the reason `pinned` is required: a projection that forgot it would publish
+    #: an absence the client is entitled to read as no claim, and an archived
+    #: conversation would sit in the ordinary list with nothing saying so.
+    archived: bool
 
 
 class SessionList(BaseModel):
@@ -167,6 +183,18 @@ class SessionSearchRow(BaseModel):
     #: forgot it fails loudly here instead of shipping an omission the client is
     #: entitled to read as no claim.
     pinned: bool
+    #: Whether this conversation is archived: ALWAYS PRESENT, both values, on
+    #: every hit — `pinned`'s rule, and this key's own reason for existing is
+    #: stronger here than on the catalogue.
+    #:
+    #: A SEARCH HIT IS THE ONE ROW A CLIENT CAN SYNTHESISE THAT THE CATALOGUE
+    #: NEVER SENT, so the archived fact has to travel with it: the store's
+    #: default search does not return archived conversations at all, which means
+    #: every hit a client sees from a default search is ``false`` — and a hit
+    #: from an ``include_archived=true`` search is the only way it learns
+    #: otherwise. Dropping the key would make the two answers indistinguishable
+    #: to a client merging hits into the rows it holds.
+    archived: bool
 
 
 class SessionSearch(BaseModel):
@@ -521,6 +549,45 @@ class PinState(BaseModel):
 
     session_id: str
     pinned: bool
+
+
+class ArchiveState(BaseModel):
+    """What a session's archive is, after the write that set it.
+
+    ``set_pin``'s shape deliberately, down to the field names: this is the same
+    kind of verb on the same kind of address (a per-session flag the client
+    reconciles its row on), so a renderer's pin handler and its archive handler
+    are the same handler with a different flag rather than two conventions.
+
+    Typed rather than ``dict[str, Any]`` for the reason :class:`PinState` gives:
+    the renderer's hand-written copy of this shape cannot drift from the
+    authority silently.
+
+    ``archived`` echoes the state the caller ASKED for, not delta information —
+    the request carries a desired state, so an idempotent retry returns exactly
+    what the first call returned.
+    """
+
+    session_id: str
+    archived: bool
+
+
+class DeletedSession(BaseModel):
+    """What a completed deletion reports: the id, and that it happened.
+
+    NO CHILD COUNT HERE, deliberately, and the omission is the interface rather
+    than an oversight: this answer is receipt-free and idempotent-adjacent (a
+    retry after a lost response answers 404, which the client reads as "it is
+    gone"), and every additional field is a field a retry cannot reproduce. The
+    blast radius belongs in the CONFIRMATION a user reads before the request,
+    which is where the TUI states it in words (see ``OperatorApp._cmd_delete``).
+
+    ``deleted`` is always true: this model is only constructed on the success
+    path, and a refusal is a 409 carrying a sentence instead.
+    """
+
+    session_id: str
+    deleted: bool
 
 
 class AttentionState(BaseModel):

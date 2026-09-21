@@ -933,6 +933,33 @@ _FRONTEND_LOCAL_SLASHES = {
     # the point of stopping from here. Routing it to the runtime would stop the
     # RUNTIME's neighbours, not the viewer's.
     "stop",
+    # ARCHIVE AND DELETE ARE FACTS ABOUT THIS MACHINE'S SESSION STORE, and the
+    # store they write is `config_dir()/archived-sessions.json` — the very file
+    # THIS terminal's sidebar and picker read. Routed to the runtime they would
+    # land on the runtime's config root while the receipt promises "hidden from
+    # /resume, the sidebar and search" about the screen in front of the user:
+    # the wrong-machine split `/notifications` states above ("the store this
+    # frontend's own sidebar paints from"), with a durable file rather than a
+    # mark.
+    #
+    # AND THEY ARE THE TWO COMMANDS A VIEWER MUST BE ABLE TO RUN ON ITSELF.
+    # `/delete` acts on the conversation the viewer is standing in, and that
+    # conversation is — by construction — the one with a live owner: it holds
+    # both `.session.pid` and `.execution-lease`, so the owner-side delete is
+    # refused by the guard it shares with every other session ("open in a
+    # running session"). Answering it HERE is what makes the remedy real: the
+    # frontend answers `/delete` in the state a viewer reaches after `/stop`
+    # (a cold facade whose owner has exited and released both markers) instead
+    # of routing it into the stopped-facade pre-route answer, which exists for
+    # commands that genuinely need the owner and used to swallow this one.
+    #
+    # A follower on ANOTHER HOST keeps the same property in the other
+    # direction: the store and the session are this terminal's, so the delete
+    # removes the directory the sidebar is listing, and the archive hides the
+    # row the sidebar is painting.
+    "archive",
+    "unarchive",
+    "delete",
 }
 # Bare ``/mcp`` renders the canonical server list locally, but its grant
 # subcommands mutate OAuth state that lives on the authoritative runtime — the

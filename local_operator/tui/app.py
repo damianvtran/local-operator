@@ -178,7 +178,7 @@ from local_operator.slash_commands import (
 )
 from local_operator.tui import images as images_mod
 from local_operator.tui import theme as theme_mod
-from local_operator.tui.autocomplete import ArgumentChoice
+from local_operator.tui.autocomplete import ArgumentChoice, SlashCommand
 from local_operator.tui.composer_focus import return_focus_to_composer
 from local_operator.tui.copy_targets import CopyTarget, build_copy_targets
 from local_operator.tui.costs import (
@@ -7442,7 +7442,7 @@ class OperatorApp(App[None]):
             editor.placeholder = (
                 SHELL_PLACEHOLDER if editor.shell_mode else editor.resting_placeholder
             )
-            editor.set_commands(SLASH_COMMANDS)
+            editor.set_commands(self._offered_commands())
             editor.set_records_history(True)
 
     def _park_switched_away_source(self, outgoing: SessionInteraction) -> None:
@@ -9151,7 +9151,7 @@ class OperatorApp(App[None]):
                         yield self._todo_panel
                     with ComposerDock(id="input-shell"):
                         yield Band(id="status-band")
-                        editor = Editor(commands=SLASH_COMMANDS)
+                        editor = Editor(commands=self._offered_commands())
                         with Horizontal(id="input-row"):
                             yield Chrome(PROMPT_CHEVRON, id="prompt-chevron")
                             yield editor
@@ -10552,6 +10552,17 @@ class OperatorApp(App[None]):
         """
         self._session = session
         self._attention_input_receipt = None
+        # THE COMMAND LIST IS A FUNCTION OF THE BOUND SESSION, so it is refreshed
+        # here — the ONE writer of ``self._session`` — rather than at each of the
+        # many routes that reach it (adopt, takeover, the boot-built handoff, the
+        # shared teardown unbind). `/unarchive` is offered only while the
+        # conversation in front of the user is archived, so a resume onto an
+        # archived session must offer it and a `/new` must not; auditing every
+        # present and future binding route is the same fragile per-callsite
+        # reasoning the binding epoch above rejects. A no-op before the composer
+        # exists (``_refresh_offered_commands`` stands down when there is no
+        # editor).
+        self._refresh_offered_commands()
         self._attention_rendered_receipt = None
         intent = getattr(self, "_attention_navigation_receipt", None)
         if session is not None and intent and intent[0] == session.session_id:
@@ -13770,7 +13781,13 @@ class OperatorApp(App[None]):
             # nothing, and "uncapped" was true only in the comment above. The
             # argument is now visible at the call site, so the claim and the
             # code can be checked against each other in one place.
-            rows = recent_session_rows(config_dir(), limit=None)
+            # ``include_archived=True``: the PICKER is the one surface with a
+            # reveal toggle, so it needs the archived rows in hand and the
+            # ``archived`` flag on each one to know which rows the toggle is
+            # revealing. They are hidden until it is used — the picker's own
+            # ``_pool`` drops them while it is off — so the default list a user
+            # sees here is the same list every other surface offers.
+            rows = recent_session_rows(config_dir(), limit=None, include_archived=True)
             # NOT enriched with creation dates here, and that is a measured
             # decision rather than an omission. ``recent_session_rows`` leaves
             # ``created_at`` at 0.0 because it is on the CLI startup path and
@@ -13813,7 +13830,15 @@ class OperatorApp(App[None]):
             # re-read) and best-effort: a store whose cache cannot be written
             # still gets the name-and-id filter the picker had before.
             try:
-                digests = build_index(config_dir(), [row.id for row in rows])
+                # ARCHIVED IDS ARE NOT HANDED TO THE INDEX, which is what makes
+                # "an archived conversation is not found by the standard search"
+                # true without an index change: the index is built from exactly
+                # the ids it is given, and a row the toggle has not revealed
+                # must not be reachable through a body match. When the toggle IS
+                # on, those rows are matched by name and id like any other row
+                # (``_digests`` simply has no entry for them), which is the
+                # documented shape of searching a revealed archive.
+                digests = build_index(config_dir(), [row.id for row in rows if not row.archived])
             except Exception:
                 digests = {}
 
@@ -14826,6 +14851,190 @@ class OperatorApp(App[None]):
             await self._preflight_usage(remote)
         finally:
             self._swapping_session = False
+
+    # -- archive and delete --------------------------------------------------
+
+    def _archived_ids(self) -> frozenset[str]:
+        """The archived ids for this app's config root, read FRESH per command.
+
+        Not cached on the app: a second frontend (the desktop app, another
+        terminal, a peer session) writes the same file, and a cached set would
+        make `/unarchive` refuse a conversation the store already holds it for —
+        the user's own two windows disagreeing about a file one of them wrote.
+        The read is one small file, only on a command that names the state.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.archived import archived_ids
+
+        return archived_ids(config_dir())
+
+    def _offered_commands(self) -> list[SlashCommand]:
+        """The registry minus the commands THIS session's state does not offer.
+
+        ONE conditional command today, and the mechanism is deliberately the
+        smallest one that works: the registry stays static (the honest place for
+        what a command IS), while the list handed to the composer is filtered,
+        which is the seam ``command_suggestions``' caller-supplied list already
+        provides for the phone's sheet.
+
+        ``/unarchive`` is offered only while the conversation in front of the
+        user is archived. The alternative — offering it always and refusing on
+        use — teaches a command that cannot do anything, and the whole value of
+        the archive is that it is quiet. Typing the word anyway still dispatches
+        (the registry is unchanged, and the dispatch chain is literal): it
+        answers with a sentence rather than silence, so a user who learned the
+        word in another window is never left guessing.
+
+        A session with NO id (a fresh, unsaved conversation) is not archived by
+        definition, so it offers nothing extra.
+        """
+        session_id = self._resumable_session_id()
+        archived = session_id in self._archived_ids() if session_id else False
+        return [entry for entry in SLASH_COMMANDS if entry.name != "unarchive" or archived]
+
+    def _refresh_offered_commands(self) -> None:
+        """Re-hand the composer the filtered list. Silent when there is no editor."""
+        try:
+            editor = self._editor()
+        except NoMatches:
+            return
+        editor.set_commands(self._offered_commands())
+
+    def _cmd_archive(self, notice: NoticeFn) -> None:
+        """``/archive`` — hide the current conversation from every listing."""
+        self._set_current_archived(True, notice)
+
+    def _cmd_unarchive(self, notice: NoticeFn) -> None:
+        """``/unarchive`` — put the current conversation back in the lists.
+
+        OFFERED ONLY WHILE THIS SESSION IS ARCHIVED (``_slash_suggestions``
+        filters it out otherwise). Typed when it does not apply, it answers with
+        a sentence rather than silence, which is the half a static registry
+        cannot do for itself: a user who learned the word in another window must
+        not read the no-op as a broken command.
+        """
+        self._set_current_archived(False, notice)
+
+    def _set_current_archived(self, archived: bool, notice: NoticeFn) -> None:
+        """Put the CURRENT conversation into the requested archive state.
+
+        The receipt names the way back, because that is the whole difference
+        between this and `/delete` and the one thing a user who has just watched
+        a conversation leave every list needs to be told. It carries the id as
+        well, because that is the spelling that still resolves an archived
+        session: nothing lists it, so a user who did not copy the id has only
+        `/resume` and the picker's Archived toggle to find it again.
+        """
+        session_id = self._resumable_session_id()
+        if not session_id:
+            # No transcript yet, so no id any resume path would accept. Saying
+            # "archived" here would be a claim about a conversation that does
+            # not exist on disk.
+            notice("this conversation has nothing saved yet — nothing to archive", "warning")
+            return
+        from local_operator.paths import config_dir
+        from local_operator.session.archived import archive_change, eviction_clause
+
+        current = self._archived_ids()
+        if archived and session_id in current:
+            notice(f"{session_id} is already archived — /unarchive brings it back", "info")
+            return
+        if not archived and session_id not in current:
+            notice("this conversation is not archived — /archive hides it from the lists", "info")
+            return
+        _, evicted = archive_change(config_dir(), session_id, archived)
+        if archived:
+            notice(
+                # NO BACKTICKS: this is a terminal, and the receipt was the only
+                # sentence in the family that printed markdown (design round 1,
+                # D4 / UX U3) — a reader met two cells of punctuation that mean
+                # nothing here. The command reads as a command without them,
+                # exactly as "Run /delete yes to confirm." does.
+                #
+                # THE CHORD IS NAMED (UX U5): the picker's own first line has
+                # always said "ctrl+a", so a keyboard user can go back without
+                # opening the picker to learn the key — which is the one thing
+                # this receipt exists to make discoverable.
+                f"archived {session_id} — it is hidden from /resume, the sidebar and "
+                "search; /unarchive brings it back, and the picker's Archived toggle "
+                "(ctrl+a) still opens it." + eviction_clause(evicted),
+                "info",
+            )
+        else:
+            notice(f"unarchived {session_id} — it is listed again", "info")
+        # The list is a function of the state this write just changed: archiving
+        # adds `/unarchive` to the composer, un-archiving takes it away.
+        self._refresh_offered_commands()
+
+    def _cmd_delete(self, arg: str, notice: NoticeFn) -> None:
+        """``/delete [yes]`` — remove the current conversation for good.
+
+        A TYPED CONFIRMATION, and the two-step shape is the point. Bare
+        `/delete` runs the whole thing as a REHEARSAL (``dry_run=True``) and
+        prints exactly what the real one would remove, including any refusal the
+        guards would give — so a user is never told "deleted" by a call that
+        took a different branch than the one they were shown. `/delete yes` runs
+        it for real.
+
+        The confirmation is a word the user TYPES rather than a row they pick,
+        which is the CLI's existing precedent (`lop sessions cleanup` asks for a
+        typed `yes`). The picker still paints the command as dangerous — see
+        ``Editor.DESTRUCTIVE_COMMANDS`` and the single ``alert`` row that fills
+        the word — but the authority to delete is the submission carrying `yes`,
+        not a keystroke on a row.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.cleanup import delete_session
+
+        session_id = self._resumable_session_id()
+        if not session_id:
+            notice(
+                "this conversation has nothing saved yet — there is nothing to delete", "warning"
+            )
+            return
+        confirmed = arg.strip().casefold() == "yes"
+        outcome = delete_session(config_dir(), session_id, actor="tui", dry_run=not confirmed)
+        if not outcome.found:
+            # Reachable when the directory is already gone (another window
+            # deleted it, or the id came from a stopped session's record).
+            notice(f"{session_id} is not on disk — nothing to delete", "warning")
+            return
+        if outcome.refusal:
+            notice(outcome.refusal, "warning")
+            return
+        if not confirmed:
+            # ONE SOURCE FOR THE SENTENCE (review round 3, R3-2): it lives on the
+            # outcome, so this host, the attached/slash host below and the
+            # detached runtime cannot drift apart on the wording of a
+            # confirmation for an irreversible act. The target is named the way
+            # the lists name it (design round 1, D2) for the same reason.
+            notice(outcome.rehearsal(), "warning")
+            return
+        # THE WINDOW MUST LAND SOMEWHERE SANE, and `/new` is where: the session
+        # it was standing in no longer exists, so leaving the user on it strands
+        # them on a dead conversation. It runs only AFTER the removal is
+        # confirmed, so a refused or rehearsed delete never moves them off their
+        # work.
+        #
+        # THE RECEIPT CROSSES THE TRANSITION BOUNDARY. `/new` rebuilds the
+        # ledger from the session that boots — an empty screen for a fresh
+        # conversation — so a notice written before it is erased with the
+        # outgoing one. ``_pending_fork_outcome`` is that mechanism (the fork's
+        # own receipts publish through it for the same reason), and it is used
+        # directly rather than re-spelled. A host that cannot start a new
+        # session at all never runs the transition, so there is no reset for the
+        # notice to survive and it is emitted directly after the refusal it
+        # accompanies.
+        if self._resume_factory is not None:
+            kept_clause = (
+                f"; {outcome.children} subagent run(s) it started were kept"
+                if outcome.children
+                else ""
+            )
+            self._pending_fork_outcome = (f"deleted {session_id}{kept_clause}", "info")
+        else:
+            notice(f"deleted {session_id}", "info")
+        self._cmd_new(notice)
 
     def _cmd_new(self, notice: NoticeFn) -> None:
         """``/new`` — start a fresh conversation without leaving the app.
@@ -29432,6 +29641,30 @@ class OperatorApp(App[None]):
             _FRONTEND_LOCAL_SLASHES as _FOLLOWER_LOCAL_SLASHES,
         )
 
+        # Commands whose WORK belongs to this machine even when an owner's stale
+        # capability snapshot still advertises them `authoritative_session`.
+        #
+        # NOT THE WHOLE `_FOLLOWER_LOCAL_SLASHES` SET, and the difference is
+        # what the set means: a membership there says "this frontend paints the
+        # interaction and the owner need not be told about it", which for `/btw`
+        # and `/loop` is true of the OVERLAY while the work still crosses the
+        # authoritative seam (`/btw`'s question rides `complete_aside`, and every
+        # `/loop` iteration submits through the source's own owner). Pulling
+        # those two back would break both — pinned by
+        # `test_every_authoritative_slash_routes_to_owner_with_supported_images`,
+        # which is why they keep their own pullbacks below.
+        #
+        # The three here are different: the store they write is
+        # `config_dir()/archived-sessions.json`, the directory they remove is in
+        # this `config_dir()/sessions/`, and the sidebar and picker that render
+        # the result are this terminal's. Routed to an owner — which is what
+        # happened for `/delete` in the state a user is actually in, and what the
+        # wrong-machine split would do to `/archive` on a cross-host attach —
+        # they would act on another machine's store, and `/delete` would be
+        # refused by the owner's own guard because the conversation a viewer is
+        # standing in always holds a live claim (review round 1, MAJOR-1).
+        _LOCAL_WORK_SLASHES = frozenset({"/archive", "/unarchive", "/delete"})
+
         if command == "/model" and arg.strip().casefold() == "saved":
             # Saved belongs to the invoking terminal, not the owner's config.
             # Resolve now, at commitment, and route the concrete selection so
@@ -29451,6 +29684,14 @@ class OperatorApp(App[None]):
             # The invoking TUI owns scheduling/interaction, even when a legacy
             # owner advertises the older authoritative classification. Each
             # loop iteration still uses the source's real owner prompt route.
+            remote_capability = None
+        if command in _LOCAL_WORK_SLASHES:
+            # ...and the same pullback for the commands whose WORK is here: an
+            # owner running older code still advertises these from the snapshot
+            # it took when the socket opened, and that advertisement must not be
+            # allowed to send the write or the removal to another machine. See
+            # `_LOCAL_WORK_SLASHES` above for why the whole frontend-local set is
+            # the wrong test.
             remote_capability = None
         # Bare ``/mcp`` is argument-dependent: its LISTING is canonical and
         # renders locally from the follower's own snapshot facade, while its
@@ -29509,7 +29750,11 @@ class OperatorApp(App[None]):
             if command == "/model" and not arg:
                 self._open_model_picker()
                 return
-            if self._stopped_session_id and bool(getattr(self._session, "is_cold", False)):
+            if (
+                self._stopped_session_id
+                and bool(getattr(self._session, "is_cold", False))
+                and (entry is None or "/" + entry.name not in _LOCAL_WORK_SLASHES)
+            ):
                 # A viewer that `/stop` ended keeps the owner's LAST capability
                 # list (the sync that would clear it is never coming), so a
                 # routed command reaches `route_shared_slash` and is refused
@@ -29548,6 +29793,19 @@ class OperatorApp(App[None]):
                 # True for exactly those three argument-bearing forms and False
                 # for `/model`, `/goal`, `/rename`, `/effort`, bare `/team`,
                 # `/team chart`, bare `/agent` and bare `/mcp`.
+                #
+                # A FOURTH EXEMPTION SITS IN THE CONDITION ITSELF: a command
+                # whose WORK is local (`_LOCAL_WORK_SLASHES` — archive,
+                # unarchive, delete) is never intercepted here, no matter what
+                # the stale snapshot advertises. The old owner's capability list
+                # is frozen at the moment the socket closed, so those three are
+                # still advertised `authoritative_session` by it, and reading
+                # the advertisement as the routing decision would answer "this
+                # session was stopped; /resume …" for commands that need no
+                # owner at all — which for `/delete` is exactly the state it must
+                # work in, since the conversation the viewer is standing in is
+                # the one whose owner just exited and released the claim this
+                # command's guard checks.
                 #
                 # The LOCAL pullbacks above are untouched by that breadth:
                 # `/model default`, bare `/mcp` and `/team chart` set
@@ -29656,6 +29914,14 @@ class OperatorApp(App[None]):
             self._cmd_move(arg, notice)
         elif command == "/rename":
             self._cmd_rename(arg, notice)
+        elif command == "/archive":
+            # Acts on the CURRENT session; see the registry entry for why it
+            # takes no argument.
+            self._cmd_archive(notice)
+        elif command == "/unarchive":
+            self._cmd_unarchive(notice)
+        elif command == "/delete":
+            self._cmd_delete(arg, notice)
         elif command == "/model":
             self._cmd_model(arg, notice)
         elif command == "/effort":
@@ -35531,7 +35797,15 @@ class OperatorApp(App[None]):
         # AFTER `load_text`: adoption re-keys onto the markers now in the
         # buffer, so the text has to be there first.
         editor.adopt_attachments(images)
-        editor.set_commands(SLASH_COMMANDS)
+        # THE INVOKER'S OWN LIST, not the raw registry (review round 1, MINOR-1).
+        # The other restore path — the boot/unbind one — was updated with the
+        # conditional offer and this one was missed, so opening and closing an
+        # aside on any session re-offered `/unarchive` for a conversation that is
+        # not archived: the one command whose whole contract is that it appears
+        # only in the state it can act on. `/unarchive` typed anyway still
+        # answers with a sentence, so nothing was ever wrong on screen — the list
+        # simply promised a verb the session could not use.
+        editor.set_commands(self._offered_commands())
         editor.set_records_history(True)
         self.screen.remove_class(ASIDE_LAYOUT_CLASS)
         editor.focus()
@@ -35945,6 +36219,40 @@ class OperatorApp(App[None]):
             return
         if message.command == "approvals":
             picker.set_choices(self._approval_choices())
+            picker.set_notice("")
+            return
+        if message.command == "delete":
+            # ONE row, and it is the word the user would otherwise type. The
+            # confirmation is that the SUBMISSION carries `yes` — this row
+            # exists so the picker can PAINT the command as dangerous (the
+            # `alert` flag) and so `delete`'s membership in
+            # ``Editor.DESTRUCTIVE_COMMANDS`` has something to gate: one Enter
+            # on the row FILLS the word, and the second Enter is the
+            # confirmation. A row that chose-and-ran on one keystroke would be
+            # the exact one-keystroke deletion this confirmation exists to
+            # prevent.
+            #
+            # The row is offered even when the guards would refuse (a running
+            # conversation): the refusal is `/delete`'s own answer, and hiding
+            # the row would leave a user who can see the command with no way to
+            # learn why it will not act.
+            picker.set_choices(
+                [
+                    ArgumentChoice(
+                        name="yes",
+                        # FITS WHOLE (design round 1, D6): the previous text
+                        # truncated to "delete this conversation and its tran…",
+                        # cutting the OPERATIVE noun — the thing being destroyed
+                        # is the transcript — so the row that exists to slow a
+                        # finger down read as a half-sentence. "for good" keeps
+                        # the register of the rehearsal sentence it confirms; the
+                        # transcript itself is named there, where there is room.
+                        description="removes this conversation for good",
+                        detail="cannot be undone",
+                        alert=True,
+                    )
+                ]
+            )
             picker.set_notice("")
             return
         if message.command == "stop":
@@ -38460,6 +38768,12 @@ class OperatorApp(App[None]):
             return self._compact_slash_result(SlashResult)
         if command == "approvals":
             return self._approvals_slash_result(args, SlashResult)
+        if command == "archive":
+            return self._archive_slash_result(True, SlashResult)
+        if command == "unarchive":
+            return self._archive_slash_result(False, SlashResult)
+        if command == "delete":
+            return await self._delete_slash_result(args, SlashResult)
         # Every authoritative capability must land on a producer ABOVE: a
         # success-shaped receipt for an operation that never ran is the round-2
         # MAJOR-1 defect, so an unhandled command answers with an honest
@@ -38471,6 +38785,120 @@ class OperatorApp(App[None]):
                 "run it in the session's own terminal"
             ),
             style="warning",
+        )
+
+    def _archive_slash_result(self, archived: bool, SlashResult: Any) -> Any:
+        """``/archive`` and ``/unarchive`` for a viewer attached to THIS owner.
+
+        The state lives in a config-root file, so a follower could write it
+        itself. It is written here instead because the receipt has to be about
+        the session BOTH surfaces are looking at, and the owner is the only
+        party that knows which that is: a viewer's idea of the current session
+        lags a ``/move``, and a receipt naming the wrong id is worse than the
+        round trip it saves.
+
+        Returns a notice rather than a block: the invoker prints it through its
+        own notice path, so an attached terminal and a local one read the same
+        sentence (see ``ServingSessionHandle._slash_result``'s twin).
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.archived import (
+            archive_change,
+            archived_ids,
+            eviction_clause,
+        )
+
+        session_id = self._resumable_session_id()
+        if not session_id:
+            return SlashResult(
+                kind="notice",
+                text="this conversation has nothing saved yet — nothing to archive",
+                style="warning",
+            )
+        current = archived_ids(config_dir())
+        if archived and session_id in current:
+            return SlashResult(
+                kind="notice",
+                text=f"{session_id} is already archived — /unarchive brings it back",
+                style="info",
+            )
+        if not archived and session_id not in current:
+            return SlashResult(
+                kind="notice",
+                text="this conversation is not archived — /archive hides it from the lists",
+                style="info",
+            )
+        _, evicted = archive_change(config_dir(), session_id, archived)
+        if archived:
+            return SlashResult(
+                kind="notice",
+                text=(
+                    # Plain text and the chord, for the reasons the local handler
+                    # states (D4 / U3, U5).
+                    f"archived {session_id} — hidden from /resume, the sidebar and search; "
+                    "/unarchive brings it back, and the picker's Archived toggle (ctrl+a) "
+                    "still opens it." + eviction_clause(evicted)
+                ),
+                style="info",
+            )
+        return SlashResult(
+            kind="notice", text=f"unarchived {session_id} — it is listed again", style="info"
+        )
+
+    async def _delete_slash_result(self, args: str, SlashResult: Any) -> Any:
+        """``/delete`` for a viewer attached to THIS owner.
+
+        The same two steps the local handler takes — an unconfirmed call is a
+        REHEARSAL that reports what the real one would do, including any refusal
+        — so a user confirms against exactly what they were shown.
+
+        IN PRACTICE THIS PATH ANSWERS THE REFUSAL, and that is the designed
+        outcome rather than a gap: the owner of a routed command is a LIVE
+        session by definition, a live session is a hard guard, and the guard
+        sentence names the remedy. The success branch is kept because it is
+        reachable (an owner between sessions, a viewer racing a shutdown) and
+        because leaving it out would make the receipt shape depend on which
+        caller asked. It lands the owner on a fresh conversation, exactly as the
+        local path does: a deleted conversation is not one anyone can stay on.
+        """
+        from local_operator.paths import config_dir
+        from local_operator.session.cleanup import delete_session
+
+        session_id = self._resumable_session_id()
+        if not session_id:
+            return SlashResult(
+                kind="notice",
+                text="this conversation has nothing saved yet — there is nothing to delete",
+                style="warning",
+            )
+        confirmed = args.strip().casefold() == "yes"
+        outcome = await asyncio.to_thread(
+            delete_session, config_dir(), session_id, actor="tui", dry_run=not confirmed
+        )
+        if not outcome.found:
+            return SlashResult(
+                kind="notice",
+                text=f"{session_id} is not on disk — nothing to delete",
+                style="warning",
+            )
+        if outcome.refusal:
+            return SlashResult(kind="notice", text=outcome.refusal, style="warning")
+        if not confirmed:
+            # Same single source as the local host above (review round 3, R3-2).
+            return SlashResult(kind="notice", text=outcome.rehearsal(), style="warning")
+        self._cmd_new(self._notice)
+        return SlashResult(
+            kind="notice",
+            text=f"deleted {session_id}",
+            # A NOTICE rather than a `block` payload with its own type, because a
+            # routed payload type is a RENDERER CONTRACT: a producer that emits a
+            # `(kind, data["type"])` pair the viewer has no arm for is a command
+            # that runs on the owner and then evaporates on the screen — no
+            # output, no error. The receipt IS the whole answer here, so it rides
+            # as text like every other routed receipt, and the machine-readable
+            # half is a plain data key (invisible to that contract test by
+            # construction, since the key it enumerates is `type`).
+            data={"deleted": True, "session_id": session_id},
         )
 
     def _context_slash_result(self, SlashResult: Any) -> Any:

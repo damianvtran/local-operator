@@ -26,6 +26,7 @@ halves carry their reasons in ``credential_shape_corpus``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shlex
@@ -37,6 +38,7 @@ from typing import Any, Callable, cast
 
 import pytest
 
+from local_operator import redaction_shapes
 from local_operator.harness.redaction import (
     current_tool_source,
     summarize_arguments,
@@ -1645,6 +1647,510 @@ def test_a_marker_inside_the_credentials_own_value_is_a_recorded_limit() -> None
 
     partial = rs.ShapeHit(label="credential-assignment", value=value, window=value)
     assert rs._only_fully_masked([partial], f"PASSWORD=tok{REDACTION_MARKER}")[0].exposed is False
+
+
+def test_a_mask_that_stopped_inside_a_credential_is_an_exposure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial mask is an EXPOSURE, and only the window half can see it.
+
+    The shape this grading exists for is a mask that stopped INSIDE a credential:
+    the pattern captured less than the credential, so the marker was written over
+    the captured part and the rest stayed readable. The whole-value question cannot
+    see that — it reads the text as delivered, and the marker sits where the head of
+    the value would be — so the window half is the only thing between that mask and
+    a silent compromise, and a case that pins the whole-value half alone leaves it
+    deletable (agent review R1, F1: of the corpus's 183 graded hits, not one needs
+    this half).
+
+    The mirror is asserted with it, so the case cannot be satisfied by a guard that
+    escalates on any mask at all.
+    """
+    import local_operator.redaction_shapes as rs
+
+    # Both window arms must answer this case, so pin the OTHER one here: at this
+    # value's 15 windows the crossover picks the per-window search arm, which left
+    # `_present_windows` (the gated pass, and the arm the incident itself took)
+    # pinned by no test at all (agent review R2, C2).
+    monkeypatch.setattr(rs, "_searches_are_cheaper", lambda keys: False)
+
+    value = "p@ssw0rd-at-the-tail"
+    hit = rs.ShapeHit(label="dsn-password", value=value, window=value)
+    tail = value[6:]  # what a mask that stopped after six characters left readable
+
+    # Only a run of the value is readable, and the whole value is not in the text
+    # because the marker is where its head was: the seam is the whole test.
+    partial = rs._only_fully_masked([hit], f"PASSWORD={REDACTION_MARKER}{tail}")[0]
+    assert (partial.complete, partial.exposed) == (False, True)
+    # And the exposure is a compromise the session reports as one: this is the
+    # predicate behind the escalated notice, so the case cannot pass by grading a
+    # hurt hit that nothing acts on.
+    assert rs.shape_report([partial]).reached_model is True
+
+    # The mirror: the marker and nothing else of this value — contained, claimable.
+    contained = rs._only_fully_masked([hit], "PASSWORD=" + REDACTION_MARKER)[0]
+    assert (contained.complete, contained.exposed) == (True, False)
+
+
+def test_the_fragment_floor_is_pinned_from_both_sides() -> None:
+    """``_FRAGMENT_WINDOW`` is the floor this check is built on, and it is pinned.
+
+    It is the shortest run of a credential the pass will call readable material, so
+    the constant is load-bearing in both directions and nothing else in the suite
+    can see either end: the corpus contains no case whose grading depends on it
+    (agent review R1, F3 — the whole test file stays green at 7, and the predicate
+    restatement cannot disagree about a case the corpus does not hold). The pin is
+    therefore behavioural rather than an equality against the constant: a run of
+    exactly the floor survives a mask seam, and a run one character shorter does
+    not, so the pair fails if the floor moves either way.
+    """
+    import local_operator.redaction_shapes as rs
+
+    six = "abcdef"
+    # The value straddles the mask: the whole-value half cannot see it (the marker
+    # is between its halves) and the window half can (its characters are back
+    # together once the marker is stripped). At a floor of 7 the value has no window
+    # and this becomes contained.
+    hit = rs.ShapeHit(label="password", value=six, window=six)
+    assert rs._only_fully_masked([hit], f"k=abc{REDACTION_MARKER}def\n")[0].exposed is True
+
+    # One character below the floor: the same shape has no window at all, so nothing
+    # of it is readable material. At a floor of 5 this becomes an exposure.
+    five = "abcde"
+    shorter = rs.ShapeHit(label="password", value=five, window=five)
+    assert rs._only_fully_masked([shorter], f"k=ab{REDACTION_MARKER}cde\n")[0].exposed is False
+
+
+# --- what the classification COSTS --------------------------------------------
+#
+# The half of this pass that grades a hit used to ask the text one question per
+# hit — ``value in text`` — and the text is megabytes, so the price was
+# ``hits x bytes``: five session runtimes on this machine were found frozen for 1.5
+# to 7.2 hours with 100% of their event-loop thread sampled inside its C-level
+# search, heartbeats stale for hours, and every control call (``lop stop``,
+# ``steer``, ``cancel``) refusing, because they all marshal onto the busy loop. The
+# tests below are the structural half of the fix: they count the WORK, in bytes
+# walked, and assert that the hit count does not appear in it — never a stopwatch,
+# for the reason AGENTS.md records under "Prefer a structural invariant to a
+# numeric one".
+
+#: One credential row, repeated. A large tool result or transcript body carries the
+#: same command and the same result over and over, so this is the shape the pass is
+#: expensive on — and the one the old per-hit scan made quadratic, because the hits
+#: multiply while the text stays a single string. Built from ``SENTINEL`` so this
+#: file still spells no credential-shaped literal of its own.
+_HIT_ROW = "MONGO_DSN=" + SENTINEL + "\n"
+
+
+def _distinct_row(index: int) -> str:
+    """One row carrying a credential no other row carries.
+
+    The USERNAME is deliberately the same in every row and the VALUE's tail is what
+    varies: the credential the pass grades is the value, so distinct usernames would
+    still be one credential to grade and would never reach the key count this fixture
+    exists for.
+    """
+    tailed = SENTINEL.replace(SENTINEL_FRAGMENT, f"{SENTINEL_FRAGMENT}-{index:04d}")
+    return "MONGO_DSN=" + tailed + "\n"
+
+
+#: Filler with no anchor in it at all, so the credential rows are the only thing
+#: the pass has to grade.
+_PAD_ROW = "a line of ordinary text with nothing shaped in it whatsoever\n"
+
+
+def _rows_text(rows: int, size: int, *, distinct: bool = False) -> str:
+    """``rows`` credential rows inside about ``size`` bytes of text."""
+    body = "".join(_distinct_row(index) for index in range(rows)) if distinct else _HIT_ROW * rows
+    return body + _PAD_ROW * max(0, (size - len(body)) // len(_PAD_ROW))
+
+
+#: A credential long enough to carry many WINDOWS, which is the half of the check the
+#: cost tests could not see: the sentinel's own value asks 11 distinct windows of the
+#: text, the credential below asks 51, and the per-window search arm walks the text
+#: once for each. The tail is a counting sequence rather than a repeated character
+#: because the windows are what that arm searches for, and a run of one character
+#: collapses into a single key. Derived from ``SENTINEL`` again, so the file still
+#: spells no credential-shaped literal of its own.
+_LONG_VALUE = SENTINEL_FRAGMENT + "".join(f"{index:02d}" for index in range(20))
+_LONG_ROW = "MONGO_DSN=" + SENTINEL.replace(SENTINEL_FRAGMENT, _LONG_VALUE) + "\n"
+
+
+def _long_rows_text(rows: int, size: int) -> str:
+    """``rows`` copies of the LONG credential inside about ``size`` bytes of text."""
+    body = _LONG_ROW * rows
+    return body + _PAD_ROW * max(0, (size - len(body)) // len(_PAD_ROW))
+
+
+#: The real ``_SurvivalIndex._readable_text``, captured here so the wrapper
+#: :func:`_grading_work` installs can call it without chaining onto a wrapper an
+#: earlier call left on the class.
+_ORIGINAL_READABLE_TEXT = redaction_shapes._SurvivalIndex._readable_text
+
+
+class _CountingText(str):
+    """A str that counts the BYTES searched on it by the whole-text arms.
+
+    ``value in text`` is a C-level walk of the whole string, and that walk is the
+    cost this file measures — the same measure for the old code (one walk per hit)
+    and for the new one (one walk per key), which is what lets the before/after
+    claim be one number rather than two mechanisms.
+
+    A search can land on a DERIVED string rather than on the object the caller
+    holds: the window half reads the text with the marker stripped, which is a
+    different string whenever the text carries a marker — and every graded fixture
+    here does, because a mask is what put the marker there. Such a copy is built
+    with the caller's ``sink`` so its walks are counted with the caller's; a private
+    counter on the copy would be read by nobody, which is exactly how the window
+    half's searches went unmeasured (agent review R1, F2).
+    """
+
+    #: Declared on the CLASS, not set only per instance: the derived copies built in
+    #: ``__new__`` are typed from this annotation, and without it pyright reports
+    #: three errors on the sink reads below (agent review R2, C1).
+    _sink: list[int]
+
+    def __new__(cls, value: str, sink: list[int] | None = None) -> "_CountingText":
+        text = super().__new__(cls, value)
+        text._sink = sink if sink is not None else [0]
+        return text
+
+    @property
+    def scanned(self) -> int:
+        """The bytes searched on this object and on every copy sharing its sink."""
+        return self._sink[0]
+
+    def __contains__(self, key: str) -> bool:
+        self._sink[0] += len(self)
+        return super().__contains__(key)
+
+
+def _grading_work(text: str, monkeypatch: pytest.MonkeyPatch) -> tuple[int, int, int]:
+    """The work grading ``text`` costs: ``(searched, passed over, credentials)``.
+
+    Both arms are counted, so neither can hide from the assertion: the whole-text
+    searches through :class:`_CountingText` — including the ones the window half
+    makes on the marker-stripped copy of the text, which is where most of its cost
+    went unmeasured — and the one-pass arms by wrapping the two helpers that read the
+    text at once. The hits come from the real pass over the real fixture, so what is
+    measured is the shipped composition rather than a hand-built approximation of it.
+    The third number is how many DISTINCT credentials were graded, which is what
+    decides which arm runs.
+    """
+    from local_operator import redaction_shapes as rs
+
+    scrubbed, hits = scrub_shapes_with_hits(text)
+    assert hits, "the fixture graded no hits, so measuring it would prove nothing"
+    # The fixture has to reach BOTH halves: an EXPOSED hit is answered by the
+    # whole-value half alone, and the window half — where the quadratic term lived
+    # — would never be measured. Every hit this shape produces is contained, so the
+    # fixture is the shape the pass is expensive on rather than a special case.
+    assert not any(hit.exposed for hit in hits), "the fixture short-circuits the window half"
+    counted = _CountingText(scrubbed)
+
+    # The window half asks its questions of ``_readable_text()``, which is the text
+    # with the marker stripped — a COPY, when there is a marker to strip, and one the
+    # caller never holds. That lookup is the window half's whole cost, so the copy is
+    # given the sink of the text THIS call handed in: without it the long-credential
+    # fixture below reported 1.86 walks while its window half was asking 51 questions
+    # of the text (agent review R1, F2).
+    #
+    # The original is taken from the module rather than from the class: this helper is
+    # called several times per test with one monkeypatch, and a wrapper that captured
+    # the class attribute would chain onto the previous call's wrapper and hand its
+    # answer back — measuring the second fixture with the first fixture's meter, which
+    # is the same blindness one layer down.
+    def counted_readable(index: Any) -> str:
+        readable = _ORIGINAL_READABLE_TEXT(index)
+        if isinstance(readable, _CountingText):
+            # No marker to strip: the readable text IS the counted text the caller
+            # handed in, and counting it counts these searches with it.
+            return readable
+        sink = getattr(getattr(index, "_text", None), "_sink", None)
+        if sink is None:
+            # A text this meter did not hand in: the wrapper stays on the class for
+            # the rest of the test, and ``scrub_shapes_with_hits`` reads its own text
+            # before every measured call. Those searches are not the measurement, so
+            # the text is handed back untouched.
+            return readable
+        return _CountingText(readable, sink)
+
+    monkeypatch.setattr(rs._SurvivalIndex, "_readable_text", counted_readable)
+    passed = 0
+
+    def account(original: Callable[..., Any]) -> Callable[..., Any]:
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            nonlocal passed
+            passed += len(args[0])
+            return original(*args, **kwargs)
+
+        return wrapper
+
+    for name in ("_present_windows", "_present_heads"):
+        original = getattr(rs, name, None)
+        if original is None:
+            # A tree with no one-pass arm at all: its per-hit searches are then the
+            # whole measurement, which is exactly what this test exists to catch,
+            # and the assertion below still reports the bytes it walked.
+            continue
+        monkeypatch.setattr(rs, name, account(original), raising=False)
+    rs._only_fully_masked(hits, counted)
+    return counted.scanned, passed, len({hit.value for hit in hits})
+
+
+def test_grading_never_costs_a_walk_of_the_text_per_hit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Four times the hits over the same text must not cost four times the work.
+
+    This is the defect itself, measured the way the freeze measured it. The grading
+    half used to be one whole-text search per hit, so the same bytes walked four
+    times as far when the hits quadrupled — which is what turned a 50 s replay into
+    a runtime that had to be SIGKILLed by hand. The bound is on WORK (bytes walked
+    by a search or a pass), which is a fact about the code rather than about this
+    machine, so it cannot flake on a loaded runner.
+    """
+    size = 256_000
+    few_text = _rows_text(rows=200, size=size)
+    many_text = _rows_text(rows=800, size=size)
+    few = _grading_work(few_text, monkeypatch)
+    many = _grading_work(many_text, monkeypatch)
+    assert sum(many[:2]) <= sum(few[:2]) * 1.5, (
+        f"grading got more expensive with the hit count: {few} -> {many} bytes walked "
+        f"over {size} bytes of text"
+    )
+
+    # And at a FIXED hit density, four times the text costs about four times the
+    # work, not sixteen: cost per byte is what rose with size in the measurements
+    # this change came from (1.19 -> 2.63 us per byte from 64 KB to 512 KB), and it
+    # rose because the hits rose with the size.
+    quarter_text = _rows_text(rows=200, size=64_000)
+    whole_text = _rows_text(rows=800, size=256_000)
+    quarter = _grading_work(quarter_text, monkeypatch)
+    whole = _grading_work(whole_text, monkeypatch)
+    quarter_rate = sum(quarter[:2]) / len(quarter_text)
+    whole_rate = sum(whole[:2]) / len(whole_text)
+    assert whole_rate <= quarter_rate * 2, (
+        f"the cost per byte of grading rises with the size of the text: "
+        f"{quarter_rate} -> {whole_rate}"
+    )
+
+
+def test_grading_walks_a_text_at_most_its_keys_worth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The absolute bound, at both ends of the key count.
+
+    One credential repeated: the whole-value half is one search and the window half
+    is one search per window of that credential — the arm chosen for a small key
+    count, and at most ``(1 + windows)`` walks of the text for the fixture below.
+    Four hundred DISTINCT credentials: both halves are past the crossover, so each
+    reads the text once whatever the key count — the arm that keeps a text full of
+    credentials from costing a walk per credential.
+    """
+    repeated = _rows_text(rows=400, size=256_000)
+    searched, passed, distinct = _grading_work(repeated, monkeypatch)
+    assert distinct == 1, f"the repeated fixture graded {distinct} credentials"
+    assert passed == 0, "the one-credential fixture took the one-pass arm"
+    limit = 40 * len(repeated)
+    assert searched <= limit, f"{searched} bytes walked over {len(repeated)}, one credential"
+
+    many = _rows_text(rows=400, size=256_000, distinct=True)
+    searched, passed, distinct = _grading_work(many, monkeypatch)
+    assert distinct == 400, f"the distinct fixture graded {distinct} credentials"
+    # One walk of the text is the marker probe that decides whether the window half
+    # has anything to strip at all; the arms themselves are the one-pass ones.
+    assert searched <= len(many), f"{searched} bytes searched for {len(many)}"
+    assert passed <= 4 * len(many), (
+        f"the many-credential fixture walked {searched + passed} bytes over "
+        f"{len(many)}: the one-pass arms must not scale with the key count"
+    )
+
+
+def test_a_long_credential_is_measured_where_its_cost_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window half's walks are counted, not just the whole-value half's.
+
+    The arm the window half takes while its key count is small is one C-level search
+    per WINDOW of the credential, and those searches run on the marker-stripped copy
+    of the text — so a meter that reads only the object the caller holds sees none of
+    them. The sentinel's own value carries 11 distinct windows; the long credential
+    below carries 51, and it is the one whose cost the meter has to show.
+
+    The floor asserted here is the window count itself, which is what makes this a
+    test of the instrument rather than of the code: the fixture below reported 1.86
+    walks on the old meter, and no such report can reach 51 windows' worth of walks
+    without counting those searches (agent review R1, F2).
+    """
+    import local_operator.redaction_shapes as rs
+
+    text = _long_rows_text(rows=400, size=256_000)
+    searched, passed, distinct = _grading_work(text, monkeypatch)
+    # The credential as the pass grades it — the value ON the hit, which is what the
+    # window half keys its windows on — rather than the literal the row was built
+    # from: the DSN rule hands over part of what the row carries.
+    (value,) = {hit.value for hit in scrub_shapes_with_hits(text)[1]}
+    windows = len(value) - rs._FRAGMENT_WINDOW + 1
+
+    assert distinct == 1, f"the long-credential fixture graded {distinct} credentials"
+    assert passed == 0, "the long-credential fixture took the one-pass arm"
+    # The floor is the window count, at half the fixture's length: not a byte-exact
+    # claim about which strings get walked, but one only a meter that counts the
+    # window half's searches can reach.
+    assert searched >= windows * len(text) // 2, (
+        f"{searched} bytes searched over {len(text)} for {windows} windows: the meter "
+        "is not counting the window half's walks"
+    )
+    # And it is still bounded by the windows, the whole-value search and the marker
+    # probe: the 400 hit rows do not appear in it.
+    assert searched <= (windows + 4) * len(
+        text
+    ), f"{searched} bytes walked for {windows} windows over {len(text)} bytes of text"
+
+
+def test_the_single_pass_arm_verifies_the_whole_value_it_claims() -> None:
+    """The one-pass arm's key is only a CANDIDATE: the value is checked in full.
+
+    ``_present_heads`` is the arm taken once the key count passes the crossover, and
+    it is keyed on each value's own first ``_FRAGMENT_WINDOW`` characters. A text can
+    carry that head without carrying the credential — a name that starts like a
+    token, a shorter value that prefixes a longer one — so every candidate is sliced
+    against the whole value before it enters the answer. Deleting that slice leaves
+    the whole suite green (agent review R1, F5), which is why it is pinned here
+    directly: through the composed pass the window half usually reaches the same
+    verdict by its own route, so the difference only shows on the narrow
+    marker-bearing shape that ``_credential_fragments_survive`` records as a limit.
+    """
+    import local_operator.redaction_shapes as rs
+
+    head = "verification-head-9"
+    # The head's six characters, and nothing after them: a candidate, not a hit.
+    assert rs._present_heads("text with verification-XXXX nothing else", [head]) == set()
+    # The same value in full IS a hit, and a value shorter than the window is looked
+    # up at its own length rather than by a window it does not have.
+    assert rs._present_heads(f"text with {head} in it", [head]) == {head}
+    assert rs._present_heads("PASSWORD=abcde tail", ["abcde"]) == {"abcde"}
+
+
+def test_the_single_pass_arm_is_total_over_an_empty_value() -> None:
+    """The empty value is skipped rather than raising ``IndexError``.
+
+    An empty value has no character to key on, so its key would be ``""`` and the
+    head lookup inside ``_present_heads`` would index it at 0. Both callers filter
+    it out today (``_SurvivalIndex`` drops it, and ``_credential_fragments_survive``
+    returns before the index), which is why this was latent instead of live — but a
+    helper whose declared input is a sequence of strings should not depend on two
+    callers to stay total (agent review R1, F4).
+    """
+    import local_operator.redaction_shapes as rs
+
+    assert rs._present_heads("aaa", [""]) == set()
+    assert rs._present_heads("aaa", ["", "aaa"]) == {"aaa"}
+
+
+def test_the_two_arms_of_the_index_are_interchangeable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The arm is a COST decision, so it may never move a mask or a grading.
+
+    Both arms are the same two predicates — one C-level search per key, or one
+    gated pass over the text — and which one runs is decided from two measured
+    per-byte costs. Forcing each arm over the whole corpus and over the incident's
+    own shape is what keeps that a fact about the code rather than an argument.
+    """
+    from local_operator import redaction_shapes as rs
+
+    texts = [
+        *(case.text for case in (*POSITIVE_CASES, *NEGATIVE_CASES)),
+        (_HIT_ROW + _PAD_ROW) * 40,
+        _HIT_ROW * 40 + _PAD_ROW * 400,
+        "".join(_distinct_row(index) for index in range(200)),
+    ]
+
+    def grading() -> list[Any]:
+        return [
+            (
+                scrub_shapes_with_hits(text)[0],
+                [
+                    (hit.label, hit.value, hit.window, hit.complete, hit.exposed)
+                    for hit in scrub_shapes_with_hits(text)[1]
+                ],
+            )
+            for text in texts
+        ]
+
+    monkeypatch.setattr(rs, "_searches_are_cheaper", lambda keys: True)
+    searches = grading()
+    monkeypatch.setattr(rs, "_searches_are_cheaper", lambda keys: False)
+    passes = grading()
+    assert searches == passes, "the arm chosen for cost changed a mask or a grading"
+
+
+def _corpus_grading() -> str:
+    """The corpus's masked text and full hit set, serialised as one digest."""
+    canonical = []
+    for case in (*POSITIVE_CASES, *NEGATIVE_CASES):
+        masked, hits = scrub_shapes_with_hits(case.text)
+        canonical.append(
+            [
+                case.reason,
+                masked,
+                [[hit.label, hit.value, hit.window, hit.complete, hit.exposed] for hit in hits],
+            ]
+        )
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+#: What the whole corpus produces TODAY, values included: every masked text, every
+#: hit and every grading. Regenerate by printing ``_corpus_grading()`` — and only in
+#: the commit that argues why the behaviour moved.
+_CORPUS_GRADING_DIGEST = "8895d033a508776b8f2822477eded754315af15ea85db4a496233f4539f79316"
+
+
+def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:
+    """A security control is not allowed to move one byte because it got faster.
+
+    The pass that decides whether a credential is masked, and how badly it leaked
+    if it was not, was re-expressed (one index over the text instead of one search
+    per hit). This is the corpus as the referee, in both directions: a mask that
+    weakened, a hit that stopped being filed, a severity that changed — any of
+    those moves the digest, and none of them may move it silently.
+    """
+    assert _corpus_grading() == _CORPUS_GRADING_DIGEST, (
+        "the corpus no longer produces the same masked text and hit set. That is a "
+        "BEHAVIOUR change on a credential control, not a fixture update: the change "
+        "that moves this constant has to say which case moved and why it is safe."
+    )
+
+
+def test_the_grading_of_every_corpus_hit_matches_the_predicate() -> None:
+    """``exposed`` restated in the test, so a case the digest cannot see still holds.
+
+    The digest pins the corpus; this pins the PREDICATE the corpus is evidence for:
+    readable material from the credential is in the text the model reads when the
+    whole value is in the text as delivered, or when the value is at least a window
+    long and one of its six-character windows is in the text with the redaction
+    marker stripped. Restating it is the point — a re-implementation that agrees
+    with the corpus for the wrong reason fails on the next case.
+    """
+    checked = 0
+    for case in (*POSITIVE_CASES, *NEGATIVE_CASES):
+        masked, hits = scrub_shapes_with_hits(case.text)
+        readable = masked.replace(REDACTION_MARKER, "")
+        for hit in hits:
+            value = hit.value
+            exposed = bool(value) and value != REDACTION_MARKER
+            if exposed:
+                exposed = value in masked or (
+                    len(value) >= 6
+                    and any(value[start : start + 6] in readable for start in range(len(value) - 5))
+                )
+            assert hit.exposed is exposed, (case.reason, hit.label)
+            checked += 1
+    assert checked > 150, f"the corpus graded only {checked} hits: it is not evidence"
 
 
 def test_the_contained_notice_names_the_tool_and_carries_no_value() -> None:

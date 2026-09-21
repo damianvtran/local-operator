@@ -292,6 +292,24 @@ _ALLOWED_ROWS: tuple[tuple[str | int, ...], ...] = (
         "<path>.unlink",
         "Removes only its own named temporary file after a failed atomic replacement",
     ),
+    # -- the archive index: the pins store's row, for the pins store's reasons --
+    # One file at the config root with a FIXED basename (`archived-sessions.json`
+    # plus a pid-named sibling while it is written). No session id, no caller
+    # input and no directory ever reaches either path: the ids the file CONTAINS
+    # are guarded by `session_directory_name` on the way in, and the ids it is
+    # pruned against are only ever joined onto `config_dir()/sessions` to be
+    # stat-ed.
+    (
+        "local_operator/session/archived.py::_write_archived",
+        "os.replace",
+        "Atomic replacement of the single archived-sessions.json file in the config "
+        "dir, never a directory and never under sessions/",
+    ),
+    (
+        "local_operator/session/archived.py::_write_archived",
+        "<path>.unlink",
+        "Removes only its own named temporary file after a failed atomic replacement",
+    ),
     # -- the mesh package: `<config>/network/` and the session STAMP ----------
     # THE MESH LEGITIMATELY WRITES AND REMOVES PLENTY — network records, invite
     # tokens, outbox queues, parked pairings, the audit log, the identity keypair.
@@ -1795,13 +1813,16 @@ _NEAR_DISPLACERS: frozenset[str] = frozenset(
         "local_operator/session/runtime/registry.py::_reap_dead_record",  # -> reaped/ FILE
         "local_operator/session/runtime/viewers.py::publish_viewer",  # tmp -> viewer FILE
         "local_operator/session/search_index.py::_save",  # tmp -> index FILE
+        "local_operator/session/archived.py::_write_archived",  # tmp -> archive index FILE
         "local_operator/session/session.py::_write_roster_sidecar",  # tmp -> roster FILE
         "local_operator/session/transcript.py::Transcript._replace_file",  # tmp -> transcript
         "local_operator/session_lease.py::acquire_session_lease",  # tmp -> lease FILE
-        # The mesh placement stamp: one FILE at `sessions/<id>/mesh.json`, written
-        # by `net_session_create` so a session the peer asked for records WHERE it
-        # lives. Its receiver is the stamp path — never the session directory, and
-        # never a second displacer riding on an allow-listed function.
+        # The mesh's session stamp: a tmp FILE -> mesh.json inside that session's
+        # own directory, written by the placement writer. Declared here for the same
+        # reason as its allow-list row above — the receiver is a FILE inside the
+        # session directory it belongs to, never a directory rename. The entry was
+        # carried on the mesh branch and lost when `main` touched this same file,
+        # which is exactly the class this guard exists to catch.
         "local_operator/session/placement.py::write_stamp",  # tmp -> mesh.json
     }
 )
