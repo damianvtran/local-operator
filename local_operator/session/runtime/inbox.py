@@ -394,20 +394,48 @@ def drop_owed_turn(session_dir: Path) -> None:
     """Drop this session's owed-turn record because NO raise can discharge it.
 
     The one case that calls it is the boot drain's deferral: a session with no
-    durable history keeps its peer rows until the owner's first turn
+    durable history keeps its PEER rows until the owner's first turn
     (``process._drain_inbox_into``'s ``requires_engagement`` branch), so every
     runtime raised for that record would boot, defer the same rows and exit —
     real work, hourly, that delivers nothing (review round 1, R1-10). The spool
     row is untouched and the owner's first turn still drains it, which is the
     deferral the sender's receipt actually describes.
 
+    TWO GUARDS, because this is the third unguarded unlink in the circuit and the
+    first two both took a fix in review (QA round 2, R2-Q2):
+
+    * IT REFUSES WHEN THE SPOOL HOLDS THE OWNER'S OWN WORDS. A ``SOURCE_USER`` row
+      is dischargeable by exactly the raise this function is declining — the
+      successor's boot drain RUNS it, durable history or not — so a record that
+      arrived for one must survive; the deferral judgement is about the peer rows
+      beside it. Without this guard the drop would delete a record the owner's own
+      prompt had just written, which is defect (B) once more, this time caused by
+      the fix for R1-10 rather than by the cap.
+    * AND IT PASSES ``expected_updated_at_ms``, the same compare-and-delete the
+      reconciler and :func:`settle_owed_turn` pass: the record is judged from the
+      read a moment earlier, so a record that has changed since is left for the
+      next pass rather than unlinked on a stale judgement. What the guard narrows
+      is the window, from the whole deferral to the unlink itself.
+
     Best-effort, like every other write on this path.
     """
     from local_operator.paths import config_dir
-    from local_operator.wakes.spooled import clear_spooled_turn
+    from local_operator.wakes.spooled import (
+        clear_spooled_turn,
+        read_spooled_turn,
+        spool_has_owner_row,
+    )
 
     try:
-        clear_spooled_turn(config_dir(), session_dir.name)
+        if spool_has_owner_row(session_dir):
+            return
+        root = config_dir()
+        record = read_spooled_turn(root, session_dir.name)
+        if record is None:
+            return
+        clear_spooled_turn(
+            root, session_dir.name, expected_updated_at_ms=record.get("updated_at_ms")
+        )
     except Exception:  # noqa: BLE001 — see settle_owed_turn
         logger.debug("could not drop the owed turn for %s", session_dir, exc_info=True)
 
