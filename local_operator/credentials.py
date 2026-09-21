@@ -147,6 +147,44 @@ class CredentialManager:
             raise
         return manager.list_credential_keys(non_empty=non_empty)
 
+    @classmethod
+    def read_credentials(cls, config_dir: Path, *, non_empty: bool = True) -> Dict[str, SecretStr]:
+        """Credential KEY→VALUE pairs from the store at ``config_dir``, read WITHOUT creating it.
+
+        The value-carrying twin of :meth:`read_key_names`, and it exists for the
+        same reason: ``__init__`` runs ``_ensure_config_exists()``, which creates
+        the directory and an empty ``credentials.env``, so a MIGRATION that wants
+        to read the file before retiring it would otherwise recreate the very
+        file it is emptying. Nothing in this class is constructed here past
+        :meth:`_bind` — see :meth:`read_key_names` for why the read-only
+        construction belongs to the class rather than to each caller.
+
+        An ABSENT store is ``{}`` (the ``ENOENT`` policy of
+        :meth:`read_key_names`); every other errno is raised for the caller to
+        report as degraded.
+
+        ``non_empty`` mirrors :meth:`list_credential_keys`: a key recorded with
+        an empty value is not a credential, and a migration that wrote it into
+        the encrypted store would move a blank string across while looking like
+        it had moved a secret.
+        """
+        manager = cls.__new__(cls)
+        manager._bind(config_dir)
+        try:
+            manager.load_from_file()
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return {}
+            raise
+        return {
+            key: value
+            for key, value in manager.get_credentials().items()
+            # Compared on the REVEALED string, not on the ``SecretStr`` object:
+            # pydantic defines no ``__bool__`` on ``SecretStr``, so an object's
+            # default truthiness would make every blank-valued key look real.
+            if not non_empty or value.get_secret_value()
+        }
+
     def load_from_file(self) -> Dict[str, SecretStr]:
         """Load credentials from the config file.
 

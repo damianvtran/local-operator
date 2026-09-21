@@ -60,7 +60,10 @@ def dispatch(args: argparse.Namespace) -> int:
     """
     command = getattr(args, "secret_command", None)
     if command is None:
-        _err("usage: lop secret {get,set,update,list,describe,rm,rotate,status,audit,file,run}")
+        _err(
+            "usage: lop secret "
+            "{get,set,update,list,describe,rm,rotate,status,audit,file,run,migrate-env}"
+        )
         return 2
 
     handlers = {
@@ -78,6 +81,7 @@ def dispatch(args: argparse.Namespace) -> int:
         "run": _run,
         "harden": _harden,
         "unlock": _unlock,
+        "migrate-env": _migrate_env,
         "broker": _broker,
     }
     try:
@@ -841,6 +845,153 @@ def _run(args: argparse.Namespace) -> int:
         # audit trail record them individually.
         environment[variable or name] = retrieve_secret(name).decode("utf-8", errors="strict")
     return subprocess.run(command, env=environment, check=False).returncode
+
+
+def _migrate_provider_env_keys() -> set[str]:
+    """Every env var NAME any registry provider reads, as a set.
+
+    Derived from the registry rather than a hard-coded list, and from BOTH
+    readers: ``env_key_names`` is the provider's own env-var name (including the
+    tuple names a provider may be configured under) and ``credential_file_names``
+    adds the names the provider's login writes into the legacy file plus its
+    alias rows (``xai-oauth`` ⇒ ``xai``). A hard-coded list beside them is free
+    to drift from the name a login actually writes, and the failure would be
+    silent: the key would be filed as an ordinary agent secret and then never
+    found by the provider reader looking it up under ``LOP_PROVIDER_*``.
+
+    A provider whose ``env_keys`` is a callable (:func:`_anthropic_env_key`)
+    contributes no NAME — the callable answers only with a VALUE, so there is
+    nothing to key a store row on. That is the same limit ``env_key_names``
+    documents; ``credential_file_names`` is what supplies the fixed
+    ``ANTHROPIC_API_KEY`` spelling for that provider.
+    """
+    from local_operator.providers.registry import (
+        PROVIDER_REGISTRY,
+        credential_file_names,
+        env_key_names,
+    )
+
+    names: set[str] = set()
+    for definition in PROVIDER_REGISTRY:
+        names.update(env_key_names(definition.id))
+        names.update(credential_file_names(definition.id))
+    return names
+
+
+def _migrate_env(args: argparse.Namespace) -> int:
+    """Move ``<config>/credentials.env`` into the encrypted store, name by name.
+
+    The plaintext ``KEY=VALUE`` file is no longer the primary credential store
+    but real keys still sit in it, greppable, so this verb relieves it: provider
+    keys become provider-class rows under ``LOP_PROVIDER_<KEY>`` and every other
+    key becomes an ordinary agent secret under its literal name (design §5).
+
+    Four properties, each deliberate:
+
+    - **It never CREATES the source file.** The read goes through the class-level
+      :meth:`CredentialManager.read_credentials`, which binds the manager without
+      running ``__init__`` — ``__init__`` calls ``_ensure_config_exists()``,
+      whose whole job is to create an empty ``credentials.env``, and a migration
+      that recreated the file it is retiring would silently undo itself on a
+      host that had already been cleaned up.
+    - **It never prints a value, and never its own source.** Names, classes and
+      counts only. This command runs right after an operator has decided their
+      secrets should stop being readable off the disk; printing them into a
+      terminal, a scrollback buffer or a shell history entry would put them
+      straight back.
+    - **It is idempotent.** A name already present in the store is reported and
+      skipped rather than overwritten, so re-running after a partial migration
+      (or after adding a key to the file) converges. It never clobbers a value
+      the store already holds — ``set`` refuses a duplicate name, and the
+      pre-check is what turns that refusal into a clear report instead of the
+      first row aborting the run.
+    - **It never deletes the source file.** Deleting the last copy of a
+      credential is irreversible and is the operator's call, made after they
+      have verified the store holds everything (design §4 step 6).
+
+    ``--dry-run`` writes nothing and opens no store; it prints the same lines
+    with ``[dry-run]`` and is safe to run as often as wanted before committing.
+    """
+    from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
+    from local_operator.paths import config_dir
+    from local_operator.secrets.keys import store_path
+    from local_operator.secrets.store import provider_secret_name
+
+    root = config_dir()
+    source = root / CREDENTIALS_FILE_NAME
+
+    # Read WITHOUT creating it, and WITHOUT CredentialManager.__init__ (whose
+    # `_ensure_config_exists` would touch the very file being retired).
+    values = CredentialManager.read_credentials(root)
+    if not values:
+        # Two distinct situations with one honest sentence. An absent file is the
+        # expected END state of this whole exercise, so it is not an error.
+        _err(
+            f"no credentials to migrate from {source}"
+            + ("" if source.exists() else " (the file is not present)")
+        )
+        return 0
+
+    provider_keys = _migrate_provider_env_keys()
+
+    existing: set[str] = set()
+    store = None
+    if not args.dry_run and store_path().exists():
+        store = open_store()
+        existing = {record.name for record in store.list()}
+
+    counts = {"stored": 0, "already present": 0, "dry-run": 0, "failed": 0}
+    for key, secret in values.items():
+        if key in provider_keys:
+            name = provider_secret_name(key)
+            role = "provider"
+            description = "Provider API key migrated from the plaintext credentials.env"
+        else:
+            name = key
+            role = "agent"
+            description = "Secret migrated from the plaintext credentials.env"
+        # The class is the one the store will DERIVE from the name, and it is
+        # computed the same way here so a dry run cannot report a destination the
+        # real run would file differently.
+        status = secret_class(name)
+        if args.dry_run:
+            counts["dry-run"] += 1
+            print(f"{key} -> {name} ({status}) [dry-run]")
+            continue
+        if name in existing:
+            counts["already present"] += 1
+            print(f"{key} -> {name} ({status}) [already present]")
+            continue
+        # One store handle across the loop, and `session_id()` so the audit chain
+        # attributes each row to the session that ran the migration. `create=True`
+        # only on this branch: it is the verb that legitimately creates a store.
+        store = store or open_store(create=True)
+        try:
+            store.set(
+                name,
+                secret.get_secret_value().encode("utf-8"),
+                description=description,
+                role=role,
+                session_id=session_id(),
+            )
+        except SecretStoreError as exc:
+            counts["failed"] += 1
+            # Per-key, so one unwritable row does not abandon the rest of the
+            # file half-migrated with no record of where it stopped.
+            _err(f"{key} -> {name} FAILED: {exc}")
+            continue
+        counts["stored"] += 1
+        existing.add(name)
+        print(f"{key} -> {name} ({status}) [stored]")
+
+    summary = ", ".join(f"{count} {label}" for label, count in counts.items() if count)
+    _err(f"migrate-env: {len(values)} key(s) read from {source.name}; {summary or 'nothing to do'}")
+    if not args.dry_run:
+        _err(
+            f"the plaintext file was left in place; delete {source} once `lop secret list` "
+            "shows every name."
+        )
+    return 0
 
 
 def _read_passphrase(prompt: str) -> str:
