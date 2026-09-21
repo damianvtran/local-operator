@@ -181,14 +181,47 @@ def test_purge_identity_is_refused_on_a_real_process_without_a_terminal(root: Pa
     assert identity.identity_path(root).exists()
 
 
-def test_uninstall_reports_an_isolated_home_instead_of_a_launchd_error(root: Path) -> None:
+def test_uninstall_reports_an_isolated_home_instead_of_a_launchd_error(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """R6: a redirected HOME has no LaunchAgent, and the message must say that
     plainly — this is the shape a test harness runs in, and it must not read as a
-    failure to install."""
+    failure to install.
+
+    THE PLATFORM IS PINNED, and that is not decoration: every sentence this test
+    asserts is chosen by ``is_supported()`` (``uninstall``'s step, ``install``'s
+    reason, ``service_action``'s reason — see the two siblings below, which pin the
+    OPPOSITE answer and are the other half of this surface). Unpinned, the test
+    asserted the launchd wording on a host that has launchd and therefore failed on
+    CI's Linux runner, where the honest answers are "no launchd on this platform"
+    and reason ``no_launchd``: a test that only passes on the author's OS is not a
+    test. ``sys.platform`` and ``shutil.which`` are patched to the launchd answer
+    rather than stubbing the guard, so the real ``is_supported()`` expression is
+    what runs. In an isolated HOME nothing downstream reaches ``launchctl``:
+    ``_plist_is_addressable()`` is a passwd-home question and answers False here."""
     identity.mint(root)
+    monkeypatch.setattr(relay.sys, "platform", "darwin")
+    monkeypatch.setattr(relay.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        relay,
+        "_launchctl",
+        lambda *args: pytest.fail(f"launchctl was invoked from a redirected HOME: {args}"),
+    )
     result = relay.uninstall(root=root)
     assert result["ok"] is True
-    assert any("no LaunchAgent to remove here" in step for step in result["steps"]), result
+    # Two sentences say the same thing here, and which one is correct depends on
+    # the HOST, not on the HOME: a redirected HOME on a machine that HAS launchd
+    # reports that launchd supervises a different home, while a host with no
+    # launchd at all reports that there is no launchd to unload. Both mean
+    # "nothing was loaded or unloaded, and here is how to run without launchd",
+    # and asserting only the first made this test pass on the author's macOS and
+    # fail on CI's Linux — a test that only holds on one OS is not a test of the
+    # receipt. The teeth are unchanged: a receipt that reported success with no
+    # step at all, or a step that did not explain itself, still fails.
+    assert any(
+        "no LaunchAgent to remove here" in step or "no launchd on this platform" in step
+        for step in result["steps"]
+    ), result
 
     started = relay.install(port=4097)
     assert started["ok"] is False

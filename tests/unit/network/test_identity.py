@@ -129,8 +129,11 @@ def test_rotation_changes_the_id_and_keeps_continuity(root: Path) -> None:
     assert new.rotated_from == old.device_id
     assert new.device_id != old.device_id
     assert previous.device_id == old.device_id
-    assert identity.load(root).device_id == new.device_id
-
+    # The store, read back: ``identity.load`` is ``None`` for a device that has never
+    # minted, so the assertion proves the rotated identity is the one on disk.
+    stored = identity.load(root)
+    assert stored is not None
+    assert stored.device_id == new.device_id
     statement = identity.rotation_statement(old, new, "n_abc", signed_at=1.0)
     identity.verify_rotation_statement(statement, old.public_key)
 

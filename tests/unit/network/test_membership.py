@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -113,9 +114,10 @@ def test_removing_a_member_tombstones_rotates_and_bumps_the_epoch(root: Path) ->
     outcome = relay.remove_member(record, state, device_id=PEER, by=SELF, root=root)
     assert outcome.epoch == 2
     assert outcome.removed == [PEER]
-    assert record.member(PEER) is not None
-    assert record.member(PEER).active is False
-    assert record.member(PEER).removed_at is not None
+    peer_row = record.member(PEER)
+    assert peer_row is not None
+    assert peer_row.active is False
+    assert peer_row.removed_at is not None
     assert record.is_burned(PEER)
     assert record.rotations["2"] == SELF
     # The secret changed and the old one is retained for reconcile, and nothing more.
@@ -170,7 +172,9 @@ def test_the_lowest_id_active_admin_rotates_after_a_leave() -> None:
     peer_row.capabilities = sorted(types.capabilities_for_role("admin"))
     assert relay.lowest_id_admin(record) == PEER
     relay.leave(record, device_id=PEER, persist=False)
-    assert record.member(PEER).active is False
+    left_row = record.member(PEER)
+    assert left_row is not None
+    assert left_row.active is False
     assert relay.lowest_id_admin(record) == "d_" + "c" * 32
 
 
@@ -179,7 +183,9 @@ def test_leaving_marks_the_row_and_burns_the_id() -> None:
     _admit_peer(record)
     relay.leave(record, device_id=PEER, persist=False)
     assert record.is_burned(PEER)
-    assert record.member(PEER).removed_by == PEER
+    removed_row = record.member(PEER)
+    assert removed_row is not None
+    assert removed_row.removed_by == PEER
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +224,10 @@ def test_the_member_digest_moves_only_with_membership() -> None:
     unanswerable, so liveness fields are excluded from it."""
     record, _state = _record()
     digest = relay.members_digest_of(record)
-    record.member(SELF).last_seen_at = 12345.0
-    record.member(SELF).duplicate_count = 4
+    self_row = record.member(SELF)
+    assert self_row is not None
+    self_row.last_seen_at = 12345.0
+    self_row.duplicate_count = 4
     assert relay.members_digest_of(record) == digest
     _admit_peer(record)
     assert relay.members_digest_of(record) != digest
@@ -230,7 +238,9 @@ def test_the_member_digest_moves_only_with_membership() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _epoch_frame(record: types.NetworkRecord, state: types.SecretState, *, epoch: int) -> dict:
+def _epoch_frame(
+    record: types.NetworkRecord, state: types.SecretState, *, epoch: int
+) -> dict[str, Any]:
     frame = relay.epoch_frame(record, state, reason="member_removed", target_device_id=SELF)
     frame["epoch"] = epoch
     frame["rotation_id"] = PEER
@@ -276,7 +286,9 @@ def test_a_member_list_that_drops_self_is_refused() -> None:
     record, state = _record()
     _admit_peer(record)
     frame = _epoch_frame(record, state, epoch=2)
-    frame["members"] = [record.member(PEER).to_json()]
+    peer_row = record.member(PEER)
+    assert peer_row is not None
+    frame["members"] = [peer_row.to_json()]
     frame["members_digest"] = ""
     outcome = relay.apply_epoch(record, state, frame, sender_device_id=PEER, persist=False)
     assert outcome.detail == "self_absent_from_members"

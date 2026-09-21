@@ -407,6 +407,25 @@ def test_a_member_count_reports_what_it_could_and_could_not_verify(
     b = _make(devices, "b", mode=SILENT)
     c = _make(devices, "c", mode=HUB)
 
+    # B MUST NOT DIAL A, and that is the topology this test is ABOUT rather than an
+    # optimisation. A dial-only relay advertises LOOPBACK (`advertise_endpoints`),
+    # which a sibling relay on the same host can reach, so on a loaded runner `b`
+    # established a link to `a` moments after the member list gave it `a`'s row —
+    # and then "verified with 1 of 2" was the wrong expectation for an honest
+    # report that HAD asked both. CI failed on exactly that shard: the assertions
+    # below read the race, not the rule. Blocking b's dials to a makes "this leaf
+    # can ask only one of its two peers" a property of the fixture instead of a
+    # hope about scheduling; the spy goes on before any network exists, so there is
+    # no window in which the link could already be up.
+    original_dial = b.server._ensure_link_with_reason  # noqa: SLF001 — the dialling path
+
+    def _hold_a(device_id: str, **fields: Any) -> Any:
+        if device_id == a.device_id:
+            return None, "test_fixture: this device is held unreachable"
+        return original_dial(device_id, **fields)
+
+    b.server._ensure_link_with_reason = _hold_a  # type: ignore[method-assign]  # noqa: SLF001
+
     record = _init_network(c.server)
     assert _join(b, inviter=c, monkeypatch=monkeypatch)["device_id"] == b.device_id
     assert _join(a, inviter=c, monkeypatch=monkeypatch)["device_id"] == a.device_id
@@ -417,6 +436,15 @@ def test_a_member_count_reports_what_it_could_and_could_not_verify(
     row = next(item for item in rows if item["network_id"] == record.network_id)
     assert row["members"] == 3
     assert row["membership_state"] == "active"
+
+    # THE FIXTURE'S PRECONDITION, ASSERTED RATHER THAN ASSUMED. If a link to `b`
+    # exists by the time the report is read, then "b is the peer a cannot verify
+    # with" is not the state under test — and the accidental-dial race this fixture
+    # blocks would show up here, by name, instead of as a cryptically longer
+    # ``answered`` list three assertions later.
+    assert (
+        a.server._link_for(b.device_id) is None
+    ), "the leaf gained a link to its unverifiable peer"
 
     # A lone leaf CANNOT verify with the peer it has no link to, and says so.
     reports = a.server.refresh_membership()  # noqa: SLF001
@@ -486,7 +514,12 @@ def test_the_removal_frame_is_applied_by_the_device_it_removes(
     assert removed.epoch == 2, "the removed device never applied the rotation that removed it"
     assert b.device_id in removed.removed_ids
     own_row = removed.member(b.device_id)
-    assert own_row is not None and not own_row.active and own_row.removed_at > 0
+    assert own_row is not None
+    assert own_row.active is False
+    # ``removed_at`` is stamped only by the tombstone path, so its presence IS the
+    # assertion — a removed row without the stamp is the defect, not a detail.
+    assert own_row.removed_at is not None
+    assert own_row.removed_at > 0
     # THE SECRET IS STILL WITHHELD — the ordering fix does not leak key material to
     # the device being evicted (§8.1, `epoch_secret_withheld_from_removed`).
     assert store.load_secrets(record.network_id, b.root).secret == before
@@ -586,15 +619,15 @@ def test_a_pairing_refusal_carries_the_sentence_and_the_remedy(
     )
     assert store.load(record.network_id, a.root).is_burned(b.device_id)
 
+    # NO HUMAN ON THE INVITING DEVICE AT ALL, and no clock to outlive: whether this
+    # id is burned is a LOCAL fact the admitting device holds, so the refusal must
+    # arrive on its own. This is what makes the case robust under load — the round-4
+    # review measured `assert 'timeout' == 'device_id_conflict'` in 2 runs of 5 when
+    # the refusal waited behind a confirmation window (and it is why the listener now
+    # decides it before it asks: nobody should compare six digits for a pairing that
+    # cannot succeed).
+    started = time.monotonic()
     with pytest.raises(types.PairingRefusal) as excinfo:
-        # NO HUMAN ON THE INVITING DEVICE AT ALL, and no clock to outlive: whether this
-        # id is burned is a LOCAL fact the admitting device holds, so the refusal must
-        # arrive on its own. This is what makes the case robust under load — the round-4
-        # review measured `assert 'timeout' == 'device_id_conflict'` in 2 runs of 5 when
-        # the refusal waited behind a confirmation window (and it is why the listener now
-        # decides it before it asks: nobody should compare six digits for a pairing that
-        # cannot succeed).
-        started = time.monotonic()
         _join(b, inviter=a, monkeypatch=monkeypatch, confirm=False)
     elapsed = time.monotonic() - started
     sentence = excinfo.value.sentence

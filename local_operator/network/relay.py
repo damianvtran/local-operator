@@ -155,6 +155,18 @@ DEFAULT_MAX_LINKS = 32
 #: and not a share, exactly as ``probe_candidates`` is: past it, a connection is
 #: closed rather than queued, because a queue is the resource being defended.
 DEFAULT_MAX_HANDSHAKES = 8
+
+#: How often a SATURATED pre-auth bound is allowed to say so in the local audit log.
+#:
+#: The peer is told nothing (see the call site: a silent close is what keeps the port
+#: from being a probe oracle), so the ONLY record of a refusal is the operator's own
+#: log — and the question it answers is the one a saturated relay produces: "my peer
+#: cannot connect and this device looks idle". Rate limited because the traffic shape
+#: that produces a drop is a flood: one record per connection would let an
+#: unauthenticated stranger churn the log an incident review needs, which is the same
+#: resource the cap itself exists to defend. One record per window names the cap; the
+#: repetition and the subject address describe the volume.
+HANDSHAKE_CAP_NOTICE_S = 60.0
 DEFAULT_AUTOSTART = True
 
 #: Reconcile grants: at most this many per device per network per hour. "I keep
@@ -2170,6 +2182,10 @@ class RelayServer:
         #: plain: a release without an acquire is a bug this turns into a loud
         #: ValueError rather than a cap that silently grows.
         self._handshake_slots = threading.BoundedSemaphore(max(1, self.settings.max_handshakes))
+        #: When the pre-auth bound last reported itself (``_note_handshake_cap``).
+        #: Written and read by the accept loop alone, which is one thread, so it needs
+        #: no lock; the audit writer is the relay's own and is already thread-safe.
+        self._cap_notice_at = 0.0
         self._reconcile_grants: dict[tuple[str, str], list[float]] = {}
         self._handlers: dict[str, Callable[[PeerLink, dict[str, Any]], dict[str, Any] | None]] = {
             "ping": self._op_ping,
@@ -2685,6 +2701,7 @@ class RelayServer:
             # error frame here would be a probe oracle for a stranger who never
             # authenticated.
             if not self._handshake_slots.acquire(blocking=False):
+                self._note_handshake_cap(addr)
                 sock.close()
                 continue
             thread = threading.Thread(
@@ -2694,6 +2711,35 @@ class RelayServer:
                 daemon=True,
             )
             thread.start()
+
+    def _note_handshake_cap(self, addr: Any) -> None:
+        """Name a pre-auth cap drop in the LOCAL audit record, once per window.
+
+        The dropped connection learns nothing (no reply, no frame) and that is
+        deliberate, so this record is the only place the cap is ever named. Without
+        it a saturated relay had no local trace at all: the operator's symptom is a
+        peer that cannot connect while this device reports nothing, which is the
+        "dead instrument" shape this repo treats as a defect of its own.
+
+        One record per :data:`HANDSHAKE_CAP_NOTICE_S` window rather than one per
+        connection — see that constant for why a stranger must not be able to churn
+        the log. ``subject`` is the first refused peer of the window; later drops in
+        the same window are the same story and are not re-told.
+        """
+        now = time.time()
+        if self._cap_notice_at and now - self._cap_notice_at < HANDSHAKE_CAP_NOTICE_S:
+            return
+        self._cap_notice_at = now
+        self.audit.record(
+            AuditEvent(
+                event="handshake_refused",
+                actor="unknown",
+                subject=f"{addr[0]}:{addr[1]}" if isinstance(addr, tuple) else str(addr),
+                outcome="refused",
+                cause="handshake_cap",
+                detail={"cause": "handshake_cap", "mode": "unauthenticated"},
+            )
+        )
 
     def _handshake_inbound(self, sock: socket.socket, addr: Any) -> None:
         """One accepted connection: take a pre-auth slot, give it back on EVERY exit.
@@ -6364,6 +6410,12 @@ def install(port: int = DEFAULT_PORT, *, dry_run: bool = False) -> dict[str, Any
         return {
             "ok": False,
             "steps": steps,
+            # ``reason`` beside the sentence, like this verb's two siblings:
+            # ``service_action`` answers ``no_launchd`` for the same condition, and a
+            # refusal with only prose is what the CLI's own caller has to switch on
+            # by string. Additive — no caller reads this key today (the CLI refuses
+            # before it gets here), which is exactly why naming it now costs nothing.
+            "reason": "no_launchd",
             "error": (
                 "install needs macOS launchd; run `lop network serve` in the foreground "
                 "elsewhere"

@@ -78,11 +78,6 @@ def test_the_link_version_is_separate_from_the_session_protocol() -> None:
 def test_the_network_group_is_registered_by_the_main_cli() -> None:
     """The one wiring edit: the parser the user actually runs knows the group."""
     from local_operator.cli import build_cli_parser
+    from tests.unit.network import conftest as net_fixtures
 
-    parser = build_cli_parser()
-    actions = [action for action in parser._actions if getattr(action, "choices", None)]
-    subcommands = set()
-    for action in actions:
-        if isinstance(getattr(action, "choices", None), dict):
-            subcommands |= set(action.choices)
-    assert "network" in subcommands
+    assert "network" in set(net_fixtures.subcommands_of(build_cli_parser()))

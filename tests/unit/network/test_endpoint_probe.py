@@ -39,6 +39,7 @@ from __future__ import annotations
 import socket
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -272,7 +273,9 @@ def _record(device_id: str) -> types.NetworkRecord:
     return record
 
 
-def _row(device_id: str, *, role: str = "drive", endpoints: list[str] | None = None) -> dict:
+def _row(
+    device_id: str, *, role: str = "drive", endpoints: list[str] | None = None
+) -> dict[str, Any]:
     return types.MemberRecord(
         device_id=device_id,
         public_key=wire.b64u(b"b" * 32),
@@ -375,8 +378,9 @@ def test_the_dialler_learns_the_member_table_from_the_peer_it_dialled(
     link, reason = server_b.dial(record.network_id, host=f"{host_a}:{port_a}", epoch=record.epoch)
     assert link is not None, reason
     learned = store.load(record.network_id, server_b.root)
-    assert learned.member(NEWCOMER) is not None
-    assert learned.member(NEWCOMER).name == "newcomer"
+    newcomer_row = learned.member(NEWCOMER)
+    assert newcomer_row is not None
+    assert newcomer_row.name == "newcomer"
     link.close("test")
 
 

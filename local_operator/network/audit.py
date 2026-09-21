@@ -135,6 +135,12 @@ CAUSES: frozenset[str] = frozenset(
         "reconcile_rate_limited",
         "protocol_mismatch",
         "duplicate_identity",
+        # The pre-auth bound refused a connection: named as its own cause because the
+        # operator's remedy differs from every other refusal here (nothing is wrong
+        # with that peer; this device is saturated), and because a cause that is not
+        # in this enum is written as "internal" — which would have reported a
+        # deliberately-bounded relay as a relay with an internal fault.
+        "handshake_cap",
         "policy",
         "timeout",
         "internal",
