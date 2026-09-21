@@ -85,6 +85,20 @@ SENTINEL = "mongodb+srv://svc_user:sh4pedSentinelPw@db.internal/app"
 SENTINEL_FRAGMENT = SENTINEL.split(":", 1)[1].rsplit("@", 1)[0]
 
 
+def _exposed_text() -> str:
+    """The corpus's own ESCALATING case: a DSN with the username as its password.
+
+    The pair of fixtures this file needs is "masked whole" (``SENTINEL``) and
+    "readable material left behind", and only the corpus knows which spellings
+    grade as the second: the DSN rule deliberately keeps the userinfo username, so
+    ``amqp://guest:guest@…`` reads its own password back and the classification
+    escalates. Derived rather than written out, so this file still spells no
+    credential-shaped literal of its own, and so the day the corpus changes its
+    mind the tests follow it instead of disagreeing with it.
+    """
+    return next(case.text for case in POSITIVE_CASES if case.reason == "amqp DSN")
+
+
 def _store(text: str) -> str:
     return VariableStore(cwd=".").redact(text)
 
@@ -484,16 +498,26 @@ def test_a_registered_shape_value_is_never_readable() -> None:
         store.read("sh4pedSentinelPw")
 
 
-def test_the_session_hook_reports_the_shapes_that_fired() -> None:
+def test_a_contained_hit_is_not_an_incident_and_is_still_contained() -> None:
+    """The operator's rule, both halves, in one test because they are one pair.
+
+    "As long as something wasn't actually leaked to the transcript we shouldn't get
+    a session incident indicated anywhere": a value masked WHOLE files nothing at
+    all. The second claim is the one that must NOT move with it — the hit is still
+    registered for containment, so the same secret in a spelling the table has no
+    rule for is masked later in the session. The incident is the INDICATOR; the
+    registration is the PROTECTION, and only the indicator was asked to go.
+    """
     session = _session()
     session._pending_shape_incidents.clear()
     session._reported_shape_incidents.clear()
     text = session._redact_tool_result_text(SENTINEL)
-    assert SENTINEL_FRAGMENT not in text
-    assert [
-        (labels, reached_model)
-        for _tool, labels, _summary, reached_model in session._pending_shape_incidents
-    ] == [(["dsn-password"], False)]
+    assert SENTINEL_FRAGMENT not in text, "the value stopped being masked"
+    assert session._pending_shape_incidents == [], "a contained hit filed an incident"
+    # The protection, exercised through the shipped hook rather than the store: the
+    # value comes back in a form the shape table has no rule for.
+    later = session._redact_tool_result_text(f"prefix {SENTINEL_FRAGMENT} suffix")
+    assert SENTINEL_FRAGMENT not in later, "the masked value was not registered"
 
 
 def test_the_incident_names_the_tool_and_carries_no_value() -> None:
@@ -507,23 +531,29 @@ def test_the_incident_names_the_tool_and_carries_no_value() -> None:
     assert "sh4pedSentinelPw" not in text
 
 
-def test_one_incident_per_tool_and_shape_set() -> None:
-    """A command that echoes the same credential ten times is one fact."""
+def test_an_exposed_hit_still_files_one_incident_per_tool_and_shape_set() -> None:
+    """A command that echoes the same credential ten times is one fact.
+
+    Driven with the EXPOSED case, which is the only one that reaches the queue now:
+    the dedupe has to keep working for the event that is still filed.
+    """
     session = _session()
     session._pending_shape_incidents.clear()
     session._reported_shape_incidents.clear()
     for _ in range(5):
-        session._redact_tool_result_text(SENTINEL)
-    assert len(session._pending_shape_incidents) == 1
+        session._redact_tool_result_text(_exposed_text())
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
 
 
 @pytest.mark.asyncio
 async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> None:
     """Flushed at the boundary, and PERSISTED: a resumed session still knows.
 
-    Persisted rather than live-only because what it records — a credential
-    reached a tool result and must be rotated — is still true tomorrow, which is
-    the opposite of the MCP-recovery record's reason for not persisting.
+    Persisted rather than live-only because what it records is still true
+    tomorrow, which is the opposite of the MCP-recovery record's reason for not
+    persisting. Driven with the EXPOSED case, which is the only one that files
+    now: a contained hit has nothing to persist, and its own end-to-end absence
+    test is below.
     """
     session = Session(
         model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
@@ -535,13 +565,13 @@ async def test_the_queued_incident_reaches_the_transcript(tmp_path: Path) -> Non
         cwd=str(tmp_path),
         variables=VariableStore(cwd=str(tmp_path)),
     )
-    session._redact_tool_result_text(SENTINEL)
+    session._redact_tool_result_text(_exposed_text())
     await session._flush_shape_incidents()
 
     body = (tmp_path / "incident" / "transcript.jsonl").read_text()
     assert "session_incident" in body
-    assert "sh4pedSentinelPw" not in body
-    assert "dsn-password" in body
+    assert "rotate" in body
+    assert REDACTION_MARKER not in body
 
 
 def test_the_tool_identity_travels_with_the_redaction() -> None:
@@ -723,6 +753,99 @@ def test_the_shape_pass_is_linear_in_the_size_of_the_text() -> None:
     assert large <= max(small, 1e-4) * 40, f"shape pass looks super-linear: {small} -> {large}"
 
 
+# --- the credential-printing detector: one bounded window, no unbounded run ------
+#
+# The dump table is a SECOND pattern table, on the same hot path, and the file rule
+# in it was quadratic in the length of the line: an unbounded lazy gap followed by an
+# unbounded ``[^\s]*`` makes the engine walk the rest of the line at every gap length.
+# Measured on ``"head " + "x" * 140000``: 114.4 s of CPU for ONE ``search``, against
+# 0.0009 s once both runs are bounded. Real commands reach 30,849 characters (p99
+# 4.9 KB over 39,111 harvested commands), so the blowup was latent rather than live —
+# and latent is not safe: the same class of unbounded run had frozen six sessions on
+# this fleet hours earlier. The three tests below pin the cost three ways, none of
+# them a stopwatch reading taken on this machine.
+
+
+def _dump_cpu(command: str) -> float:
+    """CPU seconds for one detection, best of three samples.
+
+    ``process_time`` and not wall time, and the minimum of three and not one
+    sample, for the reasons AGENTS.md records under "If you must measure, measure
+    CPU, not wall time": a wall reading on this host conflates "the engine worked"
+    with "the OS did not schedule this process" (measured there: 525-668 ms of
+    apparent stall with the loop idle), and the minimum is the sample that saw the
+    least of it. A single wall sample of a sub-millisecond call is noise — this test
+    WAS written that way first and failed once in a full-tier run while passing
+    alone, which is the flake the docstring above warns about.
+    """
+    best = float("inf")
+    for _ in range(3):
+        start = time.process_time()
+        credential_dump_notice(command)
+        best = min(best, time.process_time() - start)
+    return best
+
+
+#: Written to be the worst case for the OLD shape: a reading verb, then a long
+#: separator-free run, and NO match in it, so every gap length and every path length
+#: has to be tried before the search gives up. 8,000 characters is the size that
+#: makes the arithmetic work in both directions: the pre-fix rule needs 0.58 s here
+#: and 37 s at eight times the text (quadratic), while the fixed rule needs 14 ms and
+#: 110 ms (linear) — so the 40x allowance sits between two numbers it cannot confuse,
+#: and both are far above the clock's noise floor.
+_PATHOLOGICAL_LINE = "head " * 1_600
+
+
+def test_no_dump_rule_may_walk_a_long_line_super_linearly() -> None:
+    """The RATIO, for the reason the shape pass's twin test carries.
+
+    An absolute millisecond budget here would be a number off this host, and this
+    host runs ~25 sibling sessions (AGENTS.md records three PRs lost to exactly that
+    mistake). What holds anywhere is the ratio: eight times the text must not cost
+    eight times the time per character. The 40x allowance is enormous on purpose —
+    the regression it catches is quadratic, which is 64x at this size, and a constant
+    factor is not it.
+    """
+    small = _dump_cpu(_PATHOLOGICAL_LINE)
+    large = _dump_cpu(_PATHOLOGICAL_LINE * 8)
+    assert large <= max(small, 1e-4) * 40, f"the dump rule looks super-linear: {small} -> {large}"
+
+
+def test_the_file_rule_may_not_look_beyond_a_bounded_window() -> None:
+    """The gap bound, pinned from both sides as behaviour rather than as constants.
+
+    A credential filename has to be an argument OF the reading verb, which is what
+    bounds the rule: ~90 characters out still fires (a path built through a loop
+    variable, which is how one real harness command spelled it), while 5,000 does
+    not. The far probe is the one the OLD rule failed — with an unbounded gap it
+    matched a bare ``.pem`` five thousand characters away from the verb.
+    """
+    near = "head -c 200 " + "x" * 80 + "/key.pem"
+    far = "head -c 200 " + "x" * 5_000 + "/key.pem"
+    assert credential_dump_notice(near) is not None, "the window is too tight to be usable"
+    assert credential_dump_notice(far) is None, "the rule walked past its own window"
+
+
+def test_the_file_rule_is_written_without_an_unbounded_run() -> None:
+    r"""A STRUCTURAL pin on the cost, independent of any measurement.
+
+    The rule's own source is asserted to contain no unbounded quantifier, so the
+    property cannot come back by an edit that looks innocent and measures fine on a
+    short line: ``[^\n]*?`` and ``[^\s]*`` are exactly what made the search
+    quadratic, and both are fixed-width now. Every other rule in the table is checked
+    for the same reason it is cheap — its unbounded gap is followed by alternations
+    that are literal-anchored, so a failing position costs a constant — which is why
+    this pin is per-rule rather than over the table.
+    """
+    from local_operator.redaction_shapes import DUMP_SHAPES
+
+    rule = next(shape for shape in DUMP_SHAPES if shape.label == "credential-file-read")
+    source = rule.pattern.pattern
+    assert "*" not in source, f"an unbounded ``*`` run is back: {source}"
+    assert "+" not in source, f"an unbounded ``+`` run is back: {source}"
+    assert "{" in source, "the bounds were removed rather than expressed"
+
+
 # --- subagents ---------------------------------------------------------------
 #
 # The defect this module closes was found in a SUBAGENT's tool result, so the
@@ -807,11 +930,13 @@ async def test_a_subagents_transcript_never_carries_the_credential(
     bodies = {path: path.read_text() for path in transcripts}
     for path, body in bodies.items():
         assert "sh4pedSentinelPw" not in body, f"the credential reached {path}"
-    assert any(
-        "session_incident" in body for body in bodies.values()
-    ), "the child's redaction was never reported"
-    # And the command really ran: the masked value is what the child wrote.
+    # And the command really ran: the masked value is what the child wrote. This is
+    # the liveness evidence now that a contained hit files nothing at all — an
+    # absence assertion alone could not tell "quiet" from "never exercised".
     assert any(REDACTION_MARKER in body for body in bodies.values())
+    assert not any(
+        "session_incident" in body for body in bodies.values()
+    ), "a contained hit was reported"
     await parent.dispose()
 
 
@@ -2198,12 +2323,16 @@ def test_the_escalated_notice_still_demands_a_rotation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_contained_result_files_an_informational_incident(tmp_path: Path) -> None:
-    """End to end: the store's classification reaches the transcript and the operator.
+async def test_a_contained_result_files_nothing_anywhere(tmp_path: Path) -> None:
+    """End to end: masked whole means NO incident on any surface the operator sees.
 
-    The value below is masked WHOLE, which is the contained case, and every artefact
-    has to agree — the queued flag, the journaled record and the live receipt.
-    Measured before this change: all of them said "rotate it".
+    The three artefacts have to agree, and they are the whole of "indicated": the
+    queued flag, the live receipt and the journaled row. Measured before this
+    change: all three fired, for a value the model never read, which is the
+    indicator the operator asked to be rid of. The masking itself is asserted in
+    the same breath — an absence test that cannot tell "quiet" from "not running"
+    is no evidence at all (AGENTS.md: a dead instrument returns a reading, not an
+    error).
     """
     from local_operator.harness.types import NoticeEvent
 
@@ -2214,18 +2343,22 @@ async def test_a_contained_result_files_an_informational_incident(tmp_path: Path
     session.subscribe(events.append)
 
     assert SENTINEL_FRAGMENT not in session._redact_tool_result_text(SENTINEL)
-    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [False]
+    assert session._pending_shape_incidents == [], "a contained hit filed an incident"
 
     await session._flush_shape_incidents()
 
-    notices = [event for event in events if isinstance(event, NoticeEvent)]
-    assert notices, "the contained incident emitted no live receipt"
-    assert "no exposure" in notices[0].text and "rotate" not in notices[0].text
-
-    body = (tmp_path / "session" / "transcript.jsonl").read_text()
-    rows = [json.loads(line) for line in body.splitlines() if "session_incident" in line]
-    assert rows, "the contained incident was not journaled"
-    assert rows[-1]["payload"]["details"]["reached_model"] is False
+    assert not [
+        event for event in events if isinstance(event, NoticeEvent)
+    ], "a contained hit emitted a live receipt"
+    # The transcript is written lazily — on a turn, not by the redaction hook —
+    # so "no row" is asserted over whatever exists rather than over a file the
+    # harness was never asked to create.
+    transcript = tmp_path / "session" / "transcript.jsonl"
+    body = transcript.read_text() if transcript.exists() else ""
+    assert "session_incident" not in body, "a contained hit was journaled"
+    # The instrument is not dead: the mask really is what the hook returned, and
+    # that is what a reader of this session sees.
+    assert REDACTION_MARKER in session._redact_tool_result_text(SENTINEL)
 
 
 @pytest.mark.asyncio
@@ -2264,16 +2397,51 @@ async def test_an_exposure_with_no_contained_label_still_files_the_rotation(tmp_
     assert "rotate" in notices[0].text
 
 
-def test_the_live_stream_reports_its_classification_too() -> None:
-    """The pipe filter files its own incident, so it needs its own classification.
+def test_the_live_stream_files_only_an_exposure() -> None:
+    """The pipe filter is a producer, and the sink's gate covers it too.
 
     It is the only layer that sees a credential existing ONLY in a command's
     output — the production case this whole feature was written for — and it masks
-    the bytes before any result exists, so nothing later can report it. Its hits
-    are contained (the bytes were masked before publication), and the notice it
-    files has to say so rather than demand a rotation.
+    the bytes before any result exists, so nothing later can report it. Its
+    ordinary hit is CONTAINED (the bytes are masked before publication) and files
+    nothing; an exposure inside the same stream still has to file, which is the
+    second half of the test because a gate that swallows both is indistinguishable
+    from a broken reporter.
     """
     from local_operator.harness.redaction import (
+        reset_shape_hit_reporter,
+        set_shape_hit_reporter,
+    )
+
+    def _feed(session: Any, payload: str) -> list[bool]:
+        session._pending_shape_incidents.clear()
+        session._reported_shape_incidents.clear()
+        token = set_shape_hit_reporter(session._queue_shape_incident)
+        try:
+            redactor = builtin._PipeRedactor([])
+            redactor.feed(payload.encode())
+            redactor.feed(b"", final=True)
+        finally:
+            reset_shape_hit_reporter(token)
+        return [flag for _t, _l, _s, flag in session._pending_shape_incidents]
+
+    session = _session()
+    assert _feed(session, SENTINEL) == [], "a contained stream hit filed an incident"
+    assert _feed(session, _exposed_text()) == [True], "an exposure stopped being filed"
+
+
+def test_a_contained_report_cannot_file_by_any_route() -> None:
+    """The gate is the SINK's, so every producer inherits it — including a new one.
+
+    The policy has to hold for the result hook (tested above), for the pipe filter
+    (tested above) and for anything that reports through
+    ``harness.redaction.report_shape_hits``, which is the shape every other surface
+    uses. Driving the sink directly is the point: a route that appears later cannot
+    file a contained hit by forgetting a gate, and an exposure from the same tool is
+    still filed exactly once.
+    """
+    from local_operator.harness.redaction import (
+        report_shape_hits,
         reset_shape_hit_reporter,
         set_shape_hit_reporter,
     )
@@ -2281,31 +2449,18 @@ def test_the_live_stream_reports_its_classification_too() -> None:
     session = _session()
     session._pending_shape_incidents.clear()
     session._reported_shape_incidents.clear()
+    session._queue_shape_incident(["dsn-password"], False)
+    assert session._pending_shape_incidents == [], "the sink filed a contained hit"
+
     token = set_shape_hit_reporter(session._queue_shape_incident)
     try:
-        redactor = builtin._PipeRedactor([])
-        redactor.feed(SENTINEL.encode())
-        redactor.feed(b"", final=True)
+        report_shape_hits(["dsn-password"], reached_model=False)
+        assert session._pending_shape_incidents == [], "the reporter filed a contained hit"
+        report_shape_hits([], reached_model=True)
+        report_shape_hits([], reached_model=True)
     finally:
         reset_shape_hit_reporter(token)
-    assert session._pending_shape_incidents, "the live stream reported nothing"
-    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [False]
-
-
-def test_the_classification_separates_two_incidents_from_one_tool() -> None:
-    """Contained from bash and EXPOSED from bash are two facts, not one duplicate.
-
-    Deduping on ``(tool, labels)`` alone would drop the escalation as a duplicate of
-    the informational notice whenever the same tool produced both in one turn —
-    exactly the turn where losing the louder one costs the most.
-    """
-    session = _session()
-    session._pending_shape_incidents.clear()
-    session._reported_shape_incidents.clear()
-    session._queue_shape_incident(["dsn-password"], False)
-    session._queue_shape_incident(["dsn-password"], True)
-    session._queue_shape_incident(["dsn-password"], True)
-    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [False, True]
+    assert [flag for _t, _l, _s, flag in session._pending_shape_incidents] == [True]
 
 
 def test_a_store_without_the_report_view_keeps_the_escalated_reading() -> None:

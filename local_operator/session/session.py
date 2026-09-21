@@ -9324,12 +9324,12 @@ class Session:
         live production DSN was found in a transcript with nothing anywhere saying
         it had happened, and every such miss today is discovered by accident. One
         :data:`SESSION_INCIDENT_MESSAGE_TYPE` row names the tool and the shapes, so
-        it becomes a ticket rather than a footnote. The classification is what kind
-        of ticket: a value that was masked whole before the model could read it is
-        contained and owes only cleanup, while readable material left in the text is
-        the one case that asks the operator for a rotation. Labels only, never
-        values: a notice carrying the credential would be the leak it exists to
-        report.
+        it becomes a ticket rather than a footnote — but ONLY for the case that is
+        a ticket: readable material the model can see. A value the pass masked
+        whole is contained, nothing was leaked to the transcript, and it files
+        nothing at all (the operator's instruction: no incident indicated anywhere
+        unless something was actually leaked). Labels only, never values: a notice
+        carrying the credential would be the leak it exists to report.
 
         Called with text alone, so the tool identity rides
         :func:`local_operator.harness.redaction.current_tool_source` — published
@@ -9365,12 +9365,38 @@ class Session:
         except Exception:  # noqa: BLE001 — see the docstring's never-raises note
             logger.warning("credential shape pass failed; withholding this text", exc_info=True)
             return "[output withheld: this session's credential redaction sink could not be read]"
-        if labels or reached_model:
-            self._queue_shape_incident(labels, reached_model)
+        # The filing decision belongs to the SINK, not to either producer: it is the
+        # one place every surface funnels through (this result hook, the pipe filter
+        # and the live-text path, both of which report through
+        # :func:`local_operator.harness.redaction.report_shape_hits`), so "an incident
+        # means an exposure" cannot drift between them. Called with the report as it
+        # is: a contained hit is dropped inside, before the tool lookup or the dedupe
+        # set is touched.
+        self._queue_shape_incident(labels, reached_model)
         return scrubbed
 
     def _queue_shape_incident(self, labels: list[str], reached_model: bool) -> None:
-        """Record one shape-masked result for the boundary flush. Never raises."""
+        """Record one EXPOSED shape hit for the boundary flush. Never raises.
+
+        AN INCIDENT IS AN EXPOSURE, and nothing else. A credential the shape pass
+        masked WHOLE never reached this session's context, so there is nothing to
+        rotate and nothing the model has to be told: it files nothing (the
+        operator's instruction — "as long as something wasn't actually leaked to
+        the transcript we shouldn't get a session incident indicated anywhere"), and
+        a notice shown for a non-event is the noise that teaches an operator to
+        skip the one that is real.
+
+        THIS IS THE ONLY GATE, deliberately. Every surface reports through this
+        method — the session installs it as the reporter
+        (``set_shape_hit_reporter``) and the pipe filter and live-text path reach it
+        via :func:`~local_operator.harness.redaction.report_shape_hits` — so one
+        predicate here covers all three and a fourth added later cannot forget it.
+        The PROTECTION is not here and must not become conditional:
+        ``VariableStore.redact_with_report`` registers every hit for containment
+        before any of this runs.
+        """
+        if not reached_model:
+            return
         try:
             tool, summary = current_tool_source()
             # The classification is part of the identity: the first result of a
@@ -9400,7 +9426,7 @@ class Session:
     async def journal_shape_incident(
         self, tool: str, labels: list[str], summary: str, *, reached_model: bool = True
     ) -> None:
-        """Tell the model (and the transcript) that a result was masked.
+        """Tell the model (and the transcript) that READABLE material was masked.
 
         Rendered rather than classified: this is not a FAILURE, and running it
         through :func:`~local_operator.incidents.classify_incident` would attach
@@ -9409,7 +9435,15 @@ class Session:
         change and a model switch carry their own formatter.
 
         ``reached_model`` is the severity, and its default is the ESCALATED one so
-        that a caller which does not know cannot make the quieter claim.
+        that a caller which does not know cannot make the quieter claim. In-tree it
+        is now always True: both producers (the session result hook and
+        ``harness.redaction.report_shape_hits``, which every other surface goes
+        through) gate on it, because a credential masked WHOLE was never leaked to
+        the transcript and so is no incident at all. The quieter wording is kept in
+        the formatter rather than deleted — it is the formatter's own contract, and
+        a caller that deliberately has something to say about a contained hit
+        should not have to invent the words — and what the operator asked for is
+        silence on the contained case, not the deletion of the sentence.
 
         Persisted, unlike an MCP recovery: what it records (a credential reached a
         tool result, and either it was contained there or it is readable in this
