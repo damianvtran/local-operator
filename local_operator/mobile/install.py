@@ -119,6 +119,14 @@ _COREPACK_ENABLE_TIMEOUT = 30.0
 #: for it: on its own it does not fail closed (see :func:`_package_manager_env`).
 _MANAGE_PM_VERSIONS_ENV = "npm_config_manage_package_manager_versions"
 
+#: The two settings that turn a PIN MISMATCH into a failure instead of a warning:
+#: pnpm's version check only runs at all when the first is set, and only throws
+#: when the second is on. See :func:`_package_manager_env` for the measurements
+#: that put them here — with the disarm alone a wrong pnpm builds the tree and
+#: exits 0, which is the silent shape this guard exists to prevent.
+_STRICT_PM_VERSION_ENV = "npm_config_package_manager_strict_version"
+_STRICT_PM_ENV = "npm_config_package_manager_strict"
+
 #: Corepack asks before it downloads a package manager, and a build child's stdin
 #: is not a terminal — it can never answer. Off in every child this module spawns.
 _COREPACK_DOWNLOAD_PROMPT_ENV = "COREPACK_ENABLE_DOWNLOAD_PROMPT"
@@ -767,8 +775,21 @@ def _package_manager_env(web_dir: Path) -> dict[str, str]:
         behind the refusal in :func:`_pin_mismatch`, never a substitute for it: on
         its own it does not fail closed, and a shared home that is unwritable or
         misconfigured would put an unguarded install straight back into the loop.
-        With it set, a pnpm that does not match the pin fails immediately and
-        loudly (``ERR_PNPM_BAD_PM_VERSION``) instead of forking.
+        With it set, a pnpm that does not match the pin does NOT fail on its own —
+        measured on 2026-09-21 with pnpm 10.30.3 against a tree pinning 11.22.0:
+        ``pnpm build`` and ``pnpm install --lockfile-only`` both exited **0**, and
+        the build script reported ``pnpm/10.30.3``. pnpm's version check compares
+        the pin with the running pnpm but only THROWS when ``packageManagerStrict``
+        is on, and only compares at all when ``packageManagerStrictVersion`` is on
+        (both default to warn-and-continue for the version, which is why an earlier
+        revision of this docstring claimed a loud failure the code did not
+        deliver). So those two settings are added with the same exact-pin gate, and
+        with both the same two commands exit **1** with ``ERROR This project is
+        configured to use v11.22.0 of pnpm. Your current pnpm is v10.30.3``.
+        ``package_manager_strict`` is set explicitly rather than relied on as a
+        default because an operator's ``.npmrc`` may turn it off, and this layer's
+        job is to fail CLOSED; neither setting can fire on a build that the pin
+        itself runs, which is every route this module chooses.
 
         The EXACTNESS test is this function's own, and it is not redundant with
         :func:`_pinned_pnpm`: that one reports the ``packageManager`` spelling's
@@ -776,7 +797,10 @@ def _package_manager_env(web_dir: Path) -> dict[str, str]:
         anything ``semver.valid`` rejects — ``switchCliVersion`` warns ``Cannot
         switch to pnpm@^11: "^11" is not a valid version`` and RETURNS, measured in
         the shipped 10.30.3 bundle — so a range is not a fetch, and disarming one
-        would turn pnpm's warn-and-continue into an error on a tree that works today.
+        would turn pnpm's warn-and-continue into an error on a tree that works
+        today. The strict pair is gated the same way for a second reason: a range
+        can never EQUAL the running version, so with the strict pair set pnpm would
+        throw on a tree that is fine.
       * ``PNPM_HOME``/``COREPACK_HOME`` at the locations resolved above — the
         shared, pre-populated homes — so a seeded machine finds the pinned manager
         already there instead of fetching it.
@@ -791,6 +815,8 @@ def _package_manager_env(web_dir: Path) -> dict[str, str]:
     pin = _pinned_pnpm(web_dir)
     if pin is not None and _EXACT_VERSION.fullmatch(pin) is not None:
         env[_MANAGE_PM_VERSIONS_ENV] = "false"
+        env[_STRICT_PM_VERSION_ENV] = "true"
+        env[_STRICT_PM_ENV] = "true"
     return env
 
 
@@ -945,45 +971,57 @@ def _pin_mismatch(runner: Sequence[str], web_dir: Path) -> str | None:
     )
 
 
-def _seeded_or_path(runner: list[str], web_dir: Path) -> list[str]:
-    """``runner``, or a VERIFIED seeded pin in its place when PATH cannot satisfy the pin.
+def _runner_or_refusal(
+    runner: list[str], web_dir: Path, *, env: Mapping[str, str]
+) -> tuple[list[str], str | None]:
+    """``(runner, None)``, or the guard's own refusal when no route can satisfy the pin.
 
-    THE ONE PLACE THIS BRANCH CHANGES SHIPPED BEHAVIOUR, stated here as well as in
-    the PR body because #1394 landed the opposite an hour earlier and a silent
-    difference between two guards for the same hazard is worse than either. Main's
-    guard refuses whenever the runner's reported version is not the pin; this
-    prefers, in order, a pin already installed where pnpm keeps managed versions,
-    then corepack, and refuses only when neither can supply the pin. The short
-    argument: refusing a machine that can already build safely is a usability
-    regression with no safety gain, and the seeded binary is verified by a probe
-    that cannot itself fetch (:func:`_probe_env`), so a half-written one is not
-    mistaken for a pin.
+    THE POLICY THIS BRANCH ADDS TO #1394's GUARD, and the one place it changes
+    shipped behaviour: main refuses whenever the runner's reported version is not
+    the pin, while this prefers a runner that CAN supply the pin and refuses only
+    when none can. The order, and why each clause is where it is:
 
-    Clause by clause, and the ORDER is load-bearing for the probe count a shipped
-    test asserts (:func:`_pin_mismatch`'s own probe is the only one a machine with
-    nothing seeded pays):
+      1. the runner PATH resolved, when :func:`_pin_mismatch` accepts it. That call
+         is also the ONLY version probe on a machine with nothing else to offer,
+         so the process list #1394's tests assert is unchanged — this function adds
+         no probe to the happy path, and ``_pin_mismatch`` still owns the sentence
+         and the policy for a runner that cannot answer at all (not a mismatch;
+         the group bound is the wall there);
+      2. a pinned pnpm VERIFIED where pnpm keeps managed versions
+         (:func:`_seeded_pnpm`) — local, so it downloads nothing, and verified by
+         ASKING it rather than by its directory existing, so the residue a killed
+         fetch leaves behind is not mistaken for a pin;
+      3. corepack (:func:`_corepack_enable` then ``corepack pnpm``) — a bounded
+         tarball fetch that converges, run through the same bounded, armed runner
+         as every other child, and pnpm's own switch is unreachable on this route
+         (``isExecutedByCorepack``). This is the route a machine that already
+         relied on corepack keeps: dropping the arm refused hosts that used to
+         build, which is the regression this arm closes;
+      4. nothing — the runner is handed back WITH the guard's refusal, so the
+         sentence a reader ends up acting on is still the one #1394 ships.
 
-      * No pin, or a corepack-shaped runner — nothing to prefer. Corepack RESOLVES
-        the pin, so it is never the runner this refusal exists for, and swapping it
-        for a seeded binary would trade the route corepack owns (its own cache) for
-        one that may not be there.
-      * Nothing seeded — the runner is returned untouched, and the caller's guard
-        sees exactly the process list it saw before this arm existed (one probe).
-      * Seeded and the runner already reports the pin — keep the runner. Switching
-        would be a change for nothing, and PATH is what the operator chose.
-      * Otherwise the seeded pin is used. This branch also covers a runner that
-        could not answer AT ALL (the probe hung): an unverifiable runner is not
-        thereby acceptable, and between the two the verified one is the safer
-        choice. Nothing new is fetched either way — :func:`_seeded_pnpm` looks for a
-        binary that is already on the disk and asks it its version.
+    Arms 2 and 3 are consulted only when the guard WOULD refuse, which is what
+    keeps a machine whose PATH pnpm already satisfies the pin from having a
+    package manager downloaded for it: there is nothing to fix, so nothing is
+    fetched. (:func:`_package_runner`'s no-pnpm arm keeps #1394's own order —
+    corepack first — because a host with no pnpm on PATH has no runner to compare
+    and corepack is the route it already has; the seeded pin is that arm's
+    fallback.)
     """
+    mismatch = _pin_mismatch(runner, web_dir)
+    if mismatch is None:
+        return runner, None
     pin = _pinned_pnpm(web_dir)
-    if pin is None or _corepack_shaped(runner):
-        return runner
+    if pin is None:
+        return runner, mismatch
     seeded = _seeded_pnpm(pin)
-    if seeded is None:
-        return runner
-    return runner if _runner_reports(runner) == pin else seeded
+    if seeded is not None:
+        return seeded, None
+    corepack = _shim_argv("corepack")
+    if corepack is None:
+        return runner, mismatch
+    _corepack_enable(corepack, web_dir, env=env)
+    return [*corepack, "pnpm"], None
 
 
 def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) -> str | None:
@@ -1016,7 +1054,8 @@ def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) 
     :func:`_package_runner` may run — gets the ARMED environment
     (:func:`_package_manager_env`), built once at the top of this function so one
     owner supplies it to all of them. Before the pin is judged, a runner that
-    cannot satisfy the pin is offered the seeded one (:func:`_seeded_or_path`).
+    cannot satisfy the pin is offered every other route this host has
+    (:func:`_runner_or_refusal`), and only its refusal ends the build.
     """
     web_dir = _WEB_DIR if web_dir is None else web_dir
     env = _package_manager_env(web_dir)
@@ -1077,13 +1116,11 @@ def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) 
         # Before any pnpm BUILD child is started: a runner whose version is not
         # the pin is the recursion's engine (see :func:`_pin_mismatch`), and
         # refusing here is the difference between an install that stops with a
-        # sentence and one that stops when the machine runs out of memory. The
-        # probes this costs are spawned by design and cannot fetch (see
-        # :func:`_probe_env`): one for the runner, and — only on a host that has
-        # a seeded pin — one to verify the candidate, plus `_pin_mismatch`'s
-        # own. See :func:`_seeded_or_path`.
-        runner = _seeded_or_path(runner, web_dir)
-        mismatch = _pin_mismatch(runner, web_dir)
+        # sentence and one that stops when the machine runs out of memory. The one
+        # probe this costs is `_pin_mismatch`'s own and it cannot fetch (see
+        # :func:`_probe_env`); the routes that can supply the pin when PATH cannot
+        # are :func:`_runner_or_refusal`'s business.
+        runner, mismatch = _runner_or_refusal(runner, web_dir, env=env)
         if mismatch is not None:
             return mismatch
         for args in (["install", "--frozen-lockfile"], ["build"]):

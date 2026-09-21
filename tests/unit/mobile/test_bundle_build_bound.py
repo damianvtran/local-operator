@@ -544,14 +544,24 @@ def test_an_external_sigterm_reaps_the_group_before_we_die(
 
 
 def test_a_pnpm_that_is_not_the_pinned_one_is_refused_before_anything_runs(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The recursion's engine, refused: no build step is ever started.
 
     ``package.json`` pins pnpm@11.22.0 and the runner reports 10.30.3. Asserted on
     the refusal AND on the absence of any ``install``/``build`` invocation,
     because a refusal that still spawned pnpm would leave the engine running.
+
+    PATH is emptied first, and that is not tidiness: the refusal is only this
+    host's answer when NO route can supply the pin, and a resolving Corepack is one
+    (it builds through Corepack instead — see
+    ``test_pnpm_fetch_guard.py::test_the_corepack_route_builds_a_tree_the_path_pnpm_cannot``),
+    so a test that inherited a developer's or a CI runner's PATH would measure a
+    decision that depends on the machine rather than on the guard.
     """
+    no_tools = tmp_path / "no-tools"
+    no_tools.mkdir()
+    monkeypatch.setenv("PATH", str(no_tools))
     fake = StandIn(tmp_path / "bin", version="10.30.3")
     web = _web(tmp_path, pin="pnpm@11.22.0")
 
@@ -613,6 +623,13 @@ def test_the_refusal_keeps_the_corepack_route_where_one_resolves(
     absence would go green by deleting them everywhere. The npm route is asserted
     ABSENT here as well, so the two are shown to be independent rather than two
     spellings of one conditional.
+
+    Read straight off :func:`install._pin_mismatch` rather than through
+    :func:`install._build_bundle`, because on a host where Corepack resolves that
+    route is TAKEN, not offered: ``_runner_or_refusal`` builds through Corepack, so
+    the guard's sentence is the only place this copy can be observed. The taken
+    route is pinned by
+    ``test_pnpm_fetch_guard.py::test_the_corepack_route_builds_a_tree_the_path_pnpm_cannot``.
     """
     fake = StandIn(tmp_path / "bin", version="10.30.3")
     web = _web(tmp_path, pin="pnpm@11.22.0")
@@ -626,7 +643,7 @@ def test_the_refusal_keeps_the_corepack_route_where_one_resolves(
     shim.chmod(0o755)
     monkeypatch.setenv("PATH", str(tools))
 
-    error = install._build_bundle(web, fake.runner)
+    error = install._pin_mismatch(fake.runner, web)
 
     assert error is not None
     assert "corepack enable" in error
