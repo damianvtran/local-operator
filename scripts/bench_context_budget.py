@@ -241,6 +241,20 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: the ratchet stays tight; the tighten band below (1,200) is nowhere near
 #: tripped and the next context reduction tightens it.
 #:
+#: RAISED 30,025 -> 30,100 for the per-command memory guard's ``memory_mb``
+#: field (2026-09-21), stated with the same arithmetic the guard exists to
+#: force. The base — ``origin/main`` 40544beb, the tree the PR diffs against —
+#: measures 83,336 chars = ~29,977 billed on this machine, i.e. 48 tokens of
+#: headroom; a ``BashParams`` field costs ~51 even with the shortest honest
+#: description ("RAM ceiling in MB for the command's group." lands 3 over), so
+#: the head with the shipped three-semantics description measures 83,646 chars
+#: = ~30,088 billed and the ceiling is set 12 above it — well inside the 46-51
+#: token band this file's ``secret`` (49), ``web_read`` (71) and
+#: ``scratchpad://`` (51) raises hold. The alternative the ladder prefers —
+#: OFFSET the cost — was measured and is NOT available here: no schema clause
+#: in the prefix is filler, and the field is not droppable because the
+#: tool-result text ("pass memory_mb on the bash call") and the escape from F7
+#: both name it. Recorded rather than hidden.
 #: RAISED 29,950 -> 30,025 for the scratchpad-salience change, stated here with
 #: the arithmetic because the guard exists to make this an explicit decision.
 #: The base — THIS BRANCH'S base, ``origin/main`` 0bc5fb3a, the tree the PR
@@ -279,7 +293,7 @@ CHARS_PER_BILLED_TOKEN = 2.78
 #: 46-51 band this file's ``secret`` (49), ``web_read`` (71) and
 #: ``scratchpad://`` (51) raises hold to — so the ratchet stays as tight as it
 #: was, and the tighten band below (1,200) is nowhere near tripped.
-BUDGET_BILLED_TOKENS = 30_025
+BUDGET_BILLED_TOKENS = 30_100
 
 #: How much slack is allowed before the guard demands the ratchet be TIGHTENED.
 #:
