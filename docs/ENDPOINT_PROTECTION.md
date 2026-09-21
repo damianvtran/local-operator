@@ -634,9 +634,9 @@ install:
    `~/Library/Application Support/Local Operator/…`, not from a normal
    toolchain location. What it *supervises* points elsewhere: measured on this
    machine, the live `wakes` plist names the generation shim and the running
-   supervisor is the generation's image, not an Application Support one. Every
-   installer run rewrites its own plist and
-   re-registers the job (§1), and this machine shows what that does to the
+   supervisor is the generation's image, not an Application Support one. An
+   installer run writes and re-registers the job only when the render differs
+   from the file on disk (§1), and this machine shows what that does to the
    supervised path: the stale `…wakes.plist.bak-…` (a leftover §1 flags as
    unknown provenance, but on this machine it is the old path) names the
    uv-tool prefix, while the live plist names the generation **shim**
