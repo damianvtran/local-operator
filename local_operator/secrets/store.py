@@ -948,6 +948,13 @@ class SecretStore:
         and that no command could remove. This deletes by primary key, which
         needs no key material for the row itself.
 
+        ``role`` re-asserts the namespace rule: the sealed name is decoded (when
+        it can be) before the delete, so an agent surface can no more remove a
+        ``LOP_PROVIDER_*`` row by id than by name. A row that will not open
+        (``SecretCorrupt``, i.e. genuine damage) carries no readable identity and
+        so is permitted; a row that merely needs a NEWER runtime
+        (``IncompatibleStore``) is intact and is refused rather than destroyed.
+
         Returns whether a row was removed. Still audited, and still guarded by
         the key epoch: removing a record is a write.
         """
@@ -966,6 +973,18 @@ class SecretStore:
                 # A DAMAGED row is permitted: its name cannot be read, it carries
                 # no provider identity to protect, and it is already unusable —
                 # refusing it would break the repair path this verb exists for.
+                #
+                # ONLY ``SecretCorrupt`` COUNTS AS DAMAGED HERE, and the round-3
+                # review (R3-1) is why this is narrower than ``_enumerate``'s catch:
+                # ``IncompatibleStore`` is the RECORD-FORMAT skew (§13), raised at
+                # ``_decode``'s version check BEFORE the ciphertext is touched, so
+                # such a row is fully intact — its name and value both open on a
+                # runtime that understands them, and its remedy is ``lop update``,
+                # not deletion. Catching it here would let this verb irreversibly
+                # destroy a valid credential (measured: the same row is refused by
+                # ``delete(name)`` yet was deleted by ``delete_record_id``), which is
+                # the exact loss the namespace boundary exists to prevent. A row that
+                # cannot be DECODED is therefore refused rather than deleted blind.
                 row = connection.execute(
                     f"SELECT {_RECORD_COLUMNS} FROM secrets WHERE id = ?", (record_id,)
                 ).fetchone()
@@ -974,7 +993,7 @@ class SecretStore:
                     return False
                 try:
                     decoded_name = self._decode(row)[0].name
-                except (SecretCorrupt, IncompatibleStore):
+                except SecretCorrupt:
                     decoded_name = None
                 if decoded_name is not None:
                     _validate_role(decoded_name, role)

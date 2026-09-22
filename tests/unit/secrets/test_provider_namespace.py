@@ -28,7 +28,8 @@ from pathlib import Path
 import pytest
 
 from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
-from local_operator.secrets.errors import InvalidSecretName
+from local_operator.secrets.crypto import RECORD_FORMAT_VERSION
+from local_operator.secrets.errors import IncompatibleStore, InvalidSecretName
 from local_operator.secrets.store import (
     PROVIDER_SECRET_PREFIX,
     SecretStore,
@@ -263,6 +264,34 @@ def test_a_damaged_row_is_still_removable_by_id_under_the_agent_role(
     assert store.delete_record_id(damaged.record_id) is True
     assert store.damaged_records() == []
     assert [record.name for record in store.list()] == ["GOOD_ONE"]
+
+
+def test_an_undecodable_row_is_NOT_deleted_blind_by_id(store: SecretStore) -> None:
+    """A row that merely needs a NEWER runtime must not be destroyed (R3-1).
+
+    ``IncompatibleStore`` is the record-format skew (§13), raised by the version
+    check BEFORE the ciphertext is touched — such a row is fully intact and its
+    remedy is ``lop update``. ``delete_record_id`` therefore catches only
+    ``SecretCorrupt``: a version-skewed row is refused rather than deleted, so an
+    irreversible loss can never be reached through the repair verb. The same row
+    is refused by the name-keyed ``delete``, which is the behaviour this pins for
+    the by-id path too.
+    """
+    record = store.set("SKEWED", b"value")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE secrets SET format_version = ? WHERE id = ?",
+            (RECORD_FORMAT_VERSION + 1, record.record_id),
+        )
+
+    with pytest.raises(IncompatibleStore):
+        store.delete_record_id(record.record_id)
+    # The row survives: refused, not destroyed.
+    with sqlite3.connect(store.path) as connection:
+        row = connection.execute(
+            "SELECT COUNT(*) FROM secrets WHERE id = ?", (record.record_id,)
+        ).fetchone()
+    assert row[0] == 1, "a version-skewed row is refused, never deleted blind"
 
 
 def test_delete_by_id_of_an_absent_row_still_reports_false(store: SecretStore) -> None:
