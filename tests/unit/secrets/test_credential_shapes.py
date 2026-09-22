@@ -776,6 +776,245 @@ def test_the_pipe_releases_at_a_carriage_return_too() -> None:
     assert redactor.feed(b"step 1/3\r") == b"step 1/3\r"
 
 
+# --- the pipe filter's PEM classifiers: gated, and the shape that is not ------
+#
+# `_mask_open_key_block` runs the header, body and END classifiers over EVERY
+# 64 KiB read a child produces, and `_pump` calls them ON THE EVENT LOOP. Their
+# prefix grammar is the shared `LINE_PREFIX`, which is ambiguous by construction:
+# a unit's `\d+` may end in the middle of a digit run, so a line of numeric
+# columns has 2**k live partitions and `re`, which does not memoise, walks every
+# one of them before concluding that the line is not PEM. Measured on the
+# released code, ONE `%8d`-padded row of four-digit numbers: 33 characters
+# 1.5 ms, 49 characters 283 ms, 65 characters 55.98 s — and ten such rows cost
+# 225 s inside a SINGLE `search` call.
+#
+# Say precisely what the evidence is, because the frame and the frequency are
+# different claims. The frame is real: `~/.local-operator/logs/runtime-stall-
+# 85845.log` carries `_mask_open_key_block` -> `_feed_scrubbed` -> `feed` ->
+# `_pump` for a session that wedged with its transcript unchanged, burning 97%
+# of a core for 45 s. The instance is ONE: of the 31 bound dumps written on this
+# fleet that night, this routine appears in one, three more carry other
+# `local_operator` frames, 22 are the runtime's ordinary loops parked in stdlib
+# and five carry no `local_operator` frame at all. So this is a located spin,
+# NOT the freeze class of that night; the volume belongs to the liveness axis
+# (#1408/#1419).
+#
+# Nor is size what makes it burn: the `wait` it froze in was blocked over a
+# launch payload of 8-10 KB, and one numeric row inside a 10 KB payload costs
+# 56 s of CPU on its own, while an unclosed block and a block past the cap cost
+# nothing at the same size (measured, all three). The cost is a property of the
+# SHAPE of the bytes, which is why these tests are sized in tens of bytes.
+#
+# The gates are the fix. The residual is stated rather than implied: a read that
+# does carry the literals still walks the classifier's own ambiguity, and the
+# BODY classifier cannot be gated at all — `10000000 10000001` is a line it
+# MATCHES, so no necessary condition can reject it cheaply. That half needs a
+# linear replacement for the prefix grammar, which is a design change rather
+# than a guard; `redaction_shapes.LINE_PREFIX` records the four rewrites that do
+# not fix it and the two that would lose matches.
+
+
+class _CountingPattern:
+    """A classifier stand-in that records the WORK rather than the time.
+
+    `_mask_open_key_block` reads the pattern off the module at call time, so this
+    is how far "the classifier was not reached" can be asserted as a fact: the
+    call count is zero or it is not, whatever the runner's load.
+    """
+
+    def __init__(self, pattern: re.Pattern[str]) -> None:
+        self._pattern = pattern
+        self.calls = 0
+        self.scanned = 0
+
+    def search(self, text: str) -> re.Match[str] | None:
+        self.calls += 1
+        self.scanned += len(text)
+        return self._pattern.search(text)
+
+    def match(self, text: str) -> re.Match[str] | None:
+        self.calls += 1
+        self.scanned += len(text)
+        return self._pattern.match(text)
+
+
+#: The dash run of a PEM banner, and a builder for the banner itself. The banner is
+#: ASSEMBLED rather than written down because the literal is the shape this file's own
+#: subject matter treats as a credential: tooling on the way in that redacts it would
+#: leave a broken line and a test that still passes while asserting nothing.
+#: `_PEM_SPELLINGS` and `_PEM_BODY` are the file's existing spellings and body, reused
+#: so a spelling a future round adds is covered here too.
+_DASHES = "-" * 5
+
+
+def _banner(spelling: str, kind: str = "BEGIN") -> str:
+    """A PEM banner line, without the literal appearing in this file."""
+    return f"{_DASHES}{kind} {spelling}{_DASHES}\n"
+
+
+def _numeric_rows(rows: int, columns: int = 3, start: int = 0) -> str:
+    """A numeric table row of `%8d`-padded columns: the shape that burns.
+
+    `start=0` so the fields are ONE OR TWO digits wide, and that is not cosmetic:
+    the partitions of a digit run are what the engine walks, so three-digit fields
+    multiply a row's cost by ~2**2 per field and turn a regression from a slow test
+    into a hang — which is a worse test than a fast one. The sizes below are picked
+    against the CONFIRMED-AMPLIFIED curve, not a guess: 129 characters is ~0.1 ms
+    and 257 is ~4.2 s on the released paths, against ~0 on the gated ones.
+    """
+    return "".join(
+        "".join(f"{start + row * columns + column:8d}" for column in range(columns)) + "\n"
+        for row in range(rows)
+    )
+
+
+def test_ordinary_output_reaches_no_pem_classifier_and_is_published_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shape, not the size: numeric table output must reach no scan at all.
+
+    A gate that skipped a scan it should have run would surface here as a masked
+    or dropped line, so the bytes are asserted too — a gate may avoid work, never
+    change an answer. Nothing is timed: the assertion is the call count.
+    """
+    spies = {
+        name: _CountingPattern(getattr(builtin, name))
+        for name in ("_PEM_HEADER_LINE", "_PEM_BODY_LINE", "_PEM_END_LINE")
+    }
+    for name, spy in spies.items():
+        monkeypatch.setattr(builtin, name, spy)
+    prose = "".join(
+        f"reading {index}: ordinary output, nothing credential shaped\n" for index in range(400)
+    )
+    raw = (prose + "\n" + _numeric_rows(20)).encode()
+    redactor = builtin._PipeRedactor([])
+    published = b"".join(
+        redactor.feed(raw[start : start + 64 * 1024]) for start in range(0, len(raw), 64 * 1024)
+    )
+    published += redactor.feed(b"", final=True)
+    reached = {name: spy.calls for name, spy in spies.items() if spy.calls}
+    assert not reached, f"ordinary output reached a PEM classifier: {reached}"
+    assert published == raw, "ordinary output must come out byte for byte"
+
+
+def test_a_numeric_row_does_not_cost_more_than_the_line_it_replaces() -> None:
+    """A ratio rather than a laptop-calibrated ceiling, and no growing payload.
+
+    The released code needs 0.11 ms for a three-column row and 283 ms for six — a
+    factor of ~2,500 for a line that doubled — and ten rows cost 225 s inside one
+    search. The 40x allowance for a doubled line is the one the shape pass's own
+    linearity test uses: exponential blowup is orders of magnitude, not a constant
+    factor. The sizes sit where the curve turns, so a regression fails here in tens
+    of milliseconds instead of hanging the suite.
+    """
+
+    def feed_cpu(text: str) -> float:
+        raw = text.encode()
+        redactor = builtin._PipeRedactor([])
+        start = time.process_time()
+        for offset in range(0, len(raw), 64 * 1024):
+            redactor.feed(raw[offset : offset + 64 * 1024])
+        return time.process_time() - start
+
+    prose = "reading 1: ordinary output, nothing credential shaped\n\n"
+    # Sixteen and thirty-two columns: a ratio test has to be sized where the curve
+    # actually turns, and the fronts moved when the prefix grammar's whitespace
+    # handling did. The 40x allowance is the shape pass's own linearity allowance.
+    small = feed_cpu(prose + _numeric_rows(1, columns=16))
+    large = feed_cpu(prose + _numeric_rows(1, columns=32))
+    assert large <= max(small, 1e-4) * 40, f"a numeric row looks super-linear: {small} -> {large}"
+
+
+def test_an_unclosed_block_is_masked_and_the_text_before_it_is_released() -> None:
+    """The gate moved WHERE the search is called, so the offsets it keeps matter.
+
+    `begin` is what releases everything ahead of the header. A version that lost
+    that offset would either swallow the leading output or publish the first body
+    line, and the second is the leak this whole layer exists to prevent.
+    """
+    header = _banner(_PEM_SPELLINGS[0])
+    raw = (f"before the key: nothing secret here\n{header}{_PEM_BODY}\n{_PEM_BODY}\n").encode()
+    redactor = builtin._PipeRedactor([])
+    text = (redactor.feed(raw) + redactor.feed(b"", final=True)).decode()
+    assert "before the key: nothing secret here" in text, "output ahead of the header was lost"
+    assert _PEM_BODY not in text, "an unclosed block's body was published"
+    assert REDACTION_MARKER in text, "an unclosed block must still be masked"
+
+
+def test_a_closed_block_is_masked_and_its_terminator_is_released() -> None:
+    """The other arm of the same contract, on the path that releases a PREFIX.
+
+    A closed block arrives in one read as prose + header + body + END, so the
+    release point hands the mask loop the header rather than holding it — which is
+    what makes `ready[:begin.end()]` the line that releases the prose. Losing that
+    offset would drop the leading line, and dropping output is the failure this arm
+    is here for.
+    """
+    header = _banner(_PEM_SPELLINGS[0])
+    terminator = _banner(_PEM_SPELLINGS[0], kind="END")
+    lead = "before the key: nothing secret here\n"
+    raw = (f"{lead}{header}{_PEM_BODY}\n{terminator}after the key: ordinary output\n").encode()
+    redactor = builtin._PipeRedactor([])
+    text = (redactor.feed(raw) + redactor.feed(b"", final=True)).decode()
+    assert _PEM_BODY not in text, "a closed block's body was published"
+    assert REDACTION_MARKER in text, "a closed block must still be masked"
+    assert lead.strip() in text, "the line ahead of the header was dropped"
+    assert "after the key: ordinary output" in text, "output after the block was lost"
+
+
+@pytest.mark.parametrize("hint_index", [0, 1])
+def test_a_read_missing_one_literal_reaches_no_classifier(
+    monkeypatch: pytest.MonkeyPatch, hint_index: int
+) -> None:
+    """The gate is a NECESSARY condition, so it needs EVERY literal, not one.
+
+    The header pattern cannot match without both of them, and the spellings are taken
+    from the constant itself rather than written here so this stays true if the
+    pattern's literals change. The failure this pins is a gate loosened to `any` —
+    the plausible simplification, since one literal looks like enough — which sends
+    ordinary reads back into the ambiguous search for nothing.
+    """
+    hints = builtin._PEM_HEADER_HINTS
+    assert len(hints) >= 2, "the gate is only a gate while it needs more than one literal"
+    spy = _CountingPattern(builtin._PEM_HEADER_LINE)
+    monkeypatch.setattr(builtin, "_PEM_HEADER_LINE", spy)
+    others = [hint for index, hint in enumerate(hints) if index != hint_index]
+    # The absent literal is NOT written into the fixture text, or the fixture would
+    # carry both and assert nothing.
+    text = f"a read carrying the {hints[hint_index]!r} literal and none of the rest\n"
+    assert all(other not in text for other in others), "the fixture carries the other literal"
+    redactor = builtin._PipeRedactor([])
+    out = redactor.feed(text.encode()) + redactor.feed(b"", final=True)
+    assert spy.calls == 0, f"the gate admitted a read missing {others[0]!r}"
+    assert out.decode() == text, "a read that opens no block must be published unchanged"
+
+
+def test_an_open_block_consults_the_end_classifier_only_where_the_literal_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The END gate, on the line loop, which the arms above never enter.
+
+    The state is set DIRECTLY, and the reason is worth recording: the release point
+    holds a whole unterminated block in `pending` until its terminator arrives, so a
+    streamed block reaches this loop only when the deferral cap forces it — which is
+    a leak of its own (reported, not fixed here) and not a state to build a fixture
+    on. With the state set, the two classifiers are watched together: the body test
+    must RUN, or "the END test did not run" would be true of a loop that never ran at
+    all, and the END test must not, because no line here carries the literal that
+    `PEM_END_LINE_RE` requires.
+    """
+    end_spy = _CountingPattern(builtin._PEM_END_LINE)
+    body_spy = _CountingPattern(builtin._PEM_BODY_LINE)
+    monkeypatch.setattr(builtin, "_PEM_END_LINE", end_spy)
+    monkeypatch.setattr(builtin, "_PEM_BODY_LINE", body_spy)
+    redactor = builtin._PipeRedactor([])
+    redactor._in_key_block = True
+    lines = "reading an ordinary line, nothing credential shaped\n" * 20
+    redactor.feed(lines.encode())
+    assert body_spy.calls >= 20, "the line loop did not run, so this proves nothing"
+    assert end_spy.calls == 0, f"the END classifier scanned {end_spy.scanned} chars of prose"
+
+
 # --- the store: containment, and the incident path ---------------------------
 
 

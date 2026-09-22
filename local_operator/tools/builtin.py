@@ -2263,6 +2263,11 @@ _PEM_END_LINE = PEM_END_LINE_RE
 #: #1427 puts in front of the mask's own search (``_PEM_HEADER_HINTS`` in that branch),
 #: so a merge of the two keeps ONE gate instead of two that can drift apart; on this
 #: branch the cap-split hold below is the reader.
+#: The other literal a classifier needs: `END `, a necessary condition of the END
+#: pattern, kept as a gate at the call site below because a line without it cannot
+#: be an END line and so must not run the prefix grammar at all.
+_PEM_END_HINT = "END "
+
 _PEM_HEADER_HINTS = ("BEGIN ", "PRIVATE KEY")
 
 #: The line terminator that ends a PEM header's own line. Consumed by the mask at
@@ -2634,7 +2639,9 @@ class _PipeRedactor:
         if self._in_key_block:
             out: list[str] = []
             for line in ready.splitlines(keepends=True):
-                if _PEM_END_LINE.match(line.rstrip("\r\n")):
+                # Stripped ONCE: the gate and the classifier must see the same bytes.
+                stripped = line.rstrip("\r\n")
+                if _PEM_END_HINT in stripped and _PEM_END_LINE.match(stripped):
                     self._in_key_block = False
                     self._key_block_marker_sent = False
                     out.append(line)
@@ -2674,7 +2681,15 @@ class _PipeRedactor:
                 self._key_block_marker_sent = False
                 out.append(line)
             return "".join(out)
-        begin = _PEM_HEADER_LINE.search(ready)
+        # GATED SEARCH, and the gate is what makes an ORDINARY read free: this is
+        # the one place the ambiguous prefix grammar runs over arbitrary text, and
+        # both literals are necessary conditions of the pattern, so a read carrying
+        # neither skips the search entirely (see `_PEM_HEADER_HINTS`).
+        begin = (
+            _PEM_HEADER_LINE.search(ready)
+            if all(hint in ready for hint in _PEM_HEADER_HINTS)
+            else None
+        )
         if begin is None:
             return ready
         self._in_key_block = True

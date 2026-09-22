@@ -1657,7 +1657,36 @@ _PEM_HEADER_PHRASE = re.compile(r"-{1,4}[\x27\x22]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE
 #: `│ 12 │`, any of them repeated (`3| 4| …`), with spaces or a TAB around the separator.
 LINE_PREFIX = (
     r"[ \t]*(?:(?:"
-    r"\[?\d+\]?[ \t]*(?:[.)\]]|\.\]|->|[|:>-])?[ \t]*"
+    # THE SEPARATOR'S TRAILING WHITESPACE LIVES INSIDE THE OPTIONAL GROUP, and that
+    # is the difference from `[ \t]*(?:SEP)?[ \t]*`. Both accept exactly the same
+    # strings (`[ \t]*` | `[ \t]*SEP[ \t]*`), but this one consumes a run of
+    # whitespace in ONE place per unit instead of two, and that removes a whole
+    # family of partition paths: the old spelling could split a gap between two
+    # digit runs across the trailing and the leading `[ \t]*`, so 2**k paths for
+    # k digit runs on a line. Measured on the released fragment: one 65-character
+    # numeric table row (`%8d`-padded columns, i.e. a numpy row or a padded column
+    # dump) cost 1.34 s in `PEM_HEADER_LINE_RE.search` and 1.74 s in
+    # `PEM_BODY_LINE_RE.match`; 48 characters of space-separated 2-digit runs did
+    # not return in 190 s. This spelling: 12 ms and 14 ms for the same 65
+    # characters.
+    #
+    # IT DOES NOT REMOVE THE EXPONENTIAL, and the comment says so because the next
+    # reader will otherwise "simplify" one of two things back. The remaining paths
+    # are the DIGIT runs: a unit may end in the middle of `\d+` (nothing forbids it
+    # when no separator follows), and every split is live, so the engine still
+    # walks 2**k for k digit runs. THREE OTHER language-preserving spellings were
+    # measured alongside this one — whitespace made maximal with a `(?![ \t])`
+    # assertion, possessive `[ \t]*+`, and both together — and all four still grow
+    # by a factor per digit run. Two narrower spellings are NOT available: making `\d+`
+    # possessive or forbidding a unit to end before a digit both DROP matches
+    # (`12 34 MIIEowIBAAKCA` is a doubly-numbered body line that the second loses
+    # outright), and a dropped body line is a published key, which is the one
+    # failure this grammar must not have. The cost is therefore bounded by a
+    # number of partitions INHERENT to the language, and the fix for a caller that
+    # runs it over arbitrary text is a guard or a linear matcher, not a cheaper
+    # fragment: `local_operator/tools/builtin.py` shields its two hot call sites
+    # with necessary-condition gates and records the residual.
+    r"\[?\d+\]?[ \t]*(?:(?:[.)\]]|\.\]|->|[|:>-])[ \t]*)?"
     r"|\u2502[ \t]*\d+[ \t]*\u2502[ \t]*"
     r")+)?"
 )
