@@ -2042,7 +2042,9 @@ class DesktopFeed:
         """
         baseline_ready = self._baseline_ready
         if baseline_ready is not None:
-            await baseline_ready
+            # A disconnect cancels this waiter, not the feed-wide handshake that
+            # other subscribers still need to build their own open snapshots.
+            await asyncio.shield(baseline_ready)
         elif self._authoring_token is None:
             # A synchronous subscriber has no poller task, but still needs the
             # same first-connection boundary before its open snapshot.

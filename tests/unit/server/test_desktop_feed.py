@@ -3310,6 +3310,54 @@ async def test_first_open_waits_for_authoring_baseline_and_keeps_no_replay(tmp_p
     assert feed._authoring_invalidated is False
 
 
+@pytest.mark.asyncio
+async def test_cancelling_one_open_waiter_does_not_cancel_shared_baseline(tmp_path, monkeypatch):
+    """One disconnect must not cancel the baseline other subscribers await."""
+    feed = _feed(tmp_path)
+    baseline_entered = threading.Event()
+    release_baseline = threading.Event()
+    original_baseline = feed._take_baseline
+
+    def held_baseline() -> None:
+        baseline_entered.set()
+        if not release_baseline.wait(timeout=5):
+            raise TimeoutError("test did not release the baseline barrier")
+        original_baseline()
+
+    monkeypatch.setattr(feed, "_take_baseline", held_baseline)
+    first = feed.subscribe()
+    first_events = feed.events(first)
+    first_open = asyncio.create_task(anext(first_events))
+    second_events = None
+    second_open = None
+    try:
+        assert await asyncio.to_thread(baseline_entered.wait, 5), "poller never entered baseline"
+        # Let the first connection park on the shared gate before cancelling it.
+        await asyncio.sleep(0.05)
+        first_open.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await first_open
+        assert feed._baseline_ready is not None
+        assert not feed._baseline_ready.cancelled(), "one subscriber cancelled the shared baseline"
+
+        second = feed.subscribe()
+        second_events = feed.events(second)
+        second_open = asyncio.create_task(anext(second_events))
+        release_baseline.set()
+        opened = await asyncio.wait_for(second_open, timeout=5)
+        assert opened["type"] == "open", opened
+    finally:
+        release_baseline.set()
+        if second_open is not None and not second_open.done():
+            second_open.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await second_open
+        if second_events is not None:
+            await second_events.aclose()
+        await first_events.aclose()
+        await feed.close()
+
+
 def test_an_authoring_invalidation_is_not_replayed_to_a_late_subscriber(tmp_path):
     """A reconnecting client is told the COUNTER, never the old frame.
 
