@@ -491,6 +491,14 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
     decision, never widen a refusal into one, and a string that is not an action
     structure must stay the malformation it is.
 
+    The claim stops at the ARRAY on purpose: whether the objects inside it are
+    valid actions is the action protocol's question, not the decoder's (this
+    module is framing-only -- see its docstring). A string carrying an array
+    whose objects are not actions is still refused, by ``parse_decision`` and
+    with that class and hint (``unknown-action-kind``, a missing ``kind``, a
+    stale binding) rather than with the generic batch-shape sentence, which is
+    the same layering the identical objects get when the array is not a string.
+
     No logging here, deliberately. This runs over candidate objects while
     scanning untrusted trailing text (see :func:`_batch_observation_ids`) as well
     as over the reply's own decision, and a record that means "a reply was
