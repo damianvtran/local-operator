@@ -201,6 +201,12 @@ class Shape:
 #: away into the rest of a document when a value is unterminated.
 _ASSIGNED_VALUE = r"[^\s]{4,200}"
 
+#: The shortest value the two grammars below accept: the run plus the character
+#: that must END it. Named because the value JUDGEMENT asks the same question of a
+#: rendered value — see :func:`_value_before_an_escape`, which refuses to treat an
+#: escape as the value's end below this floor.
+_ASSIGNED_VALUE_MIN_CHARS = 8
+
 #: The value of a named assignment, floored at 8 characters and required NOT to
 #: END on a separator character.
 #:
@@ -232,9 +238,37 @@ _ASSIGNED_VALUE_GROUP = (
     # "followed by a delimiter" requirement is a leak for a credential longer
     # than the bound in a whitespace-free run: the engine finds no delimiter
     # inside the window, gives up, and publishes the whole thing untouched.
-    # ``[^\s]`` already cannot cross a line, so there is nothing to run away
-    # into.
-    r"([^\s]{7,}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
+    # ``[^\s]`` cannot cross a REAL line, and a real line is the only kind this
+    # class may stop at.
+    #
+    # IT CROSSES A RENDERED LINE, AND THAT IS THE SAFE DIRECTION. A JSON payload
+    # spells every newline inside a string as the two characters ``\\`` and ``n``,
+    # and neither of them is whitespace, so a value arriving in a rendering runs
+    # past the line break and takes the next line's material with it. Masking that
+    # material is an over-mask — it can hide the following line of ordinary code in
+    # a notice that stays CONTAINED (``complete=True``, ``exposed=False``) — and the
+    # alternative was measured and refused (agent review R1-2, 2026-09-21):
+    #
+    #   A VALUE THAT STOPS AT THE ESCAPE LOSES CREDENTIAL MATERIAL. Through both
+    #   modules in one process: a credential-named assignment whose own bytes carry
+    #   an escaped break — a JSON "client_secret" field holding a short run, then
+    #   the two characters backslash and ``n``, then forty more characters of
+    #   body — is masked WHOLE and contained at ``origin/main``, and with the
+    #   exclusion in
+    #   place came back with the tail readable while the hit was still graded
+    #   ``complete=True``, so the notice claimed a containment that did not happen;
+    #   and when the run before the escape was shorter than the seven-character
+    #   floor the rule did not fire AT ALL — the value readable, and nothing
+    #   registered for containment either, so no later pass could contain it.
+    #
+    # Under-masking a real credential is the one direction this table refuses to
+    # buy with an over-mask, so the value keeps every byte the rendering gave it.
+    # The escape is handled where it belongs — on the NAME, by
+    # ``_name_after_an_escape``, which is what actually closed the false positive
+    # this rule was being changed for.
+    r"([^\s]{"
+    + str(_ASSIGNED_VALUE_MIN_CHARS - 1)
+    + r",}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
 )
 
 #: The value of an assignment whose value is QUOTED, sharing the grammar above
@@ -270,7 +304,9 @@ _ASSIGNED_VALUE_GROUP = (
 #: credential containing a quote (the case the negative corpus already carries as
 #: `DB_PASSWORD=abc"defghij"`).
 _QUOTED_ASSIGNED_VALUE_GROUP = (
-    r"((?:(?!(?P=quote)(?=[\s,;)\]}\"']|$))[^\s]){7,}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
+    r"((?:(?!(?P=quote)(?=[\s,;)\]}\"']|$))[^\s]){"
+    + str(_ASSIGNED_VALUE_MIN_CHARS - 1)
+    + r",}[^\s,;)\]}\"'.])(?=[\s,;)\]}\"']|$)"
 )
 
 #: A guard for the two rules that consume a WHOLE value: skip when that value
@@ -601,6 +637,27 @@ def is_count_shaped(name: str) -> bool:
     return segments[-1] in _COUNT_TAIL_NOUNS and any(
         segment in _COUNT_WORDS for segment in segments[1:-1]
     )
+
+
+def _tail_is_a_quantity_noun(name: str) -> bool:
+    """Whether a name's LAST segment is a quantity by itself.
+
+    The narrow half of :func:`is_count_shaped`, and the scope a value judgement
+    needs (agent review R1-1). ``is_count_shaped`` releases a name whose FIRST
+    segment is a count word, which is the vocabulary a model parameter is named
+    with, and its tail arm needs a count word in the middle as well — so a usage
+    counter that names no quantity (``reasoning_tokens``, ``extra_native_tokens``)
+    is a credential-shaped name to both of those and to everything else in this
+    table.
+
+    What the tail alone buys is the one judgement those counters need: a name whose
+    tail is ``tokens``/``count``/``counts`` cannot hold a secret, because a plural
+    quantity noun IS the quantity. That is deliberately NOT extended to the
+    singular ``token``: a ``…_TOKEN`` name is how every issuer credential is
+    spelled, and it stays under the full credential judgement.
+    """
+    segments = _name_segments(name)
+    return bool(segments) and segments[-1] in _COUNT_TAIL_NOUNS
 
 
 #: Issuer prefixes whose separator is one of ``-``/``_`` (so the gate needs both
@@ -978,12 +1035,63 @@ def _value_is_not_a_credential(value: str, *, name: str, strong: bool) -> bool:
         # name in this tree is digit-free.
         return True
     # A bare ``_``-led identifier with no digit is a reference, even under a strong
-    # name: ``get_api_key=_oauth_api_key``.
+    # name: ``get_api_key=_oauth_api_key``. Restored unchanged from ``origin/main``
+    # when the arm below was narrowed: this clause never released a credential name
+    # (agent review R1-1).
     if (
         strong
         and value.startswith("_")
         and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
         and not any(char.isdigit() for char in value)
+    ):
+        return True
+    # A USAGE COUNTER's value is the name of another local, and this arm is scoped
+    # to the names that makes true for. Measured 2026-09-21 on a ``read`` of
+    # ``local_operator/providers/clients.py``: ``reasoning_tokens=<another local>``
+    # and ``extra_native_tokens=<another local>`` are counters whose TAIL is a
+    # credential word, so :func:`is_count_shaped` does not cover them — the tail is a
+    # QUANTITY noun, which is a different test from that arm's first-segment
+    # vocabulary — and the identifier on the right was read as a credential and
+    # ESCALATED to a rotation demand for a variable name.
+    #
+    # **The arm used to be "any multi-segment identifier" and that was a leak**
+    # (agent review R1-1). Through both modules in one process: a credential-named
+    # assignment whose value is a digit-free underscore-joined phrase — the shape a
+    # person writing a passphrase reaches for — went from MASKED to NO HIT AT ALL
+    # under a database-password name, a bare password name, a Postgres password
+    # name, a Mongo password name, an API token name and the AWS secret access
+    # key name, in the ``export``-prefixed and
+    # docker-compose spellings and inside JSON, while the HYPHENATED and
+    # digit-carrying spellings of the identical value stayed masked. Nothing was
+    # registered either, so the later exact-value pass could not contain it. The
+    # class is pinned in the POSITIVE half of the corpus now, which is where it
+    # should have been from the start.
+    #
+    # So the scope is the names the two reports actually share: a tail that is a
+    # QUANTITY NOUN, which is what ``_COUNT_TAIL_NOUNS`` holds. The boundary that
+    # leaves is real, and it is pinned in the NEGATIVE half rather than left to a
+    # paragraph — a passphrase spelled with underscores under a ``…_TOKENS`` name is
+    # read as a NAME. Every other credential name keeps masking it.
+    #
+    # The digit floor is not negotiable: every issuer-prefixed key, every AWS key id,
+    # and every hex, base64 and UUID-shaped value carries one and stays masked — none
+    # of them is spelled as a phrase. Hyphenated phrases are untouched here for the
+    # same reason the corpus pins a hyphenated multi-word password: a hyphen is a
+    # separator a person writing a password reaches for, an underscore is not.
+    # The issuer clause keeps the vendor rules' own cases: a value that OPENS with an
+    # issuer prefix is judged by ``vendor-prefixed-token``, which knows the alphabet
+    # and the tail each one really carries. Without it the two rules contradict each
+    # other on the same string — an npm token's own spelling is a lowercase
+    # underscore-joined run — and the corpus's ``.npmrc`` rows measured exactly that:
+    # the mask stayed, and the credential reading silently dropped to a duplicate hit
+    # on the rule beside it.
+    if (
+        strong
+        and _tail_is_a_quantity_noun(name)
+        and value.count("_")
+        and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", value)
+        and not any(char.isdigit() for char in value)
+        and not _VENDOR_PATTERN.match(value)
     ):
         return True
     if strong:
@@ -1098,7 +1206,30 @@ def _base64_value_guard(match: Match[str]) -> bool:
 #: a tail carrying mixed case or a digit cannot reach the form. Closing it needs a
 #: predicate on the VALUE half — a wider rule than this fix, with the same
 #: false-positive risk on the other side (QA round 1, Q8).
-_VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[_-][a-z]+)+(?:=\S*)?")
+#:
+#: **``/`` is a separator here for the same reason ``-`` is, and it was measured.**
+#: A path is a name spelled with slashes, and a vendor-looking prefix in front of one
+#: is the commonest spelling of a repo slug. Measured 2026-09-21 against
+#: ``origin/main``: the prose tail of a docstring in ``local_operator/providers/clients.py``
+#: (line 2298) — an issuer prefix, then a lowercase org/repo path — was the one
+#: string the pass masked in that whole file, and it is what a ``read`` of the file
+#: reported as ``vendor-prefixed-token``, escalating a rotation demand for a
+#: docstring mention of a model name on a call that read a source file. The tail
+#: after the prefix is a lowercase name joined by a separator; ``/`` was simply
+#: missing from the separator class, so the SAME slug survived when its separator
+#: was written ``_`` or ``-`` — both already in the class — and masked only in the
+#: slash spelling, which is the one a path is actually written with. The cost is the
+#: class the two existing separator arms already accept: an issuer tail spelled as
+#: all-lowercase words joined by ``/`` is left readable, and a real one would have
+#: to be a run carrying no uppercase letter and no digit while containing a slash.
+#: ``glpat-lowercase-token-value`` pins that boundary for the same reason.
+#:
+#: A tail ending in a DIGIT is still a token here (``xai``-prefixed org and repo
+#: names that end in a version number included): the charset witnesses a token's
+#: alphabet, and dropping the digit discriminator is the change this table already
+#: measured and refused (see ``_VENDOR_TAIL``). That residual is recorded, not
+#: closed.
+_VENDOR_TAIL_IS_A_NAME = re.compile(r"[a-z]+(?:[-_/][a-z]+)+(?:=\S*)?")
 
 
 def _vendor_tail_guard(match: Match[str]) -> bool:
@@ -1136,6 +1267,76 @@ def _vendor_tail_guard(match: Match[str]) -> bool:
 _ENV_NAME_SHAPED = re.compile(r"[A-Z][A-Z0-9_]*")
 
 
+#: What ends an argument on a command line: whitespace, and the shell's separators.
+#: Used to read the TOKEN an assignment sits inside, for the flag-argument check in
+#: :func:`_is_a_credential_flags_argument`.
+_ARGUMENT_BOUNDARIES = frozenset(" \t\r\n|;&")
+
+#: A credential FLAG immediately before the argument under test, built from the flag
+#: rule's own vocabulary rather than retyped, in either separator spelling. The
+#: joined spelling is deliberately absent: it puts the whole argument inside the flag
+#: token, so an assignment can never begin inside it.
+_CLI_CREDENTIAL_FLAG_BEFORE = re.compile(
+    r"(?:^|[\s|;&])(?i:--(?:password|passwd|pwd|token|api[-_]?key|apikey|secret|"
+    r"client[-_]?secret|auth[-_]?token|access[-_]?token))\s+$"
+)
+
+
+def _value_is_a_reference_to_a_credential(value: str) -> bool:
+    """Whether a flag's argument is the NAME of a stored credential, not one.
+
+    Two spellings, both of them a NAME: the store's own (``--secret
+    OS_PROD2_ADMIN_PASSWORD``) and the two-part one ``guide://credentials`` teaches
+    for handing that secret to a child under a different name
+    (``--secret NPM_TOKEN=NODE_AUTH_TOKEN``). A NAME is all caps, digits and
+    underscores and carries no lower case; the two-part form additionally requires
+    the RIGHT half — the one the child will read — to end in a credential word.
+
+    **One predicate, two rules** (agent review R1-1). It is factored out because the
+    assignment rule sees the same text from inside: ``--secret NPM_TOKEN=NODE_AUTH_TOKEN``
+    is also an assignment whose name is ``NPM_TOKEN`` and whose value is the other
+    NAME, and a mask there files an ESCALATED rotation demand for the guide's own
+    documentation. Whichever rule sees it must reach the same verdict, so they share
+    the clause rather than each carrying a copy.
+    """
+    if "_" in value and _ENV_NAME_SHAPED.fullmatch(value) and is_credential_name(value):
+        return True
+    left, sep, right = value.partition("=")
+    return bool(
+        sep
+        and _ENV_NAME_SHAPED.fullmatch(left)
+        and _ENV_NAME_SHAPED.fullmatch(right)
+        and is_credential_name(right)
+    )
+
+
+def _is_a_credential_flags_argument(match: Match[str]) -> bool:
+    """Whether this assignment is the NAME=VAR argument of a credential flag.
+
+    ``lop secret run --secret NPM_TOKEN=NODE_AUTH_TOKEN -- <command>`` is the
+    documented way to hand a stored secret to a child under a second name, and the
+    assignment grammar sees the middle of it as an assignment. The flag rule already
+    judges that argument a REFERENCE; this is how that verdict reaches the rule that
+    would otherwise mask it, because a rejected span is re-scanned from one character
+    in (see :func:`_apply_guarded`) and the second reading is an assignment.
+
+    Measured 2026-09-21: without this, narrowing the identifier arm for R1-1 put the
+    mask back on the guide's own example, and because ``_TOKEN`` is a six-character
+    window of the neighbouring NAME the hit graded ``exposed`` — an ESCALATED
+    rotation demand for a variable name, through a rule nobody had pointed at it.
+    """
+    text = match.string
+    left = match.start(0)
+    while left and text[left - 1] not in _ARGUMENT_BOUNDARIES:
+        left -= 1
+    right = match.end(0)
+    while right < len(text) and text[right] not in _ARGUMENT_BOUNDARIES:
+        right += 1
+    if not _value_is_a_reference_to_a_credential(text[left:right]):
+        return False
+    return _CLI_CREDENTIAL_FLAG_BEFORE.search(text[:left]) is not None
+
+
 def _flag_value_guard(match: Match[str]) -> bool:
     """A ``--flag VALUE`` pair, unless the value is syntax or a NAME.
 
@@ -1150,8 +1351,16 @@ def _flag_value_guard(match: Match[str]) -> bool:
     rotation ticket in a production transcript for a credential that was not in
     the text at all (the second firing of this class). A value that is spelled as
     an environment variable AND ends in a credential word is a reference to a
-    credential, never one: the same judgement the rule already makes for
-    ``--secret NAME[=VAR]``.
+    credential, never one — the same judgement this rule already made for the
+    ``NAME[=VAR]`` form.
+
+    **The bracket in that form was load-bearing, and it was not honoured.** The
+    clause used to test the value as a SINGLE token, so the two-part spelling
+    fell straight through it and was masked — the harness's own
+    ``guide://credentials`` teaches that spelling as the way to rename a stored
+    secret for a child, so following the documentation filed an incident.
+    Measured 2026-09-21: a ``read`` of that guide masked the guide's own example
+    and filed an ESCALATED rotation demand naming no shape at all.
 
     **The SEPARATOR is required, and that is the whole of the narrowing.** Capitals
     plus a credential-word tail is not enough on its own: it also describes exactly
@@ -1172,7 +1381,7 @@ def _flag_value_guard(match: Match[str]) -> bool:
     value = match.group(2)
     if any(char in value for char in _EXPRESSION_CHARS):
         return False
-    if "_" in value and _ENV_NAME_SHAPED.fullmatch(value) and is_credential_name(value):
+    if _value_is_a_reference_to_a_credential(value):
         return False
     return True
 
@@ -1180,6 +1389,128 @@ def _flag_value_guard(match: Match[str]) -> bool:
 def _BARE_SCHEME_REPLACEMENT(match: Match[str]) -> str:
     """Keep the ``bearer `` keyword; mask the value."""
     return match.group(0)[: match.start(2) - match.start(0)] + REDACTION_MARKER
+
+
+#: The letters an escape leaves glued to the front of a NAME (agent review R1-3/R1-4).
+#: ``json.dumps`` is the live renderer (``local_operator/harness/redaction.py``): it
+#: writes the two-character spellings for a newline, a carriage return, a tab, a
+#: backspace and a form feed, and ``\uXXXX`` for everything outside ASCII — so a
+#: payload carrying a raw U+2028, which ``str.splitlines`` treats as a break too,
+#: arrives as its own six-character spelling rather than as itself. ``\xNN`` is the
+#: same spelling at byte width, which a decoded-at-the-wrong-width payload carries.
+#:
+#: **A named assumption, not a closed set** (agent review R1-4). A renderer that
+#: spelled a break some other way — percent-encoding, say — would reproduce the false
+#: positive these helpers close, and it is recorded rather than guessed at because the
+#: surfaces this pass runs on are both JSON: a tool call's arguments and a tool result.
+_ESCAPE_LETTERS = re.compile(r"u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[nrtbf]")
+#: The grouping is load-bearing: concatenation binds tighter than ``|``, so an
+#: unparenthesised alternation would carry the backslash on its FIRST alternative
+#: only and the rest would match a bare letter anywhere in the run.
+_ESCAPED_BREAK = re.compile(r"\\(" + _ESCAPE_LETTERS.pattern + r")")
+
+
+def _name_after_an_escape(match: Match[str]) -> str:
+    """The name to judge, with the escape before it detached from its front.
+
+    An assignment is scrubbed on more than one surface, and one of them is a
+    RENDERING: a tool call is journaled as its JSON payload, where every newline
+    inside a string arrives as the two characters ``\\`` and ``n``. The name group's
+    class is ``[A-Za-z0-9_.\\-]``, so ``n`` is a name character to it, and a name
+    that begins immediately after an escaped newline is therefore matched WITH the
+    newline's own letter glued on. That is not a cosmetic difference: the count-trap
+    exclusion (:func:`is_count_shaped`) keys on the FIRST segment of the name, so a
+    count name arrives as itself with a stray ``n`` in front of it, the first
+    segment stops being the count word, and the exclusion stops applying to exactly
+    the construct it exists for.
+
+    Measured 2026-09-21, and it is why this function exists: a ``write`` of ordinary
+    Python source was flagged as carrying a credential, its value graded READABLE,
+    and an escalated rotation notice filed for an assignment of a small integer
+    constant, the file on disk holding no shape at all.
+
+    **Only an ESCAPE's letters are detached, and only when the backslash is not
+    itself escaped** (agent review R1-3, R2-F2). The first revision of this helper
+    detached whatever followed a backslash, so a literal backslash before a
+    single-segment credential name ate the name's own first letter, the name stopped
+    being credential-shaped, and the mask was lost where ``origin/main`` had kept it.
+    :data:`_ESCAPE_LETTERS` accepts only the escape spellings above, so a backslash
+    that is not one changes nothing.
+
+    The R1-3 answer left the other half of the same reading open, and R2-F2 measured
+    it: a rendering writes a LITERAL backslash as TWO of them, so the character
+    before the name is still a backslash and ``t`` is an escape letter — the strip
+    ate it, ``oken`` is not a credential name, and the mask was gone with no hit and
+    nothing registered, so no later exact-value pass could contain it either.
+    Measured 2026-09-21: ``"\\\\" + "token=" + <value>`` was masked at
+    ``origin/main`` and came back READABLE here. A doubled backslash is the one
+    spelling where this reading is DECIDABLE — a backslash with a backslash before it
+    is an escaped literal, and the letter after it is the name's own — so it is the
+    one spelling where the answer may not be guessed.
+
+    What stays undecidable is stated rather than smoothed over: an UNDOUBLED
+    backslash before a name whose first letter is an escape letter IS that escape's
+    spelling on the surfaces this pass reads (a tool call's arguments and a tool
+    result are both JSON), so the name really does begin after it and the mask is
+    correctly absent — the same reading that spares ``C:\\tokens``, where the
+    pre-escape grammar masked a path segment. On a surface where such a backslash is
+    a literal (a shell word) that is a loss, and it is the residual this helper
+    cannot settle from the bytes at hand.
+
+    The letters are read off the NAME rather than off the text before it, because the
+    name group starts INSIDE the escape: its first character is the escape's own
+    letter, and the backslash is the character before the match.
+
+    An escape's letters belong to the escape, so they are removed before the name is
+    judged. The mask does not move: only the VERDICT depends on the name, and for
+    every name that is not count-shaped the stripped reading and the matched one
+    agree.
+    """
+    name = match.group(1)
+    start = match.start(1)
+    # ``start < 2 or match.string[start - 2] != "\\"`` is the "the backslash is not
+    # ITSELF escaped" half of the docstring's rule (agent review R2-F2): a doubled
+    # backslash is how a rendering writes a literal one, so the name after it
+    # follows a literal backslash and the letter at its front is its own.
+    if start and match.string[start - 1] == "\\" and (start < 2 or match.string[start - 2] != "\\"):
+        letters = _ESCAPE_LETTERS.match(name)
+        if letters is not None:
+            return name[len(letters.group(0)) :]
+    return name
+
+
+def _value_before_an_escape(value: str) -> str:
+    """The value the JUDGEMENT reads: the run before the rendering's first break.
+
+    The mirror of :func:`_name_after_an_escape`, and the division of labour between
+    the judgement and the mask is the whole of it (agent review R1-2). The MASK
+    keeps the entire run — the grammar runs across an escaped break, because a value
+    whose own bytes carry one is a value the rendering only re-spelled, and
+    stopping the mask there published its tail while the hit still graded
+    ``complete=True``, and published it with no hit at all when the run before the
+    break was shorter than the floor. The JUDGEMENT reads the run before the break,
+    because that is the value as the operator wrote it: on a surface where newlines
+    are newlines the same assignment's value stops at the same place, so the two
+    surfaces agree on what the value IS, and the rendered one masks strictly more.
+
+    Measured against ``origin/main``, in one process over the whole corpus: this
+    releases nothing the truncated reading did not already release — the run before
+    the break IS the value that reading judged — and it masks everything that
+    reading masked, plus the tail it had left readable. 0 of the 346 pre-existing
+    rows move.
+
+    **Below the rule's own floor the escape is not a break this rule may trust.**
+    A run shorter than :data:`_ASSIGNED_VALUE_MIN_CHARS` is not a value at all (it
+    is EMPTY when the value opens with an escape), and the mask's floor is the
+    evidence that what follows the escape is part of the value rather than the next
+    line — the grammar could not have matched otherwise. So the whole run is judged,
+    which is what ``origin/main`` did, and a value that opens with an escape keeps
+    its mask.
+    """
+    before = _ESCAPED_BREAK.split(value, maxsplit=1)[0]
+    if len(before) >= _ASSIGNED_VALUE_MIN_CHARS:
+        return before
+    return value
 
 
 def _assignment_value_guard(match: Match[str]) -> bool:
@@ -1201,11 +1532,23 @@ def _assignment_value_guard(match: Match[str]) -> bool:
     """
     if REDACTION_MARKER in match.group(4):
         return False
-    name = match.group(1)
+    name = _name_after_an_escape(match)
     if not is_credential_name(name) or is_count_shaped(name):
         return False
+    # ...and a NAME sitting in a credential FLAG's argument is the FLAG rule's
+    # judgement, not this one's: both rules look at the same bytes, and the second
+    # reading of a span the flag rule rejected is an assignment (agent review R1-1,
+    # see :func:`_is_a_credential_flags_argument`).
+    if _is_a_credential_flags_argument(match):
+        return False
+    # The VALUE is read the way the NAME is: the rendering's line breaks are line
+    # breaks for the judgement too, so what is judged is the run before the first
+    # of them while the mask covers the whole run (see
+    # :func:`_value_before_an_escape`).
     if _value_is_not_a_credential(
-        match.group(4), name=name, strong=is_strong_credential_name(name)
+        _value_before_an_escape(match.group(4)),
+        name=name,
+        strong=is_strong_credential_name(name),
     ):
         return False
     return not _is_keyword_argument(match)
@@ -2908,6 +3251,27 @@ _FILE_GAP_CHARS = 96
 _FILE_PATH_CHARS = 128
 
 
+#: What counts as a COMMAND POSITION for a dump rule: the start of the command, or
+#: the word that follows a shell separator.
+#:
+#: ``(`` is an arm of its own here, and it requires WHITESPACE after it, because a
+#: bare ``(`` is not lexical evidence of anything. Measured 2026-09-21 on a peer
+#: session's own count-only scan: ``where=collections.defaultdict(set)`` — a Python
+#: expression — drew ``[credential guard] env: print names, not values``, because the
+#: ``(`` opened a "command position" and ``set`` is the shell builtin that dumps
+#: variables. The command held no ``env``, no ``printenv``, no ``cut``, and no dump of
+#: any kind: the guard was matching the shape of the SEARCH QUERY the agent had just
+#: written, which is the circular case — an agent cannot audit its own detector
+#: without writing the pattern that trips it. A shell subshell is written ``( env`` or
+#: ``(env``; only the spaced spelling survives, and that is the recorded cost. An
+#: advisory is all this rule produces, so a missing one is cheap next to a false one
+#: naming an idiom the command never used.
+#:
+#: ``$(`` keeps its zero-width arm deliberately: ``x=$(set)`` IS a dump, and a command
+#: substitution has no other spelling.
+_COMMAND_POSITION = r"[;&|]\s*|\(\s+|\$\(\s*"
+
+
 DUMP_SHAPES: tuple[DumpShape, ...] = (
     # A bare ``env`` / ``printenv`` / ``set`` prints every value in the
     # environment — this is the incident's own shape. The command has to be at a
@@ -2917,7 +3281,7 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
     # neither is a dump.
     DumpShape(
         "environment-dump",
-        re.compile(r"(?:^|[;&|(]\s*|\$\(\s*)(?:env|printenv|set)\s*(?=[|;&)]|$)"),
+        re.compile(r"(?:^|" + _COMMAND_POSITION + r")(?:env|printenv|set)\s*(?=[|;&)]|$)"),
         "print names, not values: `env | cut -d= -f1`; or use the value inside the "
         "command that needs it, e.g. `$(lop secret get NAME)`",
     ),
@@ -2925,7 +3289,9 @@ DUMP_SHAPES: tuple[DumpShape, ...] = (
     # credential. Narrow on purpose: ``printenv PATH`` must stay ordinary.
     DumpShape(
         "named-variable-dump",
-        re.compile(rf"(?i)(?:^|[;&|(]\s*|\$\(\s*)printenv\s+{_COUNT_PREFIXES}{_CREDENTIAL_NAME}"),
+        re.compile(
+            r"(?i)(?:^|" + _COMMAND_POSITION + rf")printenv\s+{_COUNT_PREFIXES}{_CREDENTIAL_NAME}"
+        ),
         "print only the part you need, or read the value inside the command that "
         "needs it, e.g. `$(lop secret get NAME)`",
     ),
