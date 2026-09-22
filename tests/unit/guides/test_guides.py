@@ -158,6 +158,13 @@ def test_every_guide_reference_in_the_code_resolves() -> None:
     Scoped to the packaged `local_operator/` tree: that is the code that ships
     beside the guides and therefore the only code whose references this catalog
     can promise. A reference in a user's own script is theirs to get right.
+
+    BOTH `.py` and `.md`, the latter because the highest-traffic reference site in
+    the harness is the packaged system prompt: `prompts_md/system.md` carries four
+    `guide://` pointers and rides every session on every turn, so a rename there
+    is a dead end in front of every model — and a `.py`-only walk could not see it
+    (QA round 1, Q4, which demonstrated exactly that by breaking the prompt and
+    watching the test stay green).
     """
     root = Path(discover_guides()[0].file_path).resolve().parents[2]
     assert (root / "guides").is_dir(), f"unexpected package layout at {root}"
@@ -167,14 +174,18 @@ def test_every_guide_reference_in_the_code_resolves() -> None:
     # character class stops at `<`), which is why the protocol's own prose in
     # `skills/index.py` and the prompts does not trip this.
     dangling: list[str] = []
-    for path in sorted(root.rglob("*.py")):
-        for lineno, line in enumerate(
-            path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
-        ):
-            for target in set(re.findall(r"guide://([a-zA-Z0-9_-]+)", line)):
-                if target not in names:
-                    dangling.append(f"{path.relative_to(root)}:{lineno} -> guide://{target}")
+    walked = 0
+    for pattern in ("*.py", "*.md"):
+        for path in sorted(root.rglob(pattern)):
+            walked += 1
+            for lineno, line in enumerate(
+                path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+            ):
+                for target in set(re.findall(r"guide://([a-zA-Z0-9_-]+)", line)):
+                    if target not in names:
+                        dangling.append(f"{path.relative_to(root)}:{lineno} -> guide://{target}")
 
+    assert walked > 100, f"the walk found only {walked} files, which is not this tree"
     assert not dangling, f"code references a guide that does not exist: {dangling}"
 
 

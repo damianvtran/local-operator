@@ -49,14 +49,22 @@ where a fix goes wrong:
   Verify by running the thing, not by finding it.
 
 **A shell that answered `command not found` is only evidence about THAT shell.**
-The console surface starts the user's own shell, and what is on its `PATH`
-depends on how that shell was started: a login shell reads `~/.zprofile`,
-`~/.bash_profile` or `~/.profile`, while a non-login one may read none of them —
-and on Windows a process sees the `PATH` its parent had at launch. **Measured in
-the Console on a macOS host with Homebrew installed:** the surface's `bash`
-reported `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `command -v ffmpeg` said
-`MISSING`, and `/opt/homebrew/bin/ffmpeg` ran fine from the very same surface.
-`ffmpeg` was installed the whole time.
+What is on its `PATH` depends on how it was started: a login shell reads
+`~/.zprofile`, `~/.bash_profile` or `~/.profile`, while a non-login one may read
+none of them — and on Windows a process sees the `PATH` its parent had at
+launch. **Measured in a Console surface started as `bash`** (`create` with
+`command: /bin/bash`, which is not a login shell) on a macOS host with Homebrew
+installed: that surface reported `PATH=/usr/bin:/bin:/usr/sbin:/sbin`,
+`command -v ffmpeg` said `MISSING`, and `/opt/homebrew/bin/ffmpeg` ran fine from
+the very same surface. `ffmpeg` was installed the whole time.
+
+The surface matters, and this is the one place to get it wrong: **a surface
+you start with no `command` runs the user's own login shell**, which on the same
+host read `~/.zprofile` and *did* have `/opt/homebrew/bin` on `PATH` — there,
+`command -v ffmpeg` correctly answered `present`. So the trap appears when the
+surface's shell is not a login shell (an explicit `bash`, a nested `-c`, a
+script), not on every surface. It costs one command to rule out either way,
+which is why step 1 checks twice regardless.
 
 So check it twice before installing anything:
 
@@ -135,9 +143,9 @@ eval "$(/opt/homebrew/bin/brew shellenv)"      # for the rest of THIS surface, i
 ```
 
 The last line uses the **absolute path to `brew`**, and that is not decoration: in
-the surface this guide measured, `brew` itself does not resolve, so
-`eval "$(brew shellenv)"` substitutes an EMPTY string — `eval ""` exits 0 and
-changes nothing, which is the worst kind of fix. Check `command -v brew` first,
+the `bash` surface this guide measured (the same one step 1 describes), `brew`
+itself does not resolve, so `eval "$(brew shellenv)"` substitutes an EMPTY
+string — `eval ""` exits 0 and changes nothing, which is the worst kind of fix. Check `command -v brew` first,
 as above, and use the absolute path when it is absent. On Intel Macs the prefix
 is `/usr/local` rather than `/opt/homebrew`.
 
@@ -332,7 +340,7 @@ guide — so the table is by tool, not by task.
 |---|---|---|---|---|---|---|---|
 | ffmpeg | convert, cut, encode, mux video and audio; thumbnails | `brew install ffmpeg` | `sudo apt install ffmpeg` | `sudo dnf install ffmpeg` | `sudo pacman -S ffmpeg` | `winget install --id Gyan.FFmpeg -e` | `ffmpeg -version \| head -1` |
 | ffprobe | inspect a file without converting it — codecs, duration, streams | ships with ffmpeg | `sudo apt install ffmpeg` | ships with ffmpeg | ships with ffmpeg | ships with ffmpeg | `ffprobe -version \| head -1` |
-| ImageMagick | convert, resize, crop, compose images; PDF-to-image (needs ghostscript) | `brew install imagemagick` | `sudo apt install imagemagick` | `sudo dnf install ImageMagick` | `sudo pacman -S imagemagick` | `winget install --id ImageMagick.ImageMagick -e` | `magick -version \| head -1` **or** `convert -version \| head -1` (see note) |
+| ImageMagick | convert, resize, crop, compose images; PDF-to-image (needs ghostscript) | `brew install imagemagick` | `sudo apt install imagemagick` | `sudo dnf install ImageMagick` | `sudo pacman -S imagemagick` | `winget install --id ImageMagick.ImageMagick -e` | `magick -version 2>/dev/null \|\| convert -version` (see note) |
 | poppler | text and images out of PDFs (`pdftotext`, `pdftoppm`, `pdfinfo`) | `brew install poppler` | `sudo apt install poppler-utils` | `sudo dnf install poppler-utils` | `sudo pacman -S poppler` | `winget install --id oschwartz10612.Poppler -e` | `pdftotext -v` (see note) |
 | ghostscript | the PostScript/PDF engine ImageMagick and `mutool` lean on | `brew install ghostscript` | `sudo apt install ghostscript` | `sudo dnf install ghostscript` | `sudo pacman -S ghostscript` | **no winget package** — `choco install ghostscript`, or the Artifex installer | `gs --version` |
 | pandoc | document format conversion (`docx` ↔ `md`, `html`, `epub`) | `brew install pandoc` | `sudo apt install pandoc` | `sudo dnf install pandoc` | `sudo pacman -S pandoc` | `winget install --id JohnMacFarlane.Pandoc -e` | `pandoc --version \| head -1` |
@@ -344,12 +352,20 @@ The caveats in that table are load-bearing:
 - **ImageMagick's command depends on the VERSION, and half of Linux ships 6.**
   ImageMagick 7's command is `magick`; ImageMagick 6's is `convert`. Debian 12
   "bookworm" and both current Ubuntu LTS releases install **IM6**, where `magick`
-  does not exist at all — so `magick -version | head -1` reports failure on a
-  perfectly good install there, which is the exact confusing text this guide's
-  opening calls the most common failure mode. Check either spelling, IM7 first:
-  `magick -version || convert -version`. (Debian 13 "trixie" is IM7, which is
-  why a check run only there looks right; it is not the distribution most users
-  have.)
+  does not exist at all — so `magick -version` reports failure on a perfectly
+  good install there, which is the exact confusing text this guide's opening
+  calls the most common failure mode. Check either spelling, IM7 first:
+  `magick -version 2>/dev/null || convert -version`. (Debian 13 "trixie" is IM7,
+  which is why a check run only there looks right; it is not the distribution
+  most users have.)
+
+  **Do not put a pipe on the `||` check** — `magick -version | head -1 ||
+  convert -version | head -1` prints NOTHING and exits 0 on an IM6 machine,
+  because `head` succeeds and the `||` never runs. That is the same silent
+  success this guide calls out for `eval "$(brew shellenv)"`, and step 6 is
+  exactly where it would turn into a claim of verification you did not get. Run
+  the unpiped form and read its first line, or pipe the whole thing:
+  `{ magick -version || convert -version; } | head -1`.
 - **`convert` is not ImageMagick on Windows** — `convert.exe` is a filesystem
   tool, so on Windows the command is `magick` and nothing else.
 - **`pdftotext` has no `--version`.** `-v` prints a banner to stderr and the
