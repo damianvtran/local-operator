@@ -25,7 +25,7 @@ Text, and rendered frames:
   (`bash`, `eval` and `grep` all take that path).
 - **Data you are still shaping** — a `.csv`/`.tsv` extract, a `.json` payload, a
   scratch list of rows you will filter next turn.
-  - **A rendered frame or a still** — a PNG, a JPEG/GIF/WebP, or a screenshot
+- **A rendered frame or a still** — a PNG, a JPEG/GIF/WebP, or a screenshot
   of a UI under test. These are first-class here: a raster image written into
   the pad by `bash` reads back through the scheme as a VIEWABLE image. (An SVG
   is stored here too, but the reader does not decode vector formats — it comes
@@ -49,7 +49,7 @@ Left in their tree, this is litter they cannot tell apart from output.
 
 - Anything the user asked for as an output → the working directory, at the path
   they would expect.
-  - Anything that must outlive this conversation → not here; an output that has
+- Anything that must outlive this conversation → not here; an output that has
   to survive belongs in the working directory, or wherever the user wants it.
   But do not confuse that with the pad being EPHEMERAL — it is not (measured
   2026-09-22: a session that read its lifetime as "like a temp directory" kept
@@ -59,7 +59,7 @@ Left in their tree, this is litter they cannot tell apart from output.
   deleting the session (or the cleanup pass, when its policy is on) takes the
   whole folder. A long-running loop or a multi-turn state file has no reason to
   keep a second copy anywhere else.
-  - **Do not put these here: build trees, dependency trees, compiled artefacts,
+- **Do not put these here: build trees, dependency trees, compiled artefacts,
   archives, anything the shell built.** `write`/`edit` refuse them by NAME — a
   `node_modules`/`target`/`dist`/`out` directory, a
   `*-build`/`_build`/`*-cache`/ `cmake-build-*`/`bazel-*` tree, a
@@ -74,7 +74,7 @@ Left in their tree, this is litter they cannot tell apart from output.
   policed, so a `pnpm install`, a `cargo build` or a redirect into the pad
   still succeeds and still lists back through the scheme. The refusal is a
   nudge at the tool surface: it cannot undo what a shell has already put there.
-  - **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
+- **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
   has no text to return, so the reader refuses it as text. (`bash mktemp -d`
   with NO template lands in `$TMPDIR`, the per-user temp directory; a template
   carrying `/tmp` puts you back in the directory macOS reaps, where
@@ -168,12 +168,12 @@ an absolute path, so a shell can create directly into it:
 The folder is created on first use — by `write`/`edit`, or before a shell call
 runs — so a bare redirect and a `mktemp` template both work first time. Some
 results also carry a one-line `[scratch]` reminder when a command writes into a
-temp root; the result carries the path whole. The idiom for a rig that wants a private subdirectory is
-`mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXX"` — the template keeps the
-directory inside the pad, so the files stay readable through the scheme and
-survive the session, which a `/tmp` one does not. The name is set only inside an
-agent's own shell and kernel; it is unset in the user's terminal, where the
-`scratchpad://` calls are the way in.
+temp root; the result carries the path whole. The idiom for a rig that wants a
+private subdirectory is `mktemp -d "$LOCAL_OPERATOR_SCRATCHPAD/rig.XXXXXX"`
+— the template keeps the directory inside the pad, so the files stay readable
+through the scheme and survive the session, which a `/tmp` one does not. The
+name is set only inside an agent's own shell and kernel; it is
+unset in the user's terminal, where the `scratchpad://` calls are the way in.
 
 ## File names and types
 
