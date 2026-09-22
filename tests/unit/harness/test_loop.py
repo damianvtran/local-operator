@@ -27,6 +27,7 @@ from local_operator.harness.loop import (
     _get_before_timeout,
     validate_tool_arguments,
 )
+from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
 from local_operator.harness.rows import (
     assistant_stop_notice,
     is_harness_chrome,
@@ -988,7 +989,7 @@ async def test_todo_reminder_follow_up_reenters_and_stays_invisible():
     user's screen. The real session renderer is pinned in
     ``tests/unit/session/test_todo_guardrail.py``; this stands in for it.
     """
-    from local_operator.harness.message_types import TODO_REMINDER_MESSAGE_TYPE
+
 
     reminder = CustomMessage(
         custom_type=TODO_REMINDER_MESSAGE_TYPE,
@@ -5264,3 +5265,163 @@ async def test_a_conversation_continued_on_an_aggregator_route_echoes_reasoning(
         if isinstance(event, TurnEndEvent) and isinstance(event.message, Message)
     ]
     assert "summarised" in replies
+
+
+@pytest.mark.asyncio
+async def test_a_parent_note_does_not_spend_the_todo_budget():
+    """Parent notes plus a still-moving todo list must not end the run.
+
+    RC1. The counter at the outer-loop yield boundary used to be RUN-SCOPED and
+    shared by three unrelated producers (steering, asides, follow-ups), so a
+    chatty parent spent a child's todo allowance: nine re-entries of ANY kind
+    ended the turn on a BARE ``AgentEndEvent`` that every reader takes as a
+    completed answer. Here a parent speaks five times while the child's todo
+    list keeps MOVING (a fresh reminder every call, which is what the real
+    ``Session._todo_continuation`` requires to fire at all), so the combined
+    re-entry count passes eight while neither producer is anywhere near its own
+    budget.
+
+    The producer split is the discriminating property: on the parent commit the
+    shared counter trips on the ninth re-entry and the run ends there; with
+    per-producer budgets the run continues while the list moves.
+    """
+    follow_calls = 0
+
+    async def get_follow_ups():
+        nonlocal follow_calls
+        follow_calls += 1
+        if follow_calls > 12:
+            return []
+        return [
+            CustomMessage(
+                custom_type=TODO_REMINDER_MESSAGE_TYPE,
+                attribution="system",
+                details={"text": f"<system-reminder>still open: item {follow_calls}</system-reminder>"},
+            )
+        ]
+
+    # Fires at the YIELD boundary only. The inner loop's own inflight drain
+    # consumes asides too, so a producer that answers every call would never
+    # reach the outer guard at all — answering the even calls lands one note per
+    # outer pass, which is the boundary the counter lives on.
+    aside_calls = 0
+
+    async def get_asides():
+        nonlocal aside_calls
+        aside_calls += 1
+        if aside_calls % 2 == 0 and aside_calls <= 10:
+            return [Message.user(f"parent note {aside_calls // 2}")]
+        return []
+
+    turns = [
+        [StreamTextDelta(delta=f"t{i}"), StreamEndEvent(stop_reason="stop")] for i in range(40)
+    ]
+    stream = ScriptedStream(turns)
+    context = LoopContext(tools=[])
+    config = make_config(
+        stream,
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        get_aside_messages=get_asides,
+        get_follow_up_messages=get_follow_ups,
+    )
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    # Not cut off, and not ended by an error...
+    assert end.cut_off_cause == "", f"run was cut off: {end.cut_off_cause!r}"
+    assert end.error is None, end.error
+    # ...and the run did the WHOLE job. The five parent notes plus the twelve
+    # moving todo reminders are thirteen re-entries, and the shared counter
+    # tripped on the ninth: the parent commit ends here at NINE requests on a
+    # BARE end, so this count is the discriminating assertion.
+    assert len(stream.requests) == 13, len(stream.requests)
+    assert follow_calls == 13, follow_calls  # the moving list ran to exhaustion
+
+
+@pytest.mark.asyncio
+async def test_the_aside_budget_still_bounds_a_runaway_parent():
+    """A parent that never stops must end the run NAMED, not bare.
+
+    The negative arm of the split: per-producer budgets are still budgets. A
+    parent speaking faster than the child consumes is the runaway the guard
+    exists for, and the end it produces must be involuntary AND named — the bare
+    ``AgentEndEvent`` it used to be reads as a completed answer, which is the
+    other half of the defect.
+    """
+    aside_calls = 0
+
+    async def get_asides():
+        nonlocal aside_calls
+        aside_calls += 1
+        # One note per outer pass; see the sibling test on why the even calls.
+        return [Message.user(f"note {aside_calls // 2}")] if aside_calls % 2 == 0 else []
+
+    turns = [
+        [StreamTextDelta(delta=f"t{i}"), StreamEndEvent(stop_reason="stop")] for i in range(30)
+    ]
+    stream = ScriptedStream(turns)
+    context = LoopContext(tools=[])
+    config = make_config(stream, get_aside_messages=get_asides)
+
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, config, None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.cut_off_cause == "continuation-limit", end.cut_off_cause
+    assert end.aborted is True
+    # The loop stamps the TOKEN and the involuntariness; the rendered sentence
+    # is the classifier's (``Session._classify_cut_off`` — see
+    # ``tests/unit/session/test_cut_off_turns.py``), which is the same
+    # one-writer-per-fact split every other cut-off arm uses.
+    assert end.cut_off == ""
+    # Exactly one increment past the budget: the guard fires on the (N+1)th.
+    assert len(stream.requests) == config.max_paused_turn_continuations + 1
+
+
+@pytest.mark.asyncio
+async def test_a_clean_completion_carries_no_cut_off():
+    """The other negative arm: a normal end must stay bare.
+
+    A fix that stamped a cause on every end would pass "a cause is present"
+    while making every completion read as a cut-off, so the clean path is
+    pinned here.
+    """
+    stream = ScriptedStream([[StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")]])
+    context = LoopContext(tools=[])
+    events = []
+    async for event in AgentLoop().run([Message.user("go")], context, make_config(stream), None):
+        events.append(event)
+
+    end = events[-1]
+    assert isinstance(end, AgentEndEvent)
+    assert end.cut_off_cause == ""
+    assert end.cut_off == ""
+    assert not end.aborted
+
+
+def test_the_continuation_limit_cause_is_a_named_involuntary_token():
+    """Why the loop's new end reads as a CUT-OFF everywhere for free.
+
+    The loop stamps a token; the VOCABULARY decides whether every existing
+    surface already renders it (the attention outcome, the roster, the panel
+    row). A token missing from ``CUT_OFF_CAUSES`` — or one that landed in the
+    deliberate half — would leave the new end invisible on the surfaces this
+    change exists to fix, so the classification is pinned rather than assumed.
+    """
+    from local_operator.incidents import (
+        CONTINUATION_LIMIT_CAUSE,
+        is_cut_off_cause,
+        is_deliberate_cause,
+        render_cut_off_reason,
+    )
+
+    assert CONTINUATION_LIMIT_CAUSE == "continuation-limit"
+    assert is_cut_off_cause(CONTINUATION_LIMIT_CAUSE)
+    assert not is_deliberate_cause(CONTINUATION_LIMIT_CAUSE)
+    assert render_cut_off_reason(CONTINUATION_LIMIT_CAUSE)

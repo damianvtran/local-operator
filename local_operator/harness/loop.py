@@ -95,7 +95,7 @@ from local_operator.harness.types import (
     TurnStartEvent,
     Usage,
 )
-from local_operator.incidents import REASONING_ECHO_MARKERS
+from local_operator.incidents import CONTINUATION_LIMIT_CAUSE, REASONING_ECHO_MARKERS
 from local_operator.model.effort import real_rungs
 
 #: How often a still-composing tool call re-announces its size. Fast enough that
@@ -1104,7 +1104,7 @@ class AgentLoop:
         context.messages.extend(initial_messages)
         pending: list[AgentMessage] = []
         has_more_tool_calls = True  # forces the first model call
-        reentries = 0  # outer-loop re-entries; capped by config
+        reentries: dict[str, int] = {}  # per-producer outer-loop re-entries
         # A reasoning model can spend its ENTIRE output budget thinking and be
         # cut off at ``length`` with nothing visible to show for it — the user
         # then watches minutes of "thinking" end in silence (session f3c058d1:
@@ -1989,26 +1989,62 @@ class AgentLoop:
 
                 late = await self._collect_yield_injections(config)
                 if late:
-                    reentries += 1
-                    if reentries > config.max_paused_turn_continuations:
-                        # MAX_PAUSED_TURN_CONTINUATIONS guard: a producer
-                        # that never stops (follow-ups arriving faster than
-                        # they are consumed) must not re-enter forever.
+                    # PER-PRODUCER BUDGETS, and the tag is what makes them
+                    # possible: the collector hands back (source, message) pairs,
+                    # and the source decides whose budget this re-entry charges.
+                    # A COUNTER CANNOT RECOVER THIS AFTER THE FACT — once three
+                    # producers' messages share one list, "which budget does this
+                    # increment charge" is unanswerable, and charging all three
+                    # to one budget IS the defect: a parent's hub note consumed a
+                    # child's todo allowance, and a child with open todos was cut
+                    # off after eight of them.
+                    #
+                    # The source of the BATCH is taken from its first tagged
+                    # entry. A batch can mix producers in principle only when two
+                    # drains fire in the same yield; the follow-up drain latches on
+                    # a moving list, so the mixed case is the follow-up one and the
+                    # charge follows the producer that will keep it alive.
+                    source = late[0][0]
+                    budget = (
+                        config.max_follow_up_continuations
+                        if source == "follow-up"
+                        else config.max_paused_turn_continuations
+                    )
+                    reentries[source] = reentries.get(source, 0) + 1
+                    if reentries[source] > budget:
+                        # The continuation guard: a producer that never stops
+                        # (messages arriving faster than they are consumed) must
+                        # not re-enter forever. Named as an INVOLUNTARY CUT-OFF
+                        # rather than the bare end it used to be, because a bare
+                        # end reads as a completed answer on every surface.
                         logger.warning(
-                            "paused-turn continuation limit (%d) reached; ending run",
-                            config.max_paused_turn_continuations,
+                            "continuation limit (%d) reached for %s; ending run",
+                            budget,
+                            source,
                         )
                         yield NoticeEvent(
                             text=(
-                                f"Continuation limit reached "
-                                f"({config.max_paused_turn_continuations}); stopping."
+                                f"Continuation limit reached ({budget}, {source}); "
+                                "work is still queued — stopping."
                             ),
                             kind="warning",
                         )
-                        self._discard_pending_custom(late)
-                        yield AgentEndEvent(messages=new_messages, generation=generation)
+                        # The pending batch is dropped (as today), and the end
+                        # NAMES the cause: ``aborted=True`` is what the taxonomy
+                        # reads as involuntary, and ``cut_off_cause`` is the token
+                        # every surface already renders (``AgentEndEvent`` carries
+                        # both). ``Session._classify_cut_off`` turns the pair into
+                        # an error outcome whose cause is this token, so a stalled
+                        # child is never mistaken for one that finished.
+                        self._discard_pending_custom([m for _, m in late])
+                        yield AgentEndEvent(
+                            messages=new_messages,
+                            aborted=True,
+                            cut_off_cause=CONTINUATION_LIMIT_CAUSE,
+                            generation=generation,
+                        )
                         return
-                    pending = late
+                    pending = [m for _, m in late]
                     has_more_tool_calls = True
                     continue
                 break
@@ -4007,15 +4043,27 @@ class AgentLoop:
         return pending
 
     @staticmethod
-    async def _collect_yield_injections(config: LoopConfig) -> list[AgentMessage]:
-        """Steering + asides + follow-ups at the yield boundary."""
-        pending: list[AgentMessage] = []
+    async def _collect_yield_injections(
+        config: LoopConfig,
+    ) -> list[tuple[str, AgentMessage]]:
+        """Steering + asides + follow-ups at the yield boundary, each TAGGED
+        with the producer that supplied it.
+
+        The tag is what lets the outer-loop guard budget the producers
+        separately (see ``_run``). It cannot be recovered later from the
+        messages themselves: a ``CustomMessage`` and an aside are both plain
+        ``AgentMessage``s by the time they are drained, and the producers are
+        the only place that knows which drain a message came from.
+        """
+        pending: list[tuple[str, AgentMessage]] = []
         if config.get_steering_messages is not None:
-            pending.extend(await config.get_steering_messages())
+            pending.extend(("steering", m) for m in await config.get_steering_messages())
         if config.get_aside_messages is not None:
-            pending.extend(_materialize_asides(await config.get_aside_messages()))
+            pending.extend(
+                ("aside", m) for m in _materialize_asides(await config.get_aside_messages())
+            )
         if config.get_follow_up_messages is not None:
-            pending.extend(await config.get_follow_up_messages())
+            pending.extend(("follow-up", m) for m in await config.get_follow_up_messages())
         return pending
 
     @staticmethod
