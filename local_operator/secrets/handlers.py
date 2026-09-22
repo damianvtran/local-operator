@@ -348,6 +348,12 @@ def _warn_damaged(damaged: list[str]) -> None:
 
 
 def _describe(args: argparse.Namespace) -> int:
+    # Default `role="agent"`: this is the operator's ordinary CLI surface, and a
+    # provider-class row (`LOP_PROVIDER_*`) is refused here exactly as the agent
+    # tool's `describe` refuses it — an agent or a misdirected script must not be
+    # able to enumerate which provider keys a host holds. The provider-side
+    # readers (`registry.provider_secret_value`, the qwencloud ticket) pass
+    # `role="provider"` and are unaffected.
     record = open_store().describe(args.name)
     if args.json:
         print(json.dumps(_record_dict(record), indent=2))
@@ -399,6 +405,11 @@ def _remove(args: argparse.Namespace) -> int:
         _err(f"deleted record {args.id}")
         return 0
 
+    # `role="agent"` by default, so this irreversible verb cannot remove a
+    # provider-owned row: the value is kept nowhere else, which makes an
+    # unguarded delete the destructive half of the namespace boundary rather
+    # than a read leak. Provider-class deletion is `lop credential delete`,
+    # which passes `role="provider"`.
     record = open_store().delete(args.name, session_id=session_id())
     _err(f"deleted {record.name}")
     return 0
@@ -847,17 +858,51 @@ def _run(args: argparse.Namespace) -> int:
     return subprocess.run(command, env=environment, check=False).returncode
 
 
-def _migrate_provider_env_keys() -> set[str]:
-    """Every env var NAME any registry provider reads, as a set.
+def _web_search_env_keys() -> set[str]:
+    """Every env var NAME the built-in web-search transports read, as a set.
 
-    Derived from the registry rather than a hard-coded list, and from BOTH
-    readers: ``env_key_names`` is the provider's own env-var name (including the
-    tuple names a provider may be configured under) and ``credential_file_names``
-    adds the names the provider's login writes into the legacy file plus its
-    alias rows (``xai-oauth`` ⇒ ``xai``). A hard-coded list beside them is free
-    to drift from the name a login actually writes, and the failure would be
-    silent: the key would be filed as an ordinary agent secret and then never
-    found by the provider reader looking it up under ``LOP_PROVIDER_*``.
+    **These keys are NOT in ``PROVIDER_REGISTRY``, and that is why they need
+    their own source (R3).** ``lop search setup`` writes each of them through
+    ``store_provider_key`` (a ``LOP_PROVIDER_<KEY>`` row with
+    ``role="provider"``), and ``web_search/providers.py``'s ``_credential``
+    reads them back through ``provider_secret_value`` — so the search readers
+    resolve them from the PROVIDER namespace even though the registry does not
+    know them. A migration that classified only by the registry filed them as
+    bare agent secrets, where ``provider_secret_value`` will never look, so the
+    key silently stopped resolving after a migration that appeared to succeed.
+
+    Derived from BOTH the writer and the readers in ``web_search`` rather than a
+    second hand-maintained list, for the same reason
+    ``_migrate_provider_env_keys`` derives from the registry: a list beside the
+    writer is free to drift from the name the writer actually stores.
+    ``_API_KEY_NAMES`` is what ``lop search setup`` writes a key UNDER, and
+    ``PROVIDERS[...].credential_keys`` is what the transports LOOK it up as —
+    the two differ by the ``SERP_API_KEY`` alias, which is read through
+    ``provider_secret_value`` and must therefore be migrated into the provider
+    namespace too.
+    """
+    from local_operator.web_search.cli import _API_KEY_NAMES
+    from local_operator.web_search.providers import PROVIDERS
+
+    names = set(_API_KEY_NAMES.values())
+    for definition in PROVIDERS.values():
+        names.update(definition.credential_keys)
+    return names
+
+
+def _migrate_provider_env_keys() -> set[str]:
+    """Every env var NAME any registry provider OR web-search transport reads.
+
+    Derived rather than hard-coded, and from all three readers: ``env_key_names``
+    is the provider's own env-var name (including the tuple names a provider may
+    be configured under), ``credential_file_names`` adds the names the provider's
+    login writes into the legacy file plus its alias rows (``xai-oauth`` ⇒
+    ``xai``), and ``_web_search_env_keys`` adds the search keys that live in the
+    provider namespace without being registry providers. A hard-coded list beside
+    them is free to drift from the name a login or ``lop search setup`` actually
+    writes, and the failure would be silent: the key would be filed as an
+    ordinary agent secret and then never found by the provider reader looking it
+    up under ``LOP_PROVIDER_*``.
 
     A provider whose ``env_keys`` is a callable (:func:`_anthropic_env_key`)
     contributes no NAME — the callable answers only with a VALUE, so there is
@@ -871,7 +916,7 @@ def _migrate_provider_env_keys() -> set[str]:
         env_key_names,
     )
 
-    names: set[str] = set()
+    names: set[str] = _web_search_env_keys()
     for definition in PROVIDER_REGISTRY:
         names.update(env_key_names(definition.id))
         names.update(credential_file_names(definition.id))

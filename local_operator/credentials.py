@@ -101,6 +101,35 @@ class CredentialManager:
         self.config_file = config_dir / CREDENTIALS_FILE_NAME
 
     @classmethod
+    def readonly(cls, config_dir: Path) -> "CredentialManager":
+        """Bind and load an instance WITHOUT creating the config dir or the file.
+
+        ``__init__`` runs :meth:`_ensure_config_exists`, whose whole job is to
+        create an empty ``credentials.env`` and re-tighten a loose one. That is
+        correct for a writer and WRONG for every flow that now writes the
+        encrypted store instead: ``lop credential update`` and ``lop search
+        setup`` were each resurrecting the plaintext file this consolidation
+        retires, on a host that had already been migrated and cleaned up (R5).
+        Those flows still need a bound manager — for ``config_dir`` and for the
+        status/landing readers — so the read-only construction is exposed here
+        rather than left to each caller reaching past ``__init__`` with
+        ``__new__``.
+
+        An ABSENT file is an empty credential set, not an error: a host that has
+        migrated has no file to read, and that is the expected end state. Every
+        other errno is raised, matching :meth:`read_key_names`.
+        """
+        manager = cls.__new__(cls)
+        manager._bind(config_dir)
+        try:
+            manager.load_from_file()
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                raise
+            manager.credentials = {}
+        return manager
+
+    @classmethod
     def read_key_names(cls, config_dir: Path, *, non_empty: bool = True) -> List[str]:
         """Credential KEY NAMES from the store at ``config_dir``, read WITHOUT creating it.
 

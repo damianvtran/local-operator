@@ -233,6 +233,12 @@ async def execute_secret(
             # row for a retrieval that never handed out a byte — misreporting
             # the one trail the operator relies on. Existence is the whole
             # question this verb answers.
+            #
+            # The store's `role` defaults to "agent" on describe/delete, so this
+            # agent surface cannot inspect or remove a `LOP_PROVIDER_*` row — the
+            # same boundary `set`/`get` enforce. Nothing is passed here on
+            # purpose: defaulting to the restrictive side means a future verb
+            # added without a role argument is denied rather than served.
             record = store.describe(name)
             summary = f"{record.name} is stored"
             if record.description:

@@ -155,6 +155,61 @@ def test_an_agent_update_of_a_provider_row_is_refused(store: SecretStore) -> Non
     assert store.get(name, role="provider") == b"real-key"
 
 
+def test_an_agent_delete_of_a_provider_row_is_refused(store: SecretStore) -> None:
+    """The DESTRUCTIVE half of the boundary (Q-1/R2).
+
+    The write guard stops an agent creating a ``LOP_PROVIDER_*`` row and the read
+    guard stops it serving one, but ``delete`` is irreversible — the value is
+    retained nowhere — so an unrestricted delete let an agent surface destroy the
+    credential a provider authenticates with. Refused, and the row survives: a
+    refusal that still removed the record would be the very defect, one step later.
+    """
+    name = provider_secret_name("OPENROUTER_API_KEY")
+    store.set(name, b"provider-key", role="provider")
+
+    with pytest.raises(InvalidSecretName):
+        store.delete(name)
+
+    assert store.get(name, role="provider") == b"provider-key"
+
+
+def test_a_provider_may_delete_its_own_row(store: SecretStore) -> None:
+    """``role="provider"`` still works, or the boundary would be a regression.
+
+    This is the path ``lop credential delete`` / ``remove_provider_key`` takes.
+    """
+    name = provider_secret_name("OPENROUTER_API_KEY")
+    store.set(name, b"provider-key", role="provider")
+
+    removed = store.delete(name, role="provider")
+
+    assert removed.name == name
+    assert store.list() == []
+
+
+def test_an_agent_describe_of_a_provider_row_is_refused(store: SecretStore) -> None:
+    """Metadata is not the value, but it is the map to it.
+
+    An agent surface that could describe a ``LOP_PROVIDER_*`` row would enumerate
+    which provider keys a host holds — name, kind, description, timestamps —
+    which is exactly what the prefix exists to keep from it.
+    """
+    name = provider_secret_name("ANTHROPIC_API_KEY")
+    store.set(name, b"provider-key", role="provider", description="stored by login")
+
+    with pytest.raises(InvalidSecretName):
+        store.describe(name)
+
+    assert store.describe(name, role="provider").name == name
+
+
+def test_a_provider_may_describe_its_own_row(store: SecretStore) -> None:
+    name = provider_secret_name("ANTHROPIC_API_KEY")
+    store.set(name, b"provider-key", role="provider")
+
+    assert store.describe(name, role="provider").name == name
+
+
 def test_the_two_namespaces_are_disjoint_so_shadowing_is_impossible(
     store: SecretStore,
 ) -> None:
@@ -366,6 +421,96 @@ def test_provider_env_key_falls_back_to_the_legacy_file_during_the_transition(
     assert provider_env_key("openrouter", base=sandbox) == "from-the-file"
 
 
+def test_a_provider_key_read_on_a_store_less_host_creates_no_store(sandbox: Path) -> None:
+    """A READ must not spawn a broker daemon or create ``secrets/`` (R1).
+
+    ``retrieve_secret`` reaches ``ensure_broker`` BEFORE it asks whether a store
+    exists, and ``ensure_broker`` makes the ``secrets/`` directory and spawns
+    ``python -m local_operator.secrets.brokerd``. So on the very common host that
+    has never run ``lop secret set``, an unguarded provider-key read — reached by
+    the credential cascade, the model catalogue, the classification legs and every
+    search transport — left a directory and a detached daemon behind. This drives
+    the real reader with no store on disk and asserts the side effect is absent.
+
+    Process-counted rather than import-asserted: "no daemon was spawned" is a
+    property of the machine, and the guard's whole cost is one ``exists()``.
+    """
+    from local_operator.providers.registry import (
+        provider_env_key,
+        provider_secret_value,
+    )
+
+    root = sandbox / "config"
+    root.mkdir()
+    assert not (root / "secrets").exists(), "fixture must start with no store"
+
+    assert provider_secret_value("OPENROUTER_API_KEY", base=root) is None
+    # Through the cascade reader too, which is how the defect was reached.
+    assert provider_env_key("openrouter", base=root) in (None, "")
+
+    assert not (root / "secrets").exists(), "a pure read created the secrets dir"
+
+
+def test_migrate_env_files_web_search_keys_under_the_provider_prefix(sandbox: Path) -> None:
+    """Search keys are provider-namespaced readers, so they must migrate as such (R3).
+
+    ``lop search setup`` writes ``BRAVE_API_KEY`` etc. through
+    ``store_provider_key`` and ``web_search.providers._credential`` reads them with
+    ``provider_secret_value``, but none of them is in ``PROVIDER_REGISTRY`` — so a
+    registry-only classification filed them as bare agent secrets and the search
+    reader, which only ever looks under ``LOP_PROVIDER_*``, never found them again.
+    """
+    from local_operator.providers.registry import provider_secret_value
+
+    _, config = _migrate_cli(sandbox)
+    _write_source(config, ["BRAVE_API_KEY", "EXA_API_KEY"])
+
+    result, config = _migrate_cli(sandbox)
+    assert result.returncode == 0, result.stderr
+
+    names = _stored_names(config)
+    assert names == sorted([provider_secret_name(key) for key in ("BRAVE_API_KEY", "EXA_API_KEY")])
+    assert provider_secret_value("BRAVE_API_KEY", base=config) == "value-of-BRAVE_API_KEY"
+
+
+def test_credential_update_does_not_recreate_the_plaintext_file(sandbox: Path) -> None:
+    """The writer that now writes only the store must leave the file absent (R5).
+
+    ``CredentialManager.__init__`` runs ``_ensure_config_exists``, which CREATES an
+    empty ``credentials.env`` — so ``lop credential update`` on a host that had
+    already migrated and deleted the file was resurrecting the very file this
+    consolidation retires. Driven through the real CLI in a subprocess, because
+    "creates no file" is a property of the process.
+    """
+    home = sandbox / "home"
+    config = sandbox / "config"
+    home.mkdir(exist_ok=True)
+    config.mkdir(exist_ok=True)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("CMUX_")}
+    environment.update(
+        HOME=str(home),
+        LOCAL_OPERATOR_CONFIG_DIR=str(config),
+        PYTHONPATH=str(REPO_ROOT),
+        TERM="xterm-256color",
+    )
+    environment.pop("NO_COLOR", None)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "local_operator.cli", "credential", "update", "OPENROUTER_API_KEY"],
+        input=b"sk-from-the-test\n",
+        capture_output=True,
+        env=environment,
+        timeout=180,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (
+        config / CREDENTIALS_FILE_NAME
+    ).exists(), "credential update recreated the plaintext file it retires"
+    # And the key really landed in the store, so the assertion above is not
+    # passing because the command did nothing.
+    assert provider_secret_name("OPENROUTER_API_KEY") in _stored_names(config)
+
+
 def test_no_plaintext_writer_outside_the_retired_manager() -> None:
     """The plaintext file must have NO writers left outside ``credentials.py``.
 
@@ -375,14 +520,32 @@ def test_no_plaintext_writer_outside_the_retired_manager() -> None:
     copy the whole consolidation exists to retire. ``prompt_for_credential`` is
     deliberately NOT in the set — it is a UI prompt whose WRITE now goes to the
     store, so calling it is fine; it is the file-write primitives that must have
-    no callers. Read at the AST level so a commented-out or string-literal mention
-    is not a false hit.
+    no callers.
+
+    **Two independent shapes are checked, because a name check alone is not the
+    proof the description implies (R7).** The first is the call shape
+    (``set_credential``/``write_to_file`` attributes); the second is a DIRECT
+    file write — an ``open()``/``Path.write_text``/``write_bytes`` whose
+    argument mentions ``credentials.env`` or ``CREDENTIALS_FILE_NAME`` — which
+    the attribute walk would miss entirely, so a future module could hand-edit
+    the plaintext file and this guard would stay green. Both are read at the AST
+    level so a commented-out or docstring mention is not a false hit;
+    ``io.open``/``os.fdopen`` are covered by the same base-name test on the call
+    target.
     """
     import ast
     from pathlib import Path
 
     package = Path(__file__).resolve().parents[3] / "local_operator"
     writers = {"set_credential", "write_to_file"}
+    #: Call targets that CREATE or TRUNCATE a file. Read-only calls
+    #: (``read_text``, ``"r"`` mode) are deliberately excluded: reading the file
+    #: during the transition is sanctioned and several probes do it.
+    write_calls = {"open", "write_text", "write_bytes", "fdopen"}
+    #: Substrings that name the retired plaintext store. ``CREDENTIALS_FILE_NAME``
+    #: is the module constant ``credentials.py`` owns, so a module that writes
+    #: through it is writing the same file under another spelling.
+    plaintext_markers = ("credentials.env", "CREDENTIALS_FILE_NAME")
     offenders: list[str] = []
     for path in sorted(package.rglob("*.py")):
         if path.name == "credentials.py":
@@ -391,4 +554,23 @@ def test_no_plaintext_writer_outside_the_retired_manager() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in writers:
                 offenders.append(f"{path.relative_to(package)}:{node.lineno} .{node.attr}")
+                continue
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name not in write_calls:
+                continue
+            # A write call only counts when one of its arguments NAMES the retired
+            # file; `open(path, "r")` on an unrelated path is not this guard's
+            # business, and excluding the read mode keeps the existing
+            # transition-time readers from tripping it.
+            text = ast.unparse(node)
+            if not any(marker in text for marker in plaintext_markers):
+                continue
+            if name == "open" and any(
+                isinstance(arg, ast.Constant) and arg.value == "r" for arg in node.args
+            ):
+                continue
+            offenders.append(f"{path.relative_to(package)}:{node.lineno} {text}")
     assert offenders == [], offenders

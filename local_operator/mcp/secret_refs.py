@@ -12,26 +12,27 @@ spawned or sent, so a refusal leaves nothing to unwind (an OAuth server's
 proactive refresh, :func:`~local_operator.mcp.auth.ensure_mcp_oauth_fresh`, runs
 after this and is therefore skipped entirely for a server that cannot start).
 
-**The store is the encrypted one; the legacy file is a read-only fallback.**
+**The store is the encrypted one and it is the ONLY leg.**
 ``<config dir>/secrets/store.db`` through
 :class:`~local_operator.secrets.access`, which is what the desktop MCP
 credential write (``POST /v1/desktop/sessions/{id}/mcp/credentials``) and MCP
-sign-in put values in. ``<config dir>/credentials.env`` through
-:class:`~local_operator.credentials.CredentialManager` is consulted only on
-DEFINITIVE ABSENCE from the encrypted store — the pre-migration location, for a
-machine whose credentials were entered before it — and is never written: a
-reference that resolves must not move or create the file, and a corrupt or
-unreadable store is a refusal rather than a reason to fall back. The memory-only
+sign-in put values in. The legacy ``<config dir>/credentials.env`` file is no
+longer consulted: the consolidation removed its writers, so a fallback would
+serve a file nothing maintains — a key present only there reads as MISSING
+until ``lop secret migrate-env`` moves it. A reference that resolves must not
+move or create the file, and a corrupt or unreadable store is a refusal rather
+than a reason to fall back. The memory-only
 session credentials that ``/credential`` collects (``VariableStore._credentials``)
 are deliberately NOT consulted: they never reach disk, so a config file referring
 to one could not resolve in the next process, and a reference that works once and
 then silently does not is the same class of failure this module removes.
 
-``CredentialManager.get_credential`` falls back to ``os.environ`` for a key the
-file does not hold, and that fallback is deliberately not used here. Two
-reasons, and the second is the load-bearing one: the file's key set is exactly
-what the credentials surface LISTS, so "the reference names something the user
-can see and edit" stays true; and an environment fallback would let a
+A legacy file reader also falls back to ``os.environ`` for a key the file
+does not hold, and that fallback is deliberately not used here. Two reasons,
+and the second is the load-bearing one: the key set the references are matched
+against is exactly what the credentials surface LISTS, so "the reference names
+something the user can see and edit" stays true; and an environment fallback
+would let a
 project-scoped ``.mcp.json`` — untrusted input, see the trust model in
 ``docs/mcp.md`` — copy any variable out of the daemon's own environment into a
 remote server's headers, which the allowlisted stdio child environment
@@ -384,9 +385,9 @@ def _substitute_value(
     if isinstance(entry, SecretStr):
         return entry.get_secret_value() or None
     if isinstance(entry, str):
-        # Not what ``CredentialManager`` returns, but a plain mapping is a shape
-        # a test or a future store may hand us; accepting it keeps that from
-        # masquerading as an unreadable value.
+        # Not what the store's reader returns (a ``SecretStr``), but a plain
+        # mapping is a shape a test or a future store may hand us; accepting it
+        # keeps that from masquerading as an unreadable value.
         return entry or None
     raise _unreadable(server, field, entry_name, key)
 

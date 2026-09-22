@@ -69,11 +69,25 @@ async def list_credentials(
         from local_operator.secrets.access import open_store
         from local_operator.secrets.errors import SecretStoreError
         from local_operator.secrets.keys import store_path
+        from local_operator.secrets.store import PROVIDER_SECRET_PREFIX
 
         if store_path(credential_manager.config_dir).exists():
             try:
+                # The provider-class rows are STRIPPED here exactly as the
+                # docstring promises. Adding the raw name made every provider
+                # credential appear twice — once as ``LOP_PROVIDER_<KEY>`` from
+                # this loop and once as ``<KEY>`` from ``stored_provider_env_keys``
+                # above — so a client keyed on this list (the Settings UI) showed
+                # a phantom, un-configurable second row for every provider key
+                # (QA Q-2). Agent-class rows are unprefixed and pass through
+                # untouched, which is what keeps them listed.
                 keys.update(
-                    record.name for record in open_store(credential_manager.config_dir).list()
+                    (
+                        record.name[len(PROVIDER_SECRET_PREFIX) :]
+                        if record.name.startswith(PROVIDER_SECRET_PREFIX)
+                        else record.name
+                    )
+                    for record in open_store(credential_manager.config_dir).list()
                 )
             except (SecretStoreError, OSError):
                 logger.warning("credential store unavailable", exc_info=True)

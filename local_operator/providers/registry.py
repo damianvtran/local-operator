@@ -844,13 +844,32 @@ def provider_secret_value(env_key: str, *, base: Path | None = None) -> str | No
         return None
     from local_operator.secrets.access import retrieve_secret
     from local_operator.secrets.errors import SecretStoreError
+    from local_operator.secrets.keys import store_path
     from local_operator.secrets.store import provider_secret_name
 
+    root = _config_root(base)
+    # **The existence guard is load-bearing, not an optimisation (R1).**
+    # `retrieve_secret` reaches `ensure_broker` BEFORE it considers whether a
+    # store exists, and `ensure_broker` creates `secrets/` and spawns
+    # `python -m local_operator.secrets.brokerd`. So an unguarded READ on the
+    # very common host that has never run `lop secret set` leaves both a
+    # directory and a detached daemon behind — the "leaves new state on a read"
+    # fault class `info/collect.py` and `mcp/credentials.py` explicitly ban, and
+    # this is the hottest such path: the credential cascade, the model
+    # catalogue, the classification legs and every search transport all read
+    # through here. `stored_provider_env_keys` below and the qwencloud ticket
+    # reader in `providers/controller.py` already carry the same gate.
+    if not store_path(root).exists():
+        return None
     try:
-        raw = retrieve_secret(provider_secret_name(env_key), _config_root(base), role="provider")
+        raw = retrieve_secret(provider_secret_name(env_key), root, role="provider")
     except (SecretStoreError, OSError, ValueError):
         return None
-    value = raw.decode("utf-8", "replace").strip()
+    # ``surrogateescape``, matching the plaintext reader this consolidates
+    # (:meth:`CredentialManager.load_from_file`): a credential is an arbitrary
+    # byte string, and ``errors="replace"`` would substitute U+FFFD so the
+    # provider authenticates with a corrupted key instead of the stored one.
+    value = raw.decode("utf-8", "surrogateescape").strip()
     return value or None
 
 
@@ -988,6 +1007,11 @@ def remove_provider_key(env_key: str, *, base: Path | None = None) -> bool:
 
     Best-effort on an absent store (returns ``False``): a delete of something
     that is not there is the desired end state, not an error.
+
+    Passes ``role="provider"``, which the store now REQUIRES for this name: the
+    reserved namespace check on ``delete`` that keeps an agent surface from
+    destroying a provider credential also refuses a caller that has not
+    declared itself as the provider side.
     """
     from local_operator.secrets.access import open_store, session_id
     from local_operator.secrets.errors import SecretNotFound, SecretStoreError
@@ -995,7 +1019,7 @@ def remove_provider_key(env_key: str, *, base: Path | None = None) -> bool:
 
     try:
         open_store(_config_root(base)).delete(
-            provider_secret_name(env_key), session_id=session_id()
+            provider_secret_name(env_key), role="provider", session_id=session_id()
         )
         return True
     except (SecretNotFound, SecretStoreError, OSError):

@@ -30,6 +30,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from pydantic import BaseModel, SecretStr
@@ -1645,15 +1646,16 @@ def _listing_can_correct(info: ModelInfo) -> bool:
 _PUBLIC_LISTING_TOKEN = "public-catalogue-read"
 
 
-def _catalogue_api_key(provider: str) -> str:
+def _catalogue_api_key(provider: str, *, base: Path | None = None) -> str:
     """An explicit API key for ``provider`` from the provider store, env, or the
     legacy credential file, else "".
 
     Reading ONLY ``os.environ`` was a real defect rather than a shortcut: both
     sanctioned credential flows bypass the environment. ``local-operator
-    credential update OPENROUTER_API_KEY`` now writes a provider-class store row
-    (and, mid-transition, the legacy ``CredentialManager`` file), and the TUI's
-    ``/login`` writes the ``AuthStore``. So the users who configured credentials
+    credential update OPENROUTER_API_KEY`` writes a provider-class ``LOP_PROVIDER_*``
+    STORE row (``store_provider_key`` never writes the legacy file — that file has
+    no writers left), and the TUI's ``/login`` writes the ``AuthStore``. So the
+    users who configured credentials
     the app's own way were exactly the ones this enrichment silently skipped —
     their sessions streamed fine (the stream-time cascade reads those stores)
     while their band showed a 128k window and no cost, forever, with the failure
@@ -1671,12 +1673,16 @@ def _catalogue_api_key(provider: str) -> str:
 
     The OAuth store is NOT read here — see :func:`_catalogue_credential`, which
     layers it underneath this and reports which kind of secret it found.
+
+    ``base`` is threaded from the caller's ``CredentialManager`` (R4), so a
+    catalogue resolve for a manager configured at a non-default root reads the
+    store that manager writes.
     """
     canonical = "test" if provider == "noop" else provider
     try:
         from local_operator.providers.registry import provider_env_key
 
-        value = provider_env_key(canonical)
+        value = provider_env_key(canonical, base=base)
         if value:
             return value
     except Exception as exc:  # noqa: BLE001 - a store failure is not fatal here
@@ -1712,7 +1718,9 @@ def _env_secret_is_oauth(secret: str) -> bool:
     return bool(names) and all("OAUTH" in name for name in names)
 
 
-def _catalogue_credential(provider: str) -> tuple[str, bool, str | None]:
+def _catalogue_credential(
+    provider: str, *, base: Path | None = None
+) -> tuple[str, bool, str | None]:
     """``(secret, is_oauth, account_id)`` for a listing call.
 
     The OAuth flag selects provider-specific auth, while OpenAI additionally
@@ -1725,7 +1733,7 @@ def _catalogue_credential(provider: str) -> tuple[str, bool, str | None]:
     practice for Anthropic: the env leg could not see a callable ``env_keys``, so
     a stored OAuth row beat an explicitly exported ``ANTHROPIC_API_KEY``.
     """
-    key = _catalogue_api_key(provider)
+    key = _catalogue_api_key(provider, base=base)
     if key:
         return key, _env_secret_is_oauth(key), None
     return _oauth_listing_token(provider)
@@ -1768,7 +1776,12 @@ def _oauth_listing_token(provider: str) -> tuple[str, bool, str | None]:
 
 
 def _info_from_discovery(
-    provider: str, model_name: str, fallback: ModelInfo, *, timeout: float | None = None
+    provider: str,
+    model_name: str,
+    fallback: ModelInfo,
+    *,
+    timeout: float | None = None,
+    base: Path | None = None,
 ) -> ModelInfo:
     """Fill ``fallback``'s gaps from the provider's own live model listing.
 
@@ -1804,7 +1817,9 @@ def _info_from_discovery(
     try:
         from local_operator.model.discovery import DEFAULT_TIMEOUT_S, available_models
 
-        secret, is_oauth, account_id = _listing_credential.get() or _catalogue_credential(provider)
+        secret, is_oauth, account_id = _listing_credential.get() or _catalogue_credential(
+            provider, base=base
+        )
         rows, status = available_models(
             provider,
             api_key=secret or None,
@@ -2186,7 +2201,7 @@ _listing_credential: ContextVar[tuple[str, bool, str | None] | None] = ContextVa
 
 @functools.lru_cache(maxsize=64)
 def _resolve_model_info_cached(
-    provider: str, model_id: str, _bucket: int, _scope: str = ""
+    provider: str, model_id: str, _bucket: int, _scope: str = "", _base: Path | None = None
 ) -> ModelInfo:
     """Memoized body of :func:`resolve_model_info`.
 
@@ -2244,6 +2259,7 @@ def _resolve_model_info_cached(
             model_id,
             info,
             timeout=None if _needs_enrichment(info) else _REFRESH_TIMEOUT_S,
+            base=_base,
         )
     route_context = (info.context_window, info.default_context_window, info.max_context_window)
     if _needs_enrichment(info) and canonical != "deepseek":
@@ -2317,7 +2333,11 @@ def invalidate_model_info_cache() -> None:
 
 
 def resolve_model_info(
-    provider: str, model_id: str, *, credential: tuple[str, bool, str | None] | None = None
+    provider: str,
+    model_id: str,
+    *,
+    credential: tuple[str, bool, str | None] | None = None,
+    base: Path | None = None,
 ) -> ModelInfo:
     """A model's real metadata: static registry first, catalogue to fill gaps.
 
@@ -2364,17 +2384,19 @@ def resolve_model_info(
     if provider == "openai":
         from local_operator.model.discovery import _cache_key
 
-        credential = credential if credential is not None else _catalogue_credential(provider)
+        credential = (
+            credential if credential is not None else _catalogue_credential(provider, base=base)
+        )
         scope = _cache_key("openai", account_scoped=credential[1], account_id=credential[2])
         if credential[1] and not credential[2]:
             scope = "openai-oauth-unscoped"
         token = _listing_credential.set(credential)
         try:
-            info = _resolve_model_info_cached(provider, model_id, bucket, scope)
+            info = _resolve_model_info_cached(provider, model_id, bucket, scope, base)
         finally:
             _listing_credential.reset(token)
     else:
-        info = _resolve_model_info_cached(provider, model_id, bucket)
+        info = _resolve_model_info_cached(provider, model_id, bucket, "", base)
     # Feed the paint memo from the authoritative answer, so a renderer that
     # resolves AFTER the session does (the common order) paints the real row,
     # and so the background refresh is the only writer on a cold process.
@@ -2706,7 +2728,11 @@ def configure_model(
         try:
             from local_operator.providers.registry import provider_env_key
 
-            static_key = provider_env_key(canonical)
+            # The manager's own root (R4): a store the caller configured
+            # elsewhere is the one this key must come from.
+            static_key = provider_env_key(
+                canonical, base=getattr(credential_manager, "config_dir", None)
+            )
         except Exception:  # noqa: BLE001 - a store failure must not block config
             static_key = None
         if static_key:
@@ -2726,7 +2752,9 @@ def configure_model(
         # compaction sizes itself off a 128k fallback on a 1M model and cost
         # cannot be reported at all. `resolve_model_info` fills the gap from a
         # disk-cached catalogue: one HTTP call a day, and never a blocked start.
-        model_info = resolve_model_info(canonical, model_name)
+        model_info = resolve_model_info(
+            canonical, model_name, base=getattr(credential_manager, "config_dir", None)
+        )
 
     spec = build_model_spec(canonical, model_name, model_info)
     if definition.local_setup:
