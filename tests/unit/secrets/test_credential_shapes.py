@@ -1207,15 +1207,47 @@ def test_every_notice_fits_one_narrow_card_row() -> None:
         assert "`" in notice, f"{label} offers no copy-pasteable form"
 
 
-def test_the_advisory_survives_a_long_result_and_is_not_last() -> None:
-    """The notice must not be the first thing the 40-line head crop drops."""
-    from local_operator.tools import builtin
+@pytest.mark.asyncio
+async def test_the_advisory_survives_a_long_result_and_is_not_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notice must not be the first thing the 40-line head crop drops.
 
-    # Read the MODULE, not ``inspect.getsource(execute_bash)``: the tool is
-    # wrapped by a decorator, so getsource returns the wrapper and the assertion
-    # sees none of the body it is meant to pin.
-    source = Path(builtin.__file__).read_text()
-    assert "parts.insert(1, notice)" in source, "the advisory went back to the tail"
+    This used to pin the INSERT SPELLING — ``"parts.insert(1, notice)" in the
+    module source`` — and round 2's Q5 fix broke it by computing the index from
+    the exit-code line instead (the TIMEOUT head is inserted at 0 before the
+    advisories, so a literal index put them ABOVE ``exit code:`` on that path).
+    A source-text pin cannot tell a repositioned notice from an equivalent one,
+    so it is a behavioural row now: a command that dumps a credential-shaped
+    line and then hundreds of lines of output must still carry the notice inside
+    the head window a card keeps, UNDER the exit code. That is the property the
+    old assertion stood in for, and it fails for the reason that matters — the
+    notice being at the tail — rather than on a rename.
+    """
+    from local_operator.harness.types import AbortSignal, ToolContext
+    from local_operator.tools import builtin
+    from local_operator.variables import VariableStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = ToolContext(
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+        session_id="advisory-head",
+    )
+    # ``env`` is credential-shaped, and the loop puts the notice's position under
+    # the same crop a real 200-line result would.
+    command = 'env; for i in $(seq 1 200); do echo "line $i of the report"; done'
+    result = await builtin.execute_bash(
+        "cred-long", {"command": command}, AbortSignal(), None, context
+    )
+
+    lines = result.text.splitlines()
+    advisory = next((index for index, line in enumerate(lines) if "credential guard" in line), None)
+    assert advisory is not None, result.text[:400]
+    # Inside the head window, which is what "not the first thing dropped" means,
+    # and below the exit code, so the shape is the same on every path.
+    assert advisory < 5, lines[:8]
+    assert lines[0].startswith("exit code: "), lines[:3]
 
 
 def test_the_live_pending_text_matches_the_card() -> None:

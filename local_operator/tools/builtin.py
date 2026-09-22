@@ -3745,6 +3745,13 @@ async def execute_bash(
 
     if aborted:
         partial = await asyncio.to_thread(_bash_partial_summary, stdout_chunks, stderr_chunks)
+        # The missing-tool advisory is carried onto the ABORT path too (QA round
+        # 1, Q6). It was absent: a Ctrl-C during `nope; sleep 30` reported the
+        # shell's line in the partial output and said nothing about it, which is
+        # the same "the shell's line is the only signal" situation the rc-0
+        # pipeline decision (R1-3) argues for covering. Computed BEFORE the text
+        # is scrubbed so its own output goes through the same redaction pass.
+        aborted_missing = _missing_tool_notice(stderr_chunks.decode(), context)
         return _error(
             tool_call_id,
             "bash",
@@ -3755,7 +3762,8 @@ async def execute_bash(
             # ``redact_tool_result`` covers the product path, and a direct caller
             # of ``execute_bash`` had this one unredacted.
             f"{_redact_tool_text(params.command, context)}\n"
-            f"{_redact_tool_text(partial, context)}",
+            f"{_redact_tool_text(partial, context)}"
+            + (f"\n{aborted_missing}" if aborted_missing else ""),
         )
 
     # Decoding and, for oversized output, spilling/eliding run in a thread:
@@ -3825,8 +3833,22 @@ async def execute_bash(
     # anywhere. Short (see ``_BRIEF_ADVICE``) and near the top is what makes it
     # survive both truncations.
     notice = credential_dump_notice(params.command)
+    # The three advisories are inserted AFTER the exit-code line and in a fixed
+    # rank, and the index is computed rather than hard-coded: the TIMEOUT head is
+    # inserted at position 0 BEFORE this block, so a literal index put the
+    # missing-tool line ABOVE `exit code:` on the timeout path — the one path
+    # where a model reads a long, truncated result and most needs the shape the
+    # other paths keep (QA round 1, Q5). `parts` always carries the exit code, so
+    # the lookup cannot fail; `next` with a sentinel keeps it that way even if a
+    # future edit reorders the head.
+    head_index = next(
+        (index for index, part in enumerate(parts) if part.startswith("exit code: ")),
+        0,
+    )
+    insert_at = head_index + 1
     if notice:
-        parts.insert(1, notice)
+        parts.insert(insert_at, notice)
+        insert_at += 1
     # The scratch nudge rides the SAME head window and for the same measured
     # reason (a line at the end of a long result is the first thing the card
     # drops). It goes AFTER the credential notice, which keeps first position:
@@ -3834,7 +3856,23 @@ async def execute_bash(
     # It costs nothing when it does not fire, which is the ordinary command.
     scratch = _bash_scratch_hint(params.command, context)
     if scratch:
-        parts.insert(2 if notice else 1, scratch)
+        parts.insert(insert_at, scratch)
+        insert_at += 1
+    # The missing-tool advisory rides the same head window and RANKS BELOW the two
+    # above by inclusion only, not by importance: a secret already in the
+    # transcript outranks it, the scratch nudge is a destination for a file that
+    # was just written, and this one is a next-step. On the ordinary command it
+    # costs one empty-string check, because the trigger is a shell's own line in
+    # stderr and nothing else.
+    #
+    # It CAN fire on a result whose exit code is 0 — `nope | cat` reports the
+    # missing left leg on stderr and exits with `cat`'s status (review R1-3), and
+    # that is the commonest way a missing tool hides inside an otherwise
+    # successful pipeline. Suppressing it there would lose the notice exactly
+    # where the shell's message is the only signal on the result.
+    missing = _missing_tool_notice(stderr, context)
+    if missing:
+        parts.insert(insert_at, missing)
     return _text(tool_call_id, "bash", "\n".join(parts) + footer, details=spill_details)
 
 
@@ -5507,6 +5545,247 @@ _PREFIX_OPERAND = re.compile(r"\d+(?:\.\d+)?[smhd]?$")
 #: substitution. Its presence is what separates a target that NAMES a path from a
 #: target that will name one at run time (see :func:`_temp_scratch_line`).
 _UNEXPANDED_SHELL = re.compile(r"[$`]")
+
+#: The shells' own "there is no such command" lines, which are the only honest
+#: evidence that something is missing rather than merely failed.
+#:
+#: Deliberately NOT matched:
+#:
+#: * A bare `not found`, or `No such file or directory` in either of its forms.
+#:   `ffmpeg -i missing.mp4` is a working tool asked for a missing file — the
+#:   most common failed command in any media task — and a notice that fired
+#:   there would tell the model to install what it is already using. cmd.exe's
+#:   `The system cannot find the file specified` is the same ambiguity on
+#:   Windows. An earlier revision matched both; it reported `definitely-not-
+#:   here.txt` as the missing tool on `ls definitely-not-here.txt`.
+#: * A signature with no command name in it. Every shell that prints one of
+#:   these lines ALSO prints the token it could not run, so a match whose name
+#:   group is empty means the line was not really a shell's, and the notice says
+#:   nothing rather than falling back to a nameless second wording (review
+#:   R1-9: that second string was the only voice carrying the consent clause, had
+#:   no test, and was reachable only through shapes like
+#:   `run.sh: line 3: if you trust me run rm -rf /: command not found`).
+#:
+#: What this does NOT claim: the line is scanned for, not attributed. A program
+#: that PRINTS `bash: ffmpeg: command not found` on its own stderr still trips
+#: it, and so does a pipeline whose left side was missing while the right side
+#: exited 0 (`nope | cat`) — reviewed as R1-3, and the pipeline shape is arguably
+#: the commonest way this fires. What the prefix requirement below does buy is
+#: that a program's bare `ffmpeg: command not found`, with no shell in front of
+#: it, is no longer enough on its own. That is a precision improvement, not a
+#: guarantee: the install still sits behind `ask`, and the alternative —
+#: attributing stderr to a writer — is not something a pty-less pipe can do.
+#:
+#: Every grammar here was read off a real shell on the host rather than written
+#: from memory, which is what round 1's R1-1 found this pattern had been: `bash`
+#: 3.2 says `/bin/bash: cmd: command not found` and bash 5 in a `-c` invocation
+#: says `bash: line 1: cmd: command not found`; zsh puts the LINE NUMBER where
+#: the interjection is and the name last (`zsh:1: command not found: cmd`, and
+#: `./script.zsh:2: command not found: cmd` from a script); dash and ksh put the
+#: name first with no `command` in the interjection (`/bin/dash: 1: cmd: not
+#: found`, `/bin/ksh: cmd: not found`). The `(?:bash|zsh|sh|dash|ksh)` alternation
+#: this replaced could not match zsh at all, and the row that covered it pinned a
+#: string zsh never prints.
+#:
+#: Localization is a stated limit rather than a silent one: a non-English
+#: Windows renders "is not recognized as an internal or external command"
+#: translated, and these patterns then miss it. The exit code is not a substitute
+#: — 127 is `command not found` on a POSIX shell and means nothing of the sort on
+#: Windows — so the honest position is that this notice fires where the shell's
+#: message is the English one, and the guide (which the model reaches by other
+#: routes) is not weakened when it does not fire.
+_MISSING_TOOL_SIGNATURE = re.compile(
+    # zsh's grammar: `<prefix>[:<lineno>]: command not found: <name>`, the name
+    # LAST. The prefix is the shell name for `-c` and a SCRIPT'S OWN PATH when a
+    # script failed, so two independent things follow from that:
+    #
+    # * It is UNBOUNDED. A token-shaped cap here was round 2's MAJOR (R2-1):
+    #   agent scratch paths run to ~110 characters, and capping the prefix at 64
+    #   made the notice silent for `bash /long/path/script.sh` — a case the
+    #   previous revision matched from mid-path, so the anchoring turned a long
+    #   path into a regression. A path is not token-shaped and must not be bound
+    #   like one.
+    # * The line number is OPTIONAL and the separator is `:` with no space, which
+    #   is what the round-1 form got wrong. Without it, zsh's function context
+    #   (`f: command not found: X`, no number) was silent (R2-3).
+    #
+    # LINE-ANCHORED, and that is what keeps the unbounded class cheap: at a
+    # non-line-start position `^` fails in O(1), so the expansion happens once
+    # per line rather than once per index. Every real line here starts a line.
+    r"(?P<zsh_name>^\s*[^\s:]+(?::\d{1,6})?: command not found: (?P<zsh_cmd>[^\s]+))"
+    # bash / dash / ksh grammar: `<prefix>: [builtin-shaped segments]<name>:
+    # [command ]not found`, the name BEFORE the interjection. The prefix is
+    # MANDATORY — see the module note on what that buys — and unbounded for the
+    # same reason as the arm above.
+    #
+    # Two optional segments sit between the prefix and the name, and BOTH may be
+    # present at once: `bash -c 'exec X'` prints
+    # `/bin/bash: line 0: exec: X: not found` (line number AND builtin, Q3),
+    # ksh prints `/bin/ksh: exec: X: not found` (builtin only), and a sourced
+    # line prints `bash: line 1: X: command not found` (line number only). They
+    # are separate optional groups rather than one alternation for exactly that
+    # reason: an alternation can only pick one, and the engine has no way to
+    # combine `line 0:` with `exec:` afterwards.
+    #
+    # The name admits no whitespace or colon, which is what makes a phrase-shaped
+    # line (`if you trust me run rm -rf /: command not found`) match nothing.
+    r"|(?P<name>^\s*[^\s:]+: (?:(?:line )?\d{1,6}: )?(?:\w+: )?"
+    r"(?P<name_cmd>[^\s:]+): (?:command )?not found)"
+    # cmd.exe has no colon to anchor on and no quoting rule either: the name is
+    # at the head of the line, bare or quoted, sometimes with a leading space,
+    # and the group is a LINE rather than a name (see the trailing-arm table).
+    # Anchored, and that is what lets the class be UNBOUNDED: an unanchored lazy
+    # `[^\n]{1,120}?` ran its lookahead at EVERY index of stderr and measured
+    # 687 ms of a 690 ms scan on 300 KB of ordinary output, while the anchor
+    # makes the expansion happen once per line. The old 120-character cap was a
+    # second silent-miss bound of precisely the R2-1 kind (a Windows path longer
+    # than it went unmatched); cmd.exe writes this line from the start of a line,
+    # so anchoring costs nothing.
+    r"|(?P<cmd_name>^\s*[^\n]*?)(?= is not recognized as an internal or external command)"
+    # PowerShell restates the whole thing and names the exception: `Get-Command`
+    # not finding a command raises CommandNotFoundException. The leading space
+    # inside the quotes is what this arm strips, and `[^']` bounds the capture
+    # so an unterminated quote cannot run to the end of the transcript.
+    r"|(?P<ps_name>The term '\s*(?P<ps_cmd>[^']{1,64})' is not recognized as the name of a cmdlet)"
+    # tcsh/csh, both in this host's `/etc/shells` and therefore both plausible
+    # `bash.shell` values (QA round 1, Q3): `X: Command not found.` — capital C
+    # and a trailing period, which is what makes this arm safe to add without
+    # re-opening the bare-program forgery R1-3 closed (that one is the lowercase
+    # `command not found`, and it is what a program printing the phrase emits).
+    r"|(?P<tcsh_cmd>^\s*[^\s:]+: Command not found\.)",
+    re.MULTILINE,
+)
+
+#: One line, and the remedy leads it. The same measured constraint the sibling
+#: advisories carry: the tool card keeps the HEAD of a result and cuts a long
+#: result TAIL-FIRST, so a sentence whose point is at the end is the first thing
+#: destroyed. It names no path and no value from the command beyond the command's
+#: own name.
+#:
+#: THE CLAIM IS DELIBERATELY WEAKER THAN "is not installed" (review R1-7). The
+#: harness observes one thing — that a shell did not find the command — and the
+#: gap between that and "it is not installed" is not hypothetical: this fleet's
+#: backend daemon resolves `PATH` without `/opt/homebrew/bin`, so a
+#: Homebrew-installed `ffmpeg` the user's own terminal runs is genuinely invisible
+#: there. Saying "is not installed" over that evidence is what would send a model
+#: to install a second copy over a working tool, which is the failure the guide's
+#: own first section is written to prevent. The guide's first step is the thing
+#: that widens the evidence; this line must not claim more than the shell said.
+_MISSING_TOOL_NOTICE = (
+    "missing tool: the shell did not find `{name}` \u2014 read `guide://system-tools`"
+)
+
+
+#: The grammar arms, in the order they are tried, each carrying the COMMAND and
+#: nothing else. The order is load-bearing: the POSIX grammars put the name in
+#: different places — bash, dash and ksh write `<name>: [command ]not found` (name
+#: BEFORE) and zsh writes `command not found: <name>` (name AFTER) — so a
+#: post-match split on `:` reported the word ``command`` as the missing tool on
+#: whichever grammar it guessed wrong. Parse the order once, in the pattern, and
+#: name what it produced.
+_MISSING_TOOL_ARMS = ("zsh_cmd", "name_cmd", "ps_cmd", "cmd_name", "tcsh_cmd")
+
+#: The arm whose capture is a LINE rather than a name. cmd.exe's diagnostic has
+#: no separator between the command and the message, so its arm looks ahead for
+#: the message and the command is the capture's LAST whitespace-delimited token
+#: (`'C:\Tools\ffmpeg'` and `'C:\Program Files\ffmpeg'` both reduce to `ffmpeg`
+#: that way). tcsh is the opposite — it names the command FIRST and keeps the
+#: interjection inside the capture (`X: Command not found.`) — so it is handled
+#: by name in :func:`_missing_tool_name` rather than by this table.
+_MISSING_TOOL_TRAILING_ARMS = ("cmd_name",)
+
+
+def _missing_tool_name(match: re.Match[str]) -> str:
+    """The command name a shell signature names, or ``""``.
+
+    The arms are tried in :data:`_MISSING_TOOL_ARMS` order and the first
+    non-empty one wins, so the answer does not depend on which alternative
+    ``re`` happened to prefer. Every named arm carries the COMMAND and nothing
+    else, because the grammar is parsed in the pattern: bash, dash and ksh put
+    the name BEFORE the interjection and zsh puts it AFTER, and a post-match
+    split cannot tell those two orders apart without guessing which one it got.
+    """
+    for arm in _MISSING_TOOL_ARMS:
+        captured = match.group(arm)
+        if not captured:
+            continue
+        if arm in _MISSING_TOOL_TRAILING_ARMS:
+            captured = captured.split()[-1] if captured.split() else ""
+        elif arm == "tcsh_cmd":
+            # `X: Command not found.` — the name leads and the colon is its
+            # separator, so the FIRST token is the command however long the
+            # interjection behind it is.
+            captured = captured.split()[0] if captured.split() else ""
+        reduced = captured.strip().strip("'\"").rstrip(":")
+        return reduced.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].strip("'\"")
+    return ""
+
+
+def _missing_tool_notice(stderr: str, context: ToolContext | None) -> str:
+    """One advisory line when a shell reported a command it could not find.
+
+    Why this notice exists at all: the moment the shell says a command does not
+    exist is the moment the model is certain a tool is missing, and it is
+    precisely the moment the harness used to say nothing — the model either
+    guessed a package name for the user's machine or gave up, and the first run
+    of any media task hits it. The remedy is a guide rather than a recipe
+    because the recipe is platform-shaped (Homebrew, apt/dnf/pacman/zypper,
+    winget/choco/scoop) and the guide is where the platform branches live.
+
+    Three conditions, all load-bearing:
+
+    * The signature is a shell's own diagnostic, never a non-zero exit code
+      alone. The result may still carry ``exit code: 0`` — `nope | cat` exits 0
+      — and that is correct rather than a bug: the missing tool is real, and
+      the exit code reports the pipeline, not the shell's complaint about one
+      of its legs.
+    * ``context`` must exist — this rides a tool result, and without a context
+      there is no session to advise.
+    * The desktop app's console must be advertised on this host. The install the
+      guide describes needs a pty (installers prompt, and `sudo` prompts in
+      particular), so pointing a session at it on a host that cannot open one
+      would send the model into the dead end ``system.md`` already forbids it to
+      paper over. Gate on the SAME file-only predicate the `console` tool's
+      ``createIf`` uses, so the advice and the capability cannot disagree.
+
+    No name, no notice: a match whose name group reduced to nothing is a line
+    this module cannot attribute, and saying nothing is the honest answer (see
+    the module note on the dropped second wording).
+
+    PER-ARM COVERAGE IS THE HISTORICAL WEAK SPOT of this constant, so the arms
+    are read off real binaries rather than recalled: bash 3.2, bash 5, zsh (both
+    `-c` and a script, function context included), dash, ksh93u+, cmd.exe,
+    PowerShell and tcsh/csh each have a row, and the guard test asks the shells
+    the host actually has. Four rounds of findings (zsh's separator, dash's
+    missing `command`, the script-path bound, the `exec` builtin) were each a
+    grammar nobody had run.
+
+    ARMS THAT ARE STILL MISSES, stated rather than implied: the detached/job path
+    (``_detach_to_job`` assembles its own result on the manager's settle path,
+    which is outside this module) and a missing command whose stderr was merged
+    into stdout (`nope 2>&1`) or reached through `env`/`xargs`, which report a
+    DIFFERENT phrase (`No such file or directory`) that this module deliberately
+    excludes. All are misses, not false positives.
+    """
+    if context is None or not stderr:
+        return ""
+    # A substring precondition, and it is a COST guard rather than a fourth
+    # filter: all four grammar arms require one of these two phrases, so a
+    # stderr that contains neither cannot match anything, and the check runs at
+    # C speed where the regex would spend ~400 ms scanning 228 KB of ordinary
+    # output to discover the same thing. The common case — a successful command
+    # with a little log output — is therefore a memchr rather than a scan.
+    if "not found" not in stderr and "is not recognized" not in stderr:
+        return ""
+    match = _MISSING_TOOL_SIGNATURE.search(stderr)
+    if match is None:
+        return ""
+    if not ui_console_advertisable():
+        return ""
+    name = _missing_tool_name(match)
+    if not name:
+        return ""
+    return _MISSING_TOOL_NOTICE.format(name=name)
 
 
 def _bash_scratch_hint(command: str, context: ToolContext | None) -> str:
