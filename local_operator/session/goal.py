@@ -188,6 +188,91 @@ GOAL_JUDGE_STATES = frozenset(
 )
 
 
+def goal_flag_form(arg: str) -> str:
+    """Which FLAG a whole argument names, or "" when it is an objective.
+
+    The whole-argument rule (:data:`GOAL_CLEAR_ARGS`) resolved in ONE place,
+    because four hosts read it: a word honoured on one host and stored as the
+    goal body on another is the host-disagreement class these vocabularies exist
+    to remove, and four copies of the branch chain is how that returns. Returns
+    the canonical form name (not the token), so a host switches on the act.
+    """
+    token = (arg or "").strip().lower()
+    if token in GOAL_DONE_ARGS:
+        return "done"
+    if token in GOAL_DISMISS_ARGS:
+        return "dismiss"
+    if token in GOAL_HISTORY_ARGS:
+        return "history"
+    if token in GOAL_CLEAR_ARGS:
+        return "clear"
+    return ""
+
+
+def goal_report(text: str, status: str) -> str:
+    """The bare ``/goal`` report: the objective plus the state it is in.
+
+    Shared by every host so the status cannot be shown on one and omitted on
+    another. A DONE goal names the way to drop the chip, because a settled goal
+    has no live work to do and the user's next question is how to get rid of it.
+    """
+    if not text:
+        return "no goal set — /goal <text> to set one"
+    if status == "done":
+        return f"goal: {text} — done; /goal --dismiss clears it"
+    return f"goal: {text} — active"
+
+
+def goal_dismissed_receipt(dismissed: bool) -> str:
+    """The ``/goal --dismiss`` receipt, which must say when nothing was there.
+
+    The flag is a no-op unless the chip is up, and a bare "goal dismissed" for
+    that case would report a state change that did not happen.
+    """
+    return "goal dismissed" if dismissed else "nothing to dismiss"
+
+
+def goal_history_notice(count: int) -> str:
+    """The one-line notice beside ``/goal --history``'s rows.
+
+    A COUNT, never the rows: the entries ride the receipt's ``data`` because a
+    multi-row payload dump in the transcript is exactly what the receipt
+    discipline exists to prevent (see :func:`cleared_goal_receipt`).
+    """
+    if count <= 0:
+        return "no settled goals"
+    return f"{count} settled goal{'s' if count != 1 else ''} — newest first"
+
+
+def goal_history_items(entries: "list[dict[str, Any]]") -> list[list[str]]:
+    """``/goal --history``'s rows: ``[objective, facts]`` per settled goal.
+
+    ONE builder for the hosts, so the typed receipt and the pane cannot disagree
+    about order or clip. The objective is clipped per row with the receipt echo's
+    own bound rather than the full goal bound, for the reason that bound exists:
+    a history row is a pointer to the objective, and a list row should not carry
+    a spec. ``facts`` is the short metadata column — status, when it settled, and
+    the judge's reason when there was one ("" for a supersede, and for a
+    user-typed mark-done, which no model spoke).
+    """
+    rows: list[list[str]] = []
+    for entry in entries:
+        text = " ".join(str(entry.get("text") or "").split())
+        if len(text) > CLEARED_GOAL_ECHO_CHARS:
+            text = text[:CLEARED_GOAL_ECHO_CHARS].rstrip() + "…"
+        facts = str(entry.get("status") or "")
+        settled = str(entry.get("settled_at") or "")
+        if settled:
+            facts = f"{facts} · {settled}"
+        reason = " ".join(str(entry.get("reason") or "").split())
+        if reason:
+            if len(reason) > CLEARED_GOAL_ECHO_CHARS:
+                reason = reason[:CLEARED_GOAL_ECHO_CHARS].rstrip() + "…"
+            facts = f"{facts} · {reason}"
+        rows.append([text, facts])
+    return rows
+
+
 @dataclass
 class GoalHistoryEntry:
     """One SETTLED goal.
