@@ -4945,3 +4945,76 @@ async def test_a_host_capability_probe_flip_cannot_start_a_prefix_epoch(
     )
     assert _leading_region(stream.requests[2])[0] == first_region[0]
     await session.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_removed_mid_turn_stays_in_the_array_until_the_next_turn(
+    tmp_config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shrink direction, which used to republish the array mid-turn.
+
+    ``session_factory.refresh_selected`` — the MCP ``on_tools_changed`` and
+    disconnect path — rebinds the inventory through ``Session.refresh_tools``,
+    and before the array's one-publish latch that rebind moved the array for the
+    turn in flight: the same prefix cost as a grow, paid by a server dropping
+    away rather than by anything the user did. ``Session._reconcile_web_tools``
+    already refuses to move the inventory mid-turn for exactly this reason; the
+    latch is what extends that rule to the array.
+
+    What must still be immediate is the INVENTORY, and that is asserted too: a
+    removal that took effect only at the next turn would leave a session offering
+    a tool whose transport is gone.
+    """
+    stream = _ScriptedChatStream(
+        [
+            [
+                StreamToolCallDelta(index=0, id="c1", name="drop", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+            [StreamTextDelta(delta="ok"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = await _composition_root_session(tmp_config_dir, monkeypatch, stream)
+
+    async def never_execute(*args: Any, **kwargs: Any):
+        raise AssertionError("the removed tool must not be executed by this test")
+
+    def _tool(name: str, execute) -> AgentTool:
+        return AgentTool(
+            name=name,
+            description=f"{name} the inventory",
+            parameters={"type": "object", "properties": {}},
+            approval_tier="read",
+            execute=execute,
+        )
+
+    dropped: list[bool] = []
+
+    async def drop_execute(tool_call_id, args, signal, on_update, context):
+        # Exactly what a disconnected MCP server's `on_tools_changed` does.
+        dropped.append(
+            session.refresh_tools([tool for tool in session._tools if tool.name != "victim"])
+        )
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="drop", content=[TextContent(text="dropped")]
+        )
+
+    seeded = session.refresh_tools(
+        [*session._tools, _tool("victim", never_execute), _tool("drop", drop_execute)]
+    )
+    await session.prompt("drop the victim tool, then answer")
+    await session.prompt("and again")
+
+    first, second, third = stream.requests[0], stream.requests[1], stream.requests[2]
+    assert {"victim", "drop"} <= {tool.name for tool in first.tools}
+    # The inventory dropped it at once — the tool is no longer resolvable.
+    assert "victim" not in {tool.name for tool in session._tools}
+    # ... while the array the turn is using is untouched, then catches up.
+    assert "victim" in {tool.name for tool in second.tools}
+    assert _leading_region(second) == _leading_region(first)
+    assert "victim" not in {tool.name for tool in third.tools}
+    assert seeded is True
+    assert dropped == [False], "a mid-turn removal must not republish the array"
+    await session.dispose()
