@@ -1672,9 +1672,24 @@ LINE_SEP = r"(?:\\r\\n|\\n|\r\n|\n|\r)"
 #: text — inside an open block nothing may be published, which is the block's whole point
 #: (Q10-F2: a sub-eight-character line in the MIDDLE published everything after it, and a
 #: short FINAL line published where the previous head masked).
-_PEM_FULL_LINE = r"[A-Za-z0-9+/=]{8,},?[ \t]*"
+#:
+#: The floor is a NAME because the pipe needs the same number for a different question:
+#: a cap-forced release can end INSIDE a line, and a fragment shorter than the floor is
+#: read as PROSE (the full-line alternative needs the floor) — which CLOSES an open
+#: block. `tools/builtin.py` holds that cut back to the line boundary by at most
+#: ``PEM_BODY_FLOOR - 1`` bytes, and reads this constant rather than restating the
+#: number, for the same reason the regexes above are shared.
+PEM_BODY_FLOOR = 8
+_PEM_FULL_LINE = r"[A-Za-z0-9+/=]{" + str(PEM_BODY_FLOOR) + r",},?[ \t]*"
 _PEM_SHORT_MID_LINE = (
-    r"[A-Za-z0-9+/=]{1,7},?[ \t]*(?=" + LINE_SEP + LINE_PREFIX + r"[A-Za-z0-9+/=]{8,})"
+    r"[A-Za-z0-9+/=]{1,"
+    + str(PEM_BODY_FLOOR - 1)
+    + r"},?[ \t]*(?="
+    + LINE_SEP
+    + LINE_PREFIX
+    + r"[A-Za-z0-9+/=]{"
+    + str(PEM_BODY_FLOOR)
+    + r",})"
 )
 #: A short line is a body line when a full one FOLLOWS it, and the run may end with one
 #: short line. A lone short line — `12| done`, `12| 42` — is numbered PROSE and must
@@ -1683,7 +1698,7 @@ _PEM_LINE_CONTENT = _PEM_FULL_LINE + r"|" + _PEM_SHORT_MID_LINE
 _PEM_RUN = (
     r"(?:" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")"
     r"|" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")?)*"
-    r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]{1,7},?)?"
+    r"(?:" + LINE_PREFIX + r"[A-Za-z0-9+/=]{1," + str(PEM_BODY_FLOOR - 1) + r"},?)?"
 )
 PEM_BODY_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"(?:" + _PEM_LINE_CONTENT + r")$", re.MULTILINE)
 PEM_HEADER_LINE_RE = re.compile(
