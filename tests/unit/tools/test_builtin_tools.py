@@ -3503,6 +3503,187 @@ async def test_the_tmpdir_spelling_is_recognised(tmp_path, monkeypatch) -> None:
         assert _bash_nudge_line(temp_root / "x.log") in text
 
 
+def _home_spelling_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """A ``HOME`` the test owns, with the name arm's own root fixture in place.
+
+    ``Path.expanduser``/``Path.home`` read ``HOME`` from the environment — the same
+    variable the product hands its child shells — so redirecting it covers BOTH the
+    scan under test and the command's own ``~`` expansion, and no seam has to be
+    opened in the module for the test's benefit. Aiming the temp roots at the
+    test's root is not optional: see ``_name_arm_fixture`` for why a row that
+    skipped it would pass for a reason it does not name.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "segment", "created"),
+    [
+        # The three spellings, and the `${HOME}` row is not a duplicate of the
+        # `$HOME` one: the expansion order is a real difference there, so a helper
+        # that rewrote `${HOME}` into a leftover `${}` would be silent on exactly
+        # this row (the same reason `${TMPDIR}` gets its own row next door).
+        ("echo hi > ~/workspace/minervaai/tmp/tilde.md", "tmp", "tilde.md"),
+        ("echo hi > $HOME/workspace/minervaai/tmp/dollar.md", "tmp", "dollar.md"),
+        ("echo hi > ${HOME}/workspace/minervaai/scratch/braced.sh", "scratch", "braced.sh"),
+        # A different creation POSITION through the same spelling: `mkdir`'s
+        # operand rather than a redirect, so the row fails if the normalisation
+        # reached one position and not the other.
+        ("mkdir ~/workspace/minervaai/tmp/somewhere", "tmp", "somewhere"),
+    ],
+)
+async def test_the_home_spelling_is_recognised(
+    tmp_path, monkeypatch, command, segment, created
+) -> None:
+    """The hole this closes, measured on the released v0.62.3: the SAME write into a
+    scratch-named directory was advised when its target was spelled absolutely and
+    fell SILENT when it was spelled through the home directory — which is how a
+    session spells a home path far more often. `write`/`edit` never had the
+    asymmetry (`_resolve_workspace_path` calls `Path.expanduser`), so these rows pin
+    one channel agreeing with the other rather than two channels disagreeing.
+
+    The command really runs, so the row also proves the two sides agree about WHICH
+    file is meant: the shell's own `~`/`$HOME` expansion picks the file the scan
+    predicted, which is the only thing that lets the assertion name one path.
+    """
+    home = _home_spelling_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+    directory = home / "workspace" / "minervaai" / segment
+    (home / "workspace" / "minervaai" / "tmp").mkdir(parents=True, exist_ok=True)
+    (home / "workspace" / "minervaai" / "scratch").mkdir(parents=True, exist_ok=True)
+
+    text = await _run_bash(context, command)
+
+    lines = [line for line in text.splitlines() if line.startswith("[scratch]")]
+    expected = _scratch_dir_nudge_line(directory / created, remedy=f"${SCRATCHPAD_PATH_ENV}")
+    assert lines == [expected], text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        # ANOTHER user's home is not this scan's to resolve, so the normaliser
+        # DECLINES it and the target keeps the shape it had before this change —
+        # the same refusal `_resolve_workspace_path` makes for `~nosuchuser` (whose
+        # own row lives in test_approval_descriptions.py).
+        "echo hi > ~other/workspace/minervaai/tmp/x.md",
+        # Depth TWO: expanding a home spelling must not reach past the depth-1 rule
+        # the arm documents for the absolute form of the same path.
+        "echo hi > ~/workspace/minervaai/tmp/deep/x.md",
+        # A `~` that is not the LEADING component is a literal directory name.
+        "echo hi > {home}/workspace/minervaai/tmp/~/x.md",
+        # A word that merely CONTAINS a spelling is not the spelling.
+        "echo hi > $HOMEfoo/workspace/minervaai/tmp/x.md",
+        # The relative case, still exactly where it was: the normalisation is an
+        # addition to the absolute test, not a working directory for it.
+        "echo hi > tmp/x.md",
+    ],
+)
+async def test_a_home_spelling_that_names_no_scratch_named_directory_is_silent(
+    tmp_path, monkeypatch, command
+) -> None:
+    """The refusals around the new expansion, one row each.
+
+    Called at the SCANNER rather than through `_run_bash`, unlike the rows above:
+    two of these commands cannot complete in a shell at all (`~other` names no
+    user, and `$HOMEfoo` expands to a path nothing creates), and a row that failed
+    for that reason would be reporting the shell's error as the scan's verdict.
+    The rows the shell CAN run go through the tool, because there a completed
+    command is part of the evidence.
+
+    They matter because an expansion is the kind of change whose failures are
+    silent in the OTHER direction: a helper that rewrote too much would nudge a
+    path the command never named, and every row here would still pass if the
+    normaliser were deleted outright. Two of them (the leading-`~`-only rule and
+    the merely-containing word) are the ones a `str.replace`-shaped implementation
+    gets wrong.
+    """
+    home = _home_spelling_fixture(monkeypatch, tmp_path)
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    assert builtin._bash_scratch_hint(command.format(home=home), context) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_home_spelling_into_the_pad_is_never_nudged(tmp_path, monkeypatch) -> None:
+    """The containment clause, reached through the new expansion.
+
+    With the home directory handed to the session, the pad is a SUBDIRECTORY of it,
+    so a tilde path into the pad now meets the pad's own `scratchpad`/`tmp` name
+    through a spelling that could not reach it before. This row is silent both
+    before and after — it exists so the expansion cannot START nudging the pad, and
+    the temp roots are moved aside because `tmp_path` really does live under the
+    machine's `$TMPDIR`, where the name arm declines everything anyway (see
+    `_name_arm_fixture`).
+    """
+    _point_the_nudge_at(monkeypatch, tmp_path / "shared-tmp")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    context, pad, _ = _scratchpad_context(tmp_path)
+    (pad / "tmp").mkdir(parents=True, exist_ok=True)
+    assert pad.is_relative_to(tmp_path)  # the shape this row depends on
+
+    text = await _run_bash(context, "echo hi > ~/sessions/sess-pad/scratchpad/tmp/rig.log")
+
+    assert "[scratch]" not in text, text
+
+
+@pytest.mark.asyncio
+async def test_a_home_spelling_reaches_the_temp_root_arm(tmp_path, monkeypatch) -> None:
+    """The normalisation sits BEFORE the absolute test, so both arms share it.
+
+    With the temp root aimed at the home directory itself, `~/x.log` has to fire
+    the TEMP arm with the temp root's own reason, exactly as `/…/x.log` does. A
+    helper called from the name arm alone would leave this row silent while every
+    row above still passed.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    _point_the_nudge_at(monkeypatch, home)
+    monkeypatch.setenv("HOME", str(home))
+    context, _, _ = _scratchpad_context(tmp_path)
+
+    text = await _run_bash(context, "echo hi > ~/paid.log")
+
+    assert text.count("[scratch]") == 1, text
+    assert _bash_nudge_line(home / "paid.log") in text
+
+
+@pytest.mark.asyncio
+async def test_a_write_through_a_home_spelling_is_nudged(tmp_path, monkeypatch) -> None:
+    """Pin the channel that never had the hole.
+
+    `write`/`edit` resolve through `_resolve_workspace_path`, which calls
+    `Path.expanduser`, so a `~/…` target has always fired here — this row exists so
+    that a later change to the shell normaliser cannot be "harmonised" by teaching
+    THIS channel the shell's old silence.
+    """
+    _name_arm_fixture(monkeypatch, tmp_path)
+    home = tmp_path / "home"
+    (home / "workspace" / "minervaai" / "tmp").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    context, _, tools = _scratchpad_context(tmp_path)
+    target = home / "workspace" / "minervaai" / "tmp" / "pinned.md"
+
+    result = await tools["write"].execute(
+        "c",
+        {"path": "~/workspace/minervaai/tmp/pinned.md", "content": "pinned\n"},
+        None,
+        None,
+        context,
+    )
+
+    assert result.is_error is False
+    first, second = result.text.split("\n")
+    assert first == f"Created {target.resolve()} (7 chars)."
+    assert second == _scratch_dir_nudge_line(target)
+
+
 @pytest.mark.asyncio
 async def test_no_scratchpad_root_means_no_bash_nudge(tmp_path, monkeypatch) -> None:
     """Same contract as ``SCRATCHPAD_UNAVAILABLE``: with nowhere better to point
