@@ -718,6 +718,9 @@ def row_facts(
             status="running",
             queued=False,
             paused=False,
+            # A row whose job could not be read cannot carry a cause; the
+            # fallback is a blank, not an invented cut-off.
+            cut_off=False,
             running=False,
             elapsed="0s",
             activity="",
