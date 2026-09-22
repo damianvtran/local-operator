@@ -355,22 +355,28 @@ def _resolve_scratchpad(path: Path, url: str) -> Path:
 # removes nothing (see its docstring), and a policy that deleted would be free to
 # reap a pad whose owner is still working in it.
 #
-# The test is the NAME plus one coarse size ceiling, and deliberately nothing
-# else, because that is all a refusal can rest on without reading the payload:
-# a segment that is a build or dependency directory, an extension that is a
-# compiled artefact, an archive or a model, or a payload too large for a scratch
-# pad. Everything the pad is FOR survives it — a 20 MB shaped CSV, a rendered
-# frame, notes, a one-off script, a benchmark table.
+# The test is a SHAPE, in the name and in the size, and deliberately nothing
+# else, because that is all a refusal can rest on without reading the payload: a
+# segment shaped like a build or dependency tree, a basename shaped like a
+# compiled artefact, an archive, a model or a versioned library, a payload too
+# large for one write, or a pad already holding too much for any. The shapes are
+# MATCHED rather than listed because a list is a guess about shape, and the 34.8
+# GB was made of the guesses nobody made (``cmake-build-debug/``, ``bazel-out/``,
+# ``_build/``, ``*-cache/``, a versioned ``libfoo.so.1.2``); the pad-total ceiling
+# below is the backstop for the shapes no name rule can reach at all, the 4.94 GB
+# ``node_modules`` included. Everything the pad is FOR survives — a 20 MB shaped
+# CSV, a rendered frame, notes, a one-off script, a benchmark table.
 
 #: Path SEGMENTS refused wherever they appear BELOW the pad root: the build
-#: trees, dependency stores and caches of the toolchains this fleet runs.
+#: trees, dependency stores and caches of the toolchains this fleet runs. These
+#: are the COMMON CASES of the shape rule below rather than the rule itself —
+#: kept as names because they are what a caller actually types, so the refusal
+#: can name the directory it found.
 #:
-#: Matched as a whole segment and never as a substring, so ``node_modules-notes.md``
-#: and ``build-report.csv`` are ordinary scratch while ``node_modules/`` and
-#: ``build/`` are not. Ambiguous names are left OUT on purpose (``out``,
-#: ``objects``, ``bin``, ``lib``): a refusal that fires on a name an agent
-#: legitimately meant as scratch teaches it to route around the pad, which is
-#: how the user's own working tree ends up holding the litter instead.
+#: Ambiguous names are left OUT on purpose (``objects``, ``bin``, ``lib``): a
+#: refusal that fires on a name an agent legitimately meant as scratch teaches
+#: it to route around the pad, which is how the user's own working tree ends up
+#: holding the litter instead.
 #:
 #: The dot-prefixed entries are already unreachable through a URL — the parser
 #: refuses every dotfile segment — and are listed anyway so the policy is stated
@@ -390,6 +396,8 @@ SCRATCHPAD_REFUSED_SEGMENTS: frozenset[str] = frozenset(
         "target",
         "build",
         "dist",
+        "out",
+        "obj",
         ".next",
         ".nuxt",
         ".svelte-kit",
@@ -421,7 +429,59 @@ _REFUSED_SEGMENTS_FOLDED: frozenset[str] = frozenset(
     name.lower() for name in SCRATCHPAD_REFUSED_SEGMENTS
 )
 
-#: File EXTENSIONS refused below the pad root: compiled artefacts, build
+#: The same tokens as BOUNDARY prefixes: a segment that IS a token, or that
+#: BEGINS with one up to a ``.`` (``build.old``, ``node_modules.bak``).
+#:
+#: WHY A BOUNDARY, AND WHY NOT THE HYPHEN. The shapes a name-exact list misses
+#: are the QUALIFIED trees, and a dot is the one separator a hyphenated word does
+#: not continue through. A hyphen does, in both directions: ``build-report.csv``
+#: and ``node_modules-notes.md`` are a report and a note that merely begin with a
+#: token and must stay scratch, while the hyphenated BUILD trees are caught as the
+#: qualifiers they end in (below) or as one of the two lead-ins (below that).
+#: ``build-debug`` therefore stays allowed, and that is the known cost of the
+#: boundary rather than an oversight.
+_REFUSED_SEGMENT_BOUNDARIES: tuple[str, ...] = tuple(
+    f"{name}." for name in sorted(_REFUSED_SEGMENTS_FOLDED)
+)
+
+#: A segment that ENDS WITH one of these: a build tree or a cache QUALIFIED by
+#: what it is (``cmake-build-debug``'s siblings — ``foo-build``, ``_build``,
+#: ``repo-cache``), the two packaging metadata directories, and a dSYM.
+#:
+#: ``.dsym`` belongs here rather than among the file suffixes below because a dSYM
+#: is a DIRECTORY: the suffix arm judges the basename alone, so ``Foo.app.dSYM/…``
+#: would be allowed by its leaf, while the segment rule sees the bundle itself at
+#: whatever depth it appears.
+SCRATCHPAD_REFUSED_SEGMENT_SUFFIXES: tuple[str, ...] = (
+    "-build",
+    "_build",
+    "-cache",
+    "-out",
+    "-dist",
+    ".egg-info",
+    ".dist-info",
+    ".dsym",
+)
+
+#: A segment that STARTS WITH one of these, exactly: the two build systems whose
+#: trees are qualified with a HYPHEN — ``cmake-build-debug``, ``bazel-out``,
+#: ``bazel-bin`` — which is the one continuation the boundary rule above allows
+#: on purpose for an ordinary name.
+SCRATCHPAD_REFUSED_SEGMENT_LEADINS: tuple[str, ...] = ("cmake-build-", "bazel-")
+
+
+def _is_refused_segment(segment: str) -> bool:
+    """Whether one path segment is shaped like a build tree or a dependency store."""
+    folded = segment.lower()
+    return (
+        folded in _REFUSED_SEGMENTS_FOLDED
+        or folded.startswith(SCRATCHPAD_REFUSED_SEGMENT_LEADINS)
+        or folded.endswith(SCRATCHPAD_REFUSED_SEGMENT_SUFFIXES)
+        or folded.startswith(_REFUSED_SEGMENT_BOUNDARIES)
+    )
+
+
+#: File-suffix TOKENS refused below the pad root: compiled artefacts, build
 #: intermediates, archives, disk images, executables and model weights. None of
 #: these has a reading as scratch, and the non-image ones have no text to return
 #: through the scheme either (``read`` refuses their bytes as text), so a pad
@@ -453,6 +513,7 @@ SCRATCHPAD_REFUSED_SUFFIXES: frozenset[str] = frozenset(
         ".gz",
         ".bz2",
         ".xz",
+        ".zst",
         ".7z",
         ".rar",
         ".dmg",
@@ -471,13 +532,83 @@ SCRATCHPAD_REFUSED_SUFFIXES: frozenset[str] = frozenset(
     }
 )
 
+#: The COMPOUND suffixes a single token cannot express, kept apart so the refusal
+#: can name the archive the caller actually typed — ``foo.tar.gz``, not ``foo.gz``,
+#: which the plain ``.gz`` would refuse too while naming the wrong half of it.
+SCRATCHPAD_REFUSED_MULTIPART_SUFFIXES: tuple[str, ...] = (
+    ".tar.gz",
+    ".tar.bz2",
+    ".tar.xz",
+    ".tar.zst",
+)
+
+#: :data:`SCRATCHPAD_REFUSED_SUFFIXES` in a FIXED order and after the compound
+#: ones, because the arm returns the first token that matches and the message
+#: names that token — and a ``frozenset`` has no order to depend on.
+_REFUSED_SUFFIXES_ORDERED: tuple[str, ...] = SCRATCHPAD_REFUSED_MULTIPART_SUFFIXES + tuple(
+    sorted(SCRATCHPAD_REFUSED_SUFFIXES)
+)
+
+
+def _refused_suffix(basename: str) -> str | None:
+    """The refused suffix token ``basename`` ends with, or ``None``.
+
+    Judged on the case-folded BASENAME rather than on ``Path.suffix``, which two
+    of the shapes this policy exists for both defeat: ``Path('foo.tar.gz').suffix``
+    is ``.gz`` alone, and ``Path('libfoo.so.1.2').suffix`` is ``.2``, so a
+    suffix-exact rule never sees the ``.tar`` or the ``.so`` at all. The versioned
+    spelling is reached by stripping trailing dot-separated digit groups first
+    (``libfoo.so.1.2`` -> ``libfoo.so``), and the strip is also why ``notes.2`` and
+    ``rows.csv.1`` stay scratch: what is left after it is what gets judged, and it
+    is not refused. A versioned DYLD needs no help from the strip —
+    ``libbar.1.dylib`` still ends in the token.
+    """
+    folded = basename.lower()
+    for name in (folded, _without_version_groups(folded)):
+        for token in _REFUSED_SUFFIXES_ORDERED:
+            if name.endswith(token):
+                return token
+    return None
+
+
+def _without_version_groups(name: str) -> str:
+    """``name`` without trailing ``.digits`` groups: ``libfoo.so.1.2`` -> ``libfoo.so``."""
+    while (dot := name.rfind(".")) > 0 and name[dot + 1 :].isdigit():
+        name = name[:dot]
+    return name
+
+
 #: The most a single ``write`` may put in a pad, in bytes. Set far above real
 #: scratch on purpose — the largest artefact the audit found that the scheme
 #: exists FOR was a shaped CSV orders of magnitude below it, and a rendered frame
 #: is smaller still — so this catches a dump rather than shaping legitimate work.
-#: It is a per-write ceiling and NOT a cap on the folder: a pad may hold many
-#: files, and nothing budgets the sum (see ``guide://scratchpad``).
+#: A per-write ceiling; the pad's own total (below) is the other half of the size
+#: policy.
 SCRATCHPAD_MAX_WRITE_BYTES = 32 * 1024 * 1024
+
+#: The most a pad may HOLD, in bytes, before every further write is refused.
+#:
+#: This is the BACKSTOP, and it is the arm that does not guess: every name rule
+#: above is an inference from a shape, and the 34.8 GB was mostly shapes nobody
+#: had inferred. A total is a fact about the pad itself, so it catches whatever
+#: filled it — including the 4.94 GB ``node_modules`` even had its name never
+#: been listed. Set far above any pad this scheme exists for (the intended
+#: material across the WHOLE fleet's pads measured 3.4 GB before this policy, so
+#: a quarter of a gigabyte in ONE pad is still generous), because a backstop that
+#: refuses real work is one the fleet routes around.
+SCRATCHPAD_TOTAL_BUDGET_BYTES = 256 * 1024 * 1024
+
+#: How many directory entries the budget walk visits before it stops and refuses
+#: anyway. The walk runs on EVERY write and its input is a tree the caller may have
+#: filled by accident, so it must be BOUNDED — and the bound is an entry count
+#: rather than a timeout because a count is the same on every machine.
+#:
+#: 20,000 is two orders of magnitude past the tens of entries a pad holds, so a
+#: walk that reaches it has found a tree, which is the shape being refused; the
+#: WORK is bounded with it, measured at 11.1 us per entry here (2026-09-22, 20,000
+#: entries in one warm APFS directory: 222.9 ms), i.e. 0.22 s at the cap and
+#: microseconds for a pad that keeps working.
+SCRATCHPAD_BUDGET_SCAN_ENTRIES = 20_000
 
 #: The sentence EVERY content refusal ends with: where the material DOES belong.
 #: A refusal that only says no sends the agent to the next-worst place — the
@@ -533,11 +664,60 @@ def _relative_parts(path: Path, root: Path) -> tuple[str, ...] | None:
         return None
 
 
+def _pad_bytes_below(root: Path, replaced: Path, budget: int, cap: int) -> tuple[int, bool]:
+    """``(bytes under ``root`` excluding a file at ``replaced``, whether the walk hit ``cap``)``.
+
+    Stops as soon as ``budget`` is exceeded — the rest of the tree cannot change
+    the answer — and at ``cap`` entries otherwise, so the cost of measuring is a
+    bound and not a property of whatever a shell left in the pad.
+
+    Iterative rather than recursive: the depth is bounded only by the entry cap,
+    and a stack of one directory per entry is what keeps a pad shaped like a
+    single deep chain from meeting the interpreter's recursion limit first. A
+    symlink is never followed (a pad may hold one pointing out of it; it is
+    ``resolve`` that refuses a write through one) and an entry that cannot be
+    read contributes 0 rather than failing a write over a directory listing.
+    """
+    total = 0
+    seen = 0
+    stack = [root]
+    while stack:
+        try:
+            entries = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                seen += 1
+                if seen > cap:
+                    return total, True
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(Path(entry.path))
+                        continue
+                    if entry.name == replaced.name and entry.path == str(replaced):
+                        # An overwrite REPLACES these bytes rather than adding to
+                        # them, so counting them and then adding the payload would
+                        # refuse a write that leaves the pad SMALLER. The caller
+                        # spells ``replaced`` from the scan root for exactly this
+                        # comparison, and the name is tested first so the walk
+                        # pays one string compare per entry rather than a join.
+                        continue
+                    total += entry.stat(follow_symlinks=False).st_size
+                except OSError:
+                    continue
+                if total > budget:
+                    return total, False
+    return total, False
+
+
 def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> None:
     """Refuse a write whose NAME or SIZE is build output rather than scratch.
 
     Raises :class:`ScratchpadContentError` on a refused segment, a refused
-    extension, a ``size`` over :data:`SCRATCHPAD_MAX_WRITE_BYTES`, or a path that
+    suffix, a ``size`` over :data:`SCRATCHPAD_MAX_WRITE_BYTES`, a write that would
+    take the pad past :data:`SCRATCHPAD_TOTAL_BUDGET_BYTES`, a pad too wide to
+    finish measuring (:data:`SCRATCHPAD_BUDGET_SCAN_ENTRIES`), or a path that
     cannot be placed inside the pad; returns ``None`` otherwise. ``url`` is
     echoed so the message names the address the caller actually typed, and every
     message ends with :data:`SCRATCHPAD_ELSEWHERE`, which is where the material
@@ -545,9 +725,10 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
 
     ``size`` is the payload's length in BYTES, and it is optional because
     ``edit`` has none to give: an edit sees only its hunks, never the whole
-    file, so an edit is judged on the name alone. ``write`` passes the encoded
-    length — bytes and not characters, because the ceiling is about what lands on
-    the shared disk.
+    file, so an edit is judged on the name alone — and, for the pad total, on
+    what the pad already holds rather than on what the edit would add to it.
+    ``write`` passes the encoded length — bytes and not characters, because every
+    ceiling here is about what lands on the shared disk.
 
     READS ARE DELIBERATELY NOT GATED. Pads written before this policy are full of
     exactly these names, and their owner is the agent cleaning them up: a gate on
@@ -561,13 +742,13 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
             f"rather than judged. {SCRATCHPAD_ELSEWHERE}"
         )
     for segment in below:
-        if segment.lower() in _REFUSED_SEGMENTS_FOLDED:
+        if _is_refused_segment(segment):
             raise ScratchpadContentError(
                 f"{url}: '{segment}' is a build or dependency directory, not scratch. "
                 f"{SCRATCHPAD_ELSEWHERE}"
             )
-    suffix = Path(below[-1]).suffix.lower() if below else ""
-    if suffix in SCRATCHPAD_REFUSED_SUFFIXES:
+    suffix = _refused_suffix(below[-1]) if below else None
+    if suffix is not None:
         raise ScratchpadContentError(
             f"{url}: '{suffix}' is a compiled, archived or model artefact, not scratch. "
             f"{SCRATCHPAD_ELSEWHERE}"
@@ -576,4 +757,30 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
         raise ScratchpadContentError(
             f"{url}: {size} bytes is over the {SCRATCHPAD_MAX_WRITE_BYTES}-byte ceiling for a "
             f"single write. {SCRATCHPAD_ELSEWHERE}"
+        )
+    # Spelled from ``root`` rather than used as ``path``: the walk enumerates
+    # ``root``, so the file it must recognise as the one being REPLACED has to be
+    # spelled from the same string. ``path`` is resolved and the root need not be
+    # — on macOS that is ``/private/var`` against ``/var``, which silently drops
+    # the exclusion and then refuses an overwrite that SHRINKS the pad. That
+    # matters beyond tidiness: a pad over its total would otherwise be writable
+    # only from a shell, which is the route around the pad this policy exists to
+    # avoid.
+    replaced = root.joinpath(*below)
+    held, truncated = _pad_bytes_below(
+        root, replaced, SCRATCHPAD_TOTAL_BUDGET_BYTES, SCRATCHPAD_BUDGET_SCAN_ENTRIES
+    )
+    if truncated:
+        # The walk stopped counting, so the pad is refused on the SHAPE of what
+        # it holds rather than on its size: 20,000 entries is a tree.
+        raise ScratchpadContentError(
+            f"{url}: this pad holds more than {SCRATCHPAD_BUDGET_SCAN_ENTRIES:,} entries, which "
+            f"is a tree rather than a pad. {SCRATCHPAD_ELSEWHERE}"
+        )
+    would_hold = held + (size or 0)
+    if would_hold > SCRATCHPAD_TOTAL_BUDGET_BYTES:
+        raise ScratchpadContentError(
+            f"{url}: the pad holds {held:,} bytes, so this write would leave it holding "
+            f"{would_hold:,} — over the {SCRATCHPAD_TOTAL_BUDGET_BYTES:,}-byte ceiling for a "
+            f"pad. {SCRATCHPAD_ELSEWHERE}"
         )
