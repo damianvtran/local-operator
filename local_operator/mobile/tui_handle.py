@@ -243,25 +243,23 @@ class TuiSessionHandle(SessionHandle):
 
         Reads the same ``RUNNING_SUBAGENT_STATUSES`` predicate the owned handle
         and ``/info`` use — a private set here would let the record and the tree
-        drawn beneath it disagree. ``(None, None)`` on any failure, never
-        ``(0, 0)``: this runs before the session finishes starting, and a
-        not-yet-readable roster is not a measurement of zero.
+        drawn beneath it disagree. The statuses come from
+        ``SubagentComms.status_counts()``, one linear walk shared with the owned
+        handle's publisher (this loop used to build every ``SubagentNode`` in the
+        registry, once per event, to read one string each). ``(None, None)`` on
+        any failure, never ``(0, 0)``: this runs before the session finishes
+        starting, and a not-yet-readable roster is not a measurement of zero.
         """
         try:
             comms = getattr(self._session(), "subagent_comms", None)
             if comms is None:
                 return (None, None)
-            nodes = comms.nodes()
+            counts = comms.status_counts()
         except Exception:  # noqa: BLE001 — a stale count never breaks the app
             logger.debug("could not read the subagent roster", exc_info=True)
             return (None, None)
-        running = queued = 0
-        for node in nodes:
-            status = str(getattr(node, "status", "") or "")
-            if status in RUNNING_SUBAGENT_STATUSES:
-                running += 1
-            elif status == "queued":
-                queued += 1
+        running = sum(counts.get(status, 0) for status in RUNNING_SUBAGENT_STATUSES)
+        queued = counts.get("queued", 0)
         return (running, queued)
 
     def rebind(self) -> None:
