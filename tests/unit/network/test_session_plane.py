@@ -1156,6 +1156,50 @@ def test_a_cold_session_on_a_peer_still_lists_and_can_be_engaged(
         _stop_all(served)
 
 
+def test_the_session_plane_listing_has_a_header_and_says_the_state_in_words(
+    peer_pair: Devices, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """UX round 5, U29: a header, and the state in the words the app uses.
+
+    The listing was four bare CLI columns with no header, so three of them were
+    for the reader to infer from shape alone, and the STATE it printed was the
+    catalogue's own token — ``stored`` — which is a third vocabulary for a state
+    the rest of the app already shows (the sidebar paints that session under
+    ``⇄`` with a row mark; ``resume.session_state_words`` owns the words, and
+    ``--json`` keeps the token).
+
+    Driven through ``cli._cmd_sessions`` over a real peer link, because the header
+    and the row are ONE printed listing: a re-derived format string would pin
+    nothing about what the command prints.
+    """
+    from local_operator.network import cli as network_cli
+
+    server_a, server_b, _host_a, _port_a = peer_pair
+    record, _host, _port = _pair(peer_pair, monkeypatch, role="drive")
+    host_b, port_b = _listen(server_b)
+    _seed(server_b.root, SESSION)
+    link = _dial_to(server_a, record, host_b, port_b)
+    try:
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(server_a.root))
+        capsys.readouterr()
+        assert (
+            network_cli._cmd_sessions(  # noqa: SLF001 - the command's own handler
+                argparse.Namespace(peer=server_b.identity.device_id, all_peers=False, json=False)
+            )
+            == 0
+        )
+        out = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+        # Imported rather than restated: a reword of the header fails HERE.
+        assert out[0] == network_cli.SESSIONS_HEADER, out
+        row = next(line for line in out if line.startswith(SESSION))
+        # The words, and not the peer's 34-character id in place of its name.
+        assert "not running" in row, row
+        assert "stored" not in row, row
+        assert server_b.identity.device_id not in row, row
+    finally:
+        link.close("test")
+
+
 def test_a_session_lifecycle_op_is_refused_by_name(
     peer_pair: Devices, monkeypatch: pytest.MonkeyPatch
 ) -> None:

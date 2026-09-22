@@ -1528,6 +1528,15 @@ def _cmd_service(action: str) -> Callable[[argparse.Namespace], int]:
 _STOP_ENDED_OUTCOMES = frozenset({"stopped", "killed", "already-gone", "not_running"})
 
 
+#: The session plane's listing header (UX round 5, U29).
+#:
+#: The rows are four CLI columns that had no header, so three of them were for the
+#: reader to infer from shape alone — the same defect the local `lop sessions`
+#: table never had (its columns are named, ``cli.STATE_COLUMN_WIDTH``'s line).
+#: Named in the order the rows print them.
+SESSIONS_HEADER = "SESSION  DEVICE  STATE  CONVERSATION"
+
+
 #: What a stop outcome leaves the user with, when it leaves them with anything
 #: (UX round 3, U21).
 #:
@@ -1742,6 +1751,8 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
             or str((row.get("peer") or {}).get("name") or "").lower() == wanted
         ]
     lines = []
+    from local_operator.resume import session_state_words
+
     for row in remote:
         block = row.get("peer") or {}
         # A ROW THIS DEVICE HOLDS IS NAMED AS SUCH, not as ``?`` (UX round 2,
@@ -1753,10 +1764,21 @@ def _cmd_sessions(args: argparse.Namespace) -> int:
         holder = str(block.get("name") or block.get("device_id") or "").strip()
         if not holder:
             holder = str(payload.get("device_name") or "this device")
+        # THE STATE IN WORDS (UX round 5, U29). This printed the catalogue's raw
+        # token — ``stored`` — in a headerless row of CLI columns, so a reader had
+        # to infer three of the four columns from shape alone and read a token no
+        # other surface uses (the sidebar paints that session under ``⇄`` with a
+        # row mark, and the words the app has for the condition are in
+        # ``resume.session_state_words``).
         lines.append(
             f"{row.get('session_id')}  {holder}"
-            f"  {row.get('state') or '?'}  {row.get('conversation_name') or ''}".rstrip()
+            f"  {session_state_words(str(row.get('state') or '')) or '?'}"
+            f"  {row.get('conversation_name') or ''}".rstrip()
         )
+    if remote:
+        # Only when there are rows: with none, the sentence below IS the listing
+        # and a header above it would name columns nothing is printed under.
+        lines.insert(0, SESSIONS_HEADER)
     # A DEVICE THAT COULD NOT BE ASKED IS NAMED, IN EVERY CASE (Q-R4-1, UX round
     # 2 U14). The sibling family already does this (``lop sessions --all-peers``
     # prints ``<device>: unreachable (<reason>)``), and this one used to answer
@@ -1849,6 +1871,37 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return _emit(args, {"ok": True, **payload}, lines)
 
 
+def _peer_line(row: Any) -> str:
+    """One ``/network peers`` row, in the words a person reads.
+
+    A NAME, A STATE WORD AND A REASON IN WORDS — never the wire token, and never
+    the 34-character device id (UX round 5, U28). The row printed
+    ``unreachable d_1a2b3c…  pixel-8  connect_failed:ConnectionRefusedError``: a
+    stage token plus a Python class name where the sibling create arm says
+    "cannot be reached from this device right now", and a peer addressed by the
+    id every other surface replaces with its NAME (``mesh-ui.md`` §1.2 gives the
+    id a column of its own, eight characters of it; the sidebar's heading is
+    ``⇄ <label>``; a peer with no name is ``resume.UNNAMED_DEVICE`` on all of
+    them, design round 1 D8). The gloss is the SHARED one
+    (``resume.peer_reason_words``, design round 1 D3) — the same function the
+    ``--all-peers`` listing and the sidebar's tooltip read, so this line cannot
+    drift into a second vocabulary for ``connect_failed:ConnectionRefusedError``.
+
+    The token is not lost: it is the ``reason`` field of this verb's ``--json``
+    payload, which is the machine surface and the detail view these lines
+    summarise (the row also keeps ``device_id`` there, for the same reason).
+    """
+    from local_operator.resume import UNNAMED_DEVICE, peer_reason_words
+
+    name = str(row.get("name") or "").strip() or UNNAMED_DEVICE
+    if row.get("reachable"):
+        return f"{name}  reachable"
+    return (
+        f"{name} cannot be reached from this device right now "
+        f"({peer_reason_words(str(row.get('reason') or ''))})"
+    )
+
+
 def _cmd_peers(args: argparse.Namespace) -> int:
     # A LISTING PROBES ITS PEERS, so it needs the relay's own listing budget plus
     # slack rather than the 5s default: with the default, one unreachable member
@@ -1887,11 +1940,7 @@ def _cmd_peers(args: argparse.Namespace) -> int:
     return _emit(
         args,
         {"ok": True, "peers": rows},
-        [
-            f"{'reachable' if row['reachable'] else 'unreachable':11} {row['device_id']}  "
-            f"{row['name']}  {row.get('reason', '')}"
-            for row in rows
-        ]
+        [_peer_line(row) for row in rows]
         or ["no peers: this device is the only member of its networks"],
     )
 
