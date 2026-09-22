@@ -2387,9 +2387,19 @@ def test_a_non_string_entry_is_skipped_rather_than_raised_on() -> None:
     truthy non-``str`` entry raised ``TypeError`` from inside the mask — the one
     failure a redaction pass must never have, because it turns a tool result
     into a tool crash. The filter now lives in the generator.
+
+    The calls below are deliberately OFF-CONTRACT (the signature is
+    ``Iterable[Optional[str]]``), which is the point: the list is built by a
+    caller this module cannot see, and a bug in that builder is what the runtime
+    guard is for. ``cast`` rather than a widened signature, so the contract stays
+    meaningful for the callers the type checker actually protects.
     """
-    assert redaction_shapes.scrub_values("ordinary text", [123]) == "ordinary text"
-    assert redaction_shapes.scrub_values("ordinary text", [None, b"bytes"]) == "ordinary text"
+    assert redaction_shapes.scrub_values("ordinary text", cast("list[Any]", [123])) == (
+        "ordinary text"
+    )
+    assert redaction_shapes.scrub_values("ordinary text", cast("list[Any]", [None, b"bytes"])) == (
+        "ordinary text"
+    )
     assert redaction_shapes.scrub_values("text", [""]) == "text"
     assert redaction_shapes.credential_forms("") == ()
 
