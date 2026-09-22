@@ -442,6 +442,11 @@ def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:
     # the pad's own.
     assert "32 MiB (33,554,432 bytes)" in collapsed
     assert "256 MiB (268,435,456 bytes)" in collapsed
+    # The third refusal condition (N1) — a pad of many small files, nowhere near
+    # the byte ceiling, that refuses every write — and the ONE exemption that gets
+    # a pad back under (M4), since nothing here deletes.
+    assert "over 20,000 entries" in collapsed
+    assert "replaced file is not counted twice" in collapsed
     # The shapes, not only the names: the trees the list never held.
     assert "cmake-build-*" in collapsed
     assert "libfoo.so.1.2" in collapsed

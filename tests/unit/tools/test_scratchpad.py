@@ -557,55 +557,92 @@ def test_a_write_at_the_ceiling_is_allowed(tmp_path: Path) -> None:
 
 
 def _fill_pad(root: Path, size: int, name: str = "bulk.dat") -> Path:
-    """Give the pad ``size`` logical bytes without writing them.
+    """Give the pad ``size`` ALLOCATED bytes.
 
-    ``truncate`` makes a SPARSE file on APFS: ``st_size`` — which is what the
-    budget walk sums — reports the whole size while the volume allocates no
-    blocks, so the 256 MiB boundary cases below cost this suite nothing. That is
-    the same fact the walk rests on: it measures what the pad CLAIMS, not what
-    the filesystem set aside for it.
+    Real bytes and not ``truncate``: the walk sums allocated blocks, so a sparse
+    file measures 0 and the boundary cases below would then pass against a walk
+    that counted nothing. The write is one call, so the file is a single
+    block-aligned extent — which is what lets each test set its budget from
+    ``_allocated`` instead of hard-coding a filesystem's block size.
     """
     path = root / name
-    with path.open("wb") as handle:
-        handle.truncate(size)
+    path.write_bytes(b"x" * size)
     return path
 
 
-def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(tmp_path: Path) -> None:
+def _allocated(path: Path) -> int:
+    """The bytes the volume holds for ``path``, which is the walk's own unit."""
+    return path.stat().st_blocks * 512
+
+
+def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The backstop's boundary, and the same shape as the per-write one: the
     ceiling catches a pad that has stopped being scratch, and the payload that
-    lands exactly on it is the last legitimate one rather than the first
-    refused."""
+    lands exactly on it is the last legitimate one rather than the first refused.
+
+    The budget is set FROM the pad's allocated size, so the boundary is exact on
+    any block size rather than only on a 4096-byte one.
+    """
     root = _pad(tmp_path)
-    _fill_pad(root, SCRATCHPAD_TOTAL_BUDGET_BYTES - 8)
+    filled = _fill_pad(root, 4096)
+    monkeypatch.setattr(
+        scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", _allocated(filled) + 4096
+    )
 
-    assert check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 8) is None
+    assert check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 4096) is None
 
 
-def test_a_write_one_byte_over_the_pad_total_is_refused(tmp_path: Path) -> None:
+def test_a_write_one_byte_over_the_pad_total_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The BACKSTOP, and the arm that does not guess about shape: the name here
     is ordinary scratch, and it is the pad's own total that refuses it. The
     message has to name both numbers, because the caller's next move (is this a
     dump I should move, or is it 40 files I should clear out?) depends on
     which."""
     root = _pad(tmp_path)
-    held = SCRATCHPAD_TOTAL_BUDGET_BYTES - 8
-    _fill_pad(root, held)
+    filled = _fill_pad(root, 4096)
+    held = _allocated(filled)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", held + 4096)
 
     with pytest.raises(ScratchpadContentError) as excinfo:
-        check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 9)
+        check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 4097)
 
     assert f"the pad holds {held:,} bytes" in str(excinfo.value)
-    assert f"{SCRATCHPAD_TOTAL_BUDGET_BYTES:,}-byte ceiling" in str(excinfo.value)
+    assert f"{held + 4096:,}-byte ceiling" in str(excinfo.value)
     assert "mktemp -d" in str(excinfo.value)
 
 
-def test_an_edit_into_a_pad_already_over_the_total_is_refused(tmp_path: Path) -> None:
+def test_a_sparse_entry_does_not_count_against_the_pad_total(tmp_path: Path) -> None:
+    """The budget is about the DISK, so the walk sums allocated blocks rather
+    than apparent length. A sparse file reports a size the volume never stored:
+    counting it would refuse every later write into a pad that is paying for
+    nothing, which is the false refusal the negative list exists to prevent.
+
+    Run against the SHIPPED budget — a 1 GiB sparse entry, zero blocks — so the
+    shipped number and the metric are pinned together at no cost to this suite.
+    """
+    root = _pad(tmp_path)
+    sparse = root / "map.dat"
+    with sparse.open("wb") as handle:
+        handle.truncate(SCRATCHPAD_TOTAL_BUDGET_BYTES * 4)
+
+    assert sparse.stat().st_size > SCRATCHPAD_TOTAL_BUDGET_BYTES
+    assert sparse.stat().st_blocks * 512 == 0
+    assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 8) is None
+
+
+def test_an_edit_into_a_pad_already_over_the_total_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """``edit`` has no payload size to give, so the total arm judges it on what
     the pad ALREADY holds rather than sending it through unmeasured: a pad that
     is over the ceiling is over it however the next write arrives."""
     root = _pad(tmp_path)
-    _fill_pad(root, SCRATCHPAD_TOTAL_BUDGET_BYTES + 1)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
+    _fill_pad(root, 8192)
 
     with pytest.raises(ScratchpadContentError):
         check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md")
@@ -636,13 +673,16 @@ def test_a_pad_too_wide_to_measure_is_refused_rather_than_walked(
     assert "more than 3 entries" in str(excinfo.value)
 
 
-def test_overwriting_a_file_counts_its_bytes_once_and_not_twice(tmp_path: Path) -> None:
+def test_overwriting_a_file_counts_its_bytes_once_and_not_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The budget is the pad's total AFTER the write, so a file being REPLACED is
     counted once. Counting it and then adding the payload would refuse an
     overwrite that leaves the pad SMALLER — the one refusal that would teach a
     session to route around the pad with the tools it still has."""
     root = _pad(tmp_path)
-    replaced = _fill_pad(root, SCRATCHPAD_TOTAL_BUDGET_BYTES)
+    replaced = _fill_pad(root, 4096)
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", _allocated(replaced))
 
     assert check_scratchpad_write(replaced, root, "scratchpad://bulk.dat", 1) is None
     # ...and the exclusion is not a hole in the ceiling: a DIFFERENT name in the
@@ -652,7 +692,7 @@ def test_overwriting_a_file_counts_its_bytes_once_and_not_twice(tmp_path: Path) 
 
 
 def test_the_replaced_file_is_recognised_when_the_root_is_spelled_differently(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The pair ``_scratchpad_target`` actually hands over: a root spelled the way
     the CONTEXT carries it and a target the parser RESOLVED. Those differ on this
@@ -665,7 +705,8 @@ def test_the_replaced_file_is_recognised_when_the_root_is_spelled_differently(
     real = _pad(tmp_path / "real")
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
-    _fill_pad(real, SCRATCHPAD_TOTAL_BUDGET_BYTES, name="bulk.dat")
+    replaced = _fill_pad(real, 4096, name="bulk.dat")
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", _allocated(replaced))
 
     assert (
         check_scratchpad_write((link / "bulk.dat").resolve(), link, "scratchpad://bulk.dat", 1)
@@ -673,7 +714,9 @@ def test_the_replaced_file_is_recognised_when_the_root_is_spelled_differently(
     )
 
 
-def test_the_walk_never_follows_a_symlink_out_of_the_pad(tmp_path: Path) -> None:
+def test_the_walk_never_follows_a_symlink_out_of_the_pad(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A symlink is measured as the LINK, not as its target: a pad may hold one
     pointing outside it (that is what ``resolve`` refuses a WRITE through), and
     following it here would let a tree the pad does not own decide the pad's
@@ -684,7 +727,8 @@ def test_the_walk_never_follows_a_symlink_out_of_the_pad(tmp_path: Path) -> None
     """
     outside = tmp_path / "outside"
     outside.mkdir()
-    _fill_pad(outside, SCRATCHPAD_TOTAL_BUDGET_BYTES * 2, name="big.dat")
+    _fill_pad(outside, 8192, name="big.dat")
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_TOTAL_BUDGET_BYTES", 4096)
     root = _pad(tmp_path)
     (root / "link").symlink_to(outside, target_is_directory=True)
 
@@ -717,6 +761,14 @@ def test_an_edit_passes_no_size_and_is_judged_on_the_name_alone(tmp_path: Path) 
         # ``libfoo.so.1.2``, and what it leaves behind is what gets judged.
         ("notes.2",),
         ("rows.csv.1",),
+        # The LEAF of a token-shaped name is a file and not a tree (M1): the dot
+        # after ``out`` here is a file TYPE, and judging it as a build directory
+        # made ordinary data work pay for a rule about directories.
+        ("out.json",),
+        ("obj.json",),
+        ("build.log",),
+        ("dist.md",),
+        ("target.txt",),
     ],
 )
 def test_intended_scratch_is_allowed(tmp_path: Path, segments: tuple[str, ...]) -> None:
@@ -731,6 +783,28 @@ def test_intended_scratch_is_allowed(tmp_path: Path, segments: tuple[str, ...]) 
     url = "scratchpad://" + "/".join(segments)
 
     assert check_scratchpad_write(root.joinpath(*segments), root, url) is None
+
+
+@pytest.mark.parametrize("name", ["out", "obj", "build", "dist", "target", "node_modules"])
+def test_a_token_shaped_leaf_is_a_file_while_the_directory_of_that_name_is_not(
+    tmp_path: Path, name: str
+) -> None:
+    """The leaf/parent pair, pinned together so the narrowing cannot be
+    implemented by deleting the arm. M1: the segment arms judge the PARENT parts,
+    because the same spelling is a build TREE as a directory and a file name as a
+    leaf — and a leaf called ``out.json`` is data work, not a build tree.
+
+    ``node_modules`` is the case the leaf rule is for: a file of that name is
+    writeable, and everything written THROUGH it is refused one level earlier.
+    """
+    root = _pad(tmp_path)
+
+    assert check_scratchpad_write(root / f"{name}.json", root, f"scratchpad://{name}.json") is None
+    assert check_scratchpad_write(root / name, root, f"scratchpad://{name}") is None
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root / name / "x.md", root, f"scratchpad://{name}/x.md")
+
+    assert f"'{name}' is a build or dependency directory" in str(excinfo.value)
 
 
 def test_a_refused_name_in_an_ancestor_of_the_root_does_not_refuse_the_write(
