@@ -5314,7 +5314,7 @@ async def test_a_parent_note_does_not_spend_the_todo_budget():
             return [Message.user(f"parent note {aside_calls // 2}")]
         return []
 
-    turns = [
+    turns: list[list[StreamEvent]] = [
         [StreamTextDelta(delta=f"t{i}"), StreamEndEvent(stop_reason="stop")] for i in range(40)
     ]
     stream = ScriptedStream(turns)
@@ -5361,7 +5361,7 @@ async def test_the_aside_budget_still_bounds_a_runaway_parent():
         # One note per outer pass; see the sibling test on why the even calls.
         return [Message.user(f"note {aside_calls // 2}")] if aside_calls % 2 == 0 else []
 
-    turns = [
+    turns: list[list[StreamEvent]] = [
         [StreamTextDelta(delta=f"t{i}"), StreamEndEvent(stop_reason="stop")] for i in range(30)
     ]
     stream = ScriptedStream(turns)

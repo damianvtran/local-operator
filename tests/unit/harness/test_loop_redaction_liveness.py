@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -308,7 +308,8 @@ async def test_the_redacted_result_is_byte_identical_and_identifies_its_call():
     rows = _tool_rows(await _run_loop(context, _config(_ScriptedStream(), spy)))
 
     assert len(rows) == 1, rows
-    assert rows[0].content[0].text == "prefix " + MASKED_ANCHOR + "suffix"
+    block = cast(TextContent, rows[0].content[0])
+    assert block.text == "prefix " + MASKED_ANCHOR + "suffix"
     assert spy.sources, "the hook never ran"
     name, summary = spy.sources[-1]
     assert name == "collect", spy.sources
@@ -355,7 +356,7 @@ async def test_every_text_block_of_a_multi_block_result_is_masked():
     spy = RedactSpy()
     rows = _tool_rows(await _run_loop(context, _config(_ScriptedStream(), spy)))
 
-    assert [block.text for block in rows[0].content] == [
+    assert [cast(TextContent, block).text for block in rows[0].content] == [
         "a " + MASKED_ANCHOR,
         "b " + MASKED_ANCHOR,
     ]

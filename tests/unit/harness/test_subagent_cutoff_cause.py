@@ -23,7 +23,7 @@ import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -241,15 +241,19 @@ async def test_the_roster_reports_why_a_settled_child_stopped() -> None:
 
 
 class _AttachedChild:
-    """The child handle ``comms.attach`` stores; nothing here calls into it."""
+    """The child handle ``comms.attach`` stores; nothing here calls into it.
 
-    def subscribe(self, _handler: Any) -> Callable[[], None]:
+    Signature-compatible with ``ChildSession`` so the type checker agrees this
+    is a stand-in for the protocol rather than an accidental one.
+    """
+
+    def subscribe(self, handler: Callable[[AgentEvent], Any]) -> Callable[[], None]:
         return lambda: None
 
-    def queue_aside(self, _thunk: Any) -> None:
+    def queue_aside(self, thunk: Callable[[], Any]) -> None:
         return None
 
-    def steer_message(self, _message: Any) -> None:
+    def steer_message(self, message: Message) -> None:
         return None
 
 
@@ -262,7 +266,7 @@ def test_the_cause_survives_a_snapshot_restore_round_trip() -> None:
     """
     comms = _comms()
     comms.record_launch("job-4", "child", prompt="go")
-    comms.attach("job-4", _AttachedChild(), Path("/tmp/child-4"))
+    comms.attach("job-4", cast(Any, _AttachedChild()), Path("/tmp/child-4"))
     comms.record_outcome("job-4", "failed", cut_off_cause=CUT_CAUSE)
 
     payload = comms.snapshot()
