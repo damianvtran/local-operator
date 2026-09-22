@@ -276,8 +276,54 @@ def _chat_providers() -> list[ProviderDefinition]:
     It also keeps the LIVE fetch honest: :func:`available_models` would otherwise
     be asked to list a decision endpoint's models and offer them as chat models,
     spending a network round trip to build a list that must not be shown.
+
+    LOGIN FLAVOURS ARE DROPPED HERE TOO, and this is the ONE place that rule
+    lives: a flavour declares ``store_credentials_as`` naming the provider it
+    actually authenticates, and it adds NO catalogue its base does not already
+    add. The two resolve to the SAME credential and therefore the SAME listing —
+    ``_listing_credential`` follows ``store_credentials_as`` for the api_key,
+    the ``is_oauth`` flag and the account scope alike — so the base row already
+    carries everything the flavour row would.
+
+    WHAT THIS FIXES, measured on the operator's catalogue: the picker offered a
+    duplicated Radient listing under two labels. A key-only install saw 444
+    ``radient/`` rows AND 444 ``radient-key/`` rows, the identical listing twice;
+    querying ``auto`` returned ``radient/auto`` beside ``radient-key/auto``. The
+    requirement is a single ``radient/`` namespace whenever the account is usable
+    in EITHER form.
+
+    WHY IT IS NOT RADIENT-SPECIFIC, and why an OAuth-only gate would be wrong.
+    The credential-view suppression in :meth:`usable_providers` (
+    ``store_credentials_as`` and the storage id in ``oauth_providers``) only
+    hides a flavour when an OAUTH row exists — so a key-only install, before
+    this, was offered BOTH labels (measured 2026-09-22 with a seeded
+    ``upsert_credential("radient-key", {"type": "api_key", ...})``). And the
+    duplication is not a Radient peculiarity: every flavour in
+    ``PROVIDER_REGISTRY`` carries it — ``openai``/``openai-device``,
+    ``xai``/``xai-oauth``, ``zai``/``zai-oauth``,
+    ``alibaba-token-plan``/``alibaba-token-plan-oauth`` as well. Those four are
+    already de-duplicated on the DESKTOP picker by the connected-only filter
+    (only ``openai`` is in ``usable_providers``, so ``openai-device``'s rows are
+    hidden), but they still reached the LIVE catalogue and the phone's sheet, so
+    naming radient here would have been a special case of a general rule. The
+    flavour's target is always a non-decision-only registry row, so a flavour is
+    dropped exactly when its base is in the chat providers — which is always.
+
+    A caller that names a flavour explicitly is therefore served the BASE
+    catalogue, not the flavour's. That is lossless for the reason above (same
+    credential, same listing) and no such caller exists: flavours are not
+    hostings ``configure_model`` accepts, so nothing may run under one, and
+    :meth:`live_catalogue`'s ``providers`` argument is a credential-admission
+    filter (the phone's ``persisted_providers``) rather than a way to request a
+    prefix.
     """
-    return [definition for definition in PROVIDER_REGISTRY if not is_decision_only(definition.id)]
+    chat = [definition for definition in PROVIDER_REGISTRY if not is_decision_only(definition.id)]
+    ids = {definition.id for definition in chat}
+    return [
+        definition
+        for definition in chat
+        if not (definition.store_credentials_as and definition.store_credentials_as in ids)
+    ]
 
 
 class ProviderController:

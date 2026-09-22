@@ -106,8 +106,53 @@ class ModelRow:
         return f"{self.provider}/{self.model_id}"
 
 
-#: `(tier, -score, version_key, row)` — the shape `rank_rows` sorts.
-_RankEntry = tuple[tuple[int, int], int, tuple[float, float, str], "ModelRow"]
+#: `(tier, preferred_router, -score, version_key, row)` — the shape `rank_rows` sorts.
+#:
+#: ``preferred_router`` sits ABOVE ``-score`` for the reason
+#: :func:`_preferred_router_rank` records: on the ``auto`` query the preference has
+#: to beat a higher-scoring OpenRouter match (``openrouter/auto`` scores 7 to
+#: ``radient/auto``'s 6, so a rung below the score would leave the order unchanged).
+_RankEntry = tuple[tuple[int, int], int, int, tuple[float, float, str], "ModelRow"]
+
+
+#: The model id of the Radient auto-router, appended to the aggregator's own
+#: namespace (``radient``/``auto``).
+_AUTO_ROUTER_MODEL_ID = "auto"
+
+
+def _preferred_router_rank(row: ModelRow) -> int:
+    """0 for the Radient auto-router, 1 for everything else.
+
+    A DELIBERATE PRODUCT PREFERENCE, not a heuristic, and it says so plainly
+    because the code cannot invent a rationale it does not have. Measured on the
+    operator's catalogue with the query ``auto`` typed, BEFORE this rung:
+
+        openrouter/openrouter/auto
+        openrouter/openrouter/auto-beta
+        radient/auto                       <-- the row the operator wanted first
+        radient/openrouter/auto-beta
+
+    The two OpenRouter rows led because, among rows tied on the connected and
+    aggregated rungs, ``-score`` and ``_version_key`` did not separate them from
+    ``radient/auto``, and the tie fell through to the input order (registry
+    order, openrouter before radient) — an incidental fact, not a decision.
+
+    The operator chose the precedence: ``radient/auto`` leads the ``auto`` query
+    for EVERY user, including one who has only signed in to OpenRouter. That is
+    why there is no credential or account check here — the harness maker's own
+    router is presented first on purpose, not because it is the one signed in.
+
+    Only ``radient/auto`` is elevated, and NARROWLY: OpenRouter is an aggregator
+    the operator also uses, so demoting OpenRouter rows wholesale would be a much
+    larger behavioural change deserving its own design review. A caller that
+    builds rows from a different catalogue still gets the same precedence, which
+    is the point of ranking owning it rather than the picker.
+
+    The gate on the PROVIDER matters for the same reason ``is_meta_route_id`` is
+    provider-scoped: a local ``ollama/auto`` is a model a user can simply have,
+    and it must not be lifted by a bare id test.
+    """
+    return 0 if row.provider == "radient" and row.model_id == _AUTO_ROUTER_MODEL_ID else 1
 
 
 def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
@@ -132,6 +177,15 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     `anthropic/claude-opus-5` are the same model, and after logging in to Anthropic
     the direct route is the one the user meant.
 
+    A PREFERRED-ROUTER rung sits ABOVE the score and the version key, in BOTH
+    branches, so ``/model`` with no query and ``/model auto`` agree. It is the one
+    non-lexical thing here and it is a product preference rather than a heuristic:
+    it lifts ``radient/auto`` above every other row — see
+    :func:`_preferred_router_rank` for the measured order that motivated it and
+    how narrowly it is scoped. It has to outrank the SCORE rather than merely
+    ``_version_key``, because on the ``auto`` query the OpenRouter rows score
+    higher (7 to 6) and a rung below the score would change nothing.
+
     DECISION-ONLY PROVIDERS ARE DROPPED, in both branches, before any scoring.
     This is the surface ``/model`` offers the catalogue THROUGH, and ranking is
     the last gate before a row becomes a choice: a decision model (TypeSafe's Jev)
@@ -152,7 +206,13 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     if not needle:
         return sorted(
             rows,
-            key=lambda row: (not row.connected, row.aggregated, row.provider, _version_key(row)),
+            key=lambda row: (
+                not row.connected,
+                row.aggregated,
+                _preferred_router_rank(row),
+                row.provider,
+                _version_key(row),
+            ),
         )
     exact: list[_RankEntry] = []
     fuzzy: list[_RankEntry] = []
@@ -163,14 +223,15 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
             continue
         entry = (
             (0 if row.connected else 1, 1 if row.aggregated else 0),
+            _preferred_router_rank(row),
             -score,
             _version_key(row),
             row,
         )
         (exact if needle in target else fuzzy).append(entry)
     pool = exact or fuzzy
-    pool.sort(key=lambda item: (item[0], item[1], item[2]))
-    return [item[3] for item in pool]
+    pool.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+    return [item[4] for item in pool]
 
 
 def _version_key(row: ModelRow) -> tuple[float, float, str]:

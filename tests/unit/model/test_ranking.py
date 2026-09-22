@@ -162,6 +162,69 @@ def test_version_is_the_first_number_not_the_largest():
     assert [row.selector for row in rank_rows(rows, "gpt")][0] == "openai/gpt-4.1"
 
 
+def test_the_radient_auto_router_leads_the_auto_query_and_the_empty_one():
+    """The measured ordering the operator asked for, in both sort branches.
+
+    BEFORE this rule the picker led with the two OpenRouter rows on the query
+    ``auto``: among rows tied on the connected and aggregated rungs the score and
+    version rungs did not separate them from ``radient/auto``, so the tie fell
+    through to registry order (openrouter before radient) — an incidental fact,
+    not a decision. The OpenRouter rows SCORE HIGHER (7 to 6), which is exactly
+    why the preference rung sits above ``-score``: a rung below it changes
+    nothing here. Asserted with no query as well, because ``/model`` opens on the
+    empty sort and the two surfaces must agree.
+    """
+    rows = [
+        _row("openrouter/openrouter/auto", aggregated=True),
+        _row("openrouter/openrouter/auto-beta", aggregated=True),
+        _row("radient/auto", aggregated=True),
+        _row("radient/openrouter/auto-beta", aggregated=True),
+    ]
+    for query in ("auto", ""):
+        assert rank_rows(rows, query)[0].selector == "radient/auto", query
+
+
+def test_the_preference_is_provider_scoped_not_a_bare_id_test():
+    """``ollama/auto`` is a model a user can simply have and must not be lifted.
+
+    The same gate ``is_meta_route_id`` carries: the router id means something
+    only inside the Radient namespace, so a bare ``model_id == "auto"`` test would
+    silently reorder a local model the user named.
+    """
+    rows = [_row("ollama/auto"), _row("openai/gpt-5")]
+    assert [row.selector for row in rank_rows(rows, "auto")] == [
+        "ollama/auto",
+    ]
+    # And, with a same-tier neighbour that sorts before it alphabetically, it
+    # keeps the ordinary order rather than being raised.
+    rows = [_row("anthropic/auto"), _row("ollama/auto")]
+    assert [row.selector for row in rank_rows(rows, "auto")] == [
+        "anthropic/auto",
+        "ollama/auto",
+    ]
+
+
+def test_the_preference_does_not_resurrect_a_dropped_or_tiered_row():
+    """The preference is a sort rung, not a filter bypass.
+
+    It cannot lift a row the caller filtered out (ranking never sees it), and it
+    cannot lift an UNCONNECTED ``radient/auto`` above a connected row: the
+    connected tier stays first, so a login-required router does not lead a list
+    of models that run.
+    """
+    rows = [
+        _row("radient/auto", aggregated=True, connected=False),
+        _row("openai/auto"),
+    ]
+    assert [row.selector for row in rank_rows(rows, "auto")] == [
+        "openai/auto",
+        "radient/auto",
+    ]
+    # A decision-only row is dropped before any ordering, preference included —
+    # so even a query that matches nothing else leaves ``[]``, not the router.
+    assert [row.selector for row in rank_rows([_row("typesafe/auto")], "auto")] == []
+
+
 def test_a_query_matching_nothing_returns_nothing():
     """An empty result is a real answer; the picker says "no matching models"."""
     assert rank_rows([_row("openai/gpt-5")], "zzzz") == []
