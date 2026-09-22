@@ -130,14 +130,14 @@ from local_operator.procstate import (
 from local_operator.redaction_shapes import (
     CREDENTIAL_SHAPES,
     PEM_BODY_FLOOR,
-    PEM_BODY_LINE_RE,
-    PEM_END_LINE_RE,
-    PEM_HEADER_LINE_RE,
     REDACTION_MARKER,
     ShapeHit,
     ShapeReport,
     credential_dump_notice,
     has_shape_anchor,
+    pem_body_line,
+    pem_end_line,
+    pem_header_line_end,
     scrub_secrets_with_hits,
     shape_report,
 )
@@ -2250,9 +2250,15 @@ MEMORY_EXCEEDED_FALLBACK = (
 # between the two classifiers is a silent leak — which is exactly what happened when the
 # table learned `cat -n`'s `number<TAB>` and this file did not (Q10-F1: the whole body was
 # published for `cat -n key.pem`, `nl -ba key.pem` and `grep -n` output).
-_PEM_HEADER_LINE = PEM_HEADER_LINE_RE
-_PEM_BODY_LINE = PEM_BODY_LINE_RE
-_PEM_END_LINE = PEM_END_LINE_RE
+#: The SAME three languages, decided in linear time rather than by the patterns'
+#: own backtracking walk — the three call sites below are where that walk was
+#: measured. The patterns stay the definition and the arms in
+#: `tests/unit/secrets/test_credential_shapes.py` pin each decider to its pattern.
+#: Bound at module level so a test can stand in for one, which is how "the
+#: classifier was not reached" is asserted as a fact rather than a duration.
+_pem_body_line = pem_body_line
+_pem_end_line = pem_end_line
+_pem_header_line_end = pem_header_line_end
 
 #: NECESSARY CONDITIONS of the header pattern above, checked BEFORE it wherever the
 #: pattern would otherwise run over text this filter did not shape. Both literals are
@@ -2641,12 +2647,12 @@ class _PipeRedactor:
             for line in ready.splitlines(keepends=True):
                 # Stripped ONCE: the gate and the classifier must see the same bytes.
                 stripped = line.rstrip("\r\n")
-                if _PEM_END_HINT in stripped and _PEM_END_LINE.match(stripped):
+                if _PEM_END_HINT in stripped and _pem_end_line(stripped):
                     self._in_key_block = False
                     self._key_block_marker_sent = False
                     out.append(line)
                     continue
-                if _PEM_HEADER_LINE.match(line.rstrip("\r\n")):
+                if _pem_header_line_end(stripped) is not None:
                     # A SECOND block's header inside an open block is armour, not prose.
                     # The prose rule below closed the state on it, and because a header
                     # is released with the body lines that follow it (the hold keeps a
@@ -2671,7 +2677,7 @@ class _PipeRedactor:
                     self._key_block_marker_sent = False
                     out.append(line)
                     continue
-                if _PEM_BODY_LINE.match(line.rstrip("\r\n")):
+                if _pem_body_line(stripped):
                     if not self._key_block_marker_sent:
                         self._key_block_marker_sent = True
                         out.append(REDACTION_MARKER + "\n")
@@ -2686,7 +2692,7 @@ class _PipeRedactor:
         # both literals are necessary conditions of the pattern, so a read carrying
         # neither skips the search entirely (see `_PEM_HEADER_HINTS`).
         begin = (
-            _PEM_HEADER_LINE.search(ready)
+            _pem_header_line_end(ready)
             if all(hint in ready for hint in _PEM_HEADER_HINTS)
             else None
         )
@@ -2828,7 +2834,7 @@ class _PipeRedactor:
         length — so an alignment that puts the cap inside the header line splits the
         MARKER: ``-----BEGIN RSA PRI`` goes out as a bare armour fragment and the rest
         of the marker stays in ``pending``, where its line no longer STARTS with the
-        marker, so ``_PEM_HEADER_LINE`` can never match it again. The state never
+        marker, so no header line can start there any more. The state never
         opens, the carried-state masking below never engages, and every later release
         is body that nothing masks. Measured on the shape of ``head -c 8210 key.pem``:
         138 raw body lines published, and the alignment is fixed per stream — a session
@@ -2864,7 +2870,7 @@ class _PipeRedactor:
         line = text[line_start : break_match.start()]
         if not all(hint in line for hint in _PEM_HEADER_HINTS):
             return cut
-        if _PEM_HEADER_LINE.match(line) is None:
+        if _pem_header_line_end(line) is None:
             return cut
         return break_match.end()
 

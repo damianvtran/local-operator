@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import json
 import re
 import shlex
@@ -776,17 +777,28 @@ def test_the_pipe_releases_at_a_carriage_return_too() -> None:
     assert redactor.feed(b"step 1/3\r") == b"step 1/3\r"
 
 
-# --- the pipe filter's PEM classifiers: gated, and the shape that is not ------
+# --- the pipe filter's PEM classifiers: gated, linear, and pinned -------------
 #
 # `_mask_open_key_block` runs the header, body and END classifiers over EVERY
 # 64 KiB read a child produces, and `_pump` calls them ON THE EVENT LOOP. Their
 # prefix grammar is the shared `LINE_PREFIX`, which is ambiguous by construction:
 # a unit's `\d+` may end in the middle of a digit run, so a line of numeric
 # columns has 2**k live partitions and `re`, which does not memoise, walks every
-# one of them before concluding that the line is not PEM. Measured on the
-# released code, ONE `%8d`-padded row of four-digit numbers: 33 characters
-# 1.5 ms, 49 characters 283 ms, 65 characters 55.98 s — and ten such rows cost
-# 225 s inside a SINGLE `search` call.
+# one of them before concluding that the line is not PEM. Every figure below
+# NAMES ITS POPULATION, because they differ by two orders of magnitude between
+# populations and an unqualified number is how the first version of this comment
+# came to understate the residual by ~300x (round 1's R1-2):
+#
+# * base (`origin/main`), ONE 65-character `%8d` row of FOUR-digit values: the
+#   header search does not return in 300 s (timed out). The same row of ONE-digit
+#   values: 1.357 s in that search, 1.828 s in the body match.
+# * head, the four-digit row: 3.9 s / 6.7 s. The whitespace rewrite of the prefix
+#   fragment (`redaction_shapes.LINE_PREFIX`) is what buys that difference, and
+#   reverting it puts both paths back over 150 s.
+# * head, the body classifier INSIDE AN OPEN BLOCK: 12.5 s for ONE rejected
+#   digit-dense line, 26.1 s for two — charged PER LINE OF THE RELEASED BUFFER
+#   and not per line of the block, because closing the state is what releases the
+#   rest of the read and the loop goes on classifying after it closes.
 #
 # Say precisely what the evidence is, because the frame and the frequency are
 # different claims. The frame is real: `~/.local-operator/logs/runtime-stall-
@@ -805,37 +817,54 @@ def test_the_pipe_releases_at_a_carriage_return_too() -> None:
 # nothing at the same size (measured, all three). The cost is a property of the
 # SHAPE of the bytes, which is why these tests are sized in tens of bytes.
 #
-# The gates are the fix. The residual is stated rather than implied: a read that
-# does carry the literals still walks the classifier's own ambiguity, and the
-# BODY classifier cannot be gated at all — `10000000 10000001` is a line it
-# MATCHES, so no necessary condition can reject it cheaply. That half needs a
-# linear replacement for the prefix grammar, which is a design change rather
-# than a guard; `redaction_shapes.LINE_PREFIX` records the four rewrites that do
-# not fix it and the two that would lose matches.
+# THE FIX HAS TWO HALVES. The gates close the ORDINARY read: a read carrying
+# neither literal never reaches a classifier, which is what makes ordinary output
+# free. They cannot close the rest, and the BODY classifier cannot be gated at all
+# — `10000000 10000001` is a line it MATCHES, so no necessary condition rejects it
+# cheaply. That half is the LINEAR DECIDERS: `pem_body_line`, `pem_end_line` and
+# `pem_header_line_end` in `redaction_shapes` decide the same three languages in
+# one pass each, with no backtracking to walk. The arms below hold them to the
+# patterns they replace — a sweep over character-kind sequences in BOTH
+# directions (a dropped line is a published key, an extra one masks prose), the
+# digit predicate against `\d` over the whole code space, and the cost of the
+# ungated path itself, which no gate-based arm could see (round 1's R1-1).
+#
+# WHAT IS NOT FIXED HERE, measured rather than implied: the shape TABLE's own PEM
+# block rules (`_MULTILINE_SHAPES`) embed the same ambiguous fragment, so a read
+# carrying an anchored `private_key` spelling AND a digit-dense line still costs
+# seconds there — 320 ms for a SIX-column row at head, and past 20 s at base; an
+# eight-column row is past 25 s at both. That is pre-existing, byte-identical at
+# both revisions, and closing it needs linear versions of the two block rules
+# rather than of the classifiers, so it is `deferred` on the PR. The rewrite arm
+# below is there because that path is where the whitespace rewrite is still the
+# thing keeping the cost at tens of milliseconds.
+
+#: The character KINDS these three languages are functions of. A sequence of kinds
+#: stands for every string built from the same kinds, which is what lets a bounded
+#: sweep below stand for an unbounded one. `\u0661` is an Arabic-Indic digit: `\d`
+#: takes it and `[0-9]` does not, so its presence here is what catches a machine
+#: that read the fragment's digit class as ASCII.
+_DECIDER_KINDS = ("1", "\u0661", " ", "[", "]", "\u2502", ".", "-", "a", ",")
+#: Tokens for the must-not-reject direction: eight characters is the body floor,
+#: and the shorter ones are what the short-line arm is for.
+_DECIDER_TOKENS = ("MIIEowIB", "MIIEowIB,", "MIIEowIB  ", "M")
 
 
-class _CountingPattern:
-    """A classifier stand-in that records the WORK rather than the time.
+class _CountingDecider:
+    """A decider stand-in that records the CALL rather than the time.
 
-    `_mask_open_key_block` reads the pattern off the module at call time, so this
-    is how far "the classifier was not reached" can be asserted as a fact: the
-    call count is zero or it is not, whatever the runner's load.
+    `_PipeRedactor` reads the decider off the module at call time, so this is how
+    far "the classifier was not reached" can be asserted as a FACT: the call count
+    is zero or it is not, whatever the runner's load.
     """
 
-    def __init__(self, pattern: re.Pattern[str]) -> None:
-        self._pattern = pattern
+    def __init__(self, decider: Callable[[str], object]) -> None:
+        self._decider = decider
         self.calls = 0
-        self.scanned = 0
 
-    def search(self, text: str) -> re.Match[str] | None:
+    def __call__(self, text: str) -> Any:
         self.calls += 1
-        self.scanned += len(text)
-        return self._pattern.search(text)
-
-    def match(self, text: str) -> re.Match[str] | None:
-        self.calls += 1
-        self.scanned += len(text)
-        return self._pattern.match(text)
+        return self._decider(text)
 
 
 #: The dash run of a PEM banner, and a builder for the banner itself. The banner is
@@ -855,17 +884,134 @@ def _banner(spelling: str, kind: str = "BEGIN") -> str:
 def _numeric_rows(rows: int, columns: int = 3, start: int = 0) -> str:
     """A numeric table row of `%8d`-padded columns: the shape that burns.
 
-    `start=0` so the fields are ONE OR TWO digits wide, and that is not cosmetic:
-    the partitions of a digit run are what the engine walks, so three-digit fields
-    multiply a row's cost by ~2**2 per field and turn a regression from a slow test
-    into a hang — which is a worse test than a fast one. The sizes below are picked
-    against the CONFIRMED-AMPLIFIED curve, not a guess: 129 characters is ~0.1 ms
-    and 257 is ~4.2 s on the released paths, against ~0 on the gated ones.
+    `start=0` so the fields are one or two digits wide unless a caller asks for
+    more, and that is not cosmetic: the partitions of a digit run are what the
+    engine walks, so a wider field multiplies a row's cost and turns a regression
+    from a slow test into a hang — which is a worse test than a fast one. The
+    deciders are linear, so a size that a released path could not finish is now
+    the cheapest way to show that nothing walks the partitions.
     """
     return "".join(
         "".join(f"{start + row * columns + column:8d}" for column in range(columns)) + "\n"
         for row in range(rows)
     )
+
+
+def _decider_forms(sequence: str) -> tuple[str, ...]:
+    """The shapes one kind sequence is asked about, in BOTH directions.
+
+    A bare sequence is the must-not-accept direction (the pattern rejects it, so
+    the decider has to as well, or prose gets masked). Each token form is the
+    must-not-reject direction: the pattern takes it, and a decider that drops it
+    publishes a key. The newline forms put the short-line arm's lookahead in play.
+    """
+    forms = [sequence]
+    for token in _DECIDER_TOKENS:
+        forms.append(sequence + token)
+        forms.append(f"{sequence}{token}\n")
+        forms.append(f"{sequence}{token}\n{_PEM_BODY}\n")
+    return tuple(forms)
+
+
+def _decider_fixtures() -> list[str]:
+    """The shapes a caller actually sees, both directions, every spelling.
+
+    Assembled from the file's own constants so a spelling a future round adds is
+    covered here too, and including the two shapes that a per-line reading of the
+    body pattern gets wrong: a banner line is NOT a body line, and a numeric table
+    row after one is not the line the match is anchored to.
+    """
+    fixtures = []
+    prefixes = ("", "12|", "12:", "[12]", "\u2502 12 \u2502", "\t", "12| 34|")
+    for spelling in _PEM_SPELLINGS:
+        header = _banner(spelling)
+        for prefix in prefixes:
+            fixtures.append(prefix + _PEM_BODY)
+            fixtures.append(f"{prefix}{_PEM_BODY}\n{prefix}{_PEM_BODY}\n")
+            fixtures.append(prefix + "10000000 10000001")
+            fixtures.append(prefix + "[112345678")
+            fixtures.append(f"{_numeric_rows(1)}")
+            fixtures.append(f"{prefix}{_PEM_BODY}\n{prefix}")
+        fixtures.append(header.rstrip())
+        fixtures.append("the key at ./id_rsa:" + header.rstrip())
+        fixtures.append(header + _PEM_BODY + "\n")
+        fixtures.append(header + _PEM_BODY + "\n" + _banner(spelling, "END"))
+        fixtures.append(header + _numeric_rows(2))
+        fixtures.append("the key at ./id_rsa:" + header.rstrip() + "\n" + _numeric_rows(2))
+    return fixtures
+
+
+def _assert_deciders_agree(text: str) -> None:
+    """One input, all three deciders against all three patterns."""
+    body = redaction_shapes.PEM_BODY_LINE_RE.match(text) is not None
+    assert redaction_shapes.pem_body_line(text) == body, f"body decider differs on {text!r}"
+    end = redaction_shapes.PEM_END_LINE_RE.match(text) is not None
+    assert redaction_shapes.pem_end_line(text) == end, f"END decider differs on {text!r}"
+    match = redaction_shapes.PEM_HEADER_LINE_RE.search(text)
+    want = None if match is None else match.end()
+    assert redaction_shapes.pem_header_line_end(text) == want, f"header decider differs on {text!r}"
+
+
+def test_the_linear_deciders_agree_with_the_patterns_they_replace() -> None:
+    """The equivalence obligation: the patterns stay the DEFINITION, and the
+    deciders are only a cheaper way to decide them.
+
+    This is the arm that carries the risk of that trade, so it sweeps rather than
+    spot-checks: every character-KIND sequence up to length three, in both
+    directions, plus the shapes a caller actually sees. A sequence of kinds stands
+    for every string built from those kinds, which is why a bounded sweep is the
+    right shape here — and why the failure it guards against (a dropped line is a
+    published key) is worth the few thousand comparisons it costs.
+    """
+    for length in range(4):
+        for combo in itertools.product(_DECIDER_KINDS, repeat=length):
+            for text in _decider_forms("".join(combo)):
+                _assert_deciders_agree(text)
+    for text in _decider_fixtures():
+        _assert_deciders_agree(text)
+
+
+def test_the_prefix_machine_reads_digits_the_way_the_pattern_does() -> None:
+    """`\\d` is Unicode-decimal and not `[0-9]`, and a machine that read it as
+    ASCII would reject a body line the pattern accepts.
+
+    Whole-code-space rather than sampled: `re.findall` gives the pattern's own set
+    in one pass and the comprehension gives the predicate's, so this compares two
+    sets of every character rather than a list of favourites — the same shape as
+    the sweep above, and cheap enough to be one pass of each.
+    """
+    code_space = "".join(chr(code) for code in range(0x110000))
+    assert set(re.findall(r"\d", code_space)) == {char for char in code_space if char.isdecimal()}
+
+
+def test_the_gates_are_necessary_conditions_of_the_patterns_they_guard() -> None:
+    """Nothing else ties a hint list to the pattern it guards (round 1's R1-4).
+
+    A `PEM_HEADER_LINE_RE` that stopped spelling one of `_PEM_HEADER_HINTS` — the
+    literals it needs, which the gate tests for with `in` — would silently turn
+    the gate into a filter that skips real matches, and no arm would redden. So
+    the implication is asserted directly, over candidates that are MUTATIONS of a
+    real banner (one deletion or one substitution), which is what a hand check
+    does and what a future change would break.
+    """
+    hints = builtin._PEM_HEADER_HINTS
+    candidates = []
+    for spelling in _PEM_SPELLINGS:
+        for kind in ("BEGIN", "END"):
+            line = _banner(spelling, kind).rstrip("\n")
+            candidates.append(line)
+            for index in range(len(line)):
+                candidates.append(line[:index] + line[index + 1 :])
+                for letter in ("A", " ", "x"):
+                    candidates.append(line[:index] + letter + line[index + 1 :])
+            for prefix in ("12|", "the key: ", "  ", "["):
+                candidates.append(prefix + line)
+    for text in candidates:
+        if redaction_shapes.PEM_HEADER_LINE_RE.search(text) is not None:
+            missing = [hint for hint in hints if hint not in text]
+            assert not missing, f"a header match without {missing}: {text!r}"
+        if redaction_shapes.PEM_END_LINE_RE.match(text) is not None:
+            assert builtin._PEM_END_HINT in text, f"an END match without the literal: {text!r}"
 
 
 def test_ordinary_output_reaches_no_pem_classifier_and_is_published_untouched(
@@ -878,8 +1024,8 @@ def test_ordinary_output_reaches_no_pem_classifier_and_is_published_untouched(
     change an answer. Nothing is timed: the assertion is the call count.
     """
     spies = {
-        name: _CountingPattern(getattr(builtin, name))
-        for name in ("_PEM_HEADER_LINE", "_PEM_BODY_LINE", "_PEM_END_LINE")
+        name: _CountingDecider(getattr(builtin, name))
+        for name in ("_pem_header_line_end", "_pem_body_line", "_pem_end_line")
     }
     for name, spy in spies.items():
         monkeypatch.setattr(builtin, name, spy)
@@ -898,14 +1044,15 @@ def test_ordinary_output_reaches_no_pem_classifier_and_is_published_untouched(
 
 
 def test_a_numeric_row_does_not_cost_more_than_the_line_it_replaces() -> None:
-    """A ratio rather than a laptop-calibrated ceiling, and no growing payload.
+    """The GATED path's linearity, and what this arm does NOT cover.
 
-    The released code needs 0.11 ms for a three-column row and 283 ms for six — a
-    factor of ~2,500 for a line that doubled — and ten rows cost 225 s inside one
-    search. The 40x allowance for a doubled line is the one the shape pass's own
-    linearity test uses: exponential blowup is orders of magnitude, not a constant
-    factor. The sizes sit where the curve turns, so a regression fails here in tens
-    of milliseconds instead of hanging the suite.
+    A ratio rather than a laptop-calibrated ceiling, and no growing payload: the
+    40x allowance for a doubled line is the one the shape pass's own linearity
+    test uses, because exponential blowup is orders of magnitude rather than a
+    constant factor. This arm reads the ordinary-approval path, so it is blind to
+    the two paths the gates do not cover — round 1 measured the whole section
+    passing with the prefix fragment reverted. The arm named for the open block
+    below is the one that reaches them.
     """
 
     def feed_cpu(text: str) -> float:
@@ -919,18 +1066,69 @@ def test_a_numeric_row_does_not_cost_more_than_the_line_it_replaces() -> None:
     prose = "reading 1: ordinary output, nothing credential shaped\n\n"
     # Sixteen and thirty-two columns: a ratio test has to be sized where the curve
     # actually turns, and the fronts moved when the prefix grammar's whitespace
-    # handling did. The 40x allowance is the shape pass's own linearity allowance.
+    # handling did.
     small = feed_cpu(prose + _numeric_rows(1, columns=16))
     large = feed_cpu(prose + _numeric_rows(1, columns=32))
     assert large <= max(small, 1e-4) * 40, f"a numeric row looks super-linear: {small} -> {large}"
 
 
+def test_a_numeric_row_inside_an_open_block_is_not_charged_per_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The path NO GATE can reach — round 1's R1-1, and the arm that was missing.
+
+    The gates close the ordinary read, so a cost regression on the paths they leave
+    open was invisible to every other arm here: with the prefix fragment reverted
+    this whole section still passed while these paths went from seconds to minutes.
+    So this drives the BODY classifier on a `%8d` row of four-digit values with the
+    state open, and asserts two things. First, that the row was CLASSIFIED — a call
+    count, so "it was fast" cannot mean "it was skipped". Second, that it is cheap:
+    the SAME row costs 6.7 s in the pattern's own hands and 12.5 s per rejected
+    line inside an open block at head, so the ceiling below sits three orders of
+    magnitude above the linear path and an order of magnitude under the pattern's
+    cost — a regression fails here in seconds rather than hanging the suite.
+    """
+    spy = _CountingDecider(builtin._pem_body_line)
+    monkeypatch.setattr(builtin, "_pem_body_line", spy)
+    row = _numeric_rows(1, columns=8, start=1000)
+    redactor = builtin._PipeRedactor([])
+    redactor._in_key_block = True
+    start = time.process_time()
+    redactor.feed(row.encode())
+    redactor.feed(b"", final=True)
+    cpu = time.process_time() - start
+    assert spy.calls >= 1, "the body classifier was skipped, so this proves nothing"
+    assert cpu < 0.5, f"one 65-character table row inside an open block cost {cpu:.3f} s of CPU"
+
+
+def test_the_prefix_fragment_keeps_the_shape_tables_block_rule_cheap() -> None:
+    """The rewrite's OWN coverage, on the one path where it is still load-bearing.
+
+    Round 1's R1-1 is that the whitespace rewrite — the only thing between the
+    fragment's users and a multi-second burn before the deciders landed — had no
+    test that failed without it. The pipe's classifiers no longer run the fragment
+    (the deciders do), so the arm belongs where the fragment is still the thing
+    being measured: the shape TABLE's PEM block rules, which embed it verbatim.
+    Measured there, an anchored `private_key` spelling followed by ONE `%8d` row of
+    four-digit values costs 42 ms with the current spelling and past 20 s (the cap)
+    with the released one; six columns is 320 ms here and also past 20 s at base.
+    The ceiling is ~12x the current cost and at least 40x under the released one,
+    and a regression fails in seconds rather than hanging.
+    """
+    header = '"private_key": "' + _banner(_PEM_SPELLINGS[0]).rstrip("\n")
+    text = f"{header}\n{_numeric_rows(1, columns=5, start=1000)}"
+    start = time.process_time()
+    redaction_shapes.scrub_shapes(text)
+    cpu = time.process_time() - start
+    assert cpu < 0.5, f"an anchored five-column row cost {cpu:.3f} s of CPU in the shape table"
+
+
 def test_an_unclosed_block_is_masked_and_the_text_before_it_is_released() -> None:
     """The gate moved WHERE the search is called, so the offsets it keeps matter.
 
-    `begin` is what releases everything ahead of the header. A version that lost
-    that offset would either swallow the leading output or publish the first body
-    line, and the second is the leak this whole layer exists to prevent.
+    `end` is what releases everything ahead of the header. A version that lost that
+    offset would either swallow the leading output or publish the first body line,
+    and the second is the leak this whole layer exists to prevent.
     """
     header = _banner(_PEM_SPELLINGS[0])
     raw = (f"before the key: nothing secret here\n{header}{_PEM_BODY}\n{_PEM_BODY}\n").encode()
@@ -946,9 +1144,9 @@ def test_a_closed_block_is_masked_and_its_terminator_is_released() -> None:
 
     A closed block arrives in one read as prose + header + body + END, so the
     release point hands the mask loop the header rather than holding it — which is
-    what makes `ready[:begin.end()]` the line that releases the prose. Losing that
-    offset would drop the leading line, and dropping output is the failure this arm
-    is here for.
+    what makes `ready[:end]` the line that releases the prose. Losing that offset
+    would drop the leading line, and dropping output is the failure this arm is
+    here for.
     """
     header = _banner(_PEM_SPELLINGS[0])
     terminator = _banner(_PEM_SPELLINGS[0], kind="END")
@@ -972,12 +1170,12 @@ def test_a_read_missing_one_literal_reaches_no_classifier(
     from the constant itself rather than written here so this stays true if the
     pattern's literals change. The failure this pins is a gate loosened to `any` —
     the plausible simplification, since one literal looks like enough — which sends
-    ordinary reads back into the ambiguous search for nothing.
+    ordinary reads back into the search for nothing.
     """
     hints = builtin._PEM_HEADER_HINTS
     assert len(hints) >= 2, "the gate is only a gate while it needs more than one literal"
-    spy = _CountingPattern(builtin._PEM_HEADER_LINE)
-    monkeypatch.setattr(builtin, "_PEM_HEADER_LINE", spy)
+    spy = _CountingDecider(builtin._pem_header_line_end)
+    monkeypatch.setattr(builtin, "_pem_header_line_end", spy)
     others = [hint for index, hint in enumerate(hints) if index != hint_index]
     # The absent literal is NOT written into the fixture text, or the fixture would
     # carry both and assert nothing.
@@ -1000,19 +1198,19 @@ def test_an_open_block_consults_the_end_classifier_only_where_the_literal_is(
     a leak of its own (reported, not fixed here) and not a state to build a fixture
     on. With the state set, the two classifiers are watched together: the body test
     must RUN, or "the END test did not run" would be true of a loop that never ran at
-    all, and the END test must not, because no line here carries the literal that
-    `PEM_END_LINE_RE` requires.
+    all, and the END test must not, because no line here carries the literal the END
+    pattern requires.
     """
-    end_spy = _CountingPattern(builtin._PEM_END_LINE)
-    body_spy = _CountingPattern(builtin._PEM_BODY_LINE)
-    monkeypatch.setattr(builtin, "_PEM_END_LINE", end_spy)
-    monkeypatch.setattr(builtin, "_PEM_BODY_LINE", body_spy)
+    end_spy = _CountingDecider(builtin._pem_end_line)
+    body_spy = _CountingDecider(builtin._pem_body_line)
+    monkeypatch.setattr(builtin, "_pem_end_line", end_spy)
+    monkeypatch.setattr(builtin, "_pem_body_line", body_spy)
     redactor = builtin._PipeRedactor([])
     redactor._in_key_block = True
     lines = "reading an ordinary line, nothing credential shaped\n" * 20
     redactor.feed(lines.encode())
     assert body_spy.calls >= 20, "the line loop did not run, so this proves nothing"
-    assert end_spy.calls == 0, f"the END classifier scanned {end_spy.scanned} chars of prose"
+    assert end_spy.calls == 0, f"the END classifier was asked about {end_spy.calls} prose lines"
 
 
 # --- the store: containment, and the incident path ---------------------------

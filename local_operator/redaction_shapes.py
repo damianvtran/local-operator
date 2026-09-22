@@ -1791,6 +1791,422 @@ PEM_HEADER_LINE_RE = re.compile(
 PEM_END_LINE_RE = re.compile(r"^" + LINE_PREFIX + r"-{1,4}[\x27\x22]?-{1,4}END ", re.MULTILINE)
 
 
+# --- the LINEAR decision procedures for the three patterns above -------------
+#
+# WHY THESE EXIST — and it is the one part of the pipe filter's cost that no
+# necessary-condition guard can reach. `LINE_PREFIX` is AMBIGUOUS BY
+# CONSTRUCTION: a unit's `\d+` may end in the middle of a digit run (`12` is one
+# unit or two, and every split is a live path), so a line with k digit runs
+# walks 2**k partitions, and `re` has no memoisation to cut them down. Measured
+# on this tree at the classifier call sites in `tools/builtin.py`: ONE
+# 65-character `%8d` table row (`%8d`-padded columns — a numpy row, a padded
+# column dump) costs 6.7 s in `PEM_BODY_LINE_RE.match` and 3.9 s in
+# `PEM_HEADER_LINE_RE.search`; a 3.3 KB read that merely QUOTES a banner costs
+# 1.86 s, of which 1814 ms is the body classifier; a 6.5 KB read runs past
+# 120 s. `tools/builtin.py` gates what it can, and the gates are what make
+# ordinary output free, but they cannot reach this: a read that carries the
+# literals OPENS the state, and the body classifier is then asked about lines it
+# genuinely MATCHES — `10000000 10000001` is a numbered body line — so no
+# cheaper test rejects the pathological line.
+#
+# WHAT THEY ARE. The same three languages, decided by an explicit mode-set
+# simulation of the prefix grammar — the modes are positions in the grammar, one
+# character moves the whole set on, and nothing is ever revisited — followed by
+# the rigid literal tail each pattern requires, whose candidate offsets are
+# ENUMERATED (the tail is at most nine characters, so there are at most a
+# handful) instead of searched. Cost is O(len) per call with a small constant,
+# for every input shape.
+#
+# THE EQUIVALENCE OBLIGATION, stated plainly because it is the whole risk of a
+# second spelling of a language that was already written once. A divergence has
+# two directions and only one of them survives review: a decider that ACCEPTS
+# where the pattern does not masks text the agent needed to read (a defect, per
+# the module docstring), while a decider that REJECTS where the pattern accepts
+# DROPS A BODY LINE — a published key, silently, because the line loop also
+# closes the state on it. So the deciders are pinned against the patterns
+# THEMSELVES rather than against hand-written expectations:
+# `tests/unit/secrets/test_credential_shapes.py` sweeps every character-KIND
+# sequence up to a bounded length (these languages are functions of the
+# character kind, which is what lets a bounded sweep stand for longer strings,
+# and one arm there pins that digit predicate against `\d` over the whole code
+# space) and then fuzzes the shapes a caller actually sees. `PEM_BODY_LINE_RE`,
+# `PEM_HEADER_LINE_RE` and `PEM_END_LINE_RE` REMAIN THE DEFINITION of the
+# language; the functions below are how the hot path decides it.
+
+_PFX_BETWEEN = 1 << 0  # between units: a unit may start, whitespace may run, the prefix may END
+_PFX_OPEN = 1 << 1  # after the `[` of a unit: a digit must follow
+_PFX_DIGITS = 1 << 2  # inside a unit's digit run
+_PFX_CLOSED = 1 << 3  # after digits + the closing `]`
+_PFX_DIGITS_WS = 1 << 4  # after digits (+ `]`) + whitespace
+_PFX_SEP = 1 << 5  # after a separator (and any whitespace that followed it)
+_PFX_SEP_DOT = 1 << 6  # after a `.` separator: `]` may extend it (the `.\]` spelling)
+_PFX_SEP_DASH = 1 << 7  # after a `-` separator: `>` may extend it (the `->` spelling)
+_PFX_BOX_OPEN = 1 << 8  # after the opening `│` of `│ 12 │`
+_PFX_BOX_WS = 1 << 9  # after `│` + whitespace
+_PFX_BOX_DIGITS = 1 << 10  # inside the box form's digit run
+_PFX_BOX_DIGITS_WS = 1 << 11  # after the box form's digits + whitespace
+_PFX_BOX_CLOSED = 1 << 12  # after the box form's closing `│`
+
+#: Modes in which a UNIT HAS JUST COMPLETED. From any of them the grammar allows
+#: the prefix to end, and it also allows a new unit to start on the very next
+#: character (`12` is two units as readily as one) — the epsilon edge that
+#: `_pem_prefix_end_flags` applies after every step, which is why the machine
+#: needs no separate "between units" transition per mode.
+_PFX_COMPLETE = (
+    _PFX_DIGITS
+    | _PFX_CLOSED
+    | _PFX_DIGITS_WS
+    | _PFX_SEP
+    | _PFX_SEP_DOT
+    | _PFX_SEP_DASH
+    | _PFX_BOX_CLOSED
+)
+
+#: THE MACHINE, as data: for each character kind, the `(mode, mode-after-it)`
+#: pairs. Written from the fragment rather than derived from it, and that is the
+#: point — a derivation would be the same expression rewritten, which is what
+#: the algebraic rewrites in this file's history were, and three of them were
+#: language-changing. `tools/builtin.py` does not use this machine; the patterns
+#: above stay the definition, and the test file pins the two together.
+_PFX_STEP_WS = (
+    (_PFX_BETWEEN, _PFX_BETWEEN),
+    (_PFX_DIGITS, _PFX_DIGITS_WS),
+    (_PFX_CLOSED, _PFX_DIGITS_WS),
+    (_PFX_DIGITS_WS, _PFX_DIGITS_WS),
+    (_PFX_SEP, _PFX_SEP),
+    (_PFX_SEP_DOT, _PFX_SEP),
+    (_PFX_SEP_DASH, _PFX_SEP),
+    (_PFX_BOX_OPEN, _PFX_BOX_WS),
+    (_PFX_BOX_WS, _PFX_BOX_WS),
+    (_PFX_BOX_DIGITS, _PFX_BOX_DIGITS_WS),
+    (_PFX_BOX_DIGITS_WS, _PFX_BOX_DIGITS_WS),
+    (_PFX_BOX_CLOSED, _PFX_BOX_CLOSED),
+)
+_PFX_STEP_DIGIT = (
+    (_PFX_BETWEEN, _PFX_DIGITS),
+    (_PFX_OPEN, _PFX_DIGITS),
+    (_PFX_DIGITS, _PFX_DIGITS),
+    (_PFX_BOX_OPEN, _PFX_BOX_DIGITS),
+    (_PFX_BOX_WS, _PFX_BOX_DIGITS),
+    (_PFX_BOX_DIGITS, _PFX_BOX_DIGITS),
+)
+_PFX_STEP_OPEN = ((_PFX_BETWEEN, _PFX_OPEN),)
+#: `]` is both the unit's closing bracket and one of the separators, so it lands
+#: in both (`1]2` is a bracketed unit then a new one, `1]` a unit whose separator
+#: is `]`), and it is the second half of the `.\]` spelling.
+_PFX_STEP_CLOSE = (
+    (_PFX_DIGITS, _PFX_CLOSED | _PFX_SEP),
+    (_PFX_CLOSED, _PFX_SEP),
+    (_PFX_DIGITS_WS, _PFX_SEP),
+    (_PFX_SEP_DOT, _PFX_SEP),
+)
+#: `.` and `-` carry their longer spelling as well as themselves: `1.]` and `1->2`
+#: are real, and the spelling that dropped them measured 146/1140 lost strings.
+_PFX_STEP_DOT = (
+    (_PFX_DIGITS, _PFX_SEP | _PFX_SEP_DOT),
+    (_PFX_CLOSED, _PFX_SEP | _PFX_SEP_DOT),
+    (_PFX_DIGITS_WS, _PFX_SEP | _PFX_SEP_DOT),
+)
+_PFX_STEP_DASH = (
+    (_PFX_DIGITS, _PFX_SEP | _PFX_SEP_DASH),
+    (_PFX_CLOSED, _PFX_SEP | _PFX_SEP_DASH),
+    (_PFX_DIGITS_WS, _PFX_SEP | _PFX_SEP_DASH),
+)
+#: `)`, `|` and `:` have no longer spelling; `>` has one, only after `-`.
+_PFX_STEP_SEP = (
+    (_PFX_DIGITS, _PFX_SEP),
+    (_PFX_CLOSED, _PFX_SEP),
+    (_PFX_DIGITS_WS, _PFX_SEP),
+)
+_PFX_STEP_GT = _PFX_STEP_SEP + ((_PFX_SEP_DASH, _PFX_SEP),)
+#: The box form has no separator and its digits are optional only in the sense
+#: that `│` may be followed by whitespace: `│ 12 │`, `│12│` and `│ 12│` all read.
+_PFX_STEP_BOX = (
+    (_PFX_BETWEEN, _PFX_BOX_OPEN),
+    (_PFX_BOX_DIGITS, _PFX_BOX_CLOSED),
+    (_PFX_BOX_DIGITS_WS, _PFX_BOX_CLOSED),
+)
+_PFX_WS = " \t"
+_PFX_SINGLE_SEP = ")|:"
+
+#: The two character classes the deciders check by name, spelled once here. They
+#: are the patterns' own classes (`[A-Za-z0-9+/=]` for a body token, `[A-Z0-9 ]`
+#: between a header's literals); a change to either pattern that this does not
+#: follow shows up as a divergence in the differential arms rather than as a
+#: quietly different answer on the hot path.
+_PEM_TOKEN_CLASS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
+_PEM_HEADER_CLASS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+_PEM_BEGIN = "BEGIN "
+_PEM_KEY = "PRIVATE KEY"
+_PEM_END = "END "
+
+
+def _pem_prefix_end_flags(text: str) -> bytearray:
+    """`flags[i]` is 1 exactly when `text[:i]` is in the `LINE_PREFIX` language.
+
+    The whole decision in one left-to-right pass: `modes` is the set of grammar
+    positions the prefix could be in after `i` characters, and the prefix is in
+    the language exactly when `_PFX_BETWEEN` is in that set — nothing is pending,
+    so what was consumed is `[ \\t]*` followed by a complete `(unit)+`.
+
+    AN EMPTY MODE SET IS FINAL, which is what makes this cheap on ordinary text:
+    nothing in the fragment consumes a newline, a letter or a `#`, so a prose
+    line kills the set within a few characters and the loop stops — the flags
+    beyond that point are already zero. That is also why the flags array is
+    written by index instead of built positionally.
+    """
+    flags = bytearray(len(text) + 1)
+    modes = _PFX_BETWEEN
+    flags[0] = 1
+    for index, char in enumerate(text):
+        if char in _PFX_WS:
+            steps = _PFX_STEP_WS
+        elif char.isdecimal():
+            # `\d`, not `[0-9]`: the fragment's class is Unicode-decimal, and a
+            # hand-written ASCII class here would reject a body line the pattern
+            # accepts. `isdecimal()` is the same predicate `\d` uses (the test
+            # file checks the two against each other over the whole code space).
+            steps = _PFX_STEP_DIGIT
+        elif char == "]":
+            steps = _PFX_STEP_CLOSE
+        elif char == ".":
+            steps = _PFX_STEP_DOT
+        elif char == "-":
+            steps = _PFX_STEP_DASH
+        elif char == "\u2502":
+            steps = _PFX_STEP_BOX
+        elif char == ">":
+            steps = _PFX_STEP_GT
+        elif char == "[":
+            steps = _PFX_STEP_OPEN
+        elif char in _PFX_SINGLE_SEP:
+            steps = _PFX_STEP_SEP
+        else:
+            break
+        reached = 0
+        for mode, after in steps:
+            if modes & mode:
+                reached |= after
+        if reached & _PFX_COMPLETE:
+            reached |= _PFX_BETWEEN
+        modes = reached
+        if not modes:
+            break
+        if modes & _PFX_BETWEEN:
+            flags[index + 1] = 1
+    return flags
+
+
+def _pem_rigid_end_lengths(text: str, end: int) -> set[int]:
+    """Lengths 2..9 with which `-{1,4}['\\"]?-{1,4}` can END at `end`.
+
+    An enumeration rather than a scan, because the structure is a literal: four
+    dashes at most, an optional quote, four dashes at most, so every spelling is
+    nine characters or fewer and the candidate offsets of a header or END line
+    are a handful. `end` is exclusive and the structure must begin inside
+    `text`, so a caller passing a region that starts mid-string cannot be told
+    the region matched something in front of it.
+    """
+    lengths: set[int] = set()
+    dashes = 0
+    index = end - 1
+    while index >= 0 and dashes < 4 and text[index] == "-":
+        dashes += 1
+        index -= 1
+    for head in range(1, dashes + 1):
+        start = end - head
+        if start >= 1 and text[start - 1] in "\x27\x22":
+            quoted = 0
+            index = start - 2
+            while index >= 0 and quoted < 4 and text[index] == "-":
+                quoted += 1
+                index -= 1
+            lengths.update(head + 1 + tail for tail in range(1, quoted + 1) if head + 1 + tail <= 9)
+        closing = 0
+        index = start - 1
+        while index >= 0 and closing < 4 and text[index] == "-":
+            closing += 1
+            index -= 1
+        lengths.update(head + tail for tail in range(1, closing + 1) if head + tail <= 9)
+    return lengths
+
+
+def _pem_body_arm_span(piece: str, floor: int, ceiling: int | None) -> tuple[int, int] | None:
+    """Offsets a body line's base64 token may start at, as a low/high span.
+
+    The token is the piece's trailing run of `[A-Za-z0-9+/=]`, optionally
+    followed by one `,` and then whitespace to the piece end. Its width is a
+    RANGE rather than one number in both arms — `{8,}` is a floor, and the short
+    arm is a ceiling — and the PREFIX may enter the run as well as start before
+    it, which is why this returns a span: `[112345678` is a prefix of `[1` with a
+    token of `12345678`. No span means no offset can work, and the common case —
+    `%8d` columns end in a short digit run, prose ends in a word — stops here
+    without touching the machine.
+
+    `floor` and `ceiling` are the width bounds of the arm being asked about;
+    `ceiling=None` is the full arm, whose token may take the whole run.
+    """
+    trimmed = piece.rstrip(" \t")
+    if trimmed.endswith(","):
+        trimmed = trimmed[:-1]
+    end = len(trimmed)
+    run = end - len(trimmed.rstrip(_PEM_TOKEN_CLASS))
+    if run < floor:
+        return None
+    low = max(0, end - (run if ceiling is None else min(run, ceiling)))
+    high = end - floor
+    if low > high:
+        return None
+    return low, high
+
+
+def _pem_prefix_leads_a_token(piece: str) -> bool:
+    """Is some prefix end in `piece` followed by eight body characters?
+
+    The short arm's lookahead, read the other way round: the separator is
+    consumed, a `LINE_PREFIX` follows it, and a full token must sit immediately
+    behind that prefix. Read this way the lookahead is an ordinary linear
+    question — every prefix end of the piece is already known from the flags, and
+    the eight characters behind each one are a slice.
+    """
+    flags = _pem_prefix_end_flags(piece)
+    for start in range(len(piece) - 7):
+        if flags[start] and all(char in _PEM_TOKEN_CLASS for char in piece[start : start + 8]):
+            return True
+    return False
+
+
+def pem_body_line(line: str) -> bool:
+    """`PEM_BODY_LINE_RE.match(line)`, in linear time, for any string.
+
+    `match` is ANCHORED AT POSITION 0, so the question is about the string's FIRST
+    line: neither the prefix nor a token can contain a newline, so no match can
+    start anywhere else, and the only thing the pattern reads past the first line
+    is the short arm's lookahead. That is why this asks the first piece, and the
+    second one only when the short arm is live — a run over every piece would
+    answer `search`'s question instead, which is a different question and is how
+    this decider first over-accepted a table row that follows a banner.
+
+    `$` under `MULTILINE` means "the end, or just before a newline", so each arm
+    ends at its piece's end: the full arm is a `{8,}` token, and the short arm is
+    a one-to-seven character token followed by a separator and then a full token
+    behind a prefix. The caller is the pipe's line loop (`tools/builtin.py`),
+    which passes one line with its terminator stripped — where the short arm can
+    never fire — and this is exact for that input and for a whole multi-line read
+    alike, because the arms are the pattern's own rather than an in-domain
+    approximation of them.
+    """
+    pieces = line.split("\n", 1)
+    piece = pieces[0]
+    full = _pem_body_arm_span(piece, 8, None)
+    short = _pem_body_arm_span(piece, 1, 7) if len(pieces) > 1 else None
+    if full is None and short is None:
+        return False
+    flags = _pem_prefix_end_flags(piece)
+    if full is not None and any(flags[full[0] : full[1] + 1]):
+        return True
+    return bool(
+        short is not None
+        and any(flags[short[0] : short[1] + 1])
+        and _pem_prefix_leads_a_token(pieces[1])
+    )
+
+
+def pem_end_line(line: str) -> bool:
+    """`PEM_END_LINE_RE.match(line)`, in linear time.
+
+    The pattern is not end-anchored: the line only has to START with the prefix
+    grammar and then `-{1,4}['\\"]?-{1,4}END `, so the decision is "is any
+    enumerated structure start also a prefix end". The enumeration is over the
+    occurrences of the literal `END `, which is a necessary condition of the
+    pattern itself, and this is exact for any string rather than only for a
+    single line: a separator or a newline outside the fragment's character set
+    empties the mode set, so a candidate after it can never be a prefix end.
+    """
+    if _PEM_END not in line:
+        return False
+    flags = _pem_prefix_end_flags(line)
+    offset = 0
+    while True:
+        at = line.find(_PEM_END, offset)
+        if at < 0:
+            return False
+        offset = at + 1
+        for length in _pem_rigid_end_lengths(line, at):
+            start = at - length
+            if start >= 0 and flags[start]:
+                return True
+
+
+def pem_header_line_end(text: str) -> int | None:
+    """Where `PEM_HEADER_LINE_RE.search(text)` ends, or None, in linear time.
+
+    Returns the offset the caller needs (`match.end()`) rather than a match:
+    the pipe uses it to split the read at the header's line end and re-enter the
+    body loop on the remainder, and that offset is what releases the output
+    ahead of the header.
+
+    The search is modelled as the pattern's own `MULTILINE` anchors: `^` matches
+    at the start of the text and after every `\\n`, `$` at the end and before
+    every `\\n` — so the text is cut at its `\\n`s and each piece is asked the
+    end-anchored question. A piece keeps any `\\r` of a CRLF terminator, and the
+    rigid tail cannot contain one, so a CRLF header line does not match here any
+    more than it matches the pattern.
+
+    Both literals the tail needs are required before any of the work below, and
+    they are necessary conditions of the pattern (the fragment cannot consume a
+    letter, so the tail's own `BEGIN ` and `PRIVATE KEY` cannot be assembled out
+    of prefix characters).
+    """
+    offset = 0
+    for piece in text.split("\n"):
+        if _pem_header_piece_matches(piece):
+            return offset + len(piece)
+        offset += len(piece) + 1
+    return None
+
+
+def _pem_header_piece_matches(piece: str) -> bool:
+    """One `^…$` line of `pem_header_line_end`: `LINE_PREFIX` + the whole tail.
+
+    The tail is `-{1,4}['\\"]?-{1,4}BEGIN [A-Z0-9 ]*PRIVATE KEY-{1,4}['\\"]?-{1,4}`
+    and every piece of it is local: a rigid structure, the `BEGIN ` literal, a
+    run of `[A-Z0-9 ]`, the `PRIVATE KEY` literal, a rigid structure that has to
+    reach the line end. So the candidates are enumerated from the literals and
+    each one is a constant-time question against the prefix machine's flags —
+    no search, and no partition to walk.
+    """
+    if _PEM_BEGIN not in piece or _PEM_KEY not in piece:
+        return False
+    length = len(piece)
+    endings = {
+        length - rigid for rigid in _pem_rigid_end_lengths(piece, length) if length - rigid >= 0
+    }
+    if not endings:
+        return False
+    flags = _pem_prefix_end_flags(piece)
+    at = piece.find(_PEM_BEGIN)
+    while at >= 0:
+        body = at + len(_PEM_BEGIN)
+        # The `[A-Z0-9 ]*` between the literals is a run, so its end bounds where
+        # `PRIVATE KEY` may begin — and a `PRIVATE KEY` that starts inside it and
+        # ends past it is still a match, which is why the search window is the
+        # run's end plus the literal's own length.
+        bound = body
+        while bound < length and piece[bound] in _PEM_HEADER_CLASS:
+            bound += 1
+        key = piece.find(_PEM_KEY, body, bound + len(_PEM_KEY))
+        while 0 <= key <= bound:
+            if key + len(_PEM_KEY) in endings:
+                for rigid in _pem_rigid_end_lengths(piece, at):
+                    start = at - rigid
+                    if start >= 0 and flags[start]:
+                        return True
+            key = piece.find(_PEM_KEY, key + 1, bound + len(_PEM_KEY))
+        at = piece.find(_PEM_BEGIN, at + 1)
+    return False
+
+
 def _anchored_key_value_guard(match: Match[str]) -> bool:
     """Only a value that CARRIES a PEM header phrase is a key, not every `private_key`."""
     return _PEM_HEADER_PHRASE.search(match.group(2).upper()) is not None
