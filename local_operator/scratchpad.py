@@ -605,9 +605,13 @@ SCRATCHPAD_TOTAL_BUDGET_BYTES = 256 * 1024 * 1024
 #:
 #: 20,000 is two orders of magnitude past the tens of entries a pad holds, so a
 #: walk that reaches it has found a tree, which is the shape being refused; the
-#: WORK is bounded with it, measured at 11.1 us per entry here (2026-09-22, 20,000
-#: entries in one warm APFS directory: 222.9 ms), i.e. 0.22 s at the cap and
-#: microseconds for a pad that keeps working.
+#: WORK is bounded with it. The BOUND is not the whole cost, though, and the
+#: honest ceiling is per write rather than per pad: measured on this host at
+#: 10.5-42 us per entry under fleet load (11.1 us over a directory of 20,000,
+#: 223 ms; 29.2 us over one of 19,999, 744 ms for the check), of which 584 ms
+#: was the bare scandir+lstat floor (17.3 ms with no stats at all) — so the walk
+#: adds essentially nothing over reading the directory, the spread is load rather
+#: than the walk, and a pad just UNDER the cap pays it on every write.
 SCRATCHPAD_BUDGET_SCAN_ENTRIES = 20_000
 
 #: The sentence EVERY content refusal ends with: where the material DOES belong.
@@ -671,6 +675,13 @@ def _pad_bytes_below(root: Path, replaced: Path, budget: int, cap: int) -> tuple
     the answer — and at ``cap`` entries otherwise, so the cost of measuring is a
     bound and not a property of whatever a shell left in the pad.
 
+    The unit is ALLOCATED bytes (``st_blocks``), not apparent length, because the
+    budget exists for the shared volume: a sparse 268 MB entry the disk never
+    held must not refuse every later write, and ``du`` — what an operator will
+    compare against — reports the same number. A hardlink is still counted under
+    each of its names, which is the conservative direction and the only case
+    where the total exceeds what the volume stores.
+
     Iterative rather than recursive: the depth is bounded only by the entry cap,
     and a stack of one directory per entry is what keeps a pad shaped like a
     single deep chain from meeting the interpreter's recursion limit first. A
@@ -703,7 +714,7 @@ def _pad_bytes_below(root: Path, replaced: Path, budget: int, cap: int) -> tuple
                         # comparison, and the name is tested first so the walk
                         # pays one string compare per entry rather than a join.
                         continue
-                    total += entry.stat(follow_symlinks=False).st_size
+                    total += entry.stat(follow_symlinks=False).st_blocks * 512
                 except OSError:
                     continue
                 if total > budget:
@@ -714,14 +725,14 @@ def _pad_bytes_below(root: Path, replaced: Path, budget: int, cap: int) -> tuple
 def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = None) -> None:
     """Refuse a write whose NAME or SIZE is build output rather than scratch.
 
-    Raises :class:`ScratchpadContentError` on a refused segment, a refused
-    suffix, a ``size`` over :data:`SCRATCHPAD_MAX_WRITE_BYTES`, a write that would
-    take the pad past :data:`SCRATCHPAD_TOTAL_BUDGET_BYTES`, a pad too wide to
-    finish measuring (:data:`SCRATCHPAD_BUDGET_SCAN_ENTRIES`), or a path that
-    cannot be placed inside the pad; returns ``None`` otherwise. ``url`` is
-    echoed so the message names the address the caller actually typed, and every
-    message ends with :data:`SCRATCHPAD_ELSEWHERE`, which is where the material
-    belongs instead.
+    Raises :class:`ScratchpadContentError` on a refused DIRECTORY segment, a
+    refused suffix on the file name, a ``size`` over
+    :data:`SCRATCHPAD_MAX_WRITE_BYTES`, a write that would take the pad past
+    :data:`SCRATCHPAD_TOTAL_BUDGET_BYTES`, a pad too wide to finish measuring
+    (:data:`SCRATCHPAD_BUDGET_SCAN_ENTRIES`), or a path that cannot be placed
+    inside the pad; returns ``None`` otherwise. ``url`` is echoed so the message
+    names the address the caller actually typed, and every message ends with
+    :data:`SCRATCHPAD_ELSEWHERE`, which is where the material belongs instead.
 
     ``size`` is the payload's length in BYTES, and it is optional because
     ``edit`` has none to give: an edit sees only its hunks, never the whole
@@ -741,7 +752,14 @@ def check_scratchpad_write(path: Path, root: Path, url: str, size: int | None = 
             f"{url}: this write could not be placed inside the pad, so it is refused "
             f"rather than judged. {SCRATCHPAD_ELSEWHERE}"
         )
-    for segment in below:
+    # The PARENT parts only (``below[:-1]``): an arm that judged the LEAF would
+    # apply directory rules to a file name, where the dot after a token is a file
+    # TYPE rather than a qualifier — ``out.json`` and ``build.log`` are ordinary
+    # scratch while ``out/…`` and ``build/…`` are not — and it would refuse them
+    # as "a build or dependency directory", which is false about the shape. The
+    # leaf is judged by the suffix rules below, and a write cannot name a
+    # directory (``_scratchpad_target`` refuses a directory URL first).
+    for segment in below[:-1]:
         if _is_refused_segment(segment):
             raise ScratchpadContentError(
                 f"{url}: '{segment}' is a build or dependency directory, not scratch. "

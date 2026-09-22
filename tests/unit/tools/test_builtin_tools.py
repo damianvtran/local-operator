@@ -42,7 +42,6 @@ from local_operator.scratchpad import (
     SCRATCHPAD_ELSEWHERE,
     SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_PATH_ENV,
-    SCRATCHPAD_TOTAL_BUDGET_BYTES,
 )
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
@@ -1549,21 +1548,21 @@ async def test_scratchpad_refuses_build_output_by_name_through_write_and_edit(tm
 
 
 @pytest.mark.asyncio
-async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path) -> None:
+async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path, monkeypatch) -> None:
     """The BACKSTOP end to end, and the arm only the pad's own contents can
     refuse: every name here is ordinary scratch, so nothing but the total can
     say no. It has to arrive as the model's own argument at fault, like the name
     arms, because the fix is a decision about where that material lives rather
     than a machine failure to retry.
 
-    The pad is filled with a SPARSE file (``truncate``), so the 256 MiB case
-    costs the suite no blocks — the walk sums ``st_size``, which is the same
-    number either way.
+    The budget is set from the pad's own ALLOCATED size, which is the walk's unit
+    (a sparse file measures 0), so the boundary is exact on any block size.
     """
     context, pad, tools = _scratchpad_context(tmp_path)
     pad.mkdir(parents=True)
-    with (pad / "bulk.dat").open("wb") as handle:
-        handle.truncate(SCRATCHPAD_TOTAL_BUDGET_BYTES)
+    (pad / "bulk.dat").write_bytes(b"x" * 4096)
+    budget = (pad / "bulk.dat").stat().st_blocks * 512
+    monkeypatch.setattr("local_operator.scratchpad.SCRATCHPAD_TOTAL_BUDGET_BYTES", budget)
 
     refused = await tools["write"].execute(
         "c", {"path": "scratchpad://x.csv", "content": "a,b\n"}, None, None, context
@@ -1571,7 +1570,7 @@ async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path) -
 
     assert refused.is_error is True
     assert refused.details is not None and refused.details["__fault"] == "invalid_arguments"
-    assert f"{SCRATCHPAD_TOTAL_BUDGET_BYTES:,}-byte ceiling" in refused.text
+    assert f"{budget:,}-byte ceiling" in refused.text
     assert refused.text.endswith(SCRATCHPAD_ELSEWHERE)
     assert not (pad / "x.csv").exists()
 
@@ -1646,6 +1645,15 @@ async def test_scratchpad_still_writes_ordinary_scratch_with_the_same_fixture(tm
     )
     assert contained.is_error is False
     assert (pad / "node_modules-notes.md").read_text() == "why it is big\n"
+
+    # ...and neither does a LEAF that merely begins with a token followed by a
+    # file TYPE (M1): `out.json` is data work, while `out/` is the directory the
+    # rule is about.
+    leaf = await tools["write"].execute(
+        "c", {"path": "scratchpad://out.json", "content": "{\n}\n"}, None, None, context
+    )
+    assert leaf.is_error is False
+    assert (pad / "out.json").read_text() == "{\n}\n"
     assert (pad / "notes.md").read_text(encoding="utf-8") == "still scratch\n"
 
 
