@@ -433,6 +433,16 @@ class MemberRecord:
     #: Device ids this row was known by before a key rotation, kept for a bounded
     #: window so a link that authed at the old id is not cut mid-turn.
     previous_ids: list[str] = field(default_factory=list)
+    #: The rotation STATEMENT that produced this row (``identity.rotation_statement``,
+    #: signed by the old key), or ``{}`` when the row was never rotated. It is the
+    #: continuity proof, and it rides on the row because the row is the only place a
+    #: peer that never saw the ``net_identity_rotate`` frame can get it: the member
+    #: table is a snapshot, and a table delivered after a rotation otherwise shows a
+    #: device as a new id with no way to tell that from an impostor claiming a
+    #: member's name with a new key (QA round 16, Q16-1). Additive: a build that does
+    #: not know the field drops it on parse (``_known``) and simply cannot retire the
+    #: superseded row, which is where this codebase was before it existed.
+    rotation_proof: dict[str, Any] = field(default_factory=dict)
     rotated_at: float | None = None
     removed_at: float | None = None
     removed_by: str | None = None
@@ -450,7 +460,13 @@ class MemberRecord:
 
     @staticmethod
     def from_json(data: dict[str, Any]) -> MemberRecord:
-        return MemberRecord(**_known(MemberRecord, data))
+        fields = _known(MemberRecord, data)
+        # A peer's JSON can carry ``null`` or a list where this field expects an
+        # object, and a row that fails to parse is a member this device forgets — so
+        # an unusable proof degrades to "no proof", never to a raise.
+        if not isinstance(fields.get("rotation_proof"), dict):
+            fields["rotation_proof"] = {}
+        return MemberRecord(**fields)
 
 
 @dataclass
