@@ -316,14 +316,7 @@ def serving_plane() -> None:
     while True:
         stall_watchdog.beat(stall_watchdog.SERVING)
         count += 1
-        # THE FIRST STAMP PRINTS IMMEDIATELY, and that is not cosmetic: this child
-        # runs under ``SHORT_BOUND_S`` (1 s) and the fifth beat lands at 1.0 s, so
-        # the print used to race the C timer with a margin of zero and lost about
-        # half the time under fleet load — measured 2 failed / 2 passed on the BASE
-        # tree and on this head alike, so the race is the cell's and not a change's.
-        # The assertion is untouched; the serving plane is now shown to have
-        # reported EARLIER in the run than before.
-        if count == 1 or count % 5 == 0:
+        if count % 5 == 0:
             print(f"serving-stamp:{count}", flush=True)
         time.sleep(0.2)
 
