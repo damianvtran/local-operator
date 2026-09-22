@@ -2706,6 +2706,56 @@ SETTINGS: tuple[Setting, ...] = (
         help=_BASH_SHELL_HELP,
         empty_unsets=True,
     ),
+    # -- search_interception ------------------------------------------------
+    # ``path`` mirrors ``tools.builtin.SEARCH_INTERCEPTION_*_PATH`` (pinned
+    # together by ``test_search_interception_rows_share_the_consumer_paths``,
+    # the same split the bash.shell row uses).
+    #
+    # These live in ``tools`` rather than a section of their own because that
+    # section is already "how a tool executes" and its ``Scope`` is uniform
+    # (LIVE) — ``_search_interception_config`` reads a fresh ``ConfigManager``
+    # on every ``bash`` call, so an edit lands on the next command.
+    #
+    # Three rows rather than one: a guard that REFUSES a command the model wrote
+    # deserves a master switch, a warn-only arm so an operator can watch before
+    # enforcing, and a separate lever for the ripgrep default-prune.
+    Setting(
+        key="tools.search_interception.enabled",
+        path=("tools", "search_interception", "enabled"),
+        section="tools",
+        label="Block unbounded searches",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Refuse a shell `grep`/`rg`/`find` that recurses from a repository root "
+            "or a vendor/build tree, and point the agent at the `grep` tool. "
+            "A scoped or single-file search is never touched. Off disables the check."
+        ),
+    ),
+    Setting(
+        key="tools.search_interception.block",
+        path=("tools", "search_interception", "block"),
+        label="...refuse rather than warn",
+        section="tools",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "On: the command is refused with a suggestion. Off: it runs anyway and "
+            "the interception is logged, so an operator can watch before enforcing."
+        ),
+    ),
+    Setting(
+        key="tools.search_interception.rg_excludes",
+        path=("tools", "search_interception", "rg_excludes"),
+        label="...prune vendor trees for ripgrep",
+        section="tools",
+        kind=Kind.BOOL,
+        default=True,
+        help=(
+            "Give ripgrep a generated config that skips node_modules/.git/out etc., so "
+            "an `rg` the guard does not block is still fast. Applies to ripgrep only."
+        ),
+    ),
     # -- memory_guard -------------------------------------------------------
     # ``path`` mirrors ``memory_guard.BASH_MEMORY_*_PATH``; the four are pinned
     # together by ``test_memory_guard_rows_share_the_consumer_paths`` rather than
