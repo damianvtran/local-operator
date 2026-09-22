@@ -48,7 +48,6 @@ import pytest
 
 from local_operator.harness.loop import AgentLoop, LoopContext
 from local_operator.harness.redaction import current_tool_source
-from local_operator.redaction_shapes import scrub_secrets_with_hits
 from local_operator.harness.types import (
     AgentEndEvent,
     AgentTool,
@@ -63,6 +62,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolResult,
 )
+from local_operator.redaction_shapes import scrub_secrets_with_hits
 
 MODEL = ModelSpec(provider="test", model_id="m")
 
@@ -196,7 +196,9 @@ class _ScriptedStream:
         self.requests.append(request)
         turn: list[StreamEvent] = (
             [
-                StreamToolCallDelta(index=0, id="c1", name="collect", argument_delta='{"text": "hi"}'),
+                StreamToolCallDelta(
+                    index=0, id="c1", name="collect", argument_delta='{"text": "hi"}'
+                ),
                 StreamEndEvent(stop_reason="toolUse"),
             ]
             if len(self.requests) == 1
