@@ -464,22 +464,32 @@ def _search_tools(
     if deny_reason is not None:
         lines.append(deny_reason)
     elif deferred:
+        # THE ARM A SESSION ACTUALLY RENDERS: both shipped callers pass a deferrer
+        # (``session_factory.wire_mcp_into_session`` and ``harness/subagent.py``),
+        # so ``enable`` below is a deferral and this read adds no schema. The
+        # timing correction therefore has to live HERE, not only on the other arm:
+        # point the model at the reply that knows when a schema is advertised
+        # (the per-tool read, whose two arms are the model's answer to "when").
+        # LENGTH IS LOAD-BEARING on this arm — ``used`` below gates which matched
+        # tools are shown AND enabled — so this line is held at or under the length
+        # of the text it replaced (157 characters, measured; this is 156), and the
+        # timing it cannot spell out in the budget is what the tool's own URL
+        # reply states precisely.
         lines.append(
             'Call discovered tools from eval with tool("name", **arguments); '
             "validation and approvals still apply. "
-            "Discovery keeps the advertised schema prefix unchanged."
+            "No schema advertised here; a tool's own URL says when."
         )
     else:
-        # The same promise the per-tool detail read makes, in one clause: the
-        # session publishes its tools array at most once per turn
-        # (``Session._wire_tools``), so an enable read mid-turn reaches the
-        # request's definitions at the next TURN. This header is composed before
-        # the enables below run, so it states the rule rather than the outcome.
+        # The same rule for a host that builds the resolver WITHOUT a deferrer
+        # (no shipped caller does today). The pointer names the per-tool reply
+        # rather than "the detail read below", which is what actually sits there:
+        # the inline entry with its schema, not a second read.
         lines.append(
             "Matched tools are enabled; their schemas reach the request's tool "
             "definitions at the next model call, or at the next turn if this turn's "
-            "list is already published. Each per-tool detail read below says which "
-            "of the two it is."
+            "list is already published. Each tool's own `mcp://<server>/<tool>` "
+            "reply says which of the two it is."
         )
     used = sum(map(len, lines))
     included = 0
@@ -614,8 +624,9 @@ def make_mcp_resolver(
             if published is not False
             else "The full input schema will be available in the tool definition at "
             "the NEXT TURN, not the next model call: this turn is already running "
-            "with the tool list it started with. Continue with the work you can do "
-            "now; if this tool is the only way to continue, say so and stop."
+            "with the tool list it started with. The tool is callable now. Call it "
+            "if its description gives you its arguments, and otherwise continue "
+            "with the work you can do now."
         )
         return "\n".join(
             [

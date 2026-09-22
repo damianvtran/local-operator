@@ -307,6 +307,14 @@ def test_a_deferred_enable_says_next_turn_not_next_model_call() -> None:
     assert deferred_detail is not None
     assert "NEXT TURN, not the next model call" in deferred_detail
     assert "full input schema is now available" not in deferred_detail
+    # The tool IS callable in that turn — the live inventory carries it and
+    # resolution reads the inventory — so the reply says so and conditions the
+    # call on the description carrying the arguments (the schema is in neither
+    # the array nor the block, and a blind call is what the conditional avoids).
+    # It must NOT tell the model to stop: that is the stall this reply exists to
+    # prevent (copy round 2, C4).
+    assert "The tool is callable now." in deferred_detail
+    assert "say so and stop" not in deferred_detail
     # Everything else about the reply is unchanged: same activation, same header,
     # same untrusted-description warning.
     assert "# Enabled MCP tool: mcp__linear_get_user" in deferred_detail
@@ -315,3 +323,32 @@ def test_a_deferred_enable_says_next_turn_not_next_model_call() -> None:
     immediate_detail = immediate("mcp://linear/get_user")
     assert immediate_detail is not None
     assert "full input schema is now available" in immediate_detail
+
+
+def test_the_search_header_a_session_renders_states_when_a_schema_arrives() -> None:
+    """Both arms carry the timing rule; the RENDERED one must not grow.
+
+    ``make_mcp_resolver`` renders the DEFERRED arm whenever it is given a deferrer,
+    and both shipped callers give it one (``session_factory.wire_mcp_into_session``
+    and ``harness/subagent.py``), so this is the header a real session reads (copy
+    round 2's correction; QA round 2, Q-r2-1). Its length is not cosmetic: the line
+    is appended before ``used = sum(map(len, lines))``, and that running total
+    decides which matched tools are shown AND enabled against
+    ``MAX_SEARCH_RESULT_CHARS`` — measured, a 63-character growth flipped a
+    boundary case from 4 enabled matches to 3 (QA round 2, Q-r2-2). So the
+    rendered line is pinned to the length of the text it replaced, and the arm no
+    shipped caller reaches states the same rule in more words.
+    """
+    rendered = make_mcp_resolver(FakeManager(), lambda *a: None, defer=lambda *a: None)
+    result = rendered("mcp://?search=authenticated+user&limit=2")
+    assert result is not None
+    header = next(line for line in result.splitlines() if line.startswith("Call discovered"))
+    assert "No schema advertised here" in header
+    assert "a tool's own URL says when" in header
+    assert len(header) == 156, "the rendered search header grew; see this test's docstring"
+
+    unreachable = make_mcp_resolver(FakeManager(), lambda *a: None)
+    enabled_result = unreachable("mcp://?search=authenticated+user&limit=2")
+    assert enabled_result is not None
+    assert "at the next model call, or at the next turn" in enabled_result
+    assert "mcp://<server>/<tool>" in enabled_result

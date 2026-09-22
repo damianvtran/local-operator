@@ -14466,9 +14466,16 @@ class Session:
         appended tool costs a prompt-cache prefix miss on every later call of
         the session (AGENTS.md, "the tool-surface footprint ladder").
 
-        Never mid-turn: the loop reads ``context.tools`` per model call, and a
-        tool removed between a model's call and its dispatch comes back "Tool
-        not found" — the per-call gate in the tool gives a better answer.
+        Never mid-turn: the loop RESOLVES against ``context.tools`` per model
+        call, and a tool removed between a model's call and its dispatch comes
+        back "Tool not found" — the per-call gate in the tool gives a better
+        answer. The MCP shrink path (``session_factory.refresh_selected``,
+        reached from ``activate`` and ``on_tools_changed``) ACCEPTS that same
+        refusal rather than deferring the inventory, and the two policies differ
+        because the transports do: a web tool that is still resolvable answers
+        for itself through its per-call gate, where a server that dropped away
+        has nothing left to answer with — see :meth:`_reconcile_tool_inventory`
+        and ``refresh_selected``'s own docstring.
 
         The dirty flag is cleared only once the reconcile has actually HAPPENED
         (review round 1, R5). Cleared up front, a pass that returned early
