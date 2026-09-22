@@ -20,6 +20,7 @@ round (D2) established for this slot.
 from __future__ import annotations
 
 import json
+import secrets
 import socket
 import subprocess
 import sys
@@ -27,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from scripts.mobile_overflow_capture import PASSWORD, Chrome, Page
+from scripts.mobile_overflow_capture import Chrome, Page
 
 VIEWPORTS = [(390, 844), (360, 640)]
 
@@ -67,8 +68,15 @@ def main() -> None:
     outdir.mkdir(parents=True, exist_ok=True)
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
+    # A THROWAWAY PASSWORD, GENERATED PER RUN AND NEVER PRINTED. The fixture daemon
+    # is bound to loopback and lived for one capture, so a shared constant bought
+    # nothing and cost something: a credential-shaped literal sitting in a script
+    # that a reader (or an agent) has to open to understand the harness. The value
+    # is passed to the fixture as an argument and typed into the login form below,
+    # so it never appears in this file, in the fixture, or in any output.
+    password = secrets.token_urlsafe(16)
     fixture = subprocess.Popen(
-        [sys.executable, "scripts/mobile_delegating_fixture.py", str(port), PASSWORD],
+        [sys.executable, "scripts/mobile_delegating_fixture.py", str(port), password],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -97,7 +105,7 @@ def main() -> None:
             page.goto(f"{base}/login")
             page.js(
                 "(() => { const f = document.querySelector('form');"
-                f" f.password.value = {PASSWORD!r}; f.submit(); return true; }})()"
+                f" f.password.value = {password!r}; f.submit(); return true; }})()"
             )
             time.sleep(2.0)
             page.goto(f"{base}/#/")

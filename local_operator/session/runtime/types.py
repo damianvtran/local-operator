@@ -919,6 +919,75 @@ class DiscoveryRecord(Protocol):
 RUNNING_SUBAGENT_STATUSES = frozenset({"running", "starting", "pausing"})
 
 
+#: The largest value a subagent count on a record may carry and still be read as
+#: a measurement.
+#:
+#: Lives here for the same reason the set above does: THREE readers refuse a value
+#: past this ceiling — ``info.collect`` when it tallies a fleet, ``resume._counted``
+#: when it asks whether a sidebar row is delegating, and the desktop listing's own
+#: response model when it serializes a row — and they must refuse at the SAME
+#: number, because the failure they guard is a display one: a 31-digit figure
+#: renders 81 cells wide and overflows every frame, including the abbreviated rung
+#: that exists to serve it. It is not that such a count is wrong; it is that nothing
+#: past this could be real, so refusing it is the honest reading, and the readers
+#: agreeing is what keeps one surface from printing a number another drops.
+#:
+#: DELIBERATELY FAR ABOVE ANYTHING THIS CODEBASE CAN PRODUCE —
+#: ``DEFAULT_MAX_RUNNING_JOBS`` is 15 and the count is a ``len()`` over a bounded
+#: roster — so it can only reject a foreign or damaged record, never a real fleet.
+#: Six digits still fit the narrow rung.
+#:
+#: ``SessionRecord.from_json`` does no type validation, so this is a bound on what
+#: a RECORD may say, not on what the runtime publishes (its own writer counts real
+#: children). This module stays stdlib-only, so neither the constant nor the reader
+#: below costs anything to import on the CLI startup path.
+MAX_REPORTED_SUBAGENT_COUNT = 999_999
+
+
+def reported_subagent_count(value: Any) -> int | None:
+    """A published subagent count, or ``None`` when the record did not report one.
+
+    THE ONE RULE, read by every consumer of these two fields: ``info.collect``'s
+    fleet tally, ``resume._counted`` (the sidebar's predicate), and the desktop
+    listing's response model at the wire edge. It lives beside the fields it
+    validates rather than in the first module that needed it, because the three
+    disagreeing about which values are believable is how one surface prints a
+    figure another drops.
+
+    ``SessionRecord.from_json`` filters keys and calls the constructor — it does
+    no type validation — so every field on a record is whatever the writer put in
+    the file. That is fine for the strings and bools read elsewhere, which only
+    ever get formatted, but these two are the first record fields its readers do
+    ARITHMETIC on, and arithmetic is where a foreign value stops being cosmetic:
+
+    * a ``str`` or ``list`` raises ``TypeError`` inside a roll-up. ``info``'s
+      ``_safe`` guards whole SECTIONS, so one bad record cost the entire sessions
+      block — no table, no runtimes row, and no lower-bound caveat — on a screen
+      whose whole purpose is describing a host that is already broken. Before
+      these fields existed there was no arithmetic there and the same record
+      listed normally, so that was a regression rather than a new limitation.
+    * a merely-numeric wrong value does not raise at all, which is worse: a float
+      printed ``4.5 total — 1 sessions + 3.5 subagents`` and a negative printed
+      ``-1 subagents``, both as measured fact.
+    * at the desktop listing's wire edge the same choice is between a degradation
+      and an outage, because a validation error on ONE row fails the WHOLE
+      response: a damaged record would take out the conversation list rather than
+      lose a count from it.
+
+    Anything that is not a non-negative ``int`` at or below
+    :data:`MAX_REPORTED_SUBAGENT_COUNT` is therefore treated as NOT REPORTED
+    rather than sanitised into a number: an unusable value is not a measurement,
+    and calling it ``None`` is what each reader's own contract already says to do
+    with a missing term. ``bool`` is excluded explicitly — it is an ``int``
+    subclass, so ``True`` would otherwise count as one subagent.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    if value > MAX_REPORTED_SUBAGENT_COUNT:
+        return None
+    return value
+
+
 @dataclass
 class SessionRecord:
     """The discovery record one ``lop`` process publishes for one session.

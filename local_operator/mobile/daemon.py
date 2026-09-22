@@ -296,6 +296,57 @@ class SessionEntry:
         return self._req_seq
 
 
+def _advertisable_counts(entry: SessionEntry | None) -> tuple[int | None, int | None]:
+    """This entry's ``(running, queued)`` children, or ``(None, None)``.
+
+    WHY THE DAEMON DECIDES THIS AND NOT THE CLIENT. The phone's summary carries
+    no status CODE (see ``types.ts``), so a client drawing a mark from the
+    counts alone keeps advertising delegated work for a session the terminal and
+    the desktop are calling "Leaving…" or "Not answering" — the phone's row and
+    the tooltip beside it disagreeing about the same session (UX round 1, U1;
+    the counts pre-dated the mark, but the mark made the misreport twice as
+    loud). The counts are a CLAIM ABOUT A LIVE RUNTIME, and this daemon is the
+    only party that can say whether the runtime is still there to make it:
+
+    * ``entry.ended`` — the conversation is over; nothing it says is current any
+      more, and the row is kept only so the phone can still open it;
+    * ``entry.degraded`` — the relay's own dial is down (``_dial`` sets it on a
+      failed connect, the reader loop on a dropped one), so the daemon has not
+      confirmed anything about this session for as long as the redial backoff
+      has been running;
+    * a beat older than ``HEARTBEAT_TIMEOUT_S``, or no beat at all — the owner
+      has stopped reporting. THE SAME CONSTANT ``registry.classify`` uses,
+      deliberately: a row the catalogue calls ``wedged`` must not be one the
+      phone draws a count for, and two independent timeouts would let exactly
+      that happen in the gap between them. (A record's beat defaults to now, so
+      this arm only fires on a record that really stopped, or one that was
+      never stamped — which is an unknown, not a fresh fact.)
+    * ``leaving`` — the runtime has committed to exiting and is finishing the
+      work in flight. Its children ARE running, but the phrase is the fact to
+      lead with, exactly as ``SessionRow.delegating`` gates on it so the
+      terminal, the desktop and this list cannot say three different things
+      about one draining session (its children run under a parent that is
+      leaving; the session is on its way out).
+
+    ``None`` IS THE WIRE'S "NOT REPORTED", never ``0``. The client hides the
+    mark AND the chip on it, which is the same rule the absent-field case
+    already follows (an older runtime that has no such field, a durable-only
+    row with no live entry): one unknown, one rendering, on every path.
+    """
+    if entry is None or entry.ended or entry.degraded:
+        return None, None
+    record = entry.record
+    if str(getattr(record, "leaving", "") or ""):
+        return None, None
+    beat = float(getattr(record, "heartbeat_at", 0.0) or 0.0)
+    if beat <= 0.0 or time.time() - beat > registry.HEARTBEAT_TIMEOUT_S:
+        return None, None
+    return (
+        getattr(record, "subagents_running", None),
+        getattr(record, "subagents_queued", None),
+    )
+
+
 class SessionTable:
     """The daemon's whole runtime state. One instance, owned by the loop."""
 
@@ -593,6 +644,7 @@ class SessionTable:
         out: list[dict[str, Any]] = []
         for session_id in set(durable) | set(active):
             entry = active.get(session_id)
+            counts = _advertisable_counts(entry)
             p = entry.projection if entry else None
             row = durable.get(session_id)
             out.append(
@@ -633,33 +685,29 @@ class SessionTable:
                     # were in play: this line counted ``status == "running"`` over
                     # ``p.subagents`` while the record counts ``RUNNING_SUBAGENT_STATUSES``
                     # (``session/runtime/types.py``), which also holds ``starting``
-                    # and ``pausing``. The projection is the daemon's own view of a
-                    # session it is relay-tailing, and its ladder is what feeds the
-                    # phone's chip for a session the phone HAPPENS to be relaying;
-                    # every other row gets the count from a record that is always
-                    # resident and heartbeating. One source removes the chance that
-                    # two phone frames for one session disagree.
+                    # and ``pausing``. The record is the one source that answers for
+                    # every row — the phone's own relay view exists only for a
+                    # session it happens to be tailing — so one number cannot come
+                    # out twice.
                     #
-                    # THE FIELD STAYS ``None``-ABLE. A durable-only row (no live
-                    # entry at all) has no record and therefore no count, and a
-                    # record written by an older runtime carries no field: both are
-                    # ``None``, which the client must render as "not reported" —
-                    # never ``0``, which would assert "no subagents" about a
-                    # session nobody asked. That is what makes the two dict
-                    # entries below a deliberate pair rather than a copy of the
-                    # ``leaving``/``updating`` lines above.
-                    "subagents_running": (
-                        getattr(entry.record, "subagents_running", None) if entry else None
-                    ),
-                    # Queued children are carried separately for the reason the
-                    # record keeps them apart: a child parked waiting for a
-                    # capacity slot is not spending anything, but "children
-                    # queued with nothing running" is still not an idle session,
-                    # and it is the one shape a client cannot infer from the
-                    # running count alone.
-                    "subagents_queued": (
-                        getattr(entry.record, "subagents_queued", None) if entry else None
-                    ),
+                    # AND THE DAEMON IS WHAT SAYS SO, NOT THE CLIENT.
+                    # ``_advertisable_counts`` returns ``None`` for a session this
+                    # daemon cannot vouch for (degraded dial, stale beat, a runtime
+                    # that is leaving), because the summary carries no status CODE
+                    # for a client to rank against and a client drawing a mark from
+                    # the counts alone would keep advertising children the terminal
+                    # and the desktop are calling "Leaving…" (UX round 1, U1).
+                    # ``None`` is "not reported", never ``0``, and the client hides
+                    # both marks on it.
+                    #
+                    # The pair is carried separately rather than summed because a
+                    # child parked waiting for a capacity slot is not spending
+                    # anything, and "queued with nothing running" is not an idle
+                    # session — a distinction the CATALOGUE label draws (running ·
+                    # queued) even though this list's chip deliberately sums the two
+                    # (see ``session-list.tsx``).
+                    "subagents_running": counts[0],
+                    "subagents_queued": counts[1],
                     "todos_open": sum(
                         1
                         for phase in (p.todos if p else [])
