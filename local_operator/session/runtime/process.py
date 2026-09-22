@@ -2841,6 +2841,7 @@ async def _drain_inbox_into(handle: object) -> int:
         SOURCE_USER,
         append_inbox,
         drain_inbox,
+        drop_owed_turn,
     )
 
     requires_engagement = not durable_conversation_path(directory / TRANSCRIPT_FILENAME)
@@ -2866,6 +2867,14 @@ async def _drain_inbox_into(handle: object) -> int:
                 directory,
                 len(keep),
             )
+            # AND THE RAISE OBLIGATION GOES WITH THE DEFERRAL (review round 1,
+            # R1-10). Every runtime raised for this record would boot, defer the
+            # same rows and exit — real work, hourly, that delivers nothing,
+            # because the one thing that would deliver them is the owner's first
+            # turn. The rows stay in the spool (touch nothing else here) and that
+            # turn still drains them, which is the deferral the sender's receipt
+            # describes.
+            drop_owed_turn(directory)
             return 0
     probed = getattr(handle, "receive_peer_message", None)
     if not lines:
@@ -2936,6 +2945,14 @@ async def _drain_inbox_into(handle: object) -> int:
                 logger.warning("spooled message could not be delivered", exc_info=True)
     if delivered:
         logger.info("delivered %d spooled message(s) at open", delivered)
+    # THE DRAIN THAT EMPTIES THE SPOOL RETIRES THE OBLIGATION (``wakes.spooled``):
+    # the rows are delivered, so nothing is owed any more, and the record would
+    # otherwise leave the supervisor raising a runtime for a session with nothing
+    # to run. Placed AFTER the loop rather than in a wrapper so the deferral
+    # branch above keeps its own, opposite, decision.
+    from local_operator.session.runtime.inbox import settle_owed_turn
+
+    settle_owed_turn(directory, cwd=str(getattr(handle, "_desktop_cwd", "") or ""))
     return delivered
 
 

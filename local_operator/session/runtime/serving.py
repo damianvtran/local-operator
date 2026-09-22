@@ -2029,6 +2029,46 @@ class ServingSessionHandle(SessionHandle):
             "session runtime: spooled a %s for the successor",
             "prompt" if source == SOURCE_USER else "peer message",
         )
+        if source == SOURCE_USER or wake:
+            # THE PROMISE IN THE RECEIPT IS KEPT HERE, and this is the only
+            # writer of it. The two receipts returned below are promises about a
+            # runtime THIS process cannot start: it holds the transcript lease
+            # until it exits, so the successor has to be raised by someone else
+            # — and until this call existed, that someone was "whoever engages
+            # next", which on this fleet is nobody for a headless session with no
+            # wake due. Measured 2026-09-21: a session retired for a newer build
+            # with rows in its spool and no successor, and the receipt it had
+            # handed the sender ("held for the next runtime — it runs it") was
+            # true of no process at all.
+            #
+            # ONLY TURN-ASKING ROWS CREATE THE OBLIGATION. A quiet note does not:
+            # ``wake=False`` means "read this on your next turn", which is a
+            # deferral the sender asked for rather than work a successor owes
+            # (``peer_send.deliver_peer_message`` argues the trade), and raising a
+            # runtime for every note is the process churn that argument declines.
+            # A ``SOURCE_USER`` row always owes one: it is the OWNER's own prompt,
+            # and its receipt says the next runtime runs it.
+            #
+            # Best-effort in both directions, like every evidence write on this
+            # path: the row is already in the spool, so a failure here loses the
+            # RAISING and not the message, and it must not fail a delivery the
+            # sender is about to be told succeeded.
+            # NOTE_SPOOLED_TURN ALSO RAISES THE READER, and that argument lives in
+            # ONE place — see ``wakes.spooled.note_spooled_turn`` (review round 5,
+            # R5-1; round 6, R6-2; rationale deduplicated in round 7, R7-1). What
+            # matters at this call site: the supervisor is normally DOWN and
+            # nothing on the spool path used to revive it, so a row spooled for a
+            # successor waited for an unrelated schedule persist to raise the only
+            # process that can act on it.
+            from local_operator.paths import config_dir
+            from local_operator.wakes.spooled import note_spooled_turn
+
+            noted = str(getattr(session, "session_id", "") or "") or Path(directory).name
+            note_spooled_turn(
+                config_dir(),
+                noted,
+                cwd=str(getattr(self, "_desktop_cwd", "") or ""),
+            )
         if source == SOURCE_USER:
             return SPOOL_RECEIPT_PROMPT
         return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE
