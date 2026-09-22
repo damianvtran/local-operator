@@ -1005,3 +1005,26 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
     # narrated as this row's death.
     os.utime(dump, (row.started_at - 600, row.started_at - 600))
     assert journal.death_verdict(row)[1] != STALL_BOUND_CAUSE
+
+    # (f) A FIRE THE RUNTIME SURVIVED IS NOT THIS TURN'S DEATH — the THIRD STATE,
+    # and the one this change introduces. With a turn in flight the bound dumps and
+    # leaves the runtime ALIVE (``stall_watchdog._holds_work``), so a dump carrying
+    # ``HELD_MARKER`` is evidence the runtime was STALLED, never evidence about what
+    # killed it: the death that left this row is some other death, and calling it
+    # ``runtime-stall-bound`` would put the instrument's name on the wrong corpse —
+    # the precise falsehood this rung was added to end, in the other direction. The
+    # fact still reaches the reader, as a lead on whatever DID answer.
+    dump.write_text(
+        f"[stall watchdog] armed\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n"
+        f"{stall_watchdog.HELD_MARKER}it did not end it\n",
+        encoding="utf-8",
+    )
+    os.utime(dump, (row.started_at + 1, row.started_at + 1))
+    kind, cause, reason = journal.death_verdict(row)
+    assert (
+        cause != STALL_BOUND_CAUSE
+    ), f"a fire the runtime SURVIVED was narrated as the death that ended it: {reason}"
+    assert journal.HELD_BOUND_LEAD in reason, (
+        f"the death says nothing about the bound that fired and held, so a reader "
+        f"comparing this with the dump sees two unrelated events: {reason}"
+    )

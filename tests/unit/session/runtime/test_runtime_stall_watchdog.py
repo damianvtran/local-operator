@@ -3549,3 +3549,31 @@ def test_a_beat_records_a_fire_that_landed_while_it_was_pending(
     stall_watchdog.disarm()
     assert dump.exists(), "the artifact of a fire this runtime survived was erased"
     assert stall_watchdog.deadline_path(pid, tmp_path).exists()
+
+
+def test_held_pids_is_the_subset_of_fired_pids_that_survived(tmp_path: Path) -> None:
+    """The third state as a SET, because a listing is where it is read.
+
+    ``fired_pids`` answers "whose bound fired"; ``held_pids`` answers "whose bound
+    fired and did NOT end them", and the two are nested by construction. A surface
+    that has only the first cannot tell a post-mortem from a session that is still
+    holding work and needs a ``lop stop``, which is the operator's question answered
+    backwards — so the nesting is asserted rather than assumed.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / f"{stall_watchdog.DUMP_PREFIX}-11.log").write_text(
+        f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n", encoding="utf-8"
+    )
+    (logs / f"{stall_watchdog.DUMP_PREFIX}-22.log").write_text(
+        f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n{stall_watchdog.HELD_MARKER}held\n",
+        encoding="utf-8",
+    )
+    # A header-only file is an armed runtime, not a fire, and it must not leak in.
+    (logs / f"{stall_watchdog.DUMP_PREFIX}-33.log").write_text(
+        f"{stall_watchdog.ARM_MARKER}armed\n{stall_watchdog.HELD_MARKER}held\n", encoding="utf-8"
+    )
+
+    assert stall_watchdog.fired_pids(logs) == {11, 22}
+    assert stall_watchdog.held_pids(logs) == {22}
+    assert stall_watchdog.held_pids(logs) <= stall_watchdog.fired_pids(logs)

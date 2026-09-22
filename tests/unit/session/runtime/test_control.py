@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -1635,3 +1637,123 @@ async def test_refresh_all_asks_only_live_sessions_and_reports_each(
 
 def test_summarize_refresh_on_an_empty_machine_says_so() -> None:
     assert control.summarize_refresh([]) == "no live sessions to refresh"
+
+
+#: A runtime that is WEDGED in the exact way the stall bound now leaves alive: its
+#: main thread holds the GIL inside a C call, so NOTHING in the process can act on a
+#: Python-level signal handler until that call returns. This is the shape the
+#: operator's escape hatch has to reach, and it is why the hatch is the ladder's
+#: SIGKILL rung rather than the socket op: the socket is served by a loop this
+#: process cannot run.
+_WEDGED_CHILD = """
+import re
+import signal
+import sys
+
+# THE HANDLER IS INSTALLED FIRST, and that is what makes this a wedge rather than a
+# process the kernel can simply terminate. A runtime installs its own SIGTERM
+# handler (``procstate.install_loop_signal_handlers``), and ``signal`` runs it on the
+# main thread BETWEEN BYTECODES — so a thread inside an uninterruptible C call never
+# reaches that point, and the flag is set while nothing acts on it. Measured while
+# writing this cell: a child that does NOT install one dies on the ladder's FIRST
+# rung (rc -15), because SIGTERM's default disposition belongs to the kernel rather
+# than to Python.
+signal.signal(signal.SIGTERM, lambda *_args: None)
+# READINESS, so the test cannot send a signal into the window where the handler is not
+# installed yet — measured: racing ``Popen`` ended the child with rc -15 and the cell
+# reported "this rig is not a wedge", which was true.
+print("wedged", flush=True)
+
+# ``_sre_SRE_Pattern_search`` HOLDING THE GIL, which is not an arbitrary choice: it is
+# this module's founding measurement ("five runtimes frozen 1.5-7.2h, the main thread
+# inside ``_sre_SRE_Pattern_search`` with CPU advancing at ~0.9 core"), it is why
+# ``faulthandler`` rather than a Python timer is the instrument, and it is the one
+# shape a SIGTERM handler can never run inside. Catastrophic backtracking on 40 a's
+# is ~2**40 steps, i.e. hours, and the C engine checks no signals.
+re.compile(r"(a+)+$").match("a" * 40 + "b")
+"""
+
+
+#: Launches the wedge and then EXITS, so the wedged process is re-parented away from
+#: the test runner and reaped by init when it dies. Without this the rig could not
+#: confirm the kill at all: a direct child that has been SIGKILLed stays in the
+#: process table as a ZOMBIE until its parent waits, and the ladder reads the table
+#: (``registry.pid_alive``) — so the rung would report a kill that had already
+#: happened as one that did not. Production has the same shape for a different
+#: reason: a runtime is spawned detached, and the stopping process is never its
+#: parent.
+_LAUNCH_WEDGED = """
+import subprocess
+import sys
+
+child = subprocess.Popen([sys.executable, "-c", sys.argv[1]])
+print(child.pid, flush=True)
+"""
+
+
+@pytest.mark.asyncio
+async def test_the_escape_hatch_reaches_a_runtime_wedged_in_a_c_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE OPERATOR'S WAY OUT, driven against a REAL wedged process.
+
+    With the bound holding its exit leg (``stall_watchdog._holds_work``) a wedged
+    runtime stays ALIVE, so ``lop stop`` stops being a convenience and becomes the
+    only way out — and the process it has to reach is one whose own loop cannot run
+    at all. This cell parks a real child in a GIL-holding ``libc.sleep`` and drives
+    the ladder's OWN rungs at it, so nothing here is stubbed:
+
+    * SIGTERM, with a short grace, must report that it did NOT land. The receiver's
+      handler is a Python one, and ``signal`` runs it on the main thread between
+      bytecodes — a thread inside a long C call never reaches that point, so this is
+      the measurement that says "the socket is not the hatch" rather than an
+      assumption about it;
+    * the process must still be alive after that, or the rig is not a wedge and the
+      second half proves nothing;
+    * ``hard_kill_signal()`` — the ladder's rung 3 — must land, and the child's exit
+      status must be the kernel's account of it (``-SIGKILL``), which a cancelled
+      wait or a recorded outcome cannot fake.
+
+    The identity gate is NOT exercised here: ``stop_session`` reaches these rungs
+    only after it is satisfied, and ``test_force_still_refuses_a_stale_record_over_a
+    _recycled_pid`` owns that rule. What this cell is about is whether the rung the
+    hatch leans on can actually end a process that answers nothing.
+    """
+    import signal as signal_mod
+
+    from local_operator import procstate
+
+    launcher = subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        [sys.executable, "-c", _LAUNCH_WEDGED, _WEDGED_CHILD],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        assert launcher.stdout is not None
+        pid = int(launcher.stdout.readline().strip())
+        # The handler is installed BEFORE the first signal: a signal landing during
+        # interpreter start-up is the kernel's to act on, and the process dies.
+        assert launcher.stdout.readline().strip() == "wedged"
+        launcher.wait(timeout=10)
+
+        record = SessionRecord(
+            pid=pid,
+            kind="tui",
+            session_id="wedged-escape-hatch",
+            conversation_name="wedged",
+            cwd=str(tmp_path),
+            model_label="test",
+            control_port=0,
+            control_key="",
+        )
+        assert await control._signal_and_confirm(record, signal_mod.SIGTERM, 5.0) is False, (
+            "a runtime wedged in a C call answered SIGTERM: the rig is not a wedge, "
+            "so it cannot say whether the rung below is reachable"
+        )
+        assert registry.pid_alive(pid), "the wedged child died on SIGTERM; this rig is not a wedge"
+        assert await control._signal_and_confirm(record, procstate.hard_kill_signal(), 10.0) is True
+        assert not registry.pid_alive(pid), "the killed wedged process is still in the table"
+    finally:
+        if registry.pid_alive(pid):
+            os.kill(pid, signal_mod.SIGKILL)

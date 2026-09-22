@@ -72,18 +72,32 @@ update when their turn is complete (fully idle), not based on some heuristic of
 inactivity that kills a running process to update it."
 
 Measured against the fleet before this change, the two acts were not the same
-event at all. Of 40 ``runtime-stall-*.log`` dumps on this machine (11 on 09-21,
-29 on 09-22 up to 11:00), 37 carry the fired marker, and the event-loop thread's
-own stack in those fires is a runtime DOING WORK more often than a runtime that
-has stopped: ``session._run_turn`` -> ``_emit`` -> ``serving._refresh_state`` ->
-``comms.roster`` (pids 78817, 30990), a boot still inside
-``transcript.__init__`` on an executor thread (pid 5527), and — for six fires in
-the 01:00-07:00 window — an idle loop parked in ``selectors.select`` while a
-SINGLE plane's tick had gone missing. A bound that dumps every thread is worth
-keeping exactly as it is in all of those cases: the stacks are the only
-evidence, and one of these fires was the one that finally identified an
-hours-long freeze. A bound that also ends the process is what the operator is
-asking to be rid of, because the act it ends is a turn.
+event at all. Of the 40 ``runtime-stall-*.log`` dumps on this machine (37 fired,
+3 header-only; re-derived by the peer session that owns the census, which also
+corrected an earlier count of mine), 36 of the fires are LIVENESS fires against
+exactly one progress fire — so the overwhelmingly common fire is a runtime that
+stopped REPORTING, not one caught spinning. What the event-loop thread's own
+stack says in those fires is a runtime DOING WORK more often than a runtime that
+has stopped: read directly here, ``session._run_turn`` -> ``_emit`` ->
+``serving._refresh_state`` -> ``comms.roster`` (pids 78817, 30990) and a boot
+still inside ``transcript.__init__`` on an executor thread (pid 5527). A bound
+that dumps every thread is worth keeping exactly as it is in all of those cases:
+the stacks are the only evidence, and one of these fires was the one that finally
+identified an hours-long freeze. A bound that also ENDS the process is what the
+operator is asking to be rid of, because the act it ends is a turn.
+
+WHY THOSE PLANES WERE SILENT IS A HYPOTHESIS, NOT A READING THIS CHANGE OWNS.
+The leading candidate is a reporter that stopped running rather than a loop that
+stopped working — the two plane stamps are written by two different loops
+(``process._beat_stall_watchdog`` and ``RuntimeServer._heartbeat_loop``), and the
+record heartbeat a reader sees is NOT the same clock as either stamp, so a fresh
+``beat_lag_s`` beside a stale stamp is the expected pair rather than a
+contradiction. What would falsify it: a fire whose dump shows a parked turn AND an
+arm that went stale at the same instant, i.e. evidence that the reported work had
+genuinely stopped rather than that its reporter had. Until such a reading exists,
+this module's comments do not claim the bound fired *because* a loop was parked,
+and the change below does not depend on which of the two it was: an in-flight turn
+must not be ended either way.
 
 So the timer is armed with ``exit=`` answered at every re-arm:
 
@@ -1412,22 +1426,21 @@ def _record_held_fire(armed: "_Armed") -> bool:
     return True
 
 
-def _refresh_exit_leg(armed: "_Armed") -> None:
-    """Re-read the exit leg on the sampler's cadence, and re-arm when it flips.
+def _apply_exit_leg(armed: "_Armed", held: bool) -> None:
+    """Re-arm for the leg just read, when it differs from the one in force.
 
-    THE ONE THING THAT KEEPS THE EXIT LEG CURRENT. The decision is made where the
-    probe can be read safely (this thread, and the arming thread), while the timer
-    fires between beats: a runtime that picks up a turn after its last arm would
-    otherwise be ended by a timer that was armed while it was idle, which is the
-    defect in its other order. The sampler's interval is what bounds the staleness of
-    the decision — the same interval the progress leg already accepts for its own
-    reading (``_sample_interval``), and far inside the bound it guards.
+    THE READING HAPPENS OUTSIDE :data:`_LOCK` AND THE DECISION INSIDE IT, which is a
+    constraint rather than a preference: ``beat`` takes that lock on the serving
+    plane's thread and on the workload loop, and a probe that takes a while to answer
+    would hold the bound's own bookkeeping against the very ticks it exists to time
+    (the same property the progress leg's probe call is being moved out of the lock
+    for, in the change that owns that leg). Splitting the call from the mutation is
+    what lets both happen without either one widening the critical section.
 
     Only a FLIP re-arms. A re-arm on every sample would push the deadline out every
-    fifteen seconds and the liveness leg could then never fire at all — a dead
-    instrument, in this module's own words.
+    interval and the liveness leg could then never fire at all — a dead instrument,
+    in this module's own words.
     """
-    held = _holds_work(armed.busy)
     if held == armed.held:
         return
     armed.held = held
@@ -1653,15 +1666,21 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
     """
     interval = _sample_interval(armed.seconds)
     while not stop.wait(interval):
+        # THE PROBE IS READ HERE, outside the lock, and the decision is applied
+        # inside: see :func:`_apply_exit_leg`. This is also why the exit leg is
+        # re-read at all — the decision is made where the probe can be asked safely
+        # while the timer fires between beats, so a runtime that picks up a turn after
+        # its last arm is not ended by a timer armed while it was idle.
+        held = _holds_work(armed.busy)
         with _LOCK:
             if _ARMED is not armed:
                 return
             # BEFORE the sample, and in this order: a fire that landed since the
             # last wake is recorded and re-armed on the same pass, and only then is
-            # the next progress decision taken. The exit leg is re-read first of all
+            # the next progress decision taken. The exit leg is applied first of all
             # so that a flip made while the timer was pending is in force before
-            # anything else can act on the arm.
-            _refresh_exit_leg(armed)
+            # anything else acts on the arm.
+            _apply_exit_leg(armed, held)
             if _record_held_fire(armed):
                 continue
             if _sample(armed):
@@ -1912,6 +1931,41 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     """
     text = _dump_text(dump_path(pid, directory))
     return _fires(text) and any(line.startswith(HELD_MARKER) for line in text.splitlines())
+
+
+def held_pids(directory: Path | None = None) -> set[int]:
+    """The pids whose bound FIRED AND DID NOT END THEM — the third state, as a set.
+
+    ``fired_pids``' sibling and its companion on every listing that shows both: a
+    fired dump whose ``HELD_MARKER`` is present says the runtime was STALLED with work
+    in flight, and that wants a person (``lop stop``), while one without it says the
+    runtime is gone and wants a successor. The two sets are nested — held is a subset
+    of fired — and the reader needs both because the useful question is "which of the
+    fired ones is still alive", which is exactly what a listing of live rows is.
+
+    ONE SCAN, like :func:`fired_pids`, and for the same reason: the marker has to be
+    read out of each candidate file, so a per-row call would re-read the same
+    directory once per session. Unreadable entries are skipped rather than raising —
+    a diagnostic must never take the listing down.
+    """
+    from local_operator.paths import log_dir
+
+    base = directory if directory is not None else log_dir()
+    held: set[int] = set()
+    try:
+        candidates = sorted(base.glob(f"{DUMP_PREFIX}-*.log"))
+    except OSError:
+        return held
+    for path in candidates:
+        text = _dump_text(path)
+        if not _fires(text):
+            continue
+        if not any(line.startswith(HELD_MARKER) for line in text.splitlines()):
+            continue
+        suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
+        if suffix.isdigit():
+            held.add(int(suffix))
+    return held
 
 
 def fired_leg(pid: int | None = None, directory: Path | None = None) -> str | None:

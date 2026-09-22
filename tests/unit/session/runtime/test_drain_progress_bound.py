@@ -50,15 +50,20 @@ class _Handle:
         self.retired = False
         self.draining = False
         self.update_failed: str | None = None
+        #: Permanently busy until a test says otherwise — the incident's own shape
+        #: (a lane parked behind a child process), and the one state the abandon arm
+        #: exists for. Flipped by the cell that asserts the COMMITMENT outlives the
+        #: abandon: the departure must still happen when the work finally ends.
+        self.busy_forever = True
 
     def is_busy(self) -> bool:
-        return True
+        return self.busy_forever
 
     def next_wake_due_at(self) -> None:
         return None
 
     def may_refresh(self) -> str:
-        return "busy"
+        return "busy" if self.busy_forever else ""
 
     def attach_clients(self) -> int:
         return 0
@@ -165,7 +170,7 @@ async def test_a_drain_with_silent_work_is_ABANDONED_and_the_runtime_keeps_servi
         # The stall: nothing this runtime can observe moves again, ever.
         assert await _wait_for(lambda: handle.releases == 1, timeout=2.0), (
             "the drain's work went silent past the bound and the handover was not "
-            "abandoned: the latch is still holding and this handle is busy forever"
+            "abandoned: the refusal is still holding and this handle is busy forever"
         )
         assert handle.draining is False, "the latch was counted but never taken off"
         assert not stop.is_set(), "the process must keep serving, not stop"
@@ -179,14 +184,24 @@ async def test_a_drain_with_silent_work_is_ABANDONED_and_the_runtime_keeps_servi
         assert handle.update_failed is None, (
             "the handle remembered the pair, which is the WINDOW rung's memo for not "
             "burning its bound twice — here it would be the opposite of correct, "
-            "because the drain rung is meant to ask again on its next check"
+            "because the drain rung keeps asking"
         )
         assert [leaving for _reason, _to, _draining, leaving in runtime.retiring] == [
             LEAVING_FOR_BUILD
         ], "the abandoned handover wears a phrase for a departure it did not take"
-        assert await _wait_for(lambda: handle.drains >= 2, timeout=2.0), (
-            "the reaper never retried: a released latch with the watch dropped would "
-            "leave a stale runtime resident forever instead of asking again"
+        # THE COMMITMENT SURVIVES THE ABANDON, and the two halves are asserted apart
+        # because they are what a re-latch would break: the drain object stays (a
+        # second ``begin_drain`` would re-run ``retire_wakes_to_inbox`` and discard
+        # the wakes this drain already swallowed), and the departure still happens at
+        # the first idle instant.
+        assert handle.drains == 1, "the drain was latched a second time"
+        assert [reason for reason, _to, _d, _l in runtime.retiring] == [
+            "stale-build"
+        ], "the drain announced its departure twice"
+        handle.busy_forever = False
+        assert await _wait_for(lambda: handle.disposed, timeout=2.0), (
+            "the work finished and the runtime never left, so the abandonment turned a "
+            "stalled handover into a permanent one"
         )
     finally:
         stop.set()

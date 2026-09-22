@@ -1073,15 +1073,12 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             # ``BUILD_STAGGER_S`` slice at the exit — the exact delay
             # ``_Drain.stagger_until`` is drawn at drain start to avoid — and
             # announce ``retiring`` a second time for one departure.
-            retired = await _drain_for(drain, handle, runtime, stop)
-            if _drain_abandoned(drain):
-                # The handover gave up and its latch is released, so this
-                # runtime is serving again and there is nothing left to drain.
-                # Dropping it here rather than keeping the object is what makes
-                # the NEXT check re-commit on its own terms — a fresh drain, a
-                # fresh progress clock, and no second publish for this bound.
-                drain = None
-            return retired
+            #
+            # A drain whose bound expired stays HERE too, with its latch released
+            # (``_abandon_move``): the commitment is what is being kept, not the
+            # refusal, so the tick still retries the departure and the clean idle
+            # exit is still what ends it.
+            return await _drain_for(drain, handle, runtime, stop)
         if poll.refreshable():
             return await _refresh_for(cast("BuildStamp", poll.newer), handle, runtime, stop)
         if not poll.draining():
@@ -1089,10 +1086,7 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
         drain = await _begin_drain(poll, handle, runtime, stop)
         if drain is None:
             return False
-        retired = await _drain_for(drain, handle, runtime, stop)
-        if _drain_abandoned(drain):
-            drain = None
-        return retired
+        return await _drain_for(drain, handle, runtime, stop)
 
     while not stop.is_set():
         await asyncio.sleep(REAP_CHECK_S)
@@ -1110,8 +1104,6 @@ async def _reaper(handle: object, runtime: object, stop: asyncio.Event) -> bool:
             # window is for a runtime that might still be wanted — this one has
             # already stopped taking work.
             retired = await _drain_for(drain, handle, runtime, stop)
-            if _drain_abandoned(drain):
-                drain = None
             if retired:
                 return True
             continue
@@ -1758,19 +1750,6 @@ class _Drain:
     #: that can observe it. A drain that never ticks never needs a clock, and the
     #: first tick is within ``REAP_CHECK_S`` of the latch.
     progress: "_DrainProgress | None" = None
-
-
-def _drain_abandoned(drain: "_Drain | None") -> bool:
-    """Whether this drain gave up and RELEASED its latch, so the reaper drops it.
-
-    One predicate rather than a field read at three call sites (the two
-    ``refresh_check`` rungs and the reaper's drain branch), because the sites
-    disagreeing is what would leave a released latch in place: a runtime serving
-    again while the reaper still believes it is leaving and keeps calling
-    ``_drain_for`` against an object whose bound has already been reported.
-    """
-    progress = drain.progress if drain is not None else None
-    return bool(progress is not None and progress.abandoned)
 
 
 def _transcript_footprint(transcript: object) -> "tuple[Any, ...]":
@@ -2488,13 +2467,21 @@ async def _abandon_move(
     the alternative — refusing work for the rest of the process's life — is the
     wedge this arm exists to end rather than to create.
 
-    WHY THIS IS NOT A SILENT RE-LATCH LOOP. The next check re-commits the drain
-    (``_BuildWatch``'s trip is monotone for the process's life), so a runtime whose
-    work never moves abandons once per bound rather than spinning: each abandon
-    re-latches through :func:`_commit_to_leaving`, which rebuilds the progress
-    clock, and each one publishes its failure. That cadence is the signal — a
-    runtime that cannot be updated is reported repeatedly, at a rate a person can
-    read, instead of being killed once and silently.
+    THE DRAIN OBJECT STAYS, AND THAT IS NOT AN OVERSIGHT. The reaper keeps calling
+    :func:`_drain_for` with it, so the departure is still retried on every tick and
+    still happens at the first idle instant — but the LATCH IS NOT TAKEN AGAIN, and
+    that matters more than it looks: a second ``begin_drain`` re-runs
+    ``Session.retire_wakes_to_inbox``, which STARTS A FRESH ``_wake_rearms`` list and
+    so discards the one-shot wakes this drain has already swallowed. A reminder that
+    fired before the bound would then never fire at all, which is a silent loss of
+    the operator's work in exchange for a re-announcement nobody needs — the drain
+    is already latched as a commitment (the record still says it is leaving for the
+    build on disk when its turn ends, which is still true).
+
+    ONCE PER DRAIN, and the guard is written where the drain object lives rather than
+    at the caller: the reaper ticks every ``REAP_CHECK_S`` and a released refusal
+    does not stop ``_drain_for`` being called again, so without it a runtime that
+    cannot reach idle would publish its failure four times a minute.
 
     WHAT IS DELIBERATELY NOT UNDONE: the ``retiring`` frame the drain sent to
     attached viewers. There is no "staying" op on the wire, and inventing one is a

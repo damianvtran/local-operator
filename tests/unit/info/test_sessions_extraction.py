@@ -199,8 +199,11 @@ EXPECTED = [
         # after the pair above for the same append-only reason: ``None`` here
         # because no runtime in this fixture tripped it (the path is
         # ``stall_watchdog``'s to compose, and it is the one artifact a reader
-        # needs after a freeze — see that module).
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
         "stall_dump": None,
+        "stall_held": False,
     },
     {
         "state": "live",
@@ -245,8 +248,11 @@ EXPECTED = [
         # after the pair above for the same append-only reason: ``None`` here
         # because no runtime in this fixture tripped it (the path is
         # ``stall_watchdog``'s to compose, and it is the one artifact a reader
-        # needs after a freeze — see that module).
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
         "stall_dump": None,
+        "stall_held": False,
     },
     {
         "state": "stale",
@@ -296,8 +302,11 @@ EXPECTED = [
         # after the pair above for the same append-only reason: ``None`` here
         # because no runtime in this fixture tripped it (the path is
         # ``stall_watchdog``'s to compose, and it is the one artifact a reader
-        # needs after a freeze — see that module).
+        # needs after a freeze — see that module). ``stall_held`` is the third
+        # state's reader and a bool on every row, so a fixture with no fire at all
+        # is ``False`` rather than null.
         "stall_dump": None,
+        "stall_held": False,
     },
 ]
 
@@ -547,7 +556,11 @@ def test_a_drain_is_published_in_the_rows_and_named_in_the_table(
     assert list(rows[0]).index("update_failed") < list(rows[0]).index("beat_lag_s")
     assert list(rows[0]).index("beat_lag_s") < list(rows[0]).index("cpu_since_beat_s")
     assert list(rows[0]).index("cpu_since_beat_s") < list(rows[0]).index("stall_dump")
-    assert list(rows[0])[-1] == "stall_dump"
+    # ``stall_held`` is the third state and the newest key, appended after the dump
+    # path it qualifies: a reader that has ``stall_dump`` and not this one cannot
+    # tell a runtime that survived its bound from one the bound ended.
+    assert list(rows[0]).index("stall_dump") < list(rows[0]).index("stall_held")
+    assert list(rows[0])[-1] == "stall_held"
 
     assert (
         cli.sessions_command(

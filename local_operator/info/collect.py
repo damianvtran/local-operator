@@ -640,6 +640,7 @@ def session_rows(
     from local_operator.session.runtime import stall_watchdog
 
     fired = stall_watchdog.fired_pids()
+    held = stall_watchdog.held_pids()
     return [
         {
             "state": line.state,
@@ -731,6 +732,17 @@ def session_rows(
             # definition — a listing is where they arrive (``stall_watchdog``
             # owns the naming, so the path is never composed twice).
             "stall_dump": str(stall_watchdog.dump_path(line.pid)) if line.pid in fired else None,
+            # THE THIRD STATE, on the surface a person looks at first. A row whose
+            # bound fired is two different situations now, and this is what tells
+            # them apart: WITHOUT it the runtime is gone and the dump is a
+            # post-mortem; WITH it the runtime SURVIVED the fire, is still holding
+            # whatever it was doing, and the way out is ``lop stop`` — so a reader
+            # who cannot see this would take a stalled-but-alive session for a dead
+            # one, which is the operator's question answered backwards. Appended
+            # after ``stall_dump`` for the append-only reason every key above it
+            # states, and ``False`` rather than ``None`` when no bound fired: this
+            # is a question with a yes/no answer on every row.
+            "stall_held": line.pid in held,
         }
         for line in info.lines
     ]
