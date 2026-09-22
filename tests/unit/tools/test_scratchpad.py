@@ -27,6 +27,7 @@ from local_operator.scratchpad import (
     SCRATCHPAD_NAMESPACE,
     SCRATCHPAD_PATH_ENV,
     SCRATCHPAD_SCHEME,
+    SCRATCHPAD_TOTAL_BUDGET_BYTES,
     SCRATCHPAD_UNAVAILABLE,
     ScratchpadContentError,
     ScratchpadPathError,
@@ -409,6 +410,26 @@ def _pad(where: Path, *ancestors: str) -> Path:
         (("__pycache__", "module"), "__pycache__"),
         (("NODE_MODULES", "pkg", "index.js"), "NODE_MODULES"),
         (("pods", "x"), "pods"),
+        # One row per FAMILY arm, because the whole point of the shape rule is
+        # the tree nobody listed: the two hyphen-qualified build systems, the
+        # qualified build/cache tree, its underscore spelling, the packaging
+        # metadata, the debug-symbol bundle, and the two ambiguous short names
+        # the family rule now names (``out``, ``obj``).
+        (("cmake-build-debug", "CMakeCache.txt"), "cmake-build-debug"),
+        (("bazel-out", "k8-fastbuild", "bin", "app"), "bazel-out"),
+        (("repo-cache", "pkg", "index.js"), "repo-cache"),
+        (("_build", "x"), "_build"),
+        (("lib", "libfoo.egg-info", "METADATA"), "libfoo.egg-info"),
+        (("lib", "libfoo.dist-info", "RECORD"), "libfoo.dist-info"),
+        (("Foo.app.dSYM", "Contents", "DWARF", "Foo"), "Foo.app.dSYM"),
+        (("out", "stdout.log"), "out"),
+        (("obj", "x"), "obj"),
+        # A dot is the boundary the family rule stops at, so a QUALIFIED tree is
+        # refused wherever the list of bare names would have recognised it — and
+        # the fold covers the new arms too, not only the tokens of the old list.
+        (("build.old", "x"), "build.old"),
+        (("node_modules.bak", "x"), "node_modules.bak"),
+        (("CMAKE-BUILD-RELEASE", "x"), "CMAKE-BUILD-RELEASE"),
     ],
 )
 def test_a_refused_segment_is_refused_wherever_below_the_root_it_appears(
@@ -436,22 +457,65 @@ def test_a_refused_segment_is_refused_wherever_below_the_root_it_appears(
 
 
 @pytest.mark.parametrize(
+    ("segments", "refused"),
+    [
+        (("cmake-build-debug", "x"), "cmake-build-debug"),
+        (("bazel-bin", "x"), "bazel-bin"),
+        (("repo-build", "x"), "repo-build"),
+        (("repo-out", "x"), "repo-out"),
+        (("repo-dist", "x"), "repo-dist"),
+        (("parcel-cache", "x"), "parcel-cache"),
+    ],
+)
+def test_a_qualified_build_tree_is_refused_up_to_the_dot_boundary(
+    tmp_path: Path, segments: tuple[str, ...], refused: str
+) -> None:
+    """The arms that make the rule SHAPE-based: the hyphen-qualified build
+    systems, the trees qualified by what they are, and a cache under any name.
+
+    These are the shapes the audit found in the pads and the name list did not
+    have — a pad written by ``cmake``, by ``bazel``, or by a tool that appends
+    ``-cache`` to whatever it caches. Kept separate from the token rows above
+    because they exercise a different arm, so a reader can see which rule caught
+    which tree.
+    """
+    root = _pad(tmp_path)
+    url = "scratchpad://" + "/".join(segments)
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root.joinpath(*segments), root, url)
+
+    assert f"'{refused}' is a build or dependency directory" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
     ("segments", "suffix"),
     [
         (("artefact.o",), ".o"),
         (("runs", "artefact.o"), ".o"),
         (("artefact.zip",), ".zip"),
         (("artefact.pt",), ".pt"),
-        (("artefact.TAR.GZ",), ".gz"),
+        (("artefact.TAR.GZ",), ".tar.gz"),
+        # The compound forms, named whole: a plain ``.gz`` token would refuse
+        # ``foo.tar.gz`` too and tell the caller about the wrong half of the name.
+        (("backup.tar.bz2",), ".tar.bz2"),
+        (("backup.tar.xz",), ".tar.xz"),
+        (("backup.tar.zst",), ".tar.zst"),
+        (("stream.zst",), ".zst"),
+        # A shared library whose version is IN its name, which ``Path.suffix``
+        # cannot see at all (``Path('libfoo.so.1.2').suffix`` is ``'.2'``).
+        (("libfoo.so.1.2",), ".so"),
+        (("libs", "libfoo.so.6"), ".so"),
+        (("libbar.1.dylib",), ".dylib"),
     ],
 )
 def test_a_refused_extension_is_refused_and_names_a_temp_dir(
     tmp_path: Path, segments: tuple[str, ...], suffix: str
 ) -> None:
-    """The compiled/archive/model extensions are judged on the FILE name, so
-    burying one in a subdirectory is not an escape — and the spelling is
-    case-folded, because the same artefact arrives upper-cased from any tool
-    that does it (a Finder-made ``ZIP``).
+    """The compiled/archive/model extensions are judged on the case-folded
+    FILE NAME, so burying one in a subdirectory is not an escape, a compound
+    archive is named whole, and a versioned shared library is caught by the name
+    its version group is attached to.
     """
     root = _pad(tmp_path)
     url = "scratchpad://" + "/".join(segments)
@@ -492,6 +556,141 @@ def test_a_write_at_the_ceiling_is_allowed(tmp_path: Path) -> None:
     )
 
 
+def _fill_pad(root: Path, size: int, name: str = "bulk.dat") -> Path:
+    """Give the pad ``size`` logical bytes without writing them.
+
+    ``truncate`` makes a SPARSE file on APFS: ``st_size`` — which is what the
+    budget walk sums — reports the whole size while the volume allocates no
+    blocks, so the 256 MiB boundary cases below cost this suite nothing. That is
+    the same fact the walk rests on: it measures what the pad CLAIMS, not what
+    the filesystem set aside for it.
+    """
+    path = root / name
+    with path.open("wb") as handle:
+        handle.truncate(size)
+    return path
+
+
+def test_a_write_that_reaches_the_pad_total_exactly_is_allowed(tmp_path: Path) -> None:
+    """The backstop's boundary, and the same shape as the per-write one: the
+    ceiling catches a pad that has stopped being scratch, and the payload that
+    lands exactly on it is the last legitimate one rather than the first
+    refused."""
+    root = _pad(tmp_path)
+    _fill_pad(root, SCRATCHPAD_TOTAL_BUDGET_BYTES - 8)
+
+    assert check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 8) is None
+
+
+def test_a_write_one_byte_over_the_pad_total_is_refused(tmp_path: Path) -> None:
+    """The BACKSTOP, and the arm that does not guess about shape: the name here
+    is ordinary scratch, and it is the pad's own total that refuses it. The
+    message has to name both numbers, because the caller's next move (is this a
+    dump I should move, or is it 40 files I should clear out?) depends on
+    which."""
+    root = _pad(tmp_path)
+    held = SCRATCHPAD_TOTAL_BUDGET_BYTES - 8
+    _fill_pad(root, held)
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root / "x.csv", root, "scratchpad://x.csv", 9)
+
+    assert f"the pad holds {held:,} bytes" in str(excinfo.value)
+    assert f"{SCRATCHPAD_TOTAL_BUDGET_BYTES:,}-byte ceiling" in str(excinfo.value)
+    assert "mktemp -d" in str(excinfo.value)
+
+
+def test_an_edit_into_a_pad_already_over_the_total_is_refused(tmp_path: Path) -> None:
+    """``edit`` has no payload size to give, so the total arm judges it on what
+    the pad ALREADY holds rather than sending it through unmeasured: a pad that
+    is over the ceiling is over it however the next write arrives."""
+    root = _pad(tmp_path)
+    _fill_pad(root, SCRATCHPAD_TOTAL_BUDGET_BYTES + 1)
+
+    with pytest.raises(ScratchpadContentError):
+        check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md")
+
+
+def test_a_pad_too_wide_to_measure_is_refused_rather_than_walked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The walk is BOUNDED, and the bound is an entry count rather than a
+    timeout because a count is the same on every machine. The cap is patched down
+    here so the arm is reachable without creating 20,000 inodes; what is pinned is
+    that reaching it is a refusal of its own — the pad is refused for being a
+    TREE, the message says so, and it does not claim a byte total it stopped
+    counting.
+    """
+    monkeypatch.setattr(scratchpad_module, "SCRATCHPAD_BUDGET_SCAN_ENTRIES", 3)
+    root = _pad(tmp_path)
+    for index in range(4):
+        (root / f"f{index}.md").write_text("x")
+
+    with pytest.raises(ScratchpadContentError) as excinfo:
+        check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md")
+
+    assert "is a tree rather than a pad" in str(excinfo.value)
+    # The message names the cap that ACTUALLY stopped the walk (patched here),
+    # not the shipped one: a count that disagreed with the walk is exactly the
+    # kind of number a caller cannot act on.
+    assert "more than 3 entries" in str(excinfo.value)
+
+
+def test_overwriting_a_file_counts_its_bytes_once_and_not_twice(tmp_path: Path) -> None:
+    """The budget is the pad's total AFTER the write, so a file being REPLACED is
+    counted once. Counting it and then adding the payload would refuse an
+    overwrite that leaves the pad SMALLER — the one refusal that would teach a
+    session to route around the pad with the tools it still has."""
+    root = _pad(tmp_path)
+    replaced = _fill_pad(root, SCRATCHPAD_TOTAL_BUDGET_BYTES)
+
+    assert check_scratchpad_write(replaced, root, "scratchpad://bulk.dat", 1) is None
+    # ...and the exclusion is not a hole in the ceiling: a DIFFERENT name in the
+    # same pad is judged against the pad it would join.
+    with pytest.raises(ScratchpadContentError):
+        check_scratchpad_write(root / "other.csv", root, "scratchpad://other.csv", 1)
+
+
+def test_the_replaced_file_is_recognised_when_the_root_is_spelled_differently(
+    tmp_path: Path,
+) -> None:
+    """The pair ``_scratchpad_target`` actually hands over: a root spelled the way
+    the CONTEXT carries it and a target the parser RESOLVED. Those differ on this
+    machine by construction — ``/tmp`` is ``/private/tmp``, and every ``tmp_path``
+    sits under one such pair — so an exclusion that compared the walk's entries
+    against the resolved spelling would silently never apply, and a pad over its
+    total would be writable only from a shell: the route around the pad that this
+    policy exists to close.
+    """
+    real = _pad(tmp_path / "real")
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    _fill_pad(real, SCRATCHPAD_TOTAL_BUDGET_BYTES, name="bulk.dat")
+
+    assert (
+        check_scratchpad_write((link / "bulk.dat").resolve(), link, "scratchpad://bulk.dat", 1)
+        is None
+    )
+
+
+def test_the_walk_never_follows_a_symlink_out_of_the_pad(tmp_path: Path) -> None:
+    """A symlink is measured as the LINK, not as its target: a pad may hold one
+    pointing outside it (that is what ``resolve`` refuses a WRITE through), and
+    following it here would let a tree the pad does not own decide the pad's
+    total — which is the number every write to that pad is then judged against.
+
+    The target is a whole over-budget tree, so a walk that followed the link
+    would refuse this ordinary write and fail here.
+    """
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _fill_pad(outside, SCRATCHPAD_TOTAL_BUDGET_BYTES * 2, name="big.dat")
+    root = _pad(tmp_path)
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    assert check_scratchpad_write(root / "notes.md", root, "scratchpad://notes.md", 8) is None
+
+
 def test_an_edit_passes_no_size_and_is_judged_on_the_name_alone(tmp_path: Path) -> None:
     """``edit`` sees only its hunks, so it has no size to give and must not be
     refused for one — but the name arm still applies to it."""
@@ -507,22 +706,26 @@ def test_an_edit_passes_no_size_and_is_judged_on_the_name_alone(tmp_path: Path) 
     [
         ("notes.md",),
         ("runs", "deep.csv"),
+        ("perf.png",),
         ("perf-2026-09-22.png",),
         ("node_modules-notes.md",),
         ("build-report.csv",),
-        ("out", "stdout.log"),
         ("objects", "shape.json"),
         ("targets", "notes.md"),
         ("probe.sh",),
+        # A version group is not a compiled artefact: the strip exists to reach
+        # ``libfoo.so.1.2``, and what it leaves behind is what gets judged.
+        ("notes.2",),
+        ("rows.csv.1",),
     ],
 )
 def test_intended_scratch_is_allowed(tmp_path: Path, segments: tuple[str, ...]) -> None:
     """The negative half of the policy, and the half a reviewer should read
     first. The rule is a path SEGMENT and never a substring, so a name that
     merely contains a refused token is scratch; the ambiguous directory names
-    (``out``, ``objects``) are deliberately not in the list, because a false
-    refusal teaches the caller to route around the pad and put the litter back
-    in the user's tree.
+    (``objects``, ``targets``) stay out of the list, because a false refusal
+    teaches the caller to route around the pad and put the litter back in the
+    user's tree.
     """
     root = _pad(tmp_path)
     url = "scratchpad://" + "/".join(segments)

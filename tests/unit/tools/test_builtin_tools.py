@@ -42,6 +42,7 @@ from local_operator.scratchpad import (
     SCRATCHPAD_ELSEWHERE,
     SCRATCHPAD_MAX_WRITE_BYTES,
     SCRATCHPAD_PATH_ENV,
+    SCRATCHPAD_TOTAL_BUDGET_BYTES,
 )
 from local_operator.tools import builtin
 from local_operator.tools.registry import create_tools
@@ -1498,6 +1499,34 @@ async def test_scratchpad_refuses_build_output_by_name_through_write_and_edit(tm
     assert folded.details is not None and folded.details["__fault"] == "invalid_arguments"
     assert "'NODE_MODULES' is a build or dependency directory" in folded.text
 
+    # The FAMILY arm, which is the whole point of matching a SHAPE: this tree was
+    # in no list, and a caller that reaches for it is exactly who the refusal is
+    # for. The segment is named as typed, so the message reads as the URL does.
+    family = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://cmake-build-debug/CMakeCache.txt", "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+    assert family.is_error is True
+    assert family.details is not None and family.details["__fault"] == "invalid_arguments"
+    assert "'cmake-build-debug' is a build or dependency directory" in family.text
+
+    # A versioned shared library, whose version rides in the name after the
+    # extension — the shape ``Path.suffix`` cannot see, judged here on the real
+    # tool so the wiring and the matcher are proved together.
+    versioned = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://libfoo.so.1.2", "content": "x\n"},
+        None,
+        None,
+        context,
+    )
+    assert versioned.is_error is True
+    assert versioned.details is not None and versioned.details["__fault"] == "invalid_arguments"
+    assert "'.so' is a compiled, archived or model artefact" in versioned.text
+
     suffix = await tools["edit"].execute(
         "c",
         {"path": "scratchpad://runs/model.pt", "old_text": "a", "new_text": "b"},
@@ -1515,6 +1544,45 @@ async def test_scratchpad_refuses_build_output_by_name_through_write_and_edit(tm
     assert not (pad / "node_modules").exists()
     assert not (pad / "NODE_MODULES").exists()
     assert not (pad / "runs").exists()
+    assert not (pad / "cmake-build-debug").exists()
+    assert not (pad / "libfoo.so.1.2").exists()
+
+
+@pytest.mark.asyncio
+async def test_scratchpad_refuses_a_pad_over_its_total_through_write(tmp_path) -> None:
+    """The BACKSTOP end to end, and the arm only the pad's own contents can
+    refuse: every name here is ordinary scratch, so nothing but the total can
+    say no. It has to arrive as the model's own argument at fault, like the name
+    arms, because the fix is a decision about where that material lives rather
+    than a machine failure to retry.
+
+    The pad is filled with a SPARSE file (``truncate``), so the 256 MiB case
+    costs the suite no blocks — the walk sums ``st_size``, which is the same
+    number either way.
+    """
+    context, pad, tools = _scratchpad_context(tmp_path)
+    pad.mkdir(parents=True)
+    with (pad / "bulk.dat").open("wb") as handle:
+        handle.truncate(SCRATCHPAD_TOTAL_BUDGET_BYTES)
+
+    refused = await tools["write"].execute(
+        "c", {"path": "scratchpad://x.csv", "content": "a,b\n"}, None, None, context
+    )
+
+    assert refused.is_error is True
+    assert refused.details is not None and refused.details["__fault"] == "invalid_arguments"
+    assert f"{SCRATCHPAD_TOTAL_BUDGET_BYTES:,}-byte ceiling" in refused.text
+    assert refused.text.endswith(SCRATCHPAD_ELSEWHERE)
+    assert not (pad / "x.csv").exists()
+
+    # The same fixture one name apart: overwriting the file that IS the pad's
+    # total is still allowed, because the write REPLACES those bytes rather than
+    # adding to them. A pad at the ceiling must stay workable in place.
+    replaced = await tools["write"].execute(
+        "c", {"path": "scratchpad://bulk.dat", "content": "small\n"}, None, None, context
+    )
+    assert replaced.is_error is False
+    assert (pad / "bulk.dat").read_text() == "small\n"
 
 
 @pytest.mark.asyncio
@@ -1565,6 +1633,19 @@ async def test_scratchpad_still_writes_ordinary_scratch_with_the_same_fixture(tm
         # as meaning "like a temp directory" (2026-09-22).
         " — kept for this session (survives restarts)."
     )
+
+    # The negatives that must survive the shape rule, through the tool: a name
+    # that merely BEGINS with a refused token is scratch, and it is the case a
+    # rule that matched a substring would have taken away.
+    contained = await tools["write"].execute(
+        "c",
+        {"path": "scratchpad://node_modules-notes.md", "content": "why it is big\n"},
+        None,
+        None,
+        context,
+    )
+    assert contained.is_error is False
+    assert (pad / "node_modules-notes.md").read_text() == "why it is big\n"
     assert (pad / "notes.md").read_text(encoding="utf-8") == "still scratch\n"
 
 

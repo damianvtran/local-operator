@@ -69,35 +69,35 @@ cannot tell apart from output.
   automatic cleanup pass does too when its policy is switched on). A long-running
   loop or a multi-turn state file therefore has no reason to keep a second copy
   anywhere else.
-- **Build output, a dependency tree, a compiled artefact or an archive** → not
-  here, and `write`/`edit` refuse it by name if you try. Build it in a git
-  worktree instead — `git worktree add <path>` — where the output is wanted and
-  can be rebuilt from the commit rather than carried around as bytes. A pad is
-  the wrong home for it in both directions: it is billed to a disk shared with
-  every other session, and it ends with the session, so nothing can be built
-  from it afterwards. **This rule is enforced at the TOOLS and not in a shell.**
-  `write` and `edit` carry their payload inline and are checked; `bash` and the
-  `eval` kernel are handed this pad as a path (`$LOCAL_OPERATOR_SCRATCHPAD`) and
-  are NOT policed, so a `pnpm install`, a `cargo build` or a redirect into the
-  pad still succeeds and still lists back through the scheme. The refusal is a
-  nudge at the tool surface — it keeps a build tree out of a pad you write with
-  the tools, and it does not by itself undo what a shell has already put there.
-- **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it
-  has no text to return, so the reader refuses it as text and there is nothing
-  useful to do with it. (`bash mktemp -d` with NO template, which lands in
-  `$TMPDIR`, the per-user temp directory, is the home for those.) An IMAGE is
+- **Do not put these here: build trees, dependency trees, compiled artefacts,
+  archives, anything the shell built.** `write`/`edit` refuse them by NAME — a
+  `node_modules`/`target`/`dist`/`out` segment, a `*-build`/`_build`/`*-cache`/
+  `cmake-build-*`/`bazel-*` tree, a `libfoo.so.1.2`, a `foo.tar.gz` — and refuse
+  a write that would take the WHOLE pad past its cap, whatever shaped what is
+  already in it. Build it in a git worktree instead (`git worktree add <path>`):
+  the output is wanted there and can be rebuilt from the commit rather than
+  carried around as bytes. A pad is the wrong home for it in both directions: it
+  is billed to a disk shared with every other session, and it ends with the
+  session, so nothing can be built from it afterwards. **This rule is enforced
+  at the TOOLS and not in a shell.** `write` and `edit` carry their payload
+  inline and are checked; `bash` and the `eval` kernel are handed this pad as a
+  path (`$LOCAL_OPERATOR_SCRATCHPAD`) and are NOT policed, so a `pnpm install`, a
+  `cargo build` or a redirect into the pad still succeeds and still lists back
+  through the scheme. The refusal is a nudge at the tool surface: it cannot undo
+  what a shell has already put there.
+- **A NON-image binary** (an archive, a model file, a `.bin`) → not here: it has
+  no text to return, so the reader refuses it as text. (`bash mktemp -d` with NO
+  template — that lands in `$TMPDIR`, the per-user temp directory, while a
+  template carrying `/tmp` puts you back in the one directory macOS reaps:
+  `/usr/libexec/tmp_cleaner` (launchd `com.apple.tmp_cleaner`, daily) prunes
+  `/tmp` entries older than three days, and `$TMPDIR` is not on that list, so
+  scratch there can be deleted out from under a running session.) An IMAGE is
   not in this class — measured 2026-09-21: a PNG written into the pad by `bash`
   reads back through the scheme as a viewable image, so rendered frames belong
-  here with everything else. Do NOT pass a template that carries
-  the `/tmp` directory in its path — that is what puts you back in the one
-  directory macOS reaps. `/tmp` belongs to the system cleaner:
-  `/usr/libexec/tmp_cleaner` (launchd `com.apple.tmp_cleaner`, run daily)
-  prunes entries under `/tmp` older than three days, and `$TMPDIR` is not on
-  that list — so scratch there can be deleted out from under a session that is
-  still running, while `$TMPDIR` survives it. Then write that absolute path into
-  the scratchpad itself (`scratchpad://dirs.txt`): the path is what `bash` and
-  `read` need to reach the files, and a path that lives only in an old
-  transcript is a path already lost.
+  here with everything else. Then write that absolute path into the scratchpad
+  itself (`scratchpad://dirs.txt`): the path is what `bash` and `read` need to
+  reach the files, and a path that lives only in an old transcript is a path
+  already lost.
 
 ## A directory named `tmp` or `scratch` is not scratch space
 
@@ -216,20 +216,15 @@ gets no tile and no viewer. One file per subject; subdirectories are free
 - One directory level per listing, and a listing is bounded, so a wide directory
   cannot flood the transcript. Reading a very large file comes back truncated,
   with the `read` call that continues it.
-- The folder is NOT size-capped overall, and nothing budgets the sum of what a
-  pad holds. A SINGLE write is the one thing that is capped: 32 MiB
-  (33,554,432 bytes), because a pad is disk shared with every other session on
-  the machine and is reclaimed only when its session ends — so a payload meant
-  to be built from or streamed belongs in a git worktree or a temp directory.
-  A write is refused by NAME as well: a build or dependency directory
-  (`node_modules`, `target`, `dist`, `build`, `site-packages`, `Pods`, …) or a
-  compiled, archived or model extension (`.o`, `.a`, `.so`, `.zip`, `.tar.gz`,
-  `.pt`, `.bin`, …) is not scratch, whatever it is called here. Reading is
-  deliberately NOT gated: a pad written before this rule can still be listed,
+- A pad is capped TWICE, because it is disk shared with every other session on
+  the machine and is reclaimed only when its session ends: a SINGLE write at
+  32 MiB (33,554,432 bytes), and the whole pad at 256 MiB (268,435,456 bytes),
+  past which every write is refused whatever filled it — no list of names knows
+  every shape of build tree, so the last rule is the pad's own total. Reading is
+  deliberately NOT gated: a pad written before these rules can still be listed,
   read and cleaned up, which is the point. Nothing removes the folder later
   either — the only thing that removes it is the session going away, by the
-  cleanup pass (when its policy is switched on) or by the session being
-  deleted.
+  cleanup pass (when its policy is switched on) or by the session being deleted.
 - Paths are resolved and must stay inside the scratchpad; a symlink pointing out
   is refused rather than followed.
 - Any other URL scheme in a path argument is refused: a scheme the tools do not

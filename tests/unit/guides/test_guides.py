@@ -399,7 +399,11 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     in a shell) is not policed at all, and the check has one call site either
     way. The claim and its boundary are pinned TOGETHER, because the failure this
     guards is a later revision keeping the rule and dropping the honest half —
-    which is exactly how the over-claim got written.
+    which is exactly how the over-claim got written. The material is named as the
+    list the generality round asked for (build trees, dependency trees, compiled
+    artefacts, archives, anything the shell built) rather than as "build output"
+    alone: a dependency tree is the largest single shape in the audit and calling
+    it build output is what let it read as somebody else's problem.
     """
     resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
     body = resolver("guide://scratchpad")
@@ -410,11 +414,37 @@ def test_scratchpad_guide_states_the_boundary_of_the_content_policy() -> None:
     # assertion on the raw bytes would pin the line width rather than the claim.
     collapsed = " ".join(section.split())
 
-    assert "Build output" in collapsed
+    assert "build trees, dependency trees, compiled artefacts" in collapsed
     assert "git worktree add" in collapsed
     # The boundary: the tools are checked, a shell is not.
     assert "enforced at the TOOLS and not in a shell" in collapsed
     assert "NOT policed" in collapsed
+
+
+def test_scratchpad_guide_states_the_shapes_and_the_pad_total() -> None:
+    """The content policy is a SHAPE rule plus a backstop, and both halves are
+    what a reader has to be able to act on: the "do not put these here" list, the
+    shapes a list of names would miss (a build tree qualified by its toolchain, a
+    versioned shared library), and the pad's own 256 MiB total — the arm that
+    refuses material whose name no list has ever seen.
+    """
+    resolver = make_guide_resolver({guide.name: guide for guide in discover_guides()})
+    body = resolver("guide://scratchpad")
+    assert body is not None
+
+    # Whitespace-collapsed: the guide is PROSE and re-wraps as it is edited, so an
+    # assertion on the raw bytes would pin the line width rather than the list.
+    collapsed = " ".join(body.split())
+
+    assert "Do not put these here: build trees, dependency trees, compiled artefacts" in collapsed
+    assert "anything the shell built" in collapsed
+    # Both ceilings, as the numbers a reader compares against: a per-write one and
+    # the pad's own.
+    assert "32 MiB (33,554,432 bytes)" in collapsed
+    assert "256 MiB (268,435,456 bytes)" in collapsed
+    # The shapes, not only the names: the trees the list never held.
+    assert "cmake-build-*" in collapsed
+    assert "libfoo.so.1.2" in collapsed
 
 
 def test_scratchpad_guide_makes_a_rendered_frame_first_class_content() -> None:
