@@ -46,6 +46,8 @@ from local_operator.harness.redaction import (
 )
 from local_operator.harness.types import (
     AbortSignal,
+    AgentTool,
+    LoopConfig,
     Message,
     ModelSpec,
     StreamEndEvent,
@@ -54,6 +56,7 @@ from local_operator.harness.types import (
     TextContent,
     ToolCall,
     ToolContext,
+    ToolResult,
 )
 from local_operator.redaction_shapes import (
     REDACTION_MARKER,
@@ -3173,3 +3176,243 @@ def test_a_flag_whose_value_is_a_name_is_not_a_credential() -> None:
     # ...and a value that could be a credential is still masked, which is what the
     # corpus's own flag cases pin (they run over every surface above).
     assert "cli-credential-flag" in match_shape_names("server --token=" + "Sup3rTokenValue91")
+
+
+# ---------------------------------------------------------------------------
+# Step cost: the pass is handed ONE STEP, never the conversation
+# ---------------------------------------------------------------------------
+#
+# The requirement these pin: redaction must be step by step, with NOTHING whose
+# cost grows with how long the session has been running. That is a claim about
+# WHAT EACH PASS CALL IS HANDED, so it is measured at the single funnel every
+# redaction path shares — ``redaction_shapes.scrub_secrets_with_hits`` — rather
+# than argued from the call graph. A future path that handed the pass the whole
+# conversation would leave every other test in this file green, which is exactly
+# why these exist.
+
+#: What one settled tool result may be. The arms below use the PRODUCTION number
+#: rather than a test-sized one, so the shape measured is the shipped one while
+#: the whole test stays `steps x 8 KiB` of work.
+_STEP_RESULT_BYTES = builtin.TOOL_OUTPUT_LIMIT_CHARS
+
+
+def _record_funnel(monkeypatch) -> list[tuple[int, int]]:
+    """Record ``(bytes_in, hit_count)`` for every call into the one funnel.
+
+    Every redaction path in the tree — the loop's result hook, the journaled
+    tool-call argument scrub, the live pipe filter, the live-text path — reaches
+    the table through this one function, so recording here counts a call
+    wherever it came from and whatever it decided.
+    """
+    records: list[tuple[int, int]] = []
+    real = redaction_shapes.scrub_secrets_with_hits
+
+    def wrapper(text, values=()):
+        scrubbed, hits = real(text, values)
+        records.append((len(text), len(hits)))
+        return scrubbed, hits
+
+    # Each module holds its OWN binding of the name (a module-level ``from …
+    # import``), so patching one leaves the others reading the real function and
+    # the measurement silently under-counts. ``redaction_shapes`` is patched for
+    # its own ``scrub_secrets`` / ``match_shape_names`` views.
+    import local_operator.variables as variables
+
+    monkeypatch.setattr(redaction_shapes, "scrub_secrets_with_hits", wrapper)
+    monkeypatch.setattr(variables, "scrub_secrets_with_hits", wrapper)
+    monkeypatch.setattr(builtin, "scrub_secrets_with_hits", wrapper)
+    return records
+
+
+def _step_text() -> str:
+    """One settled tool result: ordinary, anchor-bearing log text.
+
+    The anchor is deliberate. A result with no anchor at all returns from the
+    funnel before the table runs, so a measurement over anchor-free text would
+    pin the gate rather than the pass.
+    """
+    line = "2026-09-21T00:00:00Z INFO build step completed, token budget nominal\n"
+    return (line * ((_STEP_RESULT_BYTES // len(line)) + 1))[:_STEP_RESULT_BYTES]
+
+
+def _step_tool() -> AgentTool:
+    async def execute(tool_call_id, args, signal, on_update, context):
+        return ToolResult(
+            tool_call_id=tool_call_id,
+            tool_name="emit",
+            content=[TextContent(text=_step_text())],
+        )
+
+    return AgentTool(
+        name="emit",
+        parameters={"type": "object", "properties": {}},
+        execute=execute,
+    )
+
+
+def _step_stream(steps: int):
+    """A provider that asks for ``steps`` tool calls and then stops."""
+    issued = [0]
+
+    def stream_fn(request, signal=None):
+        n = min(issued[0], steps)
+        issued[0] += 1
+
+        async def gen():
+            if n < steps:
+                yield StreamToolCallDelta(index=0, id=f"c{n}", name="emit", argument_delta="{}")
+                yield StreamEndEvent(stop_reason="toolUse")
+            else:
+                yield StreamTextDelta(delta="done")
+                yield StreamEndEvent(stop_reason="stop")
+
+        return gen()
+
+    return stream_fn
+
+
+async def _drive_steps(steps: int) -> None:
+    """Run the REAL loop for ``steps`` tool-calling turns."""
+    from local_operator.harness.loop import AgentLoop, LoopContext
+
+    store = VariableStore(cwd=".")
+    loop = AgentLoop()
+    context = LoopContext(system_blocks=["sys"], tools=[_step_tool()])
+    config = LoopConfig(
+        model=ModelSpec(provider="test", model_id="unit-model"),
+        convert_to_llm=lambda messages: [m for m in messages if isinstance(m, Message)],
+        stream_fn=_step_stream(steps),
+        # The production hook on the production wiring: ``Session`` hands
+        # ``_redact_tool_result_text`` here, which funnels to
+        # ``redact_with_report``. A bare ``redact`` would measure the same pass,
+        # but the report-carrying entry point is what ships.
+        redact_tool_result=lambda text: store.redact_with_report(text)[0],
+    )
+    async for _ in loop.run([Message.user("go")], context, config, None):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_the_pass_is_handed_one_step_and_the_largest_call_does_not_grow(monkeypatch):
+    """The structural statement of "step by step only".
+
+    The MAXIMUM is what a session-scoped scan would move: a pass handed the whole
+    history has a largest call that climbs with the session, while a per-step
+    pass is flat. The TOTAL is expected to climb — that is the step count, which
+    is the point — so only the maximum is asserted.
+    """
+    records = _record_funnel(monkeypatch)
+
+    records.clear()
+    await _drive_steps(3)
+    short = list(records)
+
+    records.clear()
+    await _drive_steps(30)
+    long = list(records)
+
+    assert short and long
+    assert max(b for b, _ in short) == _STEP_RESULT_BYTES
+    assert max(b for b, _ in long) == _STEP_RESULT_BYTES, (
+        "the largest single pass call grew with session length: some path is "
+        "handing the funnel more than one step"
+    )
+    # Growth is in CALLS and linear in steps, which is the shape asked for.
+    assert len(long) > len(short)
+    assert len(long) <= 4 * 30, "implausibly many calls per step"
+
+
+@pytest.mark.asyncio
+async def test_a_resume_replay_makes_no_pass_calls_at_all(monkeypatch, tmp_path):
+    """The replay is a PASSTHROUGH, and that is measured rather than argued.
+
+    A resumed child is built on the stopped child's directory: ``Transcript``
+    reads the file back and ``Session.__init__`` seeds its context from
+    ``build_llm_history()``. No scrub runs on that path — no module under
+    ``session/`` references the redaction table at all. Containment is a property
+    of the WRITE path (the journaled-arguments scrub and the result hook, both
+    upstream of the file), so a replay has nothing left to remove and costs
+    nothing. A figure like "49.7 s of scrub CPU across 22 child transcripts" is
+    arithmetic on the assumption that this path scrubs; it does not.
+    """
+    records = _record_funnel(monkeypatch)
+
+    # Written straight to disk, bypassing the write-path scrub on purpose: the
+    # replay's behaviour over credential-shaped bytes is the thing under test,
+    # so the bytes have to be there.
+    directory = tmp_path / "stopped-child"
+    transcript = Transcript(directory)
+    await transcript.append_message(
+        Message.assistant(
+            "calling the API",
+            tool_calls=[
+                ToolCall(
+                    name="bash",
+                    arguments={"command": "curl -u svc:hunter2swordfish https://example.test"},
+                )
+            ],
+        )
+    )
+    on_disk = list(Transcript(directory).build_llm_history())
+
+    records.clear()
+    resumed = Session(
+        model=ModelSpec(provider="test", model_id="unit-model", context_window=1000),
+        stream_fn=_never_streams,
+        tools=[],
+        transcript=Transcript(directory),
+        system_blocks_provider=lambda *_a: [],
+        yolo=True,
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+    )
+    assert records == [], f"the replay called the pass {len(records)} time(s)"
+
+    # ...and it did not rewrite the bytes it replayed. Asserted on the message the
+    # new session seeded its context with, because "no funnel calls" alone would
+    # also be true of a replay that quietly dropped the history.
+    replayed = [m for m in resumed._context.messages if isinstance(m, Message)]
+    assert [m.model_dump() for m in replayed] == [m.model_dump() for m in on_disk]
+    assert "hunter2swordfish" in json.dumps([m.model_dump() for m in replayed])
+
+
+def test_the_bash_settled_path_bounds_the_pass_before_it_runs(monkeypatch):
+    """The settled-stream cap BITES, and it bites before the pass runs.
+
+    Pins the ORDER, not the number: the elision has to happen before the redact,
+    so the pass is never paid for text the result then throws away. Moving the
+    truncation back to after the pass reds this — the pass would be handed the
+    whole stream, which is what it was found doing at up to the retention limit
+    per pipe while the model's display budget is 8 KiB.
+    """
+    seen: list[int] = []
+    real = builtin._redact_tool_text
+
+    def spy(text, context):
+        seen.append(len(text))
+        return real(text, context)
+
+    monkeypatch.setattr(builtin, "_redact_tool_text", spy)
+    # Capped small so the assertion costs kilobytes instead of megabytes; the
+    # shipped cap is the retention limit below and the shape is the same.
+    monkeypatch.setattr(builtin, "_REDACT_STREAM_LIMIT_CHARS", 4096)
+
+    out = builtin._redact_settled_stream("x" * 100_000, ToolContext(cwd="."))
+
+    assert seen == [4096], f"the pass was handed {seen}; expected the cap exactly"
+    assert len(out) <= 4096 + len(builtin.BASH_TRUNCATION_MARKER)
+
+
+def test_the_settled_cap_is_the_retention_limit_not_the_display_budget():
+    """The cap may only drop what is dropped from the OUTPUT too.
+
+    The same text the display elides is what gets spilled to the store, and the
+    store's copy is readable later, so a cap set to the 8 KiB display budget
+    would skip bytes that are still published — the bound would leak rather than
+    mask. The cap is therefore the largest text the retention layer produces, so
+    nothing reachable is skipped and detection is unchanged.
+    """
+    from local_operator.tools.spill import SPILL_ENTRY_LIMIT_BYTES
+
+    assert builtin._REDACT_STREAM_LIMIT_CHARS == SPILL_ENTRY_LIMIT_BYTES
+    assert builtin._REDACT_STREAM_LIMIT_CHARS > builtin.TOOL_OUTPUT_LIMIT_CHARS

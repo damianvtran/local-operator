@@ -2803,6 +2803,71 @@ def _redact_tool_text(text: str, context: ToolContext | None) -> str:
     return redacted if isinstance(redacted, str) else text
 
 
+#: The most text one call into the credential pass may be handed, per stream.
+#:
+#: **Why a cap at all.** The pass costs CPU proportional to its input — measured
+#: on this tree at ~0.2 microseconds per byte when the shape gate stays shut and
+#: ~3-4 when every line carries an anchor, i.e. 1-16 seconds of synchronous work
+#: for a 4 MB stream. Before this constant the bash settled path handed the pass
+#: the WHOLE retained stream (`_BashOutput` keeps up to
+#: :data:`SPILL_ENTRY_LIMIT_BYTES` per pipe) and only afterwards applied the
+#: 8 KiB :data:`TOOL_OUTPUT_LIMIT_CHARS` display budget, so the model saw 8 KiB
+#: and the session paid for megabytes. The cap makes the pass input an explicit
+#: bound instead of whatever an upstream retention constant happened to be.
+#:
+#: **Why this number, and what it costs in detection: nothing.** The cap is the
+#: retention limit itself, which is the largest text that reaches `bash` here at
+#: all — so no byte this path can be given is skipped, and detection is
+#: unchanged. It is deliberately NOT the 8 KiB display budget: the same text is
+#: what gets spilled to the store, which the model can `read` later, so bounding
+#: the pass at the display budget would publish raw credentials into a file the
+#: session can still open. A bound may drop only what is dropped from the output
+#: as well, and that is what :func:`_redact_settled_stream` does.
+_REDACT_STREAM_LIMIT_CHARS = SPILL_ENTRY_LIMIT_BYTES
+
+
+def _redact_settled_stream(text: str, context: ToolContext | None) -> str:
+    """Redact one settled `bash` stream under :data:`_REDACT_STREAM_LIMIT_CHARS`.
+
+    The bound and the mask are applied together rather than the mask being run
+    over an unbounded string: when the input is over the cap the elided middle
+    is removed from the RETURNED text too, so the cap can only ever drop bytes
+    that are no longer published. Redacting first and eliding afterwards is
+    what this replaces — it is correct but it pays the pass for text the result
+    then throws away.
+
+    Unreachable in the shipped path today (the retention cap above is the same
+    number), which is the point: it is a guard on the pass, not a knob on the
+    output, and it keeps the bound true if retention is ever raised.
+    """
+    return _redact_tool_text(truncate_output(text, _REDACT_STREAM_LIMIT_CHARS), context)
+
+
+def _decode_and_redact_streams(
+    stdout_chunks: "_BashOutput",
+    stderr_chunks: "_BashOutput",
+    context: ToolContext | None,
+) -> tuple[str, str]:
+    """Decode both captured streams and redact them, in ONE off-loop call.
+
+    **Why the pass is in here rather than beside the decode.** The comment at
+    the foreground call site already moved the multi-MB decode, join and elision
+    into a thread because a batch of concurrent `bash` calls finishing together
+    froze the TUI frame. The redaction moved with it only for the streams that
+    are small: it is the other multi-MB synchronous step, so leaving it on the
+    event loop kept the freeze for exactly the commands the thread was added
+    for. The work is byte-for-byte the same; only the thread it runs on changes.
+
+    ``asyncio.to_thread`` copies the current context, so the tool-source and
+    shape-hit reporters the pass publishes through are the same ones the calling
+    task would have seen — the incident a hit files is unchanged.
+    """
+    return (
+        _redact_settled_stream(stdout_chunks.decode(), context),
+        _redact_settled_stream(stderr_chunks.decode(), context),
+    )
+
+
 def _bash_output_summary(stdout: str, stderr: str) -> str:
     """The shared 'stdout/stderr' body used by updates and the final result."""
     parts = [
@@ -3496,9 +3561,9 @@ async def execute_bash(
                 await cleanup(kill=True)
                 raise
 
-            out, err = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-            out = _redact_tool_text(out, context)
-            err = _redact_tool_text(err, context)
+            out, err = await asyncio.to_thread(
+                _decode_and_redact_streams, stdout_chunks, stderr_chunks, context
+            )
             code = process.returncode if process.returncode is not None else -1
             head = f"TIMEOUT after {params.timeout}s (process killed)" if timed_out_bg else ""
             if memory_exceeded_bg:
@@ -3766,15 +3831,17 @@ async def execute_bash(
             + (f"\n{aborted_missing}" if aborted_missing else ""),
         )
 
-    # Decoding and, for oversized output, spilling/eliding run in a thread:
-    # a command that printed megabytes turns this tail into a multi-MB
-    # decode, a multi-MB join, a disk write of the spill and string slicing
-    # to elide it — all synchronous, all on the loop that renders the TUI,
-    # and the reason a batch of concurrent bash calls used to freeze the
-    # frame at the moment they finished together.
-    stdout_raw, stderr_raw = await asyncio.to_thread(_decode_chunks, stdout_chunks, stderr_chunks)
-    stdout_raw = _redact_tool_text(stdout_raw, context)
-    stderr_raw = _redact_tool_text(stderr_raw, context)
+    # Decoding, redaction and (for oversized output) spilling/eliding run in a
+    # thread: a command that printed megabytes turns this tail into a multi-MB
+    # decode, a multi-MB credential pass, a multi-MB join, a disk write of the
+    # spill and string slicing to elide it — all synchronous, all on the loop
+    # that renders the TUI, and the reason a batch of concurrent bash calls used
+    # to freeze the frame at the moment they finished together. The redaction is
+    # in the thread with the decode (`_decode_and_redact_streams`) rather than
+    # beside it, because it is one of those multi-MB steps.
+    stdout_raw, stderr_raw = await asyncio.to_thread(
+        _decode_and_redact_streams, stdout_chunks, stderr_chunks, context
+    )
     return_code = process.returncode if process.returncode is not None else -1
 
     # Both streams may end up carrying a marker, so reserve room for two.
@@ -3881,14 +3948,6 @@ def _bash_partial_summary(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput
     return _bash_output_summary(
         truncate_output(stdout_chunks.decode()),
         truncate_output(stderr_chunks.decode()),
-    )
-
-
-def _decode_chunks(stdout_chunks: _BashOutput, stderr_chunks: _BashOutput) -> tuple[str, str]:
-    """Join and decode both captured streams off the event loop."""
-    return (
-        stdout_chunks.decode(),
-        stderr_chunks.decode(),
     )
 
 
