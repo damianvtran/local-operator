@@ -396,7 +396,8 @@ async def test_the_sweeper_hands_every_outcome_to_the_walk(
     config_dir = tmp_path / "store"
     _session(config_dir, "sess-wired", rows=[_wake_row()])
     spooled.note_spooled_turn(config_dir, "sess-wired")
-    assert spooled.read_spooled_turn(config_dir, "sess-wired")["attempts"] == 0
+    fresh = spooled.read_spooled_turn(config_dir, "sess-wired")
+    assert fresh is not None and fresh["attempts"] == 0
 
     seen: dict[str, object] = {}
 
@@ -476,14 +477,15 @@ def test_dropping_a_deferral_still_judges_the_record_it_clears(
     directory = _session(config_dir, "sess-cas", rows=[_wake_row()])
     store.note_spooled_turn(config_dir, "sess-cas")
     judged = store.read_spooled_turn(config_dir, "sess-cas")
+    assert judged is not None, "the fixture must have written a record"
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
 
-    seen: dict[str, object] = {}
+    seen: dict[str, int | None] = {}
     real_clear = store.clear_spooled_turn
 
-    def _spy(root: Path, session_id: str, **kwargs: object) -> bool:
-        seen.update(kwargs)
-        return real_clear(root, session_id, **kwargs)
+    def _spy(root: Path, session_id: str, *, expected_updated_at_ms: int | None = None) -> bool:
+        seen["expected_updated_at_ms"] = expected_updated_at_ms
+        return real_clear(root, session_id, expected_updated_at_ms=expected_updated_at_ms)
 
     # ``drop_owed_turn`` imports the name function-locally, so patching the module
     # attribute is what the production call resolves.
