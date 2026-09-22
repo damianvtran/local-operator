@@ -5338,7 +5338,24 @@ def _live_state_supersedes_outcome(row: dict[str, Any]) -> bool:
     which surface is behind. Stored rows are untouched — they have no live state
     to supersede anything, and their outcome is the only thing they can say.
     """
-    if row.get("state") == "stored":
+    # STORED AND STALE ROWS HAVE NO LIVE STATE, and stale is the one that has to
+    # be said out loud. A stored row obviously carries none — nothing is
+    # running. A STALE row looks like it does: ``registry.scan`` classifies it
+    # stale because the pid is GONE, but the record on disk is the last one the
+    # dead runtime published, so the ``busy``/``pending`` flags in it are frozen
+    # at whatever was true the instant before it died. Reading those as "this
+    # session is working" would suppress the receipt on exactly the row the WHY
+    # column was added for — a killed runtime publishes nothing further, and its
+    # reason survives only in the attention store (see the column's note above,
+    # and the 2026-09-13 kill wave it names).
+    #
+    # It is also where the ``catalog.status`` precedent this rule follows draws
+    # the same line: ``catalog`` drops stale records from its live map outright
+    # (``if session_id and state != "stale"``), so a stale row there has no live
+    # state to outrank its completion mark and the receipt shows. Excluding it
+    # here is what keeps the two surfaces agreeing rather than inverting on the
+    # one row whose whole story is the outcome.
+    if row.get("state") in ("stored", "stale"):
         return False
     return bool(row.get("pending")) or bool(row.get("busy")) or row.get("state") == "wedged"
 

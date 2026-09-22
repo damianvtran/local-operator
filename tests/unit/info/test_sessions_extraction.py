@@ -399,6 +399,25 @@ GLYPH_FIXTURE: list[tuple[Any, str]] = [
         ),
         "live",
     ),
+    (
+        # The SECOND idle row, so both glyph classes keep RENDERED clamp
+        # coverage (agent review round 1, F2). The VS16-selection class has its
+        # own way to be split — a selector parted from its base — and pinning it
+        # only through the `_clamp_reason_cell` helper is the helper-level pin
+        # this file's own docstring blames for letting the assembled-row defect
+        # through. One idle row per class keeps both measured on the real table.
+        _Record(
+            pid=5153,
+            kind="exec",
+            session_id="facedeadf11d",
+            conversation_name=VS16 * 20,
+            cwd="/tmp/probe/idle-selection",
+            model_label=KEYCAP * 14,
+            started_at=NOW - 60.0,
+            heartbeat_at=NOW - 1.0,
+        ),
+        "live",
+    ),
 ]
 
 
@@ -927,6 +946,69 @@ def test_the_table_explains_a_session_only_when_it_has_something_to_explain(
     payload = _json.loads(capsys.readouterr().out)
     row = next(item for item in payload if item["session_id"] == WHY_ROW_SESSION_ID)
     assert "killer pid 40609" in row["completion_reason"]
+
+
+def test_a_killed_runtime_is_still_explained_though_its_record_says_busy(
+    monkeypatch: Any, tmp_path: Any, capsys: Any
+) -> None:
+    """A STALE row's frozen flags are not live state (agent review round 1, F1).
+
+    The row the WHY column was added for is the killed runtime: it publishes
+    nothing further, so its reason survives only in the attention store, and
+    "why did this die, and did I ask for it?" is answerable from a shell only
+    here. That row is also the trap for a live-state rule.
+
+    ``registry.scan`` classifies a record stale because the PID IS GONE — but
+    the record itself is the last one that runtime wrote, so its ``busy`` and
+    ``pending`` fields are frozen at whatever was true the instant before it
+    died. A runtime killed mid-turn leaves ``busy=True`` behind. Read as "this
+    session is working", that suppresses the receipt on precisely the row that
+    has nothing else to say, and — since the column is conditional — drops the
+    column entirely for a fleet whose only news is a kill.
+
+    ``catalog`` draws the same line by dropping stale records from its live map
+    (``state != "stale"``), so the surfaces agree here rather than inverting.
+    """
+    import argparse
+
+    from local_operator import cli
+    from local_operator.session.runtime import registry
+
+    _install_fixture(monkeypatch)
+    monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
+    # A CURRENT record (the fixture's dead row is an `_OldRecord`, which predates
+    # these fields), carrying the flags a mid-turn kill leaves frozen behind it:
+    # the runtime died while a turn was running, so the last thing it published
+    # says `busy=True` and nothing ever corrects it.
+    killed = _Record(
+        pid=999999,
+        kind="exec",
+        session_id="0badc0de0bad",
+        conversation_name="Dead runtime",
+        cwd="/tmp/probe/dead",
+        model_label="anthropic/claude-opus-4-1",
+        started_at=NOW - 600.0,
+        heartbeat_at=NOW - 600.0,
+        busy=True,
+    )
+    monkeypatch.setattr(registry, "scan", lambda root=None: [(killed, "stale")])
+    _seed_outcome(
+        tmp_path,
+        "0badc0de0bad",
+        kind="interrupted",
+        reason=_deliberate_stop_reason(),
+        cause="user-stop",
+    )
+
+    code = cli.sessions_command(
+        argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    # The column survives, and the dead row carries its reason.
+    assert "WHY" in out.splitlines()[0], out
+    dead_line = next(line for line in out.splitlines() if "Dead runtime" in line)
+    assert "killed by /stop --all" in dead_line, dead_line
 
 
 def test_a_parked_row_is_not_explained_by_the_stop_that_preceded_its_resume(
@@ -1631,9 +1713,11 @@ def test_sequence_glyph_rows_keep_the_table_header_width(
     _install_fixture(monkeypatch)
     monkeypatch.setattr(cli, "config_dir", lambda: tmp_path)
     monkeypatch.setattr(registry, "scan", lambda root=None: GLYPH_FIXTURE)
-    # Seeded on the idle row: the two gated rows above suppress a stale outcome
-    # by design, and this case is about the column's cell arithmetic.
+    # Seeded on the idle rows: the two gated rows above suppress a stale outcome
+    # by design, and this case is about the column's cell arithmetic. One per
+    # glyph class, so BOTH clamps are measured on the rendered table.
     _seed_outcome(tmp_path, "facedeadf00d", kind="error", reason=FAMILY * 30, cause="future-cause")
+    _seed_outcome(tmp_path, "facedeadf11d", kind="error", reason=VS16 * 30, cause="future-cause")
 
     code = cli.sessions_command(
         argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
@@ -1653,7 +1737,7 @@ def test_sequence_glyph_rows_keep_the_table_header_width(
 
     # Each clamped cell is inside its column, and the sequences are whole ones —
     # a clamp may not split a VS16 selection from its base or a family cluster.
-    selection, family, idle = lines
+    selection, family, idle, idle_selection = lines
     assert _cells_span(selection, conversation_at, cli.CONVERSATION_COLUMN_WIDTH) == VS16 * 12
     assert _cells_span(selection, model_at, cli.MODEL_COLUMN_WIDTH) == KEYCAP * 12
     assert _cells_span(selection, needs_at, cli.NEEDS_COLUMN_WIDTH) == VS16 * 4
@@ -1663,13 +1747,31 @@ def test_sequence_glyph_rows_keep_the_table_header_width(
     # and padded by the column's remaining CELLS: 6 cells of family plus 2.
     assert _cells_span(family, needs_at, cli.NEEDS_COLUMN_WIDTH) == FAMILY * 3 + "  "
 
-    # The clamp is asserted on the row that CARRIES a reason. The two gated rows
-    # render an empty WHY cell by the supersession rule, and an empty cell has
-    # no sequence to split — their contribution to this case is the header-width
-    # invariant above, which every row still pays.
-    reason_cell = _cells_span(idle, why_at, cli.WHY_COLUMN_WIDTH).rstrip()
-    assert reason_cell.endswith("…"), repr(reason_cell)
-    assert cell_len(reason_cell) <= cli.WHY_COLUMN_WIDTH, (cell_len(reason_cell), reason_cell)
-    assert not reason_cell[:-1].endswith("\u200d"), repr(reason_cell)
+    # The clamp is asserted on the rows that CARRY a reason, one per glyph class
+    # (F2). The two gated rows render an empty WHY cell by the supersession
+    # rule, and an empty cell has no sequence to split — their contribution to
+    # this case is the header-width invariant above, which every row still pays.
+    for carrier in (idle, idle_selection):
+        reason_cell = _cells_span(carrier, why_at, cli.WHY_COLUMN_WIDTH).rstrip()
+        assert reason_cell.endswith("…"), repr(reason_cell)
+        assert cell_len(reason_cell) <= cli.WHY_COLUMN_WIDTH, (cell_len(reason_cell), reason_cell)
+        # No dangling joiner. NOT asserted for VS16: a selection sequence ENDS
+        # with U+FE0F by construction (base + selector), so a whole, correctly
+        # clamped cell of them legitimately ends in one — the split to guard
+        # against there is a base left WITHOUT its selector, which the
+        # whole-sequence equality below pins directly.
+        assert not reason_cell[:-1].endswith("\u200d"), repr(reason_cell)
+
+    # THE SPLIT ITSELF, per class: the clamped body is whole sequences plus the
+    # marker, so a selector can never be parted from its base nor a cluster from
+    # its joiner. Asserted as equality rather than as a shape probe, because
+    # that is the property the class needs and a probe is what F2 called out.
+    assert _cells_span(idle, why_at, cli.WHY_COLUMN_WIDTH).rstrip() == (
+        FAMILY * ((cli.WHY_COLUMN_WIDTH - 1) // cell_len(FAMILY)) + "…"
+    )
+    assert _cells_span(idle_selection, why_at, cli.WHY_COLUMN_WIDTH).rstrip() == (
+        VS16 * ((cli.WHY_COLUMN_WIDTH - 1) // cell_len(VS16)) + "…"
+    )
+
     for gated in (selection, family):
         assert _cells_span(gated, why_at, cli.WHY_COLUMN_WIDTH).strip() == "", repr(gated)
