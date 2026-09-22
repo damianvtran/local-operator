@@ -63,8 +63,9 @@ def _credential(manager: CredentialManager, *keys: str) -> str:
     """
     from local_operator.providers.registry import provider_secret_value
 
+    base = getattr(manager, "config_dir", None)
     for key in keys:
-        stored = provider_secret_value(key)
+        stored = provider_secret_value(key, base=base)
         if stored:
             return stored
     for key in keys:

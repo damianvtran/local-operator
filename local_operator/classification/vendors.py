@@ -560,7 +560,9 @@ class _HttpDecisionVendor:
                 continue
             from local_operator.providers.registry import provider_secret_value
 
-            stored_key = provider_secret_value(tier)
+            stored_key = provider_secret_value(
+                tier, base=getattr(manager, "config_dir", None)
+            )
             if stored_key:
                 return SecretStr(stored_key), index
             value = manager.get_credential(tier)

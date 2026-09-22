@@ -1707,7 +1707,7 @@ async def _setup_knowledge(
             # read below still resolves it.
             from local_operator.providers.registry import provider_secret_value
 
-            stored = provider_secret_value(key)
+            stored = provider_secret_value(key, base=config_dir)
             if stored:
                 return stored
             secret = credential_manager.get_credential(key)

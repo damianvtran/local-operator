@@ -356,7 +356,9 @@ async def list_models(
                 # row saved by `lop credential update` wins over an ambient export.
                 from local_operator.providers.registry import provider_env_key
 
-                api_key = provider_env_key("openrouter")
+                api_key = provider_env_key(
+                    "openrouter", base=credential_manager.config_dir
+                )
                 if api_key:
                     try:
                         # Create the OpenRouter client

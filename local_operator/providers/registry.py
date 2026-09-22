@@ -803,7 +803,7 @@ def resolve_env_key(provider_id: str) -> str | None:
     return None
 
 
-def provider_secret_value(env_key: str) -> str | None:
+def provider_secret_value(env_key: str, *, base: Path | None = None) -> str | None:
     """The VALUE of the provider-owned store row for ``env_key``, else ``None``.
 
     The store reader every provider-key resolution leg shares, so the cascade
@@ -831,14 +831,14 @@ def provider_secret_value(env_key: str) -> str | None:
     from local_operator.secrets.store import provider_secret_name
 
     try:
-        raw = retrieve_secret(provider_secret_name(env_key), role="provider")
+        raw = retrieve_secret(provider_secret_name(env_key), base, role="provider")
     except (SecretStoreError, OSError, ValueError):
         return None
     value = raw.decode("utf-8", "replace").strip()
     return value or None
 
 
-def provider_env_key(provider_id: str) -> str | None:
+def provider_env_key(provider_id: str, *, base: Path | None = None) -> str | None:
     """Resolve ``provider_id``'s API key value, STORE FIRST then environment.
 
     Returns the same VALUE :func:`resolve_env_key` does, but its resolution order
@@ -864,10 +864,12 @@ def provider_env_key(provider_id: str) -> str | None:
     if definition is None or definition.env_keys is None:
         return None
     names = env_key_names(provider_id) or credential_file_names(provider_id)
-    return first_provider_key(names, resolve_env_key(provider_id))
+    return first_provider_key(names, resolve_env_key(provider_id), base=base)
 
 
-def first_provider_key(names: Iterable[str], env_value: str | None = None) -> str | None:
+def first_provider_key(
+    names: Iterable[str], env_value: str | None = None, *, base: Path | None = None
+) -> str | None:
     """First configured value across the store, ``env_value``, then the file.
 
     The rung ORDER every store-first reader shares, split out from
@@ -883,7 +885,7 @@ def first_provider_key(names: Iterable[str], env_value: str | None = None) -> st
     if it has one, and is consulted between the store and the file.
     """
     for name in names:
-        stored = provider_secret_value(name)
+        stored = provider_secret_value(name, base=base)
         if stored:
             return stored
     if env_value:
@@ -896,7 +898,9 @@ def first_provider_key(names: Iterable[str], env_value: str | None = None) -> st
     from local_operator.paths import config_dir
 
     try:
-        plaintext = CredentialManager.read_credentials(config_dir(), non_empty=True)
+        plaintext = CredentialManager.read_credentials(
+            base if base is not None else config_dir(), non_empty=True
+        )
     except OSError:
         return None
     for name in names:

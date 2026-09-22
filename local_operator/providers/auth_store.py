@@ -3169,7 +3169,12 @@ class AuthStore:
         #
         # The cascade ORDER is untouched: this is still step 5, still one value,
         # still before the stored-api_key and fallback-resolver rungs.
-        return provider_env_key(provider)
+        #
+        # ``base`` is the manager's own config root, so a store (or legacy file)
+        # the caller configured elsewhere is the one consulted; unset means the
+        # HOME-derived default, which is what a CLI invocation wants.
+        base = getattr(self._credential_manager, "config_dir", None)
+        return provider_env_key(provider, base=base)
 
     # -- failover support --------------------------------------------------------
 

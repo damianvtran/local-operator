@@ -24,7 +24,7 @@ def _radient_api_key(manager: CredentialManager) -> SecretStr:
     """
     from local_operator.providers.registry import provider_secret_value
 
-    stored = provider_secret_value("RADIENT_API_KEY")
+    stored = provider_secret_value("RADIENT_API_KEY", base=manager.config_dir)
     if stored:
         return SecretStr(stored)
     return manager.get_credential("RADIENT_API_KEY")

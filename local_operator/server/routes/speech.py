@@ -157,7 +157,9 @@ async def create_agent_speech(
             # Store-first like the rest of the provider-key surface.
             from local_operator.providers.registry import provider_env_key
 
-            api_key = provider_env_key("openrouter")
+            api_key = provider_env_key(
+                "openrouter", base=credential_manager.config_dir
+            )
             if api_key:
                 model_info_client = OpenRouterClient(api_key)
             else:
