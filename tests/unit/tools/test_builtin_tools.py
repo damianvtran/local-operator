@@ -2649,12 +2649,13 @@ async def test_the_second_arm_never_borrows_the_macos_prune(tmp_path, monkeypatc
 @pytest.mark.parametrize(
     "relative",
     [
+        # Every row here is depth ONE under a name the guard is the only reason for:
+        # with the guard removed each one fires, so each one can tell the guard from
+        # its absence. A row like `build/tmp/deep/x.o` could not — its own parent is
+        # not a name, so it is silent either way.
         "scratch/x.md",
         "tmp/x.md",
         "build/tmp/x.o",
-        # A DEPTH-2 row would pass with the guard removed (its own parent is not a
-        # name), so this one is depth 1: every row here has to be a row the guard
-        # is the only reason for.
         ".tmp/x.md",
     ],
 )
@@ -2682,6 +2683,32 @@ async def test_a_scratch_named_directory_inside_a_temp_root_is_not_nudged(
     assert result.is_error is False
     assert "[scratch]" not in result.text
     assert target.read_text(encoding="utf-8") == "x\n"
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_pad_under_a_temp_root_is_also_silent(tmp_path, monkeypatch) -> None:
+    """The chosen consequence of R1, pinned so that it is a decision rather than an
+    accident (round 2). A FOREIGN session's pad that sits under a temp root is
+    silent too, and that is right: a pad is somebody's pad wherever it lives, so the
+    temp arm's reason would be false about it (a pad IS a session's own area) and
+    this arm's advice — your scratch belongs in the pad — would be wrong about one.
+
+    Reachable through this fleet's own rigs, which put the config dir inside
+    `mktemp -d`. Guard-dependent like the rows above: without the containment it
+    fires, because the parent is named `scratchpad`.
+    """
+    temp_root = _name_arm_fixture(monkeypatch, tmp_path)
+    context, _, tools = _scratchpad_context(tmp_path)
+    foreign = temp_root / "iso-rig" / ".local-operator" / "sessions" / "other" / "scratchpad"
+    foreign.mkdir(parents=True)
+
+    result = await tools["write"].execute(
+        "c", {"path": str(foreign / "x.md"), "content": "x\n"}, None, None, context
+    )
+
+    assert result.is_error is False
+    assert "[scratch]" not in result.text
+    assert (foreign / "x.md").read_text(encoding="utf-8") == "x\n"
 
 
 @pytest.mark.asyncio
@@ -2733,10 +2760,11 @@ async def test_another_sessions_pad_fires_with_a_location_neutral_reason(
 
 @pytest.mark.asyncio
 async def test_an_unresolvable_pad_root_is_silent_on_both_channels(tmp_path, monkeypatch) -> None:
-    """R5. The two channels disagreed here: the tool arm FIRED when the pad root
-    could not be resolved while the shell scan stayed silent, so the session was
-    told to move a file into a pad that had just failed to resolve. One predicate
-    answers for both now, and its answer is silence.
+    """R5. With a pad root that could not be resolved, BOTH channels used to emit a
+    line (measured on the round-1 base) — telling the session, twice, to move a file
+    into a pad that had just failed to resolve — while no pad at all was silent on
+    both channels but crashed the tool arm. One predicate answers for both now, and
+    its answer is silence for both shapes.
 
     The failure is injected at ``Path.resolve`` for the pad root alone, because the
     OS will not produce it from a test directory: measured, a symlink loop and a

@@ -5427,12 +5427,12 @@ _TEMP_ROOT_TRAP = "a temp root"
 #: location gate either, because the NAME is the convention the session was already
 #: following when it wrote there.
 #:
-#: What is wrong with one of these is NOT what is wrong with a temp root (see
-#: ``_SCRATCH_DIR_WHY``), and it is not that nothing prunes it — it is that it sits
-#: inside the user's own tree, nothing removes it with the session, and the user
-#: cannot tell it apart from their own files. Measured 2026-09-22 on this host: one
-#: such directory held 634 files / 193 MB, with two of the same shape beside it at
-#: 356 MB and 239 MB.
+#: What is wrong with one of these is NOT what is wrong with a temp root: it is not
+#: that nothing prunes it, and the line's reason is deliberately neutral about WHERE
+#: the directory sits — see ``_SCRATCH_DIR_WHY`` for what it does say and why. What
+#: is measured 2026-09-22 on this host: one such directory held 634 files / 193 MB,
+#: with two of the same shape beside it at 356 MB and 239 MB — none of them pruned
+#: by anything, and none of them tellable apart from the operator's own work.
 _SCRATCH_DIR_NAMES = frozenset(
     {"tmp", ".tmp", "temp", "scratch", ".scratch", "scratchpad", ".scratchpad"}
 )
@@ -5521,12 +5521,15 @@ def _resolved_scratchpad_root(scratchpad_root: Path | None) -> Path | None:
     one, is a silent miss.
 
     ``None`` on failure rather than the unresolved path, because a pad root the OS
-    refuses to resolve cannot be advised about — and it has to answer the same way
-    on BOTH channels. The tool arm used to fire here while the shell scan (whose
-    ``_scratch_dir_target`` returns ``None`` when its own resolve fails) stayed
-    silent, which told the session to move a file into a pad that had just failed
-    to resolve (round 1, R5). Silence is the safe answer, and one predicate is how
-    the two channels cannot disagree about it again.
+    refuses to resolve cannot be advised about. Measured on the round-1 base
+    (``5f347f03``): with a pad root whose ``resolve()`` raises, BOTH arms emitted a
+    line — the tool one with the scheme remedy, the shell one with the PATH remedy —
+    so the session was told, on both channels, to move a file into a pad that had
+    just failed to resolve. ``None`` (no pad at all) was silent on both, but crashed
+    the tool arm with ``AttributeError``. Silence is the safe answer to both shapes,
+    and one predicate is how the two channels cannot answer differently again.
+    (Round 1's rationale claimed an asymmetry between the channels; the measured
+    base had none, and R5's real content is firing on an unresolvable pad at all.)
     """
     if scratchpad_root is None:
         return None
@@ -5568,6 +5571,23 @@ def _in_scratch_named_dir(
       asserted a location fact that is false inside a temp root and re-fired on
       that exempt class — ``$TMPDIR/scratch/x.md``, ``$TMPDIR/tmp/x.md``,
       ``/private/tmp/build/tmp/x.o`` (round 1, R1).
+
+      Two consequences of this bullet are CHOSEN, not incidental, and round 2 asked
+      for both to be stated rather than left to be discovered:
+
+      * The containment compare is an EXACT-path compare, inherited from the temp
+        arm's own root match (``resolved.parent == temp_root``). So
+        ``/private/TMP/x.md`` — the same path on a case-insensitive filesystem —
+        still reaches the name arm while ``/private/tmp/x.md`` does not. The line it
+        gets there is not false, only less specific than the prune; making this
+        compare case-insensitive while the temp arm's stays exact would create an
+        asymmetry rather than remove one, so the inherited compare is kept and named
+        here.
+      * A FOREIGN session's pad that sits under a temp root is silent too. A pad is
+        somebody's pad wherever it lives: the temp arm's reason would be false about
+        it (a pad is exactly a session's own area) and this arm's advice — your
+        scratch belongs in the pad — would be wrong about a pad. Reachable through
+        this fleet's own ``ISO=$(mktemp -d)`` rigs.
     * Nothing inside the session's own pad counts. This is not a refinement: a pad
       root is commonly named ``scratchpad`` and an agent may well make a ``tmp/``
       inside it, so without containment EVERY write into the pad would be told to
@@ -5594,13 +5614,14 @@ def _temp_scratch_hint(path: Path, context: ToolContext | None, *, is_scratchpad
     Two arms, one advisory. The temp-root arm is the shipped contract (below).
     The second arm fires on the parent's NAME (``tmp``, ``.tmp``, ``temp``,
     ``scratch``, ``.scratch``, ``scratchpad``, ``.scratchpad``, any case, any
-    location) and exists because the same funnel runs through the user's own tree:
-    the incident it was built for (2026-09-22) wrote an interface spec to a
-    ``minervaai/tmp/`` file with no deliberation at all — it followed the
-    workspace's ambient convention — and handed the path to two subagents that
-    then read and wrote it. Nothing prunes that directory and no session teardown
-    touches it, so it is indistinguishable from the user's own work forever.
-    ``_in_scratch_named_dir`` owns the trigger and its three constraints.
+    location) and exists because the same funnel runs through the tree the session is
+    working IN — a workspace or repo ``tmp/``, which is the user's filesystem, not the
+    system's temp area: the incident it was built for (2026-09-22) wrote an interface
+    spec to a ``minervaai/tmp/`` file with no deliberation at all — it followed the
+    workspace's ambient convention — and handed the path to two subagents that then
+    read and wrote it. Nothing prunes that directory and no session teardown touches
+    it, so it is indistinguishable from the user's own work forever.
+    ``_in_scratch_named_dir`` owns the trigger and its four constraints.
 
     The two arms share the builder, the word order (remedy first) and the
     one-line-per-result rule, and they differ in the reason clause: the temp arm
