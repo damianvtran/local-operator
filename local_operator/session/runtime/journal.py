@@ -888,6 +888,22 @@ def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, .
     timer expires — while a file older than the turn belongs to a predecessor that
     happened to hold the same pid.
 
+    THE FILE IS SEARCHED FOR, NOT COMPUTED, and the reason is measured rather than
+    defensive. ``dump_path`` resolves its directory from ``paths.log_dir()``, which
+    honours ``LOCAL_OPERATOR_CONFIG_DIR`` PER PROCESS — and on this fleet (measured
+    2026-09-22) the session runtimes are started with that variable set, to the
+    DEFAULT config directory, while the ``lop serve`` daemon that classifies their
+    deaths is not (``ps eww``: pid 92815 carries it, pid 1276 does not). A reader
+    that asked for one path therefore opened a directory the dump had never been
+    written into, and answered "this turn left no dump of its own" about a runtime
+    that had dumped every thread: pid 96510 on 0.62.4, whose own cut-off card read
+    ``unattributed`` while its fired dump sat in ``~/.local-operator/logs`` — the
+    exact mis-narration this rung exists to end, reached by a path the rung's own
+    author could not see because the test wrote and read in one store.
+    ``stall_watchdog.fired_dump`` searches every directory a writer on this machine
+    can have used and answers with the file that FIRED, so the fence below is
+    applied to the artifact this death actually left.
+
     THE FENCE IS ONE-DIRECTIONAL, AND THE OTHER DIRECTION IS A NAMED LIMITATION
     rather than a solved problem (agent review round 1, MINOR 3). It excludes a
     STALE same-pid dump; it cannot recover a fired one, because ``arm`` opens the
@@ -912,8 +928,8 @@ def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, .
     try:
         from local_operator.session.runtime import stall_watchdog
 
-        path = stall_watchdog.dump_path(row.pid)
-        if not path.exists() or path.stat().st_mtime < row.started_at:
+        path = stall_watchdog.fired_dump(row.pid)
+        if path is None or path.stat().st_mtime < row.started_at:
             return None, (), False
         return (
             stall_watchdog.fired_leg(row.pid),

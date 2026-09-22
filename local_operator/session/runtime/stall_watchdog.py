@@ -1298,6 +1298,32 @@ def dump_path(pid: int | None = None, directory: Path | None = None) -> Path:
     return base / f"{DUMP_PREFIX}-{pid or os.getpid()}.log"
 
 
+def dump_candidates(pid: int | None = None, directory: Path | None = None) -> tuple[Path, ...]:
+    """Every place this pid's dump MAY have been written, this process's dir first.
+
+    A WRITER takes :func:`dump_path` — one path, its own — and a READER takes this,
+    because a reader holding a dead pid is routinely not the process that wrote the
+    file: the directory comes from ``paths.log_dir()``, which honours
+    ``LOCAL_OPERATOR_CONFIG_DIR`` PER PROCESS, and the two processes need not agree.
+    Measured on this fleet (2026-09-22): the runtimes carry that variable and the
+    ``lop serve`` daemon that classifies their deaths does not, so a fired dump sat
+    in ``~/.local-operator/logs`` while the classifier resolved
+    ``~/Library/Logs/local-operator`` — and the death of a runtime that had dumped
+    every thread was narrated ``unattributed`` (``pid 96510``, the card reproduced
+    in ``tests/unit/session/runtime/test_turn_journal.py``).
+
+    ``directory`` SUPPRESSES THE SEARCH rather than seeding it: an explicit
+    directory is how a test or an isolated run states which store it means, and a
+    reader that widened that to the host's real log directories would escape the
+    isolation it was handed. One candidate, exactly as before, when it is given.
+    """
+    from local_operator.paths import log_dirs
+
+    if directory is not None:
+        return (dump_path(pid, directory),)
+    return tuple(dump_path(pid, base) for base in log_dirs())
+
+
 def deadline_path(pid: int | None = None, directory: Path | None = None) -> Path:
     """Where the CURRENT deadline goes: ``<log dir>/runtime-stall-<pid>.deadline``.
 
@@ -2565,6 +2591,50 @@ def _fires(text: str) -> bool:
     return any(line.startswith(FIRED_MARKER) for line in text.splitlines())
 
 
+def fired_dump(pid: int | None = None, directory: Path | None = None) -> Path | None:
+    """THE dump that fired for this pid, wherever it was written, or ``None``.
+
+    The file every reader in this module should read, and the reason they no longer
+    read :func:`dump_path` directly: the pid is the only key a death leaves, so the
+    reader searches :func:`dump_candidates` and answers with the first candidate
+    that CARRIES THE FIRE — a file the pid's dump was written into but never fired
+    in is not evidence about this bound, and preferring it would let a header-only
+    file left by a SIGKILL mask a fire in the other store.
+
+    IT FALLS BACK TO THE FIRST CANDIDATE THAT EXISTS, and that is a distinction the
+    readers need rather than a convenience: "no dump" and "a dump with no fire" are
+    different facts (a hard kill writes the file and nothing else), and a caller
+    deciding whether a dump exists at all — ``journal._stall_bound_evidence``'s
+    mtime fence — must be able to see the second one. ``None`` only when no
+    candidate exists anywhere.
+
+    DETERMINISTIC, so a reader that calls one of the four question-readers after
+    this one reads the SAME file: candidates keep :func:`dump_candidates`' order and
+    the first fire wins, so two stores cannot make two readers disagree about which
+    life they are describing.
+    """
+    first_existing: Path | None = None
+    for candidate in dump_candidates(pid, directory):
+        text = _dump_text(candidate)
+        if _fires(text):
+            return candidate
+        if first_existing is None and candidate.exists():
+            first_existing = candidate
+    return first_existing
+
+
+def _evidence_text(pid: int | None, directory: Path | None) -> str:
+    """The text of the dump that is this pid's evidence, or ``""``.
+
+    ONE CHOICE OF FILE FOR THE FOUR READERS, because they are four questions about
+    the same artifact — which leg fired, which tickers died, which loops were seen
+    running, whether the fire ended the runtime — and two of them picking different
+    files would be two chances for the pair to describe two different lives.
+    """
+    path = fired_dump(pid, directory)
+    return _dump_text(path) if path is not None else ""
+
+
 def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     """Did this pid's bound fire and NOT end the runtime? The third state.
 
@@ -2581,7 +2651,7 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     unreadable: the flag is the marker's presence, and the quiet direction is the
     one that cannot narrate a runtime as stalled when it never fired.
     """
-    text = _dump_text(dump_path(pid, directory))
+    text = _evidence_text(pid, directory)
     # A SUBSTRING TEST, NOT A LINE-START ONE (QA round 2, Q-4). This marker is the one
     # line of ours written into a file ANOTHER WRITER IS STILL FLUSHING: ``faulthandler``
     # writes its dump from its own thread with a buffered handle, we append this from
@@ -2611,23 +2681,28 @@ def held_pids(directory: Path | None = None) -> set[int]:
     directory once per session. Unreadable entries are skipped rather than raising —
     a diagnostic must never take the listing down.
     """
-    from local_operator.paths import log_dir
+    from local_operator.paths import log_dirs
 
-    base = directory if directory is not None else log_dir()
+    # EVERY CANDIDATE STORE, not just this process's: the daemon that renders a
+    # listing does not carry the override the runtimes that wrote these files do, so
+    # a single-directory scan answers "nothing fired" for a fleet of fired dumps (see
+    # ``dump_candidates``). An explicit ``directory`` still means exactly one store.
+    bases = (directory,) if directory is not None else log_dirs()
     held: set[int] = set()
-    try:
-        candidates = sorted(base.glob(f"{DUMP_PREFIX}-*.log"))
-    except OSError:
-        return held
-    for path in candidates:
-        text = _dump_text(path)
-        if not _fires(text):
+    for base in bases:
+        try:
+            candidates = sorted(base.glob(f"{DUMP_PREFIX}-*.log"))
+        except OSError:
             continue
-        if HELD_MARKER not in text:  # a substring, for the interleaving reason above (Q-4)
-            continue
-        suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
-        if suffix.isdigit():
-            held.add(int(suffix))
+        for path in candidates:
+            text = _dump_text(path)
+            if not _fires(text):
+                continue
+            if HELD_MARKER not in text:  # a substring, for the interleaving reason above (Q-4)
+                continue
+            suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
+            if suffix.isdigit():
+                held.add(int(suffix))
     return held
 
 
@@ -2656,7 +2731,7 @@ def fired_leg(pid: int | None = None, directory: Path | None = None) -> str | No
     only the detail names the wrong predicate. The progress fire warns at WARNING
     when it cannot record its leg, so the case is not silent in ``runtime.log``.
     """
-    text = _dump_text(dump_path(pid, directory))
+    text = _evidence_text(pid, directory)
     if not _fires(text):
         return None
     if any(line.startswith(PROGRESS_MARKER) for line in text.splitlines()):
@@ -2680,7 +2755,7 @@ def tick_deaths(pid: int | None = None, directory: Path | None = None) -> tuple[
     Empty when the file is missing, unreadable, or carries no such line — the
     quiet direction, as in :func:`_dump_text`.
     """
-    text = _dump_text(dump_path(pid, directory))
+    text = _evidence_text(pid, directory)
     return tuple(
         line[len(TICK_DEATH_MARKER) :].split(":", 1)[0].strip()
         for line in text.splitlines()
@@ -2703,7 +2778,7 @@ def executing_planes(pid: int | None = None, directory: Path | None = None) -> t
     Empty when the file is missing, unreadable, or carries no such line — the same
     quiet direction as :func:`tick_deaths`.
     """
-    text = _dump_text(dump_path(pid, directory))
+    text = _evidence_text(pid, directory)
     return tuple(
         line[len(EXECUTING_MARKER) :].split(" ", 1)[0].strip()
         for line in text.splitlines()
@@ -2730,19 +2805,23 @@ def fired_pids(directory: Path | None = None) -> set[int]:
     so a per-row call would re-glob and re-read the same directory once per
     session on a surface that renders every row.
     """
-    from local_operator.paths import log_dir
+    from local_operator.paths import log_dirs
 
-    base = directory if directory is not None else log_dir()
+    # EVERY CANDIDATE STORE, for the reason ``held_pids`` gives: the listing's reader
+    # is not the process that wrote these dumps, and a scan of one directory reports a
+    # fleet of fired runtimes as never having fired.
+    bases = (directory,) if directory is not None else log_dirs()
     fired: set[int] = set()
-    try:
-        candidates = sorted(base.glob(f"{DUMP_PREFIX}-*.log"))
-    except OSError:
-        return fired
-    for path in candidates:
-        text = _dump_text(path)
-        if not _fires(text):
+    for base in bases:
+        try:
+            candidates = sorted(base.glob(f"{DUMP_PREFIX}-*.log"))
+        except OSError:
             continue
-        suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
-        if suffix.isdigit():
-            fired.add(int(suffix))
+        for path in candidates:
+            text = _dump_text(path)
+            if not _fires(text):
+                continue
+            suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
+            if suffix.isdigit():
+                fired.add(int(suffix))
     return fired

@@ -151,11 +151,25 @@ def log_dir() -> Path:
       ``~/.local/state/local-operator/logs`` per the XDG base directory spec,
       which places "state that should persist but is not config or cache" —
       exactly a log — under the state root rather than under data or cache.
+
+    A WRITER wants this function; a READER looking for a file some OTHER process
+    wrote wants :func:`log_dirs`, because the override is per process and the two
+    processes need not agree (see that function for the measured case).
     """
     override = os.environ.get(CONFIG_DIR_ENV)
     if override:
         return Path(override) / LOG_DIRNAME
+    return platform_log_dir()
 
+
+def platform_log_dir() -> Path:
+    """The platform's conventional log directory, IGNORING :data:`CONFIG_DIR_ENV`.
+
+    Split out of :func:`log_dir` so :func:`log_dirs` can name BOTH places a log may
+    be without a second copy of the platform table below: this is the directory a
+    process WITHOUT the override writes into, and it is therefore the second place
+    :func:`log_dirs` has to look.
+    """
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Logs" / APP_DIRNAME
 
@@ -170,6 +184,56 @@ def log_dir() -> Path:
     xdg_state = os.environ.get("XDG_STATE_HOME")
     base = Path(xdg_state) if xdg_state else Path.home() / ".local" / "state"
     return base / APP_DIRNAME / LOG_DIRNAME
+
+
+def log_dirs() -> tuple[Path, ...]:
+    """Every directory a log file for THIS machine may be in, this process's first.
+
+    A SET RATHER THAN ONE PATH, because the override is PER PROCESS and a reader is
+    routinely not the process that wrote the file it is looking for. Measured on
+    this fleet (2026-09-22): the session runtimes carry
+    ``LOCAL_OPERATOR_CONFIG_DIR`` (``ps eww`` on pid 92815 shows it), so
+    ``arm`` writes ``runtime-stall-<pid>.log`` under ``$CONFIG_DIR/logs``; the
+    ``lop serve`` daemon that supervises and classifies them does NOT carry it
+    (``ps eww`` on pid 1276), so its :func:`log_dir` is the platform default. A
+    reader that resolves ONE directory therefore misses evidence that exists, and
+    a dead runtime whose dump fired is narrated as if no dump had been written at
+    all. A pid is all the reader has, and it cannot know which process wrote the
+    file — so it looks in both.
+
+    ORDER IS THE PREFERENCE, not a sort: this process's own :func:`log_dir` first
+    is where the writer put it whenever the two agree (and the only directory an
+    isolated run can see, since every candidate is HOME- or override-derived), then
+    the two directories a writer that does NOT share this process's environment can
+    have used — the DEFAULT config directory's logs (``$HOME`` +
+    :data:`DEFAULT_CONFIG_DIRNAME`) and the platform default. Deduplicated, so a
+    process without the override gets two entries rather than one path twice.
+
+    THE DEFAULT CONFIG DIR IS NOT REDUNDANT WITH THE PLATFORM ONE, and this is the
+    measured case rather than a theory: the runtimes on this host are started with
+    ``LOCAL_OPERATOR_CONFIG_DIR`` set to the DEFAULT config directory, so their
+    dumps land in ``~/.local-operator/logs`` -- a directory no reader resolving the
+    platform default would ever open. Both are listed for that reason.
+
+    WHAT THIS DOES NOT COVER, stated rather than implied: a writer started with a
+    CUSTOM override (``LOCAL_OPERATOR_CONFIG_DIR=/somewhere/else``) is
+    undiscoverable from here, because the reader holding a pid knows nothing about
+    the environment of the process that died. Every candidate is a directory this
+    machine's own defaults produce; a dump written anywhere else is still invisible
+    to a reader, and closing that for good means a pid-to-path index at arm time
+    rather than a search.
+    """
+    primary = log_dir()
+    candidates = [
+        primary,
+        Path.home() / DEFAULT_CONFIG_DIRNAME / LOG_DIRNAME,
+        platform_log_dir(),
+    ]
+    ordered: list[Path] = []
+    for candidate in candidates:
+        if candidate not in ordered:
+            ordered.append(candidate)
+    return tuple(ordered)
 
 
 #: The session runtimes' own log, beside the mobile daemon's ``mobile.log``.
