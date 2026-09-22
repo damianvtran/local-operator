@@ -16,7 +16,7 @@ from typing import Dict, List
 
 from pydantic import SecretStr
 
-from local_operator.cli_style import CYAN, SUCCESS, can_encode, paint
+from local_operator.cli_style import CYAN, ERROR, SUCCESS, can_encode, paint
 
 # Name of the file used to store credentials in .env format
 CREDENTIALS_FILE_NAME: str = "credentials.env"
@@ -390,7 +390,7 @@ class CredentialManager:
         )
         border = h * line_length
 
-        # Colour is gated on NO_COLOR/tty/TERM by ``paint`` \u2014 a raw escape here
+        # Colour is gated on NO_COLOR/tty/TERM by ``paint`` — a raw escape here
         # painted literal ``[1;36m`` into a piped or dumb-terminal transcript.
         def cyan(text: str) -> str:
             return paint(text, CYAN)
@@ -429,8 +429,25 @@ class CredentialManager:
         if not credential:
             raise ValueError(f"{key} is required for this step.")
 
-        # Save the new API key to config file
-        self.set_credential(key, credential, write=True)
+        # Save the new key as a provider-class STORE row, the consolidated home
+        # for provider credentials. The store-first readers resolve it from
+        # there, so a name the operator pastes here takes effect immediately.
+        from local_operator.providers.registry import store_provider_key
+
+        try:
+            store_provider_key(key, credential)
+        except Exception as exc:  # noqa: BLE001 - one honest line, not a panel
+            from local_operator.ansi import strip_control_sequences
+
+            print(
+                paint(
+                    strip_control_sequences(f"Could not save {key}: {exc}"),
+                    ERROR,
+                    stream=sys.stderr,
+                ),
+                file=sys.stderr,
+            )
+            raise ValueError(f"Could not save {key} to the credential store.") from exc
 
         # ASCII fallback for the check glyph too: a stdout that cannot encode the
         # box drawing cannot encode ✓ either, and crashing on the SUCCESS line

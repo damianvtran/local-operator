@@ -9,13 +9,24 @@ import pytest
 
 from local_operator.credentials import CREDENTIALS_FILE_NAME, CredentialManager
 
+#: The value the prompt tests feed and assert against. Named rather than
+#: repeated, so a mock and its assertion cannot silently diverge.
+SECRET = "new-secret-value"
+
 
 @pytest.fixture
-def temp_config():
+def temp_config(monkeypatch):
     initial_env = os.environ.copy()
     """Fixture to create a temporary config file for testing."""
     with tempfile.TemporaryDirectory() as temp_dir:
         config_path = Path(temp_dir) / CREDENTIALS_FILE_NAME
+        # prompt_for_credential now writes a provider-class STORE row, which is
+        # rooted at the HOME-derived config dir unless the registry helpers are
+        # told otherwise. Point the process's config dir at this test's temp
+        # root so the store lands beside the credentials file and never in the
+        # operator's live ~/.local-operator (which a bare HOME override would
+        # not cover — config_dir() honours LOCAL_OPERATOR_CONFIG_DIR first).
+        monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", temp_dir)
         yield config_path
         # Clear any used environment variables after each test
         os.environ.clear()
@@ -86,17 +97,21 @@ def test_prompt_for_credential(temp_config, monkeypatch):
     # would silently exercise the pipe path and ignore the getpass mock below.
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     # Mock getpass and print statements
-    monkeypatch.setattr("getpass.getpass", lambda _: "new_test_key")
+    monkeypatch.setattr("getpass.getpass", lambda _: SECRET)
     monkeypatch.setattr("builtins.print", lambda *args, **kwargs: None)
 
     credential = manager.prompt_for_credential("NEW_API_KEY")
-    assert credential.get_secret_value() == "new_test_key"
+    assert credential.get_secret_value() == SECRET
 
-    # Verify the key was saved to the config file
-    with open(temp_config, "r") as f:
-        content = f.read()
-    assert "NEW_API_KEY=new_test_key" in content
-    assert temp_config.stat().st_mode & 0o777 == 0o600
+
+    # The key is saved as a provider-class STORE row, not the plaintext file.
+    from local_operator.secrets.access import open_store
+    from local_operator.secrets.store import provider_secret_name
+
+    stored = open_store(temp_config.parent).get(
+        provider_secret_name("NEW_API_KEY"), role="provider"
+    )
+    assert stored.decode() == SECRET
 
 
 def test_missing_credential_raises_error(temp_config, monkeypatch):

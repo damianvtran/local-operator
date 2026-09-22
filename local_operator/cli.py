@@ -1574,8 +1574,16 @@ def credential_update_command(args: argparse.Namespace) -> int:
 
 
 def credential_delete_command(args: argparse.Namespace) -> int:
-    credential_manager = CredentialManager(config_dir())
-    credential_manager.set_credential(args.key, "")
+    """Remove a credential from the provider-class store namespace.
+
+    Deletes the ``LOP_PROVIDER_<KEY>`` store row. The plaintext file is left
+    untouched — a value that only ever lived there still has a reader during the
+    transition — but a store row the modern writer created is what this command
+    is expected to remove.
+    """
+    from local_operator.providers.registry import remove_provider_key
+
+    remove_provider_key(args.key)
     return 0
 
 

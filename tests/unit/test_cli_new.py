@@ -453,11 +453,10 @@ def test_credential_update_command(tmp_home: Path) -> None:
 
 
 def test_credential_delete_command(tmp_home: Path) -> None:
-    manager = MagicMock()
-    with patch("local_operator.cli.CredentialManager", return_value=manager):
+    with patch("local_operator.providers.registry.remove_provider_key") as remove:
         args = argparse.Namespace(key="TEST_API_KEY")
         assert credential_delete_command(args) == 0
-    manager.set_credential.assert_called_once_with("TEST_API_KEY", "")
+    remove.assert_called_once_with("TEST_API_KEY")
 
 
 def test_credential_update_ctrl_c_exits_130(tmp_home: Path, capsys) -> None:
