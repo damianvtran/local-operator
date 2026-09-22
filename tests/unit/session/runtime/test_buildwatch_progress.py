@@ -41,11 +41,7 @@ import pytest
 
 from local_operator import update as update_mod
 from local_operator.session.runtime import process as child_mod
-from local_operator.session.runtime.process import (
-    _Drain,
-    _drain_for,
-    _reaper,
-)
+from local_operator.session.runtime.process import _Drain, _drain_for, _reaper
 from local_operator.session.runtime.types import (
     BUILD_DRAIN_PROGRESS_S,
     LEAVING_FOR_BUILD,
@@ -380,6 +376,22 @@ async def test_a_landed_tool_boundary_resets_the_clock(rig) -> None:
     _land_a_tool_boundary(rig, 2)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
     assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
     assert (
         rig.drain.progress is not None and rig.drain.progress.abandoned is True
@@ -395,6 +407,22 @@ async def test_a_lane_step_resets_the_clock(rig) -> None:
     _bump_the_roster(rig)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
     assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
     assert (
         rig.drain.progress is not None and rig.drain.progress.abandoned is True
@@ -410,6 +438,22 @@ async def test_a_settling_job_resets_the_clock(rig) -> None:
     _settle_a_job(rig)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
     assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
     assert (
         rig.drain.progress is not None and rig.drain.progress.abandoned is True
@@ -435,6 +479,22 @@ async def test_a_job_that_is_printing_resets_the_clock(rig) -> None:
     # bound survives on printing alone, one tick at a time.
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
     assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
     assert (
         rig.drain.progress is not None and rig.drain.progress.abandoned is True
@@ -457,6 +517,22 @@ async def test_a_lane_reporting_activity_resets_the_clock(rig) -> None:
     _report_from_a_lane(rig)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
     assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
     assert (
         rig.drain.progress is not None and rig.drain.progress.abandoned is True
@@ -478,6 +554,20 @@ async def test_a_job_row_that_never_changes_cannot_hold_the_drain_open(rig) -> N
     _print_from_a_job(rig)
     _report_from_a_lane(rig)
     assert await _tick(rig, T0 + 1) is False, "the whole footprint is seen here"
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + 1
+    ), (
+        "the footprint change was never observed, so the bound is being measured from the "
+        "latch: this cell would pass with a drain clock that never advances"
+    )
+    assert rig.drain.progress.abandoned is False
 
     assert await _tick(rig, T0 + 1 + BOUND) is False
     assert (
@@ -562,6 +652,22 @@ async def test_a_spooled_message_resets_the_clock(rig) -> None:
     _spool_a_message(rig)
     assert await _tick(rig, T0 + BOUND - 1) is False
     assert rig.runtime.retiring == []
+    # THE DISCRIMINATING ASSERTION (agent review round 1, MAJOR-1). A return value
+    # cannot carry this claim any more: without a reset the drain ABANDONS at the
+    # later tick just as surely as with one, so `is False` + `abandoned is True`
+    # there is satisfied by a clock that never moved. What this cell is about is the
+    # clock itself, so it asserts the clock: the movement was OBSERVED at this tick,
+    # i.e. this is the instant the bound is now measured from. Delete the reset and
+    # ``moved_at`` stays at the latch's ``T0`` and this fails.
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + BOUND - 1
+    ), (
+        "the movement was never observed, so the bound is being measured from the latch: "
+        "this cell would pass with a drain clock that never advances"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the bound expired before the movement was observed, so nothing was reset"
     assert await _tick(rig, T0 + BOUND - 1 + BOUND) is False
     assert (
         rig.drain.progress is not None and rig.drain.progress.abandoned is True
@@ -734,9 +840,9 @@ async def test_the_reaper_abandons_a_stalled_drain_and_retries_it(
     # BEFORE it publishes, so waiting on the release and then reading ``failures``
     # raced the publish on a loaded worker (measured: green in this file alone, red
     # inside the runtime slice). Waiting on the publish proves both happened.
-    assert handle.releases == 1, (
-        "the latch was never released, so this runtime cannot take work again"
-    )
+    assert (
+        handle.releases == 1
+    ), "the latch was never released, so this runtime cannot take work again"
     # THE COMMITMENT OUTLIVES THE ABANDON, and both halves are asserted because a
     # re-latch would break the first without failing the second: the drain object
     # stays (a second ``begin_drain`` re-runs ``Session.retire_wakes_to_inbox``,

@@ -1700,7 +1700,8 @@ async def test_the_escape_hatch_reaches_a_runtime_wedged_in_a_c_call(
     With the bound holding its exit leg (``stall_watchdog._holds_work``) a wedged
     runtime stays ALIVE, so ``lop stop`` stops being a convenience and becomes the
     only way out — and the process it has to reach is one whose own loop cannot run
-    at all. This cell parks a real child in a GIL-holding ``libc.sleep`` and drives
+    at all. This cell parks a real child in GIL-holding catastrophic regex backtracking
+    (``_sre_SRE_Pattern_search``, the founding measurement's own shape) and drives
     the ladder's OWN rungs at it, so nothing here is stubbed:
 
     * SIGTERM, with a short grace, must report that it did NOT land. The receiver's

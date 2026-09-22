@@ -360,6 +360,15 @@ def collect_sessions(
     stamp = time.time() if now is None else now
     live_pids = [rec.pid for rec, state in scanned if state == "live"]
     measured = usage_fn(live_pids)
+    # Read ONCE for the whole listing, beside the usage measurement and for the same
+    # reason: the set answers a per-row question and a per-row file scan would be the
+    # cost ``session_rows`` already pays once (``fired_pids``/``held_pids`` each read
+    # every dump's text). The row builder below derives the same bit from the same
+    # reader, and the two must agree — ``session_rows`` is ``stall_held``'s published
+    # form and this field is what the panel paints from.
+    from local_operator.session.runtime import stall_watchdog
+
+    held_pids = stall_watchdog.held_pids()
 
     lines: list[SessionLine] = []
     for rec, state in scanned:
@@ -406,6 +415,11 @@ def collect_sessions(
                 beat_lag_s=getattr(rec, "beat_lag_s", None),
                 cpu_since_beat_s=getattr(rec, "cpu_since_beat_s", None),
                 detached=bool(getattr(rec, "detached", False)),
+                # THE THIRD STATE, carried onto the LINE so a rendered surface can show
+                # it (design review round 1, D1): the row dict has had it since this
+                # branch, and until the panel read it the only place it existed was the
+                # JSON.
+                stall_held=rec.pid in held_pids,
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
                 # Same getattr defaulting as the live-state fields above.

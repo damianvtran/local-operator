@@ -345,6 +345,14 @@ logger = logging.getLogger(__name__)
 #: :data:`DEFAULT_STALL_S`; ``0``/``off`` disables the watchdog outright.
 ENV_SECONDS = "LOP_RUNTIME_STALL_SECONDS"
 
+#: How many doublings a survived fire's interval may take, and the ceiling it stops
+#: at (agent review round 1, MINOR-5). Two figures rather than one so the growth is
+#: written down where a reader asks "how fast does this grow": 4 steps of a 300 s
+#: bound reaches 4800 s, and the cap holds it there, so a runtime held for a day
+#: writes ~24 dumps instead of ~288.
+HELD_FIRE_BACKOFF_STEPS = 4
+HELD_FIRE_BACKOFF_MAX_S = 3600.0
+
 #: Seconds of NO PROGRESS before the runtime dumps every thread and leaves.
 #:
 #: Sized against the two numbers the record already publishes, and against the
@@ -624,6 +632,15 @@ REARM_FAILED_MARKER = "[stall watchdog] re-arm failed: "
 #: NOT SPELLED IN THE HEADER, for the reason every marker here states: readers test
 #: these as substrings, so a header quoting it would make an armed file read as a
 #: runtime whose bound already fired and held.
+#: WHY THIS LINE MAY SAY "STALLED" WHEN THE ONLINE VOCABULARY MAY NOT (agent review
+#: round 1, NIT-1): the word is barred from the drain's prose because a runtime cannot
+#: establish that a slow turn is stuck, and a sentence that says so would assert a half
+#: it cannot know. The bound's own premise is narrower and provable — 300 s in which
+#: NEITHER plane reported and, if the progress leg fired, no CPU moved either — so for
+#: the bound "stalled" names the measurement it just made rather than a guess about
+#: someone else's work. The dump is also the artifact an operator reads while looking
+#: for exactly this, which is why the word is worth keeping here and nowhere else.
+
 HELD_MARKER = "[stall watchdog] bound held: "
 
 #: What the first sample of a progress clock holds before it has anything to
@@ -741,6 +758,7 @@ class _Armed:
         "held",
         "arm_size",
         "seen_fires",
+        "held_fires",
         "after_fire_at",
         "fired_held",
         "progress_deadline",
@@ -764,6 +782,12 @@ class _Armed:
         self.deadline_path = path.with_suffix(DEADLINE_SUFFIX)
         self.handle = handle
         self.seconds = seconds
+        #: How many fires this process has SURVIVED. Only the held-fire backoff reads
+        #: it (see ``_rearm``): an all-thread dump is ~14 KB, so a runtime wedged with
+        #: work in flight would otherwise write one every bound for the rest of its
+        #: life — measured at ~4 MB/day for a 300 s bound, which is the accumulation
+        #: this module refuses everywhere else (see ``_note_quiet_plane``).
+        self.held_fires = 0
         self.pid = pid
         #: Each plane's last sign of life, in ``time.monotonic`` seconds. Seeded to
         #: the ARM time rather than left empty, so a plane that has simply not
@@ -1330,7 +1354,22 @@ def _rearm(armed: "_Armed", *, remaining: float | None = None) -> None:
             # reported as stalled). So the next episode's bound runs from the fire that
             # ended the last one. A plane that REPORTS again revives the ordinary
             # arithmetic on its own, because its stamp is then in the future.
-            remaining = max(remaining, armed.seconds - (time.monotonic() - armed.after_fire_at))
+            # THE HELD-FIRE BACKOFF (agent review round 1, MINOR-5). While the work
+            # stays in flight the episode repeats, and every repeat writes another
+            # all-thread dump: at the shipping bound that is ~14 KB every 300 s, i.e.
+            # ~4 MB a day, on a runtime a person has already been told about. So the
+            # interval between dumps DOUBLES per survived fire up to an hour, which
+            # keeps "the bound fired and it is still stalled" on the record at a rate a
+            # person can read and bounds the artifact at tens of KB a day instead of
+            # megabytes. The budget is a CAP, never a stop: a held runtime keeps
+            # producing evidence, and nothing here turns the bound into a monitor that
+            # has given up — the fail-safe for a plane that truly stopped reporting is
+            # still the ordinary liveness leg.
+            interval = min(
+                armed.seconds * (2 ** min(armed.held_fires, HELD_FIRE_BACKOFF_STEPS)),
+                HELD_FIRE_BACKOFF_MAX_S,
+            )
+            remaining = max(remaining, interval - (time.monotonic() - armed.after_fire_at))
     _arm_timer(armed.handle, remaining, exit_leg=not armed.held)
     armed.arm_size = _dump_size(armed.path)
 
@@ -1375,6 +1414,14 @@ def _record_held_fire(armed: "_Armed") -> bool:
     so a reader never sees the re-armed timer without the statement about the fire
     that preceded it.
 
+    WHY THE SIZE AND THE COUNT ARE READ TOGETHER, and not just the size: growth on
+    its own cannot distinguish a fire from this module's own lines. The pair can,
+    because the C handler writes the stack dump and appends the marker in ONE call
+    with no scheduling point between them (the probe it consults is pure Python), so a
+    sampler can never observe the growth first and re-baseline over a fire it should
+    have annotated — and the count comparison is what makes a repeat observation of
+    the same fire a no-op rather than a second report.
+
     WHAT HAPPENS NEXT depends on the ONE question the exit leg asks, read again here:
 
     * the work is still in flight — re-arm for a full bound. The runtime is stalled
@@ -1410,6 +1457,7 @@ def _record_held_fire(armed: "_Armed") -> bool:
     )
     if _holds_work(armed.busy):
         armed.held = True
+        armed.held_fires += 1
     else:
         armed.held = False
     try:
@@ -1671,25 +1719,56 @@ def _progress_sampler(armed: "_Armed", stop: threading.Event) -> None:
     """
     interval = _sample_interval(armed.seconds)
     while not stop.wait(interval):
-        # THE PROBE IS READ HERE, outside the lock, and the decision is applied
-        # inside: see :func:`_apply_exit_leg`. This is also why the exit leg is
-        # re-read at all — the decision is made where the probe can be asked safely
-        # while the timer fires between beats, so a runtime that picks up a turn after
-        # its last arm is not ended by a timer armed while it was idle.
-        held = _holds_work(armed.busy)
-        with _LOCK:
-            if _ARMED is not armed:
+        # THE WHOLE BODY IS GUARDED, and it is the same rule ``server._heartbeat_loop``
+        # now follows one plane over (agent review round 1, MINOR-1). This thread is the
+        # ONLY thing that re-reads the exit leg after the arm, and a raise from the
+        # sample or from the fire bookkeeping would end it silently: ``armed.held``
+        # would then stay frozen at whatever it last read, and a frozen ``False`` with
+        # work in flight is precisely the defect this change removes — the fatal fire
+        # needs no Python at all (``faulthandler._exit``). A reporter that dies takes
+        # its plane's evidence with it; the fix is to keep it running.
+        try:
+            if _sample_once(armed):
                 return
-            # BEFORE the sample, and in this order: a fire that landed since the
-            # last wake is recorded and re-armed on the same pass, and only then is
-            # the next progress decision taken. The exit leg is applied first of all
-            # so that a flip made while the timer was pending is in force before
-            # anything else acts on the arm.
-            _apply_exit_leg(armed, held)
-            if _record_held_fire(armed):
-                continue
-            if _sample(armed):
-                return
+        except Exception:  # noqa: BLE001 — a diagnostic never ends a reporter
+            logger.warning(
+                "stall watchdog: the exit-leg sampler raised; it keeps running so the leg "
+                "stays fresh",
+                exc_info=True,
+            )
+
+
+def _sample_once(armed: "_Armed") -> bool:
+    """One pass of the sampler. ``True`` when the loop is DONE with this arm.
+
+    EXTRACTED SO THE LOOP CAN GUARD IT AS A WHOLE (agent review round 1, MINOR-1):
+    this body is the only thing that re-reads the exit leg after the arm, and a raise
+    from it used to end the thread silently — freezing ``armed.held`` at whatever it
+    last read, which is the defect this change removes whenever the frozen value is
+    ``False`` with work in flight (the fatal fire needs no Python: ``faulthandler``
+    calls ``_exit`` from its own C thread). Both ways the old loop body left were
+    "done": the arm having been replaced under it, and a progress decision that ended
+    the episode.
+
+    THE PROBE IS READ OUTSIDE THE LOCK and the decision applied inside (see
+    :func:`_apply_exit_leg`). This is also why the exit leg is re-read at all: the
+    decision is made where the probe can be asked safely while the timer fires
+    between beats, so a runtime that picks up a turn after its last arm is not ended
+    by a timer armed while it was idle.
+    """
+    held = _holds_work(armed.busy)
+    with _LOCK:
+        if _ARMED is not armed:
+            return True
+        # BEFORE the sample, and in this order: a fire that landed since the last
+        # wake is recorded and re-armed on the same pass, and only then is the next
+        # progress decision taken. The exit leg is applied first of all so that a flip
+        # made while the timer was pending is in force before anything else acts on
+        # the arm.
+        _apply_exit_leg(armed, held)
+        if _record_held_fire(armed):
+            return False
+        return _sample(armed)
 
 
 def _sample(armed: "_Armed") -> bool:
@@ -1844,6 +1923,11 @@ def disarm() -> None:
                 # Beside the dump (see the docstring): a surviving sibling would advertise
                 # a deadline for a process that disarmed, and the sibling's absence is
                 # half of how a never-engaged fire is told apart from a stale-plane one.
+                # WHEN A HELD FIRE IS KEPT the pair is kept with it, deliberately: the
+                # sibling names the deadline the fire was waiting for, so a reader
+                # comparing "was due at" against "fired at" reads one episode rather
+                # than two, which is exactly the cross-check a survived bound needs
+                # (agent review round 1, NIT-2).
                 armed.deadline_path.unlink()
             except OSError:
                 pass
@@ -1876,7 +1960,9 @@ def announce() -> None:
         if armed is None:
             return
         logger.info(
-            "stall watchdog armed: %.0fs of no progress dumps every thread to %s and exits",
+            "stall watchdog armed: %.0fs of no progress dumps every thread to %s and ends "
+            "the runtime only when nothing is in flight (a turn, a subagent or a job holds "
+            "the exit; the dump is written either way)",
             armed.seconds,
             armed.path,
         )

@@ -631,6 +631,72 @@ FAILED_WINDOW = [
 ]
 
 
+#: ``FIXTURE`` whose first session SURVIVED its own stall bound — the third
+#: attribution state, and the one that reached no rendered surface before design review
+#: round 1 (D1): with the exit held, such a runtime stays stalled for the life of the
+#: process, so the listing is where a person learns it needs them.
+HELD_SESSION = [
+    (replace(record, leaving="") if index == 0 else record, state)
+    for index, (record, state) in enumerate(FIXTURE)
+]
+
+
+def test_a_held_runtime_is_named_in_the_fleet_table(monkeypatch: Any, capsys: Any) -> None:
+    """D1: the bound fired, dumped, and did NOT end it — the row must say so.
+
+    Before this, ``stall_held`` reached the JSON row and no screen: a held session listed
+    exactly as an idle one, under a state word ("not answering") that reads as "still
+    settling" — while the safety net that used to resolve it has already fired and the
+    only way out is a person running ``lop stop``. Both halves are asserted: the column
+    and its cell when a row is held, and no column at all when none is.
+    """
+    import argparse
+
+    from local_operator import cli
+    from local_operator.session.runtime import stall_watchdog
+
+    _install_fixture(monkeypatch, HELD_SESSION)
+    held_pid = HELD_SESSION[0][0].pid
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {held_pid})
+
+    rows = session_rows()
+    assert rows[0]["stall_held"] is True
+    assert [row["stall_held"] for row in rows[1:]] == [False, False]
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "STALLED" in out, f"the held state rendered nowhere: {out}"
+    assert cli.HELD_CELL in out, out
+    assert "lop stop" in out, "the cell must name the way out, not only the state"
+
+
+def test_the_stalled_column_is_absent_when_no_row_is_held(monkeypatch: Any, capsys: Any) -> None:
+    """The gate, in the other direction: no held row anywhere means no column.
+
+    Same rule as ``LEAVING``/``UPDATING`` — a column that prints for a state nothing is
+    in teaches a reader to ignore it — and the assertion is here because the cell is
+    wide enough that a stray one would push every other column along with it.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    _install_fixture(monkeypatch)
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    out = capsys.readouterr().out
+    assert "STALLED" not in out, out
+
+
 def test_a_failed_window_is_named_in_the_fleet_table(monkeypatch: Any, capsys: Any) -> None:
     """D1: a fleet whose only news is an abandoned update must say so.
 

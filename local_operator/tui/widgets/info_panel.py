@@ -230,6 +230,14 @@ _LEAVING_SHORT: dict[str, str] = {
 #: The fallback above: no trigger named, no bound claimed, nothing false.
 _LEAVING_SHORT_OTHER = "leaving"
 
+#: What a row says when its own stall bound fired, dumped every thread and LEFT IT
+#: ALIVE: stalled with the work still inside it, and only ``lop stop`` ends it
+#: (``stall_watchdog.HELD_MARKER``; design review round 1, D1). Short because the
+#: meta ladder sheds from the right and this clause must survive to the narrowest
+#: frame — the state word is what a reader scans first, and "not answering" without
+#: this reads as a runtime that is merely slow to report.
+HELD_STATE_WORD = "bound held"
+
 #: The shelf form of an UPDATE WINDOW, keyed by the PHASE TOKEN rather than by the
 #: sentence — the one structural difference from ``_LEAVING_SHORT`` above, and it is
 #: forced: every updating sentence carries a build pair, so a table keyed by the
@@ -871,6 +879,16 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
             # answering" is what a stale heartbeat establishes, and "wedged"
             # both invites a diagnosis the evidence does not support and hides
             # the fact that the process is still there.
+            # THE HELD STATE, in the state's own slot (design review round 1, D1).
+            # "not answering" alone reads as "still settling", and before this change
+            # the bound RESOLVED such a runtime inside one deadline — now it survives
+            # for the life of the process, so the word has to say that the safety net
+            # has already fired and a person is the remedy. Placed immediately before
+            # the state so the row reads ``… · bound held · not answering``, and it is
+            # deliberately inside the shed list rather than after the facts: this is
+            # the one clause on the row that changes what the reader may safely do.
+            if line.stall_held:
+                bits.append(HELD_STATE_WORD)
             bits.append("not answering" if line.state == "wedged" else line.state)
         # The measurement, ahead of uptime and memory for the same reason: on
         # this row the age is the reason the reader is looking at it at all.
@@ -942,7 +960,7 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # carries the bound where the phrase has one, so the narrow reader is
         # told both that it is leaving and how long that can take.
         if line.state == "wedged":
-            short_meta = "not answering"
+            short_meta = HELD_STATE_WORD if line.stall_held else "not answering"
         elif phase:
             # The SHELF form, keyed by the PHASE the row is in — the failed phase
             # included, so a fleet whose only news is an abandoned update says so at

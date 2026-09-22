@@ -2442,9 +2442,10 @@ async def _abandon_move(
     :data:`types.BUILD_DRAIN_PROGRESS_S` of no movement from the work in flight.
     That arm was measured against the fleet and removed on the operator's rule for
     every build move: a runtime is replaced when its turn is COMPLETE, never on a
-    heuristic of inactivity. Three live sessions still carry its ``runtime-overdue``
-    WHY, which is exactly the false report this replaces — the turn it "cut" was a
-    turn the operator was still running.
+    heuristic of inactivity. Three live sessions still carried its
+    ``runtime-overdue`` WHY when this arm was removed (counted 2026-09-22), which is
+    exactly the false report this replaces — the turn it "cut" was a turn the
+    operator was still running.
 
     WHY THE CUT WAS WRONG EVEN WHERE IT WAS AIMED. Its argument was that a lane
     parked behind a bash child keeps ``is_busy()`` answering True, so the drain's
@@ -2477,6 +2478,16 @@ async def _abandon_move(
     the operator's work in exchange for a re-announcement nobody needs — the drain
     is already latched as a commitment (the record still says it is leaving for the
     build on disk when its turn ends, which is still true).
+
+    THE RECORD KEEPS ``LEAVING_FOR_BUILD`` THROUGH THE ABANDON, and that is deliberate
+    rather than a leftover (agent review round 1, MINOR-2; design round 1, D4 read the
+    same pair from the rendered frame): the COMMITMENT is what survives — the drain
+    object stays latched, so this runtime still leaves at the first idle instant — and
+    the phrase is therefore true of it. A row showing it beside "update failed" tells
+    the reader two true things about one runtime, which is what the record is for;
+    clearing it would produce the one lie of the pair, a runtime that exits with no
+    departure phrase on its record, which is the silently-leaving runtime the phrase
+    exists to prevent.
 
     ONCE PER DRAIN, and the guard is written where the drain object lives rather than
     at the caller: the reaper ticks every ``REAP_CHECK_S`` and a released refusal

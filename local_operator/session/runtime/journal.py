@@ -864,7 +864,10 @@ def install_moved(row: TurnJournalRow) -> bool:
 #: ended it. It is the same shape as the other attribution leads on this function
 #: (``SIGTERM received``, ``unattributed``) because it is the same kind of fact —
 #: something established about the death that is not its name.
-HELD_BOUND_LEAD = "its own stall bound fired earlier and did NOT end it"
+HELD_BOUND_LEAD = (
+    "its own stall bound fired earlier, dumped every thread beside its log and did NOT "
+    "end this runtime"
+)
 
 
 def _stall_bound_evidence(row: TurnJournalRow) -> tuple[str | None, tuple[str, ...], bool]:
@@ -1067,9 +1070,8 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
             "runtime-shutdown",
             render_cut_off_reason(
                 "runtime-shutdown",
-                detail=row_detail(
-                    row, lead=", ".join(part for part in (f"{signal} received", held_lead) if part)
-                ),
+                detail=row_detail(row, lead=f"{signal} received"),
+                clause=held_lead,
             ),
         )
     recorded = str(row.exit_cause or "")
@@ -1085,20 +1087,18 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         return (
             "error",
             recorded,
-            render_cut_off_reason(recorded, detail=row_detail(row, lead=held_lead)),
+            render_cut_off_reason(recorded, detail=row_detail(row), clause=held_lead),
         )
     if install_moved(row):
         # The lead rides here too: the install-window arm has the narrowest detail of
         # the four (a build pair), and a runtime that survived a bound before the
         # install moved under it is a fact the reader needs on THIS arm most of all —
         # a stall is why it was still alive to be caught by the tear.
-        detail = f" ({row.build_label()} → {_current_build_label()})"
-        if held_lead:
-            detail = f" ({held_lead}; {row.build_label()} → {_current_build_label()})"
+        detail = f"{row.build_label()} → {_current_build_label()}"
         return (
             "error",
             "install-mid-update",
-            render_cut_off_reason("install-mid-update", detail=detail),
+            render_cut_off_reason("install-mid-update", detail=detail, clause=held_lead),
         )
     return (
         "error",

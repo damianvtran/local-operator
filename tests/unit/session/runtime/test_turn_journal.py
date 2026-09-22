@@ -1028,3 +1028,20 @@ def test_a_fired_stall_bound_is_narrated_as_its_own_class(
         f"the death says nothing about the bound that fired and held, so a reader "
         f"comparing this with the dump sees two unrelated events: {reason}"
     )
+
+    # AND THE LIST COLUMN KEEPS IT (design review round 1, D3). ``outcome_summary`` is
+    # what a LIST renders a reason through, and it splits the sentence at its
+    # parenthetical — so while the lead rode inside the brackets a held death and a
+    # no-dump death rendered byte-identical there, collapsing three attribution states
+    # into two outcomes on the surface a person scans. The lead is a CLAUSE of the
+    # sentence now, which is what makes it survive the split.
+    from local_operator import incidents
+
+    listed = incidents.outcome_summary(reason)
+    assert journal.HELD_BOUND_LEAD in listed, (
+        f"the listing column dropped the one fact that says this runtime survived its "
+        f"bound: {listed!r}"
+    )
+    assert listed != incidents.outcome_summary(
+        incidents.render_cut_off_reason(incidents.KILL_UNATTRIBUTED)
+    ), "a held death must not render as a plain unattributed one"

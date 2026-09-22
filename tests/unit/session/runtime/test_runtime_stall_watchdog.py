@@ -1418,9 +1418,11 @@ def test_the_only_arm_site_is_the_runtime_entry_point() -> None:
     # create, move or cancel the process-global timer, and recording a tick's death
     # does none of those.
     assert "beat" in touched, f"the serving plane never reports progress: {touched}"
-    assert touched <= {"beat", "SERVING", "note_tick_death"}, (
-        f"the serving plane reaches the watchdog for {touched}"
-    )
+    assert touched <= {
+        "beat",
+        "SERVING",
+        "note_tick_death",
+    }, f"the serving plane reaches the watchdog for {touched}"
 
 
 @pytest.mark.slow
@@ -3418,9 +3420,9 @@ def test_an_UNREADABLE_work_report_still_fires_and_holds(tmp_path: Path) -> None
     assert sentinel.read_text(encoding="utf-8") == "stopped on its own terms"
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
-    assert text.count(stall_watchdog.FIRED_MARKER) >= 1, (
-        f"the fire was WITHHELD when the predicate could not be read: {text[:600]!r}"
-    )
+    assert (
+        text.count(stall_watchdog.FIRED_MARKER) >= 1
+    ), f"the fire was WITHHELD when the predicate could not be read: {text[:600]!r}"
     assert any(
         line.startswith(stall_watchdog.HELD_MARKER) for line in text.splitlines()
     ), f"the dump does not say the fire was held: {text[:900]!r}"

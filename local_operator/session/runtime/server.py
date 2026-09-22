@@ -3887,8 +3887,14 @@ class RuntimeServer:
         from local_operator import incidents
         from local_operator.session.runtime.types import UPDATE_FAILED_CAUSE
 
+        # THE BOUND THE CALLER ACTUALLY ENFORCED, which is why it is a parameter
+        # (design review round 1, D2): two arms publish this token with two different
+        # bounds, and the shared sentence names none of them, so the failure reports
+        # its own number here or it reports no number at all. Rendering the window's
+        # constant instead told the operator that an update which had spent fifteen
+        # minutes in the drain gave up "within 5s".
         rendered = incidents.render_cut_off_reason(
-            UPDATE_FAILED_CAUSE, detail=f"({pair})" if pair else ""
+            UPDATE_FAILED_CAUSE, detail=incidents.update_failed_detail(pair, bound)
         )
         try:
             await write_incident(UPDATE_FAILED_CAUSE, token=UPDATE_FAILED_CAUSE, rendered=rendered)

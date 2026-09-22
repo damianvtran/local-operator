@@ -3853,6 +3853,15 @@ def sessions_command(args: argparse.Namespace) -> int:
     # the column entirely and list that session exactly as an ordinary idle one — the
     # defect design review round 1 (D1) measured against this renderer.
     show_updating = any(updating.values()) or any(failed.values())
+    # THE THIRD STATE (design review round 1, D1), gated and separate for the reasons
+    # the two above state: it is not a departure and not an update, it is a runtime
+    # whose own bound fired, dumped and could not end it — stalled with the turn still
+    # inside, and only ``lop stop`` ends it. Without this the listing rendered such a
+    # session exactly as an ordinary idle one, which is the half of the operator's rule
+    # (a runtime is a person's to end once it can no longer finish) that a listing
+    # carries.
+    held = {row["session_id"]: bool(row.get("stall_held")) for row in rows}
+    show_held = any(held.values())
     header = (
         f"{'STATE':<{STATE_COLUMN_WIDTH}} {'PID':>7} {'KIND':<7} "
         f"{'NEEDS':<{NEEDS_COLUMN_WIDTH}} {'CONVERSATION':<{CONVERSATION_COLUMN_WIDTH}} "
@@ -3867,6 +3876,8 @@ def sessions_command(args: argparse.Namespace) -> int:
         header += f" {'LEAVING':<{LEAVING_COLUMN_WIDTH}}"
     if show_updating:
         header += f" {'UPDATING':<{UPDATING_COLUMN_WIDTH}}"
+    if show_held:
+        header += f" {'STALLED':<{HELD_COLUMN_WIDTH}}"
     print(header)
     now = time.time()
     for row in rows:
@@ -3911,6 +3922,13 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
+        if show_held:
+            # The record's own phrase is a full sentence and belongs in the notice; a
+            # list column carries the fact, in the words the panel uses, so one state
+            # does not acquire two vocabularies across the two surfaces a reader
+            # compares (the rule ``STOP_RUNG_LABELS`` states for the stop rungs).
+            line += f" {_pad_cell(HELD_CELL if held.get(row['session_id']) else '', HELD_COLUMN_WIDTH)}"
+
         if show_updating:
             # The cell is RENDERED from the row's pair through the ONE phase reader
             # (``types.update_phase``/``update_short``), so the copy here, the info
@@ -5315,6 +5333,11 @@ WHY_COLUMN_WIDTH = 48
 #: module keeps session internals out of its module scope on purpose (see the
 #: header) — so a reword of the phrase fails loudly there instead of silently
 #: cutting the new clause off the row.
+#: What the ``STALLED`` column says, and the width the header needs. The cell names
+#: the state and the remedy in the register the panel uses (``HELD_STATE_WORD``),
+#: because the fact is one the reader must be able to act on from a listing.
+HELD_CELL = "bound held - stalled; lop stop"
+HELD_COLUMN_WIDTH = len(HELD_CELL)
 LEAVING_COLUMN_WIDTH = 51
 
 #: Width of `lop sessions`' trailing UPDATING column, in display CELLS.
