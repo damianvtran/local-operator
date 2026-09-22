@@ -103,7 +103,10 @@ A home path is not that case: a LEADING `~/`, `$HOME/` or `${HOME}/` is expanded
 to the real home directory before the scan looks at the target, so it fires
 exactly as its absolute spelling does. Leading alone, and the three spellings
 only — `~other/tmp/x.md` is another user's home and is left alone, as is a `~`
-that is not at the front. Spell the whole path and both channels see it.
+that is not at the front. The expansion reads the token, not its quoting, exactly
+as the `$TMPDIR` spelling always has: `'~/x'` is a literal name to the shell and
+is expanded here anyway, so the line can name a file the command did not create.
+Spell the whole path and both channels see it.
 
 A scratch-named directory inside a temp directory is not this advisory's
 business: `/tmp` and `$TMPDIR` are the system's own area, and anything deeper

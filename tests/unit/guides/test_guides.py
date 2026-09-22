@@ -341,6 +341,10 @@ def test_scratchpad_guide_states_the_rules_no_tool_schema_can() -> None:
     assert "needs the path NAMED, not related" in flat
     assert "`~/`, `$HOME/` or `${HOME}/` is expanded to the real home" in flat
     assert "`~other/tmp/x.md` is another user's home" in flat
+    # The quoting clause is here because the tilde spelling makes a pre-existing
+    # class newly REACHABLE (`'~/x'` could not fire at all before the expansion),
+    # so the copy an agent reads has to say that a quoted token is read anyway.
+    assert "expanded here anyway" in flat
     assert "one-off script" in body
     assert "Data you are still shaping" in body
     assert "real extension" in body
