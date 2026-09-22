@@ -898,6 +898,118 @@ def test_a_plain_runner_is_not_taken_for_corepack(
     assert install._corepack_shaped(["pnpm"]) is False
 
 
+def _npx_stand_in(tools: Path) -> StandIn:
+    """An ``npx`` on PATH that records its argv and writes the dist on ``build``.
+
+    The SAME generated script as :class:`StandIn` — one instrument for the whole
+    file, so a change that breaks the recording breaks both loudly — copied to
+    the name ``npx`` and given an ABSOLUTE interpreter shebang. The absolute one
+    matters: these tests point ``PATH`` at this directory alone, so
+    ``#!/usr/bin/env python3`` would fail to resolve its own interpreter before
+    the script ever ran. The exec bit is what ``shutil.which`` (inside
+    ``_shim_argv``) requires.
+    """
+    npx = StandIn(tools, exit=0, dist=True)
+    body = npx.script.read_text(encoding="utf-8").replace(
+        "#!/usr/bin/env python3", f"#!{sys.executable}", 1
+    )
+    shim = tools / ("npx.cmd" if os.name == "nt" else "npx")
+    shim.write_text(body, encoding="utf-8")
+    shim.chmod(0o755)
+    return npx
+
+
+def test_the_npx_arm_is_chosen_only_when_no_other_route_can_supply_the_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last-resort route: nothing local can satisfy the pin, so npx fetches it.
+
+    The host this was written on is the shape: pnpm 10.30.3 on PATH against a
+    ``pnpm@11.22.0`` pin, and Node v26.5.0 — which ships no corepack at all — so
+    neither the seeded arm nor the corepack arm resolves and the guard would
+    otherwise refuse. ``npx --yes pnpm@11.22.0`` fetches the PIN and runs it,
+    without entering pnpm's own ``pnpm add pnpm@<pin>`` self-install (the
+    recursion this guard exists to refuse).
+
+    PATH is the stand-in directory ALONE, so the route is measured against this
+    test's npx and not against a developer's or a CI runner's corepack; PNPM_HOME
+    points at an empty home so no seeded pin short-circuits the arm (the arm order
+    is asserted by the tests above it).
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    npx = _npx_stand_in(tools)
+    monkeypatch.setenv("PATH", str(tools))
+    monkeypatch.setenv("PNPM_HOME", str(tmp_path / "empty-home"))
+    fake = StandIn(tmp_path / "bin", version="10.30.3", exit=1)
+    web = _web(tmp_path, pin="pnpm@11.22.0")
+
+    error = install._build_bundle(web, fake.runner)
+
+    assert error is None, f"npx can satisfy the pin, so this host must build: {error}"
+    assert fake.argv_seen() == [
+        ["--version"]
+    ], "the runner that cannot satisfy the pin is probed and never asked to build"
+    # The pinned version is what npx is asked for, and the two build steps are
+    # appended to the npx argv prefix exactly as they are for the other arms.
+    assert npx.argv_seen() == [
+        ["--yes", "pnpm@11.22.0", "install", "--frozen-lockfile"],
+        ["--yes", "pnpm@11.22.0", "build"],
+    ], f"npx runs the PIN, once per step: {npx.argv_seen()}"
+
+
+def test_the_npx_arm_is_not_consulted_when_path_pnpm_is_the_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No download on a machine that is already fine — the arm's ordering, pinned.
+
+    The routes are consulted only when the guard WOULD refuse, so a matching pnpm
+    on PATH must leave npx untouched. A route that ran anyway would fetch a
+    package manager for a build that needed nothing, which is the property the
+    earlier arms were ordered to preserve and this one must not lose.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    npx = _npx_stand_in(tools)
+    monkeypatch.setenv("PATH", str(tools))
+    monkeypatch.setenv("PNPM_HOME", str(tmp_path / "empty-home"))
+    fake = StandIn(tmp_path / "bin", version="11.22.0", exit=0, dist=True)
+    web = _web(tmp_path, pin="pnpm@11.22.0")
+
+    assert install._build_bundle(web, fake.runner) is None
+
+    assert ["build"] in fake.argv_seen(), "PATH's pnpm is the one that builds"
+    assert npx.argv_seen() == [], "nothing to fix, so nothing is fetched"
+
+
+def test_the_npx_arm_is_not_reached_for_a_range_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A range is not a pin, and this arm must not be the first route to resolve one.
+
+    ``_pinned_pnpm`` reports the ``packageManager`` version verbatim, so a tree
+    pinning ``pnpm@^11`` reaches this arm with ``^11`` in hand. Fetching
+    ``pnpm@^11`` through npx would run *whatever the registry serves today* — a
+    wider promise than any existing route makes (pnpm's own switch returns early
+    on a range, and ``_package_manager_env`` states at length that a range is not
+    a fetch), and an untestable one. The exact-version matcher the disarm gating
+    already uses is what excludes it, so the refusal below is today's behaviour.
+    """
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    npx = _npx_stand_in(tools)
+    monkeypatch.setenv("PATH", str(tools))
+    monkeypatch.setenv("PNPM_HOME", str(tmp_path / "empty-home"))
+    fake = StandIn(tmp_path / "bin", version="10.30.3", exit=1)
+    web = _web(tmp_path, pin="pnpm@^11")
+
+    error = install._build_bundle(web, fake.runner)
+
+    assert error is not None, "a range falls through to the refusal, not to a fetch"
+    assert "^11" in error
+    assert npx.argv_seen() == [], f"nothing may be fetched for a range: {npx.argv_seen()}"
+
+
 @pytest.mark.parametrize(
     ("pin", "expected"),
     [
