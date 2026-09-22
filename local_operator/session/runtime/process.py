@@ -1983,6 +1983,104 @@ class _DrainProgress:
         return at - self.moved_at
 
 
+#: The handle of the runtime this process is currently running, for the stall
+#: bound's progress leg — and for nothing else.
+#:
+#: MODULE STATE BECAUSE THE TWO SIDES CANNOT SEE EACH OTHER: ``arm`` runs in the
+#: ``__main__`` branch, before ``amain`` has built a session, while the probe it
+#: needs a handle for only exists once ``spawn_owned_session`` has returned. A
+#: closure over the handle is therefore impossible at the one moment arming is
+#: allowed (see ``stall_watchdog`` on why that site is load-bearing), so the
+#: handle is published here and the probe reads it lazily. Set by ``amain``,
+#: cleared by ``main``'s ``finally`` beside ``disarm``.
+_live_handle: object | None = None
+
+
+def _tool_batch_in_flight(session: object) -> bool:
+    """Is a tool batch EXECUTING in this session right now?
+
+    Reads the live context through ``protocol.unanswered_tail_call_ids``, which IS
+    this rule and the one scan behind both display questions that ask it
+    (``pending_display_tool_ids`` / ``executing_display_tool_ids``). Agent review
+    round 1 caught the first revision re-deriving it by hand: that copy agreed on
+    today's shapes and would have drifted, because the published rule also scopes
+    to the latest group after the latest user boundary (so an old interrupted turn
+    cannot be revived by a later turn's liveness) and steps over the
+    ``CustomMessage`` rows an incident can land on top of an open batch. The
+    property itself is the message tail's, not a session's — ``AgentLoop`` appends
+    the assistant message when a model turn ends and the tool results only once
+    ``_execute_tool_calls`` returns, so for the whole duration of every batch the
+    live list ends in unanswered calls.
+
+    An unreadable context answers ``False`` — "no batch" — deliberately: this
+    feeds a predicate that ends the process, so a state we cannot read must not be
+    the thing that fires it, and a session with no context has nothing running.
+    (The opposite direction is right for :func:`_work_motion`, whose docstring
+    argues it: that tuple decides when to stop WAITING.)
+    """
+    context = getattr(session, "_context", None)
+    messages = getattr(context, "messages", None)
+    if not messages:
+        return False
+    # Function-local like every other import in this module: this file is the
+    # child's boot path, and ``protocol`` pulls the session graph in.
+    from local_operator.session.protocol import unanswered_tail_call_ids
+
+    try:
+        return bool(unanswered_tail_call_ids(messages))
+    except Exception:  # noqa: BLE001 — an unreadable tail must not fire a bound
+        logger.debug("stall watchdog: could not read the tool-batch tail", exc_info=True)
+        return False
+
+
+def _step_in_flight(handle: object) -> bool:
+    """Is this process EXECUTING a step, i.e. is a spin not what we are seeing?
+
+    The escape hatch that keeps the progress leg from cutting legitimate work,
+    and it is deliberately two facts rather than ``handle.is_busy()``: that
+    predicate is the RESIDENCY answer and is maximally inclusive by design — a
+    running subagent lane or a detached background job makes it true — while the
+    incident this leg exists for had four running lanes that had produced
+    nothing for seven minutes. Reusing ``is_busy`` here would have spared the
+    very state the leg is for, so what it asks is narrower and about THIS
+    process: is a tool batch running, or a compaction rewriting history. Both
+    burn CPU with no transcript movement while they last, which is exactly what
+    the other two legs would otherwise read as a spin.
+
+    A subagent lane's OWN in-process tool is not covered here, and the module
+    docstring says so rather than leaving a reader to infer coverage. A lane that
+    is stepping is covered from the other end: its step boundaries move
+    ``_work_motion``'s roster generation, so the NO MOTION leg fails first.
+    """
+    session = getattr(handle, "_session", None)
+    if session is None:
+        return True
+    if getattr(session, "_compacting", False):
+        return True
+    return _tool_batch_in_flight(session)
+
+
+def _progress_probe() -> "tuple[object, bool]":
+    """The stall bound's progress sample: ``(motion, in_flight)``.
+
+    The seam between the two modules, and it is a plain callable rather than a
+    handle so that ``stall_watchdog`` never imports this one — ``process`` is
+    the module that imports IT, from the child's own entry point, and a cycle
+    there would be paid by every runtime boot.
+
+    NO HANDLE YET ANSWERS ``(no motion, in flight)``, i.e. "judge nothing". The
+    arming happens before the session exists, so this is the ordinary state for
+    the first seconds of every boot, and a probe that answered "not in flight"
+    there would let a slow boot start a spin clock against a process that was
+    still constructing itself. ``_work_motion`` is read through the same handle,
+    so the two facts in the tuple are always about the same instant.
+    """
+    handle = _live_handle
+    if handle is None:
+        return (), True
+    return _work_motion(handle), _step_in_flight(handle)
+
+
 async def _begin_drain(
     poll: _BuildPoll, handle: object, runtime: object, stop: asyncio.Event
 ) -> "_Drain | None":
@@ -3139,6 +3237,13 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # at load. The record also precedes the control socket by construction, so
     # "this pid listened" and "this pid only existed" are distinguishable
     # (design-session-survival §5, §8).
+    # The progress leg's view of this process, published now that there is a
+    # session to judge. Everything before this line is boot, and the probe
+    # answers "judge nothing" there rather than starting a spin clock against a
+    # process still constructing itself — see ``_live_handle`` and
+    # ``_progress_probe``.
+    global _live_handle
+    _live_handle = handle
     _bind_boot_instrumentation(handle, session_id=resume or "", cwd=cwd)
 
     # THE ORDERING IS THE GUARANTEE (design §11.4). Messages spooled while the
@@ -3588,6 +3693,11 @@ def main() -> int:
         # the reaper's and a plain stop's — and never on the paths that exit
         # from the C thread (that is the point of the file).
         stall_watchdog.disarm()
+        # Withdrawn with the bound, and for the same reason: a handle left here
+        # would outlive its own runtime for any in-process caller of ``main``,
+        # and the probe would then judge a disposed session.
+        global _live_handle
+        _live_handle = None
 
 
 if __name__ == "__main__":
@@ -3610,5 +3720,5 @@ if __name__ == "__main__":
     # ``tests/unit/session/runtime/test_runtime_stall_watchdog.py``, which pins
     # both halves of that. Arming before ``main()`` also means a stall during
     # boot — the window nothing else can report — is bounded and named.
-    stall_watchdog.arm()
+    stall_watchdog.arm(probe=_progress_probe)
     sys.exit(main())

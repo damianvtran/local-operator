@@ -49,6 +49,7 @@ REAL spawned runtime (which arms, and which disarms on a clean stop) — see
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import os
 import subprocess
@@ -56,11 +57,24 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from local_operator import incidents
+from local_operator.harness.types import (
+    AgentTool,
+    StreamEndEvent,
+    StreamTextDelta,
+    StreamToolCallDelta,
+    TextContent,
+    ToolResult,
+)
+from local_operator.session.runtime import process as process_module
 from local_operator.session.runtime import stall_watchdog
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import ScriptedStream, make_session
 
 #: The worktree root. ``parents[4]`` because this file lives four levels under it
 #: (``tests/unit/session/runtime/``).
@@ -576,10 +590,20 @@ def test_a_file_left_by_a_kill_is_not_reported_as_a_fired_bound(tmp_path: Path) 
     pid = int(result.stdout.split("armed:", 1)[1].split()[0])
     leftover = _dump_for(tmp_path, pid)
     assert leftover.is_file(), "the header-only file this test is about was never written"
-    assert stall_watchdog.FIRED_MARKER not in leftover.read_text(encoding="utf-8")
+    text = leftover.read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER not in text
+    # NEITHER MARKER IS SPELLED IN THE HEADER, and this pair is the regression
+    # test for that: the header explains what a fired dump looks like and used to
+    # quote faulthandler's own marker to do it, which made every armed file read
+    # as a fired bound to any reader testing the marker as a SUBSTRING — including
+    # this assertion. The progress marker had the same hazard one line below.
+    assert stall_watchdog.PROGRESS_MARKER not in text
     assert (
         stall_watchdog.fired_pids(tmp_path / "logs") == set()
     ), "a header-only file was reported as a fired bound"
+    assert (
+        stall_watchdog.fired_leg(pid, tmp_path / "logs") is None
+    ), "a header-only file was read as an ended runtime"
 
     fired = tmp_path / "logs" / f"{stall_watchdog.DUMP_PREFIX}-4242.log"
     fired.write_text(
@@ -590,6 +614,21 @@ def test_a_file_left_by_a_kill_is_not_reported_as_a_fired_bound(tmp_path: Path) 
     # pid can ask directly instead of globbing for a path: that is the contract
     # ``lop sessions --json``'s ``stall_dump`` relies on.
     assert stall_watchdog.dump_path(4242, tmp_path / "logs") == fired
+    # WITH NO PROGRESS LINE THE FIRE WAS THE SILENCE LEG, which is the answer a
+    # reader needs to investigate it: a loop that never came back, not one that
+    # spun. The class is one token for both, so this is the only discriminator.
+    assert stall_watchdog.fired_leg(4242, tmp_path / "logs") == stall_watchdog.LEG_SILENCE
+
+    spinning = tmp_path / "logs" / f"{stall_watchdog.DUMP_PREFIX}-4243.log"
+    spinning.write_text(
+        f"header\n{stall_watchdog.PROGRESS_MARKER}runtime-stall-bound: 300s of CPU with no "
+        f"progress\n{stall_watchdog.FIRED_MARKER}0:05:00)!\nThread 0x1:\n",
+        encoding="utf-8",
+    )
+    assert stall_watchdog.fired_leg(4243, tmp_path / "logs") == stall_watchdog.LEG_PROGRESS
+    # A PID WITH NO FILE IS NOT A FIRE, which is the third state a reader has to
+    # be able to tell apart: no bound ran at all.
+    assert stall_watchdog.fired_leg(999_999, tmp_path / "logs") is None
 
 
 # -- the bound's own arithmetic ---------------------------------------------
@@ -963,4 +1002,775 @@ def test_a_real_runtime_child_arms_its_bound_and_disarms_on_a_clean_stop(
     finally:
         signal_module.signal(signal_module.SIGUSR1, previous_usr1)
         if child is not None:
+            _reap(child, config_dir)
+
+
+# -- the progress leg: spinning without advancing ----------------------------
+#
+# THE SHAPE THESE CELLS ARE FOR, measured on this fleet on 2026-09-21. Session
+# ``14066af01c7a`` (build 0.61.16, i.e. WITH the liveness bound armed) launched a
+# four-way subagent batch 16 s after a sibling settled, acknowledged the launch,
+# and then produced nothing: no transcript row, no roster movement and no change
+# in its four subagent counters across 75 s, +14.3 s of process CPU in that
+# window, and a process tree with no build and no command in it. Its serving
+# plane's last beat was 18:34:58; the 300 s liveness deadline was 18:39:58; the
+# operator's reap landed at 18:39:46, twelve seconds short of it. Both
+# instruments were right — the loops were alive and ticking, the work was not
+# advancing — and nothing in the design could see the difference.
+#
+# So these two children are the same runtime, the same real planes and the same
+# real probe, differing only in what the workload loop does. The SPIN child is
+# the incident; the AWAIT child is the false positive the leg must not take, and
+# it is half the evidence rather than a courtesy — a predicate that fires on a
+# long wait is the bug this bound exists to prevent wearing the other hat.
+
+_SPINNING_CHILD = r"""
+import asyncio
+import os
+import pathlib
+import sys
+
+sys.path.insert(0, sys.argv[3])
+
+from local_operator.harness.types import StreamEndEvent
+from local_operator.session.runtime import process, server, stall_watchdog
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import make_session
+
+
+def _stream(request, signal):
+    async def gen():
+        yield StreamEndEvent(stop_reason="stop")
+
+    return gen()
+
+
+async def main() -> None:
+    root = pathlib.Path(sys.argv[2])
+    process.HEARTBEAT_INTERVAL_S = 0.3
+    server.HEARTBEAT_INTERVAL_S = 0.3
+
+    session = make_session(root, _stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    assert await runtime.wait_until_published(), "the boot prologue never published"
+
+    # THE PRODUCTION SEAM, not a double: the handle the entry point publishes and
+    # the probe the entry point arms with.
+    process._live_handle = handle
+    assert stall_watchdog.arm(seconds=float(sys.argv[1]), probe=process._progress_probe)
+    print(f"armed:{os.getpid()}", flush=True)
+
+    stop = asyncio.Event()
+    asyncio.create_task(process._beat_stall_watchdog(stop))
+    # BOTH PLANES HAVE RUN: the workload ticker stamped its plane and the serving
+    # plane published a record. This is the state that used to be
+    # indistinguishable from health, so the cell refuses to say anything without it.
+    await asyncio.sleep(1.0)
+    print("both-planes-ran", flush=True)
+
+    # THE INCIDENT: yielding on every pass, so the ticker and the serving plane
+    # keep their cadence and keep re-arming the timer, while burning CPU and
+    # advancing no work at all. Nothing here is a double: the spin is real CPU.
+    while True:
+        await asyncio.sleep(0)
+        sum(range(200_000))
+
+
+asyncio.run(main())
+"""
+
+#: The same boot, then a GENUINE long wait: the loop is alive and idle for four
+#: bounds, and no leg may fire. Deliberately NOT killed by the test — the child
+#: exits on its own and prints how long it waited, so "it survived" is a fact the
+#: child reports rather than one the parent infers from a missing dump.
+_AWAITING_CHILD = r"""
+import asyncio
+import os
+import pathlib
+import sys
+import time
+
+sys.path.insert(0, sys.argv[3])
+
+from local_operator.harness.types import StreamEndEvent
+from local_operator.session.runtime import process, server, stall_watchdog
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import make_session
+
+
+def _stream(request, signal):
+    async def gen():
+        yield StreamEndEvent(stop_reason="stop")
+
+    return gen()
+
+
+async def main() -> None:
+    root = pathlib.Path(sys.argv[2])
+    process.HEARTBEAT_INTERVAL_S = 0.3
+    server.HEARTBEAT_INTERVAL_S = 0.3
+
+    session = make_session(root, _stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    assert await runtime.wait_until_published()
+
+    process._live_handle = handle
+    bound = float(sys.argv[1])
+    assert stall_watchdog.arm(seconds=bound, probe=process._progress_probe)
+    print(f"armed:{os.getpid()}", flush=True)
+
+    stop = asyncio.Event()
+    asyncio.create_task(process._beat_stall_watchdog(stop))
+    await asyncio.sleep(0.5)
+
+    started = time.monotonic()
+    await asyncio.sleep(bound * 4)
+    print(f"still-alive:{time.monotonic() - started:.1f}", flush=True)
+    sys.stdout.flush()
+    # ``os._exit`` rather than a return: the runtime's own thread is still parked
+    # and must not hold the cell open. It is also what leaves the dump file
+    # exactly as written, which is the evidence the parent reads — and NOT a
+    # ``disarm``, so the file survives to be checked.
+    os._exit(0)
+
+
+asyncio.run(main())
+"""
+
+
+def test_the_progress_leg_fires_on_a_spinning_loop_that_never_advances(tmp_path: Path) -> None:
+    """The reproduction, on the REAL plumbing: alive, ticking, and going nowhere.
+
+    Cannot pass on the committed head: the only leg that existed there re-armed
+    the timer from both planes, and both planes were healthy in this child — so
+    the run produced no dump and had to be killed externally.
+    """
+    result = _run_script(
+        _SPINNING_CHILD,
+        tmp_path,
+        args=(str(CHILD_BOUND_S), str(tmp_path), str(REPO)),
+        timeout=120.0,
+    )
+    assert (
+        result.returncode == 1
+    ), f"the spinning loop was not ended by the progress leg: {result.stdout!r} {result.stderr!r}"
+    assert "both-planes-ran" in result.stdout, (
+        f"the planes never ran, so this says nothing about a process whose loops were "
+        f"ALIVE: {result.stdout!r} {result.stderr!r}"
+    )
+
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    text = _dump_for(tmp_path, pid).read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in text, text
+    # THE FIRING PATH NAMED ITS CLASS AND ITS LEG. A bound that fires without
+    # saying which predicate ended the runtime leaves the next reader unable to
+    # tell a fire from a silent non-fire — the defect this class exists for.
+    assert stall_watchdog.PROGRESS_MARKER in text, text
+    assert incidents.STALL_BOUND_CAUSE in text, text
+    assert stall_watchdog.fired_leg(pid, tmp_path / "logs") == stall_watchdog.LEG_PROGRESS
+    assert "parked_child.py" in text, f"the dump does not name the spinning loop: {text}"
+
+
+def test_the_progress_leg_spares_a_genuine_long_await(tmp_path: Path) -> None:
+    """THE NEGATIVE, and it is half the evidence: a long wait is not a spin.
+
+    A model call, a tool result or any other await leaves the work motionless for
+    as long as it takes, and the liveness leg tolerates it by design. The
+    progress leg must not narrow that: it distinguishes WAITING from SPINNING,
+    and this child is the waiting one — its loop is alive and idle for four
+    bounds, so a run that fired would make every slow provider call fatal.
+    """
+    result = _run_script(
+        _AWAITING_CHILD,
+        tmp_path,
+        args=(str(CHILD_BOUND_S), str(tmp_path), str(REPO)),
+        timeout=120.0,
+    )
+    assert (
+        result.returncode == 0
+    ), f"the bound ended a runtime that was merely WAITING: {result.stdout!r} {result.stderr!r}"
+    waited = float(result.stdout.split("still-alive:", 1)[1].split()[0])
+    assert waited >= CHILD_BOUND_S * 3, (
+        f"the child did not actually wait past the bound ({waited}s), so it proves "
+        f"nothing: {result.stdout!r}"
+    )
+
+    pid = int(result.stdout.split("armed:", 1)[1].split()[0])
+    leftover = _dump_for(tmp_path, pid)
+    assert leftover.is_file(), "the child never armed, so this cell is vacuous"
+    text = leftover.read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER not in text, text
+    assert stall_watchdog.PROGRESS_MARKER not in text, text
+    assert stall_watchdog.fired_leg(pid, tmp_path / "logs") is None
+
+
+#: A clock the progress leg can be driven through: the predicate is about the
+#: RELATION between three readings, so the readings are what a test has to
+#: control. Waiting out a real window would make every cell here a bet on host
+#: load, and this host is routinely at a load average of 50-100.
+class _FakeClock:
+    def __init__(self) -> None:
+        self.wall = 1_000.0
+        self.cpu = 5.0
+
+    def monotonic(self) -> float:
+        return self.wall
+
+    def process_time(self) -> float:
+        return self.cpu
+
+    def time(self) -> float:
+        return 1_700_000_000.0
+
+    def strftime(self, _fmt: str) -> str:
+        return "2026-01-01 00:00:00"
+
+
+def test_the_progress_leg_needs_all_three_facts_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SPINNING IS NOT WAITING, and it is not YIELDING EITHER.
+
+    The predicate is composite because each leg alone is a false positive this
+    fleet has already measured. CPU alone fires on every legitimate in-process
+    tool (an in-process render or scan burns a core with no transcript movement);
+    no-motion alone fires on every long model call, which is the bound this
+    module was designed NOT to be; and no-motion-plus-idle misses the incident
+    entirely, because the incident burned 19% of a core.
+
+    The three are driven one at a time here, on the real ``_sample`` with a
+    controlled clock, because "all three" is the claim and a test that only ever
+    shows the firing case cannot state it.
+    """
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    state: dict[str, Any] = {"motion": "still", "in_flight": False, "cpu_per_step": 1.0}
+
+    def probe() -> tuple[object, bool]:
+        return state["motion"], bool(state["in_flight"])
+
+    dump = tmp_path / f"{stall_watchdog.DUMP_PREFIX}-4242.log"
+    handle = dump.open("w", encoding="utf-8")
+    handle.write(f"{stall_watchdog.ARM_MARKER}test header\n")
+    handle.flush()
+    # Built directly rather than through ``arm``: ``arm`` starts the sampler
+    # thread, which would sample this fake clock between the lines below. The
+    # predicate is what is under test here; the thread has its own cell.
+    armed = stall_watchdog._Armed(dump, handle, 4.0, 4242, probe)
+
+    def step() -> bool:
+        fake.wall += 1.0
+        fake.cpu += float(state["cpu_per_step"])
+        return stall_watchdog._sample(armed)
+
+    # LEG 2 ALONE: a tool batch is executing, so this is work, whatever the CPU says.
+    state["in_flight"] = True
+    assert [step() for _ in range(8)] == [False] * 8
+    assert armed.progress_deadline is None, "a running tool batch did not hold the leg"
+
+    # LEG 1 ALONE: the work is advancing, one step at a time.
+    state["in_flight"] = False
+    for index in range(8):
+        state["motion"] = f"moved-{index}"
+        assert step() is False
+    assert armed.progress_deadline is None, "a session making progress did not hold the leg"
+
+    # LEG 3 ALONE: the process is WAITING — a model call, a socket, a child
+    # process — which burns no CPU in this process at all.
+    state["cpu_per_step"] = 0.0
+    assert [step() for _ in range(8)] == [False] * 8
+    assert armed.progress_deadline is None, "a waiting runtime was read as spinning"
+
+    # ALL THREE: no fire before the retained samples span the window, and a fire
+    # once they do.
+    state["cpu_per_step"] = 1.0
+    # The sample that sees the work STOP is not judged as the first of a run: the
+    # run starts there, and a window needs a window's worth of samples.
+    state["motion"] = "settled"
+    assert step() is False, "a sample that saw movement started a run"
+    assert (
+        armed.clock.mean_rate(armed.seconds) is None
+    ), "a run younger than the window was judged as if it spanned one"
+    fired_at = None
+    for index in range(1, int(armed.seconds) + 6):
+        if step():
+            fired_at = index
+            break
+    assert fired_at is not None, "the progress leg never fired on a sustained spin"
+    assert (
+        fired_at >= armed.seconds
+    ), f"the progress leg fired at sample {fired_at} of a {armed.seconds:g}s window"
+    # ...AND THE RETAINED SAMPLES ARE BOUNDED BY THE WINDOW THEY MEASURE, not by a
+    # count: this driver looks once a second, so a 4 s window holds five or six.
+    assert len(armed.clock.history) <= int(armed.seconds) + 2, len(armed.clock.history)
+
+    # THE STATISTIC, ON THE SCHEDULES BOTH REVIEW ROUNDS MEASURED. Fresh state per
+    # case because each is a claim about what ONE run does, and a real window
+    # (45 samples of a second against the 45 s window) because the burst cases are
+    # about how long a burn stays inside it.
+    def fires(cpu_steps: list[float]) -> int | None:
+        state["motion"] = "settled"
+        state["in_flight"] = False
+        spare = stall_watchdog._Armed(dump, handle, 45.0, 4244, probe)
+        for index, per_step in enumerate(cpu_steps, start=1):
+            fake.wall += 1.0
+            fake.cpu += per_step
+            if stall_watchdog._sample(spare):
+                return index
+        return None
+
+    assert fires([0.0] * 60) is None, "an idle runtime was read as spinning"
+    # ROUND 1'S SHAPE: one scheduled-out sample no longer discards the run.
+    assert fires([1.0] * 20 + [0.0] + [1.0] * 40) is not None
+    # ROUND 2'S SHAPE, both directions. A burn buys a run only while it is INSIDE
+    # the window: a 4 s burst in a 45 s window fires at sample 46, and a 2 s one
+    # never fires however long the run continues. The mean AT that fire is 0.0667,
+    # not the 0.089 the burst length over the window suggests: the retained span
+    # opens AT the burst's first second, so the CPU counted inside the window is
+    # the 3 s after it, over 45 s.
+    assert fires([1.0] * 4 + [0.0] * 60) == 46
+    assert fires([1.0] * 2 + [0.0] * 60) is None
+    # ...and the alternation that never fired at the previous head, because the
+    # run kept re-opening on the burn half: a burn/zero 2-cycle is a 50% duty
+    # cycle and is judged as one.
+    assert fires([1.0, 0.0] * 40) is not None
+    # ...and the latency follows the BURN rather than the session's age: after 200
+    # idle samples, a spin fires within a window's worth of burn and not after
+    # 0.05 x 200 = 10 samples of it, which is what a cumulative mean would need.
+    idle_then_spin = fires([0.0] * 200 + [1.0] * 60)
+    assert idle_then_spin is not None and idle_then_spin <= 208, idle_then_spin
+    # THE FIRE REUSES THE LIVENESS LEG'S EXIT — the same C timer, armed to expire
+    # now, and `exit=True` — so the dump is written and the process leaves.
+    assert spy.armed, "the progress fire never reached the C timer"
+    assert spy.armed[-1][1] is True, "a progress fire must exit, like the liveness leg"
+    assert spy.armed[-1][0] <= stall_watchdog.MIN_REARM_S
+    handle.close()
+    text = dump.read_text(encoding="utf-8")
+    assert stall_watchdog.PROGRESS_MARKER in text
+    assert incidents.STALL_BOUND_CAUSE in text
+
+
+def test_arming_with_a_probe_starts_the_sampler_and_disarming_stops_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The leg is inert without a probe, and it is a THREAD that has to be stopped.
+
+    ``arm`` is reachable from the child's entry point only (see the interlock
+    cells below), and the progress leg is opt-in per call site: an in-process host
+    or a test of the liveness leg alone passes no probe and must get exactly the
+    bound it had before. A sampler left running after ``disarm`` would be a thread
+    judging a runtime that has already gone.
+    """
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    assert stall_watchdog.arm(seconds=SHORT_BOUND_S, directory=tmp_path, pid=4242)
+    armed = stall_watchdog._ARMED
+    assert armed is not None
+    assert armed.thread is None, "a probe-less arm must not start a sampler"
+    stall_watchdog.disarm()
+
+    assert stall_watchdog.arm(
+        seconds=SHORT_BOUND_S,
+        directory=tmp_path,
+        pid=4243,
+        # A probe that can never fire: this cell is about the thread's life, and
+        # a sampler that decided to fire mid-assertion would be testing two
+        # things at once.
+        probe=lambda: ("still", True),
+    )
+    armed = stall_watchdog._ARMED
+    assert armed is not None
+    assert armed.thread is not None and armed.thread.is_alive()
+    stop = armed.stop
+    assert stop is not None and not stop.is_set()
+    stall_watchdog.disarm()
+    assert stop.is_set(), "the sampler was left running past a clean exit"
+
+
+# -- the in-flight guard and the production wiring ---------------------------
+#
+# BOTH OF THESE EXIST BECAUSE AGENT REVIEW ROUND 1 MEASURED THEIR ABSENCE, and
+# the absence was invisible: the real probe answers "no batch" in every rig that
+# only ever spins, so stubbing `_step_in_flight` to `False` left the whole file
+# green (18 passed / 1 failed, and the failure was a known flake). That is the
+# worst shape a gap can have — the leg that decides whether a legitimate long
+# operation is KILLED was reachable by nothing, and the two lines that make the
+# predicate live in production were reachable by nothing either. A predicate that
+# ships silently disabled with green tests makes the fleet look protected, which
+# is the exact failure the #1363 docstring warns about.
+
+
+@pytest.mark.asyncio
+async def test_a_real_tool_batch_holds_the_progress_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-flight leg, on a REAL batch running through the REAL agent loop.
+
+    A tool that blocks on an event is the state the leg exists for: the process
+    is burning CPU with no transcript movement — the tool's row lands only when
+    the batch returns — and cutting it would destroy work that is going fine.
+    So this drives the real loop (``Session.prompt`` over a scripted stream that
+    emits a tool call, with a real ``AgentTool`` whose ``execute`` parks), samples
+    the REAL ``process._progress_probe`` while the tool is executing, and then
+    releases it and shows the same predicate firing once nothing is in flight.
+
+    Both halves in one cell on purpose: a cell that only showed "no fire while a
+    tool runs" would pass with the whole leg stubbed out, and a cell that only
+    showed the fire would pass with the guard deleted. The mutant is the test.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute(tool_call_id, args, signal, on_update, context):
+        started.set()
+        await release.wait()
+        return ToolResult(
+            tool_call_id=tool_call_id, tool_name="slow", content=[TextContent(text="ok")]
+        )
+
+    tool = AgentTool(
+        name="slow",
+        parameters={"type": "object", "properties": {}, "required": []},
+        execute=execute,
+    )
+    stream = ScriptedStream(
+        [
+            [
+                StreamTextDelta(delta="working"),
+                StreamToolCallDelta(index=0, id="c1", name="slow", argument_delta="{}"),
+                StreamEndEvent(stop_reason="toolUse"),
+            ],
+            [StreamTextDelta(delta="done"), StreamEndEvent(stop_reason="stop")],
+        ]
+    )
+    session = make_session(tmp_path, stream, tools=[tool])
+    # A CARRIER, NOT A DOUBLE, and the constraint is measured rather than
+    # preferred: ``_step_in_flight`` reads exactly ``handle._session`` (that is
+    # its whole contract), while a real ``ServingSessionHandle`` in this harness
+    # — no running ``RuntimeServer`` to drive it — leaves the turning settle
+    # parked forever: the tool RUNS and the batch holds, and then ``prompt``
+    # never returns (measured here, 15 s). Parking on that would make this cell a
+    # test of the handle rather than of the guard. The REAL parts the guard is
+    # about — the real session, the real agent loop, the real tool, the real
+    # ``_progress_probe`` — are all below; only the carrier is synthetic.
+    handle = SimpleNamespace(_session=session)
+    monkeypatch.setattr(process_module, "_live_handle", handle)
+
+    fake = _FakeClock()
+    monkeypatch.setattr(stall_watchdog, "time", fake)
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+
+    dump = tmp_path / f"{stall_watchdog.DUMP_PREFIX}-5252.log"
+    opened = dump.open("w", encoding="utf-8")
+    armed = stall_watchdog._Armed(dump, opened, 4.0, 5252, process_module._progress_probe)
+
+    def step() -> bool:
+        fake.wall += 1.0
+        fake.cpu += 1.0
+        return stall_watchdog._sample(armed)
+
+    turn = asyncio.create_task(session.prompt("go"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=30.0)
+        # THE REAL STATE: the live context ends in unanswered calls, exactly as
+        # the loop leaves it for the whole duration of every batch.
+        assert process_module._tool_batch_in_flight(session) is True
+        assert process_module._step_in_flight(handle) is True
+        assert process_module._progress_probe()[1] is True
+        # ...AND NOTHING FIRES, however long the CPU leg would otherwise hold.
+        assert [step() for _ in range(30)] == [False] * 30, (
+            "the bound fired while a REAL tool batch was executing: this is the "
+            "false positive that would kill a legitimate in-process tool"
+        )
+        assert armed.progress_deadline is None
+        assert spy.armed == [], "the progress leg armed the C timer during a live tool batch"
+    finally:
+        release.set()
+        await asyncio.wait_for(turn, timeout=30.0)
+
+    # THE SAME PREDICATE, ONCE THE BATCH IS DONE: the tool result is in the
+    # context, nothing is executing, and the leg fires on the same spinning loop
+    # the cell was already simulating.
+    assert process_module._step_in_flight(handle) is False
+    assert process_module._progress_probe()[1] is False
+    for _ in range(int(armed.seconds) + 4):
+        if step():
+            break
+    else:
+        opened.close()
+        raise AssertionError(
+            "the leg never fired after the tool batch returned, so the first half "
+            "of this cell proves nothing about a guard that is doing work"
+        )
+    assert spy.armed, "the fire never reached the C timer"
+    opened.close()
+    assert stall_watchdog.PROGRESS_MARKER in dump.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_in_flight_holds_the_progress_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other in-flight fact: a compaction rewrites history in-process.
+
+    It burns CPU with no transcript movement while it runs (the compaction row
+    lands when it finishes), so it is the second shape leg 2 exists for. Set
+    through the same attribute the session's own compaction path sets, because
+    the point is that this predicate reads THAT attribute — a private one, for
+    the reason ``process._step_in_flight``'s docstring gives.
+    """
+    session = make_session(tmp_path, ScriptedStream([[StreamEndEvent(stop_reason="stop")]]))
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(tmp_path))
+    assert process_module._step_in_flight(handle) is False
+    session._compacting = True
+    try:
+        assert process_module._step_in_flight(handle) is True
+    finally:
+        session._compacting = False
+    assert process_module._step_in_flight(handle) is False
+    await session.dispose()
+
+
+def test_the_progress_leg_is_wired_at_the_one_arm_site_and_reads_the_live_handle() -> None:
+    """The two lines that make the leg LIVE, pinned so neither can vanish quietly.
+
+    Agent review round 1's MAJOR 2: ``_progress_probe`` is wired by exactly two
+    statements — the entry point passing ``probe=` and ``amain`` publishing the
+    handle it reads — and dropping EITHER left every cell green while the
+    predicate was inert for the whole fleet. This asserts them against the source,
+    the same way ``test_the_only_arm_site_is_the_runtime_entry_point`` pins the
+    arm site's location (a shape no behaviour in this file can observe, because
+    an inert leg and a quiet one look identical from outside).
+    """
+    source = (REPO / "local_operator" / "session" / "runtime" / "process.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    arms = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "arm"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "stall_watchdog"
+    ]
+    assert len(arms) == 1, f"expected exactly one arm call site, found {len(arms)}"
+    passed = {kw.arg: kw.value for kw in arms[0].keywords}
+    assert "probe" in passed, (
+        "the entry point arms without a probe, so the progress leg can never run: "
+        "every test would stay green and the fleet would look protected"
+    )
+    assert isinstance(passed["probe"], ast.Name) and passed["probe"].id == "_progress_probe"
+
+    published = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_live_handle" for target in node.targets
+        )
+    ]
+    assert published, (
+        "nothing publishes the live handle, so ``_progress_probe`` answers 'judge "
+        "nothing' forever and the leg is inert in production"
+    )
+    assert any(
+        isinstance(node.value, ast.Name) and node.value.id == "handle" for node in published
+    ), "the handle published is not the runtime's own"
+
+    # ...AND THE ENDS AGREE BY NAME: the probe must read the global the entry
+    # point fills, or the two halves are wired to different names.
+    probe_source = ast.get_source_segment(source, _function(tree, "_progress_probe"))
+    assert (
+        probe_source is not None and "_live_handle" in probe_source
+    ), "``_progress_probe`` no longer reads ``_live_handle``"
+    # The behavioural twin of the source claim: arming with the real callable
+    # installs THE REAL callable, which is what cell above this one drives.
+    assert process_module._progress_probe.__module__ == process_module.__name__
+
+
+def _function(tree: ast.AST, name: str) -> ast.AST:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"no function named {name}")
+
+
+def test_arming_with_the_real_probe_installs_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sampler is given the runtime's OWN callable, not a stand-in."""
+    spy = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", spy)
+    assert stall_watchdog.arm(
+        seconds=SHORT_BOUND_S, directory=tmp_path, pid=5253, probe=process_module._progress_probe
+    )
+    armed = stall_watchdog._ARMED
+    assert armed is not None
+    assert armed.probe is process_module._progress_probe
+    assert armed.thread is not None and armed.thread.is_alive()
+    stall_watchdog.disarm()
+
+
+#: The ``sitecustomize`` that makes a REAL spawned runtime spin.
+#:
+#: WHY AN INJECTED THREAD AND NOT A TURN. The shape the progress leg exists for is
+#: a process burning CPU with no progress and nothing in flight; producing it
+#: through the product would take a model call, a tool and minutes of wall time per
+#: run. ``time.process_time()`` is the WHOLE process's CPU, so a daemon thread in
+#: the child puts the process in exactly that state — every loop still ticking
+#: (a Python thread releases the GIL every switch interval, so the workload ticker
+#: and the serving heartbeat keep their cadence), nothing in flight, and a core
+#: being burned. It is injected at interpreter start rather than through the spawn
+#: API because the child under test must be the real ``-m`` entry point with the
+#: real argv: that is the whole point of the cell.
+_SPIN_SITECUSTOMIZE = """\
+import threading
+
+
+def _spin() -> None:
+    while True:
+        sum(range(200_000))
+
+
+threading.Thread(target=_spin, daemon=True, name="stall-rig-spin").start()
+"""
+
+#: The same, plus the one line MAJOR 2's negative removes: ``probe=`` is dropped
+#: from the arm inside the child, so the entry point arms without a probe and the
+#: predicate can never run. Nothing else differs, which is what makes this a
+#: measurement of that argument rather than of the rig.
+_DROP_PROBE_SITECUSTOMIZE = _SPIN_SITECUSTOMIZE + """
+
+from local_operator.session.runtime import stall_watchdog as _sw
+
+_arm = _sw.arm
+
+
+def _arm_without_probe(*args, **kwargs):
+    kwargs.pop("probe", None)
+    return _arm(*args, **kwargs)
+
+
+_sw.arm = _arm_without_probe
+"""
+
+
+def _write_sitecustomize(root: Path, body: str) -> Path:
+    """A ``PYTHONPATH`` directory holding one ``sitecustomize.py``."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sitecustomize.py").write_text(body, encoding="utf-8")
+    return root
+
+
+@pytest.mark.slow
+def test_a_real_runtime_child_fires_the_progress_leg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE ACCEPTANCE EVIDENCE: the leg is LIVE in production, on a spawned child.
+
+    Agent review round 2's MAJOR: the source pin above is a complement, not a
+    proof — three text-preserving mutants (the publication inside ``if False:``, an
+    early ``return (), True`` before the probe reads the handle, and a second
+    probe-less arm site in another module) all left it green with the prediction
+    inert, and a predicate that ships silently disabled with green tests is worse
+    than the gap it closes: it makes the fleet LOOK protected, which is the failure
+    #1363's own docstring warns about.
+
+    So this drives the real ``-m`` child through ``launch._spawn_runtime``, with
+    the bound set the way an operator sets it, and shows the leg FIRING there —
+    `rc == 1`, the fired marker, the progress line, and ``fired_leg`` naming the
+    progress leg. The negative is the same rig with ``probe=`` dropped inside the
+    child: same spin, same bound, and nothing fires. Together they are the joint
+    proof of BOTH wiring lines, because with no probe and no published handle the
+    probe answers "in flight" forever and no progress fire is reachable.
+
+    A ``slow`` cell by construction: the operator-facing bound floors at 45 s
+    (``MIN_BOUND_FLOOR_TICKS`` x ``HEARTBEAT_INTERVAL_S``), so the positive needs
+    its bound plus a boot and the negative has to outlast it. That floor is the
+    reason the bound cannot be shortened here — ``arm`` itself is unfloored, but
+    the entry point reads the environment, which is the path under test.
+    """
+    from local_operator.session.runtime import launch as launch_module
+    from tests.unit.session.runtime.test_runtime_detachment import (
+        _SESSION_ID,
+        _isolate,
+        _log_text,
+        _reap,
+        _seed,
+        _wait_for_record,
+    )
+
+    monkeypatch.setattr(launch_module, "_spawn_interpreter", lambda: sys.executable)
+    bound_s = 45.0
+    spawned: list[tuple[Any, Path]] = []
+
+    def spawn_body(body: str, name: str) -> tuple[Any, Path, Path]:
+        root = tmp_path / name
+        config_dir = root / "config"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        _seed(config_dir)
+        _isolate(monkeypatch, config_dir)
+        # AFTER ``_isolate``: it strips every inherited ``LOP_*`` (the child product
+        # reads several of them), so a value set before it would be gone.
+        monkeypatch.setenv("LOP_RUNTIME_STALL_SECONDS", str(int(bound_s)))
+        monkeypatch.setenv("PYTHONPATH", str(_write_sitecustomize(root / "site", body)))
+        child = launch_module._spawn_runtime(_SESSION_ID, str(config_dir), defer_materialise=False)
+        spawned.append((child, config_dir))
+        _wait_for_record(config_dir)
+        return (
+            child,
+            config_dir,
+            config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{child.pid}.log",
+        )
+
+    try:
+        # -- THE POSITIVE: the production path, firing ----------------------
+        child, config_dir, dump = spawn_body(_SPIN_SITECUSTOMIZE, "keep")
+        deadline = time.monotonic() + 180.0
+        while child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.5)
+        assert child.poll() is not None, (
+            f"the real runtime never left, so the leg did not fire in production:\n"
+            f"{_log_text(config_dir)[-1500:]}"
+        )
+        assert child.returncode == 1, (
+            f"the runtime left with rc={child.returncode}; the bound exits 1:\n"
+            f"{_log_text(config_dir)[-1500:]}"
+        )
+        text = dump.read_text(encoding="utf-8")
+        assert stall_watchdog.FIRED_MARKER in text, text[-2000:]
+        assert (
+            stall_watchdog.PROGRESS_MARKER in text
+        ), f"the bound fired, but not the progress leg:\n{text[-2000:]}"
+        assert stall_watchdog.fired_leg(child.pid, config_dir / "logs") == (
+            stall_watchdog.LEG_PROGRESS
+        ), text[-2000:]
+
+        # -- THE NEGATIVE: the same rig, minus `probe=` in the child --------
+        child, config_dir, dump = spawn_body(_DROP_PROBE_SITECUSTOMIZE, "drop")
+        time.sleep(bound_s * 2)
+        assert child.poll() is None, (
+            f"the probe-less rig exited (rc={child.returncode}); the negative is not a "
+            f"negative:\n{_log_text(config_dir)[-1500:]}"
+        )
+        assert not dump.exists() or stall_watchdog.FIRED_MARKER not in dump.read_text(
+            encoding="utf-8"
+        ), "the leg fired with no probe, so this cell does not measure the wiring"
+        assert stall_watchdog.fired_leg(child.pid, config_dir / "logs") is None
+    finally:
+        for child, config_dir in spawned:
             _reap(child, config_dir)
