@@ -96,9 +96,16 @@ inside the working directory, a repository, or beside one. The name is the
 whole test, in any case, and it has no extension gate. A file dropped into such
 a folder follows the convention whether or not anyone decided to.
 
-**The shell channel needs the path named absolutely.** A bare `> tmp/x.md` is
+**The shell channel needs the path NAMED, not related.** A bare `> tmp/x.md` is
 relative, and the scan has no working directory to resolve it against, so it goes
 unnoticed — while the same write through `write`/`edit` IS resolved and does fire.
+A home path is not that case: a LEADING `~/`, `$HOME/` or `${HOME}/` is expanded
+to the real home directory before the scan looks at the target, so it fires
+exactly as its absolute spelling does. Leading alone, and the three spellings
+only — `~other/tmp/x.md` is another user's home and is left alone, as is a `~`
+that is not at the front. The expansion reads the token, not its quoting, exactly
+as the `$TMPDIR` spelling always has: `'~/x'` is a literal name to the shell and
+is expanded here anyway, so the line can name a file the command did not create.
 Spell the whole path and both channels see it.
 
 A scratch-named directory inside a temp directory is not this advisory's
