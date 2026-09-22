@@ -228,7 +228,35 @@ def note_spooled_turn(
         record["next_attempt_ms"] = min(recorded_next, moment + int(RETRY_BASE_S * 1000))
     if existing.get("last_error"):
         record["last_error"] = existing["last_error"]
-    return _write(config_dir, session_id, record)
+    if not _write(config_dir, session_id, record):
+        return False
+    # AND RAISE THE ONE PROCESS THAT CAN ACT ON IT (review round 5 R5-1, moved
+    # here in round 6 R6-2). The wake supervisor is normally DOWN — it exits 0
+    # when nothing is fireable and the LaunchAgent's
+    # ``KeepAlive{SuccessfulExit:false}`` leaves it that way until a schedule
+    # PERSIST revives it — and every pre-existing caller of
+    # ``ensure_supervisor_installed`` is on that persist path, which nothing on the
+    # spool path touches. THE CALL BELONGS HERE rather than at the session writer,
+    # because every writer of an obligation has to raise the reader and there are
+    # TWO: ``serving._spool_for_successor`` (a row that asks for a turn) and
+    # ``inbox.settle_owed_turn``'s re-arm (a row that is still waiting after a
+    # supervisor cleared its record in the window between a read and an unlink —
+    # the case round 6 probed and found raising nobody).
+    #
+    # ON THE CALLER'S LOOP, deliberately (review round 6, R6-1 asked for
+    # ``to_thread`` by analogy with ``wakes/arm.py``): that precedent is a PERSIST
+    # with a turn possibly in flight, where tens of milliseconds of ``launchctl``
+    # matter; here the write has already landed, the check is idempotent, and the
+    # alternative is an awaitable store API that these call sites — the drain's
+    # settle, and a draining runtime's own spool write — cannot use. The cost is
+    # bounded by ONE install check per obligation.
+    try:
+        from local_operator.wakes.install import ensure_supervisor_installed
+
+        ensure_supervisor_installed(Path(config_dir))
+    except Exception:  # noqa: BLE001 — the raiser is best-effort, the record is not
+        logger.debug("could not raise the wake supervisor for %s", session_id, exc_info=True)
+    return True
 
 
 def clear_spooled_turn(

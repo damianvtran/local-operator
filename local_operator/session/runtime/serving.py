@@ -2070,19 +2070,12 @@ class ServingSessionHandle(SessionHandle):
             from local_operator.paths import config_dir
             from local_operator.wakes.spooled import note_spooled_turn
 
-            root = config_dir()
             noted = str(getattr(session, "session_id", "") or "") or Path(directory).name
             note_spooled_turn(
-                root,
+                config_dir(),
                 noted,
                 cwd=str(getattr(self, "_desktop_cwd", "") or ""),
             )
-            try:
-                from local_operator.wakes.install import ensure_supervisor_installed
-
-                ensure_supervisor_installed(root)
-            except Exception:  # noqa: BLE001 — the raiser is best-effort, the row is not
-                logger.debug("could not ensure the wake supervisor for %s", noted, exc_info=True)
         if source == SOURCE_USER:
             return SPOOL_RECEIPT_PROMPT
         return SPOOL_RECEIPT_WAKE if wake else SPOOL_RECEIPT_NOTE

@@ -583,10 +583,13 @@ def test_settling_re_arms_a_record_its_own_spool_still_needs(
     Unpinned until review round 5 proved the guard's removal was invisible.
     """
     from local_operator.session.runtime import inbox
+    from local_operator.wakes import install
 
     config_dir = tmp_path / "store"
     directory = _session(config_dir, "sess-k", rows=[_wake_row()])
     monkeypatch.setattr("local_operator.paths.config_dir", lambda: config_dir)
+    calls: list[Path] = []
+    monkeypatch.setattr(install, "ensure_supervisor_installed", lambda root: calls.append(root))
     assert spooled.read_spooled_turn(config_dir, "sess-k") is None
 
     inbox.settle_owed_turn(directory, cwd="/tmp/work")
@@ -594,3 +597,8 @@ def test_settling_re_arms_a_record_its_own_spool_still_needs(
     re_armed = spooled.read_spooled_turn(config_dir, "sess-k")
     assert re_armed is not None, "a row that asks for a turn must not lose its owner"
     assert re_armed["cwd"] == "/tmp/work"
+    assert calls == [config_dir], (
+        "R6-2: the RE-ARM is a writer of an obligation like any other, so it must "
+        "raise the reader too — a runtime existing here does not imply a "
+        "supervisor does"
+    )
