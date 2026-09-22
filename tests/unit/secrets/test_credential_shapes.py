@@ -76,6 +76,7 @@ from tests.unit.secrets.credential_shape_corpus import (
     FIXTURE_VALUE,
     NEGATIVE_CASES,
     POSITIVE_CASES,
+    PRE_ESCAPED_LINE,
     Case,
 )
 
@@ -297,6 +298,113 @@ def test_the_incidents_own_line_is_a_regression_case() -> None:
     assert "agent_runtime_model_worker" in scrubbed, "the user must stay readable"
     assert "mongodb-prod.example.net" in scrubbed, "the host must stay readable"
     assert scrubbed.startswith("MONGO_DSN=mongodb+srv://agent_runtime_model_worker:")
+
+
+def test_an_escape_is_neither_a_name_character_nor_a_line_the_value_may_cross() -> None:
+    """The rendering a tool call is JOURNALLED in is a surface, and it has escapes.
+
+    Four claims, each measured, all of them about the same incident — a ``write`` of
+    ordinary Python source whose file on disk holds no shape at all, whose arguments
+    are scrubbed in their JSON spelling where every newline is the two characters
+    ``\\`` and ``n``:
+
+    * the escape's own letter is not part of the NAME, so the count trap still
+      counts (the first block);
+    * the escape's letters are detached only when they ARE an escape's — in either
+      spelling of a literal backslash — so a literal backslash before a name does
+      not eat the name (the second);
+    * the escape is a line break for the JUDGEMENT, so an ordinary constant is not a
+      13-character value (the first block again) — and the MASK may only ever cover
+      more than the line the real spelling masks, never less (the third);
+    * and the MASK, unlike the judgement, keeps every byte the rendering gave it: a
+      value whose own bytes carry an escaped break is masked WHOLE, tail included
+      (the fourth) — the direction agent review R1-2 measured the other way round.
+
+    Kept as its own test rather than only corpus rows because the corpus pins the
+    SPELLINGS while this pins the INVARIANTS they rest on — a future edit can satisfy
+    every row by widening a rule somewhere else and still move this. Every assertion
+    here discriminates against at least ONE of the two revisions under review (agent
+    review R1-6, R2-F3), and which one it fails on is stated beside it: the count-trap
+    block fails on ``origin/main``, while the literal-backslash block, the tail and
+    the short-run assertions PASS there and fail only on ``5f757d9c``. Summing them
+    into "each one fails on ``origin/main``" was a claim the measurements do not
+    support.
+    """
+    # 1. The escape's letter is the newline's, not the name's: the count trap applies.
+    # The prefix matters and is not decoration: a name the count trap covers is spared
+    # by ``is_count_shaped``, which keys on the name's FIRST segment, so only a name
+    # with something glued to its front can be a false positive here — and the only
+    # thing that glues itself there is the escape letter of the line break before it.
+    escaped_constructions = (
+        PRE_ESCAPED_LINE
+        + "MAX"
+        + "_TOKENS = 4096"
+        + "\\n" * 3
+        + "def load_vendor_keys() -> dict[str, str]:",
+        PRE_ESCAPED_LINE + "context_tokens=12345678" + "\\n" * 3 + "def run() -> None:",
+        PRE_ESCAPED_LINE + "API" + "_KEY = PLACEHOLDER" + "\\n" * 3 + "def run() -> None:",
+        # The same trap in the spellings ``json.dumps`` writes for a break it cannot
+        # spell in two characters, which is what a payload carrying a raw U+2028
+        # arrives as (agent review R1-4).
+        PRE_ESCAPED_LINE.replace("\\n", "\\u2028")
+        + "MAX"
+        + "_TOKENS = 4096"
+        + "\\u2028" * 3
+        + "def load_vendor_keys() -> dict[str, str]:",
+    )
+    for text in escaped_constructions:
+        assert scrub_shapes(text) == text, f"an escaped break invented a credential in {text!r}"
+        assert match_shape_names(text) == []
+
+    # 2. Only an ESCAPE's letters may be detached from a name. A literal backslash is
+    # not one, and eating a letter made a credential name unreadable as a credential:
+    # the mask was lost where ``origin/main`` kept it (agent review R1-3).
+    literal_backslash = "\\" + "PASSWORD=" + "corr" + "ect_horse_bat" + "tery"
+    assert "corr" + "ect_horse_bat" + "tery" not in scrub_secrets(literal_backslash)
+    assert scrub_shapes(literal_backslash) != literal_backslash
+
+    # 2b. ...and the DOUBLED spelling of the same literal backslash, which is how a
+    # rendering writes one. The backslash before the name is itself escaped, so
+    # nothing may be detached: R1-3's answer checked only that SOMETHING backslashish
+    # preceded the name, and a name that IS a credential word lost its mask here with
+    # no hit and nothing registered (agent review R2-F2). This is the half that fails
+    # at the revision under review, where the block above passes there and fails on
+    # ``5f757d9c``.
+    escaped_literal_backslash = "\\\\" + "token=" + FIXTURE_VALUE
+    assert FIXTURE_VALUE not in scrub_secrets(escaped_literal_backslash)
+    assert scrub_shapes(escaped_literal_backslash) != escaped_literal_backslash
+
+    # 3. A rendered break is a break for the JUDGEMENT, and the MASK may only ever
+    # cover MORE than the line the real spelling masks — never less. The two
+    # directions on one value: on a REAL break the line after it is a line like any
+    # other and stays readable; in the rendering the same assignment is masked whole.
+    carried = (
+        "CLIENT" + "_SECRET=" + "alpha" + "_run" + "_body" + "\\n" + "more" + "_body" + "_material"
+    )
+    on_a_real_break = carried.replace("\\n", "\n")
+    real_line = "alpha" + "_run" + "_body"
+    tail = "more" + "_body" + "_material"
+    assert real_line not in scrub_shapes(on_a_real_break), "both surfaces mask the value"
+    assert tail in scrub_shapes(on_a_real_break), "the real spelling keeps the next line"
+
+    # 4. ...and it is NOT a break for the MASK: the rendering masks the WHOLE run,
+    # where the revision under review left the tail readable under a hit still graded
+    # ``complete=True``.
+    scrubbed = scrub_secrets(carried)
+    assert real_line not in scrubbed, "the key must still be masked"
+    assert tail not in scrubbed, "the tail stayed readable"
+    assert scrubbed == "CLIENT" + "_SECRET=[redacted]"
+
+    short_run = "CLIENT" + "_SECRET=" + "run" + ">" + "\\n" + "zip" + "tail" + "material"
+    scrubbed = scrub_secrets(short_run)
+    assert "zip" + "tail" + "material" not in scrubbed, "a short run still crosses the break"
+
+    # The escape is not the name's, so an assignment that begins right after one is
+    # still an assignment — judged on the name the escape actually belongs to.
+    after_an_escape = PRE_ESCAPED_LINE + "OPENROUTER_API_KEY=" + "QA-fixture-9c1f4a"
+    scrubbed = scrub_secrets(after_an_escape)
+    assert "QA-fixture-9c1f4a" not in scrubbed
+    assert scrubbed.startswith(PRE_ESCAPED_LINE), "the escaped rendering must round-trip"
 
 
 # --- the pattern pass alone --------------------------------------------------
@@ -1207,15 +1315,47 @@ def test_every_notice_fits_one_narrow_card_row() -> None:
         assert "`" in notice, f"{label} offers no copy-pasteable form"
 
 
-def test_the_advisory_survives_a_long_result_and_is_not_last() -> None:
-    """The notice must not be the first thing the 40-line head crop drops."""
-    from local_operator.tools import builtin
+@pytest.mark.asyncio
+async def test_the_advisory_survives_a_long_result_and_is_not_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The notice must not be the first thing the 40-line head crop drops.
 
-    # Read the MODULE, not ``inspect.getsource(execute_bash)``: the tool is
-    # wrapped by a decorator, so getsource returns the wrapper and the assertion
-    # sees none of the body it is meant to pin.
-    source = Path(builtin.__file__).read_text()
-    assert "parts.insert(1, notice)" in source, "the advisory went back to the tail"
+    This used to pin the INSERT SPELLING — ``"parts.insert(1, notice)" in the
+    module source`` — and round 2's Q5 fix broke it by computing the index from
+    the exit-code line instead (the TIMEOUT head is inserted at 0 before the
+    advisories, so a literal index put them ABOVE ``exit code:`` on that path).
+    A source-text pin cannot tell a repositioned notice from an equivalent one,
+    so it is a behavioural row now: a command that dumps a credential-shaped
+    line and then hundreds of lines of output must still carry the notice inside
+    the head window a card keeps, UNDER the exit code. That is the property the
+    old assertion stood in for, and it fails for the reason that matters — the
+    notice being at the tail — rather than on a rename.
+    """
+    from local_operator.harness.types import AbortSignal, ToolContext
+    from local_operator.tools import builtin
+    from local_operator.variables import VariableStore
+
+    monkeypatch.setenv("LOCAL_OPERATOR_CONFIG_DIR", str(tmp_path / "config"))
+    context = ToolContext(
+        cwd=str(tmp_path),
+        variables=VariableStore(cwd=str(tmp_path)),
+        session_id="advisory-head",
+    )
+    # ``env`` is credential-shaped, and the loop puts the notice's position under
+    # the same crop a real 200-line result would.
+    command = 'env; for i in $(seq 1 200); do echo "line $i of the report"; done'
+    result = await builtin.execute_bash(
+        "cred-long", {"command": command}, AbortSignal(), None, context
+    )
+
+    lines = result.text.splitlines()
+    advisory = next((index for index, line in enumerate(lines) if "credential guard" in line), None)
+    assert advisory is not None, result.text[:400]
+    # Inside the head window, which is what "not the first thing dropped" means,
+    # and below the exit code, so the shape is the same on every path.
+    assert advisory < 5, lines[:8]
+    assert lines[0].startswith("exit code: "), lines[:3]
 
 
 def test_the_live_pending_text_matches_the_card() -> None:
@@ -2487,7 +2627,62 @@ def _corpus_grading() -> str:
 #: byte, and 346 produce the value below. The row closes the combination agent review R1-3
 #: named — the reported family's dash join CARRYING a value, the one spelling #1399 moved,
 #: which the four rows beside it covered only by intersection.
-_CORPUS_GRADING_DIGEST = "886301f87ca385b1ae23b705efbe31a30bd08b604ad9b770095c2752b7058690"
+#:
+#: Moved on 2026-09-21 a SIXTH time, by the second-wave false-positive fix, and the
+#: argument is the same measurement rather than a claim. The 346 rows the constant
+#: above covered produce that digest BYTE FOR BYTE under the fixed module —
+#: recomputed through this very function with the eleven added rows filtered out, so
+#: not a masked text, not a label, not a value, not a window, not a severity moved;
+#: and a second, independent check agrees: origin/main's module and this branch's
+#: grade all 346 pre-existing rows identically, field for field. The digest moves
+#: because the corpus grew to 357, and the added rows are the specification of the
+#: fix. Eight negatives: the count trap one ESCAPED newline away (three spellings,
+#: the JSON rendering's own), an identifier assigned to another identifier (two
+#: rows verbatim from the file whose ``read`` reported them), the guide's
+#: two-part secret-renaming form, and a vendor-looking prefix in front of an
+#: org/repo PATH — the slash spelling of a string the ``_`` and ``-`` spellings
+#: already spared. Three positives, because a narrowing that also stopped masking
+#: the credentials arriving IN an escaped rendering would be a leak: a real key one
+#: escaped newline after its name, a real key whose line ends where the rendering
+#: says it does, and a slash-joined tail that is a token (case plus a digit).
+#: MOVED ONCE MORE on 2026-09-21, in the commit that answers agent review R1-1,
+#: R1-2, R1-3 and R1-4 — and this one moves for TWO reasons, not one.
+#:
+#: The corpus grew from 357 rows to 422: 59 positives and 6 negatives, every one of
+#: them on a class R1-1 named. ``IDENTIFIER_ARM_NAMES`` crossed with
+#: ``IDENTIFIER_ARM_SPELLINGS`` and the digit-free underscore alphabet IS the
+#: released class: each of those rows was MASKED at ``origin/main`` and came back
+#: with NO HIT AT ALL — nothing registered, so nothing the later exact-value pass
+#: could contain — at the revision under review. The hyphenated and digit-carrying
+#: neighbours are pinned beside them, on the surface that carries them most often.
+#: The six negatives pin what the narrowed arm releases on purpose (three names
+#: whose tail is a quantity noun), what the six-character escape spellings do (two),
+#: and the one value class the pre-escape judgement releases on the escaped surface
+#: BECAUSE it releases it on the real one (one: a type-name-looking first line).
+#:
+#: AND ONE PRE-EXISTING ROW MOVES, which is the part a digest argument has to name.
+#: It is the positive the previous commit added for "a real key whose line ends where
+#: the rendering says it does": it masked up to the escape then, and it masks the
+#: WHOLE run now, because R1-2 measured that stopping there left a credential's tail
+#: readable under a hit still graded ``complete=True`` — and left it readable with no
+#: hit and no registration at all when the run before the escape was shorter than the
+#: floor. Exactly ONE of the 357 rows the previous constant covered moves, measured
+#: by grading all 357 through that revision's module and this one, field for field;
+#: it moves in the direction that keeps a credential out of the context window.
+#:
+#: MOVED AGAIN on 2026-09-21, in the commit that answers agent review R2-F2, and this
+#: one has the shape of a measurement too: the corpus grew from 422 rows to 423 — ONE
+#: added positive, the doubled-backslash spelling of a literal backslash before a
+#: credential word — and the 422 rows the constant above covered produce THAT digest
+#: byte for byte under the fixed module, recomputed through this very function with
+#: the added row filtered out. So not a masked text, not a label, not a value, not a
+#: window, not a ``complete``, not an ``exposed`` moved for any pre-existing row. The
+#: added row is the specification of the fix and it is the only row whose grading
+#: moves: at the revision above it came back with NO hit and nothing registered (the
+#: value readable), and it now carries ``credential-assignment`` as complete and
+#: contained. The class is a credential that LOST its mask, which is why the row is
+#: pinned in the POSITIVE half rather than argued about in prose.
+_CORPUS_GRADING_DIGEST = "2a29fe4cf4f548c96837f1bf9583e4206f0fb793dfbf346c32dcf9e3e77b6beb"
 
 
 def test_the_corpus_masks_and_grades_byte_for_byte_as_it_always_has() -> None:

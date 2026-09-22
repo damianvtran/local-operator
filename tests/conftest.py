@@ -57,6 +57,13 @@ _AMBIENT_VARS = (
     "LOCAL_OPERATOR_NO_DESKTOP_LAUNCH",
     "LOCAL_OPERATOR_DESKTOP_TOKEN",
     "LOCAL_OPERATOR_DESKTOP_ORIGINS",
+    # The unbounded-search guard's escape hatch (``tools/search_guard.ALLOW_ENV``).
+    # An inherited value would waive the refusal every cell in
+    # ``test_bash_search_interception.py`` asserts — the same ESCAPE-HATCH class
+    # as ``ALLOW_NESTED_SESSION`` — so an operator's exported value must not
+    # reach a test. (The guard itself reads only the command's own assignments,
+    # never the process environment, but the name still has to be scrubbed.)
+    "LOCAL_OPERATOR_ALLOW_UNBOUNDED_SEARCH",
     "LOCAL_OPERATOR_HOME",
     "LOCAL_OPERATOR_DEBUG",
     # Names the session a `lop secret` retrieval is attributed to in the audit

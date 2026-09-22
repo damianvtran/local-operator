@@ -263,7 +263,15 @@ does NOT create IAM roles or security groups; those are one-time human steps.
    key works but should not be the one a worker subprocess holds.
 5. **Guest settings** → infra `OSWORLD_CLIENT_PASSWORD`, `OSWORLD_FILE_BASE_URL`;
    optional `OSWORLD_INPUTS_ROOT` (default `~/worktrees/osworld`) and
-   `OSWORLD_TTL_SECONDS` (default 7200). Optional `AWS_INSTANCE_TYPE`
+   `OSWORLD_TTL_SECONDS` (default 7200). The password must be one the IMAGE
+   accepts: it is what every privileged guest-preparation step escalates with
+   (`sudo -n`, then this value, then upstream's documented defaults when this
+   value is one of them), and a value the image rejects now **refuses the
+   episode at preparation** — before the environment is built and before any
+   model spend — instead of running into a guest whose root filesystem fills
+   minutes later. The refusal names the failing step and this knob, and the
+   partial `guest-preparation.json` stays in the episode's cache root. Optional
+   `AWS_INSTANCE_TYPE`
    (purpose `benchmark_compute`) replaces the EC2 instance type for the
    benchmark VM; it **overrides a task's own `instance_type`**, because the
    task files are content-hash verified and cannot be edited to escape an
@@ -497,19 +505,32 @@ it must print `[]`.**
   refused with the field named.
 - **Guest disk reclamation runs before every episode's first observation.**
   The released AMI ships ~93% full and the guest's own snapd fills the rest from
-  boot (a 9.7 GB `/var/lib/snapd/cache` plus an `Auto-refresh 9 snaps`), which
-  took the root filesystem to 0 bytes at ~t+383s and destroyed 7 of 8 episodes
-  in a 424-466s window. `allocate` therefore aborts the in-flight auto-refresh,
-  holds snap auto-refresh, and clears the snapd download cache between guest
-  readiness and upstream's `reset` — each privileged step as one
-  `sudo -S bash -c '<fragment>'`, because the guest's control server is not
-  root and anything the outer shell does itself happens unprivileged. It is conditional (below 12 GiB free), it
-  fails soft step by step, it never removes an installed snap or anything a task
-  could need, and it writes `guest-preparation.json` — free space before and
-  after, the disk geometry, every step's outcome — into the episode's cache
-  root. See "Guest disk reclamation at episode start" in
-  `docs/benchmarks/osworld_2/README.md`, which also records that the earlier
-  `x11grab`/ffmpeg diagnosis was wrong.
+  boot (measured 2026-09-21: ~10 GB of `*.partial` delta downloads in
+  `/var/lib/snapd/snaps`, plus an `Auto-refresh 9 snaps` — NOT the 4096-byte
+  `/var/lib/snapd/cache` an earlier revision named, and not the x11grab recorder
+  the one before that named), which took the root filesystem to 0 bytes at
+  ~t+383s and destroyed 7 of 8 episodes in a 424-466s window. `allocate`
+  therefore aborts the in-flight auto-refresh, holds snap auto-refresh, and
+  clears snapd's download scratch between guest readiness and upstream's
+  `reset` — each privileged step as one `bash -c '<fragment>'` reached through
+  the candidate ladder (`sudo -n`, then `OSWORLD_CLIENT_PASSWORD`, then
+  upstream's documented defaults when that value is one of them), because the
+  guest's control server is not root and anything the outer shell does itself
+  happens unprivileged. It is conditional (below 12 GiB free), it never removes
+  an installed snap or anything a task could need, and it writes
+  `guest-preparation.json` — free space before and after, the disk geometry,
+  every step's outcome, and the steps the episode was refused on — into the
+  episode's cache root.
+
+  **A rejected `OSWORLD_CLIENT_PASSWORD` now REFUSES the episode at
+  preparation** (naming the failing step and the knob) rather than failing soft
+  into a guest that dies minutes later: four paid episodes were lost that way.
+  A step that did not land is the only thing that refuses — a guest that
+  reclaimed successfully and is still short of free space (the measured normal
+  state, ~2.2 GB free) continues. See "Guest disk reclamation at episode start"
+  in `docs/benchmarks/osworld_2/README.md`, which also records that the earlier
+  `x11grab`/ffmpeg and `/var/lib/snapd/cache` diagnoses were wrong and that
+  `AWS_ROOT_VOLUME_SIZE` is inert.
 - **Screenshot-only observations.** The a11y tree is not shipped as a frame
   (a geometry for an XML document is a fiction). Its presence is recorded in
   observation metadata; shipping it is a protocol addition, not a fake frame.

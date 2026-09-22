@@ -5340,31 +5340,101 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
     #
     # Imported HERE rather than at module scope for the reason recorded on
     # _DAEMON_PLIST_LABELS: mobile.install pulls Starlette into the updater,
-    # and that probe runs in the CLI and in the TUI's update worker.
-    from local_operator.mobile.install import snapshot_bundle
-
-    print(
-        "lop-update: mobile web bundle: "
-        f"{snapshot_bundle(snapshot.path / 'local_operator' / 'mobile' / 'web')}",
-        flush=True,
+    # and that probe runs in the CLI and in the TUI's update worker. All three are
+    # that module's own helpers for "is this tree's UI servable, and what can build
+    # it" — re-implementing any of them here is how the two answers drift apart.
+    from local_operator.mobile.install import (
+        _EXACT_VERSION,
+        _pinned_pnpm,
+        _shim_argv,
+        snapshot_bundle,
     )
-    print(f"installing {snapshot.install_label} ({shape})")
+
+    web_dir = snapshot.path / "local_operator" / "mobile" / "web"
+    bundle_status = snapshot_bundle(web_dir)
+    print(f"lop-update: mobile web bundle: {bundle_status}", flush=True)
+    # ``snapshot_bundle`` NEVER raises — it returns a status STRING — and this
+    # caller used to print that string and install anyway, so a snapshot whose
+    # bundle did not build was flipped to `current` with no UI and exit 0: that is
+    # how generations 0.61.13-0.61.16, 0.61.18 and 0.62.0 landed with no bundle,
+    # the phone's portal answered 503 "mobile web bundle not built", and `lop
+    # mobile status` still printed `healthy: yes` the whole time. A snapshot with
+    # a `web/` tree whose build did not reach a servable dist is a FAILED update,
+    # so it does not install.
+    #
+    # The tolerance is keyed on the `web/` DIRECTORY being absent, and NOT on the
+    # `missing-sources` classifier: ``_bundle_state`` answers `missing-sources` for
+    # any tree with neither `dist/` nor `package.json`, so keying on it alone also
+    # tolerates a TRUNCATED copy that kept `web/src/` and lost the manifest — a
+    # broken tree wearing the costume of a UI-less one. "No `web/` directory" is
+    # the only shape that genuinely has no UI either way, and the non-web
+    # snapshots this command legitimately installs all have it.
+    #
+    # The guard is inside the same try/finally as the install so the refusal
+    # reclaims a temporary extract too: `_remove_tree` below is what keeps a
+    # refused `--from-snapshot <ref>` from leaking its ~95 MB
+    # `$TMPDIR/lop-snapshot-*` tree on every attempt.
     try:
-        install_into_generation(
-            snapshot.path,
-            version=snapshot.version,
-            commit=snapshot.commit,
-            ref=snapshot.ref,
-            origin=SNAPSHOT_SOURCE_TOKEN,
-        )
-    except UpdateError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
+        if web_dir.is_dir() and bundle_status not in ("built", "already built"):
+            raw_pin = _pinned_pnpm(web_dir)
+            # Whether the reader could even TYPE the fetch route (D2/R2-1/O1): a
+            # range cannot be handed to `npx`, and recommending a fetch of the very
+            # range this update just declined to auto-resolve reads as "we will not
+            # do this — you do it". An absent pin is not a range: the default below
+            # is one concrete version this module already uses.
+            exact_pin = raw_pin is None or _EXACT_VERSION.fullmatch(raw_pin) is not None
+            pinned = raw_pin or "11.22.0"
+            if exact_pin:
+                # Same habit as `_pin_mismatch`'s route list: a remedy this host
+                # cannot run is a second refusal, so the npx clause is offered only
+                # where npx resolves. `lop mobile install` is named unconditionally
+                # — it is the primary remedy, and the one that needs no pin.
+                remedy = (
+                    f"`lop mobile install`, or run `npx --yes pnpm@{pinned} "
+                    "install --frozen-lockfile && "
+                    f"npx --yes pnpm@{pinned} build` in local_operator/mobile/web, "
+                    "then re-run this update."
+                    if _shim_argv("npx") is not None
+                    else "`lop mobile install`, then re-run this update."
+                )
+            else:
+                remedy = (
+                    f"`lop mobile install` — this tree pins a range "
+                    f"(`pnpm@{raw_pin}`), so a by-hand fetch has to name a "
+                    "concrete version; then re-run this update."
+                )
+            # TWO sentences, one vocabulary ("mobile web UI"), and the status is
+            # NOT re-spliced in: it is already printed on the line above, and
+            # echoing it pushed the pair to ~470 characters (exact pin) / ~840
+            # (range) as a single paragraph of nested parentheses — a wall, at the
+            # one moment the reader's portal has already broken (design round 1,
+            # D1/D3).
+            print(
+                "lop-update: refusing to install this build — it has no mobile "
+                f"web UI to serve (bundle status above).\n  Fix the build with {remedy}",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"installing {snapshot.install_label} ({shape})")
+        try:
+            install_into_generation(
+                snapshot.path,
+                version=snapshot.version,
+                commit=snapshot.commit,
+                ref=snapshot.ref,
+                origin=SNAPSHOT_SOURCE_TOKEN,
+            )
+        except UpdateError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     finally:
         if snapshot.temporary:
             # ``uv`` has copied what it needs; the extract is ours to reclaim,
             # and leaving 136 MB of tree per install in TMPDIR is how a machine
-            # with a small /tmp dies on a day nobody is looking.
+            # with a small /tmp dies on a day nobody is looking. The refusal path
+            # above returns through here too, deliberately: a *refused*
+            # ref-snapshot is the case that leaves the extract behind when this
+            # sits outside the guard.
             _remove_tree(snapshot.path)
     return _generation_upgrade(0, services=services)
 

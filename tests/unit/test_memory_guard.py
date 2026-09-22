@@ -174,7 +174,39 @@ def test_small_device_floor_keeps_ordinary_commands_alive(
     _pin_host(monkeypatch, available_mb=1050, total_mb=8192, free_swap_mb=800)
     budget = mg.compute_budget()
     assert budget.ceiling_mb == mg._MIN_CEILING_MB
-    assert "small-device floor" in budget.reason
+    assert "floor" in budget.reason
+    assert str(mg._MIN_CEILING_MB) in budget.reason
+
+
+def test_the_floor_is_the_callers_judgement_not_a_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller whose command is not an ordinary one names its own floor.
+
+    The build path is the case in the tree (``mobile.install._STEP_MEMORY_FLOOR_MB``):
+    a package-manager child costs ~121 MB before it does anything measurable, so
+    the bash tool's 64 MB floor would kill a legitimate build step on a pressured
+    host — and report it with a remedy its reader cannot action. The floor is a
+    PARAMETER rather than a second calculation so that the reserve arithmetic keeps
+    ONE owner; this pins that the arithmetic itself is untouched and that only the
+    bar it may not fall below moves.
+    """
+    _pin_host(monkeypatch, available_mb=1050, total_mb=8192, free_swap_mb=800)
+    default = mg.compute_budget()
+    assert default.ceiling_mb == mg._MIN_CEILING_MB
+    raised = mg.compute_budget(floor_mb=256)
+    assert raised.ceiling_mb == 256
+    assert "256 MB floor" in raised.reason
+    # Same host, same reserve: the floor is the ONLY term that moved.
+    assert (raised.total_mb, raised.reserve_mb, raised.available_mb) == (
+        default.total_mb,
+        default.reserve_mb,
+        default.available_mb,
+    )
+    # And a floor above the computed ceiling does not fire where the ceiling is
+    # already higher than it: the floor is a minimum, never a target.
+    _pin_host(monkeypatch, available_mb=7109, total_mb=36864)
+    assert mg.compute_budget(floor_mb=256).ceiling_mb == mg.compute_budget().ceiling_mb
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +343,36 @@ async def test_over_budget_reading_kills() -> None:
     sample = await guard.sample()
     assert sample.bytes_used == 204800 * 1024
     assert guard.should_kill(sample) is True
+
+
+def test_sample_sync_is_the_same_read_for_a_caller_with_no_event_loop() -> None:
+    """``sample_sync`` is the reading the build path takes, and it is the SAME one.
+
+    ``mobile.install``'s step wait is synchronous — there is no loop for
+    ``asyncio.to_thread`` to be scheduled on — so the async face cannot be the only
+    one. Equality with the async reading is the property that matters: a sync arm
+    that drifted from the guarded-bash arm would be a second guard, not a reuse.
+    """
+    ps = "  100   100   204800"
+    guard = _guard(100, ps=ps)
+    sample = guard.sample_sync()
+    assert sample.bytes_used == 204800 * 1024
+    assert sample.pgid == guard.pgid
+    assert sample.bytes_hard == guard.hard_bytes
+    assert guard.should_kill(sample) is True
+    assert guard.peak_bytes == 204800 * 1024
+
+
+def test_sample_sync_never_raises_on_an_unmeasurable_group() -> None:
+    """The sync face keeps the never-kill-on-doubt contract (F6).
+
+    The build path calls this from inside an install, so a probe that cannot answer
+    must be an ordinary ``None`` reading rather than an exception out of the step.
+    """
+    guard = _guard(100, ps="")  # the group is absent from the table -> None
+    sample = guard.sample_sync()
+    assert sample.bytes_used is None
+    assert guard.should_kill(sample) is False
 
 
 @pytest.mark.asyncio

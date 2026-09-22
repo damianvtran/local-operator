@@ -197,12 +197,18 @@ def test_proxy_flag_comes_from_the_task() -> None:
 # and on both t3.xlarge and m5.xlarge -- the volume is identical either way,
 # which is why the instance-type knob changed nothing.
 #
-# The CONSUMER is the guest's own snapd (a 9.7 GB /var/lib/snapd/cache plus a
-# boot-time auto-refresh), NOT the x11grab recorder an earlier revision of this
-# comment named: pgrep found no ffmpeg process on a failing guest. The adapter
-# now reclaims that space itself at episode start (``guest_disk``); this knob
-# remains an independent lever, and cannot fully fix it on its own because the
-# root partition stays 29.5G inside whatever volume is requested.
+# The CONSUMER is the guest's own snapd (measured 2026-09-21: ~10 GB of
+# ``*.partial`` delta downloads in /var/lib/snapd/snaps -- NOT the
+# /var/lib/snapd/cache an earlier revision named, which measures 4096 bytes, and
+# not the x11grab recorder the revision before that named). The adapter now
+# reclaims that space itself at episode start (``guest_disk``).
+#
+# This knob is INERT as the adapter stands: the guest's root filesystem measured
+# 30,993,747,968 bytes in both a 40 GiB and a 120 GiB volume, because
+# ``DesktopEnv(...)`` is constructed without ``volume_size=`` so upstream's
+# ``expand_guest_volume`` never runs. It is still validated and still stamped
+# into the sealed manifest (see ``DISCLOSED_INFRA_METADATA_KEYS``), which is what
+# these tests cover; it is not what fixes the disk.
 
 
 def _with_volume_size(value: str) -> tuple[ScopedInfraValue, ...]:

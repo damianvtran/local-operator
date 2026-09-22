@@ -22,6 +22,19 @@ from local_operator.server.routes import capabilities, desktop_sessions
 from local_operator.server.utils.desktop_sessions import DesktopSessions
 from local_operator.session.attention import AttentionStore
 
+# A 12-character id in exactly the shape a session id has, but uppercase.
+#
+# Written out as a literal rather than derived from a live id with ``.upper()``,
+# and that is a fix rather than a style choice: ids are ``uuid4().hex[:12]``, so
+# roughly one draw in ``(16/10)**12`` (~282) contains no letter at all, and
+# ``.upper()`` of such an id is that id unchanged -- a perfectly VALID session.
+# The arms below then demand a rejection for a real conversation (and a 422 for
+# a real batch item), so they redden a shard at a rate rare enough to pass review
+# and recur in CI. Uppercase hex cannot be a generated id (``.hex`` only ever
+# emits lowercase), so this id is refused for its CASE on every draw, which is
+# the arm under test.
+UPPERCASE_SESSION_ID = "ABCDEF012345"
+
 
 def _publish(root, session_id: str, anchor: str, kind: str = "complete") -> str:
     token = str(uuid.uuid4())
@@ -62,7 +75,7 @@ async def test_only_a_real_user_session_in_this_root_can_be_acknowledged(tmp_pat
     pool = DesktopSessions(tmp_path)
     sid = await pool.create(str(tmp_path))
     token = _publish(tmp_path, sid, "result-1")
-    for bogus in ("../../etc", "not-hex", "a" * 12, sid.upper(), ""):
+    for bogus in ("../../etc", "not-hex", "a" * 12, UPPERCASE_SESSION_ID, ""):
         with pytest.raises(KeyError):
             await pool.acknowledge_attention(bogus, token)
     # A valid-shaped id that is not a session on disk is equally unknown.
@@ -505,7 +518,7 @@ async def test_the_bulk_route_refuses_a_malformed_batch_with_422(tmp_path, monke
             "missing": {},
             "over the cap": {"items": [item] * 501},
             "short id": {"items": [dict(item, session_id="abc")]},
-            "uppercase id": {"items": [dict(item, session_id=sid.upper())]},
+            "uppercase id": {"items": [dict(item, session_id=UPPERCASE_SESSION_ID)]},
             "non-uuid token": {"items": [dict(item, completion_token="now")]},
             # `extra="forbid"` like every other Input in this module: a
             # conversation identity is DERIVED, so a caller cannot name one.

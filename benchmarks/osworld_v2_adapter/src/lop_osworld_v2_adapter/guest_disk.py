@@ -16,7 +16,21 @@ symptom and the full disk is the cause.
 the only match was the probe's own ``pgrep`` command line, which is what made
 the theory look confirmed from outside. The measured consumer is **snapd**:
 
-* ``/var`` is 15G of a 29G disk, and ``/var/lib/snapd/cache`` **alone is 9.7 GB**
+* ``/var`` is 15G of a 29G disk, and what fills it is snapd's **delta
+  downloads**. ``/var/lib/snapd/snaps`` measured 7.9 GB -> 9.9 GB -> 10.6 GB in
+  about 50 s while free space went 2.2 GB -> 0.2 GB -> **0 bytes**, and the
+  files growing there were ``<name>_<rev>.snap.xdelta3-<old>-to-<new>.partial``
+  (``kf6-core24_64`` 209 MB -> 1.17 GB, ``audacity_1239`` 128 MB -> 399 MB):
+  snapd's downloader writes a pending refresh revision -- a delta, most of the
+  time -- beside the installed ones and renames it when the download completes.
+* ``/var/lib/snapd/cache``, the directory this module used to clear, measured
+  **4096 bytes** on this image. It IS documented as snapd's download cache
+  ("the working cache ... used to minimise download size and speed-up
+  refreshes"), which is exactly why it looks like the right target and is not:
+  this snapd streams refresh downloads, deltas included, straight into the
+  ``snaps`` directory as ``*.partial`` files, and leaves the cache directory
+  empty. Clearing it reclaimed nothing, and four paid episodes died on the
+  trajectory it was supposed to interrupt.
 * ``snap changes`` shows ``Auto-refresh 9 snaps`` and ``Pre-download novnc``,
   both fired at boot
 * the AMI ships ~93% full, so a few GB of snap downloads exhausts it
@@ -34,26 +48,46 @@ WHAT THIS MODULE DOES, AND THE LINE IT WILL NOT CROSS. This is guest
 ENVIRONMENT PREPARATION, not benchmark semantics. It clears a package manager's
 **download scratch** and stops that download from restarting; it does not
 uninstall an application, change a task, alter scoring, or touch anything the
-model observes. ``/var/lib/snapd/cache`` is documented as "the working cache,
-used to minimise download size and speed up refreshes" -- deleting it costs a
-re-download and nothing else. Nothing here uninstalls a snap or stops
-``snapd`` itself, because a task may legitimately launch a snap-packaged
-application and removing one would change the benchmark.
+model observes. Both scratch locations cost a re-download and nothing else:
+the cache directory's contents, and the ``*.partial`` files -- a download that
+never completed -- beside the installed revisions. The installed ``.snap``
+revisions themselves are NEVER touched, and nothing here uninstalls a snap or
+stops ``snapd`` itself, because a task may legitimately launch a snap-packaged
+application and removing one would change the benchmark. (A ``.snap`` file in
+that directory is an installed revision, mounted through a loop device; there
+is no version of deleting it that is housekeeping.)
 
-FAIL SOFT, ALWAYS. Every step is best-effort and every failure mode -- a missing
-binary, a denied sudo, an unreachable control server, a wedged guest -- is
-recorded and stepped over. An episode that would otherwise have succeeded must
-never be destroyed by a hygiene step, so ``prepare_guest_disk`` raises nothing
-and the caller ignores nothing: it writes the report either way.
+FAIL SOFT ON THE EPISODE, LOUD ABOUT AN UNPREPARED GUEST. ``prepare_guest_disk``
+raises nothing: a missing binary, a denied sudo, an unreachable control server
+and a wedged guest are each recorded as a step outcome and stepped over. What
+the CALLER may not do is walk into the guest anyway -- that is what the four
+dead episodes were. Every privileged step came back ``sudo: no password was
+provided`` / ``sudo: 1 incorrect password attempt`` because the
+``OSWORLD_CLIENT_PASSWORD`` the campaign passed was rejected by this image; the
+report recorded it, the adapter read past it, and ~400 s later the episode died
+on an opaque transport error with the root filesystem at 0 bytes free. So the
+report is still written in EVERY case, and ``blocking_steps`` names the
+reclamation steps that did not land so the caller can refuse the episode at
+preparation time -- before any model spend. See ``providers/aws.py``
+``_prepare_guest_disk`` for that refusal and its diagnostic.
 
 CONDITIONAL, AND WHY THE THRESHOLD IS WHERE IT IS. Free space is measured on
 every episode (that measurement is the point -- see "observability" below), but
 the reclamation only runs when the guest has less than
 ``RECLAIM_BELOW_FREE_BYTES`` free. The threshold is set ABOVE the largest
-measured consumer: snapd's cache was 9.7 GB, so a guest with more than 12 GiB
-free can absorb snapd's entire measured appetite and still have room for the
-episode's own writes, and touching it would be housekeeping nobody needs. Below
-that, the guest is on the trajectory the measurements above describe.
+measured consumer: the delta-download residue reached ~9.9 GB, so a guest with
+more than 12 GiB free can absorb snapd's entire measured appetite and still
+have room for the episode's own writes, and touching it would be housekeeping
+nobody needs. Below that, the guest is on the trajectory the measurements above
+describe.
+
+NOTHING HERE DECIDES HEALTH FROM FREE SPACE ALONE, and that is deliberate: a
+guest that reclaimed perfectly still sits at ~2.2 GB free (measured on the run
+with the correct password, which completed, was scored, and served 200 on all
+50 screenshots), well under the 12 GiB threshold. "Still below the threshold
+after reclamation" is the NORMAL successful state, so it must never be an
+error; what decides the outcome is whether the protective steps LANDED. That
+is what ``blocking_steps`` reports.
 
 OBSERVABILITY. "The guest had N MB free at the start" is the single fact needed
 to interpret a later environment failure, so the report is written to the
@@ -70,9 +104,11 @@ WHAT IS DELIBERATELY NOT DONE: growing the partition. See
 is absent, the in-place ``sfdisk`` alternative rewrites the root partition table
 and a wrong start sector destroys the guest -- a hygiene step that can fail HARD
 is precisely what this module must not contain -- and once snapd is held and its
-cache cleared the 29.5G partition has ample room for an episode. The disk vs
-partition geometry is REPORTED instead, read-only, because that is the number
-telling the next reader whether ``AWS_ROOT_VOLUME_SIZE`` bought anything.
+download scratch cleared the 29.5G partition has room for a full episode
+(measured: ~2.2 GB free after a successful hold+clear, on the run that completed
+and scored). The disk vs partition geometry is REPORTED instead, read-only,
+because that pair is what shows ``AWS_ROOT_VOLUME_SIZE`` changing nothing at all:
+30,993,747,968 bytes of filesystem inside both a 40 GiB and a 120 GiB volume.
 """
 
 from __future__ import annotations
@@ -82,8 +118,9 @@ from dataclasses import dataclass
 from typing import Callable, Literal, Sequence
 
 # Reclaim only below this much free space. Set above the largest measured
-# consumer (``/var/lib/snapd/cache`` at 9.7 GB) plus room for the episode's own
-# writes, so a guest that can already absorb a full auto-refresh is left alone.
+# consumer (the ~9.9 GB of snapd delta downloads) plus room for the episode's
+# own writes, so a guest that can already absorb a full auto-refresh is left
+# alone.
 RECLAIM_BELOW_FREE_BYTES = 12 * 1024**3
 
 # Per-command and whole-preparation ceilings. The runner allows 900s for the
@@ -94,11 +131,43 @@ RECLAIM_BELOW_FREE_BYTES = 12 * 1024**3
 COMMAND_TIMEOUT_S = 60.0
 TOTAL_BUDGET_S = 180.0
 
-# The snapd cache is pure download scratch (snapcraft "Data locations": "the
-# working cache ... used to minimise download size and speed-up refreshes").
-# The contents are removed, never the directory: snapd recreates files in it but
-# does not recreate the directory itself on every path.
+# Two directions of the same download, and only one of them is where this
+# image puts the bytes.
+#
+# ``_SNAPD_CACHE`` is snapcraft's documented download cache ("Data locations":
+# "the working cache ... used to minimise download size and speed-up
+# refreshes"). Its CONTENTS are removed, never the directory: snapd recreates
+# files in it but does not recreate the directory itself on every path. Clearing
+# it is still correct hygiene -- it is download scratch by definition -- but on
+# this image it measured 4096 bytes, so on its own it reclaims nothing.
+#
+# ``_SNAPD_REVISIONS`` is what actually fills: snapd's downloader writes a
+# pending refresh revision into it as ``<name>_<rev>.snap`` (a full download) or
+# ``<name>_<rev>.snap.xdelta3-<old>-to-<new>.partial`` (a delta, the common
+# case), and renames it on completion. Only the ``*.partial`` files are touched:
+# every other ``.snap`` in there is an INSTALLED revision, and deleting one
+# would remove an application from the benchmark rather than reclaim space.
 _SNAPD_CACHE = "/var/lib/snapd/cache"
+_SNAPD_REVISIONS = "/var/lib/snapd/snaps"
+
+# The suffix snapd gives an incomplete download, matched as a GLOB inside the
+# privileged shell (see ``_clear_download_scratch_fragment``): a literal string
+# here would be expanded by whichever shell held it unquoted, which is the
+# defect the fragments below exist to avoid, and a hard-coded name list would
+# go stale the moment a different snap refreshes.
+_SNAPD_PARTIAL_GLOB = "*.partial"
+
+# Upstream's OWN documented development defaults, in upstream's own order
+# (``desktop_env/providers/volume.py`` ``_expand_linux_guest_volume``:
+# ``for candidate in "$PASSWORD" "<the OSWorld image default>" "password"``).
+# They are here so the escalation ladder below has the same reach as upstream's
+# and no invented value enters it: the first is the password OSWorld 2.0 images
+# ship with and the value this project's runbook documents, the second upstream
+# keeps for its older development images. NO other password may be added.
+_UPSTREAM_DEFAULT_PASSWORDS: tuple[str, ...] = (
+    "osworld-public-evaluation",
+    "password",
+)
 
 # A hold far enough out that no episode can outlive it. Used only as the
 # fallback for snapd older than 2.58 (which has no ``snap refresh --hold``);
@@ -131,11 +200,14 @@ Clock = Callable[[], float]
 class StepOutcome:
     """What one preparation step did, in terms a later reader can act on.
 
-    ``detail`` is bounded and carries the guest's own stderr/stdout tail. The
-    COMMAND is never recorded: holding and clearing run through
-    ``echo <password> | sudo -S`` (upstream's own pattern, setup.py:609), so the
-    verbatim argv would put the client password in a file on the operator's
-    disk for no diagnostic gain.
+    ``detail`` is bounded and carries the guest's own output, which leads with the
+    escalation CHAIN that was tried (``escalation=agentless>supplied`` means
+    ``sudo -n`` was refused and the supplied value was accepted) so a stale infra
+    value is visible in the evidence. The COMMAND is never recorded: escalation
+    runs through ``printf <candidate> | sudo -S`` (upstream's own pattern,
+    setup.py:609), so the verbatim argv would put a password -- the operator's or
+    upstream's default -- in a file on the operator's disk for no diagnostic
+    gain.
     """
 
     name: str
@@ -186,12 +258,56 @@ class GuestDiskReport:
             "disk_bytes": self.disk_bytes,
             "threshold_bytes": self.threshold_bytes,
             "reclamation_attempted": self.reclamation_attempted,
+            # Derived, not stored: the steps are the record, and this is the
+            # answer the caller refused the episode on -- so an operator reading
+            # the file after a refusal does not have to know the rule.
+            "blocking_steps": [step.name for step in self.blocking_steps()],
             "reason": self.reason,
             "steps": [step.to_json() for step in self.steps],
         }
 
     def to_json_bytes(self) -> bytes:
         return json.dumps(self.to_json(), indent=2, sort_keys=True).encode("utf-8")
+
+    def blocking_steps(self) -> tuple[StepOutcome, ...]:
+        """Reclamation steps that did NOT land, in the order they ran.
+
+        THE QUESTION THIS ANSWERS, precisely. Not "is the guest short of
+        space" -- a guest that reclaimed perfectly still sits at ~2.2 GB free,
+        far under the 12 GiB threshold, and that is the state every COMPLETED
+        run measured. And not "did the reclamation run" -- the
+        ``reclamation_attempted`` flag says that. It is "are the steps that stop
+        the fill still standing": a guest whose hold and clear landed is
+        protected even at 2.2 GB free, while a guest whose escalation failed is
+        on the trajectory that killed four paid episodes however much space it
+        happens to have right now. So a report is blocking when one of those
+        steps is not ``ok``, which includes ``skipped`` (the pass ran out of
+        budget before reaching it) and ``unreachable`` (the control server never
+        answered, so nothing was done either).
+
+        The one EXCEPTION is the covered pair: an old snapd rejects
+        ``snap refresh --hold`` as an unknown flag and the ``refresh.hold``
+        setting is the same hold by another name, so a failed hold with a
+        succeeding fallback is not a blocker. Both failing is.
+
+        Measurement and geometry steps are deliberately NOT consulted: a
+        garbled ``df`` after a successful reclamation is a gap in the evidence,
+        not a reason to throw away an episode that would have run.
+        """
+
+        if not self.reclamation_attempted:
+            return ()
+        by_name = {step.name: step for step in self.steps}
+        blockers: list[StepOutcome] = []
+        for step in self.steps:
+            if step.name not in _RECLAMATION_STEP_NAMES or step.status == "ok":
+                continue
+            covering = _COVERING_STEPS.get(step.name)
+            if covering is not None and by_name.get(covering, None) is not None:
+                if by_name[covering].status == "ok":
+                    continue
+            blockers.append(step)
+        return tuple(blockers)
 
 
 def _bash(script: str) -> list[str]:
@@ -229,7 +345,9 @@ class _Session:
         """Run one step, record it, and return its result or None on failure.
 
         Never raises: a step that cannot run is a recorded fact, not an
-        episode-ending error. That is the whole fail-soft contract.
+        exception thrown out of the preparation pass. What that fact then MEANS
+        is the caller's decision -- ``blocking_steps`` decides it here, and
+        ``providers/aws.py`` refuses an episode whose reclamation did not land.
         """
 
         remaining = self._deadline - self._clock()
@@ -378,6 +496,46 @@ _ABORT_REFRESH_FRAGMENT = (
     'done <<<"$changes"; exit $rc'
 )
 
+# The download scratch this image actually fills, and the directory that LOOKS
+# like it. ``/var/lib/snapd/cache`` is cleared because that is what it is for --
+# snapd's documented working cache -- and because on another image it may be the
+# one holding gigabytes. It measured 4096 bytes here. The bytes are in
+# ``/var/lib/snapd/snaps``, as incomplete downloads: see ``_SNAPD_REVISIONS``.
+#
+# A PATHNAME GLOB IS CORRECT HERE and only because of where it runs. This
+# fragment is the argument of ``sudo -S bash -c '...'``, so the shell that
+# expands ``*.partial`` is the PRIVILEGED one. The same glob written in the
+# OUTER shell is the defect this module already paid for: an unprivileged shell
+# cannot read a ``drwx------ root:root`` directory, so ``rm -rf --
+# <dir>/*`` matched nothing, ``rm`` of the literal name exited 0, and the step
+# reported success while deleting nothing. ``rm -f`` also exits 0 when the glob
+# matches nothing, which is right: an empty scratch directory is not a failure.
+_CLEAR_DOWNLOAD_SCRATCH_FRAGMENT = (
+    f"rc=0; "
+    f"find {_SNAPD_CACHE} -mindepth 1 -delete || rc=1; "
+    f"cd {_SNAPD_REVISIONS} && rm -f -- {_SNAPD_PARTIAL_GLOB} || rc=1; "
+    f"exit $rc"
+)
+
+#: The steps whose failure means the guest is still on the trajectory the
+#: measurements describe: snapd downloading into a filesystem that has no room
+#: for it. ``blocking_steps`` reports them and ``providers/aws.py`` refuses the
+#: episode on any of them. The measurements are the steps' own names -- a step
+#: renamed here without being renamed there would silently stop blocking.
+_RECLAMATION_STEP_NAMES = frozenset(
+    {
+        "abort-in-flight-snap-changes",
+        "hold-snap-auto-refresh",
+        "clear-snapd-download-scratch",
+    }
+)
+
+#: A failed step that a later step covers. ``snap refresh --hold`` needs snapd
+#: 2.58+; on anything older it fails with an unknown-flag error and the
+#: ``refresh.hold`` setting is the pre-2.58 way of saying the same thing, so the
+#: pair achieves the hold and only BOTH failing means the hold did not land.
+_COVERING_STEPS = {"hold-snap-auto-refresh": "hold-snap-auto-refresh-fallback"}
+
 
 def _reclaim(session: _Session, client_password: str) -> None:
     """Stop snapd filling the disk, then delete what it already downloaded.
@@ -406,19 +564,15 @@ def _reclaim(session: _Session, client_password: str) -> None:
     returns each such snap to the revision the AMI shipped -- the benchmark's
     own baseline, and the state every other episode starts from. It is not an
     uninstall, which is the line this module does not cross.
+
+    EVERY STEP RUNS THROUGH ``escalation_script``, so each is one privileged
+    ``bash -c`` reached by the candidate ladder rather than by the operator's
+    password alone: see that function for why, and for what a wrong value used
+    to cost.
     """
 
     def privileged(fragment: str) -> str:
-        # ONE ``sudo -S`` per step, the password appearing exactly once, as the
-        # stdin of that one sudo. ``echo`` is a bash builtin in the outer shell,
-        # so nothing is exec'd with the password in its argv; the outer
-        # ``bash -c`` script itself necessarily carries it, which is the
-        # endpoint's contract (argv only, no stdin, no env) and upstream's own
-        # pattern (setup.py:609).
-        return (
-            f"echo {_shell_quote(client_password)} | sudo -S bash -c "
-            f"{_shell_quote(fragment)} 2>&1"
-        )
+        return escalation_script(fragment, client_password)
 
     session.step("abort-in-flight-snap-changes", privileged(_ABORT_REFRESH_FRAGMENT))
 
@@ -437,8 +591,105 @@ def _reclaim(session: _Session, client_password: str) -> None:
 
     # The contents, not the directory: snapd expects the directory to exist.
     # ``-mindepth 1`` is what keeps the directory; ``-delete`` implies
-    # depth-first so nested entries go before their parents.
-    session.step("clear-snapd-cache", privileged(f"find {_SNAPD_CACHE} -mindepth 1 -delete"))
+    # depth-first so nested entries go before their parents. The second half --
+    # the incomplete downloads in the revision directory, which is where this
+    # image's ~10 GB of growth actually is -- is why the step is no longer named
+    # after the cache alone: the cache is download scratch that was EMPTY, and a
+    # reader who trusts the old name goes looking in the wrong directory.
+    session.step("clear-snapd-download-scratch", privileged(_CLEAR_DOWNLOAD_SCRATCH_FRAGMENT))
+
+
+def _fallback_passwords(client_password: str) -> tuple[str, ...]:
+    """Upstream's documented defaults to try after the supplied value, or none.
+
+    THE LADDER'S THIRD RUNG IS GATED, and the gate is the whole point of this
+    function. It opens only when the value the operator supplied is ITSELF one
+    of upstream's documented defaults -- which is both the measured case (the
+    campaign passed upstream's older development default, which this image
+    rejects, while the value this project's runbook documents is the one that
+    works) and the case the runbook's own command produces. A value the operator
+    chose deliberately is not second-guessed: if it is rejected, the steps fail
+    and ``blocking_steps`` refuses the episode with a diagnostic naming
+    ``OSWORLD_CLIENT_PASSWORD``, rather than the harness quietly succeeding with
+    a credential nobody supplied. Both paths are safe; only one of them tells
+    the truth about which password opened the guest.
+
+    Nothing here is invented: the candidates ARE upstream's list, and a value
+    absent from it can never be tried.
+    """
+
+    if client_password not in _UPSTREAM_DEFAULT_PASSWORDS:
+        return ()
+    return tuple(
+        candidate for candidate in _UPSTREAM_DEFAULT_PASSWORDS if candidate != client_password
+    )
+
+
+def escalation_script(fragment: str, client_password: str) -> str:
+    """One privileged step, run through the same candidate ladder upstream uses.
+
+    WHY A LADDER. ``sudo -S`` is fed the operator's ``OSWORLD_CLIENT_PASSWORD``,
+    and a stale or wrong value is not a request error -- sudo simply rejects it,
+    the step exits non-zero, and this module used to record that and carry on
+    into a guest that dies later. Measured: ``sudo: no password was provided`` /
+    ``sudo: 1 incorrect password attempt`` on every privileged step, four paid
+    episodes lost to the disk filling behind them. Upstream's own
+    ``expand_guest_volume`` (vendored ``desktop_env/providers/volume.py``) meets
+    the same class with a candidate SEQUENCE -- ``sudo -n``, then the supplied
+    password, then known development defaults -- and this is that same
+    discipline, in the same order, with the same values and nothing else.
+
+    WHY ``sudo -n`` FIRST. It is the only candidate that cannot fail for the
+    wrong reason: if the guest has a live sudo timestamp it costs one fork and
+    no credential is used at all. It is also the one attempt whose stderr would
+    otherwise be noise (``sudo: a password is required``), which is why the
+    ladder discards each failed attempt's output instead of concatenating them.
+
+    THE RECORDED OUTPUT. Everything the last attempt produced is collected into
+    ONE output, prefixed by ``escalation=<chain>``: the rungs that were tried, in
+    order, so ``guest-preparation.json`` says WHICH password opened the guest --
+    ``escalation=agentless>supplied`` means ``sudo -n`` was refused and the
+    operator's value worked -- without ever saying what any password was. On a
+    step that SUCCEEDED the chain ends on the rung that authenticated; on one
+    that failed it ends on the last rung tried and the collected output says why
+    (``sudo: 1 incorrect password attempt`` is auth; anything else is the
+    fragment's own failure). ``escalation=none`` means nothing was attempted at
+    all, which is its own answer.
+
+    Each candidate appears exactly once in the script, as the stdin of exactly
+    one ``sudo -S``; nothing is ever exec'd with a password in its argv
+    (``printf`` is a shell builtin).
+    """
+
+    quoted_fragment = _shell_quote(fragment)
+    #: Tier labels are fixed vocabulary, never a value: they land in the report.
+    attempts: list[tuple[str, str]] = [("agentless", "")]
+    if client_password:
+        attempts.append(("supplied", client_password))
+    attempts.extend(("upstream-default", value) for value in _fallback_passwords(client_password))
+
+    lines = ["rc=1", "tiers=none", "out=''"]
+    for index, (tier, password) in enumerate(attempts):
+        # One ``bash -c`` per attempt: ``sudo -n`` takes no password at all, and
+        # every other tier feeds exactly one candidate to exactly one
+        # ``sudo -S``. The password is NEVER piped into the agentless attempt --
+        # nothing needs to read stdin there, and a pipe would put a credential
+        # on a command line whose whole point is that it used none.
+        if password:
+            invocation = (
+                f"printf '%s\\n' {_shell_quote(password)} | sudo -S bash -c {quoted_fragment}"
+            )
+        else:
+            invocation = f"sudo -n bash -c {quoted_fragment}"
+        # The FIRST attempted rung replaces the ``none`` placeholder; later ones
+        # extend the chain, so the label can never claim a rung that was not
+        # reached.
+        record = f"tiers={_shell_quote(tier)}" if index == 0 else f'tiers="$tiers>{tier}"'
+        lines.append(f'if [ "$rc" -ne 0 ]; then {record}; out=$({invocation} 2>&1); rc=$?; fi')
+    lines.append("printf 'escalation=%s\\n' \"$tiers\"")
+    lines.append("printf '%s\\n' \"$out\"")
+    lines.append("exit $rc")
+    return "; ".join(lines)
 
 
 def _shell_quote(value: str) -> str:
