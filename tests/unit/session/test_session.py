@@ -5393,6 +5393,55 @@ def test_whitespace_and_corrupt_payloads_count_as_no_bytes():
         assert _wire_image_urls(messages) == [], payload
 
 
+def test_junk_that_carries_base64_alphabet_characters_is_still_omitted():
+    """The tolerant decode is all-or-nothing, not character-ignoring (QA round 2, Q-2).
+
+    ``b64decode(validate=False)`` alone recovers bytes out of prose and markup,
+    which flipped these shapes from OMIT to KEEP and put a malformed
+    ``data:`` URL on the wire — ``data:image/png;base64,not an image at all``.
+    Requiring every character to be in the base64 alphabet before the lenient
+    decode restores the refusal without narrowing anything this pass was built
+    for, and the wire assertion here is the point: the *rendered* message is
+    serialized through the real client and must carry no image block.
+    """
+    for payload in (
+        "not an image at all",
+        "<html>error</html>",
+        "data:image/png;base64,",
+        "not base64 at all !!!",
+    ):
+        message = Message(
+            role="user",
+            content=[TextContent(text="x"), ImageContent(data=payload, mime_type="image/png")],
+        )
+        rendered, dropped = _without_unresolvable_frames([message])
+        assert dropped == 1, payload
+        assert _wire_image_urls(rendered) == [], payload
+
+
+def test_a_short_payload_of_alphabet_characters_is_indistinguishable_and_kept():
+    """The honest boundary of Q-2's fix, pinned so it is not mistaken for a miss.
+
+    ``"AA"`` and ``"qw"`` are one and the same input to every decode that could
+    be asked: both are two alphabet characters that become one byte under the
+    tolerant path (``b"\\x00"`` and ``b"\\xab"``). ``"qw"`` MUST be kept — a
+    padding-stripped real payload is exactly what the tolerant decode exists
+    for — so ``"AA"`` is kept with it. Refusing either would mean refusing real
+    media, which is the error this whole function is built to avoid; the
+    provider-side strip handles a block the model will not take, whereas a
+    wrongly-omitted image is gone for good. Tests the equivalence rather than a
+    verdict, so the reason it is kept cannot be lost.
+    """
+    for payload in ("AA", "qw"):
+        message = Message(
+            role="user",
+            content=[TextContent(text="x"), ImageContent(data=payload, mime_type="image/png")],
+        )
+        rendered, dropped = _without_unresolvable_frames([message])
+        assert dropped == 0, payload
+        assert len(_wire_image_urls(rendered)) == 1, payload
+
+
 def test_a_payload_with_no_bytes_under_any_decode_is_still_omitted():
     """The refusal side of the extended discriminator.
 

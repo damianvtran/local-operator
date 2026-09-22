@@ -41,6 +41,7 @@ import inspect
 import json
 import logging
 import os
+import string
 import tempfile
 import time
 import uuid
@@ -1126,6 +1127,16 @@ IMAGE_OMITTED_TEXT_ONLY_NOTICE = "[image omitted: the current model does not acc
 #: user will guess from "image omitted".
 IMAGE_MISSING_MEDIA_NOTICE = "[image omitted: its data is no longer in the attachment store]"
 
+#: The characters a payload may contain and still be treated as base64 by
+#: :func:`_decode_tolerantly`, AFTER that function has translated ``-_`` to
+#: ``+/``. Deliberately only the standard alphabet plus ``=`` for padding, and
+#: deliberately exclusive of everything else — whitespace included. The lenient
+#: standard decode in :func:`_has_no_image_media` already recovers line-wrapped
+#: payloads (``validate=False`` discards whitespace), so a payload that reaches
+#: the tolerant path with a space in it is prose, not a wrapped image, and
+#: tolerating it is what put junk on the wire (QA round 2, Q-2).
+_BASE64_ALPHABET = frozenset(string.ascii_letters + string.digits + "+/=")
+
 
 def _has_no_image_media(block: ImageContent) -> bool:
     """Whether ``block`` carries no image bytes AT ALL — nothing to send, ever.
@@ -1140,17 +1151,14 @@ def _has_no_image_media(block: ImageContent) -> bool:
     under ANY of the three decodes is left alone, whether or not those bytes
     are an image at all.
 
-    The KEPT side is therefore WIDER than it looks, and deliberately so: the
-    tolerant decoder recovers bytes from a lot of things that are not base64
-    (review round 2 measured 29,070 payload strings against this function,
-    with **0** newly refused by the third decode, prose like ``"no image
-    here"`` among those now kept). That is the correct direction — the
-    alternative is silently replacing real media with a text notice, which is
-    unrecoverable context loss the user cannot see — and the cost of the
-    tolerance falls on the SEND side, where the sticky
-    :func:`~local_operator.providers.failover.is_image_rejection` degrade and
-    the two acceptability strips already handle bytes a provider will not take.
-
+    The KEPT side is deliberately WIDER than "looks like base64", and it is
+    worth knowing how wide: the tolerant decode recovers bytes from short
+    non-canonical payloads that are not images at all (``"qw"``),
+    so this function does not and must not be read as a format or validity
+    check. It answers one question — did any decode yield a byte — and the
+    tolerance it applies is bounded to the ALPHABET and the PADDING, nowhere
+    else: prose, markup, a bare ``data:`` URL prefix and anything else carrying
+    a character outside base64 is still refused (QA round 2, Q-2).
     THREE decodes, not two, and the third is the one that matters most. The
     strict/lenient pair are the SAME decoder parameterised on character
     validation, and they enforce the same padding and quantum rules — so a
@@ -1174,17 +1182,21 @@ def _has_no_image_media(block: ImageContent) -> bool:
 
     COST, stated because the seam is hot: this decodes each image payload up to
     three times, where :func:`_rebound_history_images` decodes once and stops at
-    a header sniff. Measured on this host, 20 frames per render, min-of-7:
-    **945 ms** at ~4.2 MB of base64 per frame (review round 1 measured 694 ms at
-    ~2.1 MB per frame), and **0.04 ms** for the same 20 frames with empty
-    payloads — the empty case is short-circuited before any decode, so the cost
-    falls only on blocks that carry something. It is NOT free, and this pass runs
-    on EVERY render, including the ones below this call that deliberately do not
-    decode (the ``_images_rejected`` strip and the text-only strip, which skip
-    :func:`_rebound_history_images` precisely to avoid it). That is accepted
-    rather than avoided: a payload-less block is UNSENDABLE on every one of those
-    paths too, so a pass that skipped a path would leave the original 400 live on
-    it, which is the bug.
+    a header sniff. It is NOT free, and it runs on EVERY render, including the
+    ones below this call that deliberately do not decode (the ``_images_rejected``
+    strip and the text-only strip, which skip :func:`_rebound_history_images`
+    precisely to avoid it). That is accepted rather than avoided: a payload-less
+    block is UNSENDABLE on every one of those paths too, so a pass that skipped a
+    path would leave the original 400 live on it, which is the bug.
+
+    The figure is LOAD-DEPENDENT, so it is given as a range rather than as one
+    authoritative number (QA round 2, Q-1): ~540-950 ms for a 20-frame render at
+    2-4 MB of base64 per frame, on this host beside ~25 concurrent sessions
+    (review round 1 measured 694 ms at ~2.1 MB/frame; QA round 2 measured 544 ms
+    for 20 frames at ~3.0 MB each at load 124; the author measured 945 ms at
+    ~4.2 MB/frame). Against that, a render whose 20 payloads are empty costs
+    ~0.04 ms — the empty case short-circuits before any decode, so the cost falls
+    only on blocks that carry something.
     """
     data = block.data
     if not isinstance(data, str) or not data.strip():
@@ -1211,16 +1223,40 @@ def _decoded_bytes(data: str, *, validate: bool) -> bytes:
 
 
 def _decode_tolerantly(data: str) -> bytes:
-    """Last-resort decode: URL-safe alphabet, missing or surplus padding, and
-    stray characters ignored — does this hold ANY bytes?
+    """Last-resort decode: URL-safe alphabet and missing or surplus padding.
+
+    ALL-OR-NOTHING, and that is the whole contract (QA round 2, Q-2). It is
+    tolerant about the two things a real image payload is allowed to differ in
+    — the alphabet (``+/`` vs ``-_``) and the padding — and about NOTHING else:
+    if a single character is outside the base64 alphabet the answer is ``b""``,
+    never a partial recovery.
+
+    ``b64decode(validate=False)`` alone is NOT that function. It silently
+    ignores every stray character, so it recovers bytes out of prose and markup
+    (``"not an image at all"``, ``"<html>error</html>"``, a bare
+    ``"data:image/png;base64,"``), which flips OMIT to KEEP for junk that is
+    unambiguously unsendable and puts a malformed ``data:`` URL on the wire —
+    the exact class of thing this whole pass exists to stop, and QA proved it
+    with a real ``_message_to_openai`` call. Junk like that is part of the
+    externally-damaged population this seam defends against, so tolerating it
+    was a hole, not a kindness.
+
+    Whitespace is deliberately NOT tolerated here, for the same reason and with
+    the same discrimination: a line-wrapped payload is already recovered by the
+    lenient standard decode in :func:`_has_no_image_media` (``validate=False``
+    strips newlines and spaces), so this last resort is never the decoder that
+    has to see through it. A payload that reaches here with interior whitespace
+    is not line-wrapped base64 — it is prose, and prose is exactly what Q-2 is
+    about.
 
     Only ever consulted after the two standard decodes both refused the input,
-    so its tolerance cannot mask a payload the wire would have accepted. It
-    exists because a false "empty" here silently replaces a real image with a
-    text notice, which is unrecoverable context loss the user cannot even see.
+    so its tolerance cannot widen the set the wire would have accepted.
     """
-    payload = "".join(data.split()).translate(str.maketrans("-_", "+/"))
-    payload = payload.rstrip("=") + "=" * (-len(payload.rstrip("=")) % 4)
+    translated = data.translate(str.maketrans("-_", "+/"))
+    if any(char not in _BASE64_ALPHABET for char in translated):
+        return b""
+    payload = translated.rstrip("=")
+    payload += "=" * (-len(payload) % 4)
     try:
         return base64.b64decode(payload, validate=False)
     except (ValueError, TypeError):
