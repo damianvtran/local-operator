@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, Field
 
+from local_operator.model.discovery import FAILED_LISTING_STATUSES
 from local_operator.server.desktop import require_desktop
 from local_operator.server.models.schemas import CRUDResponse
 from local_operator.server.routes.auth import get_desktop_auth
@@ -113,9 +114,28 @@ async def models(live: bool = False, auth: DesktopAuth = Depends(get_desktop_aut
     try:
         failures: dict[str, str] = {}
         if live:
-            entries, raw_failures = await controller.live_catalogue()
-            # Provider exceptions can carry response bodies or credential URLs.
-            failures = {key: "Model listing unavailable" for key in raw_failures}
+            entries, statuses = await controller.live_catalogue()
+            # ``live_catalogue`` returns a STATUS for EVERY provider it
+            # considered (``ok``/``cached``/``stale``/``static``/
+            # ``unauthenticated``/``empty``), not a failure map. Naming every key
+            # as an error is how this endpoint told the desktop that all 23
+            # providers had "not answered" while two aggregators' 452 rows were
+            # on screen (D1): ``cached`` served a stored document on purpose,
+            # ``static`` providers were never listing endpoints, and
+            # ``unauthenticated`` ones were never asked. Keep the key only where
+            # a listing was genuinely attempted and produced none —
+            # ``FAILED_LISTING_STATUSES`` is that set, and the renderer's notice
+            # (its KEY COUNT) is then the truth.
+            #
+            # The VALUE stays the generic sentence on purpose: the surface that
+            # consumes this reads only the keys, and provider exceptions can
+            # carry response bodies or credential URLs, so an unvetted reason
+            # string must never reach the wire here.
+            failures = {
+                key: "Model listing unavailable"
+                for key, status in statuses.items()
+                if status in FAILED_LISTING_STATUSES
+            }
         else:
             # NOT `asyncio.to_thread`. `initial_catalogue` is synchronous and
             # I/O-free by contract (it exists to paint on the keystroke that

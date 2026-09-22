@@ -1314,3 +1314,38 @@ def test_the_pickers_price_column_reads_the_rows_own_schedule(
         output_price=1.10,
     )
     assert picker._price(flat) == "$0.27/1.1"
+
+
+def test_the_picker_filters_on_the_listings_human_name() -> None:
+    """REPRODUCTION (D2) through the WIDGET, not the ranker alone.
+
+    The operator typed the model's human name — `grok 4.7` for the row the
+    listing publishes as `SpaceXAI: Grok 4.7` — and the picker showed nothing,
+    because the match scored the selector (`x-ai/grok-4.7`) only. This is the
+    surface they actually use, so the fix is asserted here and not only on
+    ``rank_rows``: a change that repaired the ranker while the widget passed
+    something else would leave the operator's symptom in place.
+    """
+    picker = ModelPicker(lambda row: None)
+    picker.set_rows(
+        [
+            ModelRow(
+                provider="openrouter",
+                model_id="x-ai/grok-4.7",
+                label="openrouter/x-ai/grok-4.7",
+                context_window=2_000_000,
+                input_price=3.0,
+                output_price=15.0,
+                connected=True,
+                aggregated=True,
+                listing_name="SpaceXAI: Grok 4.7",
+            ),
+            ModelRow("openai", "gpt-5.4", "GPT-5.4", 400_000, 1.25, 10.0, True),
+        ]
+    )
+    picker.open("grok 4.7")
+    assert [row.selector for row in picker.suggestions()] == ["openrouter/x-ai/grok-4.7"]
+    # A query that names nothing still narrows to nothing: the name target is an
+    # ADDITION to the matcher, not a matcher that now matches anything.
+    picker.set_query("gpt 6 luna")
+    assert picker.suggestions() == []

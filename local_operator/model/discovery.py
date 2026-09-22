@@ -308,6 +308,28 @@ PUBLIC_LISTING_PROVIDERS = frozenset({"openrouter", "radient", "radient-key"})
 #: for a model released this morning actually needs to hear about.
 ListingStatus = Literal["ok", "cached", "stale", "static", "unauthenticated", "empty"]
 
+#: The statuses that mean the provider produced NO listing on this call, so a
+#: reader asking "which providers did not answer?" may name exactly these.
+#:
+#: WHY this is a separate vocabulary from ``ListingStatus`` rather than every
+#: non-``ok`` value. A status answers "how did we get these rows", and four of
+#: its values are NOT failures: ``cached`` served a stored document on purpose
+#: (fresh enough under the picker's TTL, or refreshing in the background),
+#: ``static`` means the provider has no listing endpoint at all (or a fetch
+#: failed with nothing stored, but the registry still offers its bundled rows),
+#: and ``unauthenticated`` means the caller never asked for a listing because the
+#: provider needs a credential it was not given. Treating the STATUS as the
+#: failure signal is what made the desktop picker accuse all 23 providers —
+#: including the two aggregators whose 452 rows were on screen — of having "not
+#: answered" (D1): ``ok``/``cached``/``static``/``unauthenticated`` produced rows
+#: (or were never asked) and only ``stale``/``empty`` genuinely have none.
+#:
+#: ``static``/``unauthenticated`` are reported to the user elsewhere (the TUI
+#: footer's access note and ``_catalogue_status``); naming them here too would be
+#: one fact in two places, so this set stays the two that only a listing reader
+#: can see.
+FAILED_LISTING_STATUSES = frozenset({"stale", "empty"})
+
 
 @dataclasses.dataclass(frozen=True)
 class DiscoveredModel:

@@ -274,3 +274,82 @@ def test_a_query_matching_nothing_returns_nothing():
 def test_score_reports_none_for_a_non_subsequence():
     assert _score("anthropic/claude-opus-5", "zzz") is None
     assert _score("anthropic/claude-opus-5", "opus") is not None
+
+
+def test_the_listings_human_name_is_a_match_target():
+    """REPRODUCTION (D2): `grok 4.7` must resolve the row it names.
+
+    The operator typed the model's HUMAN name, which the listing publishes
+    (`SpaceXAI: Grok 4.7`) while the selector glues the same words differently
+    (`x-ai/grok-4.7`). Scoring the selector alone returned an EMPTY list for a
+    model that was demonstrably in the catalogue, and the same for
+    `GPT 6 Luna` / `openai/gpt-6-luna`.
+    """
+    rows = [
+        ModelRow(
+            provider="openrouter",
+            model_id="x-ai/grok-4.7",
+            listing_name="SpaceXAI: Grok 4.7",
+            aggregated=True,
+        ),
+        ModelRow(
+            provider="openrouter",
+            model_id="openai/gpt-6-luna",
+            listing_name="OpenAI: GPT-6 Luna",
+            aggregated=True,
+        ),
+    ]
+    assert [row.selector for row in rank_rows(rows, "grok 4.7")] == ["openrouter/x-ai/grok-4.7"]
+    assert [row.selector for row in rank_rows(rows, "gpt 6 luna")] == [
+        "openrouter/openai/gpt-6-luna"
+    ]
+    # Case and separator spelling of the HUMAN name both resolve, because both
+    # sides normalise the same way.
+    for query in ("Grok 4.7", "spacexai grok", "GPT-6 Luna", "openai gpt 6"):
+        assert rank_rows(rows, query), query
+
+
+def test_a_name_match_never_outranks_an_identical_selector_match():
+    """The new target joins the MATCH only; it must not disturb the ORDER.
+
+    Two rows whose selectors both contain the query keep the same relative
+    order they had before `listing_name` was consulted, so adding a name cannot
+    silently promote an aggregator's row over a direct provider's.
+    """
+    rows = [
+        _row("openrouter/x-ai/grok-4", aggregated=True),
+        _row("xai/grok-4"),
+    ]
+    assert [row.selector for row in rank_rows(rows, "grok")] == [
+        "xai/grok-4",
+        "openrouter/x-ai/grok-4",
+    ]
+
+
+def test_the_bare_selector_still_resolves_unchanged():
+    """The pre-existing spelling must not regress: `x-ai/grok-4.7` still lands."""
+    rows = [
+        ModelRow(
+            provider="openrouter",
+            model_id="x-ai/grok-4.7",
+            listing_name="SpaceXAI: Grok 4.7",
+            aggregated=True,
+        )
+    ]
+    assert rank_rows(rows, "x-ai/grok-4.7")
+    assert rank_rows(rows, "openrouter/x-ai/grok-4.7")
+
+
+def test_match_key_normalises_punctuation_and_case_to_words():
+    """One rule for both sides of the comparison, asserted directly.
+
+    A per-spelling special case is what this test exists to prevent: the query
+    and the row must go through the SAME function, or `grok 4.7` matches one
+    spelling and not the other.
+    """
+    from local_operator.model.ranking import _match_key
+
+    assert _match_key("SpaceXAI: Grok 4.7") == "spacexai grok 4 7"
+    assert _match_key("x-ai/grok-4.7") == "x ai grok 4 7"
+    assert _match_key("  grok   4.7 ") == "grok 4 7"
+    assert _match_key("GPT-6 Luna") == "gpt 6 luna"

@@ -42,6 +42,12 @@ _VERSION_PATTERN = re.compile(r"(?<![\d.])(\d+(?:[.]\d+)?)")
 #: it above every real version in the catalogue.
 _MINOR_VERSION_PATTERN = re.compile(r"(?<![\d.])(\d+)-(\d{1,2})(?![\d])")
 
+#: Everything that is not a lowercase letter or a digit, as a word separator.
+#: This is the match-normaliser's whole rule (see :func:`_match_key`): every run
+#: of punctuation, whitespace and symbols collapses to ONE space, so a query and
+#: a row that spell the same words with different separators compare equal.
+_MATCH_SEPARATOR_PATTERN = re.compile(r"[^0-9a-z]+")
+
 
 @dataclasses.dataclass(frozen=True)
 class ModelRow:
@@ -67,9 +73,11 @@ class ModelRow:
     label: str = ""
     #: The source listing's own human name, carried past ``label``'s honesty
     #: rule for a consumer that disambiguates the route some other way — see
-    #: ``CatalogueEntry.listing_name``. Nothing in the RANKING reads it: scoring
-    #: and ordering are on ``label`` and the selector exactly as before, so this
-    #: is display payload travelling through, not a new sort input.
+    #: ``CatalogueEntry.listing_name``. It IS a match input (see
+    #: :func:`_match_key`): the human name is the string a user types, so
+    #: `SpaceXAI: Grok 4.7` has to resolve `grok 4.7` even though the selector
+    #: spells it `x-ai/grok-4.7`. Ordering is unaffected — this joins the
+    #: substring/subsequence test only, never a sort rung.
     #:
     #: Keyword-only so it cannot disturb the POSITIONAL argument order this row
     #: is widely constructed with (the TUI's tests build it positionally); a new
@@ -240,7 +248,7 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     from local_operator.providers.registry import is_decision_only
 
     rows = [row for row in rows if not is_decision_only(row.provider)]
-    needle = query.strip().lower()
+    needle = _match_key(query)
     if not needle:
         return sorted(
             rows,
@@ -255,10 +263,26 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
     exact: list[_RankEntry] = []
     fuzzy: list[_RankEntry] = []
     for row in rows:
-        target = row.selector.lower()
-        score = _score(target, needle)
-        if score is None:
+        # SCORED against every string a user can SEE, not the selector alone.
+        # The selector is `openrouter/x-ai/grok-4.7`; the row also carries
+        # `SpaceXAI: Grok 4.7` as ``listing_name``, and the human name is what
+        # someone actually types — so scoring the selector only is how
+        # `grok 4.7` returned an empty list while the row sat in the catalogue
+        # (D2). `label` joins them because ``label`` is the picker's own
+        # resolved display form; a reseller's ``label`` degrades to the
+        # selector, which is already covered.
+        targets = tuple(
+            _match_key(candidate)
+            for candidate in (row.selector, row.listing_name, row.label)
+            if candidate
+        )
+        scores = [(score, target) for target in targets if (score := _score(target, needle))]
+        if not scores:
             continue
+        # Densest match wins; ties fall through to the tier/version rungs below.
+        # ``target.startswith`` is folded into the score for a PREFIX match, so
+        # this is the same "best-looking" choice the single-target version made.
+        score = max(scores)[0]
         entry = (
             (0 if row.connected else 1, 1 if row.aggregated else 0),
             _preferred_router_rank(row),
@@ -266,10 +290,32 @@ def rank_rows(rows: list[ModelRow], query: str) -> list[ModelRow]:
             _version_key(row),
             row,
         )
-        (exact if needle in target else fuzzy).append(entry)
+        (exact if any(needle in target for target in targets) else fuzzy).append(entry)
     pool = exact or fuzzy
     pool.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
     return [item[4] for item in pool]
+
+
+def _match_key(text: str) -> str:
+    """A string's spelling as the matcher sees it: lowercase, space-separated words.
+
+    WHY this exists rather than a bare ``.lower()``. A model's human name is
+    published by the listing with spaces and a colon (``SpaceXAI: Grok 4.7``)
+    while its id glues the same words with hyphens and a slash
+    (``x-ai/grok-4.7``), so a plain substring test can only ever match one of
+    them: a user typing `grok 4.7` matched NEITHER, because the query's space
+    appears in neither the name's colon-adjacent spelling nor the id at all. The
+    rule is one normalisation applied to both sides, never a special case per
+    spelling: every run of non-alphanumerics becomes a single space, so
+    ``x-ai/grok-4.7`` and ``grok 4.7`` both read ``x ai grok 4 7`` /
+    ``grok 4 7`` and the substring test succeeds on the shared words.
+
+    Version components are deliberately kept as separate words: ``4.7`` reads
+    ``4 7``, so a query of ``grok 47`` would NOT match — that is the right call,
+    since ``47`` is a different token from ``4`` then ``7`` and a fuzzy
+    subsequence pass already covers the typo case.
+    """
+    return _MATCH_SEPARATOR_PATTERN.sub(" ", text.lower()).strip()
 
 
 def _version_key(row: ModelRow) -> tuple[float, float, str]:
