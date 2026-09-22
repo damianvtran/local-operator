@@ -4018,8 +4018,7 @@ class RelayServer:
             # inside it would be a name read after another writer may already have
             # replaced the file. The scope of this redial is "every live link of the
             # network this frame arrived on" — the id the link's handshake carried, which
-            # is both the key ``self.links`` is written under and the key
-            # ``store.mutate`` just took (``store.record_path``), and the value
+            # is the key ``store.mutate`` just took (``store.record_path``) and the value
             # ``_rehandshake_network`` itself selects links by. The record's content field
             # agrees with it for every record this build writes (``save`` derives the path
             # FROM that field), so the two are equal today and the link is the one that

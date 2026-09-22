@@ -611,9 +611,11 @@ def _handler_link(network_id: str, device_id: str) -> relay.PeerLink:
     """A real ``PeerLink`` carrying exactly the two fields these handlers read.
 
     ``__new__`` RATHER THAN ``__init__``: a link is built from a completed handshake
-    over a live socket, and neither handler under test touches the wire —
-    ``_op_identity_rotate`` and ``_op_epoch`` read ``network_id`` (which record to edit)
-    and audit with ``device_id`` (who dialled). The object is a ``PeerLink`` BY TYPE
+    over a live socket, and neither handler under test touches the wire — both read
+    ``network_id`` (which record to edit), and they audit from DIFFERENT fields:
+    ``_op_epoch`` names ``device_id`` (who dialled), while ``_op_identity_rotate`` names
+    ``rotation.member.device_id`` — the device the statement rotates the row TO — and
+    never reads the link's own. The object is a ``PeerLink`` BY TYPE
     (rather than a duck of one, which the type checker rightly refuses), so the handlers
     are driven for real and these tests are about the audit line and the lock instead of
     about a fake of either. It is never started, sent on, or closed, so every other
@@ -705,10 +707,14 @@ def test_the_record_lock_is_not_held_across_the_epoch_rehandshake(
 
     THE SLOW PEER IS A MODELLED STUB, and it has to be: a real socket cannot be made to
     block deterministically at these frame sizes, so a real one would make the test a
-    race rather than a proof. What the stub owes the test is only that the wait is still
-    OPEN when the concurrent write lands, and the assertions are written on THAT rather
-    than on a wall-clock latency — an elapsed-time assertion would move with this host's
-    load, while the fault being guarded is the lock held for the whole wait.
+    race rather than a proof. What the stub owes the test is that its wait is still OPEN
+    while the concurrent write runs, and the cell's own sequencing gives it that: the
+    writer is started only once the stub is inside the wait, and the stub is released only
+    after both joins. The wait's openness is therefore NOT asserted (R7-2) — such an
+    assertion cannot fail — and the cell reads two facts about the writer instead: that a
+    SECOND thread took the record lock inside the bound (a lock held across the wait is
+    what stops it, a deadlock-shaped failure rather than a slow one), and that the epoch
+    it read is the rotation's.
     """
     record, state = _record()
     _admit_peer(record)
@@ -756,16 +762,15 @@ def test_the_record_lock_is_not_held_across_the_epoch_rehandshake(
         reply.update(server._op_epoch(_handler_link(NETWORK, PEER), frame))
 
     epochs_seen: list[int] = []
-    overlapped: list[bool] = []
     write_error: list[BaseException] = []
 
     def write_record() -> None:
         try:
             with store.mutate(NETWORK, root) as live:
+                # The epoch read INSIDE the lock is this thread's whole reading: the writer
+                # gets in at all only because the peer wait is not holding the record lock,
+                # and what it finds there is the record the rotation applied.
                 epochs_seen.append(live.epoch)
-                # Read INSIDE the lock: this is the instant the writer holds it, and the
-                # peer wait must still be running at it.
-                overlapped.append(not release.is_set())
         except BaseException as exc:  # noqa: BLE001 — reported through ``write_error``
             write_error.append(exc)
 
@@ -781,7 +786,15 @@ def test_the_record_lock_is_not_held_across_the_epoch_rehandshake(
             "the rehandshake belongs OUTSIDE the record's read-modify-write"
         )
         assert write_error == [], f"the concurrent write failed: {write_error!r}"
-        assert overlapped == [True], "the write only landed after the peer wait had ended"
+        # NOTHING HERE ASSERTS THAT THE PEER WAIT WAS STILL OPEN, deliberately (R7-2): the
+        # cell's own sequencing settles it (the writer starts only after ``entered``, and
+        # ``release`` is set only in the ``finally`` below, after both joins), so such an
+        # assertion would read as evidence while being unable to fail. The falsifiable
+        # guard is the pair around this line — the join bound above, which the
+        # lock-held-across-the-wait fault trips, and the epoch read below. A SECOND thread
+        # is the only witness that can see that fault at all: the store's RLock is
+        # re-entrant for the thread holding it, so a probe from inside the peer wait — the
+        # same thread — would take it happily.
         # The applied record is on disk BEFORE the wait starts, so the concurrent writer
         # reads the epoch the rotation wrote rather than the one it replaced.
         assert epochs_seen == [2]
