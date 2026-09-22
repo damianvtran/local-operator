@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,6 +47,127 @@ def test_save_and_load_round_trip(root: Path) -> None:
 def test_a_write_leaves_no_temporary_behind(root: Path) -> None:
     store.save(_record(), root)
     assert list(store.networks_dir(root).glob(".*")) == []
+
+
+def test_two_threads_writing_one_record_lose_nothing_and_reverse_nothing(root: Path) -> None:
+    """QA round 15, Q15-2: this package serialised READERS and no writers.
+
+    The staging name was ``.{name}.{pid}.tmp``, and ``os.getpid()`` is not unique
+    inside a process, so every thread of one process writing a record shared one
+    staging file — one thread's ``os.replace`` or its ``finally`` unlink took the
+    file away under another's ``os.chmod`` (``FileNotFoundError``, measured on
+    ``test_session_plane``), and the body that landed was whichever thread last
+    wrote into the shared file rather than whichever last called ``save``.
+
+    The other half of the same fault is the sequence. ``save`` bumped the copy its
+    CALLER held, so two writers that had read the same file both stamped the same
+    next number: one update vanished with no trace, because nothing on the read
+    path can tell a stale write from a fresh one. The two halves are one fault
+    because ONE window produces both — the writers share the staging file, and
+    neither the bytes nor the counter is serialised.
+
+    SO THE CELL PINS BOTH, deterministically rather than by racing:
+
+    * (a) every write lands, and (b) nothing runs backwards: eight writers must
+      stamp eight distinct consecutive numbers, 2..9 from a file primed at 1. A
+      pre-fix writer stamps the number its own stale copy implied, so the run
+      shows repeats (the lost update) instead;
+    * no write may die. The shared staging file took the file away under another
+      thread's ``os.chmod``, so writers raise ``FileNotFoundError`` here —
+      collected rather than escaping a thread, because an exception raised in a
+      pool is how the traceback that motivated this cell got lost.
+
+    The barrier puts every writer on the same stale copy — not a widened window
+    but the exact state a relay thread and the CLI hold.
+    """
+    writers = 8
+    # Prime the file at sequence 1: every writer's copy is loaded from it, so the
+    # stamps below must be 2..9 rather than 1..8.
+    store.save(_record(), root)
+    barrier = threading.Barrier(writers, timeout=30)
+    guard = threading.Lock()
+    stamped: list[int] = []
+    errors: list[BaseException] = []
+
+    def write_one() -> None:
+        try:
+            record = store.load(NETWORK, root)
+            barrier.wait()
+            store.save(record, root)
+            # ``save`` stamps the sequence ON the caller's record, which is what
+            # the relay carries into an epoch broadcast (`relay.py`, net_epoch).
+            with guard:
+                stamped.append(record.sequence)
+        except BaseException as exc:  # noqa: BLE001 - the assertion is the report
+            with guard:
+                errors.append(exc)
+
+    threads = [
+        threading.Thread(target=write_one, name=f"mesh-store-writer-{index}")
+        for index in range(writers)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not any(thread.is_alive() for thread in threads), "a writer never returned"
+    # ONE assertion for both halves, so a pre-fix run reports the whole fault
+    # rather than whichever half it reached first: no write may die, and the
+    # writers that did land must have stamped 2..9 with no repeat.
+    assert (errors, sorted(stamped)) == ([], list(range(2, writers + 2))), (
+        "eight threads writing one record must all land, each on the file it "
+        f"replaced: {len(errors)} raised "
+        f"{sorted({type(exc).__name__ for exc in errors})}, and those that landed stamped "
+        f"{sorted(stamped)} rather than {list(range(2, writers + 2))}"
+    )
+    assert store.load(NETWORK, root).sequence == writers + 1
+
+
+def test_one_lock_per_target_is_released_and_not_leaked(root: Path) -> None:
+    """The registry of write locks must not grow with the traffic.
+
+    The outbox queues write one file PER FRAME, so an entry kept per target ever
+    written would be a leak proportional to the messages sent — which is why the
+    entry is dropped as its last user leaves rather than kept for the process.
+    """
+    assert store._WRITE_LOCKS == {}
+    for index in range(20):
+        store.enqueue_frame(
+            "d_" + "b" * 32, {"op": "net_epoch", "epoch": index}, removed=False, root=root
+        )
+    assert store._WRITE_LOCKS == {}, "every lock must go when its last writer has"
+
+
+def test_an_invite_token_arrives_by_rename_and_is_never_partial(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The token is a BEARER CREDENTIAL, and it used to be written in place.
+
+    ``path.write_text`` created it at the umask's mode and chmodded afterwards, so
+    for the length of the write the token was readable to other local users and a
+    reader could observe a truncated one. It now stages beside its target and
+    renames in, which is pinned here by the rename itself rather than by the final
+    mode: the mode is 0600 either way, and the window is the whole point.
+    """
+    renames: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def spy(source: Any, destination: Any, *args: Any, **kwargs: Any) -> None:
+        renames.append((os.fspath(source), os.fspath(destination)))
+        real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", spy)
+    path = store.save_invite_token("inv_round_trip", "tok-abc", root)
+    assert path.read_text(encoding="utf-8") == "tok-abc\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert [destination for _source, destination in renames] == [
+        os.fspath(path)
+    ], "the token must be renamed into place, never written at the target path"
+    source = renames[0][0]
+    assert os.path.dirname(source) == os.path.dirname(
+        os.fspath(path)
+    ), "staging beside the target is what makes the rename atomic"
+    assert list(store.outbox_dir(root).glob(".*")) == []
 
 
 def test_secrets_round_trip_and_keep_exactly_one_generation(root: Path) -> None:

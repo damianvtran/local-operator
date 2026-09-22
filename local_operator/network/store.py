@@ -1,10 +1,14 @@
 """The network store: records, secrets, invites and outbox queues on disk.
 
-ONE WRITER, ONE PLACE. Everything under ``<config>/network`` is written here, by
-``_write_private_json`` — staged, chmod 0600, ``os.replace`` — so a reader sees
-either the old file or the new one and never a torn one. The guarantee is stated
-at the strength the repository's other staged write already documents: it is
-durability of *process*, not of *host* (no fsync on the hot path).
+ONE WRITER, ONE PLACE, AND ONE LOCK PER TARGET. Everything under
+``<config>/network`` is written here, by ``_write_private_json`` and
+``_write_private_text`` — staged under a name unique to the process, the thread
+and the call, chmod 0600, ``os.replace`` — so a reader sees either the old file or
+the new one and never a torn one, and the writers of ONE file are serialised
+against each other by :func:`_write_lock`. The guarantee is stated at the strength
+the repository's other staged write already documents: it is durability of
+*process*, not of *host* (no fsync of the directory, so a rename outlives a crashed
+process but not a power cut).
 
 THE SECRET LIVES IN A SEPARATE FILE FROM THE RECORD, deliberately. The record is
 what ``lop network show --json`` dumps, what a future syncer copies, and what the
@@ -29,10 +33,13 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_hex
-from typing import Any
+from typing import Any, Callable, Iterator, TextIO
 
 from local_operator.network.identity import network_root
 from local_operator.network.types import (
@@ -129,15 +136,88 @@ def audit_path(root: Path | None = None) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _write_private_json(target: Path, payload: Any) -> Path:
-    """Staged 0600 JSON write, then rename. The only write path in this package."""
+@dataclass
+class _WriteLock:
+    """One target's lock, and how many threads are holding or waiting for it."""
+
+    lock: threading.RLock
+    users: int = 0
+
+
+#: ``{target: _WriteLock}``. Module state rather than a per-file one, because the
+#: writer is a plain function the relay calls from several threads.
+_WRITE_LOCKS: dict[str, _WriteLock] = {}
+_WRITE_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _write_lock(target: Path) -> Iterator[None]:
+    """Serialise the writers of ONE target, within this process.
+
+    WHY A LOCK AS WELL AS A UNIQUE STAGING NAME, and why the two faults QA round
+    15 filed are ONE fault. ``_write_private_json`` staged through
+    ``.{name}.{pid}.tmp`` and ``os.getpid()`` is not unique inside a process, so
+    two THREADS writing the same record shared one staging file: one thread's
+    ``os.replace`` (or the ``finally`` unlink) could take the file away under the
+    other, which then died at ``os.chmod`` with ``FileNotFoundError`` — and the
+    body that *did* land was whichever thread last wrote into the shared file,
+    not whichever last called ``save`` (Q15-2's ``device_name`` reading
+    ``device-b`` after the name had been set to ``pixel-8``). The same window let
+    the record's ``sequence`` run BACKWARDS, because ``save`` bumped whichever
+    in-memory copy its caller held: two writers that had read the same file both
+    wrote the same next number, and the update that lost was invisible (~15% of
+    record writes in QA's sweep).
+
+    ``relay.RelayServer`` serves in-process while the same process's CLI and
+    session path write the same record (``sync_self_endpoints`` beside
+    ``store.save`` from a session thread is the shape QA measured), so threads are
+    the whole of the reachable concurrency here and a thread lock is what closes
+    it. The lock is keyed on the target path as this process spells it — not on
+    ``realpath``, which would spend a syscall on the hot path for callers that all
+    build their path from the same root through :func:`record_path`.
+
+    An entry is dropped once its last user leaves, because the outbox queues write
+    one file PER FRAME: a registry that kept an entry per target ever written would
+    grow with every frame queued. ``users`` is incremented before the acquire, so a
+    waiting thread keeps its entry alive and no two threads can ever hold two
+    different locks for one target.
+    """
+    key = os.fspath(target)
+    with _WRITE_LOCKS_GUARD:
+        entry = _WRITE_LOCKS.get(key)
+        if entry is None:
+            entry = _WriteLock(threading.RLock())
+            _WRITE_LOCKS[key] = entry
+        entry.users += 1
+    entry.lock.acquire()
+    try:
+        yield
+    finally:
+        entry.lock.release()
+        with _WRITE_LOCKS_GUARD:
+            entry.users -= 1
+            if entry.users == 0:
+                del _WRITE_LOCKS[key]
+
+
+def _stage_private(target: Path, emit: Callable[[TextIO], None]) -> Path:
+    """Stage beside ``target``, 0600, and rename it into place.
+
+    THE CALLER HOLDS THIS TARGET'S WRITE LOCK (see :func:`_write_lock`), which is
+    why this is not a second entry point: the staging name is unique to the
+    process, the thread AND the call, so it cannot be shared by two writers even
+    if a future caller forgets the lock — the suffix is belt to the lock's braces,
+    not a substitute for it.
+    """
     directory = target.parent
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(directory, 0o700)
-    temporary = directory / f".{target.name}.{os.getpid()}.tmp"
+    temporary = directory / (
+        f".{target.name}.{os.getpid()}.{threading.get_ident()}.{token_hex(4)}.tmp"
+    )
     try:
         with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False)
+            emit(handle)
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, FILE_MODE)
@@ -148,10 +228,67 @@ def _write_private_json(target: Path, payload: Any) -> Path:
     return target
 
 
+def _write_private_json(target: Path, payload: Any) -> Path:
+    """Staged 0600 JSON write, then rename. One of this package's two write paths."""
+
+    def emit(handle: TextIO) -> None:
+        json.dump(payload, handle, ensure_ascii=False)
+
+    with _write_lock(target):
+        return _stage_private(target, emit)
+
+
+def _write_private_text(target: Path, text: str) -> Path:
+    """Staged 0600 text write, then rename — the invite token's path.
+
+    WHY NOT ``Path.write_text``, WHICH IS WHAT THIS REPLACED: that creates the file
+    at the umask's mode and chmods it afterwards, so a BEARER CREDENTIAL sat
+    readable to every local user for the length of the write while a reader could
+    see a truncated token. Staging it gives the file 0600 in the same instant it
+    becomes visible at the target, and nothing partial ever is, which is the deal
+    every other file in this package already had.
+    """
+
+    def emit(handle: TextIO) -> None:
+        handle.write(text)
+
+    with _write_lock(target):
+        return _stage_private(target, emit)
+
+
+def _sequence_on_disk(target: Path) -> int:
+    """The sequence the record file carries right now, or 0. Never raises."""
+    data = _read_json(target)
+    if data is None:
+        return 0
+    try:
+        return int(data.get("sequence") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def save(record: NetworkRecord, root: Path | None = None) -> Path:
-    """Write the network record. Never carries key material (see the module docstring)."""
-    record.sequence += 1
-    return _write_private_json(record_path(record.network_id, root), record.to_json())
+    """Write the network record. Never carries key material (see the module docstring).
+
+    THE SEQUENCE IS TAKEN FROM THE FILE, UNDER THE LOCK, not from the caller's
+    copy. ``record.sequence`` describes the snapshot the caller loaded, and a
+    caller's snapshot is stale by construction — the relay holds one while the
+    CLI writes — so the bump has to happen against the file the write is about to
+    replace or two writers mint the same number and one update is lost silently.
+    ``max`` against the caller's own copy is deliberate: :func:`_sequence_on_disk`
+    answers 0 for a record it cannot parse, and a torn read must never license a
+    number LOWER than the caller already held, because every peer's "do I already
+    have this?" compares sequences.
+    """
+    target = record_path(record.network_id, root)
+    with _write_lock(target):
+        record.sequence = max(record.sequence, _sequence_on_disk(target)) + 1
+        payload = record.to_json()
+
+        def emit(handle: TextIO) -> None:
+            json.dump(payload, handle, ensure_ascii=False)
+
+        return _stage_private(target, emit)
 
 
 def save_secrets(state: SecretState, root: Path | None = None) -> Path:
@@ -165,10 +302,7 @@ def save_invite_token(invite_id: str, token: str, root: Path | None = None) -> P
     a token printed by a command ends up in the agent's transcript, and the
     transcript is replayed to the provider on every later turn.
     """
-    path = invite_path(invite_id, root)
-    path.write_text(token + "\n", encoding="utf-8")
-    os.chmod(path, FILE_MODE)
-    return path
+    return _write_private_text(invite_path(invite_id, root), token + "\n")
 
 
 # ---------------------------------------------------------------------------
