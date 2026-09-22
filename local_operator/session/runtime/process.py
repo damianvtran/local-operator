@@ -3200,7 +3200,7 @@ def _record_tick_death(reason: str) -> str:
     try:
         recorded = stall_watchdog.note_tick_death(stall_watchdog.WORKLOAD, reason)
     except Exception:  # noqa: BLE001 — see the docstring: this must not move control flow
-        logger.warning(
+        _safe_warning(
             "session runtime: the stall bound's WORKLOAD tick-death record could not be "
             "written, so the log line for this event is the only trace of it",
             exc_info=True,
@@ -3211,12 +3211,43 @@ def _record_tick_death(reason: str) -> str:
     try:
         return f"is recorded in {stall_watchdog.dump_path()}"
     except Exception:  # noqa: BLE001 — naming the file must not decide the give-up either
-        logger.warning(
+        _safe_warning(
             "session runtime: the stall bound's WORKLOAD tick-death record landed, but its "
             "dump path could not be resolved for the log line",
             exc_info=True,
         )
         return "is recorded, in the dump beside this runtime's log"
+
+
+def _safe_warning(message: str, *args: object, exc_info: bool = False) -> None:
+    """``logger.warning`` FOR A PATH THAT MUST NOT BE BROKEN BY ITS OWN REPORT.
+
+    EVERY log call in the supervision goes through here (agent review round 4, MINOR), because
+    each one sits between a decision and the statement that carries it out — and this shape has
+    now been found three times in two functions:
+
+    * the give-up's own line: unprotected, a raise from it reached the cycle guard, which slept
+      and went round again, so the give-up never happened (rigged: 321 creations in 6 s against
+      4 for the control);
+    * the two inside :func:`_record_tick_death`, i.e. in the function documented "MAY NEVER
+      RAISE" (rigged together with the record: 282 creations);
+    * the cancellation branch's, where a raise replaces the ``CancelledError`` a shutdown asked
+      for, exactly as the un-totaled write did in round 2;
+    * the cycle guard's own, which is the one that keeps the supervision alive at all — a raise
+      there ends the supervisor, and a supervisor that has ended is the frozen stamp and the
+      bound firing on a healthy runtime, which is the incident this whole change is about.
+
+    REACHABLE BY REAL STATE, not only by a rig: this venv's ``StreamHandler.emit`` re-raises
+    ``RecursionError`` instead of routing it to ``handleError``, and a runtime wedged enough to
+    blow the recursion limit is exactly the runtime driving this loop.
+
+    The cost is stated rather than hidden: if the log line cannot be written, the event is
+    reported by the dump record that precedes it and by nothing else.
+    """
+    try:
+        logger.warning(message, *args, exc_info=exc_info)
+    except Exception:  # noqa: BLE001 — a report that cannot be made is not a second failure
+        pass
 
 
 async def _watch_stall_beats(stop: asyncio.Event) -> None:
@@ -3359,14 +3390,19 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
             # the reason in the file a reader will open.
             where = _record_tick_death(detail)
             if giving_up:
-                logger.warning(
+                # THE REPORT GOES THROUGH THE TOTAL CALL TOO (agent review round 4, MINOR):
+                # this line sat between the decision and the ``return`` below, so a raise from
+                # logging reached the guard, which slept and went round again — the give-up was
+                # defeated by the announcement of the give-up (rigged: 321 creations, no
+                # give-up line, control 4).
+                _safe_warning(
                     "session runtime: the stall bound's WORKLOAD tick died (%s); the tick's "
                     "death %s",
                     detail,
                     where,
                 )
                 return
-            logger.warning(
+            _safe_warning(
                 "session runtime: the stall bound's WORKLOAD tick died (%s); re-creating it "
                 "(death %d inside %.0fs). Its plane's stamp is refreshed by the re-creation "
                 "and then by the new tick, and the tick's death %s",
@@ -3391,7 +3427,7 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
             # cancels this tick today; the guard is here so the day something
             # does, it is in the log and in the dump rather than silent.
             if not stop.is_set():
-                logger.warning(
+                _safe_warning(
                     "session runtime: the stall bound's WORKLOAD tick was cancelled while the "
                     "session was live, so the supervision ends with it: the plane has no "
                     "reporter and the bound will end this runtime one deadline after its last "
@@ -3408,7 +3444,11 @@ async def _watch_stall_beats(stop: asyncio.Event) -> None:
                 )
             raise
         except Exception:  # noqa: BLE001 — nothing here may end the supervision unobserved
-            logger.warning(
+            # THROUGH THE TOTAL CALL, and this one matters most: a raise from this log line
+            # escapes the handler, so the ``while`` ends and the supervision dies — the tick is
+            # never re-created, the stamp freezes and the bound ends a healthy runtime, which is
+            # the incident this function exists to prevent (agent review round 4, MINOR).
+            _safe_warning(
                 "session runtime: the stall bound's WORKLOAD supervision raised in its own "
                 "recovery path and is continuing; the plane is not stamped on this path, so "
                 "the bound still bounds it",
