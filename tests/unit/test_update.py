@@ -2473,11 +2473,22 @@ def test_from_snapshot_builds_the_mobile_bundle_before_installing(
     assert "lop-update: mobile web bundle: built" in capsys.readouterr().out
 
 
-def test_from_snapshot_without_node_still_installs(
+def test_from_snapshot_without_node_refuses_to_install_a_ui_less_generation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """No Node is a documented skip, never a failed update: the daemon heals
-    itself at `lop mobile install` on a host that has one."""
+    """No Node, and web sources present: the update REFUSES rather than flipping.
+
+    This test used to assert the opposite — no Node was a documented skip that
+    installed anyway, on the theory that the daemon heals itself at `lop mobile
+    install` on a host that has Node. The measured record says the healing never
+    happened: the skip is exactly the path that flipped generations
+    0.61.13-0.61.16, 0.61.18 and 0.62.0 to `current` with no UI, exit 0, a phone
+    answering 503 and `lop mobile status` still reporting `healthy: yes`. A
+    snapshot with web sources and no servable dist is now a failed update whose
+    remedy is printed; the tolerance that remains is for a tree with NO web
+    sources at all (see
+    :func:`test_from_snapshot_without_web_sources_still_installs`).
+    """
     snapshot = tmp_path / "snapshot"
     web = snapshot / "local_operator" / "mobile" / "web"
     web.mkdir(parents=True)
@@ -2495,10 +2506,89 @@ def test_from_snapshot_without_node_still_installs(
         ),
         patch.object(update_mod, "_generation_upgrade", return_value=0),
     ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert installed == [], "a generation with no UI must never be flipped to current"
+    captured = capsys.readouterr()
+    assert (
+        "lop-update: mobile web bundle: skipped (node not installed; build at `lop mobile install`)"
+        in captured.out
+    )
+    assert "lop mobile install" in captured.err, "the refusal names the remedy"
+
+
+def test_from_snapshot_does_not_install_when_the_bundle_build_failed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """THE DEFECT, in one reading: a failed bundle build must not install.
+
+    ``snapshot_bundle`` returns a status STRING and never raises, and the caller
+    printed it and installed anyway — so a snapshot whose bundle did not build
+    was flipped to `current` with no UI and exit 0. The status here is the exact
+    spelling ``snapshot_bundle`` produces on a failed build, and the install
+    call is asserted ABSENT rather than merely expected to be harmless: the
+    generation flip is the damage.
+    """
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(
+            install_mod, "snapshot_bundle", return_value="FAILED (pnpm build failed: boom)"
+        ),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    assert installed == [], "the install call must not be made at all"
+    captured = capsys.readouterr()
+    assert "FAILED (pnpm build failed: boom)" in captured.out
+    assert "did not build" in captured.err
+    # The remedy for a machine already in this state, both spellings: the heal
+    # path, and the direct fetch the tree's own pin needs.
+    assert "lop mobile install" in captured.err
+    assert "npx --yes pnpm@11.22.0" in captured.err
+
+
+def test_from_snapshot_without_web_sources_still_installs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The tolerance the guard KEEPS: a tree with no web sources installs.
+
+    ``snapshot_bundle`` says ``skipped (no web sources in snapshot)`` for such a
+    tree, and there is no UI for the snapshot to be missing — so refusing it
+    would break the non-web snapshots this command legitimately installs. Both
+    halves are asserted, because a guard that refused everything would pass the
+    two tests above and be just as wrong.
+    """
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "local_operator").mkdir(parents=True)
+    installed: list[Path] = []
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(
+            update_mod,
+            "install_into_generation",
+            side_effect=lambda path, **kwargs: installed.append(path),
+        ),
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
         assert update_mod._snapshot_command("main") == 0
 
     assert installed == [snapshot]
     assert (
-        "lop-update: mobile web bundle: skipped (node not installed; build at `lop mobile install`)"
+        "lop-update: mobile web bundle: skipped (no web sources in snapshot)"
         in capsys.readouterr().out
     )
