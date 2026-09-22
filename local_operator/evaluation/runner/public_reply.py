@@ -107,9 +107,9 @@ _MAX_UNWRAP_DEPTH = 2
 #: How many candidate ``{`` positions the trailing-remainder scan may try before
 #: giving up. Each failed decode rescans forward one character, so an unbounded
 #: scan over a remainder full of bare braces goes quadratic -- the same bound,
-#: and the same reason, as ``_iter_json_objects`` in the tool layer. Giving up
-#: means "no competing batch found", which degrades to the tolerant path rather
-#: than to an error.
+#: and the same reason, as ``_iter_json_objects`` in the tool layer. Exhaustion is
+#: distinct from finding no competing batch: when the rest was not checked, the
+#: parser must refuse rather than treat an unchecked tail as harmless.
 _MAX_TRAILING_DECODE_ATTEMPTS = 256
 
 
@@ -409,16 +409,23 @@ def _decode_leading_json(payload: str) -> tuple[Any, str]:
             ) from error
         raise DecisionParseError(f"decision is not valid JSON: {error}") from error
     trailing = payload[end:].strip()
-    if trailing and _competing_batch_offset(trailing, decoded, decoder) is not None:
-        raise DecisionParseError(
-            "decision carries a second action batch for the same observation; "
-            "send exactly one action batch"
-        )
+    if trailing:
+        observation_ids, uses_string_actions = _batch_observation_ids(decoded)
+        offset, exhausted = _competing_batch_offset(trailing, observation_ids, decoder)
+        if offset is not None or (exhausted and uses_string_actions):
+            raise DecisionParseError(
+                "decision carries a second action batch for the same observation; "
+                "send exactly one action batch"
+            )
     return decoded, trailing
 
 
-def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecoder) -> int | None:
-    """Offset of a second batch in ``trailing`` that competes with ``decoded``.
+def _competing_batch_offset(
+    trailing: str,
+    observation_ids: set[str],
+    decoder: json.JSONDecoder,
+) -> tuple[int | None, bool]:
+    """The competing batch offset and whether unexamined candidates remain.
 
     "Competes" means it names the SAME ``observation_id``: only a decision
     about the screen currently in front of the model can supersede the one
@@ -426,13 +433,16 @@ def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecod
     than adjacency or bare JSON-ness, is the one that separates a superseding
     batch from the harness feedback a model quotes back at itself.
 
-    Returns ``None`` when the remainder is ordinary prose, which is the common
-    case and the one that must stay cheap.
+    Compare candidate object IDs with the supplied observation IDs. Returns
+    the competing object's offset, if found, and whether the candidate
+    budget was exhausted while more objects remained unchecked. Ordinary prose
+    without candidate objects returns ``(None, False)`` and stays cheap. Exhaustion
+    is reported separately so only the new string-coercion path needs to refuse;
+    legacy array replies keep their established bounded best-effort behavior.
     """
 
-    observation_ids = _batch_observation_ids(decoded)
     if not observation_ids:
-        return None
+        return None, False
     # A decision is always an object, so only "{" can start a competing batch;
     # the scan is bounded the same way ``_iter_json_objects`` is bounded, since
     # a remainder full of bare braces would otherwise cost a rescan each.
@@ -441,7 +451,7 @@ def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecod
     while attempts < _MAX_TRAILING_DECODE_ATTEMPTS:
         start = trailing.find("{", index)
         if start < 0:
-            return None
+            return None, False
         attempts += 1
         try:
             candidate, end = decoder.raw_decode(trailing, start)
@@ -455,9 +465,13 @@ def _competing_batch_offset(trailing: str, decoded: Any, decoder: json.JSONDecod
         index = max(end, start + 1)
         if not isinstance(candidate, Mapping):
             continue
-        if _batch_observation_ids(candidate) & observation_ids:
-            return start
-    return None
+        candidate_ids, _ = _batch_observation_ids(candidate)
+        if candidate_ids & observation_ids:
+            return start, False
+    # Exhaustion matters only when there is at least one candidate that the
+    # bounded scan did not inspect; exactly 256 harmless objects followed by
+    # ordinary prose is fully checked and remains accepted.
+    return None, trailing.find("{", index) >= 0
 
 
 def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
@@ -522,33 +536,35 @@ def _actions_from_json_string(value: Any) -> tuple[Any, bool]:
         return value, False
     if not all(isinstance(action, Mapping) for action in decoded):
         return value, False
-    if trailing and (
-        _competing_batch_offset(
+    if trailing:
+        observation_ids, _uses_string_actions = _batch_observation_ids(
+            {"actions": decoded}
+        )
+        offset, exhausted = _competing_batch_offset(
             trailing,
-            # A batch-shaped VIEW of what was decoded, so the scan reads the
-            # observation ids the way it reads them off any other batch. Handed
-            # the bare array it would find no id and stand down, which is the
-            # one way this tolerance could execute a decision the model
-            # superseded -- the rule this module refuses to trade away. The
-            # decoder is built with the same hook as ``_decode_leading_json``'s
+            observation_ids,
+            # The decoder is built with the same hook as ``_decode_leading_json``'s
             # so a candidate carrying duplicate keys is refused identically.
-            {"actions": decoded},
             json.JSONDecoder(object_pairs_hook=_unique_object),
         )
-        is not None
-    ):
-        return value, False
+        if offset is not None or exhausted:
+            # Unlike the legacy array spelling, this reply is accepted only by
+            # coercing the string to actions; if the bounded scan left candidate
+            # objects unchecked, the ambiguity guarantee cannot be established.
+            return value, False
     return decoded, True
 
 
-def _batch_observation_ids(value: Any) -> set[str]:
+def _batch_observation_ids(value: Any) -> tuple[set[str], bool]:
     """The observation ids an action-batch-shaped object binds to.
 
     Read from the ACTIONS rather than from a top-level ``observation_id``: a
     model reply carries the id per action (the runner supplies the batch-level
     one itself), so a top-level lookup finds nothing on the very shape this
     needs to compare. Returns an empty set for anything that is not batch
-    shaped, which the caller treats as "not a competing decision".
+    shaped, which the caller treats as "not a competing decision". The second
+    result indicates whether an accepted action array came from string coercion;
+    only that new spelling must fail closed when the bounded outer scan expires.
 
     The batch is located through the same normalisation an accepted reply gets,
     so a WRAPPED second batch competes exactly as a bare one does -- otherwise
@@ -562,27 +578,31 @@ def _batch_observation_ids(value: Any) -> set[str]:
         # A wrapper whose payload is not JSON at all cannot be a batch this
         # scan is looking for. Degrading here is required: this runs over
         # untrusted trailing text on the decode hot path.
-        return set()
+        return set(), False
     if not isinstance(value, Mapping):
-        return set()
-    actions = value.get("actions")
-    if not isinstance(actions, list):
-        nested = value.get("action_batch")
-        actions = nested.get("actions") if isinstance(nested, Mapping) else nested
-    # The same coercion the decision itself gets, for the reason the paragraph
-    # above gives: a batch the model wrote as a JSON-encoded string competes
-    # exactly as a bare one does, and accepting that spelling without reading
-    # its ids here would have quietly disabled this rule -- a competing decision
-    # inside the string's tail, or in text after the string, would be taken as
-    # ordinary noise while the earlier batch executed.
-    actions, _coerced = _actions_from_json_string(actions)
-    if not isinstance(actions, list) or not actions:
-        return set()
-    return {
-        action["observation_id"]
-        for action in actions
-        if isinstance(action, Mapping) and isinstance(action.get("observation_id"), str)
-    }
+        return set(), False
+    # Match the normaliser's two locations independently. In particular, the
+    # top-level ``actions`` value may be a JSON-encoded string; ignoring it here
+    # would make the outer trailing-batch scan blind to the very spelling that
+    # normalization accepts. Unioning both valid arrays is conservative for an
+    # ambiguous object carrying both locations: either one may bind a competing
+    # decision to this observation.
+    nested = value.get("action_batch")
+    nested_value = nested.get("actions") if isinstance(nested, Mapping) else nested
+    observation_ids: set[str] = set()
+    uses_string_actions = False
+    for raw_actions in (value.get("actions"), nested_value):
+        actions, coerced = _actions_from_json_string(raw_actions)
+        uses_string_actions = uses_string_actions or coerced
+        if not isinstance(actions, list):
+            continue
+        observation_ids.update(
+            action["observation_id"]
+            for action in actions
+            if isinstance(action, Mapping)
+            and isinstance(action.get("observation_id"), str)
+        )
+    return observation_ids, uses_string_actions
 
 
 def _carries_decision(value: Mapping[str, Any]) -> bool:
