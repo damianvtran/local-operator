@@ -675,6 +675,71 @@ def test_a_held_runtime_is_named_in_the_fleet_table(monkeypatch: Any, capsys: An
     assert "lop stop" in out, "the cell must name the way out, not only the state"
 
 
+def test_a_stale_pid_with_a_leftover_dump_is_not_held(monkeypatch: Any) -> None:
+    """D8 (round 2): a held dump outlives the runtime, and the phrase must not.
+
+    ``held_pids`` is a scan of the dump files and knows nothing about the process, so a
+    held runtime that a person later stopped kept ``bound held`` — the phrase this round
+    exists to make mean "still running, needs you" — beside a state word saying its pid
+    is gone. The fence is here rather than in the panel, because this is the layer that
+    has the state, and both surfaces read what this publishes.
+    """
+    from local_operator.session.runtime import stall_watchdog
+
+    stale = [
+        (record, "stale" if index == 0 else state) for index, (record, state) in enumerate(FIXTURE)
+    ]
+    _install_fixture(monkeypatch, stale)
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {stale[0][0].pid})
+    monkeypatch.setattr(stall_watchdog, "fired_pids", lambda *a, **k: {stale[0][0].pid})
+
+    rows = session_rows()
+    assert rows[0]["stall_dump"], "the artifact is still published: the dump is the evidence"
+    assert (
+        rows[0]["stall_held"] is False
+    ), "a leftover dump on a dead pid was rendered as a runtime that survived its bound"
+
+
+def test_the_stalled_and_updating_cells_sit_under_their_own_headers(
+    monkeypatch: Any, capsys: Any
+) -> None:
+    """Both gates on at once — the case the round-1 fix got backwards.
+
+    A runtime can be held AND carry a failed update, and the first version of the column
+    appended the header one way round and the cell the other: the held value rendered
+    under ``UPDATING`` and the update value under ``STALLED`` (agent review round 2,
+    MAJOR-3, from the rendered frame). One row is enough to show it, and this is that
+    row with both facts set.
+    """
+    import argparse
+
+    from local_operator import cli
+
+    both = [
+        (replace(record, leaving="", update_failed=UPDATE_PAIR) if index == 0 else record, state)
+        for index, (record, state) in enumerate(FIXTURE)
+    ]
+    _install_fixture(monkeypatch, both)
+    from local_operator.session.runtime import stall_watchdog
+
+    monkeypatch.setattr(stall_watchdog, "held_pids", lambda *a, **k: {both[0][0].pid})
+    rows = session_rows()
+    assert rows[0]["stall_held"] is True and rows[0]["update_failed"] == UPDATE_PAIR
+
+    assert (
+        cli.sessions_command(
+            argparse.Namespace(json=False, sessions_command=None, all=False, limit=None)
+        )
+        == 0
+    )
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    header = lines[0]
+    assert header.index("UPDATING") < header.index("STALLED"), header
+    row = next(ln for ln in lines[1:] if "4243" in ln)
+    # The VALUES must be in the same order as the HEADERS, or each is under the other's.
+    assert row.index("update failed") < row.index(cli.HELD_CELL), row
+
+
 def test_the_stalled_column_is_absent_when_no_row_is_held(monkeypatch: Any, capsys: Any) -> None:
     """The gate, in the other direction: no held row anywhere means no column.
 

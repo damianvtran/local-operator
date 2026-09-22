@@ -1105,7 +1105,17 @@ def death_verdict(row: TurnJournalRow) -> tuple[str, str, str]:
         KILL_CAUSE,
         render_cut_off_reason(
             KILL_CAUSE,
-            detail=row_detail(row, lead=", ".join(p for p in (KILL_UNATTRIBUTED, held_lead) if p)),
+            detail=row_detail(row, lead=KILL_UNATTRIBUTED),
+            # ...AND THE HELD LEAD IS A CLAUSE HERE TOO (agent review round 2, MAJOR-2;
+            # design review round 2, D3). This is the arm round 1 measured first — the
+            # "died of nothing recorded" row of that table — and it kept the lead inside
+            # the parenthetical, so a held-then-killed death and a no-dump death still
+            # rendered byte-identically in the listing cell: exactly the collapse of
+            # three states into two that the lead's placement exists to prevent. The
+            # UNATTRIBUTED half stays in the DETAIL, where it belongs: it qualifies the
+            # death, while "the bound fired and did NOT end it" changes what the row
+            # MEANS.
+            clause=held_lead,
         ),
     )
 

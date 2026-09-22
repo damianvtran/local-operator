@@ -4571,3 +4571,122 @@ def test_held_pids_is_the_subset_of_fired_pids_that_survived(tmp_path: Path) -> 
     assert stall_watchdog.fired_pids(logs) == {11, 22}
     assert stall_watchdog.held_pids(logs) == {22}
     assert stall_watchdog.held_pids(logs) <= stall_watchdog.fired_pids(logs)
+
+
+def test_the_held_fire_backoff_can_never_shorten_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-1 (round 2): the cap is a CEILING, never a floor.
+
+    ``min(bound * 2**n, MAX)`` with a bound ABOVE the cap returns the cap — so an
+    operator who configured a two-hour bound got a "backoff" of one hour, i.e. a bound
+    that fires twice as often as they asked for. The doubling is meant to stretch the
+    interval from the bound it starts at, so the arithmetic is
+    ``max(bound, min(bound * 2**n, MAX))``.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import stall_watchdog as watchdog
+
+    captured: list[float] = []
+    monkeypatch.setattr(
+        watchdog,
+        "_arm_timer",
+        lambda handle, remaining, *, exit_leg: captured.append(remaining),
+    )
+    monkeypatch.setattr(watchdog, "_record_held_fire", lambda armed: False)
+    monkeypatch.setattr(watchdog, "_dump_size", lambda path: 0)
+
+    armed = SimpleNamespace(
+        seconds=7200.0,  # above HELD_FIRE_BACKOFF_MAX_S, which is the case that broke
+        after_fire_at=1000.0,
+        held_fires=0,
+        held=True,
+        handle=object(),
+        path=tmp_path / "dump.log",
+        arm_size=0,
+        seen_fires=0,
+        # A deadline in the PAST, so the interval this branch computes is what lands.
+        deadline=lambda: 0.0,
+    )
+    monkeypatch.setattr(watchdog.time, "monotonic", lambda: 1000.0)
+    watchdog._rearm(armed)
+    assert captured, "no timer was armed at all"
+    assert (
+        captured[-1] >= 7200.0
+    ), f"a two-hour bound was re-armed for {captured[-1]}s: the cap shortened it"
+
+
+def test_the_backoff_counter_is_per_EPISODE_not_per_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MINOR-1 (round 2), second half: the hold clearing ends the episode.
+
+    A lifetime counter meant a runtime that survived a fire, cleared its work and wedged
+    AGAIN later re-armed at the backed-off interval — up to twelve times the configured
+    bound — and on the fatal arm that is the wedge recovery itself being delayed by the
+    same factor. ``_apply_exit_leg`` is the flip the sampler makes when the work clears
+    with no fire pending, so that is where the episode ends.
+    """
+    from types import SimpleNamespace
+
+    from local_operator.session.runtime import stall_watchdog as watchdog
+
+    monkeypatch.setattr(watchdog, "_arm_timer", lambda handle, remaining, *, exit_leg: None)
+    armed = SimpleNamespace(
+        seconds=300.0,
+        after_fire_at=1000.0,
+        held_fires=3,
+        held=True,
+        busy=None,
+        handle=object(),
+        path=tmp_path / "dump.log",
+        arm_size=0,
+        seen_fires=0,
+        deadline=lambda: 0.0,
+    )
+    watchdog._apply_exit_leg(armed, False)
+    assert armed.held is False
+    assert armed.held_fires == 0, (
+        "the backoff counter survived the episode, so a later wedge re-arms at up to "
+        "twelve times the configured bound"
+    )
+
+
+def test_a_marker_that_landed_MID_LINE_still_reads_as_held(tmp_path: Path) -> None:
+    """Q-4 (round 2): the marker can interleave with faulthandler's own flush.
+
+    ``faulthandler`` writes the dump from its own thread through a buffered handle while
+    the sampler appends our marker to the same ``O_APPEND`` descriptor, so the marker
+    lands at the end of whatever faulthandler had written but not flushed — MID-LINE
+    (measured on this fleet: one of four real fires, in exactly the shape built below).
+    A line-start test read that genuine held dump as "not held", which through the
+    product's own readers means no STALLED cell, ``stall_held: false`` beside a set
+    ``stall_dump``, and ``death_verdict`` narrating a still-alive runtime as one that
+    ended ITSELF. The module's own header states the rule this restores: markers are
+    read as SUBSTRINGS, which is why no header quotes one.
+    """
+    from local_operator.session.runtime import stall_watchdog
+
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    pid = 987_654
+    dump = logs / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
+    # The measured interleaving: faulthandler's unflushed tail, then our marker.
+    dump.write_text(
+        "[stall watchdog] armed for 300s\n"
+        f"{stall_watchdog.FIRED_MARKER}0:05:00)!\n"
+        "Thread 0x1 (most recent call first, thread id=1):\n"
+        '  File "/tmp/x.py", line 1 in <module>\n'
+        f'  File "{stall_watchdog.HELD_MARKER}the bound fired at 1.0 and did NOT end this '
+        "runtime\\n",
+        encoding="utf-8",
+    )
+
+    assert stall_watchdog.held_fire(pid, logs) is True, (
+        "a held marker that landed mid-line read as no held fire, so a surviving runtime "
+        "is reported as one the bound ended"
+    )
+    assert pid in stall_watchdog.held_pids(
+        logs
+    ), "the third state vanished from the listing for an interleaved dump"

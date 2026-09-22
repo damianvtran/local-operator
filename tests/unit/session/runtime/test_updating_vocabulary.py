@@ -228,9 +228,7 @@ def test_the_failure_has_a_renderable_incident_cause_of_its_own() -> None:
     assert types.bound_text(types.BUILD_DRAIN_PROGRESS_S) not in sentence, sentence
     # ...and the detail names it, per arm, which is the only place it can be known.
     window_detail = incidents.update_failed_detail("0.62.2 -> 0.63.0", buildwatch.UPDATE_LOCK_S)
-    drain_detail = incidents.update_failed_detail(
-        "0.62.2 -> 0.63.0", types.BUILD_DRAIN_PROGRESS_S
-    )
+    drain_detail = incidents.update_failed_detail("0.62.2 -> 0.63.0", types.BUILD_DRAIN_PROGRESS_S)
     assert types.bound_text(buildwatch.UPDATE_LOCK_S) in window_detail, window_detail
     assert types.bound_text(types.BUILD_DRAIN_PROGRESS_S) in drain_detail, drain_detail
     assert window_detail != drain_detail, "the two arms must not report one bound"

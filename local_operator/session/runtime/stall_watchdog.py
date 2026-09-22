@@ -1696,9 +1696,16 @@ def _rearm(armed: "_Armed", *, remaining: float | None = None) -> None:
             # producing evidence, and nothing here turns the bound into a monitor that
             # has given up — the fail-safe for a plane that truly stopped reporting is
             # still the ordinary liveness leg.
-            interval = min(
-                armed.seconds * (2 ** min(armed.held_fires, HELD_FIRE_BACKOFF_STEPS)),
-                HELD_FIRE_BACKOFF_MAX_S,
+            # ...AND NEVER SHORTER THAN THE BOUND IT STARTS FROM (agent review round 2,
+            # MINOR-1): the cap is a ceiling, so an operator whose bound is ABOVE it
+            # (``LOP_RUNTIME_STALL_SECONDS=7200`` is accepted) would otherwise have got
+            # half the bound they configured — a "backoff" that fires twice as often.
+            interval = max(
+                armed.seconds,
+                min(
+                    armed.seconds * (2 ** min(armed.held_fires, HELD_FIRE_BACKOFF_STEPS)),
+                    HELD_FIRE_BACKOFF_MAX_S,
+                ),
             )
             remaining = max(remaining, interval - (time.monotonic() - armed.after_fire_at))
     _arm_timer(armed.handle, remaining, exit_leg=not armed.held)
@@ -1791,6 +1798,14 @@ def _record_held_fire(armed: "_Armed") -> bool:
         armed.held_fires += 1
     else:
         armed.held = False
+        # THE COUNTER IS PER EPISODE, NOT PER PROCESS (agent review round 2, MINOR-1).
+        # The docstring's subject is "while the work stays in flight the episode
+        # repeats", and a lifetime counter outlived that: a runtime that survived a
+        # fire, cleared its work and wedged AGAIN later re-armed at the backed-off
+        # interval — up to twelve times the configured bound — which on the fatal arm
+        # (work cleared, so the exit leg is fatal) delays the one recovery this bound
+        # exists to perform. The hold clearing is exactly where an episode ends.
+        armed.held_fires = 0
     try:
         # The recursive call is the point: it re-arms for the next episode THROUGH
         # ``_rearm`` so that the count this call has just advanced (with
@@ -1828,6 +1843,10 @@ def _apply_exit_leg(armed: "_Armed", held: bool) -> None:
     if held == armed.held:
         return
     armed.held = held
+    if not held:
+        # The other place an episode ends: the sampler watches the work clear while no
+        # fire is pending (see ``_record_held_fire``'s counter note).
+        armed.held_fires = 0
     try:
         _rearm(armed)
     except (OSError, ValueError, RuntimeError):
@@ -2550,7 +2569,18 @@ def held_fire(pid: int | None = None, directory: Path | None = None) -> bool:
     one that cannot narrate a runtime as stalled when it never fired.
     """
     text = _dump_text(dump_path(pid, directory))
-    return _fires(text) and any(line.startswith(HELD_MARKER) for line in text.splitlines())
+    # A SUBSTRING TEST, NOT A LINE-START ONE (QA round 2, Q-4). This marker is the one
+    # line of ours written into a file ANOTHER WRITER IS STILL FLUSHING: ``faulthandler``
+    # writes its dump from its own thread with a buffered handle, we append this from
+    # Python on the same ``O_APPEND`` fd, and the two can interleave so the marker lands
+    # MID-LINE (measured on this fleet: one of four real fires, in the shape
+    # ``  File "[stall watchdog] bound held: …``). A line-start test then reads a genuine
+    # held dump as one that was NOT held, which through the product's own readers means
+    # ``held_fire=False``, ``held_pids()`` empty, no STALLED cell — and ``death_verdict``
+    # narrating a STILL-ALIVE runtime as "the runtime ended ITSELF". The module's own
+    # header states the rule this restores: readers test these markers as substrings,
+    # which is exactly why no header quotes one.
+    return _fires(text) and HELD_MARKER in text
 
 
 def held_pids(directory: Path | None = None) -> set[int]:
@@ -2580,7 +2610,7 @@ def held_pids(directory: Path | None = None) -> set[int]:
         text = _dump_text(path)
         if not _fires(text):
             continue
-        if not any(line.startswith(HELD_MARKER) for line in text.splitlines()):
+        if HELD_MARKER not in text:  # a substring, for the interleaving reason above (Q-4)
             continue
         suffix = path.name[len(DUMP_PREFIX) + 1 : -len(".log")]
         if suffix.isdigit():

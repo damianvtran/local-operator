@@ -419,7 +419,14 @@ def collect_sessions(
                 # it (design review round 1, D1): the row dict has had it since this
                 # branch, and until the panel read it the only place it existed was the
                 # JSON.
-                stall_held=rec.pid in held_pids,
+                # FENCED ON LIVENESS (design review round 2, D8): ``held_pids`` is a
+                # scan of the dump files and says nothing about whether the process is
+                # still there, so a held runtime that a person later stopped kept the
+                # phrase "still running, needs you" on a row whose pid is gone — the
+                # panel rendered ``bound held`` beside ``stale``. A held dump is a
+                # live-state fact, so it is published only for a pid the registry does
+                # not call stale.
+                stall_held=rec.pid in held_pids and state != "stale",
                 # Which build each runtime is running, for diagnosing skew
                 # across a host that replaces its install several times a day.
                 # Same getattr defaulting as the live-state fields above.
@@ -756,7 +763,9 @@ def session_rows(
             # after ``stall_dump`` for the append-only reason every key above it
             # states, and ``False`` rather than ``None`` when no bound fired: this
             # is a question with a yes/no answer on every row.
-            "stall_held": line.pid in held,
+            # ...and fenced the same way here, so the two surfaces cannot disagree
+            # about a dead pid's leftover dump (design review round 2, D8).
+            "stall_held": line.pid in held and line.state != "stale",
         }
         for line in info.lines
     ]

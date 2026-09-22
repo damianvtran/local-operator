@@ -694,13 +694,39 @@ async def test_a_lane_stepping_keeps_a_long_hold_alive(rig) -> None:
 
 @pytest.mark.asyncio
 async def test_the_bound_is_measured_from_the_last_movement_not_from_the_latch(rig) -> None:
-    """Movement at minute ten buys the hold a full bound from THEN, not from the
-    latch: the clock is a staleness clock, not a deadline."""
+    """Movement at minute ten buys the hold a full bound from THEN, not from the latch:
+    the clock is a staleness clock, not a deadline.
+
+    THE CELL NEEDED ITS FIRST TICK AT ``T0`` TO SAY THAT (agent review round 2,
+    MAJOR-1 — the eighth item of round 1's list, which the first remediation pass
+    missed). Without it the drain's clock was CREATED at ``T0+600``, so "the latch" and
+    "the last movement" were the same instant and no assertion here could tell the two
+    apart: under a clock that never advances the give-up landed one tick after the
+    latch's own bound had expired, which is every assertion the first draft made. The
+    latch is now taken at ``T0``, the movement is observed at ``T0+600``, and the
+    discriminating tick is the one ONE SECOND SHORT of the reset bound — a clock still
+    measured from the latch has already given up by then.
+    """
+    assert await _tick(rig, T0) is False, "the drain latches here, on a clock of its own"
     _land_a_tool_boundary(rig)
     assert await _tick(rig, T0 + 600) is False
-    assert await _tick(rig, T0 + 600 + BOUND - 1) is False
+    assert rig.drain.progress is not None and rig.drain.progress.moved_at == pytest.approx(
+        T0 + 600
+    ), (
+        "the movement at minute ten was never observed, so the bound is still being "
+        "measured from the latch"
+    )
+    assert (
+        rig.drain.progress.abandoned is False
+    ), "the latch's own bound had already expired, so nothing here is about the movement"
+
+    assert await _tick(rig, T0 + 600 + BOUND - 1) is False, "one second short is not the bound"
+    assert rig.drain.progress.abandoned is False, (
+        "the bound was measured from the LATCH: its own bound expired at T0+BOUND, long "
+        "before this tick, so a clock that never advances has already given up here"
+    )
     assert await _tick(rig, T0 + 600 + BOUND) is False
-    assert rig.drain.progress is not None and rig.drain.progress.abandoned is True
+    assert rig.drain.progress.abandoned is True, "the reset bound was never reached"
 
 
 @pytest.mark.asyncio

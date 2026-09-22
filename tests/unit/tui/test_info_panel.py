@@ -186,6 +186,37 @@ def test_a_draining_session_says_so_instead_of_busy() -> None:
     assert "signalled" not in ordinary, ordinary
 
 
+def test_a_held_runtime_that_is_STILL_BEATING_says_so_too() -> None:
+    """D6 (round 2): the held word must not be gated on the state word's branch.
+
+    A held runtime whose heartbeat is FRESH classifies ``live``, and that is the PROGRESS
+    leg's own shape rather than a contrived state: the loop that re-arms the timer is the
+    loop that publishes the record's beat. The first version appended the held clause
+    inside the ``state != "live"`` arm, so this row rendered identically to the healthy
+    one beside it — same glyph, same ink, counted ``live`` in the header — while
+    ``lop sessions`` named the state and the remedy for the same record.
+    """
+    from local_operator.tui.widgets.info_panel import HELD_STATE_WORD
+
+    beating = SessionLine(
+        pid=4243,
+        state="live",
+        session_id="b1f2c3d4e5f6",
+        conversation_name="heldandbeating",
+        model_label="test/mock",
+        uptime_s=5.0,
+        rss_bytes=125_000_000,
+        busy=True,
+        stall_held=True,
+    )
+    text = _text(_snapshot(sessions=SessionsInfo(lines=(beating,), total=1, live=1)))
+    assert HELD_STATE_WORD in text, f"a held runtime with a fresh beat renders as healthy: {text}"
+
+    # The LIVENESS FENCE (D8) is asserted where it lives — the collector, which is the
+    # only layer that knows a pid's state; the panel renders whatever the line carries,
+    # so a cell here could only test its own fixture.
+
+
 def test_a_held_runtime_says_so_beside_its_state() -> None:
     """D1: the panel is where a stalled-but-alive runtime has to be visible.
 

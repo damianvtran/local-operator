@@ -3922,13 +3922,6 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the reason clamp's marker exists for provider-authored prose.
             said = _fit_cell(leaving.get(row["session_id"]) or "", LEAVING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, LEAVING_COLUMN_WIDTH)}"
-        if show_held:
-            # The record's own phrase is a full sentence and belongs in the notice; a
-            # list column carries the fact, in the words the panel uses, so one state
-            # does not acquire two vocabularies across the two surfaces a reader
-            # compares (the rule ``STOP_RUNG_LABELS`` states for the stop rungs).
-            said_held = HELD_CELL if held.get(row["session_id"]) else ""
-            line += f" {_pad_cell(said_held, HELD_COLUMN_WIDTH)}"
 
         if show_updating:
             # The cell is RENDERED from the row's pair through the ONE phase reader
@@ -3947,6 +3940,17 @@ def sessions_command(args: argparse.Namespace) -> int:
             # the one column whose text is an identifier rather than prose.
             said = _clamp_reason_cell(cell, UPDATING_COLUMN_WIDTH)
             line += f" {_pad_cell(said, UPDATING_COLUMN_WIDTH)}"
+        if show_held:
+            # AFTER the updating cell, because the header appends ``STALLED`` after
+            # ``UPDATING`` (agent review round 2, MAJOR-3): emitted the other way round
+            # the two values sat under each other's headers on every row that carries
+            # both — the held cell an updating value, and vice versa. The record's own
+            # phrase is a full sentence and belongs in the notice; a list column carries
+            # the fact, in the words the panel uses, so one state does not acquire two
+            # vocabularies across the two surfaces a reader compares (the rule
+            # ``STOP_RUNG_LABELS`` states for the stop rungs).
+            said_held = HELD_CELL if held.get(row["session_id"]) else ""
+            line += f" {_pad_cell(said_held, HELD_COLUMN_WIDTH)}"
         print(line)
     return 0
 
@@ -5336,8 +5340,10 @@ WHY_COLUMN_WIDTH = 48
 #: cutting the new clause off the row.
 #: What the ``STALLED`` column says, and the width the header needs. The cell names
 #: the state and the remedy in the register the panel uses (``HELD_STATE_WORD``),
-#: because the fact is one the reader must be able to act on from a listing.
-HELD_CELL = "bound held - stalled; lop stop"
+#: because the fact is one the reader must be able to act on from a listing — ONE word
+#: for it on all three surfaces (the panel, the dump and this cell), and no "stalled"
+#: under a header that already says it (design review round 2, D7).
+HELD_CELL = "bound held; lop stop"
 HELD_COLUMN_WIDTH = len(HELD_CELL)
 LEAVING_COLUMN_WIDTH = 51
 

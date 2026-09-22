@@ -873,22 +873,25 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # whether it is not answering must survive to the narrowest frame,
         # while the memory figure is the one a reader can do without.
         bits = ["this session"] if line.is_self else []
+        # THE HELD STATE, AHEAD OF THE STATE WORD AND OUTSIDE ITS BRANCH (design review
+        # round 1, D1 for the placement; round 2, D6 for the gate). "not answering" alone
+        # reads as "still settling", and before this change the bound RESOLVED such a
+        # runtime inside one deadline — now it survives for the life of the process, so
+        # the word has to say that the safety net has already fired and a person is the
+        # remedy. It sat INSIDE the `state != "live"` arm, so a held runtime whose
+        # heartbeat was FRESH — the PROGRESS leg's own shape, since the loop that
+        # re-arms the timer is the loop that publishes the record's beat — rendered
+        # identically to the healthy row beside it, same glyph and same ink, counted
+        # `live` in the header, while ``lop sessions`` named the state and the remedy for
+        # the same record. The listing's cell is not gated on state, and neither is this.
+        if line.stall_held:
+            bits.append(HELD_STATE_WORD)
         if line.state != "live":
             # The STATE token is kept for the machine surface (the export's
             # ``[wedged]``, ``--json``), but a person reads the word: "not
             # answering" is what a stale heartbeat establishes, and "wedged"
             # both invites a diagnosis the evidence does not support and hides
             # the fact that the process is still there.
-            # THE HELD STATE, in the state's own slot (design review round 1, D1).
-            # "not answering" alone reads as "still settling", and before this change
-            # the bound RESOLVED such a runtime inside one deadline — now it survives
-            # for the life of the process, so the word has to say that the safety net
-            # has already fired and a person is the remedy. Placed immediately before
-            # the state so the row reads ``… · bound held · not answering``, and it is
-            # deliberately inside the shed list rather than after the facts: this is
-            # the one clause on the row that changes what the reader may safely do.
-            if line.stall_held:
-                bits.append(HELD_STATE_WORD)
             bits.append("not answering" if line.state == "wedged" else line.state)
         # The measurement, ahead of uptime and memory for the same reason: on
         # this row the age is the reason the reader is looking at it at all.
@@ -959,7 +962,17 @@ def _sessions_section(body: _Body, snapshot: InfoSnapshot | None) -> None:
         # only state reduced to a bare glyph beside a name. The compact form
         # carries the bound where the phrase has one, so the narrow reader is
         # told both that it is leaving and how long that can take.
-        if line.state == "wedged":
+        # A HELD ROW GETS A SHELF WHATEVER ITS STATE (design review round 2, D6): the
+        # shelf was gated on ``wedged``, so the leg where the runtime is still reporting
+        # — and the panel's only visible state is the one this change added — was the one
+        # leg that fell off the narrowest frame entirely.
+        if line.state == "wedged" or line.stall_held:
+            # THE SWAP IS DELIBERATE (design review round 2, D9): the shelf replaces the
+            # state word rather than accompanying it, because at this width only one of
+            # the two fits and the held clause is the actionable one — it implies "not
+            # answering" (a bound that fired and was held means nothing is reporting) and
+            # it is the fact that tells the reader a person is needed. The wide frame
+            # keeps both, so nothing is lost that fits.
             short_meta = HELD_STATE_WORD if line.stall_held else "not answering"
         elif phase:
             # The SHELF form, keyed by the PHASE the row is in — the failed phase
