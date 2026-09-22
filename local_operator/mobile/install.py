@@ -33,7 +33,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -104,6 +104,32 @@ _PIN_PROBE_TIMEOUT = 20.0
 
 #: How long to wait between samples while a signalled group dies.
 _GROUP_POLL_SECONDS = 0.05
+
+#: How long ``corepack enable`` may run before its group is signalled. Short by
+#: design: it writes shims and prints a summary, and the thing it can wait on —
+#: a network fetch of a package manager — is not something an install should sit
+#: behind (see :func:`_corepack_enable`).
+_COREPACK_ENABLE_TIMEOUT = 30.0
+
+#: The setting pnpm's switch to a ``packageManager``-pinned version is gated on.
+#: Set to ``false`` in the child environment of every package-manager command
+#: this module runs, which makes the ``pnpm add pnpm@<pin>`` fetch UNREACHABLE
+#: rather than merely unlikely (``switchCliVersion`` -> ``installPnpmToTools`` in
+#: the shipped bundle). Defence in depth BEHIND the refusal, never a substitute
+#: for it: on its own it does not fail closed (see :func:`_package_manager_env`).
+_MANAGE_PM_VERSIONS_ENV = "npm_config_manage_package_manager_versions"
+
+#: The two settings that turn a PIN MISMATCH into a failure instead of a warning:
+#: pnpm's version check only runs at all when the first is set, and only throws
+#: when the second is on. See :func:`_package_manager_env` for the measurements
+#: that put them here — with the disarm alone a wrong pnpm builds the tree and
+#: exits 0, which is the silent shape this guard exists to prevent.
+_STRICT_PM_VERSION_ENV = "npm_config_package_manager_strict_version"
+_STRICT_PM_ENV = "npm_config_package_manager_strict"
+
+#: Corepack asks before it downloads a package manager, and a build child's stdin
+#: is not a terminal — it can never answer. Off in every child this module spawns.
+_COREPACK_DOWNLOAD_PROMPT_ENV = "COREPACK_ENABLE_DOWNLOAD_PROMPT"
 
 #: Whether this platform can signal a whole process GROUP. ``os.killpg`` and
 #: ``os.getpgid`` are "Availability: Unix", so the group half of the bound is
@@ -235,7 +261,9 @@ def _discard_bundle(web_dir: Path) -> None:
     shutil.rmtree(_dist_dir(web_dir), ignore_errors=True)
 
 
-def _package_runner(web_dir: Path) -> tuple[list[str] | None, str | None]:
+def _package_runner(
+    web_dir: Path, *, env: Mapping[str, str] | None = None
+) -> tuple[list[str] | None, str | None]:
     """pnpm (or corepack's pnpm) for this tree, or the tool that is missing.
 
     ``(runner, None)`` when a build can run, else ``(None, "node"|"pnpm")``.
@@ -246,17 +274,53 @@ def _package_runner(web_dir: Path) -> tuple[list[str] | None, str | None]:
     spelling of each launcher comes from the ONE place that owns it (audit
     C10); ``corepack enable`` runs against ``web_dir`` because the snapshot
     updater prepares a tree that is not this install's.
+
+    The FIRST arm is the ``pnpm`` already on PATH and it is returned as-is, even
+    when it is not the pinned version: judging a pin is :func:`_pin_mismatch`'s
+    job, and it reports the refusal in the terms of the runner actually chosen.
+
+    The LAST arm — neither ``pnpm`` nor ``corepack`` resolves — consults a
+    pinned pnpm that is ALREADY installed where pnpm keeps managed versions
+    (see :func:`_seeded_pnpm`) before giving up, because a machine that has one
+    can build and refusing it names a remedy it does not need. Nothing is
+    fetched to find it: the candidate must be present AND answer.
+
+    ``env`` is the armed child environment (:func:`_package_manager_env`),
+    passed by a caller that already built it so the ``corepack enable`` child
+    and the steps that follow share one; omitted, it is built here.
     """
     if shutil.which("node") is None:
         return None, "node"
+    env = _package_manager_env(web_dir) if env is None else env
     runner = _shim_argv("pnpm")
     if runner is not None:
         return runner, None
     corepack = _shim_argv("corepack")
     if corepack is None:
-        return None, "pnpm"
-    subprocess.run([*corepack, "enable"], cwd=web_dir, capture_output=True, timeout=30)
+        pinned = _pinned_pnpm(web_dir)
+        seeded = None if pinned is None else _seeded_pnpm(pinned)
+        return (seeded, None) if seeded is not None else (None, "pnpm")
+    _corepack_enable(corepack, web_dir, env=env)
     return [*corepack, "pnpm"], None
+
+
+def _corepack_enable(corepack: Sequence[str], web_dir: Path, *, env: Mapping[str, str]) -> None:
+    """Install corepack's shims, through the same bound and child environment as a step.
+
+    WHY through :func:`_run_build_step` rather than the plain ``subprocess.run``
+    this arm used: ``corepack enable`` IS a package-manager child, and the one
+    thing this module has learned about those is that a bound reaching only the
+    direct child is not a bound (see :func:`_run_build_step`) — it is bounded and
+    its whole group is reaped on every path. It also runs in the ARMED
+    environment, so the shims it writes and the pnpm it later launches resolve
+    against the shared homes rather than re-fetching (see
+    :func:`_package_manager_env`).
+
+    Failure propagates exactly as it did before: the runner that follows is what
+    reports whether pnpm can actually run, and a run that cannot even prepare
+    corepack should say so now rather than three steps later.
+    """
+    _run_build_step([*corepack, "enable"], web_dir, timeout=_COREPACK_ENABLE_TIMEOUT, env=env)
 
 
 def _step_group(proc: subprocess.Popen[str]) -> int | None:
@@ -469,7 +533,11 @@ def _reap_step_and_die(
 
 
 def _run_build_step(
-    argv: Sequence[str], cwd: Path, *, timeout: float | None = None
+    argv: Sequence[str],
+    cwd: Path,
+    *,
+    timeout: float | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one bundle-build command in its OWN process group, and reap the group.
 
@@ -502,6 +570,14 @@ def _run_build_step(
     which is not shipped in the wheel — an installed ``lop`` has no such file to
     run. The inline spelling therefore reuses ``procstate`` for the one part
     that must not be hand-rolled (the platform decision).
+
+    ``env`` is passed to the child verbatim (``None`` inherits this process's
+    environment, which is what every caller did before the parameter existed).
+    It exists so the package-manager children can be given the armed environment
+    in :func:`_package_manager_env` — the appending of it belongs to this ONE
+    spawn site, so no caller can arm the environment and then forget to hand it
+    to the child (the shape agent review round 1 caught: an armed environment
+    that nothing passed on).
     """
     #: Boxes rather than locals: the handlers are armed BEFORE the spawn and read
     #: these at delivery time, so they see the process once it exists.
@@ -516,6 +592,7 @@ def _run_build_step(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
             **procstate.detached_popen_kwargs(),
         )
         proc_box[0] = proc
@@ -611,6 +688,171 @@ def _pinned_pnpm(web_dir: Path) -> str | None:
     return _dev_engines_pin(manifest)
 
 
+def _probe_env() -> dict[str, str]:
+    """The environment for a ``--version`` probe: the fetch disarmed, nothing moved.
+
+    Deliberately NOT :func:`_package_manager_env`. That one relocates
+    ``COREPACK_HOME``/``PNPM_HOME`` at the shared homes so a build child resolves
+    against them, and doing that in a PROBE would make the guard itself fetch a
+    package manager on a host whose ``pnpm`` is a corepack shim with a cold
+    cache — the one thing a probe must never cause. The probe wants the opposite
+    property, and it has it: an empty directory and this setting.
+
+    ``COREPACK_ENABLE_DOWNLOAD_PROMPT=0`` is set here too because a probe's stdin
+    is a pipe, so a version resolution that decided to download would block on a
+    confirmation nobody can answer until the bound fires.
+    """
+    env = dict(os.environ)
+    env[_MANAGE_PM_VERSIONS_ENV] = "false"
+    env[_COREPACK_DOWNLOAD_PROMPT_ENV] = "0"
+    return env
+
+
+def _pnpm_home() -> Path:
+    """Where pnpm keeps the versions it manages for itself, resolved as pnpm does.
+
+    Mirrors ``getDataDir`` in pnpm's own CLI (read from the shipped 10.30.3
+    bundle): ``PNPM_HOME``, else ``XDG_DATA_HOME/pnpm``, else the platform default
+    (``~/Library/pnpm`` on macOS, ``%LOCALAPPDATA%\\pnpm`` on Windows,
+    ``~/.local/share/pnpm`` elsewhere). Mirroring rather than inventing is the
+    point: ``PNPM_HOME`` also decides where pnpm's content-addressable STORE lives
+    (``<PNPM_HOME>/store``, the tree every install in this repo shares through
+    hard links), so a location of our own choosing would silently repopulate a
+    second store — hundreds of megabytes on a machine that already has one.
+
+    The module needs the value for one reason: pnpm's version switch looks for a
+    pinned pnpm under ``<PNPM_HOME>/.tools/pnpm/<version>``, so a machine that has
+    already seeded one has to be recognised as seeded rather than refused.
+    """
+    override = os.environ.get("PNPM_HOME")
+    if override:
+        return Path(override)
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    if xdg_data:
+        return Path(xdg_data) / "pnpm"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "pnpm"
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+        return base / "pnpm"
+    return Path.home() / ".local" / "share" / "pnpm"
+
+
+def _corepack_home() -> Path:
+    """Where corepack caches what it downloads, resolved as corepack does.
+
+    ``COREPACK_HOME``, else ``%LOCALAPPDATA%\\node\\corepack`` on Windows and
+    ``$HOME/.cache/node/corepack`` everywhere else — the defaults corepack
+    documents. Both are named explicitly in the build child's environment so one
+    download serves every clone and worktree of this repo on the machine; the
+    home-derived default moves with a relocated ``HOME``, which is what a
+    container, a CI runner and an isolated test run each have.
+    """
+    override = os.environ.get("COREPACK_HOME")
+    if override:
+        return Path(override)
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+        return base / "node" / "corepack"
+    return Path.home() / ".cache" / "node" / "corepack"
+
+
+def _package_manager_env(web_dir: Path) -> dict[str, str]:
+    """The child environment for the build path, one owner for all of it.
+
+    Three things beyond the ambient environment, and the first is the one that
+    matters:
+
+      * ``npm_config_manage_package_manager_versions=false`` in a tree that pins an
+        exact pnpm. pnpm reaches its ``installPnpmToTools`` (the ``pnpm add
+        pnpm@<pin>`` fetch, and the fork chain) only through ``switchCliVersion``,
+        which is gated on exactly this setting — so turning it off makes the fetch
+        UNREACHABLE rather than merely unlikely. (pnpm sets the same flag in the
+        child it re-executes after a switch, which is the same idea one layer in and
+        is where this setting's meaning was read from.) This is defence in depth
+        behind the refusal in :func:`_pin_mismatch`, never a substitute for it: on
+        its own it does not fail closed, and a shared home that is unwritable or
+        misconfigured would put an unguarded install straight back into the loop.
+        With it set, a pnpm that does not match the pin does NOT fail on its own —
+        measured on 2026-09-21 with pnpm 10.30.3 against a tree pinning 11.22.0:
+        ``pnpm build`` and ``pnpm install --lockfile-only`` both exited **0**, and
+        the build script reported ``pnpm/10.30.3``. pnpm's version check compares
+        the pin with the running pnpm but only THROWS when ``packageManagerStrict``
+        is on, and only compares at all when ``packageManagerStrictVersion`` is on
+        (both default to warn-and-continue for the version, which is why an earlier
+        revision of this docstring claimed a loud failure the code did not
+        deliver). So those two settings are added with the same exact-pin gate, and
+        with both the same two commands exit **1** with ``ERROR This project is
+        configured to use v11.22.0 of pnpm. Your current pnpm is v10.30.3``.
+        ``package_manager_strict`` is set explicitly rather than relied on as a
+        default because an operator's ``.npmrc`` may turn it off, and this layer's
+        job is to fail CLOSED; neither setting can fire on a build that the pin
+        itself runs, which is every route this module chooses.
+
+        The EXACTNESS test is this function's own, and it is not redundant with
+        :func:`_pinned_pnpm`: that one reports the ``packageManager`` spelling's
+        version verbatim, a range included, while pnpm's switch returns early for
+        anything ``semver.valid`` rejects — ``switchCliVersion`` warns ``Cannot
+        switch to pnpm@^11: "^11" is not a valid version`` and RETURNS, measured in
+        the shipped 10.30.3 bundle — so a range is not a fetch, and disarming one
+        would turn pnpm's warn-and-continue into an error on a tree that works
+        today. The strict pair is gated the same way, and for the reason the
+        MEASUREMENT gives rather than a plausible-looking one: the pair does not fire
+        on its own. The version check it controls is only reached in the ELSE of
+        pnpm's switch decision — ``if (config.managePackageManagerVersions &&
+        config.wantedPackageManager?.name === "pnpm" …) switchCliVersion(config); else
+        … checkPackageManager(…)`` in the shipped bundle — and for a range pin the
+        switch branch owns the call and returns early with its warning, so the pair
+        is inert on a range until something makes that else-branch run. That
+        something is this function's own disarm: set together, they turn a range tree
+        that is fine into a failure, measured on a tree pinning ``pnpm@^11`` with
+        both (``pnpm install --lockfile-only`` → rc 1, ``ERROR This project is
+        configured to use v^11 of pnpm. Your current pnpm is v10.30.3``). Gating both
+        on an exact pin is what keeps that from happening; the range case is handled
+        by the refusal instead, which is why the disarm is gated with them.
+      * ``PNPM_HOME``/``COREPACK_HOME`` at the locations resolved above — the
+        shared, pre-populated homes — so a seeded machine finds the pinned manager
+        already there instead of fetching it.
+      * ``COREPACK_ENABLE_DOWNLOAD_PROMPT=0``: whatever the corepack arm does may
+        download, and a child whose stdin is a pipe can never answer the
+        confirmation prompt that would otherwise guard it.
+    """
+    env = dict(os.environ)
+    env["PNPM_HOME"] = str(_pnpm_home())
+    env["COREPACK_HOME"] = str(_corepack_home())
+    env[_COREPACK_DOWNLOAD_PROMPT_ENV] = "0"
+    pin = _pinned_pnpm(web_dir)
+    if pin is not None and _EXACT_VERSION.fullmatch(pin) is not None:
+        env[_MANAGE_PM_VERSIONS_ENV] = "false"
+        env[_STRICT_PM_VERSION_ENV] = "true"
+        env[_STRICT_PM_ENV] = "true"
+    return env
+
+
+def _seeded_pnpm(pin: str) -> list[str] | None:
+    """The pinned pnpm already sitting in the shared home, if it is really there.
+
+    pnpm's switch treats the mere EXISTENCE of ``<PNPM_HOME>/.tools/pnpm/<pin>/bin``
+    as "the pinned version is installed" and re-executes whatever is inside
+    (``alreadyExisted`` in its ``installPnpmToTools``). That directory-existence
+    test is deliberately NOT repeated here: the candidate has to ANSWER with the
+    pinned version, because a directory left behind by a killed or half-written
+    fetch is exactly what turns one bad install into a chain that never converges.
+    This host is the standing example — ``~/Library/pnpm/.tools/pnpm/`` carries
+    ~14,800 ``11.22.0_tmp_<pid>`` stage directories from the incident and no
+    completed ``11.22.0`` at all, so existence alone would have "found" the pin in
+    any of them.
+    """
+    bin_dir = _pnpm_home() / ".tools" / "pnpm" / pin / "bin"
+    candidate = bin_dir / ("pnpm.cmd" if os.name == "nt" else "pnpm")
+    if not candidate.exists():
+        return None
+    argv = _windows_shim_argv(str(candidate)) if os.name == "nt" else [str(candidate)]
+    return argv if _runner_reports(argv) == pin else None
+
+
 def _runner_reports(runner: Sequence[str]) -> str | None:
     """What ``runner`` answers for ``--version``, or ``None`` if it cannot.
 
@@ -622,12 +864,18 @@ def _runner_reports(runner: Sequence[str]) -> str | None:
     after 120 s and was spawning ``pnpm add pnpm@11.22.0`` children (28 processes,
     3.2 GB RSS in 8 s), while the same command in an empty directory answered in
     under a second. Through :func:`_run_build_step` so the probe is itself
-    bounded and group-reaped: a probe that can hang must not hang the install.
+    bounded and group-reaped: a probe that can hang must not hang the install. It
+    runs with the fetch DISARMED in the child and nothing else moved — see
+    :func:`_probe_env`, and :func:`_package_manager_env` for why the shared homes
+    are deliberately not the probe's.
     """
     with tempfile.TemporaryDirectory(prefix="lop-pnpm-probe-") as probe_dir:
         try:
             result = _run_build_step(
-                [*runner, "--version"], Path(probe_dir), timeout=_PIN_PROBE_TIMEOUT
+                [*runner, "--version"],
+                Path(probe_dir),
+                timeout=_PIN_PROBE_TIMEOUT,
+                env=_probe_env(),
             )
         except (OSError, subprocess.SubprocessError):
             return None
@@ -734,6 +982,59 @@ def _pin_mismatch(runner: Sequence[str], web_dir: Path) -> str | None:
     )
 
 
+def _runner_or_refusal(
+    runner: list[str], web_dir: Path, *, env: Mapping[str, str]
+) -> tuple[list[str], str | None]:
+    """``(runner, None)``, or the guard's own refusal when no route can satisfy the pin.
+
+    THE POLICY THIS BRANCH ADDS TO #1394's GUARD, and the one place it changes
+    shipped behaviour: main refuses whenever the runner's reported version is not
+    the pin, while this prefers a runner that CAN supply the pin and refuses only
+    when none can. The order, and why each clause is where it is:
+
+      1. the runner PATH resolved, when :func:`_pin_mismatch` accepts it. That call
+         is also the ONLY version probe on a machine with nothing else to offer,
+         so the process list #1394's tests assert is unchanged — this function adds
+         no probe to the happy path, and ``_pin_mismatch`` still owns the sentence
+         and the policy for a runner that cannot answer at all (not a mismatch;
+         the group bound is the wall there);
+      2. a pinned pnpm VERIFIED where pnpm keeps managed versions
+         (:func:`_seeded_pnpm`) — local, so it downloads nothing, and verified by
+         ASKING it rather than by its directory existing, so the residue a killed
+         fetch leaves behind is not mistaken for a pin;
+      3. corepack (:func:`_corepack_enable` then ``corepack pnpm``) — a bounded
+         tarball fetch that converges, run through the same bounded, armed runner
+         as every other child, and pnpm's own switch is unreachable on this route
+         (``isExecutedByCorepack``). This is the route a machine that already
+         relied on corepack keeps: dropping the arm refused hosts that used to
+         build, which is the regression this arm closes;
+      4. nothing — the runner is handed back WITH the guard's refusal, so the
+         sentence a reader ends up acting on is still the one #1394 ships.
+
+    Arms 2 and 3 are consulted only when the guard WOULD refuse, which is what
+    keeps a machine whose PATH pnpm already satisfies the pin from having a
+    package manager downloaded for it: there is nothing to fix, so nothing is
+    fetched. (:func:`_package_runner`'s no-pnpm arm keeps #1394's own order —
+    corepack first — because a host with no pnpm on PATH has no runner to compare
+    and corepack is the route it already has; the seeded pin is that arm's
+    fallback.)
+    """
+    mismatch = _pin_mismatch(runner, web_dir)
+    if mismatch is None:
+        return runner, None
+    pin = _pinned_pnpm(web_dir)
+    if pin is None:
+        return runner, mismatch
+    seeded = _seeded_pnpm(pin)
+    if seeded is not None:
+        return seeded, None
+    corepack = _shim_argv("corepack")
+    if corepack is None:
+        return runner, mismatch
+    _corepack_enable(corepack, web_dir, env=env)
+    return [*corepack, "pnpm"], None
+
+
 def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) -> str | None:
     """Build the SPA in place. Returns an error string, or None on success.
 
@@ -759,11 +1060,19 @@ def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) 
     two docstrings, and note that this builder is shared with the updater, so a
     bound that only covered `lop mobile install` would leave `lop update`'s
     snapshot build unbounded.
+
+    Every package-manager child here — the steps, and the ``corepack enable``
+    :func:`_package_runner` may run — gets the ARMED environment
+    (:func:`_package_manager_env`), built once at the top of this function so one
+    owner supplies it to all of them. Before the pin is judged, a runner that
+    cannot satisfy the pin is offered every other route this host has
+    (:func:`_runner_or_refusal`), and only its refusal ends the build.
     """
     web_dir = _WEB_DIR if web_dir is None else web_dir
+    env = _package_manager_env(web_dir)
     try:
         if runner is None:
-            runner, missing = _package_runner(web_dir)
+            runner, missing = _package_runner(web_dir, env=env)
             if missing == "node":
                 # Named with its REMEDY rather than with its mechanism. This is the one
                 # refusal an operator meets on a fresh Linux or Windows box, and the
@@ -815,15 +1124,20 @@ def _build_bundle(web_dir: Path | None = None, runner: list[str] | None = None) 
                     "(https://pnpm.io/installation), then re-run "
                     "`lop mobile install`"
                 )
-        # Before any pnpm process is started: a runner whose version is not the
-        # pinned one is the recursion's engine (see :func:`_pin_mismatch`), and
+        # Before any pnpm BUILD child is started: a runner whose version is not
+        # the pin is the recursion's engine (see :func:`_pin_mismatch`), and
         # refusing here is the difference between an install that stops with a
-        # sentence and one that stops when the machine runs out of memory.
-        mismatch = _pin_mismatch(runner, web_dir)
+        # sentence and one that stops when the machine runs out of memory. The one
+        # probe this costs is `_pin_mismatch`'s own and it cannot fetch (see
+        # :func:`_probe_env`); the routes that can supply the pin when PATH cannot
+        # are :func:`_runner_or_refusal`'s business.
+        runner, mismatch = _runner_or_refusal(runner, web_dir, env=env)
         if mismatch is not None:
             return mismatch
         for args in (["install", "--frozen-lockfile"], ["build"]):
-            result = _run_build_step([*runner, *args], web_dir)
+            result = _run_build_step(
+                [*runner, *args], web_dir, timeout=_BUILD_STEP_TIMEOUT, env=env
+            )
             if result.returncode != 0:
                 # A failed `build` can leave a dist/ behind: vite writes it
                 # before npm's `postbuild` guard judges it, and the guard

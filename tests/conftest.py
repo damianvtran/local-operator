@@ -225,6 +225,22 @@ _AMBIENT_VARS = (
     # "redirectable anchor path" the design forbids, and the suite should not
     # inherit one either.
     "PROGRAMDATA",
+    # The three package-manager config dirs the mobile installer reads to work out
+    # where pnpm and corepack keep what they manage for THEMSELVES
+    # (`mobile/install.py`'s `_pnpm_home`/`_corepack_home`, which the fetch guard
+    # resolves through before it refuses a tree it could build in). Each NAMES A
+    # REAL-MACHINE RESOURCE and each STEERS BEHAVIOUR: an inherited `PNPM_HOME`
+    # moves both pnpm's tools directory — the one the guard reads to recognise a
+    # seeded pin — and the content-addressable store every install on the machine
+    # shares through hard links; `XDG_DATA_HOME` moves those two through pnpm's
+    # own fallback order; `COREPACK_HOME` moves the cache a corepack fetch writes
+    # into. A suite that inherited any of them would have its children resolving
+    # against, and writing to, whatever the developer's shell happened to name.
+    # Safe for the tests that exercise these homes: they set them with
+    # `monkeypatch.setenv` or stub the resolver, never inherit one.
+    "PNPM_HOME",
+    "XDG_DATA_HOME",
+    "COREPACK_HOME",
 )
 
 #: The two escape hatches that keep a test from reaching the developer's real
