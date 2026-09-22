@@ -3112,6 +3112,24 @@ def debug_stacks_enabled() -> bool:
     return os.environ.get(DEBUG_STACKS_ENV, "1").strip().lower() not in DEBUG_STACKS_OFF
 
 
+#: How many times the WORKLOAD tick is re-created after it dies before the
+#: runtime stops trying and lets the bound do its job.
+#:
+#: BOUNDED IN BOTH DIRECTIONS, and this is the number both of them tolerate. A
+#: tick that dies ONCE (a transient failure inside ``stall_watchdog.beat``) must
+#: be re-created, or its plane's stamp freezes and the bound kills an otherwise
+#: healthy runtime one deadline later — the 2026-09-21 incident
+#: :func:`_watch_stall_beats` documents. A tick that dies on EVERY attempt must
+#: NOT be re-created forever: each attempt is a task plus a WARNING, and a hot
+#: failure would turn one broken instrument into a restart storm that burns the
+#: very seconds the bound is measuring. Three re-creations at
+#: ``HEARTBEAT_INTERVAL_S`` apart is 45 s of grace against a 300 s bound, so a
+#: transient death is covered with room to spare and a permanent one is given up
+#: on well before the bound fires — with the reason in the dump, which is what
+#: the reader of a fired bound needs (see ``stall_watchdog``'s docstring).
+STALL_BEAT_RESTARTS = 3
+
+
 async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
     """Report the WORKLOAD loop's progress to the process's stall bound.
 
@@ -3137,6 +3155,106 @@ async def _beat_stall_watchdog(stop: asyncio.Event) -> None:
         # interchangeable as "this plane is alive" signals, so a drift between
         # them would be a drift in what the bound means.
         await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+        stall_watchdog.beat(stall_watchdog.WORKLOAD)
+
+
+async def _watch_stall_beats(stop: asyncio.Event) -> None:
+    """Keep the WORKLOAD tick running for as long as the session is live.
+
+    THE DEFECT THIS EXISTS FOR, measured on 0.62.0 (2026-09-21). The tick used to
+    be started with a bare ``ensure_future`` and named exactly twice — there and
+    at shutdown — so when it RAISED, nothing observed it: ``asyncio`` reports an
+    unretrieved exception only at garbage collection, and a bound-firing
+    ``_exit(1)`` never reaches GC at all. Nothing re-created the task either, so
+    the WORKLOAD stamp froze FOREVER and the bound fired one deadline later on a
+    runtime that was perfectly healthy, killing the turn in flight. Three
+    readings were wrong at once: the runtime was reported as silent while it was
+    working, the reporter's own death was reported nowhere, and the artifact
+    could not tell the two apart — ``faulthandler`` dumps THREADS, and a dead
+    task has neither a thread nor a frame, so the dump showed exactly what an
+    idle healthy process shows.
+
+    SO THE DEATH IS OBSERVED INSTEAD OF LEFT TO THE GARBAGE COLLECTOR, and the
+    ``await`` below is what observes it: this coroutine drives the tick, so the
+    raise lands in a live frame at the moment it happens. A done-callback would
+    have to spawn the replacement from a synchronous callback (it cannot await
+    the delay) and would still leave the exception for whoever remembered to
+    call ``exception()``; awaiting it is the same visibility with the restart in
+    the same frame, and it also means ``amain``'s shutdown cancels the LIVE tick
+    through this await rather than skipping a dead one.
+
+    LIVENESS SEMANTICS ARE UNCHANGED. The tick stays a plain sleep loop
+    (:func:`_beat_stall_watchdog`, whose docstring says why a waiting turn must
+    keep it ticking), a genuinely silent plane still trips the bound, and a tick
+    that stays dead still trips it eventually: nothing here unbounds a plane
+    whose reporter is gone, because the honest fail-safe is to leave on the
+    deadline with the reason written into the dump rather than to run on with
+    one leg silently switched off. What is new is only that the death is LOGGED,
+    RECORDED, and — up to ``STALL_BEAT_RESTARTS`` — UNDONE.
+    """
+    deaths = 0
+    while True:
+        tick = asyncio.ensure_future(_beat_stall_watchdog(stop))
+        caught: Exception | None = None
+        try:
+            await tick
+        except asyncio.CancelledError:
+            # The SESSION ending, not a death: our own cancellation propagates
+            # through this await into the tick, which is the sequence amain's
+            # shutdown asks for. Mistaking it for a death would re-create the
+            # tick the shutdown just cancelled.
+            raise
+        except Exception as exc:  # noqa: BLE001 — a dying tick ends nothing in itself
+            caught = exc
+        if stop.is_set():
+            # Ended because the session is ending, which is what it is for.
+            return
+        deaths += 1
+        detail = (
+            f"{type(caught).__name__}: {caught}"
+            if caught is not None
+            else "the tick returned early, with no stop and no exception"
+        )
+        # THE RECORD FIRST, so that a restart which is itself killed by the bound
+        # (a tick that dies nearly a deadline late cannot be saved) still leaves
+        # the reason in the file a reader will open.
+        where = (
+            f"is recorded in {stall_watchdog.dump_path()}"
+            if stall_watchdog.note_tick_death(stall_watchdog.WORKLOAD, detail)
+            else "could NOT be recorded, so this log line is the only trace"
+        )
+        if deaths > STALL_BEAT_RESTARTS:
+            logger.warning(
+                "session runtime: the stall bound's WORKLOAD tick died (%s), and so did "
+                "%d re-creations, so it is not re-created again. Its plane's stamp is now "
+                "frozen and the bound will end this runtime one deadline after it unless "
+                "the session ends first; the tick's death %s",
+                detail,
+                STALL_BEAT_RESTARTS,
+                where,
+            )
+            return
+        logger.warning(
+            "session runtime: the stall bound's WORKLOAD tick died (%s); re-creating it in "
+            "%.1fs (death %d of %d). Its plane's stamp stays frozen until the new tick "
+            "beats, and the tick's death %s",
+            detail,
+            HEARTBEAT_INTERVAL_S,
+            deaths,
+            STALL_BEAT_RESTARTS,
+            where,
+        )
+        # THE DELAY IS THE STORM GUARD: without it a tick that fails on its first
+        # statement would be re-created on the next loop turn, and the budget
+        # would be spent in microseconds rather than in the 45 s it is sized for.
+        await asyncio.sleep(HEARTBEAT_INTERVAL_S)
+        if stop.is_set():
+            return
+        # THE RESTART IS ITSELF A TURN OF THE WORKLOAD LOOP, so stamping here is
+        # a true reading rather than an optimistic one — this coroutine only runs
+        # when that loop runs. Without it the plane stays stamped as silent for
+        # the delay plus a full cadence, which is a window in which the bound
+        # would fire on a tick that had already recovered.
         stall_watchdog.beat(stall_watchdog.WORKLOAD)
 
 
@@ -3537,10 +3655,13 @@ async def amain(operator_cap: bytes | None = None) -> int:
     # beside the signal wait; whichever fires first wins.
     reaper = asyncio.ensure_future(_reaper(handle, runtime, stop))
     # The workload half of the stall bound, beside the reaper because it shares
-    # its lifetime exactly: both run for the whole session and both stop with
-    # it. Nothing is armed for an in-process host that never went through this
-    # module's entry point, where ``beat`` is a no-op.
-    stall_beats = asyncio.ensure_future(_beat_stall_watchdog(stop))
+    # its lifetime exactly: both run for the whole session and both stop with it.
+    # SUPERVISED rather than a bare task, because an unobserved tick that dies
+    # outlives this process's health by one deadline (see
+    # :func:`_watch_stall_beats`, and the incident it documents). Nothing is
+    # armed for an in-process host that never went through this module's entry
+    # point, where ``beat`` is a no-op.
+    stall_beats = asyncio.ensure_future(_watch_stall_beats(stop))
     reaper_ran_clean_exit = False
     await stop.wait()
     if draining is not None and not draining.done():
@@ -3551,6 +3672,11 @@ async def amain(operator_cap: bytes | None = None) -> int:
         # against a session that is already disposing.
         draining.cancel()
     if not stall_beats.done():
+        # The SUPERVISOR, so this reaches the live tick through its await rather
+        # than skipping a dead one: a tick that died and was re-created is not
+        # the task this handle names, which is exactly the state the old bare
+        # handle could not cancel. A supervisor that has returned (its restart
+        # budget exhausted) is ``done`` and owes nothing.
         stall_beats.cancel()
     if not reaper.done():
         reaper.cancel()
