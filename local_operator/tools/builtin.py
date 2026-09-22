@@ -79,7 +79,7 @@ from rich.cells import cell_len
 
 from local_operator import memory_guard
 from local_operator.agent_shell import AGENT_SHELL_ENV, MAY_DELEGATE_ENV
-from local_operator.config import ConfigManager
+from local_operator.config import CONFIG_FILE_NAME, ConfigManager
 from local_operator.harness.approval import ask_approval
 from local_operator.harness.redaction import report_shape_hits
 from local_operator.harness.subagent import (
@@ -2057,11 +2057,28 @@ def _search_interception_config() -> tuple[bool, bool, bool]:
     the keys LIVE in ``/settings``, exactly as ``_configured_bash_shell`` does.
     Any read failure returns the defaults: config trouble must never change what
     a command does, and the defaults are the protective choice (the guard on).
+
+    The unreadable-config probe runs FIRST, and that ordering is a correctness
+    property, not a nicety. ``ConfigManager`` does not raise on a broken file —
+    it MOVES it aside (``config.yml.bad.<ts>``) and continues with defaults. This
+    reader runs at the top of every ``execute_bash``, i.e. BEFORE the child
+    environment is built, so an unguarded ``ConfigManager`` here would rename the
+    operator's broken config out from under ``shell_env``'s strict-mode read and
+    silently downgrade a hardened run to ``inherit``. The probe is the same
+    ``shell_env._config_file_is_unreadable`` test the policy loader uses, so this
+    reader cannot diverge from what the config layer considers readable.
     """
     enabled = SEARCH_INTERCEPTION_ENABLED_DEFAULT
     block = SEARCH_INTERCEPTION_BLOCK_DEFAULT
     rg_excludes = SEARCH_INTERCEPTION_RG_CONFIG_DEFAULT
     try:
+        from local_operator.tools.shell_env import _config_file_is_unreadable
+
+        if _config_file_is_unreadable(config_dir() / CONFIG_FILE_NAME):
+            # A config that cannot be read is not moved (that is the destructive
+            # step avoided above) and its interception keys are unknown, so the
+            # protective defaults stand.
+            return enabled, block, rg_excludes
         config = ConfigManager(config_dir())
         enabled = bool(config.get_nested_value(SEARCH_INTERCEPTION_ENABLED_PATH, enabled))
         block = bool(config.get_nested_value(SEARCH_INTERCEPTION_BLOCK_PATH, block))
