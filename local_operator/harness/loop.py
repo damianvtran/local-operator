@@ -2014,9 +2014,7 @@ class AgentLoop:
                     # new instructions that are not self-limiting) charges the
                     # bounded steering/aside budget.
                     source = (
-                        "follow-up"
-                        if any(tag == "follow-up" for tag, _ in late)
-                        else late[0][0]
+                        "follow-up" if any(tag == "follow-up" for tag, _ in late) else late[0][0]
                     )
                     budget = (
                         config.max_follow_up_continuations
