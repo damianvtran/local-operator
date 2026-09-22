@@ -4462,7 +4462,6 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     on_session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         on_config,
-        on_dir,
         AgentRegistry(on_dir),
     )
     try:
@@ -4476,7 +4475,6 @@ async def test_the_client_is_prewarmed_at_session_build_and_only_when_the_layer_
     off_session = await session_factory.create_session(
         _args(hosting="test", model="test", yolo=True),
         off_config,
-        off_dir,
         AgentRegistry(off_dir),
     )
     try:
