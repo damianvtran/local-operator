@@ -5343,7 +5343,12 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
     # and that probe runs in the CLI and in the TUI's update worker. All three are
     # that module's own helpers for "is this tree's UI servable, and what can build
     # it" — re-implementing any of them here is how the two answers drift apart.
-    from local_operator.mobile.install import _pinned_pnpm, _shim_argv, snapshot_bundle
+    from local_operator.mobile.install import (
+        _EXACT_VERSION,
+        _pinned_pnpm,
+        _shim_argv,
+        snapshot_bundle,
+    )
 
     web_dir = snapshot.path / "local_operator" / "mobile" / "web"
     bundle_status = snapshot_bundle(web_dir)
@@ -5371,25 +5376,42 @@ def _snapshot_command(value: str, *, services: bool = True) -> int:
     # `$TMPDIR/lop-snapshot-*` tree on every attempt.
     try:
         if web_dir.is_dir() and bundle_status not in ("built", "already built"):
-            # The PIN, read from the tree being installed rather than written into
-            # the sentence: the remedy has to survive a pin bump, and naming a
-            # version this snapshot no longer carries is the same defect as naming
-            # a command the reader cannot run (the D8/D14 class, one step along).
-            pinned = _pinned_pnpm(web_dir) or "11.22.0"
-            # Same habit as `_pin_mismatch`'s route list: a remedy this host cannot
-            # run is a second refusal, so the npx clause is offered only where npx
-            # resolves. `lop mobile install` is still named unconditionally above
-            # it — that is the primary remedy, and the one that needs no pin.
-            npx_route = (
-                f", or run `npx --yes pnpm@{pinned} install --frozen-lockfile && "
-                f"npx --yes pnpm@{pinned} build` in local_operator/mobile/web"
-                if _shim_argv("npx") is not None
-                else ""
-            )
+            raw_pin = _pinned_pnpm(web_dir)
+            # Whether the reader could even TYPE the fetch route (D2/R2-1/O1): a
+            # range cannot be handed to `npx`, and recommending a fetch of the very
+            # range this update just declined to auto-resolve reads as "we will not
+            # do this — you do it". An absent pin is not a range: the default below
+            # is one concrete version this module already uses.
+            exact_pin = raw_pin is None or _EXACT_VERSION.fullmatch(raw_pin) is not None
+            pinned = raw_pin or "11.22.0"
+            if exact_pin:
+                # Same habit as `_pin_mismatch`'s route list: a remedy this host
+                # cannot run is a second refusal, so the npx clause is offered only
+                # where npx resolves. `lop mobile install` is named unconditionally
+                # — it is the primary remedy, and the one that needs no pin.
+                remedy = (
+                    f"`lop mobile install`, or run `npx --yes pnpm@{pinned} "
+                    "install --frozen-lockfile && "
+                    f"npx --yes pnpm@{pinned} build` in local_operator/mobile/web, "
+                    "then re-run this update."
+                    if _shim_argv("npx") is not None
+                    else "`lop mobile install`, then re-run this update."
+                )
+            else:
+                remedy = (
+                    f"`lop mobile install` — this tree pins a range "
+                    f"(`pnpm@{raw_pin}`), so a by-hand fetch has to name a "
+                    "concrete version; then re-run this update."
+                )
+            # TWO sentences, one vocabulary ("mobile web UI"), and the status is
+            # NOT re-spliced in: it is already printed on the line above, and
+            # echoing it pushed the pair to ~470 characters (exact pin) / ~840
+            # (range) as a single paragraph of nested parentheses — a wall, at the
+            # one moment the reader's portal has already broken (design round 1,
+            # D1/D3).
             print(
-                f"lop-update: the mobile web bundle did not build ({bundle_status}); "
-                "refusing to install a generation with no UI — fix the build with "
-                f"`lop mobile install`{npx_route}, then re-run this update.",
+                "lop-update: refusing to install this build — it has no mobile "
+                f"web UI to serve (bundle status above).\n  Fix the build with {remedy}",
                 file=sys.stderr,
             )
             return 1

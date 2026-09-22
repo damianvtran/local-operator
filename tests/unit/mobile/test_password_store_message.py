@@ -106,8 +106,76 @@ def test_the_status_line_names_a_missing_bundle(
 
     out = capsys.readouterr().out
     assert "healthy:      yes" in out
-    assert "buildable" in out, "the missing UI has to be visible next to `healthy: yes`"
+    # The label leads with the STATE, not the classifier token: `buildable` next to
+    # its own negation reads as "fine … not fine" (design round 1, D5). The token
+    # stays in the parenthesis, where it is the classifier's own name.
+    assert "bundle:       not built (buildable" in out
     assert "lop mobile install" in out, "and the line names the remedy the operator runs"
+
+
+def test_the_status_line_is_silent_when_the_portal_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """On a machine that never installed the portal there is no 503 to explain.
+
+    The line exists to make a *hidden outage* visible: `healthy: yes` while the
+    phone gets 503. With `installed: no` there is no phone, no portal and no 503,
+    so the same line reads as a fault report where the only true advice is "you
+    have not set this up yet" — and the reader has to reconcile it with
+    `installed: no` (design round 1, D4). Gated on `installed`.
+    """
+    from local_operator.mobile import install as mobile_install
+
+    monkeypatch.setattr(
+        mobile_install,
+        "status",
+        lambda port=0: {
+            "installed": False,
+            "password_set": False,
+            "healthy": True,
+            "gate_closed": True,
+            "bundle": "buildable",
+            "log": "/dev/null",
+            "sessions": [],
+        },
+    )
+
+    assert mobile_command(_args("status")) == 0
+
+    out = capsys.readouterr().out
+    assert "installed:    no" in out
+    assert "bundle:" not in out, "no portal means no outage for this line to explain"
+
+
+def test_the_status_line_names_a_raw_or_missing_web_tree(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`missing-sources` says what is true on its own, without a mislabelled token.
+
+    The two non-servable states need different words: a tree with sources needs
+    building, a tree with none has nothing to build from — and telling its reader
+    to run `lop mobile install` would be advice that cannot work.
+    """
+    from local_operator.mobile import install as mobile_install
+
+    monkeypatch.setattr(
+        mobile_install,
+        "status",
+        lambda port=0: {
+            "installed": True,
+            "password_set": True,
+            "healthy": True,
+            "gate_closed": True,
+            "bundle": "missing-sources",
+            "log": "/dev/null",
+            "sessions": [],
+        },
+    )
+
+    assert mobile_command(_args("status")) == 0
+
+    out = capsys.readouterr().out
+    assert "bundle:       not built (no web sources to build from)" in out
 
 
 def test_the_status_line_is_quiet_when_the_bundle_is_built(

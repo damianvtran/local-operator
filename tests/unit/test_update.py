@@ -2514,6 +2514,8 @@ def test_from_snapshot_without_node_refuses_to_install_a_ui_less_generation(
         "lop-update: mobile web bundle: skipped (node not installed; build at `lop mobile install`)"
         in captured.out
     )
+    assert "skipped (node not installed; build at `lop mobile install`)" in captured.out
+    assert "refusing to install this build" in captured.err
     assert "lop mobile install" in captured.err, "the refusal names the remedy"
 
 
@@ -2552,8 +2554,15 @@ def test_from_snapshot_does_not_install_when_the_bundle_build_failed(
 
     assert installed == [], "the install call must not be made at all"
     captured = capsys.readouterr()
+    # The status keeps its own line on stdout; the refusal does NOT re-splice it
+    # (design round 1, D1), so the two are asserted on the streams they belong to.
     assert "FAILED (pnpm build failed: boom)" in captured.out
-    assert "did not build" in captured.err
+    assert "FAILED (pnpm build failed: boom)" not in captured.err
+    assert "refusing to install this build" in captured.err
+    # One vocabulary for the thing that is missing (D3): the sentence says "mobile
+    # web UI" and does not spend "bundle"/"UI"/"generation" on the same object.
+    assert "mobile web UI to serve" in captured.err
+    assert "generation" not in captured.err
     # The primary remedy is named unconditionally; the npx clause only where npx
     # resolves, exactly as `_pin_mismatch` builds its own route list — so the
     # assertion moves with the host rather than pinning a command this machine may
@@ -2561,6 +2570,39 @@ def test_from_snapshot_does_not_install_when_the_bundle_build_failed(
     assert "lop mobile install" in captured.err
     assert ("npx --yes pnpm@11.22.0" in captured.err) == (install_mod._shim_argv("npx") is not None)
     assert ("pnpm@11.22.0" in captured.err) == (install_mod._shim_argv("npx") is not None)
+
+
+def test_from_snapshot_refusal_names_a_typed_fetch_only_for_an_exact_pin(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A range pin must not be advertised as something the reader can fetch (D2).
+
+    ``_runner_or_refusal`` refuses to auto-fetch a range, so recommending
+    ``npx --yes pnpm@^11`` in the same breath says "we will not do this" and then
+    "you do it" — and ``pnpm@^11`` is not a version ``npx`` can be asked for. For
+    a range the refusal names the pin as a range and says a by-hand fetch has to
+    name a concrete version; the typed ``npx`` command is offered only for an
+    exact pin.
+    """
+    snapshot = tmp_path / "snapshot"
+    web = snapshot / "local_operator" / "mobile" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text('{"packageManager":"pnpm@^11"}', encoding="utf-8")
+
+    with (
+        patch.object(update_mod, "install_kind", return_value=InstallKind.UV_TOOL),
+        patch.object(update_mod, "resolve_snapshot", return_value=SnapshotSource(path=snapshot)),
+        patch.object(install_mod, "snapshot_bundle", return_value="FAILED (boom)"),
+        patch.object(update_mod, "install_into_generation") as install,
+        patch.object(update_mod, "_generation_upgrade", return_value=0),
+    ):
+        assert update_mod._snapshot_command("main") == 1
+
+    install.assert_not_called()
+    err = capsys.readouterr().err
+    assert "pins a range (`pnpm@^11`)" in err
+    assert "name a concrete version" in err
+    assert "npx --yes pnpm@^11" not in err, "a range is not something the reader can fetch"
 
 
 def test_from_snapshot_refusal_reclaims_a_temporary_extract(
@@ -2606,7 +2648,7 @@ def test_from_snapshot_refusal_reclaims_a_temporary_extract(
 
     assert installed == []
     assert not snapshot.exists(), "a refused ref snapshot leaked its extracted tree"
-    assert "did not build" in capsys.readouterr().err
+    assert "refusing to install this build" in capsys.readouterr().err
 
 
 def test_from_snapshot_refusal_survives_an_unremovable_extract(
@@ -2670,7 +2712,7 @@ def test_from_snapshot_refuses_a_truncated_web_tree_with_no_manifest(
         assert update_mod._snapshot_command("main") == 1
 
     assert installed == [], "a web tree that cannot build must not be installed"
-    assert "did not build" in capsys.readouterr().err
+    assert "refusing to install this build" in capsys.readouterr().err
 
 
 def test_from_snapshot_without_web_sources_still_installs(
