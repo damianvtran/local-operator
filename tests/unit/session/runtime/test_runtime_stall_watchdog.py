@@ -51,7 +51,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
+import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -177,6 +179,24 @@ def _run_script(
 
 def _dump_for(config_dir: Path, pid: int) -> Path:
     return config_dir / "logs" / f"{stall_watchdog.DUMP_PREFIX}-{pid}.log"
+
+
+def _stamp_ages(stdout: str) -> tuple[list[float], list[float]]:
+    """The ``ages`` samples a dead-beater child printed, as (workload, serving).
+
+    The dead-beater children below report BOTH planes' stamp ages every 200 ms,
+    because the claim they exist for is a claim about a pair: the workload stamp
+    stops advancing while the serving plane keeps reporting normally. A child
+    that reported only the silent plane could not tell "the tick died" from "the
+    whole process wedged".
+    """
+    samples = [
+        (float(workload), float(serving))
+        for workload, serving in re.findall(
+            r"ages workload=([\d.]+) serving=([\d.]+)", stdout
+        )
+    ]
+    return [workload for workload, _ in samples], [serving for _, serving in samples]
 
 
 # -- the real thing ---------------------------------------------------------
@@ -1774,3 +1794,369 @@ def test_a_real_runtime_child_fires_the_progress_leg(
     finally:
         for child, config_dir in spawned:
             _reap(child, config_dir)
+
+
+# ============================================================================
+# THE TICK ITSELF DYING: reported, recorded, and -- bounded -- undone
+# ============================================================================
+#
+# WHY THIS SECTION EXISTS. Everything above assumes the two ticks RUN. On
+# 2026-09-21 the workload tick's task RAISED, and the wiring of the day made that
+# invisible three ways at once: nothing read the exception (no done-callback, no
+# ``await``, no reader of ``exception()``), nothing re-created the task, and the
+# dump -- the artifact an incident reader actually opens -- showed an IDLE,
+# HEALTHY process, because ``faulthandler`` dumps THREADS and a dead task has no
+# frame at all. So the bound ended a runtime that was working, one deadline later,
+# and the file attributed it to "the runtime went silent", which was the one
+# explanation that was false. The cells below pin all three halves: the death is
+# logged with its exception, recorded where the dump reader will see it, and the
+# tick is re-created.
+#
+# THE CHILD RIG IS RUN TWICE ON PURPOSE. ``bare`` is the wiring being replaced and
+# ``supervised`` is the production one; the ``bare`` half is the CONTROL for the
+# ``supervised`` half, because a green "it survived" cell on its own cannot
+# separate a real fix from a rig that is blind to the failure. See AGENTS.md,
+# "Prove the test can still fail" and the dead-instrument section under it.
+
+#: The bound the dead-beater children run under, in seconds. Each child spans
+#: FOUR of them, so the surviving run has to prove that a bound which demonstrably
+#: ends the control child never ends this one.
+DEAD_BEATER_BOUND_S = 2
+
+#: A REAL runtime whose workload tick's FIRST beat raises, in both wirings.
+#:
+#: ``bare`` reproduces the pre-fix start site verbatim -- a bare task, unreferenced
+#: by anything that observes it -- and ``supervised`` starts the production
+#: supervisor. NOTHING ELSE DIFFERS between the two runs, so the pair isolates the
+#: supervision itself rather than the rig's ability to make a tick die.
+#:
+#: The serving plane is REAL and stays healthy throughout (``RuntimeServer``'s own
+#: heartbeat, on its own thread), because that is the claim being made: the process
+#: that dies is not a wedged one. Both planes' stamp ages are printed every 200 ms
+#: so the parent can assert the pair -- one stamp frozen past the bound, the other
+#: still reporting normally -- rather than infer it from an exit code.
+_DEAD_BEATER_CHILD = r"""
+import asyncio
+import logging
+import os
+import pathlib
+import sys
+import time
+
+sys.path.insert(0, sys.argv[3])  # the checkout root, for the session factory
+
+from local_operator.harness.types import StreamEndEvent
+from local_operator.session.runtime import process, server, stall_watchdog
+from local_operator.session.runtime.server import RuntimeServer
+from local_operator.session.runtime.serving import ServingSessionHandle
+from tests.unit.session.test_session import make_session
+
+# THE RUNTIME'S OWN LOG, onto stdout: the WARNING the supervisor writes is half
+# the evidence (the dump's tick-death line is the other half), and a child that
+# left the root logger unconfigured would route it through ``logging.lastResort``
+# to stderr, unformatted -- a weaker thing to assert on than the record the
+# supervision actually writes.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
+
+
+def _stream(request, signal):
+    async def gen():
+        yield StreamEndEvent(stop_reason="stop")
+
+    return gen()
+
+
+async def main() -> None:
+    root = pathlib.Path(sys.argv[2])
+    bound = float(sys.argv[1])
+    mode = sys.argv[4]
+    # Both cadences shortened together: the child's own ticks are what the
+    # supervision re-creates, and a bound of second-scale makes the freeze
+    # observable in a test that has seconds to spend.
+    process.HEARTBEAT_INTERVAL_S = 0.2
+    server.HEARTBEAT_INTERVAL_S = 0.2
+
+    session = make_session(root, _stream)
+    handle = ServingSessionHandle(session, asyncio.get_running_loop(), cwd=str(root))
+    runtime = RuntimeServer(handle, kind="daemon")
+    runtime.start()
+    assert await runtime.wait_until_published(), "the boot prologue never published"
+    assert stall_watchdog.arm(seconds=bound), "the child could not arm the bound"
+    print(f"armed:{os.getpid()}", flush=True)
+
+    # THE LEVER, and the only thing that differs from a healthy run: the workload
+    # tick's FIRST beat raises. Once, not always -- a tick that cannot beat at all
+    # is a different scenario (the supervisor gives up on it, which the in-process
+    # cell above pins), and what this child is for is the TRANSIENT death that used
+    # to be permanent because nothing re-created the task.
+    real_beat = stall_watchdog.beat
+    raised = {"done": False}
+
+    def rigged_beat(plane):
+        if plane == stall_watchdog.WORKLOAD and not raised["done"]:
+            raised["done"] = True
+            print("beater-raised", flush=True)
+            raise RuntimeError("rig: the workload tick's beat raised on its first call")
+        return real_beat(plane)
+
+    stall_watchdog.beat = rigged_beat
+
+    stop = asyncio.Event()
+    if mode == "bare":
+        tick = asyncio.create_task(process._beat_stall_watchdog(stop))
+    else:
+        tick = asyncio.ensure_future(process._watch_stall_beats(stop))
+    assert tick is not None  # the handle outlives the loop below, as in amain
+
+    started = time.monotonic()
+    while True:
+        await asyncio.sleep(0.2)
+        armed = stall_watchdog._ARMED
+        now = time.monotonic()
+        if armed is None:
+            print("disarmed", flush=True)
+            break
+        print(
+            f"ages workload={now - armed.last_beat[stall_watchdog.WORKLOAD]:.2f} "
+            f"serving={now - armed.last_beat[stall_watchdog.SERVING]:.2f}",
+            flush=True,
+        )
+        if now - started > bound * 4:
+            # ``os._exit`` rather than a return, for two reasons: the serving
+            # plane's thread is still live and must not hold the cell open, and
+            # this leaves the dump exactly as written. A ``disarm`` would remove
+            # it, and the dump's own tick-death line is what the parent reads.
+            print("survived", flush=True)
+            sys.stdout.flush()
+            os._exit(0)
+
+
+asyncio.run(main())
+"""
+
+
+def test_a_dead_workload_ticker_is_logged_recorded_and_re_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The supervisor's whole policy, with the failure made permanent.
+
+    A tick that dies on EVERY attempt is the case the restart budget exists for,
+    and it is the one that separates this fix from an unbounded retry loop: the
+    re-creations are counted to the limit, the death is recorded each time, the
+    supervisor GIVES UP rather than spinning, and the plane is left unbounded so
+    the bound can still fire on it. The last part is the load-bearing one -- a
+    supervisor that "kept the plane alive" by suppressing the deadline would be a
+    bound that no longer guards anything (see ``stall_watchdog``'s docstring).
+
+    The record is read back through ``tick_deaths`` rather than by grepping the
+    file, because the reader is what a future incident will use: an assertion on
+    raw text would pass while the fact stayed unreadable.
+    """
+    from local_operator.session.runtime import process
+
+    fake = _FakeFaulthandler()
+    monkeypatch.setattr(stall_watchdog, "faulthandler", fake)
+    # ARMED FOR REAL, so there is a real dump file at a real path -- that file is
+    # the artifact under test. The timer is the fake's, so nothing can fire.
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    # The one patch that makes the death permanent: the tick dies before its first
+    # beat, every time. ``_watch_stall_beats`` looks this up by module attribute, so
+    # the patch reaches the supervisor's own re-creation.
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(
+            asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=30.0)
+        )
+
+    # RE-CREATED TO THE BUDGET AND THEN STOPPED: one more death than re-creations,
+    # which is the arming plus every retry. A supervisor that never gave up would
+    # hang here instead of counting (the ``wait_for`` above is the hang's backstop).
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the supervisor created the tick {deaths} times, not "
+        f"{process.STALL_BEAT_RESTARTS + 1}: the restart budget is not what the constant says"
+    )
+    pid = os.getpid()
+    assert stall_watchdog.tick_deaths(pid, tmp_path) == (
+        stall_watchdog.WORKLOAD,
+    ) * (process.STALL_BEAT_RESTARTS + 1), (
+        "the artifact does not name every death, so a dump reader still cannot tell a "
+        "dead tick from a silent loop"
+    )
+    text = stall_watchdog.dump_path(pid, tmp_path).read_text(encoding="utf-8")
+    assert text.index(stall_watchdog.ARM_MARKER) < text.index(stall_watchdog.TICK_DEATH_MARKER)
+    assert f"RuntimeError: tick death {deaths}" in text, text
+    assert stall_watchdog.FIRED_MARKER not in text, (
+        "this cell wrote a fired-bound dump; the record has to be readable on its own"
+    )
+
+    # THE LOG, which is the half that reaches an operator who never opens the dump.
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == process.STALL_BEAT_RESTARTS + 1, [
+        record.getMessage() for record in warnings
+    ]
+    assert "WORKLOAD tick died" in warnings[0].getMessage()
+    assert "RuntimeError: tick death 1" in warnings[0].getMessage()
+    assert "re-creating it in" in warnings[0].getMessage()
+    assert "is recorded in" in warnings[0].getMessage()
+    assert "is not re-created again" in warnings[-1].getMessage()
+
+
+def test_recording_a_tick_death_with_nothing_armed_is_a_no_op() -> None:
+    """The in-process case: no dump file exists, and that must not be an error.
+
+    A TUI host and a test never go through the runtime entry point, so nothing
+    arms -- and the tick can still die there. ``note_tick_death`` returning False
+    is what lets the supervisor say "this log line is the only trace" instead of
+    raising inside the handler that exists to survive a death.
+    """
+    assert stall_watchdog.is_armed() is False
+    assert stall_watchdog.note_tick_death(stall_watchdog.WORKLOAD, "RuntimeError: x") is False
+    assert stall_watchdog.tick_deaths(os.getpid()) == ()
+
+
+def test_a_dead_workload_ticker_no_longer_takes_a_healthy_runtime_with_it(
+    tmp_path: Path,
+) -> None:
+    """THE ACCEPTANCE CELL: the same rig, bare and supervised, on the real runtime.
+
+    The control run is not decoration. ``bare`` is the pre-fix start site held
+    verbatim, and it must still die -- if it ever stops dying, the supervised half
+    below has stopped measuring anything, which is exactly the failure this file's
+    "prove the test can still fail" rule is about. What the control shows on the
+    way through is the defect's whole shape:
+
+    * the workload stamp FREEZES and stays frozen past the bound (printed ages),
+      while the serving plane keeps reporting every 200 ms -- a HEALTHY runtime;
+    * the bound then kills the process (rc 1) on that frozen stamp;
+    * the dump carries the fired marker and reads as the SILENCE leg, which is the
+      wrong cause;
+    * and ``tick_deaths`` is EMPTY, so nothing in the artifact separates this from
+      a loop that genuinely parked.
+
+    The supervised run is the same child with the production wiring, and it must
+    survive four bounds: the stamp resumes, the death is in the log with its
+    exception and in the dump as a named plane, and no bound fires at all.
+    """
+    bare_dir = tmp_path / "bare"
+    bare_dir.mkdir(parents=True, exist_ok=True)
+    bare = _run_script(
+        _DEAD_BEATER_CHILD,
+        bare_dir,
+        args=(str(DEAD_BEATER_BOUND_S), str(bare_dir), str(REPO), "bare"),
+        timeout=180.0,
+    )
+
+    assert bare.returncode == 1, (
+        f"the CONTROL no longer dies, so this cell cannot tell a fix from a blind rig: "
+        f"rc={bare.returncode} stdout={bare.stdout!r} stderr={bare.stderr!r}"
+    )
+    assert "beater-raised" in bare.stdout, bare.stdout
+    assert "survived" not in bare.stdout, "the control has to die for the pair to mean anything"
+    bare_workload, bare_serving = _stamp_ages(bare.stdout)
+    assert bare_workload, f"the control printed no stamp samples: {bare.stdout!r}"
+    assert max(bare_workload) >= DEAD_BEATER_BOUND_S * 0.8, (
+        f"the workload stamp never froze ({max(bare_workload):.2f}s of {DEAD_BEATER_BOUND_S}s), "
+        f"so the rig is not reproducing the defect: {bare.stdout!r}"
+    )
+    assert max(bare_serving) < DEAD_BEATER_BOUND_S / 2, (
+        f"the serving plane was not healthy ({max(bare_serving):.2f}s), so this run says "
+        f"nothing about a runtime that was otherwise working: {bare.stdout!r}"
+    )
+    bare_pid = int(bare.stdout.split("armed:", 1)[1].split()[0])
+    bare_text = _dump_for(bare_dir, bare_pid).read_text(encoding="utf-8")
+    assert stall_watchdog.FIRED_MARKER in bare_text, bare_text[-2000:]
+    assert stall_watchdog.fired_leg(bare_pid, bare_dir / "logs") == (
+        stall_watchdog.LEG_SILENCE
+    ), f"the control's artifact no longer reads as the silence leg, which is the lie: {bare_text}"
+    assert stall_watchdog.tick_deaths(bare_pid, bare_dir / "logs") == (), (
+        "the control recorded a tick death; without the supervisor there is nothing to "
+        "record it, so this means the record is being written by something else"
+    )
+
+    # -- THE FIX: the same child, the production start site --------------------
+    supervised_dir = tmp_path / "supervised"
+    supervised_dir.mkdir(parents=True, exist_ok=True)
+    supervised = _run_script(
+        _DEAD_BEATER_CHILD,
+        supervised_dir,
+        args=(str(DEAD_BEATER_BOUND_S), str(supervised_dir), str(REPO), "supervised"),
+        timeout=180.0,
+    )
+
+    assert supervised.returncode == 0, (
+        f"the runtime died anyway: rc={supervised.returncode} "
+        f"stdout={supervised.stdout!r} stderr={supervised.stderr!r}"
+    )
+    assert "survived" in supervised.stdout, (
+        f"the child never reached four bounds, so survival is not established: "
+        f"{supervised.stdout!r} stderr={supervised.stderr!r}"
+    )
+    workload, serving = _stamp_ages(supervised.stdout)
+    assert workload, f"the child printed no stamp samples: {supervised.stdout!r}"
+    assert max(workload) < DEAD_BEATER_BOUND_S, (
+        f"the workload stamp approached the bound ({max(workload):.2f}s of "
+        f"{DEAD_BEATER_BOUND_S}s): the tick was not re-created, or it was re-created too "
+        f"late to matter: {supervised.stdout!r}"
+    )
+    assert max(serving) < DEAD_BEATER_BOUND_S / 2, (
+        f"the serving plane stopped reporting, so survival is not the supervision's doing: "
+        f"{supervised.stdout!r}"
+    )
+
+    # THE LOG: WARNING, with the exception, at the moment of death.
+    assert "WARNING" in supervised.stdout, supervised.stdout
+    assert "WORKLOAD tick died" in supervised.stdout, supervised.stdout
+    assert "RuntimeError: rig: the workload tick's beat raised" in supervised.stdout, (
+        supervised.stdout
+    )
+    assert "re-creating it in" in supervised.stdout, supervised.stdout
+
+    # THE RECORD: beside the plane's own stamp, in the dump, readable back.
+    supervised_pid = int(supervised.stdout.split("armed:", 1)[1].split()[0])
+    supervised_dump = _dump_for(supervised_dir, supervised_pid)
+    assert stall_watchdog.tick_deaths(supervised_pid, supervised_dir / "logs") == (
+        stall_watchdog.WORKLOAD,
+    ), f"the dump does not name the dead tick: {supervised_dump.read_text(encoding='utf-8')}"
+    supervised_text = supervised_dump.read_text(encoding="utf-8")
+    assert "RuntimeError: rig: the workload tick's beat raised" in supervised_text
+    assert stall_watchdog.FIRED_MARKER not in supervised_text, (
+        "a bound fired in the run that is supposed to have survived"
+    )
+    assert stall_watchdog.fired_leg(supervised_pid, supervised_dir / "logs") is None
+
+
+def test_the_runtime_entry_point_supervises_the_workload_tick() -> None:
+    """The fix is WIRED, and wired in ONE place.
+
+    Both cells above drive ``_watch_stall_beats`` directly, so a revert of the one
+    line in ``amain`` that selects it would leave all of them green while
+    production went back to an unobserved tick -- the same shape
+    ``test_the_only_arm_site_is_the_runtime_entry_point`` exists for on the other
+    side of this module. The second assertion is the other half: the tick's own
+    coroutine is created in exactly one place, the supervisor, so a second bare
+    creation cannot appear beside it unnoticed.
+    """
+    from local_operator.session.runtime import process
+
+    entry = inspect.getsource(process.amain)
+    assert "asyncio.ensure_future(_watch_stall_beats(stop))" in entry, entry[-4000:]
+    assert "_beat_stall_watchdog" not in entry, (
+        "amain starts the tick directly, so the supervisor is not in the path a real "
+        "runtime takes"
+    )
+    supervisor = inspect.getsource(process._watch_stall_beats)
+    assert "asyncio.ensure_future(_beat_stall_watchdog(stop))" in supervisor, supervisor
