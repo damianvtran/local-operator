@@ -38,8 +38,8 @@ from pathlib import Path
 import pytest
 
 from local_operator.harness.secret_sinks import (
-    RULES,
     RULE_LABELS,
+    RULES,
     refusal_text,
     scan_command,
     scan_python,

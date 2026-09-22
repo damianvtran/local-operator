@@ -43,6 +43,8 @@ from typing import Any, Awaitable, Callable, cast
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from local_operator import procstate
+from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
+from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
 from local_operator.harness.types import (
     AbortSignal,
     AgentTool,
@@ -52,8 +54,6 @@ from local_operator.harness.types import (
     ToolResult,
 )
 from local_operator.interpreter import SAFE_PATH_FLAG
-from local_operator.harness.secret_sinks import refusal_text as _secret_sink_refusal
-from local_operator.harness.secret_sinks import scan_python as _scan_secret_cell
 from local_operator.scratchpad import (
     ensure_scratchpad_dir,
     scratchpad_dir_of,
