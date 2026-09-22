@@ -419,6 +419,24 @@ def test_a_competing_batch_hidden_in_the_string_still_refuses_the_turn() -> None
         parse_decision(body, current, route=ROUTE)
 
 
+def test_a_string_actions_reply_still_binds_to_this_observation() -> None:
+    """The tolerance reads a SPELLING; it does not relax the binding rule.
+
+    A batch naming another observation is the one failure worse than losing the
+    turn, and it is refused here exactly as it is when the array arrives as an
+    array: the coercion is applied before binding is ever considered, so the
+    string spelling cannot become a way around it. The refusal is the action
+    protocol's own class, not the framing decoder's -- which is the same
+    layering the identical objects get without the string.
+    """
+
+    current = observation()
+    stale = json.loads(type_payload(observation(1)))["actions"]
+
+    with pytest.raises(DecisionParseError):
+        parse_decision(_string_actions_body(stale, note="stale"), current, route=ROUTE)
+
+
 def test_the_string_tolerance_adds_nothing_to_an_already_well_formed_reply(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
