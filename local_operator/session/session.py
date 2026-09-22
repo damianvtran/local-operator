@@ -5655,6 +5655,26 @@ class Session:
         )
 
     async def _drain_spooled_peer_inbox(self) -> None:
+        """``_drain_spooled_peer_inbox_rows``, plus the owed-turn bookkeeping.
+
+        The second of the two drains that consume a spool, and the one that runs
+        when the boot drain deliberately kept a peer row (no durable history yet).
+        Whichever drain empties the spool, the obligation the spooling runtime
+        placed in ``local_operator.wakes.spooled`` is retired by the SAME predicate —
+        see ``inbox.settle_owed_turn`` — so this wrapper exists for the same
+        reason its sibling in ``process`` does: the body returns early on several
+        paths, and every one of them is a state the settle has to be asked about.
+        """
+        try:
+            await self._drain_spooled_peer_inbox_rows()
+        finally:
+            directory = getattr(self._transcript, "directory", None)
+            if directory is not None:
+                from local_operator.session.runtime.inbox import settle_owed_turn
+
+                settle_owed_turn(directory)
+
+    async def _drain_spooled_peer_inbox_rows(self) -> None:
         """Deliver any inbox rows spooled for this session. Once per lifetime.
 
         Called by ``_run_turn_pipeline`` AFTER the turn's own messages are
