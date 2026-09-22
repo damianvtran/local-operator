@@ -310,8 +310,25 @@ def mock_credential_manager(temp_dir):
     both sides or a row is written under one root and looked up under another.
     A HOME-derived root is the worse failure of the two — an unisolated run then
     writes into the operator's real store.
+
+    IT ALSO FILLS ``app.state.config_manager``, and that is not decoration
+    (review round 2, M2). On the base the model route read
+    ``app.state.credential_manager`` — the slot this fixture used to fill — and
+    after PR2b it takes its root through ``Depends(get_config_manager)``, which
+    reads ``app.state.config_manager``. Not filling it left the slot to whatever
+    an EARLIER test in the same worker had seeded, so
+    ``test_server_models.py`` passed only in a shared run and failed 9/11 when
+    run alone (``KeyError: 'config_manager'``). The previous value is restored
+    rather than cleared to ``None``, so a test that composes both this and
+    ``mock_config_manager`` does not tear down the other's slot.
     """
-    return ConfigManager(config_dir=temp_dir)
+    config_manager = ConfigManager(config_dir=temp_dir)
+    previous = getattr(app.state, "config_manager", None)
+    app.state.config_manager = config_manager
+    try:
+        yield config_manager
+    finally:
+        app.state.config_manager = previous
 
 
 @pytest.fixture
