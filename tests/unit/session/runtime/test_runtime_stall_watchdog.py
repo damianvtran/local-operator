@@ -2344,7 +2344,7 @@ def test_a_dead_workload_ticker_no_longer_takes_a_healthy_runtime_with_it(
 def _beater_module_functions(source: str) -> dict[str, ast.AST]:
     """The module-level function bodies of ``process``, by name, as AST nodes.
 
-    AST and not text for both cells below: they pin the WIRING and the SHAPE of the
+    AST and not text for the cells below: they pin the WIRING and the SHAPE of the
     supervisor, and a rewritten comment or docstring that happens to mention a name
     must not be able to fail them (agent review round 1, NIT 2 — the earlier
     version asserted the ABSENCE of a substring in ``inspect.getsource``, which is
@@ -2357,30 +2357,145 @@ def _beater_module_functions(source: str) -> dict[str, ast.AST]:
     }
 
 
-def _started_coroutines(function: ast.AST) -> list[str]:
-    """The coroutine NAMES handed to a task starter inside ``function``."""
-    names: list[str] = []
-    for node in ast.walk(function):
-        if not isinstance(node, ast.Call):
+def _task_starters(node: ast.AST) -> list[ast.Call]:
+    """Every task-starting call under ``node`` — ``ensure_future``/``create_task``.
+
+    WHOLE-AST, AT ANY DEPTH, and that is the round-2 NIT. The earlier version looked
+    only at the MODULE's own function bodies, while the sentence these cells carry
+    was about the module: a ticker armed outside any function — a module-level
+    expression, a ``lambda``, a class body — would have slipped past the check.
+    Either the sentence or the check had to move, and the check moved, because the
+    property being pinned is about the module and not about its functions.
+    """
+    starters: list[ast.Call] = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
             continue
-        func = node.func
+        func = child.func
         if isinstance(func, ast.Attribute):
             called = func.attr
         elif isinstance(func, ast.Name):
             called = func.id
         else:
             continue
-        if called not in {"ensure_future", "create_task"}:
-            continue
-        for arg in node.args:
-            if not isinstance(arg, ast.Call):
-                continue
-            inner = arg.func
-            if isinstance(inner, ast.Name):
-                names.append(inner.id)
-            elif isinstance(inner, ast.Attribute):
-                names.append(inner.attr)
-    return names
+        if called in {"ensure_future", "create_task"}:
+            starters.append(child)
+    return starters
+
+
+def _started_name(starter: ast.Call) -> str | None:
+    """The NAME of the coroutine ``starter`` was handed, or ``None``."""
+    if len(starter.args) != 1 or not isinstance(starter.args[0], ast.Call):
+        return None
+    inner = starter.args[0].func
+    if isinstance(inner, ast.Name):
+        return inner.id
+    if isinstance(inner, ast.Attribute):
+        return inner.attr
+    return None
+
+
+def _started_coroutines(function: ast.AST) -> list[str]:
+    """The coroutine NAMES handed to a task starter inside ``function``."""
+    return [
+        name for starter in _task_starters(function) if (name := _started_name(starter)) is not None
+    ]
+
+
+def test_a_failing_record_cannot_defeat_the_give_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A TERMINAL STATE A DIAGNOSTIC CAN SWITCH OFF IS NOT TERMINAL (round 2, MINOR 2).
+
+    The give-up decision used to be re-derived AFTER the record write, so anything that
+    made that write raise skipped the ``return``: the guard caught it and the loop went
+    round again. Reproduced by the reviewer as 130 ticks, 130 guard tracebacks and no
+    give-up line in 2 s, with the plane never stamped — a failing REPORT defeating the
+    fail-safe, which is this PR's own defect shape wearing a different hat.
+
+    The lever is the module's own record function raising, and the cell demands the
+    supervisor still reaches its decision: the tick is created exactly
+    ``STALL_BEAT_RESTARTS + 1`` times, the give-up is logged, and the missing record is
+    reported as a missing record rather than as a death that did not happen.
+
+    THE ``wait_for`` IS WHAT MAKES THIS CELL RED RATHER THAN WEDGED on the un-protected
+    code, where the loop has no exit at all.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(stall_watchdog, "faulthandler", _FakeFaulthandler())
+    assert stall_watchdog.arm(seconds=60.0, directory=tmp_path)
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+    deaths = 0
+
+    async def always_dying_tick(stop: asyncio.Event) -> None:
+        nonlocal deaths
+        deaths += 1
+        raise RuntimeError(f"tick death {deaths}")
+
+    def unwritable_record(plane: str, reason: str) -> bool:
+        raise OSError("rig: the record cannot be written")
+
+    monkeypatch.setattr(process, "_beat_stall_watchdog", always_dying_tick)
+    monkeypatch.setattr(stall_watchdog, "note_tick_death", unwritable_record)
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(process._watch_stall_beats(asyncio.Event()), timeout=20.0))
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert deaths == process.STALL_BEAT_RESTARTS + 1, (
+        f"the supervisor never reached its decision ({deaths} creations), so a record that "
+        f"cannot be written defeats the give-up and makes the terminal state optional: {messages}"
+    )
+    assert any("GIVES UP" in message for message in messages), messages
+    assert sum("could not be written" in message for message in messages) == deaths, messages
+
+
+def test_a_failing_record_does_not_replace_a_cancellation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same finding's sibling: the CANCELLATION must not depend on the record either.
+
+    An un-totaled ``note_tick_death`` in the cancellation path raised where the shutdown
+    path had already committed to re-raising, so the supervisor ended ``OSError`` where it
+    was asked for ``cancelled`` — a diagnostic replacing a terminal state, one branch over
+    from the give-up that the cell above covers.
+
+    The REAL tick is left in place (it sleeps), so the cancellation lands on the object
+    production creates and the assertion is about how the supervisor ENDS.
+    """
+    from local_operator.session.runtime import process
+
+    monkeypatch.setattr(process, "HEARTBEAT_INTERVAL_S", 0.01)
+
+    def unwritable_record(plane: str, reason: str) -> bool:
+        raise OSError("rig: the record cannot be written")
+
+    monkeypatch.setattr(stall_watchdog, "note_tick_death", unwritable_record)
+
+    async def scenario() -> None:
+        supervisor = asyncio.ensure_future(process._watch_stall_beats(asyncio.Event()))
+        for _ in range(200):
+            ticks = [
+                task
+                for task in asyncio.all_tasks()
+                if getattr(task.get_coro(), "__name__", "") == "_beat_stall_watchdog"
+            ]
+            if ticks:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("the supervisor never created a tick to cancel")
+        ticks[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await supervisor
+
+    with caplog.at_level(logging.WARNING, logger=process.__name__):
+        asyncio.run(asyncio.wait_for(scenario(), timeout=20.0))
+
+    assert any("could not be written" in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
 
 
 def test_the_runtime_entry_point_supervises_the_workload_tick() -> None:
@@ -2392,20 +2507,28 @@ def test_the_runtime_entry_point_supervises_the_workload_tick() -> None:
     ``test_the_only_arm_site_is_the_runtime_entry_point`` exists for on the other
     side of this module.
 
-    The second assertion is the other half: the tick's own coroutine is handed to
-    a task starter in EXACTLY one function, the supervisor, so a second bare
-    creation cannot appear beside it unnoticed. Both are read from the AST, so
-    only a real change to the wiring can fail them.
+    The second assertion is the other half: the tick's coroutine is handed to a task
+    starter exactly ONCE in this module — **at any depth, not just inside a
+    module-level function** (agent review round 2, NIT: the earlier check looked only
+    at function bodies, so its sentence claimed more than it tested) — so a second
+    arm site beside the supervisor cannot appear unnoticed.
     """
     from local_operator.session.runtime import process
 
-    functions = _beater_module_functions(Path(process.__file__).read_text(encoding="utf-8"))
-    started = {name: _started_coroutines(node) for name, node in functions.items()}
-    assert "_watch_stall_beats" in started.get("amain", []), started.get("amain", [])
-    starters = [name for name, coros in started.items() if "_beat_stall_watchdog" in coros]
-    assert starters == ["_watch_stall_beats"], (
-        f"the tick is started outside the supervisor (by {starters}), so a real runtime can "
-        f"still run with an unobserved tick"
+    source = Path(process.__file__).read_text(encoding="utf-8")
+    functions = _beater_module_functions(source)
+    assert "_watch_stall_beats" in _started_coroutines(
+        functions["amain"]
+    ), "amain does not start the supervisor, so a real runtime can run with an unobserved tick"
+    ticks = [
+        starter
+        for starter in _task_starters(ast.parse(source))
+        if _started_name(starter) == "_beat_stall_watchdog"
+    ]
+    assert len(ticks) == 1, (
+        f"the tick's coroutine is handed to a task starter {len(ticks)} times in this module "
+        f"(at any depth): with zero the runtime has no bound ticker at all, and with two the "
+        f"second one is unobserved — the defect this PR removes"
     )
 
 
